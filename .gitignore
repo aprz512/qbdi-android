@@ -2,3 +2,7 @@
 .superpowers/
 
 .worktrees/
+.gradle/
+**/build/
+**/.cxx/
+out/
