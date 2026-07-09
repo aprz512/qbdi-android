@@ -35,7 +35,7 @@ TraceConfig parse_trace_config(const char *encoded_config) {
         } else if (part.rfind("target=", 0) == 0) {
             config.target_so = part.substr(7);
         } else if (part.rfind("scene=", 0) == 0) {
-            std::vector<std::string> fields = split(part.substr(6), ', ');
+            std::vector<std::string> fields = split(part.substr(6), ',');
             if (fields.size() < 2) continue;
             for (auto &scene : config.scenes) {
                 if (scene.name != fields[0]) continue;
