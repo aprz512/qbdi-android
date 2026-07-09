@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">QBDI Android Demo</string>
+    <string name="trace_jni">Trace JNI Case</string>
+    <string name="trace_libc">Trace Libc Case</string>
+    <string name="trace_algorithm">Trace Algorithm Case</string>
+    <string name="trace_integrity">Trace Integrity Case</string>
+</resources>
