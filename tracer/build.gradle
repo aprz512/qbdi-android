@@ -47,7 +47,7 @@ dependencies {
 
 tasks.register("copyTracerDebug", Copy) {
     dependsOn "assembleDebug"
-    from("$buildDir/intermediates/stripped_native_libs/debug/out/lib/arm64-v8a")
+    from("$buildDir/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a")
     into("$rootDir/out/arm64-v8a")
     include("libqbdi_tracer.so")
 }
