@@ -1,6 +1,7 @@
 #include "core/qbdi_runner.h"
 #include "core/logging.h"
 #include "handlers/call_handlers.h"
+#include "handlers/bypass_handlers.h"
 
 #include <QBDI.h>
 #include <QBDI/State.h>
@@ -12,8 +13,10 @@
 
 struct RunnerState {
     TraceContext context;
+    SceneConfig scene;
     TextTraceWriter writer;
     uint64_t sequence = 0;
+    bool bypass_markers_emitted = false;
 };
 
 static QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *, void *data) {
@@ -34,6 +37,10 @@ static QBDI::VMAction on_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FP
     auto *state = static_cast<RunnerState *>(data);
     const QBDI::InstAnalysis *analysis = vm->getInstAnalysis(
         QBDI::ANALYSIS_INSTRUCTION | QBDI::ANALYSIS_DISASSEMBLY | QBDI::ANALYSIS_OPERANDS);
+    if (!state->bypass_markers_emitted) {
+        emit_scene_bypass_markers(state->scene, &state->writer);
+        state->bypass_markers_emitted = true;
+    }
     InstructionText inst;
     inst.sequence = ++state->sequence;
     inst.pc = analysis->address;
@@ -55,6 +62,10 @@ static QBDI::VMAction on_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FP
             if (op.type == QBDI::OPERAND_GPR && op.regCtxIdx >= 0 &&
                 (op.regAccess == QBDI::REGISTER_READ || op.regAccess == QBDI::REGISTER_READ_WRITE)) {
                 uintptr_t target = QBDI_GPR_GET(gpr, op.regCtxIdx);
+                BypassDecision decision = maybe_bypass_external_call(state->scene, gpr, target, &state->writer);
+                if (decision == BypassDecision::SkipInstruction) {
+                    return QBDI::SKIP_INST;
+                }
                 emit_possible_external_call(gpr, target, &state->writer);
                 break;
             }
@@ -73,6 +84,7 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     state.context.module_base = invocation.module.start;
     state.context.target_offset = invocation.scene.offset;
     state.context.target_address = invocation.target_address;
+    state.scene = invocation.scene;
     state.context.pid = getpid();
     state.context.tid = static_cast<int>(syscall(SYS_gettid));
 

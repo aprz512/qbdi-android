@@ -17,7 +17,8 @@ add_library(qbdi_tracer SHARED
     core/trace_config.cpp
     hooks/inline_hook_adapter.cpp
     core/qbdi_runner.cpp
-    handlers/call_handlers.cpp)
+    handlers/call_handlers.cpp
+    handlers/bypass_handlers.cpp)
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
 target_compile_options(qbdi_tracer PRIVATE -Wall -Wextra)
