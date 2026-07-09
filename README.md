@@ -17,7 +17,8 @@ Android arm64 demo project for showing how to use QBDI in an injected tracer.
 - Android Studio or Android SDK + NDK
 - CMake 3.22.1+
 - arm64 Android device or emulator
-- Frida server matching your host Frida version
+- Frida server matching your host Frida version, on a rooted/debuggable setup that supports spawn injection
+- On jailed/non-root Android, Frida may require Gadget and plain spawn injection will fail
 - Git LFS for `libQBDI.a`
 - QBDI v0.12.1 Android AARCH64 artifact committed under `tracer/src/main/cpp/third_party/qbdi/`
 - ByteDance ShadowHook v2.0.1 from Maven Central
@@ -64,3 +65,7 @@ The constructor scene only traces reliably with spawn injection. For button scen
 adb shell run-as com.aprz.qbdiandroid ls files/qbdi-traces
 adb exec-out run-as com.aprz.qbdiandroid cat files/qbdi-traces/<trace-file> > trace.txt
 ```
+
+## Troubleshooting
+
+If Frida prints `need Gadget to attach on jailed Android`, use a rooted device with frida-server for this demo or embed/configure Frida Gadget before trying spawn injection. Constructor tracing depends on early spawn-style injection.
