@@ -35,9 +35,8 @@ Android arm64 demo project for showing how to use QBDI in an injected tracer.
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell mkdir -p /data/local/tmp/qbdi-android
 adb push out/arm64-v8a/libqbdi_tracer.so /data/local/tmp/qbdi-android/
+adb push out/arm64-v8a/libshadowhook.so /data/local/tmp/qbdi-android/
 ```
-
-Also push `libshadowhook.so` from the tracer module build output or from the ShadowHook prefab artifact into `/data/local/tmp/qbdi-android/`.
 
 ## Find Scene Offsets
 
