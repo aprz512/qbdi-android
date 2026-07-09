@@ -13,7 +13,9 @@ add_library(qbdi_tracer SHARED
     tracer_entry.cpp
     core/module_maps.cpp
     core/safe_memory.cpp
-    events/text_trace_writer.cpp)
+    events/text_trace_writer.cpp
+    core/trace_config.cpp
+    hooks/inline_hook_adapter.cpp)
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
 target_compile_options(qbdi_tracer PRIVATE -Wall -Wextra)
