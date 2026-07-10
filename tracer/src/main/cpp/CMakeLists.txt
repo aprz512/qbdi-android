@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(qbdi_tracer)
 
+set(ANDROID_16KB_PAGE_LINK_OPTIONS "-Wl,-z,max-page-size=16384")
+
 set(QBDI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qbdi)
 
 find_package(shadowhook REQUIRED CONFIG)
@@ -22,6 +24,7 @@ add_library(qbdi_tracer SHARED
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
 target_compile_options(qbdi_tracer PRIVATE -Wall -Wextra)
+target_link_options(qbdi_tracer PRIVATE ${ANDROID_16KB_PAGE_LINK_OPTIONS})
 target_include_directories(qbdi_tracer PRIVATE
     ${QBDI_ROOT}/include
     ${CMAKE_CURRENT_SOURCE_DIR})
