@@ -19,7 +19,10 @@ Call events:
 ```text
 CALL libc.strlen x0=0x... preview="qbdi"
 CALL jni.FindClass name="java/lang/String"
+CALL return strlen target=0x... ret=0x...
 ```
+
+Libc, ART, and JNI call events are emitted from QBDI `EXEC_TRANSFER_CALL` / `EXEC_TRANSFER_RETURN` VM events when execution leaves the instrumented module and returns through QBDI's ExecBroker.
 
 Code rule events:
 

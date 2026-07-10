@@ -43,22 +43,22 @@
 #ifdef __cplusplus
 namespace QBDI {
 
-static constexpr bool is_android = 1;
-static constexpr bool is_linux   = 0;
-static constexpr bool is_osx     = 0;
-static constexpr bool is_ios     = 0;
-static constexpr bool is_windows = 0;
+    static constexpr bool is_android = 1;
+    static constexpr bool is_linux = 0;
+    static constexpr bool is_osx = 0;
+    static constexpr bool is_ios = 0;
+    static constexpr bool is_windows = 0;
 
 
-static constexpr bool is_arm     = 0;
-static constexpr bool is_aarch64 = 1;
-static constexpr bool is_x86     = 0;
-static constexpr bool is_x86_64  = 0;
+    static constexpr bool is_arm = 0;
+    static constexpr bool is_aarch64 = 1;
+    static constexpr bool is_x86 = 0;
+    static constexpr bool is_x86_64 = 0;
 
-static constexpr bool it_bits_32 = 0;
-static constexpr bool is_bits_64 = 1;
+    static constexpr bool it_bits_32 = 0;
+    static constexpr bool is_bits_64 = 1;
 
-static constexpr bool has_debug_log = 0;
+    static constexpr bool has_debug_log = 0;
 }
 #endif // __cplusplus
 

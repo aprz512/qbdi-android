@@ -19,8 +19,10 @@
 #define QBDI_H_
 
 #ifdef __cplusplus
+
 #include "QBDI/Memory.hpp"
 #include "QBDI/VM.h"
+
 #else
 #include "QBDI/Memory.h"
 #include "QBDI/VM_C.h"

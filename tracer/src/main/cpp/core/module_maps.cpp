@@ -37,7 +37,7 @@ std::vector<ModuleRange> read_process_maps() {
 }
 
 bool find_module_executable_range(const std::string &soname, ModuleRange *out) {
-    for (const auto &range : read_process_maps()) {
+    for (const auto &range: read_process_maps()) {
         if (!range.executable()) continue;
         if (basename_of(range.path) == soname) {
             if (out != nullptr) *out = range;

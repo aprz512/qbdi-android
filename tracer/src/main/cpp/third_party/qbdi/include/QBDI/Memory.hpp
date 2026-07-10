@@ -33,55 +33,55 @@ namespace QBDI {
 
 /*! Memory access rights.
  */
-typedef enum {
-  PF_NONE = 0,  /*!< No access */
-  PF_READ = 1,  /*!< Read access */
-  PF_WRITE = 2, /*!< Write access */
-  PF_EXEC = 4   /*!< Execution access */
-} Permission;
+    typedef enum {
+        PF_NONE = 0,  /*!< No access */
+        PF_READ = 1,  /*!< Read access */
+        PF_WRITE = 2, /*!< Write access */
+        PF_EXEC = 4   /*!< Execution access */
+    } Permission;
 
-_QBDI_ENABLE_BITMASK_OPERATORS(Permission)
+    _QBDI_ENABLE_BITMASK_OPERATORS(Permission)
 
 /*! Map of a memory area (region).
  */
-struct MemoryMap {
+    struct MemoryMap {
 
-  Range<rword> range;    /*!< A range of memory (region), delimited between
+        Range<rword> range;    /*!< A range of memory (region), delimited between
                           * a start and an (excluded) end address.
                           */
-  Permission permission; /*!< Region access rights
+        Permission permission; /*!< Region access rights
                           * (PF_READ, PF_WRITE, PF_EXEC).
                           */
-  std::string name;      /*!< Region name or path (useful when a region
+        std::string name;      /*!< Region name or path (useful when a region
                           * is mapping a module).
                           */
 
-  /* Construct a new (empty) MemoryMap.
-   */
-  MemoryMap() : range(0, 0, real_addr_t()), permission(QBDI::PF_NONE) {};
+        /* Construct a new (empty) MemoryMap.
+         */
+        MemoryMap() : range(0, 0, real_addr_t()), permission(QBDI::PF_NONE) {};
 
-  /*! Construct a new MemoryMap (given some properties).
-   *
-   * @param[in] start        Range start value.
-   * @param[in] end          Range end value (always excluded).
-   * @param[in] permission   Region access rights (PF_READ, PF_WRITE, PF_EXEC).
-   * @param[in] name         Region name (useful when a region is mapping
-   *                         a module).
-   */
-  MemoryMap(rword start, rword end, Permission permission, std::string name)
-      : range(start, end, auth_addr_t()), permission(permission), name(name) {}
+        /*! Construct a new MemoryMap (given some properties).
+         *
+         * @param[in] start        Range start value.
+         * @param[in] end          Range end value (always excluded).
+         * @param[in] permission   Region access rights (PF_READ, PF_WRITE, PF_EXEC).
+         * @param[in] name         Region name (useful when a region is mapping
+         *                         a module).
+         */
+        MemoryMap(rword start, rword end, Permission permission, std::string name)
+                : range(start, end, auth_addr_t()), permission(permission), name(name) {}
 
-  /*! Construct a new MemoryMap (given some properties).
-   *
-   * @param[in] range        A range of memory (region), delimited between
-   *                         a start and an (excluded) end address.
-   * @param[in] permission   Region access rights (PF_READ, PF_WRITE, PF_EXEC).
-   * @param[in] name         Region name (useful when a region is mapping
-   *                         a module).
-   */
-  MemoryMap(Range<rword> range, Permission permission, std::string name)
-      : range(range), permission(permission), name(name) {}
-};
+        /*! Construct a new MemoryMap (given some properties).
+         *
+         * @param[in] range        A range of memory (region), delimited between
+         *                         a start and an (excluded) end address.
+         * @param[in] permission   Region access rights (PF_READ, PF_WRITE, PF_EXEC).
+         * @param[in] name         Region name (useful when a region is mapping
+         *                         a module).
+         */
+        MemoryMap(Range<rword> range, Permission permission, std::string name)
+                : range(range), permission(permission), name(name) {}
+    };
 
 /*! Get a list of all the memory maps (regions) of a process.
  *
@@ -90,22 +90,22 @@ struct MemoryMap {
  *
  * @return  A vector of MemoryMap object.
  */
-QBDI_EXPORT std::vector<MemoryMap> getRemoteProcessMaps(QBDI::rword pid,
-                                                        bool full_path = false);
+    QBDI_EXPORT std::vector<MemoryMap> getRemoteProcessMaps(QBDI::rword pid,
+                                                            bool full_path = false);
 
 /*! Get a list of all the memory maps (regions) of the current process.
  *
  * @param[in] full_path  Return the full path of the module in name field
  * @return  A vector of MemoryMap object.
  */
-QBDI_EXPORT std::vector<MemoryMap>
-getCurrentProcessMaps(bool full_path = false);
+    QBDI_EXPORT std::vector<MemoryMap>
+    getCurrentProcessMaps(bool full_path = false);
 
 /*! Get a list of all the module names loaded in the process memory.
  *
  * @return  A vector of string of module names.
  */
-QBDI_EXPORT std::vector<std::string> getModuleNames();
+    QBDI_EXPORT std::vector<std::string> getModuleNames();
 
 /*! Allocate a block of memory of a specified sized with an aligned base
  *  address.
@@ -117,14 +117,14 @@ QBDI_EXPORT std::vector<std::string> getModuleNames();
  *          encountered.
  *
  */
-QBDI_EXPORT void *alignedAlloc(size_t size, size_t align);
+    QBDI_EXPORT void *alignedAlloc(size_t size, size_t align);
 
 /*! Free a block of aligned memory allocated with alignedAlloc.
  *
  * @param[in] ptr  Pointer to the allocated memory.
  *
  */
-QBDI_EXPORT void alignedFree(void *ptr);
+    QBDI_EXPORT void alignedFree(void *ptr);
 
 /*! Allocate a new stack and setup the GPRState accordingly.
  *  The allocated stack needs to be freed with alignedFree().
@@ -136,8 +136,8 @@ QBDI_EXPORT void alignedFree(void *ptr);
  *
  *  @return               True if stack allocation was successfull.
  */
-QBDI_EXPORT bool allocateVirtualStack(GPRState *ctx, uint32_t stackSize,
-                                      uint8_t **stack);
+    QBDI_EXPORT bool allocateVirtualStack(GPRState *ctx, uint32_t stackSize,
+                                          uint8_t **stack);
 
 /*! Simulate a call by modifying the stack and registers accordingly
  *  (std::vector version).
@@ -148,8 +148,8 @@ QBDI_EXPORT bool allocateVirtualStack(GPRState *ctx, uint32_t stackSize,
  *  @param[in] returnAddress Return address of the call to simulate.
  *  @param[in] args          A list of arguments.
  */
-QBDI_EXPORT void simulateCall(GPRState *ctx, rword returnAddress,
-                              const std::vector<rword> &args = {});
+    QBDI_EXPORT void simulateCall(GPRState *ctx, rword returnAddress,
+                                  const std::vector<rword> &args = {});
 
 /*! Simulate a call by modifying the stack and registers accordingly
  *  (stdarg version).
@@ -161,8 +161,8 @@ QBDI_EXPORT void simulateCall(GPRState *ctx, rword returnAddress,
  *  @param[in] argNum        The number of arguments in the va_list object.
  *  @param[in] ap            An stdarg va_list object.
  */
-QBDI_EXPORT void simulateCallV(GPRState *ctx, rword returnAddress,
-                               uint32_t argNum, va_list ap);
+    QBDI_EXPORT void simulateCallV(GPRState *ctx, rword returnAddress,
+                                   uint32_t argNum, va_list ap);
 
 /*! Simulate a call by modifying the stack and registers accordingly
  *  (C array version).
@@ -174,8 +174,8 @@ QBDI_EXPORT void simulateCallV(GPRState *ctx, rword returnAddress,
  *  @param[in] argNum        The number of arguments in the array args.
  *  @param[in] args          An array or arguments.
  */
-QBDI_EXPORT void simulateCallA(GPRState *ctx, rword returnAddress,
-                               uint32_t argNum, const rword *args);
+    QBDI_EXPORT void simulateCallA(GPRState *ctx, rword returnAddress,
+                                   uint32_t argNum, const rword *args);
 
 } // namespace QBDI
 

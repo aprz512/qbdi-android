@@ -3,6 +3,21 @@
 #include "events/text_trace_writer.h"
 
 #include <QBDI.h>
-#include <cstdint>
+#include <QBDI/Callback.h>
 
-void emit_possible_external_call(QBDI::GPRState *state, uintptr_t target, TextTraceWriter *writer);
+#include <cstdint>
+#include <string>
+#include <vector>
+
+struct PendingExecTransfer {
+    uintptr_t target = 0;
+    std::string category;
+    std::string name;
+};
+
+struct ExecTransferMonitor {
+    std::vector<PendingExecTransfer> pending;
+};
+
+void emit_exec_transfer_event(ExecTransferMonitor *monitor, const QBDI::VMState *vm_state,
+                              QBDI::GPRState *state, TextTraceWriter *writer);

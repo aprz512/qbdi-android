@@ -27,30 +27,30 @@
 
 #ifdef __cplusplus
 namespace QBDI {
-extern "C" {
+    extern "C" {
 #endif
 
 /*! Memory access rights.
  */
-typedef enum {
-  QBDI_PF_NONE = 0,  /*!< No access */
-  QBDI_PF_READ = 1,  /*!< Read access */
-  QBDI_PF_WRITE = 2, /*!< Write access */
-  QBDI_PF_EXEC = 4   /*!< Execution access */
-} qbdi_Permission;
+    typedef enum {
+        QBDI_PF_NONE = 0,  /*!< No access */
+        QBDI_PF_READ = 1,  /*!< Read access */
+        QBDI_PF_WRITE = 2, /*!< Write access */
+        QBDI_PF_EXEC = 4   /*!< Execution access */
+    } qbdi_Permission;
 
 /*! Map of a memory area (region).
  */
-typedef struct {
-  rword start;                /*!< Range start value. */
-  rword end;                  /*!< Range end value (always excluded). */
-  qbdi_Permission permission; /*!< Region access rights
+    typedef struct {
+        rword start;                /*!< Range start value. */
+        rword end;                  /*!< Range end value (always excluded). */
+        qbdi_Permission permission; /*!< Region access rights
                                * (PF_READ, PF_WRITE, PF_EXEC).
                                */
-  char *name;                 /*!< Region name or path (useful when a region
+        char *name;                 /*!< Region name or path (useful when a region
                                * is mapping a module).
                                */
-} qbdi_MemoryMap;
+    } qbdi_MemoryMap;
 
 /*! Get a list of all the memory maps (regions) of a process.
  *
@@ -60,8 +60,9 @@ typedef struct {
  *
  * @return  An array of MemoryMap object.
  */
-QBDI_EXPORT qbdi_MemoryMap *qbdi_getRemoteProcessMaps(rword pid, bool full_path,
-                                                      size_t *size);
+    QBDI_EXPORT qbdi_MemoryMap * qbdi_getRemoteProcessMaps(rword
+    pid , bool full_path,
+            size_t * size ) ;
 
 /*! Get a list of all the memory maps (regions) of the current process.
  *
@@ -70,15 +71,16 @@ QBDI_EXPORT qbdi_MemoryMap *qbdi_getRemoteProcessMaps(rword pid, bool full_path,
  *
  * @return  An array of MemoryMap object.
  */
-QBDI_EXPORT qbdi_MemoryMap *qbdi_getCurrentProcessMaps(bool full_path,
-                                                       size_t *size);
+    QBDI_EXPORT qbdi_MemoryMap * qbdi_getCurrentProcessMaps(bool full_path,
+                                                            size_t *size);
 
 /*! Free an array of memory maps objects.
  *
  * @param[in] arr  An array of MemoryMap object.
  * @param[in] size Number of elements in the array.
  */
-QBDI_EXPORT void qbdi_freeMemoryMapArray(qbdi_MemoryMap *arr, size_t size);
+    QBDI_EXPORT void qbdi_freeMemoryMapArray(qbdi_MemoryMap * arr, size_t
+    size ) ;
 
 /*! Get a list of all the module names loaded in the process memory.
  *  If no modules are found, size is set to 0 and this function returns NULL.
@@ -91,7 +93,7 @@ QBDI_EXPORT void qbdi_freeMemoryMapArray(qbdi_MemoryMap *arr, size_t size);
  *          calling free() on each of its element then finally on the array
  *          itself.
  */
-QBDI_EXPORT char **qbdi_getModuleNames(size_t *size);
+    QBDI_EXPORT char **qbdi_getModuleNames(size_t * size);
 
 /*! Allocate a block of memory of a specified sized with an aligned base
  * address.
@@ -103,14 +105,15 @@ QBDI_EXPORT char **qbdi_getModuleNames(size_t *size);
  *          encountered.
  *
  */
-QBDI_EXPORT void *qbdi_alignedAlloc(size_t size, size_t align);
+    QBDI_EXPORT void *qbdi_alignedAlloc(size_t
+    size , size_t align ) ;
 
 /*! Free a block of aligned memory allocated with alignedAlloc.
  *
  * @param[in] ptr  Pointer to the allocated memory.
  *
  */
-QBDI_EXPORT void qbdi_alignedFree(void *ptr);
+    QBDI_EXPORT void qbdi_alignedFree(void *ptr);
 
 /*! Allocate a new stack and setup the GPRState accordingly.
  *  The allocated stack needs to be freed with alignedFree().
@@ -122,8 +125,8 @@ QBDI_EXPORT void qbdi_alignedFree(void *ptr);
  *
  *  @return               True if stack allocation was successfull.
  */
-QBDI_EXPORT bool qbdi_allocateVirtualStack(GPRState *ctx, uint32_t stackSize,
-                                           uint8_t **stack);
+    QBDI_EXPORT bool qbdi_allocateVirtualStack(GPRState *ctx, uint32_t stackSize,
+                                               uint8_t **stack);
 
 /*! Simulate a call by modifying the stack and registers accordingly.
  *
@@ -134,8 +137,8 @@ QBDI_EXPORT bool qbdi_allocateVirtualStack(GPRState *ctx, uint32_t stackSize,
  *  @param[in] argNum        The number of arguments in the variadic list.
  *  @param[in] ...           A variadic list of arguments.
  */
-QBDI_EXPORT void qbdi_simulateCall(GPRState *ctx, rword returnAddress,
-                                   uint32_t argNum, ...);
+    QBDI_EXPORT void qbdi_simulateCall(GPRState *ctx, rword returnAddress,
+                                       uint32_t argNum, ...);
 
 /*! Simulate a call by modifying the stack and registers accordingly
  *  (stdarg version).
@@ -147,8 +150,8 @@ QBDI_EXPORT void qbdi_simulateCall(GPRState *ctx, rword returnAddress,
  *  @param[in] argNum        The number of arguments in the va_list object.
  *  @param[in] ap            An stdarg va_list object.
  */
-QBDI_EXPORT void qbdi_simulateCallV(GPRState *ctx, rword returnAddress,
-                                    uint32_t argNum, va_list ap);
+    QBDI_EXPORT void qbdi_simulateCallV(GPRState *ctx, rword returnAddress,
+                                        uint32_t argNum, va_list ap);
 
 /*! Simulate a call by modifying the stack and registers accordingly
  *  (C array version).
@@ -160,11 +163,11 @@ QBDI_EXPORT void qbdi_simulateCallV(GPRState *ctx, rword returnAddress,
  *  @param[in] argNum        The number of arguments in the array args.
  *  @param[in] args          An array or arguments.
  */
-QBDI_EXPORT void qbdi_simulateCallA(GPRState *ctx, rword returnAddress,
-                                    uint32_t argNum, const rword *args);
+    QBDI_EXPORT void qbdi_simulateCallA(GPRState *ctx, rword returnAddress,
+                                        uint32_t argNum, const rword *args);
 
 #ifdef __cplusplus
-}
+    }
 }
 #endif
 

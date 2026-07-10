@@ -22,9 +22,9 @@
 #include "QBDI/State.h"
 
 namespace QBDI {
-struct real_addr_t {
-  explicit real_addr_t() = default;
-};
+    struct real_addr_t {
+        explicit real_addr_t() = default;
+    };
 
 } // namespace QBDI
 
@@ -70,19 +70,19 @@ inline void *sign_code_ptrauth<void *>(void *addr) {
 #else // QBDI_PTRAUTH
 
 namespace QBDI {
-using auth_addr_t = real_addr_t;
+    using auth_addr_t = real_addr_t;
 
-template <typename T>
-inline T strip_ptrauth(T addr) {
-  static_assert(sizeof(T) == sizeof(void *), "Invalid type");
-  return addr;
-}
+    template<typename T>
+    inline T strip_ptrauth(T addr) {
+        static_assert(sizeof(T) == sizeof(void *), "Invalid type");
+        return addr;
+    }
 
-template <typename T>
-inline T sign_code_ptrauth(T addr) {
-  static_assert(sizeof(T) == sizeof(void *), "Invalid type");
-  return addr;
-}
+    template<typename T>
+    inline T sign_code_ptrauth(T addr) {
+        static_assert(sizeof(T) == sizeof(void *), "Invalid type");
+        return addr;
+    }
 
 } // namespace QBDI
 #endif

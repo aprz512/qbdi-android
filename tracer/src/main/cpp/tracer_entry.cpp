@@ -25,20 +25,37 @@ static TraceConfig g_config = default_trace_config();
 static std::array<InstalledSceneHook, 5> g_hooks;
 static bool g_configured = false;
 
-static uint64_t trace_proxy_init(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-static uint64_t trace_proxy_jni(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-static uint64_t trace_proxy_libc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-static uint64_t trace_proxy_algorithm(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-static uint64_t trace_proxy_integrity(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+static uint64_t
+trace_proxy_init(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+static uint64_t
+trace_proxy_jni(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+static uint64_t
+trace_proxy_libc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+
+static uint64_t
+trace_proxy_algorithm(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
+
+static uint64_t
+trace_proxy_integrity(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                      uint64_t);
 
 static void *proxy_for_index(size_t index) {
     switch (index) {
-        case 0: return reinterpret_cast<void *>(trace_proxy_init);
-        case 1: return reinterpret_cast<void *>(trace_proxy_jni);
-        case 2: return reinterpret_cast<void *>(trace_proxy_libc);
-        case 3: return reinterpret_cast<void *>(trace_proxy_algorithm);
-        case 4: return reinterpret_cast<void *>(trace_proxy_integrity);
-        default: return nullptr;
+        case 0:
+            return reinterpret_cast<void *>(trace_proxy_init);
+        case 1:
+            return reinterpret_cast<void *>(trace_proxy_jni);
+        case 2:
+            return reinterpret_cast<void *>(trace_proxy_libc);
+        case 3:
+            return reinterpret_cast<void *>(trace_proxy_algorithm);
+        case 4:
+            return reinterpret_cast<void *>(trace_proxy_integrity);
+        default:
+            return nullptr;
     }
 }
 
@@ -59,7 +76,8 @@ static uint64_t trace_proxy_for(size_t index, uint64_t x0, uint64_t x1, uint64_t
     unhook_function(&hook.hook);
     hook.installed = false;
     uint64_t result = run_with_qbdi(g_config, invocation);
-    hook.installed = hook_function_address(invocation.target_address, proxy_for_index(index), &hook.hook);
+    hook.installed = hook_function_address(invocation.target_address, proxy_for_index(index),
+                                           &hook.hook);
     return result;
 }
 
@@ -106,11 +124,12 @@ static bool install_scene_hook_locked(const SceneConfig &scene, const ModuleRang
 static void install_hooks_for_module(const ModuleRange &module) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (!g_configured) return;
-    QTRACE_I("target module %s base=0x%lx", g_config.target_so.c_str(), static_cast<unsigned long>(module.start));
-    for (const auto &scene : g_config.scenes) install_scene_hook_locked(scene, module);
+    QTRACE_I("target module %s base=0x%lx", g_config.target_so.c_str(),
+             static_cast<unsigned long>(module.start));
+    for (const auto &scene: g_config.scenes) install_scene_hook_locked(scene, module);
 }
 
-static void install_hooks_when_ready(const TraceConfig& config) {
+static void install_hooks_when_ready(const TraceConfig &config) {
     for (int attempt = 0; attempt < 200; ++attempt) {
         ModuleRange module;
         if (find_module_executable_range(config.target_so, &module)) {
@@ -130,11 +149,12 @@ static void on_dl_init_pre(dl_phdr_info *info, size_t, void *) {
     ModuleRange module;
     if (find_module_executable_range(g_config.target_so, &module)) {
         QTRACE_I("installing hooks before init_array for %s", info->dlpi_name);
-        for (const auto &scene : g_config.scenes) install_scene_hook_locked(scene, module);
+        for (const auto &scene: g_config.scenes) install_scene_hook_locked(scene, module);
     }
 }
 
-extern "C" __attribute__((visibility("default"))) void qbdi_tracer_configure(const char *encoded_config) {
+extern "C" __attribute__((visibility("default"))) void
+qbdi_tracer_configure(const char *encoded_config) {
     if (!init_inline_hook()) return;
     TraceConfig config = parse_trace_config(encoded_config);
     {
@@ -143,7 +163,8 @@ extern "C" __attribute__((visibility("default"))) void qbdi_tracer_configure(con
         g_configured = true;
     }
     shadowhook_register_dl_init_callback(on_dl_init_pre, nullptr, nullptr);
-    QTRACE_I("configure tracer package=%s target=%s", config.package_name.c_str(), config.target_so.c_str());
+    QTRACE_I("configure tracer package=%s target=%s", config.package_name.c_str(),
+             config.target_so.c_str());
     std::thread(install_hooks_when_ready, config).detach();
 }
 

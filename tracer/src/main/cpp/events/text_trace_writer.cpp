@@ -50,7 +50,8 @@ bool TextTraceWriter::open(const TraceContext &context) {
     long long millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
     char file[512];
     snprintf(file, sizeof(file), "%s/%lld_%d_%d_%s_0x%lx.trace.txt", dir, millis, context.pid,
-             context.tid, context.scene_name.c_str(), static_cast<unsigned long>(context.target_offset));
+             context.tid, context.scene_name.c_str(),
+             static_cast<unsigned long>(context.target_offset));
     path_ = file;
     fd_ = ::open(path_.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     return fd_ >= 0;
@@ -73,7 +74,7 @@ void TextTraceWriter::instruction(const TraceContext &context, const Instruction
         << (inst.pc - context.module_base) << " " << inst.disassembly;
     if (!inst.reads.empty()) out << " | R:" << inst.reads;
     if (!inst.writes.empty()) out << " | W:" << inst.writes;
-    for (const auto &mem : inst.memory) {
+    for (const auto &mem: inst.memory) {
         out << " | MEM:" << mem.type << " addr=0x" << mem.address
             << " size=" << std::dec << mem.size << " value=0x" << std::hex << mem.value;
     }
@@ -81,7 +82,8 @@ void TextTraceWriter::instruction(const TraceContext &context, const Instruction
     append(out.str());
 }
 
-void TextTraceWriter::memory(const TraceContext &context, uintptr_t pc, const MemoryAccessText &mem) {
+void
+TextTraceWriter::memory(const TraceContext &context, uintptr_t pc, const MemoryAccessText &mem) {
     std::ostringstream out;
     out << "MEM " << context.target_so << "+0x" << std::hex << (pc - context.module_base)
         << " type=" << mem.type << " addr=0x" << mem.address
@@ -89,7 +91,8 @@ void TextTraceWriter::memory(const TraceContext &context, uintptr_t pc, const Me
     append(out.str());
 }
 
-void TextTraceWriter::call(const char *category, const std::string &name, const std::string &detail) {
+void
+TextTraceWriter::call(const char *category, const std::string &name, const std::string &detail) {
     append(std::string("CALL ") + category + "." + name + " " + detail + "\n");
 }
 

@@ -18,4 +18,5 @@ struct TraceConfig {
 };
 
 TraceConfig default_trace_config();
+
 TraceConfig parse_trace_config(const char *encoded_config);

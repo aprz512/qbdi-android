@@ -5,15 +5,16 @@
 #include <cstring>
 
 namespace {
-constexpr uint64_t kArm64ZeroFlag = 1ULL << 30U;
-constexpr size_t kReturnRegister = 0;
-constexpr size_t kStackPointerRegister = 31;
+    constexpr uint64_t kArm64ZeroFlag = 1ULL << 30U;
+    constexpr size_t kReturnRegister = 0;
+    constexpr size_t kStackPointerRegister = 31;
 }
 
 CodeRuleContext::CodeRuleContext(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr,
                                  const QBDI::InstAnalysis *instruction, const TraceContext *trace,
                                  TextTraceWriter *writer)
-    : vm_(vm), gpr_(gpr), fpr_(fpr), instruction_(instruction), trace_(trace), writer_(writer) {}
+        : vm_(vm), gpr_(gpr), fpr_(fpr), instruction_(instruction), trace_(trace),
+          writer_(writer) {}
 
 uintptr_t CodeRuleContext::address() const {
     return instruction_ != nullptr ? instruction_->address : 0;
@@ -34,7 +35,8 @@ bool CodeRuleContext::at_offset(uintptr_t expected_offset) const {
 }
 
 const char *CodeRuleContext::mnemonic() const {
-    return instruction_ != nullptr && instruction_->mnemonic != nullptr ? instruction_->mnemonic : "";
+    return instruction_ != nullptr && instruction_->mnemonic != nullptr ? instruction_->mnemonic
+                                                                        : "";
 }
 
 const char *CodeRuleContext::disassembly() const {

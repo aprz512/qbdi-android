@@ -22,12 +22,14 @@
 #include "QBDI/Platform.h"
 
 #ifdef __cplusplus
+
 #include <string>
+
 #endif
 
 #ifdef __cplusplus
 namespace QBDI {
-extern "C" {
+    extern "C" {
 #endif
 
 // If Windows.h is included, ERROR macro may be defined
@@ -43,13 +45,13 @@ extern "C" {
 /*! Each log has a priority (or level) which can be used to control verbosity.
  * In production builds, only Warning and Error logs are kept.
  */
-typedef enum {
-  _QBDI_EI(DEBUG) = 0,      /*!< Debug logs */
-  _QBDI_EI(INFO),           /*!< Info logs (default) */
-  _QBDI_EI(WARNING),        /*!< Warning logs */
-  _QBDI_EI(ERROR),          /*!< Error logs */
-  _QBDI_EI(DISABLE) = 0xff, /*!< Disable logs message */
-} LogPriority;
+    typedef enum {
+        _QBDI_EI(DEBUG) = 0,      /*!< Debug logs */
+        _QBDI_EI(INFO),           /*!< Info logs (default) */
+        _QBDI_EI(WARNING),        /*!< Warning logs */
+        _QBDI_EI(ERROR),          /*!< Error logs */
+        _QBDI_EI(DISABLE) = 0xff, /*!< Disable logs message */
+    } LogPriority;
 
 #ifdef QBDI_PLATFORM_WINDOWS
 #ifdef QBDI_LOGS_DISABLE_ERROR
@@ -62,22 +64,22 @@ typedef enum {
  * @param[in] filename    the path of the file to append the log
  * @param[in] truncate    Set to true to clear the file before append the log
  */
-QBDI_EXPORT void qbdi_setLogFile(const char *filename, bool truncate);
+    QBDI_EXPORT void qbdi_setLogFile(const char *filename, bool truncate);
 
 /*! Write log to the console (stderr)
  */
-QBDI_EXPORT void qbdi_setLogConsole();
+    QBDI_EXPORT void qbdi_setLogConsole();
 
 /*! Write log to the default location (stderr for linux, android_logger for
  * android)
  */
-QBDI_EXPORT void qbdi_setLogDefault();
+    QBDI_EXPORT void qbdi_setLogDefault();
 
 /*! Enable logs matching priority.
  *
  * @param[in] priority      Filter logs with greater or equal priority.
  */
-QBDI_EXPORT void qbdi_setLogPriority(LogPriority priority);
+    QBDI_EXPORT void qbdi_setLogPriority(LogPriority priority);
 
 #ifdef __cplusplus
 
@@ -90,26 +92,26 @@ QBDI_EXPORT void qbdi_setLogPriority(LogPriority priority);
  * @param[in] filename    the path of the file to append the log
  * @param[in] truncate    Set to true to clear the file before append the log
  */
-QBDI_EXPORT void setLogFile(const std::string &filename, bool truncate = false);
+    QBDI_EXPORT void setLogFile(const std::string &filename, bool truncate = false);
 
 /*! Enable logs matching priority.
  *
  * @param[in] priority      Filter logs with greater or equal priority.
  */
-inline void setLogPriority(LogPriority priority = LogPriority::INFO) {
-  return qbdi_setLogPriority(priority);
-}
+    inline void setLogPriority(LogPriority priority = LogPriority::INFO) {
+        return qbdi_setLogPriority(priority);
+    }
 
 /*! Write log to the console (stderr)
  */
-inline void setLogConsole() { return qbdi_setLogConsole(); }
+    inline void setLogConsole() { return qbdi_setLogConsole(); }
 
 /*! Write log to the default location (stderr for linux, android_logger for
  * android)
  */
-inline void setLogDefault() { return qbdi_setLogDefault(); }
+    inline void setLogDefault() { return qbdi_setLogDefault(); }
 
-} // "C"
+    } // "C"
 
 } // QBDI::
 #endif

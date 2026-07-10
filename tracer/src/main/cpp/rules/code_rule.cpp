@@ -21,7 +21,7 @@ void CodeRuleEngine::add(std::unique_ptr<CodeRule> rule) {
 }
 
 QBDI::VMAction CodeRuleEngine::on_pre_instruction(CodeRuleContext &context) {
-    for (const auto &rule : rules_) {
+    for (const auto &rule: rules_) {
         if (!rule->matches(context)) continue;
         QBDI::VMAction action = rule->on_pre_instruction(context);
         if (action != QBDI::CONTINUE) return action;
@@ -30,7 +30,7 @@ QBDI::VMAction CodeRuleEngine::on_pre_instruction(CodeRuleContext &context) {
 }
 
 QBDI::VMAction CodeRuleEngine::on_post_instruction(CodeRuleContext &context) {
-    for (const auto &rule : rules_) {
+    for (const auto &rule: rules_) {
         if (!rule->matches(context)) continue;
         QBDI::VMAction action = rule->on_post_instruction(context);
         if (action != QBDI::CONTINUE) return action;

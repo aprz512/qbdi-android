@@ -9,5 +9,7 @@ struct HookHandle {
 };
 
 bool init_inline_hook();
+
 bool hook_function_address(uintptr_t target, void *replacement, HookHandle *handle);
+
 bool unhook_function(HookHandle *handle);

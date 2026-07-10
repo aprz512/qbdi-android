@@ -27,35 +27,35 @@
 namespace QBDI {
 #endif
 
-typedef enum {
-  _QBDI_EI(NO_OPT) = 0, /*!< Default value */
-  // general options between 0 and 23
-  _QBDI_EI(OPT_DISABLE_FPR) = 1 << 0,          /*!< Disable all operation on FPU
+    typedef enum {
+        _QBDI_EI(NO_OPT) = 0, /*!< Default value */
+        // general options between 0 and 23
+        _QBDI_EI(OPT_DISABLE_FPR) = 1 << 0,          /*!< Disable all operation on FPU
                                                 * (SSE, AVX, SIMD). May break
                                                 * the execution if the target
                                                 * use the FPU
                                                 */
-  _QBDI_EI(OPT_DISABLE_OPTIONAL_FPR) = 1 << 1, /*!< Disable context switch
+        _QBDI_EI(OPT_DISABLE_OPTIONAL_FPR) = 1 << 1, /*!< Disable context switch
                                                 * optimisation when the target
                                                 * execblock doesn't used FPR
                                                 */
-  _QBDI_EI(OPT_DISABLE_MEMORYACCESS_VALUE) = 1 << 2, /*!< Don't load the value
+        _QBDI_EI(OPT_DISABLE_MEMORYACCESS_VALUE) = 1 << 2, /*!< Don't load the value
                                                       * when perform memory
                                                       * access.
                                                       */
-  _QBDI_EI(OPT_DISABLE_ERRNO_BACKUP) = 1 << 3, /*!< Don't save and restore errno
+        _QBDI_EI(OPT_DISABLE_ERRNO_BACKUP) = 1 << 3, /*!< Don't save and restore errno
                                                 */
-  // architecture specific option between 24 and 31
-  _QBDI_EI(OPT_DISABLE_LOCAL_MONITOR) =
-      1 << 24, /*!< Disable the local monitor for instruction like stxr */
-  _QBDI_EI(OPT_BYPASS_PAUTH) =
-      1 << 25, /*!< Disable pointeur authentication. When set, QBDI will
+        // architecture specific option between 24 and 31
+        _QBDI_EI(OPT_DISABLE_LOCAL_MONITOR) =
+        1 << 24, /*!< Disable the local monitor for instruction like stxr */
+        _QBDI_EI(OPT_BYPASS_PAUTH) =
+        1 << 25, /*!< Disable pointeur authentication. When set, QBDI will
                   strip/ignore the authentication bits instead of checking them.
                 */
-  _QBDI_EI(OPT_ENABLE_BTI) = 1 << 26, /*!< Enable BTI on instrumented code */
-} Options;
+        _QBDI_EI(OPT_ENABLE_BTI) = 1 << 26, /*!< Enable BTI on instrumented code */
+    } Options;
 
-_QBDI_ENABLE_BITMASK_OPERATORS(Options)
+    _QBDI_ENABLE_BITMASK_OPERATORS(Options)
 
 #ifdef __cplusplus
 }

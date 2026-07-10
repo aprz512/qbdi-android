@@ -23,7 +23,7 @@
 
 #ifdef __cplusplus
 namespace QBDI {
-extern "C" {
+    extern "C" {
 #endif
 
 #define QBDI_VERSION ((0 << 16 ) | \
@@ -44,7 +44,7 @@ extern "C" {
  * @param[out] version  QBDI version encoded as an unsigned integer (0xMMmmpp).
  * @return  QBDI version as a string (major.minor.patch).
  */
-QBDI_EXPORT const char* qbdi_getVersion(uint32_t* version);
+    QBDI_EXPORT const char *qbdi_getVersion(uint32_t *version);
 
 #ifdef __cplusplus
 /*! Return QBDI version.
@@ -52,11 +52,11 @@ QBDI_EXPORT const char* qbdi_getVersion(uint32_t* version);
  * @param[out] version  QBDI version encoded as an unsigned integer (0xMMmmpp).
  * @return  QBDI version as a string (major.minor.patch).
  */
-inline const char* getVersion(uint32_t* version) {
-    return qbdi_getVersion(version);
-}
+    inline const char *getVersion(uint32_t *version) {
+        return qbdi_getVersion(version);
+    }
 
-} // "C"
+    } // "C"
 } // QBDI::
 #endif
 

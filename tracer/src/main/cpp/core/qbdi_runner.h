@@ -7,7 +7,8 @@
 #include <array>
 #include <cstdint>
 
-using GenericTargetFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+using GenericTargetFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                     uint64_t, uint64_t);
 
 struct TraceInvocation {
     SceneConfig scene;
