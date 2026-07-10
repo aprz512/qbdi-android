@@ -20,6 +20,13 @@ struct RunnerState {
     uint64_t sequence = 0;
 };
 
+constexpr uint32_t kQbdiVirtualStackSize = 0x1000000;
+
+static long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
+    auto ended = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(ended - started).count();
+}
+
 static QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *, void *data) {
     auto *state = static_cast<RunnerState *>(data);
     const auto accesses = vm->getInstMemoryAccess();
@@ -104,10 +111,29 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     auto started = std::chrono::steady_clock::now();
     QBDI::VM vm;
     QBDI::GPRState *gpr = vm.getGPRState();
+
+    uint8_t *fakestack = nullptr;
+    if (!QBDI::allocateVirtualStack(gpr, kQbdiVirtualStackSize, &fakestack)) {
+        state.writer.error("allocateVirtualStack failed");
+        state.writer.end(0, false, elapsed_ms_since(started));
+        QTRACE_E("allocateVirtualStack failed");
+        return 0;
+    }
+
     for (int i = 0; i < 8; ++i) QBDI_GPR_SET(gpr, i, invocation.args[i]);
     gpr->pc = invocation.target_address;
 
-    vm.addInstrumentedModuleFromAddr(invocation.module.start);
+    if (!vm.addInstrumentedModuleFromAddr(invocation.target_address)) {
+        std::ostringstream error;
+        error << "addInstrumentedModuleFromAddr failed address=0x" << std::hex
+              << invocation.target_address;
+        state.writer.error(error.str());
+        state.writer.end(0, false, elapsed_ms_since(started));
+        QTRACE_E("addInstrumentedModuleFromAddr 0x%lx failed",
+                 static_cast<unsigned long>(invocation.target_address));
+        QBDI::alignedFree(fakestack);
+        return 0;
+    }
     vm.recordMemoryAccess(QBDI::MEMORY_READ_WRITE);
     vm.addCodeCB(QBDI::PREINST, on_pre_instruction, &state);
     vm.addCodeCB(QBDI::POSTINST, on_post_instruction, &state);
@@ -120,9 +146,8 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     args.reserve(invocation.args.size());
     for (uint64_t arg: invocation.args) args.push_back(arg);
     bool ok = vm.call(&retVal, invocation.target_address, args);
-    auto ended = std::chrono::steady_clock::now();
-    long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(ended - started).count();
-    state.writer.end(retVal, ok, elapsed);
+    state.writer.end(retVal, ok, elapsed_ms_since(started));
+    QBDI::alignedFree(fakestack);
     QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),
              state.writer.path().c_str());
     return retVal;
