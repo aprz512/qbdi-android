@@ -21,7 +21,7 @@ Android arm64 demo project for showing how to use QBDI in an injected tracer.
 - On jailed/non-root Android, Frida may require Gadget and plain spawn injection will fail
 - Git LFS for `libQBDI.a`
 - QBDI v0.12.1 Android AARCH64 artifact committed under `tracer/src/main/cpp/third_party/qbdi/`
-- ByteDance ShadowHook v2.0.1 from Maven Central
+- ByteDance ShadowHook source vendored under `tracer/src/main/cpp/third_party/android-inline-hook/`
 
 ## Build
 
@@ -36,7 +36,6 @@ Android arm64 demo project for showing how to use QBDI in an injected tracer.
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell mkdir -p /data/local/tmp/qbdi-android
 adb push out/arm64-v8a/libqbdi_tracer.so /data/local/tmp/qbdi-android/
-adb push out/arm64-v8a/libshadowhook.so /data/local/tmp/qbdi-android/
 ```
 
 ## Find Scene Offsets

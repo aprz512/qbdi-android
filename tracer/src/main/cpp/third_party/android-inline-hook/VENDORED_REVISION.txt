@@ -1,0 +1,2 @@
+Vendored from https://github.com/bytedance/android-inline-hook.git
+Commit: 47302d5bd8e508d589d2f3dfd7536ece06c610a1

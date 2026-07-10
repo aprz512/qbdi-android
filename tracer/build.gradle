@@ -20,7 +20,7 @@ android {
     }
 
     buildFeatures {
-        prefab true
+        prefab false
     }
 
     buildTypes {
@@ -41,13 +41,9 @@ android {
     }
 }
 
-dependencies {
-    implementation "com.bytedance.android:shadowhook:2.0.1"
-}
-
 tasks.register("copyTracerDebug", Copy) {
     dependsOn "assembleDebug"
     from("$buildDir/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a")
     into("$rootDir/out/arm64-v8a")
-    include("libqbdi_tracer.so", "libshadowhook.so")
+    include("libqbdi_tracer.so")
 }

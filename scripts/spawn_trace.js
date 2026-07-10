@@ -5,7 +5,6 @@
 const config = {
   packageName: 'com.aprz.qbdiandroid',
   remoteDir: '/data/local/tmp/qbdi-android',
-  shadowhook: 'libshadowhook.so',
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
   scenes: {
@@ -16,6 +15,8 @@ const config = {
     integrity: { offset: '0x0' }
   }
 };
+
+let moduleObserver = null;
 
 function loadLibrary(path) {
   try {
@@ -36,9 +37,7 @@ function encodeConfig(cfg) {
   return parts.join(';');
 }
 
-function findConfigureExport(tracerModule) {
-  const symbol = 'qbdi_tracer_configure';
-
+function findTracerExport(tracerModule, symbol) {
   if (tracerModule && typeof tracerModule.getExportByName === 'function') {
     return tracerModule.getExportByName(symbol);
   }
@@ -72,18 +71,36 @@ function findConfigureExport(tracerModule) {
 }
 
 function configureTracer(encoded, tracerModule) {
-  const configurePtr = findConfigureExport(tracerModule);
+  const configurePtr = findTracerExport(tracerModule, 'qbdi_tracer_configure');
   const configure = new NativeFunction(configurePtr, 'void', ['pointer']);
   const nativeConfig = Memory.allocUtf8String(encoded);
   configure(nativeConfig);
   console.log('[+] tracer configured: ' + encoded);
 }
 
+function installModuleObserver(tracerModule) {
+  const installPtr = findTracerExport(tracerModule, 'qbdi_tracer_install_module');
+  const installModule = new NativeFunction(installPtr, 'void', ['pointer', 'pointer', 'pointer']);
+
+  function maybeInstall(module) {
+    if (module.name !== config.targetSo) return;
+    const path = module.path || module.name;
+    installModule(Memory.allocUtf8String(path), module.base, ptr(module.size));
+    console.log('[+] install requested for ' + module.name + ' base=' + module.base + ' size=0x' + module.size.toString(16));
+  }
+
+  moduleObserver = Process.attachModuleObserver({
+    onAdded(module) {
+      maybeInstall(module);
+    }
+  });
+}
+
 function main() {
   const dir = config.remoteDir.replace(/\/$/, '');
-  loadLibrary(dir + '/' + config.shadowhook);
   const tracerModule = loadLibrary(dir + '/' + config.tracer);
   configureTracer(encodeConfig(config), tracerModule);
+  installModuleObserver(tracerModule);
   console.log('[+] tracer injected; tap a demo button for non-init scenes');
 }
 

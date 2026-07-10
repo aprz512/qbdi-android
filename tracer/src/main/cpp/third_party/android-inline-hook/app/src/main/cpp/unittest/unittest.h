@@ -1,0 +1,40 @@
+// Copyright (c) 2021-2025 ByteDance Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+
+// Created by Kelun Cai (caikelun@bytedance.com) on 2021-04-11.
+
+#pragma once
+#include <stdbool.h>
+
+int unittest_hook_sym_addr(int api_level);
+int unittest_hook_sym_name(int api_level);
+int unittest_unhook(void);
+
+int unittest_intercept_sym_addr(void);
+int unittest_intercept_sym_addr_read_fpsimd(void);
+int unittest_intercept_sym_addr_read_write_fpsimd(void);
+int unittest_intercept_sym_name(void);
+int unittest_intercept_sym_name_read_fpsimd(void);
+int unittest_intercept_sym_name_read_write_fpsimd(void);
+int unittest_unintercept(void);
+
+int unittest_run(bool hookee2_loaded);
+int unittest_benchmark(void);

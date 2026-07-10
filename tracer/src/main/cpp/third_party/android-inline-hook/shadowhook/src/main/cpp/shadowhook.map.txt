@@ -1,0 +1,70 @@
+{
+    global:
+        JNI_OnLoad;
+
+        shadowhook_get_version;
+
+        shadowhook_init;
+
+        shadowhook_get_mode;
+        shadowhook_get_debuggable;
+        shadowhook_set_debuggable;
+        shadowhook_get_recordable;
+        shadowhook_set_recordable;
+        shadowhook_get_disable;
+        shadowhook_set_disable;
+
+        shadowhook_get_errno;
+        shadowhook_to_errmsg;
+
+        shadowhook_hook_func_addr;
+        shadowhook_hook_func_addr_2;
+        shadowhook_hook_sym_addr;
+        shadowhook_hook_sym_addr_2;
+        shadowhook_hook_sym_name;
+        shadowhook_hook_sym_name_2;
+        shadowhook_hook_sym_name_callback;
+        shadowhook_hook_sym_name_callback_2;
+        shadowhook_unhook;
+
+        shadowhook_intercept_instr_addr;
+        shadowhook_intercept_func_addr;
+        shadowhook_intercept_sym_addr;
+        shadowhook_intercept_sym_name;
+        shadowhook_intercept_sym_name_callback;
+        shadowhook_unintercept;
+
+        shadowhook_get_records;
+        shadowhook_dump_records;
+
+        shadowhook_dlopen;
+        shadowhook_dlclose;
+        shadowhook_dlsym;
+        shadowhook_dlsym_dynsym;
+        shadowhook_dlsym_symtab;
+
+        shadowhook_register_dl_init_callback;
+        shadowhook_unregister_dl_init_callback;
+        shadowhook_register_dl_fini_callback;
+        shadowhook_unregister_dl_fini_callback;
+
+        shadowhook_get_prev_func;
+        shadowhook_pop_stack;
+        shadowhook_allow_reentrant;
+        shadowhook_disallow_reentrant;
+        shadowhook_get_return_address;
+
+        /* The following functions are likely to appear in the backtrace,
+           so we need to give them a particularly clear name. At the same time,
+           these exported symbols will appear in .dynsym, which makes it
+           easier for the unwinder to obtain the symbol names. */
+        shadowhook_interceptor_glue;
+        shadowhook_interceptor_glue_vfpv3d16;
+        shadowhook_interceptor_glue_vfpv3d32;
+        shadowhook_interceptor_caller;
+        shadowhook_proxy_android_linker_soinfo_call_constructors;
+        shadowhook_proxy_android_linker_soinfo_call_destructors;
+
+    local:
+        *;
+};

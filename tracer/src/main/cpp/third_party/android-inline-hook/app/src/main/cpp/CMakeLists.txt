@@ -1,0 +1,47 @@
+cmake_minimum_required(VERSION 4.0.2)
+project(app)
+enable_language(ASM)
+
+if(DEPENDENCY_ON_LOCAL_LIBRARY)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/../../../../shadowhook/local_dependency.cmake)
+else()
+    find_package(shadowhook REQUIRED CONFIG)
+endif()
+
+if(${ANDROID_ABI} STREQUAL "arm64-v8a")
+    set(ARCH "arm64")
+    set(ARCH_LINK_FLAGS "-Wl,-z,max-page-size=16384")
+elseif(${ANDROID_ABI} STREQUAL "armeabi-v7a")
+    set(ARCH "arm")
+    set(ARCH_LINK_FLAGS "")
+endif()
+
+# libhookee.so
+set(TARGET "hookee")
+file(GLOB SRC hookee/*.c hookee/arch/${ARCH}/*.S)
+add_library(${TARGET} SHARED ${SRC})
+target_compile_features(${TARGET} PRIVATE c_std_11)
+target_compile_options(${TARGET} PRIVATE -Weverything -Werror -Wno-unused-macros)
+target_include_directories(${TARGET} PRIVATE hookee)
+target_link_libraries(${TARGET} log)
+target_link_options(${TARGET} PRIVATE ${ARCH_LINK_FLAGS})
+
+# libhookee2.so
+set(TARGET "hookee2")
+file(GLOB SRC hookee2/*.c)
+add_library(${TARGET} SHARED ${SRC})
+target_compile_features(${TARGET} PRIVATE c_std_11)
+target_compile_options(${TARGET} PRIVATE -Weverything -Werror)
+target_include_directories(${TARGET} PRIVATE hookee2)
+target_link_libraries(${TARGET} log)
+target_link_options(${TARGET} PRIVATE ${ARCH_LINK_FLAGS})
+
+# libunittest.so
+set(TARGET "unittest")
+file(GLOB SRC unittest/*.c)
+add_library(${TARGET} SHARED ${SRC})
+target_compile_features(${TARGET} PRIVATE c_std_11)
+target_compile_options(${TARGET} PRIVATE -Weverything -Werror -Wno-unused-macros)
+target_include_directories(${TARGET} PRIVATE unittest hookee)
+target_link_libraries(${TARGET} log hookee shadowhook::shadowhook)
+target_link_options(${TARGET} PRIVATE ${ARCH_LINK_FLAGS})

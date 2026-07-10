@@ -3,7 +3,6 @@
 module.exports = {
   packageName: 'com.aprz.qbdiandroid',
   remoteDir: '/data/local/tmp/qbdi-android',
-  shadowhook: 'libshadowhook.so',
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
   scenes: {

@@ -1,11 +1,39 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(qbdi_tracer)
+enable_language(ASM)
 
 set(ANDROID_16KB_PAGE_LINK_OPTIONS "-Wl,-z,max-page-size=16384")
 
 set(QBDI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qbdi)
+set(SHADOWHOOK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/android-inline-hook/shadowhook/src/main/cpp)
 
-find_package(shadowhook REQUIRED CONFIG)
+if(${ANDROID_ABI} STREQUAL "arm64-v8a")
+    set(SHADOWHOOK_ARCH "arm64")
+elseif(${ANDROID_ABI} STREQUAL "armeabi-v7a")
+    set(SHADOWHOOK_ARCH "arm")
+else()
+    message(FATAL_ERROR "Unsupported ABI for ShadowHook: ${ANDROID_ABI}")
+endif()
+
+file(GLOB SHADOWHOOK_SRC
+        ${SHADOWHOOK_ROOT}/*.c
+        ${SHADOWHOOK_ROOT}/arch/${SHADOWHOOK_ARCH}/*.c
+        ${SHADOWHOOK_ROOT}/arch/${SHADOWHOOK_ARCH}/*.S
+        ${SHADOWHOOK_ROOT}/common/*.c
+        ${SHADOWHOOK_ROOT}/third_party/*/*.c)
+
+add_library(shadowhook_static STATIC ${SHADOWHOOK_SRC})
+target_compile_features(shadowhook_static PRIVATE c_std_11)
+target_compile_definitions(shadowhook_static PRIVATE SHADOWHOOK_DISABLE_LINKER_INIT)
+target_compile_options(shadowhook_static PRIVATE -Os -ffunction-sections -fdata-sections)
+target_include_directories(shadowhook_static PUBLIC ${SHADOWHOOK_ROOT}/include)
+target_include_directories(shadowhook_static PRIVATE
+        ${SHADOWHOOK_ROOT}
+        ${SHADOWHOOK_ROOT}/arch/${SHADOWHOOK_ARCH}
+        ${SHADOWHOOK_ROOT}/common
+        ${SHADOWHOOK_ROOT}/third_party/xdl
+        ${SHADOWHOOK_ROOT}/third_party/bsd
+        ${SHADOWHOOK_ROOT}/third_party/lss)
 
 add_library(qbdi_static STATIC IMPORTED)
 set_target_properties(qbdi_static PROPERTIES
@@ -32,6 +60,6 @@ target_include_directories(qbdi_tracer PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(qbdi_tracer PRIVATE
         qbdi_static
-        shadowhook::shadowhook
+        shadowhook_static
         android
         log)

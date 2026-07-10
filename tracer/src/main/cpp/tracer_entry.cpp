@@ -6,12 +6,9 @@
 
 #include <array>
 #include <cstring>
-#include <link.h>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
-
-#include <shadowhook.h>
 
 struct InstalledSceneHook {
     SceneConfig scene;
@@ -141,18 +138,6 @@ static void install_hooks_when_ready(const TraceConfig &config) {
     QTRACE_E("target module %s not found", config.target_so.c_str());
 }
 
-static void on_dl_init_pre(dl_phdr_info *info, size_t, void *) {
-    if (info == nullptr || info->dlpi_name == nullptr) return;
-    std::lock_guard<std::mutex> guard(g_lock);
-    if (!g_configured || basename_of(info->dlpi_name) != g_config.target_so) return;
-
-    ModuleRange module;
-    if (find_module_executable_range(g_config.target_so, &module)) {
-        QTRACE_I("installing hooks before init_array for %s", info->dlpi_name);
-        for (const auto &scene: g_config.scenes) install_scene_hook_locked(scene, module);
-    }
-}
-
 extern "C" __attribute__((visibility("default"))) void
 qbdi_tracer_configure(const char *encoded_config) {
     if (!init_inline_hook()) return;
@@ -162,10 +147,25 @@ qbdi_tracer_configure(const char *encoded_config) {
         g_config = config;
         g_configured = true;
     }
-    shadowhook_register_dl_init_callback(on_dl_init_pre, nullptr, nullptr);
     QTRACE_I("configure tracer package=%s target=%s", config.package_name.c_str(),
              config.target_so.c_str());
     std::thread(install_hooks_when_ready, config).detach();
+}
+
+extern "C" __attribute__((visibility("default"))) void
+qbdi_tracer_install_module(const char *module_path, uintptr_t module_base, uintptr_t module_size) {
+    if (module_path == nullptr || module_base == 0 || module_size == 0) return;
+    if (basename_of(module_path) != g_config.target_so) return;
+
+    ModuleRange module;
+    module.start = module_base;
+    module.end = module_base + module_size;
+    module.permissions = "r-xp";
+    module.path = module_path;
+
+    QTRACE_I("install hooks from observer module=%s base=0x%lx size=0x%lx", module_path,
+             static_cast<unsigned long>(module.start), static_cast<unsigned long>(module.size()));
+    install_hooks_for_module(module);
 }
 
 __attribute__((constructor)) static void qbdi_tracer_init() {

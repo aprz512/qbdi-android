@@ -28,11 +28,9 @@
  * }
  */
 
-namespace {
 
-}
 
 
 void register_user_code_rules(CodeRuleEngine &engine) {
-
+    (void)engine;
 }
