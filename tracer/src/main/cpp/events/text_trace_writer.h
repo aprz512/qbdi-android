@@ -29,6 +29,8 @@ public:
 
     void flush();
 
+    void write_crash_marker(int signal);
+
     const std::string &path() const { return path_; }
 
 private:

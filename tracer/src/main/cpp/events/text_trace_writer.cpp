@@ -125,3 +125,11 @@ void TextTraceWriter::flush() {
         buffer_.clear();
     }
 }
+
+void TextTraceWriter::write_crash_marker(int signal) {
+    if (fd_ < 0) return;
+    const char *msg = (signal == SIGSEGV)
+        ? "TRACE_END status=crashed signal=SIGSEGV\n"
+        : "TRACE_END status=crashed signal=SIGABRT\n";
+    write(fd_, msg, strlen(msg));
+}

@@ -9,6 +9,7 @@ struct SceneConfig {
     size_t index = 0;
     std::string name;
     uintptr_t offset = 0;
+    uintptr_t end_offset = 0;
 };
 
 struct TraceConfig {

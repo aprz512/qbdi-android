@@ -6,6 +6,7 @@
 #include <QBDI.h>
 #include <QBDI/State.h>
 #include <chrono>
+#include <csignal>
 #include <sstream>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -21,6 +22,35 @@ struct RunnerState {
 };
 
 constexpr uint32_t kQbdiVirtualStackSize = 0x1000000;
+
+static thread_local TextTraceWriter *t_active_writer = nullptr;
+static struct sigaction s_prev_sigsegv;
+static struct sigaction s_prev_sigabrt;
+
+static void on_crash_signal(int sig, siginfo_t *, void *) {
+    if (t_active_writer) {
+        t_active_writer->flush();
+        t_active_writer->write_crash_marker(sig);
+        t_active_writer = nullptr;
+    }
+    struct sigaction *prev = (sig == SIGSEGV) ? &s_prev_sigsegv : &s_prev_sigabrt;
+    sigaction(sig, prev, nullptr);
+    raise(sig);
+}
+
+static void install_crash_handlers() {
+    struct sigaction sa{};
+    sa.sa_sigaction = on_crash_signal;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &s_prev_sigsegv);
+    sigaction(SIGABRT, &sa, &s_prev_sigabrt);
+}
+
+static void remove_crash_handlers() {
+    sigaction(SIGSEGV, &s_prev_sigsegv, nullptr);
+    sigaction(SIGABRT, &s_prev_sigabrt, nullptr);
+}
 
 static long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
     auto ended = std::chrono::steady_clock::now();
@@ -121,9 +151,14 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     }
 
     for (int i = 0; i < 8; ++i) QBDI_GPR_SET(gpr, i, invocation.args[i]);
+    gpr->x8 = invocation.indirect_result;
     gpr->pc = invocation.target_address;
 
-    if (!vm.addInstrumentedModuleFromAddr(invocation.target_address)) {
+    if (invocation.scene.end_offset > 0) {
+        uintptr_t range_start = invocation.module.start + invocation.scene.offset;
+        uintptr_t range_end = invocation.module.start + invocation.scene.end_offset;
+        vm.addInstrumentedRange(range_start, range_end);
+    } else if (!vm.addInstrumentedModuleFromAddr(invocation.target_address)) {
         std::ostringstream error;
         error << "addInstrumentedModuleFromAddr failed address=0x" << std::hex
               << invocation.target_address;
@@ -145,7 +180,13 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     std::vector<QBDI::rword> args;
     args.reserve(invocation.args.size());
     for (uint64_t arg: invocation.args) args.push_back(arg);
+
+    t_active_writer = &state.writer;
+    install_crash_handlers();
     bool ok = vm.call(&retVal, invocation.target_address, args);
+    remove_crash_handlers();
+    t_active_writer = nullptr;
+
     state.writer.end(retVal, ok, elapsed_ms_since(started));
     QBDI::alignedFree(fakestack);
     QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),

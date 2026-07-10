@@ -1,0 +1,1157 @@
+TRACE_BEGIN scene=algorithm target=libdemo_target.so+0x6db38 base=0x758a0c0000 address=0x758a12db38 pid=16850 tid=16850
+1 libdemo_target.so+0x6db38 	sub	sp, sp, #0x30 | R:SP=0xb400007588eb3f80 
+2 libdemo_target.so+0x6db3c 	str	x0, [sp, #0x28] | R:X0=0x758a102d30 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db40 type=w addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+3 libdemo_target.so+0x6db40 	str	x1, [sp, #0x20] | R:X1=0x10 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db44 type=w addr=0xb400007588eb3f70 size=8 value=0x10
+4 libdemo_target.so+0x6db44 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db48 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+5 libdemo_target.so+0x6db48 	mov	x8, #0xca87
+6 libdemo_target.so+0x6db4c 	movk	x8, #0x85eb, lsl #16 | R:X8=0xca87 
+7 libdemo_target.so+0x6db50 	movk	x8, #0x79b1, lsl #32 | R:X8=0x85ebca87 
+8 libdemo_target.so+0x6db54 	movk	x8, #0x9e37, lsl #48 | R:X8=0x79b185ebca87 
+9 libdemo_target.so+0x6db58 	eor	x8, x8, x9 | R:X8=0x9e3779b185ebca87 X9=0x10 
+10 libdemo_target.so+0x6db5c 	str	x8, [sp, #0x18] | R:X8=0x9e3779b185ebca97 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db60 type=w addr=0xb400007588eb3f68 size=8 value=0x9e3779b185ebca97
+11 libdemo_target.so+0x6db60 	str	xzr, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db64 type=w addr=0xb400007588eb3f60 size=8 value=0x0
+12 libdemo_target.so+0x6db64 	b	#0x4
+13 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x0
+14 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+15 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x0 X9=0x10 
+16 libdemo_target.so+0x6db74 	cset	w8, hs
+17 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+18 libdemo_target.so+0x6db7c 	b	#0x4
+19 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+20 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+21 libdemo_target.so+0x6db88 	cset	w8, ne
+22 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+23 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+24 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x0
+25 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x0 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d30 size=1 value=0x51
+26 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x51 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x51
+27 libdemo_target.so+0x6dbb0 	b	#0x4
+28 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x51
+29 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x51 
+30 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x51 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x51
+31 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x51
+32 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+33 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+34 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+35 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+36 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x51 X9=0x9e3779b97f4a7c15 
+37 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x9e3779b185ebca97
+38 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c66 X9=0x9e3779b185ebca97 
+39 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x9e3779b185ebca97
+40 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x2c15e61afa3d2226 X9=0x9e3779b185ebca97 
+41 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x9e3779b185ebca97
+42 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x9e3779b185ebca97 X9=0x53a3c4875bb814cb 
+43 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0xcd94bd36de53de5c SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0xcd94bd36de53de5c
+44 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0xcd94bd36de53de5c
+45 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0xcd94bd36de53de5c
+46 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0xcd94bd36de53de5c 
+47 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x19b2 X9=0xcd94bd36de53de5c 
+48 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0x97a6dbca7bcb99b2 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0x97a6dbca7bcb99b2
+49 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0x97a6dbca7bcb99b2
+50 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+51 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+52 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+53 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+54 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0x97a6dbca7bcb99b2 X9=0xff51afd7ed558ccd 
+55 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x3508173a4c316b8a SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x3508173a4c316b8a
+56 libdemo_target.so+0x6dc24 	b	#0x4
+57 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x0
+58 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x0 
+59 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x1 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x1
+60 libdemo_target.so+0x6dc34 	b	#-0xcc
+61 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x1
+62 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+63 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x1 X9=0x10 
+64 libdemo_target.so+0x6db74 	cset	w8, hs
+65 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+66 libdemo_target.so+0x6db7c 	b	#0x4
+67 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+68 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+69 libdemo_target.so+0x6db88 	cset	w8, ne
+70 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+71 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+72 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x1
+73 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x1 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d31 size=1 value=0x42
+74 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x42 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x42
+75 libdemo_target.so+0x6dbb0 	b	#0x4
+76 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x42
+77 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x42 
+78 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x42 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x42
+79 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x42
+80 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+81 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+82 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+83 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+84 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x42 X9=0x9e3779b97f4a7c15 
+85 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x3508173a4c316b8a
+86 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c57 X9=0x3508173a4c316b8a 
+87 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x3508173a4c316b8a
+88 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0xe03d484c8ba55ed7 X9=0x3508173a4c316b8a 
+89 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x3508173a4c316b8a
+90 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x3508173a4c316b8a X9=0xed7f4e1b1eb1b9b9 
+91 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0xd87759215280d233 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0xd87759215280d233
+92 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0xd87759215280d233
+93 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0xd87759215280d233
+94 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0xd87759215280d233 
+95 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x1b0e X9=0xd87759215280d233 
+96 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xeb242a501a467b0e SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xeb242a501a467b0e
+97 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xeb242a501a467b0e
+98 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+99 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+100 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+101 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+102 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xeb242a501a467b0e X9=0xff51afd7ed558ccd 
+103 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x68c3949867623236 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x68c3949867623236
+104 libdemo_target.so+0x6dc24 	b	#0x4
+105 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x1
+106 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x1 
+107 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x2 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x2
+108 libdemo_target.so+0x6dc34 	b	#-0xcc
+109 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x2
+110 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+111 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x2 X9=0x10 
+112 libdemo_target.so+0x6db74 	cset	w8, hs
+113 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+114 libdemo_target.so+0x6db7c 	b	#0x4
+115 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+116 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+117 libdemo_target.so+0x6db88 	cset	w8, ne
+118 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+119 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+120 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x2
+121 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x2 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d32 size=1 value=0x44
+122 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x44 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x44
+123 libdemo_target.so+0x6dbb0 	b	#0x4
+124 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x44
+125 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x44 
+126 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x44 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x44
+127 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x44
+128 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+129 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+130 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+131 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+132 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x44 X9=0x9e3779b97f4a7c15 
+133 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x68c3949867623236
+134 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c59 X9=0x68c3949867623236 
+135 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x68c3949867623236
+136 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0xcf1c9fd357d709d9 X9=0x68c3949867623236 
+137 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x68c3949867623236
+138 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x68c3949867623236 X9=0xe94d84f971af9666 
+139 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x818e106116cda450 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x818e106116cda450
+140 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x818e106116cda450
+141 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x818e106116cda450
+142 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x818e106116cda450 
+143 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x1031 X9=0x818e106116cda450 
+144 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xc20c22d9b48a1031 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xc20c22d9b48a1031
+145 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xc20c22d9b48a1031
+146 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+147 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+148 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+149 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+150 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xc20c22d9b48a1031 X9=0xff51afd7ed558ccd 
+151 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x14b9d20cd0aec33d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x14b9d20cd0aec33d
+152 libdemo_target.so+0x6dc24 	b	#0x4
+153 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x2
+154 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x2 
+155 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x3 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x3
+156 libdemo_target.so+0x6dc34 	b	#-0xcc
+157 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x3
+158 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+159 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x3 X9=0x10 
+160 libdemo_target.so+0x6db74 	cset	w8, hs
+161 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+162 libdemo_target.so+0x6db7c 	b	#0x4
+163 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+164 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+165 libdemo_target.so+0x6db88 	cset	w8, ne
+166 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+167 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+168 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x3
+169 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x3 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d33 size=1 value=0x49
+170 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x49 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x49
+171 libdemo_target.so+0x6dbb0 	b	#0x4
+172 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x49
+173 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x49 
+174 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x49 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x49
+175 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x49
+176 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+177 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+178 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+179 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+180 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x49 X9=0x9e3779b97f4a7c15 
+181 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x14b9d20cd0aec33d
+182 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c5e X9=0x14b9d20cd0aec33d 
+183 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x14b9d20cd0aec33d
+184 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0xccabfcedaafb4b9e X9=0x14b9d20cd0aec33d 
+185 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x14b9d20cd0aec33d
+186 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x14b9d20cd0aec33d X9=0xd1da7170df26fc6d 
+187 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0xc563a37c0f883f50 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0xc563a37c0f883f50
+188 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0xc563a37c0f883f50
+189 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0xc563a37c0f883f50
+190 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0xc563a37c0f883f50 
+191 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x18ac X9=0xc563a37c0f883f50 
+192 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0x746f81f107ea18ac SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0x746f81f107ea18ac
+193 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0x746f81f107ea18ac
+194 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+195 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+196 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+197 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+198 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0x746f81f107ea18ac X9=0xff51afd7ed558ccd 
+199 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x509a845cc90fd1bc SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x509a845cc90fd1bc
+200 libdemo_target.so+0x6dc24 	b	#0x4
+201 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x3
+202 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x3 
+203 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x4 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x4
+204 libdemo_target.so+0x6dc34 	b	#-0xcc
+205 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x4
+206 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+207 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x4 X9=0x10 
+208 libdemo_target.so+0x6db74 	cset	w8, hs
+209 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+210 libdemo_target.so+0x6db7c 	b	#0x4
+211 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+212 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+213 libdemo_target.so+0x6db88 	cset	w8, ne
+214 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+215 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+216 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x4
+217 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x4 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d34 size=1 value=0x2d
+218 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x2d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x2d
+219 libdemo_target.so+0x6dbb0 	b	#0x4
+220 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x2d
+221 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x2d 
+222 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x2d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x2d
+223 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x2d
+224 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+225 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+226 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+227 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+228 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x2d X9=0x9e3779b97f4a7c15 
+229 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x509a845cc90fd1bc
+230 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c42 X9=0x509a845cc90fd1bc 
+231 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x509a845cc90fd1bc
+232 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0xc4d890ebc33eeb42 X9=0x509a845cc90fd1bc 
+233 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x509a845cc90fd1bc
+234 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x509a845cc90fd1bc X9=0xd8ff3202f582dfb1 
+235 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x8865b65e3c8d0e0d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x8865b65e3c8d0e0d
+236 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x8865b65e3c8d0e0d
+237 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x8865b65e3c8d0e0d
+238 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x8865b65e3c8d0e0d 
+239 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x110c X9=0x8865b65e3c8d0e0d 
+240 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xb6cbc791a1c1b10c SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xb6cbc791a1c1b10c
+241 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xb6cbc791a1c1b10c
+242 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+243 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+244 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+245 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+246 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xb6cbc791a1c1b10c X9=0xff51afd7ed558ccd 
+247 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x22ec5f6059e9569c SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x22ec5f6059e9569c
+248 libdemo_target.so+0x6dc24 	b	#0x4
+249 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x4
+250 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x4 
+251 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x5 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x5
+252 libdemo_target.so+0x6dc34 	b	#-0xcc
+253 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x5
+254 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+255 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x5 X9=0x10 
+256 libdemo_target.so+0x6db74 	cset	w8, hs
+257 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+258 libdemo_target.so+0x6db7c 	b	#0x4
+259 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+260 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+261 libdemo_target.so+0x6db88 	cset	w8, ne
+262 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+263 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+264 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x5
+265 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x5 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d35 size=1 value=0x41
+266 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x41 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x41
+267 libdemo_target.so+0x6dbb0 	b	#0x4
+268 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x41
+269 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x41 
+270 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x41 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x41
+271 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x41
+272 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+273 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+274 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+275 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+276 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x41 X9=0x9e3779b97f4a7c15 
+277 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x22ec5f6059e9569c
+278 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c56 X9=0x22ec5f6059e9569c 
+279 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x22ec5f6059e9569c
+280 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x594f51cff9a02356 X9=0x22ec5f6059e9569c 
+281 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x22ec5f6059e9569c
+282 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x22ec5f6059e9569c X9=0x620a69a8101a78fd 
+283 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x40e636c849f32e61 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x40e636c849f32e61
+284 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x40e636c849f32e61
+285 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x40e636c849f32e61
+286 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x40e636c849f32e61 
+287 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x81c X9=0x40e636c849f32e61 
+288 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xc6d9093e65cc281c SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xc6d9093e65cc281c
+289 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xc6d9093e65cc281c
+290 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+291 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+292 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+293 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+294 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xc6d9093e65cc281c X9=0xff51afd7ed558ccd 
+295 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x658d281267b76e6c SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x658d281267b76e6c
+296 libdemo_target.so+0x6dc24 	b	#0x4
+297 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x5
+298 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x5 
+299 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x6 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x6
+300 libdemo_target.so+0x6dc34 	b	#-0xcc
+301 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x6
+302 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+303 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x6 X9=0x10 
+304 libdemo_target.so+0x6db74 	cset	w8, hs
+305 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+306 libdemo_target.so+0x6db7c 	b	#0x4
+307 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+308 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+309 libdemo_target.so+0x6db88 	cset	w8, ne
+310 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+311 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+312 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x6
+313 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x6 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d36 size=1 value=0x6e
+314 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x6e SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x6e
+315 libdemo_target.so+0x6dbb0 	b	#0x4
+316 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x6e
+317 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x6e 
+318 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x6e SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x6e
+319 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x6e
+320 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+321 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+322 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+323 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+324 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x6e X9=0x9e3779b97f4a7c15 
+325 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x658d281267b76e6c
+326 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c83 X9=0x658d281267b76e6c 
+327 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x658d281267b76e6c
+328 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x1817e536d261783 X9=0x658d281267b76e6c 
+329 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x658d281267b76e6c
+330 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x658d281267b76e6c X9=0x1ae4c8580713f31e 
+331 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x7f69e04a60a49d72 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x7f69e04a60a49d72
+332 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x7f69e04a60a49d72
+333 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x7f69e04a60a49d72
+334 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x7f69e04a60a49d72 
+335 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0xfed X9=0x7f69e04a60a49d72 
+336 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0x3c094c1493ae4fed SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0x3c094c1493ae4fed
+337 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0x3c094c1493ae4fed
+338 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+339 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+340 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+341 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+342 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0x3c094c1493ae4fed X9=0xff51afd7ed558ccd 
+343 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x59fb92788fc9cc9 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x59fb92788fc9cc9
+344 libdemo_target.so+0x6dc24 	b	#0x4
+345 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x6
+346 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x6 
+347 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x7 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x7
+348 libdemo_target.so+0x6dc34 	b	#-0xcc
+349 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x7
+350 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+351 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x7 X9=0x10 
+352 libdemo_target.so+0x6db74 	cset	w8, hs
+353 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+354 libdemo_target.so+0x6db7c 	b	#0x4
+355 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+356 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+357 libdemo_target.so+0x6db88 	cset	w8, ne
+358 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+359 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+360 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x7
+361 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x7 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d37 size=1 value=0x64
+362 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x64 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x64
+363 libdemo_target.so+0x6dbb0 	b	#0x4
+364 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x64
+365 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x64 
+366 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x64 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x64
+367 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x64
+368 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+369 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+370 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+371 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+372 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x64 X9=0x9e3779b97f4a7c15 
+373 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x59fb92788fc9cc9
+374 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c79 X9=0x59fb92788fc9cc9 
+375 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x59fb92788fc9cc9
+376 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x625c39bbe71aeb9 X9=0x59fb92788fc9cc9 
+377 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x59fb92788fc9cc9
+378 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x59fb92788fc9cc9 X9=0x78db1e5a0b0d5eb 
+379 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x21208c2284c4922 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x21208c2284c4922
+380 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x21208c2284c4922
+381 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x21208c2284c4922
+382 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x21208c2284c4922 
+383 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x42 X9=0x21208c2284c4922 
+384 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0x4118450989244042 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0x4118450989244042
+385 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0x4118450989244042
+386 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+387 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+388 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+389 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+390 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0x4118450989244042 X9=0xff51afd7ed558ccd 
+391 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x2e92ad9715158cda SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x2e92ad9715158cda
+392 libdemo_target.so+0x6dc24 	b	#0x4
+393 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x7
+394 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x7 
+395 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x8 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x8
+396 libdemo_target.so+0x6dc34 	b	#-0xcc
+397 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x8
+398 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+399 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x8 X9=0x10 
+400 libdemo_target.so+0x6db74 	cset	w8, hs
+401 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+402 libdemo_target.so+0x6db7c 	b	#0x4
+403 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+404 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+405 libdemo_target.so+0x6db88 	cset	w8, ne
+406 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+407 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+408 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x8
+409 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x8 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d38 size=1 value=0x72
+410 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x72 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x72
+411 libdemo_target.so+0x6dbb0 	b	#0x4
+412 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x72
+413 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x72 
+414 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x72 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x72
+415 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x72
+416 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+417 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+418 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+419 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+420 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x72 X9=0x9e3779b97f4a7c15 
+421 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x2e92ad9715158cda
+422 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c87 X9=0x2e92ad9715158cda 
+423 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x2e92ad9715158cda
+424 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x42e2df7ec4adb307 X9=0x2e92ad9715158cda 
+425 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x2e92ad9715158cda
+426 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x2e92ad9715158cda X9=0x4e878ae489f3163d 
+427 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x601527739ce69ae7 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x601527739ce69ae7
+428 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x601527739ce69ae7
+429 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x601527739ce69ae7
+430 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x601527739ce69ae7 
+431 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0xc02 X9=0x601527739ce69ae7 
+432 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xa4ee739cd35cec02 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xa4ee739cd35cec02
+433 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xa4ee739cd35cec02
+434 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+435 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+436 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+437 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+438 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xa4ee739cd35cec02 X9=0xff51afd7ed558ccd 
+439 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0xbfed20324924159a SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0xbfed20324924159a
+440 libdemo_target.so+0x6dc24 	b	#0x4
+441 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x8
+442 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x8 
+443 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x9 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x9
+444 libdemo_target.so+0x6dc34 	b	#-0xcc
+445 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x9
+446 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+447 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x9 X9=0x10 
+448 libdemo_target.so+0x6db74 	cset	w8, hs
+449 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+450 libdemo_target.so+0x6db7c 	b	#0x4
+451 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+452 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+453 libdemo_target.so+0x6db88 	cset	w8, ne
+454 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+455 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+456 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0x9
+457 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0x9 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d39 size=1 value=0x6f
+458 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x6f SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x6f
+459 libdemo_target.so+0x6dbb0 	b	#0x4
+460 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x6f
+461 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x6f 
+462 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x6f SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x6f
+463 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x6f
+464 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+465 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+466 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+467 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+468 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x6f X9=0x9e3779b97f4a7c15 
+469 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0xbfed20324924159a
+470 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c84 X9=0xbfed20324924159a 
+471 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0xbfed20324924159a
+472 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x997f864bc84fe304 X9=0xbfed20324924159a 
+473 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0xbfed20324924159a
+474 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0xbfed20324924159a X9=0xc97ace585a98e86a 
+475 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x7697ee6a13bcfdf0 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x7697ee6a13bcfdf0
+476 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x7697ee6a13bcfdf0
+477 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x7697ee6a13bcfdf0
+478 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x7697ee6a13bcfdf0 
+479 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0xed2 X9=0x7697ee6a13bcfdf0 
+480 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xfdcd42779fbe0ed2 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xfdcd42779fbe0ed2
+481 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xfdcd42779fbe0ed2
+482 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+483 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+484 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+485 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+486 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xfdcd42779fbe0ed2 X9=0xff51afd7ed558ccd 
+487 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x4184a3583106b62a SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x4184a3583106b62a
+488 libdemo_target.so+0x6dc24 	b	#0x4
+489 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0x9
+490 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0x9 
+491 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0xa SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0xa
+492 libdemo_target.so+0x6dc34 	b	#-0xcc
+493 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0xa
+494 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+495 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0xa X9=0x10 
+496 libdemo_target.so+0x6db74 	cset	w8, hs
+497 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+498 libdemo_target.so+0x6db7c 	b	#0x4
+499 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+500 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+501 libdemo_target.so+0x6db88 	cset	w8, ne
+502 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+503 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+504 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0xa
+505 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0xa 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d3a size=1 value=0x69
+506 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x69 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x69
+507 libdemo_target.so+0x6dbb0 	b	#0x4
+508 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x69
+509 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x69 
+510 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x69 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x69
+511 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x69
+512 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+513 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+514 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+515 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+516 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x69 X9=0x9e3779b97f4a7c15 
+517 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x4184a3583106b62a
+518 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c7e X9=0x4184a3583106b62a 
+519 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x4184a3583106b62a
+520 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0xff604fc5c0f806fe X9=0x4184a3583106b62a 
+521 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x4184a3583106b62a
+522 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x4184a3583106b62a X9=0xfc1789bcd39b488 
+523 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x4e45dbc3fc3f02a2 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x4e45dbc3fc3f02a2
+524 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x4e45dbc3fc3f02a2
+525 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x4e45dbc3fc3f02a2
+526 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x4e45dbc3fc3f02a2 
+527 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x9c8 X9=0x4e45dbc3fc3f02a2 
+528 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xbb787f87e05449c8 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xbb787f87e05449c8
+529 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xbb787f87e05449c8
+530 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+531 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+532 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+533 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+534 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xbb787f87e05449c8 X9=0xff51afd7ed558ccd 
+535 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0xbd89a1bf63407528 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0xbd89a1bf63407528
+536 libdemo_target.so+0x6dc24 	b	#0x4
+537 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0xa
+538 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0xa 
+539 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0xb SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0xb
+540 libdemo_target.so+0x6dc34 	b	#-0xcc
+541 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0xb
+542 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+543 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0xb X9=0x10 
+544 libdemo_target.so+0x6db74 	cset	w8, hs
+545 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+546 libdemo_target.so+0x6db7c 	b	#0x4
+547 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+548 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+549 libdemo_target.so+0x6db88 	cset	w8, ne
+550 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+551 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+552 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0xb
+553 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0xb 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d3b size=1 value=0x64
+554 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x64 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x64
+555 libdemo_target.so+0x6dbb0 	b	#0x4
+556 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x64
+557 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x64 
+558 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x64 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x64
+559 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x64
+560 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+561 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+562 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+563 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+564 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x64 X9=0x9e3779b97f4a7c15 
+565 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0xbd89a1bf63407528
+566 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c79 X9=0xbd89a1bf63407528 
+567 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0xbd89a1bf63407528
+568 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x9fe9924f67c679 X9=0xbd89a1bf63407528 
+569 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0xbd89a1bf63407528
+570 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0xbd89a1bf63407528 X9=0x300252022837e3c3 
+571 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x8d8bf3bd4b7796eb SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x8d8bf3bd4b7796eb
+572 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x8d8bf3bd4b7796eb
+573 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x8d8bf3bd4b7796eb
+574 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x8d8bf3bd4b7796eb 
+575 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x11b1 X9=0x8d8bf3bd4b7796eb 
+576 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0x7e77a96ef2dd71b1 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0x7e77a96ef2dd71b1
+577 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0x7e77a96ef2dd71b1
+578 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+579 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+580 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+581 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+582 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0x7e77a96ef2dd71b1 X9=0xff51afd7ed558ccd 
+583 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x4fdc7b183245d6bd SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x4fdc7b183245d6bd
+584 libdemo_target.so+0x6dc24 	b	#0x4
+585 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0xb
+586 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0xb 
+587 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0xc SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0xc
+588 libdemo_target.so+0x6dc34 	b	#-0xcc
+589 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0xc
+590 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+591 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0xc X9=0x10 
+592 libdemo_target.so+0x6db74 	cset	w8, hs
+593 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+594 libdemo_target.so+0x6db7c 	b	#0x4
+595 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+596 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+597 libdemo_target.so+0x6db88 	cset	w8, ne
+598 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+599 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+600 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0xc
+601 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0xc 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d3c size=1 value=0x2d
+602 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x2d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x2d
+603 libdemo_target.so+0x6dbb0 	b	#0x4
+604 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x2d
+605 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x2d 
+606 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x2d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x2d
+607 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x2d
+608 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+609 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+610 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+611 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+612 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x2d X9=0x9e3779b97f4a7c15 
+613 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x4fdc7b183245d6bd
+614 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c42 X9=0x4fdc7b183245d6bd 
+615 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x4fdc7b183245d6bd
+616 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x95563fc610c02b82 X9=0x4fdc7b183245d6bd 
+617 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x4fdc7b183245d6bd
+618 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x4fdc7b183245d6bd X9=0xa94d5e8c1d51a131 
+619 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0xe69125942f14778c SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0xe69125942f14778c
+620 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0xe69125942f14778c
+621 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0xe69125942f14778c
+622 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0xe69125942f14778c 
+623 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x1cd2 X9=0xe69125942f14778c 
+624 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0x24b285e28ef19cd2 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0x24b285e28ef19cd2
+625 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0x24b285e28ef19cd2
+626 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+627 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+628 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+629 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+630 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0x24b285e28ef19cd2 X9=0xff51afd7ed558ccd 
+631 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x3a4c835e14f76c2a SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x3a4c835e14f76c2a
+632 libdemo_target.so+0x6dc24 	b	#0x4
+633 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0xc
+634 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0xc 
+635 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0xd SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0xd
+636 libdemo_target.so+0x6dc34 	b	#-0xcc
+637 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0xd
+638 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+639 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0xd X9=0x10 
+640 libdemo_target.so+0x6db74 	cset	w8, hs
+641 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+642 libdemo_target.so+0x6db7c 	b	#0x4
+643 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+644 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+645 libdemo_target.so+0x6db88 	cset	w8, ne
+646 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+647 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+648 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0xd
+649 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0xd 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d3d size=1 value=0x64
+650 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x64 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x64
+651 libdemo_target.so+0x6dbb0 	b	#0x4
+652 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x64
+653 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x64 
+654 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x64 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x64
+655 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x64
+656 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+657 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+658 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+659 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+660 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x64 X9=0x9e3779b97f4a7c15 
+661 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x3a4c835e14f76c2a
+662 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c79 X9=0x3a4c835e14f76c2a 
+663 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x3a4c835e14f76c2a
+664 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x3158513ebd2586f9 X9=0x3a4c835e14f76c2a 
+665 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x3a4c835e14f76c2a
+666 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x3a4c835e14f76c2a X9=0x3feb721642636203 
+667 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x5a7f14856940e29 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x5a7f14856940e29
+668 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x5a7f14856940e29
+669 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x5a7f14856940e29
+670 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x5a7f14856940e29 
+671 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0xb4 X9=0x5a7f14856940e29 
+672 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xfe290ad281c520b4 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xfe290ad281c520b4
+673 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xfe290ad281c520b4
+674 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+675 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+676 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+677 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+678 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xfe290ad281c520b4 X9=0xff51afd7ed558ccd 
+679 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0xd5aee2703881a024 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0xd5aee2703881a024
+680 libdemo_target.so+0x6dc24 	b	#0x4
+681 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0xd
+682 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0xd 
+683 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0xe SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0xe
+684 libdemo_target.so+0x6dc34 	b	#-0xcc
+685 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0xe
+686 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+687 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0xe X9=0x10 
+688 libdemo_target.so+0x6db74 	cset	w8, hs
+689 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+690 libdemo_target.so+0x6db7c 	b	#0x4
+691 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+692 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+693 libdemo_target.so+0x6db88 	cset	w8, ne
+694 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+695 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+696 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0xe
+697 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0xe 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d3e size=1 value=0x65
+698 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x65 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x65
+699 libdemo_target.so+0x6dbb0 	b	#0x4
+700 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x65
+701 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x65 
+702 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x65 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x65
+703 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x65
+704 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+705 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+706 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+707 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+708 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x65 X9=0x9e3779b97f4a7c15 
+709 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0xd5aee2703881a024
+710 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c7a X9=0xd5aee2703881a024 
+711 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0xd5aee2703881a024
+712 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x9f015c79fb2857a X9=0xd5aee2703881a024 
+713 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0xd5aee2703881a024
+714 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0xd5aee2703881a024 X9=0x3f5bce63add2ed83 
+715 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0xeaf52c1395534da7 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0xeaf52c1395534da7
+716 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0xeaf52c1395534da7
+717 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0xeaf52c1395534da7
+718 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0xeaf52c1395534da7 
+719 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x1d5e X9=0xeaf52c1395534da7 
+720 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xa58272aa69b4fd5e SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xa58272aa69b4fd5e
+721 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xa58272aa69b4fd5e
+722 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+723 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+724 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+725 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+726 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xa58272aa69b4fd5e X9=0xff51afd7ed558ccd 
+727 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0x38eb7dfc6b44c46 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0x38eb7dfc6b44c46
+728 libdemo_target.so+0x6dc24 	b	#0x4
+729 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0xe
+730 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0xe 
+731 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0xf SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0xf
+732 libdemo_target.so+0x6dc34 	b	#-0xcc
+733 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0xf
+734 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+735 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0xf X9=0x10 
+736 libdemo_target.so+0x6db74 	cset	w8, hs
+737 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x0 
+738 libdemo_target.so+0x6db7c 	b	#0x4
+739 libdemo_target.so+0x6db80 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db84 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+740 libdemo_target.so+0x6db84 	subs	x8, x8, #0x0 | R:X8=0x758a102d30 
+741 libdemo_target.so+0x6db88 	cset	w8, ne
+742 libdemo_target.so+0x6db8c 	tbnz	w8, #0x0, #0x14 | R:W8=0x1 
+743 libdemo_target.so+0x6dba0 	ldr	x8, [sp, #0x28] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba4 type=r addr=0xb400007588eb3f78 size=8 value=0x758a102d30
+744 libdemo_target.so+0x6dba4 	ldr	x9, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dba8 type=r addr=0xb400007588eb3f60 size=8 value=0xf
+745 libdemo_target.so+0x6dba8 	ldrb	w8, [x8, x9] | R:X8=0x758a102d30 X9=0xf 
+MEM libdemo_target.so+0x6dbac type=r addr=0x758a102d3f size=1 value=0x6d
+746 libdemo_target.so+0x6dbac 	str	w8, [sp, #0x4] | R:W8=0x6d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb0 type=w addr=0xb400007588eb3f54 size=4 value=0x6d
+747 libdemo_target.so+0x6dbb0 	b	#0x4
+748 libdemo_target.so+0x6dbb4 	ldr	w8, [sp, #0x4] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbb8 type=r addr=0xb400007588eb3f54 size=4 value=0x6d
+749 libdemo_target.so+0x6dbb8 	mov	w8, w8 | R:W8=0x6d 
+750 libdemo_target.so+0x6dbbc 	str	x8, [sp, #0x8] | R:X8=0x6d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc0 type=w addr=0xb400007588eb3f58 size=8 value=0x6d
+751 libdemo_target.so+0x6dbc0 	ldr	x8, [sp, #0x8] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbc4 type=r addr=0xb400007588eb3f58 size=8 value=0x6d
+752 libdemo_target.so+0x6dbc4 	mov	x9, #0x7c15
+753 libdemo_target.so+0x6dbc8 	movk	x9, #0x7f4a, lsl #16 | R:X9=0x7c15 
+754 libdemo_target.so+0x6dbcc 	movk	x9, #0x79b9, lsl #32 | R:X9=0x7f4a7c15 
+755 libdemo_target.so+0x6dbd0 	movk	x9, #0x9e37, lsl #48 | R:X9=0x79b97f4a7c15 
+756 libdemo_target.so+0x6dbd4 	add	x8, x8, x9 | R:X8=0x6d X9=0x9e3779b97f4a7c15 
+757 libdemo_target.so+0x6dbd8 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbdc type=r addr=0xb400007588eb3f68 size=8 value=0x38eb7dfc6b44c46
+758 libdemo_target.so+0x6dbdc 	add	x8, x8, x9, lsl #6 | R:X8=0x9e3779b97f4a7c82 X9=0x38eb7dfc6b44c46 
+759 libdemo_target.so+0x6dbe0 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbe4 type=r addr=0xb400007588eb3f68 size=8 value=0x38eb7dfc6b44c46
+760 libdemo_target.so+0x6dbe4 	add	x9, x8, x9, lsr #2 | R:X8=0x81e571ab2c5d8e02 X9=0x38eb7dfc6b44c46 
+761 libdemo_target.so+0x6dbe8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbec type=r addr=0xb400007588eb3f68 size=8 value=0x38eb7dfc6b44c46
+762 libdemo_target.so+0x6dbec 	eor	x8, x8, x9 | R:X8=0x38eb7dfc6b44c46 X9=0x82c91fa31e0aa113 
+763 libdemo_target.so+0x6dbf0 	str	x8, [sp, #0x18] | R:X8=0x8147a87cd8beed55 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf4 type=w addr=0xb400007588eb3f68 size=8 value=0x8147a87cd8beed55
+764 libdemo_target.so+0x6dbf4 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbf8 type=r addr=0xb400007588eb3f68 size=8 value=0x8147a87cd8beed55
+765 libdemo_target.so+0x6dbf8 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dbfc type=r addr=0xb400007588eb3f68 size=8 value=0x8147a87cd8beed55
+766 libdemo_target.so+0x6dbfc 	lsr	x8, x8, #51 | R:X8=0x8147a87cd8beed55 
+767 libdemo_target.so+0x6dc00 	orr	x8, x8, x9, lsl #13 | R:X8=0x1028 X9=0x8147a87cd8beed55 
+768 libdemo_target.so+0x6dc04 	str	x8, [sp, #0x18] | R:X8=0xf50f9b17ddaab028 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc08 type=w addr=0xb400007588eb3f68 size=8 value=0xf50f9b17ddaab028
+769 libdemo_target.so+0x6dc08 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc0c type=r addr=0xb400007588eb3f68 size=8 value=0xf50f9b17ddaab028
+770 libdemo_target.so+0x6dc0c 	mov	x9, #0x8ccd
+771 libdemo_target.so+0x6dc10 	movk	x9, #0xed55, lsl #16 | R:X9=0x8ccd 
+772 libdemo_target.so+0x6dc14 	movk	x9, #0xafd7, lsl #32 | R:X9=0xed558ccd 
+773 libdemo_target.so+0x6dc18 	movk	x9, #0xff51, lsl #48 | R:X9=0xafd7ed558ccd 
+774 libdemo_target.so+0x6dc1c 	mul	x8, x8, x9 | R:X8=0xf50f9b17ddaab028 X9=0xff51afd7ed558ccd 
+775 libdemo_target.so+0x6dc20 	str	x8, [sp, #0x18] | R:X8=0xcae127af5f4cf008 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc24 type=w addr=0xb400007588eb3f68 size=8 value=0xcae127af5f4cf008
+776 libdemo_target.so+0x6dc24 	b	#0x4
+777 libdemo_target.so+0x6dc28 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc2c type=r addr=0xb400007588eb3f60 size=8 value=0xf
+778 libdemo_target.so+0x6dc2c 	add	x8, x8, #0x1 | R:X8=0xf 
+779 libdemo_target.so+0x6dc30 	str	x8, [sp, #0x10] | R:X8=0x10 SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc34 type=w addr=0xb400007588eb3f60 size=8 value=0x10
+780 libdemo_target.so+0x6dc34 	b	#-0xcc
+781 libdemo_target.so+0x6db68 	ldr	x8, [sp, #0x10] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db6c type=r addr=0xb400007588eb3f60 size=8 value=0x10
+782 libdemo_target.so+0x6db6c 	ldr	x9, [sp, #0x20] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6db70 type=r addr=0xb400007588eb3f70 size=8 value=0x10
+783 libdemo_target.so+0x6db70 	subs	x8, x8, x9 | R:X8=0x10 X9=0x10 
+784 libdemo_target.so+0x6db74 	cset	w8, hs
+785 libdemo_target.so+0x6db78 	tbnz	w8, #0x0, #0xc0 | R:W8=0x1 
+786 libdemo_target.so+0x6dc38 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc3c type=r addr=0xb400007588eb3f68 size=8 value=0xcae127af5f4cf008
+787 libdemo_target.so+0x6dc3c 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc40 type=r addr=0xb400007588eb3f68 size=8 value=0xcae127af5f4cf008
+788 libdemo_target.so+0x6dc40 	eor	x8, x8, x9, lsr #33 | R:X8=0xcae127af5f4cf008 X9=0xcae127af5f4cf008 
+789 libdemo_target.so+0x6dc44 	str	x8, [sp, #0x18] | R:X8=0xcae127af3a3c63df SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc48 type=w addr=0xb400007588eb3f68 size=8 value=0xcae127af3a3c63df
+790 libdemo_target.so+0x6dc48 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc4c type=r addr=0xb400007588eb3f68 size=8 value=0xcae127af3a3c63df
+791 libdemo_target.so+0x6dc4c 	mov	x9, #0xec53
+792 libdemo_target.so+0x6dc50 	movk	x9, #0x1a85, lsl #16 | R:X9=0xec53 
+793 libdemo_target.so+0x6dc54 	movk	x9, #0xb9fe, lsl #32 | R:X9=0x1a85ec53 
+794 libdemo_target.so+0x6dc58 	movk	x9, #0xc4ce, lsl #48 | R:X9=0xb9fe1a85ec53 
+795 libdemo_target.so+0x6dc5c 	mul	x8, x8, x9 | R:X8=0xcae127af3a3c63df X9=0xc4ceb9fe1a85ec53 
+796 libdemo_target.so+0x6dc60 	str	x8, [sp, #0x18] | R:X8=0x471209461680f54d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc64 type=w addr=0xb400007588eb3f68 size=8 value=0x471209461680f54d
+797 libdemo_target.so+0x6dc64 	ldr	x9, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc68 type=r addr=0xb400007588eb3f68 size=8 value=0x471209461680f54d
+798 libdemo_target.so+0x6dc68 	ldr	x8, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc6c type=r addr=0xb400007588eb3f68 size=8 value=0x471209461680f54d
+799 libdemo_target.so+0x6dc6c 	eor	x8, x8, x9, lsr #29 | R:X8=0x471209461680f54d X9=0x471209461680f54d 
+800 libdemo_target.so+0x6dc70 	str	x8, [sp, #0x18] | R:X8=0x471209442e10bf7d SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc74 type=w addr=0xb400007588eb3f68 size=8 value=0x471209442e10bf7d
+801 libdemo_target.so+0x6dc74 	ldr	x0, [sp, #0x18] | R:SP=0xb400007588eb3f50 
+MEM libdemo_target.so+0x6dc78 type=r addr=0xb400007588eb3f68 size=8 value=0x471209442e10bf7d
+802 libdemo_target.so+0x6dc78 	add	sp, sp, #0x30 | R:SP=0xb400007588eb3f50 
+803 libdemo_target.so+0x6dc7c 	ret | R:LR=0x2a 
+TRACE_END status=ok ret=0x471209442e10bf7d elapsed_ms=12 bytes=89305

@@ -15,6 +15,7 @@ struct TraceInvocation {
     ModuleRange module;
     uintptr_t target_address = 0;
     std::array<uint64_t, 8> args{};
+    uint64_t indirect_result = 0;
 };
 
 uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation);

@@ -11,7 +11,8 @@ const config = {
     init: { offset: '0x6AC90' },
     jni: { offset: '0x6DCA8' },
     libc: { offset: '0x6E204' },
-    algorithm: { offset: '0x6DB38' }
+    algorithm: { offset: '0x6DB38' },
+    integrity: { offset: '0x6E584' }
   }
 };
 

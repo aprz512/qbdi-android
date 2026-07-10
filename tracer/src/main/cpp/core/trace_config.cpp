@@ -40,6 +40,9 @@ TraceConfig parse_trace_config(const char *encoded_config) {
             for (auto &scene: config.scenes) {
                 if (scene.name != fields[0]) continue;
                 scene.offset = strtoull(fields[1].c_str(), nullptr, 16);
+                if (fields.size() >= 3) {
+                    scene.end_offset = strtoull(fields[2].c_str(), nullptr, 16);
+                }
             }
         }
     }

@@ -9,6 +9,8 @@
 #include <mutex>
 #include <thread>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 struct InstalledSceneHook {
     SceneConfig scene;
@@ -19,45 +21,20 @@ struct InstalledSceneHook {
 
 static std::mutex g_lock;
 static TraceConfig g_config = default_trace_config();
-static std::array<InstalledSceneHook, 5> g_hooks;
+static std::vector<InstalledSceneHook> g_hooks;
 static bool g_configured = false;
 
-static uint64_t
-trace_proxy_init(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+static void *proxy_for_index(size_t index);
 
-static uint64_t
-trace_proxy_jni(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-
-static uint64_t
-trace_proxy_libc(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-
-static uint64_t
-trace_proxy_algorithm(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
-                      uint64_t);
-
-static uint64_t
-trace_proxy_integrity(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
-                      uint64_t);
-
-static void *proxy_for_index(size_t index) {
-    switch (index) {
-        case 0:
-            return reinterpret_cast<void *>(trace_proxy_init);
-        case 1:
-            return reinterpret_cast<void *>(trace_proxy_jni);
-        case 2:
-            return reinterpret_cast<void *>(trace_proxy_libc);
-        case 3:
-            return reinterpret_cast<void *>(trace_proxy_algorithm);
-        case 4:
-            return reinterpret_cast<void *>(trace_proxy_integrity);
-        default:
-            return nullptr;
-    }
+static inline __attribute__((always_inline)) uint64_t capture_x8() {
+    uint64_t value;
+    __asm__ volatile("mov %0, x8" : "=r"(value));
+    return value;
 }
 
 static uint64_t trace_proxy_for(size_t index, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
-                                uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) {
+                                uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7,
+                                uint64_t indirect_result) {
     if (index >= g_hooks.size() || !g_hooks[index].installed) {
         QTRACE_E("trace proxy for invalid scene index=%zu", index);
         return 0;
@@ -69,6 +46,7 @@ static uint64_t trace_proxy_for(size_t index, uint64_t x0, uint64_t x1, uint64_t
     invocation.module = hook.module;
     invocation.target_address = hook.module.start + hook.scene.offset;
     invocation.args = {x0, x1, x2, x3, x4, x5, x6, x7};
+    invocation.indirect_result = indirect_result;
 
     unhook_function(&hook.hook);
     hook.installed = false;
@@ -78,36 +56,33 @@ static uint64_t trace_proxy_for(size_t index, uint64_t x0, uint64_t x1, uint64_t
     return result;
 }
 
-static uint64_t trace_proxy_init(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
-                                 uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) {
-    return trace_proxy_for(0, x0, x1, x2, x3, x4, x5, x6, x7);
+template <size_t I>
+static uint64_t trace_proxy(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
+                            uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) {
+    uint64_t x8_val = capture_x8();
+    return trace_proxy_for(I, x0, x1, x2, x3, x4, x5, x6, x7, x8_val);
 }
 
-static uint64_t trace_proxy_jni(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
-                                uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) {
-    return trace_proxy_for(1, x0, x1, x2, x3, x4, x5, x6, x7);
+template <size_t... Is>
+static auto make_proxy_table(std::index_sequence<Is...>) {
+    return std::array<void *, sizeof...(Is)>{reinterpret_cast<void *>(trace_proxy<Is>)...};
 }
 
-static uint64_t trace_proxy_libc(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
-                                 uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) {
-    return trace_proxy_for(2, x0, x1, x2, x3, x4, x5, x6, x7);
-}
+static constexpr size_t kMaxScenes = 256;
 
-static uint64_t trace_proxy_algorithm(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
-                                      uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) {
-    return trace_proxy_for(3, x0, x1, x2, x3, x4, x5, x6, x7);
-}
-
-static uint64_t trace_proxy_integrity(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3,
-                                      uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) {
-    return trace_proxy_for(4, x0, x1, x2, x3, x4, x5, x6, x7);
+static void *proxy_for_index(size_t index) {
+    static auto table = make_proxy_table(std::make_index_sequence<kMaxScenes>{});
+    if (index >= table.size()) return nullptr;
+    return table[index];
 }
 
 static bool install_scene_hook_locked(const SceneConfig &scene, const ModuleRange &module) {
-    if (scene.index >= g_hooks.size()) return false;
     if (scene.offset == 0) {
         QTRACE_W("scene %s offset is 0, skip", scene.name.c_str());
         return false;
+    }
+    if (scene.index >= g_hooks.size()) {
+        g_hooks.resize(scene.index + 1);
     }
     InstalledSceneHook &slot = g_hooks[scene.index];
     if (slot.installed) return true;
