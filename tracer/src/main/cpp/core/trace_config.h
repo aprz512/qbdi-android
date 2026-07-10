@@ -9,8 +9,6 @@ struct SceneConfig {
     size_t index = 0;
     std::string name;
     uintptr_t offset = 0;
-    bool bypass_text = false;
-    bool bypass_maps = false;
 };
 
 struct TraceConfig {

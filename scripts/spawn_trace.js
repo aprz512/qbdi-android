@@ -9,11 +9,11 @@ const config = {
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
   scenes: {
-    init: { offset: '0x0', bypass: [] },
-    jni: { offset: '0x0', bypass: [] },
-    libc: { offset: '0x0', bypass: [] },
-    algorithm: { offset: '0x0', bypass: [] },
-    integrity: { offset: '0x0', bypass: ['text_restore', 'maps_sanitize'] }
+    init: { offset: '0x6AC90' },
+    jni: { offset: '0x6DCA8' },
+    libc: { offset: '0x6E204' },
+    algorithm: { offset: '0x6DB38' },
+    integrity: { offset: '0x0' }
   }
 };
 
@@ -31,25 +31,48 @@ function loadLibrary(path) {
 function encodeConfig(cfg) {
   const parts = ['package=' + cfg.packageName, 'target=' + cfg.targetSo];
   for (const [name, scene] of Object.entries(cfg.scenes)) {
-    parts.push(['scene=' + name, scene.offset].concat(scene.bypass).join(','));
+    parts.push(['scene=' + name, scene.offset].join(','));
   }
   return parts.join(';');
 }
 
-function findConfigureExport() {
-  const candidates = [config.tracer, null];
-  for (const moduleName of candidates) {
-    try {
-      const ptr = Module.getExportByName(moduleName, 'qbdi_tracer_configure');
-      if (!ptr.isNull()) return ptr;
-    } catch (_) {
+function findConfigureExport(tracerModule) {
+  const symbol = 'qbdi_tracer_configure';
+
+  if (tracerModule && typeof tracerModule.getExportByName === 'function') {
+    return tracerModule.getExportByName(symbol);
+  }
+
+  if (typeof Process.getModuleByName === 'function') {
+    const moduleNames = [tracerModule && tracerModule.name, config.tracer].filter(Boolean);
+    for (const moduleName of moduleNames) {
+      try {
+        return Process.getModuleByName(moduleName).getExportByName(symbol);
+      } catch (_) {
+      }
     }
   }
-  throw new Error('qbdi_tracer_configure export not found');
+
+  if (typeof Module.getExportByName === 'function') {
+    const moduleNames = [config.tracer, null];
+    for (const moduleName of moduleNames) {
+      try {
+        const ptr = Module.getExportByName(moduleName, symbol);
+        if (!ptr.isNull()) return ptr;
+      } catch (_) {
+      }
+    }
+  }
+
+  if (typeof Module.getGlobalExportByName === 'function') {
+    return Module.getGlobalExportByName(symbol);
+  }
+
+  throw new Error(symbol + ' export not found');
 }
 
-function configureTracer(encoded) {
-  const configurePtr = findConfigureExport();
+function configureTracer(encoded, tracerModule) {
+  const configurePtr = findConfigureExport(tracerModule);
   const configure = new NativeFunction(configurePtr, 'void', ['pointer']);
   const nativeConfig = Memory.allocUtf8String(encoded);
   configure(nativeConfig);
@@ -59,8 +82,8 @@ function configureTracer(encoded) {
 function main() {
   const dir = config.remoteDir.replace(/\/$/, '');
   loadLibrary(dir + '/' + config.shadowhook);
-  loadLibrary(dir + '/' + config.tracer);
-  configureTracer(encodeConfig(config));
+  const tracerModule = loadLibrary(dir + '/' + config.tracer);
+  configureTracer(encodeConfig(config), tracerModule);
   console.log('[+] tracer injected; tap a demo button for non-init scenes');
 }
 

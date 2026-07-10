@@ -15,7 +15,7 @@ public:
     void instruction(const TraceContext &context, const InstructionText &inst);
     void memory(const TraceContext &context, uintptr_t pc, const MemoryAccessText &mem);
     void call(const char *category, const std::string &name, const std::string &detail);
-    void bypass(const std::string &name, const std::string &detail);
+    void rule(const std::string &name, const std::string &detail);
     void error(const std::string &message);
     void end(uint64_t retval, bool ok, long elapsed_ms);
     void flush();

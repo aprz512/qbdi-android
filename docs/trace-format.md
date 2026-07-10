@@ -21,9 +21,9 @@ CALL libc.strlen x0=0x... preview="qbdi"
 CALL jni.FindClass name="java/lang/String"
 ```
 
-Bypass events:
+Code rule events:
 
 ```text
-BYPASS text_hash_restore range=libdemo_target.so+0x...
-BYPASS maps_sanitize hidden=frida,libqbdi_tracer,libQBDI
+RULE set_equals_flag offset=0x... z=1
+RULE force_return offset=0x... ret=0x0
 ```

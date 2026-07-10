@@ -1,7 +1,7 @@
 #include "core/qbdi_runner.h"
 #include "core/logging.h"
 #include "handlers/call_handlers.h"
-#include "handlers/bypass_handlers.h"
+#include "rules/code_rule.h"
 
 #include <QBDI.h>
 #include <QBDI/State.h>
@@ -15,8 +15,8 @@ struct RunnerState {
     TraceContext context;
     SceneConfig scene;
     TextTraceWriter writer;
+    CodeRuleEngine code_rules;
     uint64_t sequence = 0;
-    bool bypass_markers_emitted = false;
 };
 
 static QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *, void *data) {
@@ -33,14 +33,15 @@ static QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRStat
     return QBDI::CONTINUE;
 }
 
-static QBDI::VMAction on_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *, void *data) {
+static QBDI::VMAction on_pre_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr, void *data) {
     auto *state = static_cast<RunnerState *>(data);
     const QBDI::InstAnalysis *analysis = vm->getInstAnalysis(
         QBDI::ANALYSIS_INSTRUCTION | QBDI::ANALYSIS_DISASSEMBLY | QBDI::ANALYSIS_OPERANDS);
-    if (!state->bypass_markers_emitted) {
-        emit_scene_bypass_markers(state->scene, &state->writer);
-        state->bypass_markers_emitted = true;
-    }
+
+    CodeRuleContext rule_context(vm, gpr, fpr, analysis, &state->context, &state->writer);
+    QBDI::VMAction rule_action = state->code_rules.on_pre_instruction(rule_context);
+    if (rule_action != QBDI::CONTINUE) return rule_action;
+
     InstructionText inst;
     inst.sequence = ++state->sequence;
     inst.pc = analysis->address;
@@ -62,10 +63,6 @@ static QBDI::VMAction on_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FP
             if (op.type == QBDI::OPERAND_GPR && op.regCtxIdx >= 0 &&
                 (op.regAccess == QBDI::REGISTER_READ || op.regAccess == QBDI::REGISTER_READ_WRITE)) {
                 uintptr_t target = QBDI_GPR_GET(gpr, op.regCtxIdx);
-                BypassDecision decision = maybe_bypass_external_call(state->scene, gpr, target, &state->writer);
-                if (decision == BypassDecision::SkipInstruction) {
-                    return QBDI::SKIP_INST;
-                }
                 emit_possible_external_call(gpr, target, &state->writer);
                 break;
             }
@@ -74,6 +71,15 @@ static QBDI::VMAction on_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FP
 
     state->writer.instruction(state->context, inst);
     return QBDI::CONTINUE;
+}
+
+static QBDI::VMAction on_post_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr, void *data) {
+    auto *state = static_cast<RunnerState *>(data);
+    const QBDI::InstAnalysis *analysis = vm->getInstAnalysis(
+        QBDI::ANALYSIS_INSTRUCTION | QBDI::ANALYSIS_DISASSEMBLY | QBDI::ANALYSIS_OPERANDS);
+
+    CodeRuleContext rule_context(vm, gpr, fpr, analysis, &state->context, &state->writer);
+    return state->code_rules.on_post_instruction(rule_context);
 }
 
 uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation) {
@@ -87,6 +93,7 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     state.scene = invocation.scene;
     state.context.pid = getpid();
     state.context.tid = static_cast<int>(syscall(SYS_gettid));
+    register_user_code_rules(state.code_rules);
 
     if (!state.writer.open(state.context)) {
         QTRACE_E("open trace file failed");
@@ -102,17 +109,18 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
 
     vm.addInstrumentedModuleFromAddr(invocation.module.start);
     vm.recordMemoryAccess(QBDI::MEMORY_READ_WRITE);
-    vm.addCodeCB(QBDI::PREINST, on_instruction, &state);
+    vm.addCodeCB(QBDI::PREINST, on_pre_instruction, &state);
+    vm.addCodeCB(QBDI::POSTINST, on_post_instruction, &state);
     vm.addMemAccessCB(QBDI::MEMORY_READ_WRITE, on_memory, &state);
 
-    QBDI::rword retval = 0;
+    QBDI::rword retVal = 0;
     std::vector<QBDI::rword> args;
     args.reserve(invocation.args.size());
     for (uint64_t arg : invocation.args) args.push_back(arg);
-    bool ok = vm.call(&retval, invocation.target_address, args);
+    bool ok = vm.call(&retVal, invocation.target_address, args);
     auto ended = std::chrono::steady_clock::now();
     long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(ended - started).count();
-    state.writer.end(retval, ok, elapsed);
+    state.writer.end(retVal, ok, elapsed);
     QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(), state.writer.path().c_str());
-    return retval;
+    return retVal;
 }

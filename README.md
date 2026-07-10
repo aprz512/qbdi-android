@@ -54,7 +54,7 @@ Write relative offsets into both `scripts/trace_config.js` and the self-containe
 ## Inject
 
 ```bash
-frida -U -f com.aprz.qbdiandroid -l scripts/spawn_trace.js --no-pause
+frida -U -f com.aprz.qbdiandroid -l scripts/spawn_trace.js
 ```
 
 The constructor scene only traces reliably with spawn injection. For button scenes, wait for the UI and tap the desired button.

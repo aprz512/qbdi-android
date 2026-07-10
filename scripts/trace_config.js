@@ -7,10 +7,10 @@ module.exports = {
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
   scenes: {
-    init: { offset: '0x0', bypass: [] },
-    jni: { offset: '0x0', bypass: [] },
-    libc: { offset: '0x0', bypass: [] },
-    algorithm: { offset: '0x0', bypass: [] },
-    integrity: { offset: '0x0', bypass: ['text_restore', 'maps_sanitize'] }
+    init: { offset: '0x6AC90' },
+    jni: { offset: '0x6DCA8' },
+    libc: { offset: '0x6E204' },
+    algorithm: { offset: '0x6DB38' },
+    integrity: { offset: '0x0' }
   }
 };

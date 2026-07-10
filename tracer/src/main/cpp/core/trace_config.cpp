@@ -16,11 +16,11 @@ static std::vector<std::string> split(const std::string &value, char delimiter) 
 TraceConfig default_trace_config() {
     TraceConfig config;
     config.scenes = {
-        {0, "init", 0, false, false},
-        {1, "jni", 0, false, false},
-        {2, "libc", 0, false, false},
-        {3, "algorithm", 0, false, false},
-        {4, "integrity", 0, true, true},
+        {0, "init", 0},
+        {1, "jni", 0},
+        {2, "libc", 0},
+        {3, "algorithm", 0},
+        {4, "integrity", 0},
     };
     return config;
 }
@@ -40,12 +40,6 @@ TraceConfig parse_trace_config(const char *encoded_config) {
             for (auto &scene : config.scenes) {
                 if (scene.name != fields[0]) continue;
                 scene.offset = strtoull(fields[1].c_str(), nullptr, 16);
-                scene.bypass_text = false;
-                scene.bypass_maps = false;
-                for (size_t i = 2; i < fields.size(); ++i) {
-                    if (fields[i] == "text_restore") scene.bypass_text = true;
-                    if (fields[i] == "maps_sanitize") scene.bypass_maps = true;
-                }
             }
         }
     }

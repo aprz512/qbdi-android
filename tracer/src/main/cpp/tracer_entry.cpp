@@ -110,7 +110,7 @@ static void install_hooks_for_module(const ModuleRange &module) {
     for (const auto &scene : g_config.scenes) install_scene_hook_locked(scene, module);
 }
 
-static void install_hooks_when_ready(TraceConfig config) {
+static void install_hooks_when_ready(const TraceConfig& config) {
     for (int attempt = 0; attempt < 200; ++attempt) {
         ModuleRange module;
         if (find_module_executable_range(config.target_so, &module)) {

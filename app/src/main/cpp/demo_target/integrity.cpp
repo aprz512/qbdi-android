@@ -1,7 +1,5 @@
 #include "integrity.h"
 
-#include "demo_scenes.h"
-
 #include <android/log.h>
 
 #include <array>
@@ -31,7 +29,7 @@ uint64_t fnv1a64(const uint8_t *bytes, size_t size) {
 }
 
 uint64_t current_text_hash() {
-    const auto *bytes = reinterpret_cast<const uint8_t *>(reinterpret_cast<const void *>(&demo_algorithm_case));
+    const auto *bytes = reinterpret_cast<const uint8_t *>(reinterpret_cast<const void *>(&integrity_text_check));
     return fnv1a64(bytes, kTextSampleSize);
 }
 
@@ -80,7 +78,8 @@ extern "C" bool integrity_text_check() {
     __android_log_print(ok ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR, kLogTag,
                         "text integrity expected=0x%016" PRIx64 " actual=0x%016" PRIx64,
                         expected, actual);
-    return ok;
+    if (!ok) integrity_crash();
+    return true;
 }
 
 extern "C" bool integrity_maps_check() {

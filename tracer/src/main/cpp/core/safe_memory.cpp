@@ -13,6 +13,14 @@ bool safe_read_memory(uintptr_t address, void *buffer, size_t size) {
     return read == static_cast<ssize_t>(size);
 }
 
+bool safe_write_memory(uintptr_t address, const void *buffer, size_t size) {
+    if (address == 0 || buffer == nullptr || size == 0) return false;
+    iovec local{const_cast<void *>(buffer), size};
+    iovec remote{reinterpret_cast<void *>(address), size};
+    ssize_t written = process_vm_writev(getpid(), &local, 1, &remote, 1, 0);
+    return written == static_cast<ssize_t>(size);
+}
+
 std::string preview_c_string(uintptr_t address, size_t max_len) {
     std::string buffer(max_len, 0);
     if (!safe_read_memory(address, buffer.data(), max_len)) return "<unreadable>";

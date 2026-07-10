@@ -93,8 +93,8 @@ void TextTraceWriter::call(const char *category, const std::string &name, const 
     append(std::string("CALL ") + category + "." + name + " " + detail + "\n");
 }
 
-void TextTraceWriter::bypass(const std::string &name, const std::string &detail) {
-    append("BYPASS " + name + " " + detail + "\n");
+void TextTraceWriter::rule(const std::string &name, const std::string &detail) {
+    append("RULE " + name + " " + detail + "\n");
 }
 
 void TextTraceWriter::error(const std::string &message) {

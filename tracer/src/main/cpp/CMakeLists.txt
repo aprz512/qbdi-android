@@ -20,7 +20,9 @@ add_library(qbdi_tracer SHARED
     hooks/inline_hook_adapter.cpp
     core/qbdi_runner.cpp
     handlers/call_handlers.cpp
-    handlers/bypass_handlers.cpp)
+    rules/code_rule.cpp
+    rules/code_rule_context.cpp
+    rules/user_code_rules.cpp)
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
 target_compile_options(qbdi_tracer PRIVATE -Wall -Wextra)
