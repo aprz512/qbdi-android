@@ -1,9 +1,7 @@
 <resources>
-    <style name="Theme.QbdiAndroid" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.QbdiAndroid" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="colorPrimary">#0B57D0</item>
-        <item name="colorPrimaryVariant">#0842A0</item>
-        <item name="colorSecondary">#185ABC</item>
+        <item name="android:colorAccent">#185ABC</item>
     </style>
 </resources>
