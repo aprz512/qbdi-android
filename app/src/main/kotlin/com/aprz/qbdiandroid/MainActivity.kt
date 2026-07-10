@@ -23,7 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
@@ -48,8 +48,26 @@ private fun QbdiDemoApp() {
         )
     }
 
+    QbdiDemoScreen(
+        output = output,
+        onRunJni = { runScene("Trace JNI Case") { NativeDemo.runJniCase() } },
+        onRunLibc = { runScene("Trace Libc Case") { NativeDemo.runLibcCase() } },
+        onRunAlgorithm = { runScene("Trace Algorithm Case") { NativeDemo.runAlgorithmCase() } },
+        onRunIntegrity = { runScene("Trace Integrity Case") { NativeDemo.runIntegrityCase() } }
+    )
+}
+
+@Composable
+private fun QbdiDemoScreen(
+    output: String,
+    onRunJni: () -> Unit,
+    onRunLibc: () -> Unit,
+    onRunAlgorithm: () -> Unit,
+    onRunIntegrity: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     MaterialTheme {
-        Surface(modifier = Modifier.fillMaxSize()) {
+        Surface(modifier = modifier.fillMaxSize()) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -58,7 +76,7 @@ private fun QbdiDemoApp() {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = stringResource(R.string.app_name),
+                    text = "QBDI Android Demo",
                     style = MaterialTheme.typography.headlineSmall
                 )
                 Text(
@@ -66,18 +84,10 @@ private fun QbdiDemoApp() {
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(modifier = Modifier.height(4.dp))
-                SceneButton(label = stringResource(R.string.trace_jni)) {
-                    runScene(it) { NativeDemo.runJniCase() }
-                }
-                SceneButton(label = stringResource(R.string.trace_libc)) {
-                    runScene(it) { NativeDemo.runLibcCase() }
-                }
-                SceneButton(label = stringResource(R.string.trace_algorithm)) {
-                    runScene(it) { NativeDemo.runAlgorithmCase() }
-                }
-                SceneButton(label = stringResource(R.string.trace_integrity)) {
-                    runScene(it) { NativeDemo.runIntegrityCase() }
-                }
+                SceneButton(label = "Trace JNI Case", onClick = onRunJni)
+                SceneButton(label = "Trace Libc Case", onClick = onRunLibc)
+                SceneButton(label = "Trace Algorithm Case", onClick = onRunAlgorithm)
+                SceneButton(label = "Trace Integrity Case", onClick = onRunIntegrity)
                 OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                     Text(
                         text = output,
@@ -91,11 +101,23 @@ private fun QbdiDemoApp() {
 }
 
 @Composable
-private fun SceneButton(label: String, onClick: (String) -> Unit) {
+private fun SceneButton(label: String, onClick: () -> Unit) {
     Button(
         modifier = Modifier.fillMaxWidth(),
-        onClick = { onClick(label) }
+        onClick = onClick
     ) {
         Text(text = label)
     }
+}
+
+@Preview(showBackground = true, widthDp = 360)
+@Composable
+private fun QbdiDemoScreenPreview() {
+    QbdiDemoScreen(
+        output = "Trace Algorithm Case\nalgorithm: size=24, hash=0x51f00d42",
+        onRunJni = {},
+        onRunLibc = {},
+        onRunAlgorithm = {},
+        onRunIntegrity = {}
+    )
 }
