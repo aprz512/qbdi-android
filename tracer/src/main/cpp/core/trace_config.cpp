@@ -44,6 +44,8 @@ TraceConfig parse_trace_config(const char *encoded_config) {
                     scene.end_offset = strtoull(fields[2].c_str(), nullptr, 16);
                 }
             }
+        } else if (part.rfind("jni_bt=", 0) == 0) {
+            config.jni_backtrace_funcs = split(part.substr(7), ',');
         }
     }
     return config;

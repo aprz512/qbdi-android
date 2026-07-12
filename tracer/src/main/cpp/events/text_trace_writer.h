@@ -31,6 +31,9 @@ public:
 
     void write_crash_marker(int signal);
 
+    // 原始追加（不格式化，用于 jnitrace 风格多行输出）
+    void write_raw_line(const std::string &line);
+
     const std::string &path() const { return path_; }
 
 private:

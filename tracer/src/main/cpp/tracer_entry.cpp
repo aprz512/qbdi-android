@@ -2,6 +2,7 @@
 #include "core/module_maps.h"
 #include "core/qbdi_runner.h"
 #include "core/trace_config.h"
+#include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
 
 #include <array>
@@ -124,6 +125,11 @@ qbdi_tracer_configure(const char *encoded_config) {
     }
     QTRACE_I("configure tracer package=%s target=%s", config.package_name.c_str(),
              config.target_so.c_str());
+    if (!config.jni_backtrace_funcs.empty()) {
+        set_jni_backtrace_funcs(config.jni_backtrace_funcs);
+        QTRACE_I("jni backtrace enabled for %zu functions",
+                 config.jni_backtrace_funcs.size());
+    }
     std::thread(install_hooks_when_ready, config).detach();
 }
 

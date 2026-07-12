@@ -16,6 +16,8 @@ struct TraceConfig {
     std::string package_name = "com.aprz.qbdiandroid";
     std::string target_so = "libdemo_target.so";
     std::vector<SceneConfig> scenes;
+    // JNI 函数名列表，命中时打印调用栈（回溯）
+    std::vector<std::string> jni_backtrace_funcs;
 };
 
 TraceConfig default_trace_config();

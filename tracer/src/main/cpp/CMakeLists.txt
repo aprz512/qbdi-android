@@ -50,7 +50,9 @@ add_library(qbdi_tracer SHARED
         handlers/call_handlers.cpp
         rules/code_rule.cpp
         rules/code_rule_context.cpp
-        rules/user_code_rules.cpp)
+        rules/user_code_rules.cpp
+        jni/jni_state.cpp
+        jni/jni_formatter.cpp)
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
 target_compile_options(qbdi_tracer PRIVATE -Wall -Wextra)

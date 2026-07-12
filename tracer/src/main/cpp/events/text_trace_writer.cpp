@@ -133,3 +133,7 @@ void TextTraceWriter::write_crash_marker(int signal) {
         : "TRACE_END status=crashed signal=SIGABRT\n";
     write(fd_, msg, strlen(msg));
 }
+
+void TextTraceWriter::write_raw_line(const std::string &line) {
+    append(line);
+}
