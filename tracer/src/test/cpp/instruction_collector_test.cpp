@@ -9,11 +9,20 @@ namespace {
 
 struct RecordingSink final : PendingInstructionSink {
     bool emit(const InstructionRecord &record) override {
+        event_addresses.push_back(record.pc);
         records.push_back(record);
         return true;
     }
 
+    bool emit_memory_continuation(uintptr_t, const MemoryRecord &record) override {
+        event_addresses.push_back(record.address);
+        continuations.push_back(record);
+        return true;
+    }
+
     std::vector<InstructionRecord> records;
+    std::vector<MemoryRecord> continuations;
+    std::vector<uintptr_t> event_addresses;
 };
 
 RegisterSnapshot snapshot(std::initializer_list<std::pair<size_t, uint64_t>> values) {
@@ -134,6 +143,56 @@ void truncates_w_register_aliases_to_their_architectural_width() {
     assert(sink.records[0].after[1] == 0x87654321);
 }
 
+void attaches_only_the_fixed_memory_prefix_without_reordering() {
+    CachedInstruction instruction{};
+    RecordingSink sink;
+    PendingInstructionCollector collector(&sink, 0x1000);
+    assert(collector.begin(view(0x1010, &instruction), snapshot({})));
+
+    for (size_t index = 0; index < kMaxMemoryRecords; ++index) {
+        MemoryRecord memory{};
+        memory.address = 0x2000 + index;
+        memory.value = index;
+        assert(collector.append_memory(memory));
+    }
+    MemoryRecord overflow{};
+    overflow.address = 0x2008;
+    assert(!collector.append_memory(overflow));
+    assert(collector.complete_pending(snapshot({})));
+    assert(sink.records.size() == 1);
+    assert(sink.records[0].memory_count == kMaxMemoryRecords);
+    for (size_t index = 0; index < kMaxMemoryRecords; ++index) {
+        assert(sink.records[0].memory[index].address == 0x2000 + index);
+        assert(sink.records[0].memory[index].value == index);
+    }
+}
+
+void emits_more_than_eight_accesses_as_lossless_ordered_continuations() {
+    CachedInstruction instruction{};
+    RecordingSink sink;
+    PendingInstructionCollector collector(&sink, 0x1000);
+    assert(collector.begin(view(0x1010, &instruction), snapshot({})));
+
+    for (size_t index = 0; index < 11; ++index) {
+        MemoryRecord memory{};
+        memory.address = 0x3000 + index;
+        memory.value = index;
+        assert(collector.append_or_emit_memory(memory, snapshot({})));
+    }
+    assert(collector.complete_memory(snapshot({})));
+    assert(sink.records.size() == 1);
+    assert(sink.records[0].memory_count == kMaxMemoryRecords);
+    assert(sink.continuations.size() == 3);
+    assert(sink.event_addresses[0] == 0x1010);
+    for (size_t index = 0; index < kMaxMemoryRecords; ++index) {
+        assert(sink.records[0].memory[index].address == 0x3000 + index);
+    }
+    for (size_t index = 0; index < sink.continuations.size(); ++index) {
+        assert(sink.continuations[index].address == 0x3008 + index);
+        assert(sink.event_addresses[index + 1U] == 0x3008 + index);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -142,4 +201,6 @@ int main() {
     handles_zero_instruction_sequences();
     separates_previous_completion_from_current_rule_mutation();
     truncates_w_register_aliases_to_their_architectural_width();
+    attaches_only_the_fixed_memory_prefix_without_reordering();
+    emits_more_than_eight_accesses_as_lossless_ordered_continuations();
 }

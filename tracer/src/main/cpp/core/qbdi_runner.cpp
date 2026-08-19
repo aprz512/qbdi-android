@@ -69,7 +69,7 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     auto started = std::chrono::steady_clock::now();
     InstructionCache instruction_cache;
     InstructionCollector collector(&instruction_cache, &state.writer, &state.code_rules,
-                                   &state.context, &state.trace_gate);
+                                   &state.context, &state.trace_gate, config.trace);
     QBDI::VM vm;
     QBDI::GPRState *gpr = vm.getGPRState();
 
@@ -107,9 +107,17 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
         vm.addCodeCB(QBDI::POSTINST, InstructionCollector::post_callback, &collector);
     }
     if (config.trace.memory_enabled()) {
-        vm.recordMemoryAccess(QBDI::MEMORY_READ_WRITE);
-        vm.addMemAccessCB(QBDI::MEMORY_READ_WRITE, InstructionCollector::memory_callback,
-                          &collector);
+        const bool recording = vm.recordMemoryAccess(QBDI::MEMORY_READ_WRITE);
+        const uint32_t callback = recording
+                                          ? vm.addMemAccessCB(
+                                                    QBDI::MEMORY_READ_WRITE,
+                                                    InstructionCollector::memory_callback,
+                                                    &collector)
+                                          : QBDI::INVALID_EVENTID;
+        if (!recording || callback == QBDI::INVALID_EVENTID) {
+            state.writer.error("QBDI memory instrumentation unavailable");
+            state.trace_gate.observe_failure(true);
+        }
     }
     vm.addVMEventCB(QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN, on_exec_transfer,
                     &state);

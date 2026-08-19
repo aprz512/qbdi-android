@@ -46,6 +46,12 @@ add_trace_test(trace_encoder_test
     trace_encoder_test.cpp
     ../../main/cpp/events/trace_encoder.cpp)
 
+add_trace_test(memory_profile_test
+    memory_profile_test.cpp
+    ../../main/cpp/core/instruction_cache.cpp
+    ../../main/cpp/core/safe_memory.cpp
+    ../../main/cpp/events/trace_encoder.cpp)
+
 find_package(Threads REQUIRED)
 add_trace_test(async_trace_writer_test
     async_trace_writer_test.cpp

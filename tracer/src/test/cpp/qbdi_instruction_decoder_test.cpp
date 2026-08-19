@@ -125,10 +125,27 @@ void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
     assert(cache.metrics().collisions == 1);
 }
 
+void decodes_memory_formulas_only_when_the_profile_requests_them() {
+    QBDI::InstAnalysis analysis{};
+    analysis.mayLoad = true;
+    analysis.loadSize = 8;
+
+    const CachedInstruction fast = decode_qbdi_instruction(0xf8627820U, analysis, false);
+    assert(fast.memory_operand_count == 0);
+    assert(!fast.requires_slow_memory_path);
+
+    const CachedInstruction full = decode_qbdi_instruction(0xf8627820U, analysis, true);
+    assert(full.memory_operand_count == 1);
+    assert(full.memory_operands[0].base_reg == 1);
+    assert(full.memory_operands[0].index_reg == 2);
+    assert(full.memory_operands[0].shift == 3);
+}
+
 } // namespace
 
 int main() {
     decodes_scaled_branch_metadata_and_owned_strings();
     maps_mixed_aliases_and_arm64_special_registers();
     resolves_one_cold_then_one_hot_opcode_with_exact_accounting();
+    decodes_memory_formulas_only_when_the_profile_requests_them();
 }

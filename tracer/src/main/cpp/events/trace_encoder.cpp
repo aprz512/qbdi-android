@@ -99,6 +99,56 @@ bool append_register_name(AppendBuffer &buffer, const InstructionRecord &record,
     return append_char(buffer, 'X') && append_dec_u64(buffer, index);
 }
 
+bool append_memory_type(AppendBuffer &buffer, const MemoryRecord &memory) noexcept {
+    switch (memory.access_type) {
+        case 1: return append_char(buffer, 'r');
+        case 2: return append_char(buffer, 'w');
+        case 3: return append_literal(buffer, "rw");
+        default: return append_char(buffer, memory.type);
+    }
+}
+
+bool append_memory_bytes(AppendBuffer &buffer, const char *label,
+                         const MemoryBytes &bytes) noexcept {
+    if (bytes.state == MemoryBytesState::NotCaptured) return true;
+    if (!append_char(buffer, ' ') || !append_literal(buffer, label) ||
+        !append_char(buffer, '=')) {
+        return false;
+    }
+    if (bytes.state == MemoryBytesState::Unavailable) {
+        return append_literal(buffer, "<unavailable>");
+    }
+    const size_t size = std::min(static_cast<size_t>(bytes.size),
+                                 kMaxCapturedMemoryBytes);
+    for (size_t index = 0; index < size; ++index) {
+        const uint8_t value = bytes.data[index];
+        const uint8_t high = value >> 4U;
+        const uint8_t low = value & 0xfU;
+        if (!append_char(buffer, static_cast<char>(high < 10U ? '0' + high
+                                                              : 'a' + high - 10U)) ||
+            !append_char(buffer, static_cast<char>(low < 10U ? '0' + low
+                                                             : 'a' + low - 10U))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool append_memory_details(AppendBuffer &buffer,
+                           const MemoryRecord &memory) noexcept {
+    if (memory.access_type != 0 || memory.flags != 0 ||
+        memory.before.state != MemoryBytesState::NotCaptured ||
+        memory.after.state != MemoryBytesState::NotCaptured) {
+        if (!append_literal(buffer, " flags=0x") ||
+            !append_hex_u64(buffer, memory.flags) ||
+            !append_memory_bytes(buffer, "pre", memory.before) ||
+            !append_memory_bytes(buffer, "post", memory.after)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 const char *profile_name(TraceProfile profile) noexcept {
     switch (profile) {
         case TraceProfile::Fast: return "fast";
@@ -200,10 +250,11 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
     const size_t memory_count = std::min(static_cast<size_t>(record.memory_count), kMaxMemoryRecords);
     for (size_t index = 0; index < memory_count; ++index) {
         const MemoryRecord &memory = record.memory[index];
-        if (!append_literal(buffer, " | MEM:") || !append_char(buffer, memory.type) ||
+        if (!append_literal(buffer, " | MEM:") || !append_memory_type(buffer, memory) ||
             !append_literal(buffer, " addr=0x") || !append_hex_u64(buffer, memory.address) ||
             !append_literal(buffer, " size=") || !append_dec_u64(buffer, memory.size) ||
-            !append_literal(buffer, " value=0x") || !append_hex_u64(buffer, memory.value)) {
+            !append_literal(buffer, " value=0x") || !append_hex_u64(buffer, memory.value) ||
+            !append_memory_details(buffer, memory)) {
             return false;
         }
         const size_t hexdump_size = std::min(static_cast<size_t>(memory.hexdump_size), kMaxHexdumpBytes);
@@ -227,10 +278,11 @@ bool append_memory(AppendBuffer &buffer, const char *module_name, uintptr_t rela
     return append_literal(buffer, "MEM ") &&
            append_c_string(buffer, module, kMaxInstructionLineBytes) &&
            append_literal(buffer, "+0x") && append_hex_u64(buffer, relative_pc) &&
-           append_literal(buffer, " type=") && append_char(buffer, record.type) &&
+           append_literal(buffer, " type=") && append_memory_type(buffer, record) &&
            append_literal(buffer, " addr=0x") && append_hex_u64(buffer, record.address) &&
            append_literal(buffer, " size=") && append_dec_u64(buffer, record.size) &&
            append_literal(buffer, " value=0x") && append_hex_u64(buffer, record.value) &&
+           append_memory_details(buffer, record) &&
            append_char(buffer, '\n');
 }
 

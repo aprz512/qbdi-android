@@ -52,7 +52,8 @@ void copy_register_access(const QBDI::OperandAnalysis &operand,
 } // namespace
 
 CachedInstruction decode_qbdi_instruction(uint32_t opcode,
-                                          const QBDI::InstAnalysis &analysis) noexcept {
+                                          const QBDI::InstAnalysis &analysis,
+                                          bool decode_memory) noexcept {
     CachedInstruction decoded{};
     decoded.opcode = opcode;
     decoded.condition = static_cast<uint8_t>(analysis.condition);
@@ -81,5 +82,9 @@ CachedInstruction decode_qbdi_instruction(uint32_t opcode,
     constexpr size_t flags_index = QBDI::REG_FLAG;
     cache_gpr_access(&decoded, flags_index, "NZCV", sizeof(uint64_t),
                      access_reads(analysis.flagsAccess), access_writes(analysis.flagsAccess));
+    if (decode_memory && (analysis.mayLoad || analysis.mayStore)) {
+        decode_arm64_memory_operands(&decoded, opcode, analysis.mayLoad, analysis.mayStore,
+                                     analysis.loadSize, analysis.storeSize);
+    }
     return decoded;
 }

@@ -6,17 +6,22 @@
 #include <cstddef>
 #include <cstdint>
 
-constexpr size_t kTraceGprCount = 34;
+constexpr size_t kTraceGprCount = kArm64RegisterCount;
 constexpr size_t kMaxRegisterNameBytes = 16;
 constexpr size_t kMaxMemoryRecords = 8;
-constexpr size_t kMaxHexdumpBytes = 64;
+constexpr size_t kMaxHexdumpBytes = kMaxCapturedMemoryBytes;
 constexpr size_t kMaxInstructionLineBytes = 4096;
 
 struct MemoryRecord {
     char type = 'r';
+    uint8_t access_type = 0;
+    uint16_t flags = 0;
     uintptr_t address = 0;
     uint32_t size = 0;
     uint64_t value = 0;
+    MemoryBytes before{};
+    MemoryBytes after{};
+    // Legacy producer field retained for compatibility with semantic callers.
     std::array<uint8_t, kMaxHexdumpBytes> hexdump{};
     uint8_t hexdump_size = 0;
 };

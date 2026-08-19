@@ -20,6 +20,8 @@ bool PendingInstructionCollector::begin(const InstructionView &instruction,
                                         const RegisterSnapshot &registers) noexcept {
     if (pending_ && !complete(registers)) return false;
 
+    continuing_memory_ = false;
+    continuation_pc_ = 0;
     pending_record_ = {};
     pending_record_.sequence = next_sequence_++;
     pending_record_.pc = instruction.address;
@@ -53,6 +55,33 @@ bool PendingInstructionCollector::complete_pending(
 
 bool PendingInstructionCollector::finish_last(const RegisterSnapshot &registers) noexcept {
     return complete_pending(registers);
+}
+
+bool PendingInstructionCollector::append_memory(const MemoryRecord &memory) noexcept {
+    if (!pending_ || pending_record_.memory_count >= pending_record_.memory.size()) return false;
+    pending_record_.memory[pending_record_.memory_count++] = memory;
+    return true;
+}
+
+bool PendingInstructionCollector::append_or_emit_memory(
+        const MemoryRecord &memory, const RegisterSnapshot &registers) noexcept {
+    if (append_memory(memory)) return true;
+    if (pending_) {
+        continuation_pc_ = pending_record_.pc;
+        if (!complete(registers)) return false;
+        continuing_memory_ = true;
+    }
+    return continuing_memory_ && sink_ != nullptr &&
+           sink_->emit_memory_continuation(continuation_pc_, memory);
+}
+
+bool PendingInstructionCollector::complete_memory(
+        const RegisterSnapshot &registers) noexcept {
+    if (pending_ && !complete(registers)) return false;
+    const bool completed = continuing_memory_ || !pending_;
+    continuing_memory_ = false;
+    continuation_pc_ = 0;
+    return completed;
 }
 
 uint64_t PendingInstructionCollector::pending_write_mask() const noexcept {
