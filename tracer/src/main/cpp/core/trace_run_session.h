@@ -41,5 +41,7 @@ private:
     TraceRunFinalization finalization_{};
     bool execution_setup_observed_ = false;
     bool execution_setup_succeeded_ = false;
+    bool trace_setup_observed_ = false;
+    bool trace_setup_succeeded_ = false;
     bool finalized_ = false;
 };

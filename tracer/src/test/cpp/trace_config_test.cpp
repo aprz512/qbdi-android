@@ -50,4 +50,10 @@ int main() {
     assert_invalid("hexdump_limit=65");
     assert_invalid("compression=true");
     assert_invalid("unknown_option=1");
+
+    TraceConfig test_failure = parse_trace_config("test_fail_setup=1");
+    assert(test_failure.valid);
+#ifndef NDEBUG
+    assert(test_failure.test_fail_setup);
+#endif
 }

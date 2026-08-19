@@ -59,12 +59,14 @@ add_library(qbdi_tracer SHARED
         core/pending_instruction.cpp
         core/instruction_collector.cpp
         core/safe_memory.cpp
+        core/crash_marker.cpp
         events/text_trace_writer.cpp
         events/async_trace_writer.cpp
         events/trace_encoder.cpp
         core/trace_config.cpp
         hooks/inline_hook_adapter.cpp
         core/qbdi_runner.cpp
+        core/native_fallback_arm64.S
         handlers/call_handlers.cpp
         rules/code_rule.cpp
         rules/code_rule_context.cpp

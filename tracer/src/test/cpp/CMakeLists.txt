@@ -37,6 +37,7 @@ add_trace_test(qbdi_instruction_decoder_test
     qbdi_instruction_decoder_test.cpp
     ../../main/cpp/core/qbdi_instruction_decoder.cpp
     ../../main/cpp/core/arm64_memory_operand.cpp
+    ../../main/cpp/core/safe_memory.cpp
     ../../main/cpp/core/instruction_cache.cpp)
 
 add_trace_test(code_rule_test
@@ -73,6 +74,14 @@ target_link_options(text_trace_writer_test PRIVATE
     -Wl,--wrap=open
     -Wl,--wrap=write
     -Wl,--wrap=close)
+
+add_trace_test(failure_state_test
+    failure_state_test.cpp
+    ../../main/cpp/core/crash_marker.cpp
+    ../../main/cpp/events/text_trace_writer.cpp
+    ../../main/cpp/events/trace_encoder.cpp
+    ../../main/cpp/events/async_trace_writer.cpp)
+target_link_libraries(failure_state_test PRIVATE lz4_static Threads::Threads)
 
 add_trace_test(trace_callback_gate_test
     trace_callback_gate_test.cpp)

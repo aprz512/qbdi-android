@@ -31,6 +31,7 @@ public:
     bool end(uint64_t retval, bool ok, long elapsed_ms);
     bool close();
     bool failed() const { return !healthy_writer_state(); }
+    int error_code() const noexcept;
 
     const std::string &path() const { return path_; }
 
@@ -39,13 +40,14 @@ private:
     bool writable_event_state() const;
     bool append_encoded_event(std::string_view event_type, std::string_view name,
                               std::string_view detail);
-    bool write_metrics_sidecar() const;
-    bool fail();
+    bool write_metrics_sidecar();
+    bool fail(int error_code = 0);
 
     TraceOptions options_;
     TraceMetrics *metrics_ = nullptr;
     TraceEncoder encoder_;
     AsyncTraceWriter writer_;
+    TraceFaultInjector *faults_ = nullptr;
     std::string path_;
     uint64_t elapsed_ms_ = 0;
     bool opened_ = false;
@@ -55,4 +57,5 @@ private:
     bool close_called_ = false;
     bool close_result_ = false;
     bool facade_failed_ = false;
+    int facade_error_code_ = 0;
 };

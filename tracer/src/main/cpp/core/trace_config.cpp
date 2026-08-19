@@ -154,6 +154,10 @@ TraceConfig parse_trace_config(const char *encoded_config) {
                 return invalid_config(std::move(config), "invalid hexdump_limit: " + value);
             }
             config.trace.hexdump_limit = static_cast<size_t>(limit);
+        } else if (part == "test_fail_setup=1") {
+#ifndef NDEBUG
+            config.test_fail_setup = true;
+#endif
         } else {
             return invalid_config(std::move(config), "unknown trace configuration field: " + part);
         }

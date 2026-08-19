@@ -432,6 +432,8 @@ void enospc_releases_a_waiting_producer() {
     CHECK(reserve_result.load(std::memory_order_acquire) == nullptr);
     CHECK(writer.failed());
     CHECK(!writer.finish());
+    CHECK(!writer.finish());
+    CHECK(writer.error_code() == ENOSPC);
     CHECK(metrics.producer_waits >= 1);
     CHECK(metrics.producer_wait_ns > 0);
     CHECK(metrics.raw_bytes == 2 * 4096);

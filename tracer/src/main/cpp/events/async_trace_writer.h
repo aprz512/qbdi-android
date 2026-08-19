@@ -12,6 +12,18 @@
 
 enum class BufferState : uint8_t { Free, Filling, Ready, Writing };
 
+enum class FailurePoint : uint8_t {
+    None,
+    Allocation,
+    Synchronization,
+    ThreadCreation,
+    CompressionAllocation,
+    Compression,
+    FirstWrite,
+    FinalWrite,
+    MetricsSidecar,
+};
+
 struct WritableSpan {
     char *data = nullptr;
     size_t capacity = 0;
@@ -30,6 +42,7 @@ class TraceFaultInjector {
 public:
     virtual ~TraceFaultInjector() = default;
 
+    virtual int failure(FailurePoint point) noexcept;
     virtual bool fail_buffer_allocation(size_t per_buffer_bytes) noexcept;
     virtual bool fail_compression_allocation(size_t bytes) noexcept;
     virtual int create_consumer_thread(pthread_t *thread, void *(*entry)(void *),
@@ -61,6 +74,7 @@ public:
     bool append(std::string_view bytes);
     bool finish();
     bool failed() const;
+    int error_code() const noexcept;
     size_t buffer_bytes() const noexcept;
 
 private:

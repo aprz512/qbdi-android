@@ -4,6 +4,8 @@
 
 #include <cassert>
 #include <cstring>
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace {
 
@@ -21,6 +23,12 @@ bool decode_counted(uint32_t opcode, void *data, CachedInstruction *decoded) noe
     ++source->calls;
     if (source->analysis == nullptr || decoded == nullptr) return false;
     *decoded = decode_qbdi_instruction(opcode, *source->analysis);
+    return true;
+}
+
+bool decode_fallback(uint32_t opcode, void *, CachedInstruction *decoded) noexcept {
+    if (decoded == nullptr) return false;
+    *decoded = decode_arm64_fallback(opcode, true);
     return true;
 }
 
@@ -141,6 +149,49 @@ void decodes_memory_formulas_only_when_the_profile_requests_them() {
     assert(full.memory_operands[0].shift == 3);
 }
 
+void falls_back_to_owned_conservative_arm64_metadata() {
+    const CachedInstruction nop = decode_arm64_fallback(0xd503201fU, false);
+    assert(std::strcmp(nop.mnemonic, "nop") == 0);
+    assert(std::strcmp(nop.disassembly, "nop") == 0);
+
+    const CachedInstruction call = decode_arm64_fallback(0x94000004U, false);
+    assert(std::strcmp(call.mnemonic, "bl") == 0);
+    assert(has_flag(call.flags, InstructionFlags::Branch));
+    assert(has_flag(call.flags, InstructionFlags::Call));
+    assert(has_flag(call.flags, InstructionFlags::PcRelative));
+    assert(call.pc_relative_displacement == 16);
+
+    const CachedInstruction unknown = decode_arm64_fallback(0x12345678U, true);
+    assert(std::strcmp(unknown.mnemonic, ".inst") == 0);
+    assert(std::strcmp(unknown.disassembly, ".inst 0x12345678") == 0);
+    assert(unknown.requires_slow_memory_path);
+}
+
+void unreadable_and_zero_opcodes_bypass_cache_accounting() {
+    InstructionCache cache(1);
+    CachedInstruction scratch{};
+    const InstructionView unreadable = resolve_arm64_instruction(
+            1, &cache, decode_fallback, nullptr, &scratch);
+    assert(unreadable.decoded == &scratch);
+    assert(std::strcmp(unreadable.decoded->mnemonic, "<unreadable>") == 0);
+    assert(cache.metrics().hits == 0);
+    assert(cache.metrics().misses == 0);
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    assert(page_size > 0);
+    void *page = mmap(nullptr, static_cast<size_t>(page_size), PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(page != MAP_FAILED);
+    *static_cast<uint32_t *>(page) = 0;
+    const InstructionView zero = resolve_arm64_instruction(
+            reinterpret_cast<uintptr_t>(page), &cache, decode_fallback, nullptr, &scratch);
+    assert(zero.decoded == &scratch);
+    assert(std::strcmp(zero.decoded->disassembly, ".inst 0x00000000") == 0);
+    assert(cache.metrics().hits == 0);
+    assert(cache.metrics().misses == 0);
+    assert(munmap(page, static_cast<size_t>(page_size)) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -148,4 +199,6 @@ int main() {
     maps_mixed_aliases_and_arm64_special_registers();
     resolves_one_cold_then_one_hot_opcode_with_exact_accounting();
     decodes_memory_formulas_only_when_the_profile_requests_them();
+    falls_back_to_owned_conservative_arm64_metadata();
+    unreadable_and_zero_opcodes_bypass_cache_accounting();
 }

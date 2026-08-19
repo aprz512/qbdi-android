@@ -2,14 +2,20 @@
 #include "events/text_trace_writer.h"
 
 void TraceRunSessionOutcome::observe_trace_setup(bool succeeded) noexcept {
+    trace_setup_observed_ = true;
+    trace_setup_succeeded_ = succeeded;
     callback_gate_.observe_failure(!succeeded);
 }
 
 void TraceRunSessionOutcome::observe_memory_instrumentation(
         bool memory_enabled, bool recording_enabled,
         bool callback_valid) noexcept {
-    callback_gate_.observe_failure(
-            memory_enabled && (!recording_enabled || !callback_valid));
+    const bool failed = memory_enabled && (!recording_enabled || !callback_valid);
+    callback_gate_.observe_failure(failed);
+    if (failed) {
+        execution_setup_observed_ = true;
+        execution_setup_succeeded_ = false;
+    }
 }
 
 void TraceRunSessionOutcome::observe_execution_setup(bool succeeded) noexcept {
@@ -19,7 +25,8 @@ void TraceRunSessionOutcome::observe_execution_setup(bool succeeded) noexcept {
 }
 
 bool TraceRunSessionOutcome::target_should_run() const noexcept {
-    return execution_setup_observed_ && execution_setup_succeeded_;
+    return trace_setup_observed_ && trace_setup_succeeded_ &&
+           execution_setup_observed_ && execution_setup_succeeded_;
 }
 
 void TraceRunSessionOutcome::observe_target_call(TraceTargetOutcome outcome,

@@ -1,7 +1,9 @@
 #include "core/qbdi_instruction_decoder.h"
 #include "core/arm64_memory_decoder.h"
+#include "core/safe_memory.h"
 
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 
 namespace {
@@ -15,6 +17,18 @@ void copy_bounded(char (&destination)[Size], const char *source) noexcept {
         ++index;
     }
     destination[index] = '\0';
+}
+
+void format_fallback(CachedInstruction *decoded, const char *mnemonic,
+                     const char *operands = nullptr) noexcept {
+    copy_bounded(decoded->mnemonic, mnemonic);
+    if (operands != nullptr) copy_bounded(decoded->operands, operands);
+    if (operands == nullptr || operands[0] == '\0') {
+        copy_bounded(decoded->disassembly, mnemonic);
+    } else {
+        std::snprintf(decoded->disassembly, sizeof(decoded->disassembly), "%s %s",
+                      mnemonic, operands);
+    }
 }
 
 bool access_reads(QBDI::RegisterAccessType access) noexcept {
@@ -88,4 +102,72 @@ CachedInstruction decode_qbdi_instruction(uint32_t opcode,
                                      analysis.loadSize, analysis.storeSize);
     }
     return decoded;
+}
+
+CachedInstruction decode_arm64_fallback(uint32_t opcode, bool decode_memory) noexcept {
+    CachedInstruction decoded{};
+    decoded.opcode = opcode;
+
+    if (opcode == 0xd503201fU) {
+        format_fallback(&decoded, "nop");
+        return decoded;
+    }
+
+    if ((opcode & 0x7c000000U) == 0x14000000U) {
+        const bool call = (opcode & 0x80000000U) != 0;
+        const int32_t signed_immediate = static_cast<int32_t>(opcode << 6U) >> 6U;
+        decoded.pc_relative_displacement = signed_immediate * 4;
+        decoded.flags = InstructionFlags::Branch | InstructionFlags::PcRelative;
+        if (call) decoded.flags = decoded.flags | InstructionFlags::Call;
+        char operand[32]{};
+        std::snprintf(operand, sizeof(operand), "#%d",
+                      decoded.pc_relative_displacement);
+        format_fallback(&decoded, call ? "bl" : "b", operand);
+        return decoded;
+    }
+
+    if ((opcode & 0xfffffc1fU) == 0xd65f0000U) {
+        decoded.flags = InstructionFlags::Branch | InstructionFlags::Return;
+        const unsigned int reg = (opcode >> 5U) & 0x1fU;
+        char operand[8]{};
+        std::snprintf(operand, sizeof(operand), "x%u", reg);
+        format_fallback(&decoded, "ret", operand);
+        if (reg < CachedInstruction::kGprCount) {
+            cache_gpr_access(&decoded, reg, operand, sizeof(uint64_t), true, false);
+        }
+        return decoded;
+    }
+
+    char operand[24]{};
+    std::snprintf(operand, sizeof(operand), "0x%08x", opcode);
+    format_fallback(&decoded, ".inst", operand);
+    decoded.requires_slow_memory_path = decode_memory;
+    return decoded;
+}
+
+InstructionView resolve_arm64_instruction(
+        uintptr_t address, InstructionCache *cache, InstructionCache::Decoder decoder,
+        void *decoder_data, CachedInstruction *scratch) noexcept {
+    if (scratch == nullptr) return {address, nullptr};
+
+    uint32_t opcode = 0;
+    if (!safe_read_memory(address, &opcode, sizeof(opcode))) {
+        *scratch = CachedInstruction{};
+        copy_bounded(scratch->mnemonic, "<unreadable>");
+        copy_bounded(scratch->disassembly, "<unreadable>");
+        return {address, scratch};
+    }
+
+    if (opcode == 0 || cache == nullptr) {
+        *scratch = CachedInstruction{};
+        const bool decoded = decoder != nullptr && decoder(opcode, decoder_data, scratch);
+        if (!decoded) *scratch = decode_arm64_fallback(opcode);
+        scratch->opcode = opcode;
+        return {address, scratch};
+    }
+
+    const CachedInstruction *resolved = cache->resolve(opcode, decoder, decoder_data, scratch);
+    if (resolved != nullptr) return {address, resolved};
+    *scratch = decode_arm64_fallback(opcode);
+    return {address, scratch};
 }

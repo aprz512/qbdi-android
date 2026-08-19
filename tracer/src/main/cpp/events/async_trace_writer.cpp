@@ -61,6 +61,10 @@ bool TraceFaultInjector::fail_buffer_allocation(size_t) noexcept {
     return false;
 }
 
+int TraceFaultInjector::failure(FailurePoint) noexcept {
+    return 0;
+}
+
 bool TraceFaultInjector::fail_compression_allocation(size_t) noexcept {
     return false;
 }
@@ -110,6 +114,8 @@ struct AsyncTraceWriterImpl {
         ready_changed_initialized = true;
         synchronization_error = pthread_cond_init(&free_changed, nullptr);
         if (synchronization_error == 0) free_changed_initialized = true;
+        const int injected = faults->failure(FailurePoint::Synchronization);
+        if (synchronization_error == 0 && injected != 0) synchronization_error = injected;
     }
 
     ~AsyncTraceWriterImpl() {
@@ -142,6 +148,7 @@ struct AsyncTraceWriterImpl {
     size_t reservation_capacity = 0;
     uint64_t next_publication_sequence = 1;
     std::atomic<int> error{0};
+    bool first_write_attempted = false;
     int synchronization_error = 0;
     bool mutex_initialized = false;
     bool ready_changed_initialized = false;
@@ -152,6 +159,13 @@ struct AsyncTraceWriterImpl {
 };
 
 namespace {
+
+void latch_failure(AsyncTraceWriterImpl *impl, int error_code) noexcept {
+    if (error_code == 0) error_code = EIO;
+    int expected = 0;
+    impl->error.compare_exchange_strong(expected, error_code, std::memory_order_release,
+                                        std::memory_order_relaxed);
+}
 
 void unmap_region(void *region, size_t bytes) noexcept {
     if (region != nullptr && region != MAP_FAILED && bytes != 0) munmap(region, bytes);
@@ -174,8 +188,7 @@ void close_backend(AsyncTraceWriterImpl *impl) noexcept {
     if (impl->fd < 0) return;
     if (impl->backend->close_file(impl->fd) != 0) {
         int close_error = errno == 0 ? EIO : errno;
-        int expected = 0;
-        impl->error.compare_exchange_strong(expected, close_error, std::memory_order_relaxed);
+        latch_failure(impl, close_error);
     }
     impl->fd = -1;
 }
@@ -193,9 +206,7 @@ void release_consumer_resources(AsyncTraceWriterImpl *impl) noexcept {
 
 void set_failure_locked(AsyncTraceWriterImpl *impl, int error_code) noexcept {
     if (error_code == 0) error_code = EIO;
-    int expected = 0;
-    impl->error.compare_exchange_strong(expected, error_code, std::memory_order_release,
-                                        std::memory_order_relaxed);
+    latch_failure(impl, error_code);
     for (auto &buffer : impl->buffers) buffer.state = BufferState::Free;
     pthread_cond_broadcast(&impl->free_changed);
     pthread_cond_broadcast(&impl->ready_changed);
@@ -207,7 +218,23 @@ void set_failure(AsyncTraceWriterImpl *impl, int error_code) noexcept {
     pthread_mutex_unlock(&impl->mutex);
 }
 
-bool write_all(AsyncTraceWriterImpl *impl, const char *data, size_t size) noexcept {
+bool write_all(AsyncTraceWriterImpl *impl, const char *data, size_t size,
+               FailurePoint point = FailurePoint::None) noexcept {
+    if (!impl->first_write_attempted) {
+        impl->first_write_attempted = true;
+        const int injected = impl->faults->failure(FailurePoint::FirstWrite);
+        if (injected != 0) {
+            errno = injected;
+            return false;
+        }
+    }
+    if (point != FailurePoint::None) {
+        const int injected = impl->faults->failure(point);
+        if (injected != 0) {
+            errno = injected;
+            return false;
+        }
+    }
     size_t written = 0;
     while (written < size) {
         const ssize_t result = impl->backend->write_file(impl->fd, data + written, size - written);
@@ -229,8 +256,9 @@ bool write_all(AsyncTraceWriterImpl *impl, const char *data, size_t size) noexce
 
 bool write_frame(AsyncTraceWriterImpl *impl, const char *data, size_t size) noexcept {
     impl->preferences.frameInfo.contentSize = static_cast<unsigned long long>(size);
-    if (impl->faults->fail_lz4_operation()) {
-        errno = EIO;
+    const int compression_error = impl->faults->failure(FailurePoint::Compression);
+    if (compression_error != 0 || impl->faults->fail_lz4_operation()) {
+        errno = compression_error != 0 ? compression_error : EIO;
         return false;
     }
 
@@ -259,7 +287,7 @@ bool write_frame(AsyncTraceWriterImpl *impl, const char *data, size_t size) noex
     produced = LZ4F_compressEnd(impl->compression_context, impl->compression_scratch,
                                 impl->compression_scratch_bytes, nullptr);
     if (LZ4F_isError(produced) ||
-        !write_all(impl, impl->compression_scratch, produced)) {
+        !write_all(impl, impl->compression_scratch, produced, FailurePoint::FinalWrite)) {
         if (errno == 0) errno = EIO;
         return false;
     }
@@ -319,6 +347,11 @@ void *consumer_entry(void *argument) noexcept {
 }
 
 bool allocate_buffers(AsyncTraceWriterImpl *impl, size_t selected_bytes) noexcept {
+    const int injected = impl->faults->failure(FailurePoint::Allocation);
+    if (injected != 0) {
+        errno = injected;
+        return false;
+    }
     size_t candidates[4] = {selected_bytes, kFallbackBufferBytes[0], kFallbackBufferBytes[1],
                             kFallbackBufferBytes[2]};
     for (size_t candidate_index = 0; candidate_index < 4; ++candidate_index) {
@@ -356,6 +389,12 @@ bool allocate_compression(AsyncTraceWriterImpl *impl, const TraceOptions &option
     if (!options.compression_enabled) {
         impl->preferences.compressionLevel = INT_MIN;
         return true;
+    }
+
+    const int injected = impl->faults->failure(FailurePoint::CompressionAllocation);
+    if (injected != 0) {
+        errno = injected;
+        return false;
     }
 
     impl->preferences = {};
@@ -473,7 +512,7 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
         return false;
     }
     if (impl_->synchronization_error != 0) {
-        impl_->error.store(impl_->synchronization_error, std::memory_order_release);
+        latch_failure(impl_, impl_->synchronization_error);
         impl_->finish_called = true;
         return false;
     }
@@ -482,7 +521,7 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
     impl_->fd = impl_->backend->open_file(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC,
                                          0644);
     if (impl_->fd < 0) {
-        impl_->error.store(errno == 0 ? EIO : errno, std::memory_order_release);
+        latch_failure(impl_, errno == 0 ? EIO : errno);
         impl_->finish_called = true;
         return false;
     }
@@ -490,7 +529,7 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
     const size_t selected = choose_trace_buffer_bytes(physical_memory_bytes(), options.buffer_bytes,
                                                       options.auto_buffer_size);
     if (!allocate_buffers(impl_, selected) || !allocate_compression(impl_, options)) {
-        impl_->error.store(errno == 0 ? ENOMEM : errno, std::memory_order_release);
+        latch_failure(impl_, errno == 0 ? ENOMEM : errno);
         if (impl_->compression_context != nullptr) {
             LZ4F_freeCompressionContext(impl_->compression_context);
             impl_->compression_context = nullptr;
@@ -501,10 +540,13 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
         return false;
     }
 
-    const int thread_result = impl_->faults->create_consumer_thread(
-        &impl_->consumer_thread, consumer_entry, impl_);
+    const int injected_thread_error = impl_->faults->failure(FailurePoint::ThreadCreation);
+    const int thread_result = injected_thread_error != 0
+                                      ? injected_thread_error
+                                      : impl_->faults->create_consumer_thread(
+                                                &impl_->consumer_thread, consumer_entry, impl_);
     if (thread_result != 0) {
-        impl_->error.store(thread_result, std::memory_order_release);
+        latch_failure(impl_, thread_result);
         if (impl_->compression_context != nullptr) {
             LZ4F_freeCompressionContext(impl_->compression_context);
             impl_->compression_context = nullptr;
@@ -622,6 +664,10 @@ bool AsyncTraceWriter::finish() {
 
 bool AsyncTraceWriter::failed() const {
     return impl_ == nullptr || impl_->error.load(std::memory_order_acquire) != 0;
+}
+
+int AsyncTraceWriter::error_code() const noexcept {
+    return impl_ == nullptr ? ENOMEM : impl_->error.load(std::memory_order_acquire);
 }
 
 size_t AsyncTraceWriter::buffer_bytes() const noexcept {

@@ -18,4 +18,9 @@ struct TraceInvocation {
     uint64_t indirect_result = 0;
 };
 
-uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation);
+struct TraceRunResult {
+    bool target_executed = false;
+    uint64_t value = 0;
+};
+
+TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation);

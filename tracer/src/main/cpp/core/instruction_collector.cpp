@@ -10,7 +10,6 @@
 #include <QBDI/State.h>
 
 #include <algorithm>
-#include <cstring>
 
 namespace {
 
@@ -28,8 +27,9 @@ bool decode_current_instruction(uint32_t opcode, void *data,
     auto *request = static_cast<QbdiDecoderRequest *>(data);
     if (request == nullptr || request->vm == nullptr || decoded == nullptr) return false;
     const QBDI::InstAnalysis *analysis = request->vm->getInstAnalysis(kRequiredAnalysis);
-    if (analysis == nullptr) return false;
-    *decoded = decode_qbdi_instruction(opcode, *analysis, request->decode_memory);
+    *decoded = analysis != nullptr
+                       ? decode_qbdi_instruction(opcode, *analysis, request->decode_memory)
+                       : decode_arm64_fallback(opcode, request->decode_memory);
     return true;
 }
 
@@ -178,21 +178,9 @@ bool InstructionCollector::emit_memory_continuation(
 InstructionView InstructionCollector::resolve(QBDI::VM *vm,
                                               const QBDI::GPRState *gpr) noexcept {
     const uintptr_t address = gpr != nullptr ? gpr->pc : 0;
-    uint32_t opcode = 0;
-    if (address != 0) {
-        std::memcpy(&opcode, reinterpret_cast<const void *>(address), sizeof(opcode));
-        if (cache_ != nullptr) {
-            QbdiDecoderRequest request{vm, decode_memory_};
-            const CachedInstruction *decoded = cache_->resolve(
-                    opcode, decode_current_instruction, &request, &uncached_);
-            return {address, decoded != nullptr ? decoded : &uncached_};
-        }
-    }
-
-    uncached_ = CachedInstruction{};
     QbdiDecoderRequest request{vm, decode_memory_};
-    decode_current_instruction(opcode, &request, &uncached_);
-    return {address, &uncached_};
+    return resolve_arm64_instruction(address, cache_, decode_current_instruction,
+                                     &request, &uncached_);
 }
 
 RegisterSnapshot InstructionCollector::snapshot(const QBDI::GPRState &gpr,
@@ -205,7 +193,8 @@ RegisterSnapshot InstructionCollector::snapshot(const QBDI::GPRState &gpr,
 }
 
 void InstructionCollector::capture_pre_memory(QBDI::VM *vm) noexcept {
-    if (!current_view_.decoded->requires_slow_memory_path || vm == nullptr ||
+    if (current_view_.decoded == nullptr ||
+        !current_view_.decoded->requires_slow_memory_path || vm == nullptr ||
         memory_policy_.pre_capture_count() >=
                 MemoryTracePolicy::kMaxPreMemoryCaptures) {
         return;

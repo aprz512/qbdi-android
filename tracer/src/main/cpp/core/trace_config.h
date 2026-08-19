@@ -33,6 +33,9 @@ struct TraceConfig {
     // JNI 函数名列表，命中时打印调用栈（回溯）
     std::vector<std::string> jni_backtrace_funcs;
     TraceOptions trace;
+#ifndef NDEBUG
+    bool test_fail_setup = false;
+#endif
     bool valid = true;
     std::string error;
 };

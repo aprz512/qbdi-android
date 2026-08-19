@@ -101,15 +101,24 @@ bool write_rate_metric(int fd, const char *key, unsigned __int128 numerator,
 
 TextTraceWriter::TextTraceWriter(const TraceOptions &options, TraceMetrics *metrics,
                                  TraceWriterBackend *backend, TraceFaultInjector *faults)
-    : options_(options), metrics_(metrics), writer_(backend, faults) {}
+    : options_(options), metrics_(metrics), writer_(backend, faults), faults_(faults) {}
 
 TextTraceWriter::~TextTraceWriter() {
     close();
 }
 
-bool TextTraceWriter::fail() {
+bool TextTraceWriter::fail(int error_code) {
+    if (facade_error_code_ == 0) {
+        if (error_code == 0) error_code = writer_.error_code();
+        facade_error_code_ = error_code == 0 ? EIO : error_code;
+    }
     facade_failed_ = true;
     return false;
+}
+
+int TextTraceWriter::error_code() const noexcept {
+    const int writer_error = writer_.error_code();
+    return facade_error_code_ != 0 ? facade_error_code_ : writer_error;
 }
 
 bool TextTraceWriter::healthy_writer_state() const {
@@ -131,7 +140,7 @@ bool TextTraceWriter::open(const TraceContext &context) {
     *metrics_ = {};
     if (!writer_.open(path_, options_, metrics_)) {
         QTRACE_E("open trace file failed: %s", path_.c_str());
-        return fail();
+        return fail(writer_.error_code());
     }
     opened_ = true;
     return true;
@@ -257,10 +266,20 @@ bool TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
     return true;
 }
 
-bool TextTraceWriter::write_metrics_sidecar() const {
+bool TextTraceWriter::write_metrics_sidecar() {
     const std::string sidecar = path_ + ".metrics";
     const int fd = ::open(sidecar.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
-    if (fd < 0) return false;
+    if (fd < 0) return fail(errno);
+
+    if (faults_ != nullptr) {
+        const int injected = faults_->failure(FailurePoint::MetricsSidecar);
+        if (injected != 0) {
+            fail(injected);
+            (void)::close(fd);
+            (void)::unlink(sidecar.c_str());
+            return false;
+        }
+    }
 
     bool ok = write_unsigned_metric(fd, "instructions", metrics_->instructions) &&
               write_unsigned_metric(fd, "elapsed_ms", elapsed_ms_) &&
@@ -276,8 +295,15 @@ bool TextTraceWriter::write_metrics_sidecar() const {
               write_unsigned_metric(fd, "buffer_swaps", metrics_->buffer_swaps) &&
               write_unsigned_metric(fd, "producer_waits", metrics_->producer_waits) &&
               write_unsigned_metric(fd, "producer_wait_ns", metrics_->producer_wait_ns);
-    if (::close(fd) != 0) ok = false;
-    if (!ok) ::unlink(sidecar.c_str());
+    int operation_error = ok ? 0 : (errno == 0 ? EIO : errno);
+    if (::close(fd) != 0 && ok) {
+        operation_error = errno == 0 ? EIO : errno;
+        ok = false;
+    }
+    if (!ok) {
+        ::unlink(sidecar.c_str());
+        return fail(operation_error);
+    }
     return ok;
 }
 
@@ -287,8 +313,10 @@ bool TextTraceWriter::close() {
     if (!opened_) return false;
 
     const bool trace_ok = writer_.finish();
+    if (!trace_ok) fail(writer_.error_code());
     opened_ = false;
-    const bool metrics_ok = !successful_end_ || write_metrics_sidecar();
+    const bool metrics_ok = !successful_end_ || !trace_ok || write_metrics_sidecar();
+    if (!trace_ok) (void)::unlink((path_ + ".metrics").c_str());
     close_result_ = trace_ok && ended_ && healthy_writer_state() && metrics_ok;
     if (ended_ && !close_result_) facade_failed_ = true;
     return close_result_;
