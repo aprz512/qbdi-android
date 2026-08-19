@@ -41,6 +41,53 @@ void encodes_instruction_exactly() {
            "7 libx.so+0x10 add x0, x1, x2 | R:X1=0x2 X2=0x3 | W:X0=0x5\n");
 }
 
+void preserves_architecture_register_display_names() {
+    static CachedInstruction decoded{};
+    std::strcpy(decoded.mnemonic, "mov");
+    decoded.read_gpr_mask = (1ULL << 0U) | (1ULL << 30U) | (1ULL << 31U);
+    decoded.write_gpr_mask = (1ULL << 32U) | (1ULL << 33U);
+
+    InstructionRecord record{};
+    record.sequence = 8;
+    record.pc = 0x1020;
+    record.module_base = 0x1000;
+    record.decoded = &decoded;
+    record.register_names[0] = "W0";
+    record.register_names[30] = "LR";
+    record.register_names[31] = "SP";
+    record.register_names[32] = "NZCV";
+    record.register_names[33] = "PC";
+    record.before[0] = 1;
+    record.before[30] = 2;
+    record.before[31] = 3;
+    record.after[32] = 4;
+    record.after[33] = 5;
+
+    char output[256]{};
+    TraceEncoder encoder;
+    const EncodeResult result =
+        encoder.encode_instruction(output, sizeof(output), "libx.so", record);
+    assert(result.ok);
+    assert(std::string_view(output, result.size) ==
+           "8 libx.so+0x20 mov | R:W0=0x1 LR=0x2 SP=0x3 | W:NZCV=0x4 PC=0x5\n");
+}
+
+void encodes_memory_event_exactly() {
+    MemoryRecord memory{};
+    memory.type = 'w';
+    memory.address = 0x2000;
+    memory.size = 8;
+    memory.value = 0x42;
+
+    char output[256]{};
+    TraceEncoder encoder;
+    const EncodeResult result =
+        encoder.encode_memory(output, sizeof(output), "libx.so", 0x10, memory);
+    assert(result.ok);
+    assert(std::string_view(output, result.size) ==
+           "MEM libx.so+0x10 type=w addr=0x2000 size=8 value=0x42\n");
+}
+
 void rejects_insufficient_instruction_buffer_without_writing() {
     const InstructionRecord record = instruction_record();
     char tiny[8];
@@ -67,6 +114,7 @@ void encodes_begin_end_and_semantic_event() {
     metrics.raw_bytes = 300;
     metrics.cache_hits = 9;
     metrics.cache_misses = 1;
+    metrics.buffer_swaps = 4;
     metrics.producer_waits = 2;
     metrics.producer_wait_ns = 75;
     TraceEncoder encoder;
@@ -81,7 +129,7 @@ void encodes_begin_end_and_semantic_event() {
     result = encoder.encode_end(output, sizeof(output), true, 0x42, 7, metrics);
     assert(result.ok);
     assert(std::string_view(output, result.size) ==
-           "TRACE_END status=ok ret=0x42 elapsed_ms=7 instructions=9 raw_bytes=300 cache_hit_rate=0.900000 producer_waits=2 producer_wait_ns=75\n");
+           "TRACE_END status=ok ret=0x42 elapsed_ms=7 instructions=9 raw_bytes=300 cache_hit_rate=0.900000 buffer_swaps=4 producer_waits=2 producer_wait_ns=75\n");
 
     result = encoder.encode_event(output, sizeof(output), "CALL", "jni.find", "resolved");
     assert(result.ok);
@@ -167,6 +215,8 @@ void encodes_zero_cache_total_as_zero_rate() {
 
 int main() {
     encodes_instruction_exactly();
+    preserves_architecture_register_display_names();
+    encodes_memory_event_exactly();
     rejects_insufficient_instruction_buffer_without_writing();
     encodes_begin_end_and_semantic_event();
     bounds_memory_hexdump_and_null_inputs();

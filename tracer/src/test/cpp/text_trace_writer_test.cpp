@@ -1,13 +1,14 @@
 #include "events/text_trace_writer.h"
 #include "lz4frame.h"
 
-#include <cassert>
 #include <atomic>
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <new>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -26,12 +27,64 @@ std::atomic<IoFaultMode> g_io_fault_mode{IoFaultMode::None};
 std::atomic<int> g_sidecar_fd{-1};
 std::atomic<int> g_trace_fd{-1};
 std::atomic<unsigned int> g_fault_write_calls{0};
+std::atomic<size_t> g_allocations{0};
+
+void check(bool condition, const char *expression, int line) {
+    if (condition) return;
+    std::fprintf(stderr, "CHECK failed at line %d: %s\n", line, expression);
+    std::abort();
+}
+
+#define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
 bool has_suffix(const char *path, std::string_view suffix) {
     return path != nullptr && std::string_view(path).ends_with(suffix);
 }
 
 } // namespace
+
+void *operator new(size_t size) {
+    g_allocations.fetch_add(1, std::memory_order_relaxed);
+    if (void *allocation = std::malloc(size)) return allocation;
+    throw std::bad_alloc();
+}
+
+void *operator new[](size_t size) {
+    return ::operator new(size);
+}
+
+void *operator new(size_t size, const std::nothrow_t &) noexcept {
+    g_allocations.fetch_add(1, std::memory_order_relaxed);
+    return std::malloc(size);
+}
+
+void *operator new[](size_t size, const std::nothrow_t &tag) noexcept {
+    return ::operator new(size, tag);
+}
+
+void operator delete(void *allocation) noexcept {
+    std::free(allocation);
+}
+
+void operator delete[](void *allocation) noexcept {
+    ::operator delete(allocation);
+}
+
+void operator delete(void *allocation, size_t) noexcept {
+    std::free(allocation);
+}
+
+void operator delete[](void *allocation, size_t) noexcept {
+    ::operator delete(allocation);
+}
+
+void operator delete(void *allocation, const std::nothrow_t &) noexcept {
+    std::free(allocation);
+}
+
+void operator delete[](void *allocation, const std::nothrow_t &) noexcept {
+    ::operator delete(allocation);
+}
 
 extern "C" int __real_open(const char *path, int flags, ...);
 extern "C" ssize_t __real_write(int fd, const void *data, size_t size);
@@ -102,22 +155,22 @@ void set_io_fault(IoFaultMode mode) {
 std::string make_temporary_directory() {
     char path[] = "/tmp/qtrace-text-writer-XXXXXX";
     char *created = mkdtemp(path);
-    assert(created != nullptr);
+    CHECK(created != nullptr);
     return created;
 }
 
 std::vector<char> read_file(const std::string &path) {
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    assert(fd >= 0);
+    CHECK(fd >= 0);
     std::vector<char> bytes;
     char buffer[4096];
     for (;;) {
         const ssize_t result = ::read(fd, buffer, sizeof(buffer));
         if (result == 0) break;
-        assert(result > 0);
+        CHECK(result > 0);
         bytes.insert(bytes.end(), buffer, buffer + result);
     }
-    assert(::close(fd) == 0);
+    CHECK(::close(fd) == 0);
     return bytes;
 }
 
@@ -129,10 +182,10 @@ std::string read_text_file(const std::string &path) {
 std::string metric_value(const std::string &metrics, std::string_view key) {
     const std::string prefix = std::string(key) + "=";
     const size_t begin = metrics.find(prefix);
-    assert(begin != std::string::npos);
+    CHECK(begin != std::string::npos);
     const size_t value_begin = begin + prefix.size();
     const size_t end = metrics.find('\n', value_begin);
-    assert(end != std::string::npos);
+    CHECK(end != std::string::npos);
     return metrics.substr(value_begin, end - value_begin);
 }
 
@@ -141,7 +194,7 @@ std::string decompress_concatenated_frames(const std::vector<char> &compressed) 
     size_t input_offset = 0;
     while (input_offset < compressed.size()) {
         LZ4F_dctx *context = nullptr;
-        assert(!LZ4F_isError(LZ4F_createDecompressionContext(&context, LZ4F_VERSION)));
+        CHECK(!LZ4F_isError(LZ4F_createDecompressionContext(&context, LZ4F_VERSION)));
         size_t result = 1;
         while (result != 0) {
             char output[4096];
@@ -149,8 +202,8 @@ std::string decompress_concatenated_frames(const std::vector<char> &compressed) 
             size_t output_size = sizeof(output);
             result = LZ4F_decompress(context, output, &output_size,
                                      compressed.data() + input_offset, &input_size, nullptr);
-            assert(!LZ4F_isError(result));
-            assert(input_size != 0 || output_size != 0 || result == 0);
+            CHECK(!LZ4F_isError(result));
+            CHECK(input_size != 0 || output_size != 0 || result == 0);
             input_offset += input_size;
             decoded.append(output, output_size);
         }
@@ -194,36 +247,39 @@ void emits_ordered_compressed_trace_and_closes_idempotently() {
     TextTraceWriter writer(options, &metrics);
     const TraceContext context = trace_context(directory);
 
-    assert(writer.open(context));
-    assert(!writer.open(context));
-    assert(writer.begin(context));
-    assert(!writer.begin(context));
-    assert(writer.instruction(context, instruction_record()));
-    assert(writer.call("libc", "memcpy", "target=0x2000"));
+    CHECK(writer.open(context));
+    CHECK(!writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(!writer.begin(context));
+    CHECK(writer.instruction(context, instruction_record()));
+    CHECK(writer.call("libc", "memcpy", "target=0x2000"));
     const std::string cold_semantic_payload = "JNI " + std::string(10 * 1024, 'x') + "\n";
-    assert(writer.write_raw_line(cold_semantic_payload));
-    assert(writer.rule("force_tbnz", "taken=1"));
-    assert(writer.end(0x42, true, 7));
-    assert(!writer.end(0x42, true, 7));
-    assert(writer.close());
-    assert(writer.close());
-    assert(!writer.end(0x42, true, 7));
-    assert(writer.path().ends_with(".trace.txt.lz4"));
+    CHECK(writer.write_raw_line(cold_semantic_payload));
+    CHECK(writer.rule("force_tbnz", "taken=1"));
+    CHECK(writer.end(0x42, true, 7));
+    CHECK(!writer.end(0x42, true, 7));
+    CHECK(writer.close());
+    CHECK(writer.close());
+    CHECK(!writer.end(0x42, true, 7));
+    CHECK(writer.path().ends_with(".trace.txt.lz4"));
 
     const std::string text = decompress_concatenated_frames(read_file(writer.path()));
-    assert(text.find("TRACE_BEGIN") < text.find("1 libdemo_target.so+0x10"));
-    assert(text.find("CALL libc.memcpy") < text.find(cold_semantic_payload));
-    assert(text.find(cold_semantic_payload) < text.find("RULE force_tbnz"));
-    assert(text.find("RULE force_tbnz") < text.find("TRACE_END status=ok"));
+    CHECK(text.find("TRACE_BEGIN") < text.find("1 libdemo_target.so+0x10"));
+    CHECK(text.find("CALL libc.memcpy") < text.find(cold_semantic_payload));
+    CHECK(text.find(cold_semantic_payload) < text.find("RULE force_tbnz"));
+    CHECK(text.find("RULE force_tbnz") < text.find("TRACE_END status=ok"));
     const std::string sidecar = read_text_file(writer.path() + ".metrics");
-    assert(text.find("producer_waits=" + metric_value(sidecar, "producer_waits") + " ") !=
+    const std::string buffer_swaps = metric_value(sidecar, "buffer_swaps");
+    CHECK(std::stoull(buffer_swaps) > 1);
+    CHECK(text.find("buffer_swaps=" + buffer_swaps + " ") != std::string::npos);
+    CHECK(text.find("producer_waits=" + metric_value(sidecar, "producer_waits") + " ") !=
            std::string::npos);
-    assert(text.find("producer_wait_ns=" + metric_value(sidecar, "producer_wait_ns") + "\n") !=
+    CHECK(text.find("producer_wait_ns=" + metric_value(sidecar, "producer_wait_ns") + "\n") !=
            std::string::npos);
 
-    assert(::unlink((writer.path() + ".metrics").c_str()) == 0);
-    assert(::unlink(writer.path().c_str()) == 0);
-    assert(::rmdir(directory.c_str()) == 0);
+    CHECK(::unlink((writer.path() + ".metrics").c_str()) == 0);
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
 }
 
 void emits_decodable_uncompressed_trace_with_consistent_final_metrics() {
@@ -231,38 +287,71 @@ void emits_decodable_uncompressed_trace_with_consistent_final_metrics() {
     TraceOptions options{};
     options.compression_enabled = false;
     options.auto_buffer_size = false;
-    options.buffer_bytes = 4096;
+    options.buffer_bytes = 8192;
     TraceMetrics metrics{};
     TextTraceWriter writer(options, &metrics);
     const TraceContext context = trace_context(directory);
 
-    assert(writer.open(context));
-    assert(writer.begin(context));
-    assert(writer.instruction(context, instruction_record()));
-    assert(writer.end(0, true, 0));
-    assert(writer.close());
-    assert(writer.path().ends_with(".trace.txt"));
-    assert(!writer.path().ends_with(".trace.txt.lz4"));
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.instruction(context, instruction_record()));
+    CHECK(writer.end(0, true, 0));
+    CHECK(writer.close());
+    CHECK(writer.path().ends_with(".trace.txt"));
+    CHECK(!writer.path().ends_with(".trace.txt.lz4"));
 
     const std::string text = read_text_file(writer.path());
-    assert(text.starts_with("TRACE_BEGIN"));
-    assert(text.ends_with("\n"));
+    CHECK(text.starts_with("TRACE_BEGIN"));
+    CHECK(text.ends_with("\n"));
     const std::string sidecar = read_text_file(writer.path() + ".metrics");
     const std::string raw_bytes = metric_value(sidecar, "raw_bytes");
-    assert(text.find("raw_bytes=" + raw_bytes + " ") != std::string::npos);
-    assert(metric_value(sidecar, "instructions") == "1");
-    assert(metric_value(sidecar, "elapsed_ms") == "0");
-    assert(metric_value(sidecar, "instructions_per_second") == "0.000000");
-    assert(metric_value(sidecar, "compressed_bytes") == raw_bytes);
-    assert(metric_value(sidecar, "compression_ratio") == "1.000000");
+    CHECK(text.find("raw_bytes=" + raw_bytes + " ") != std::string::npos);
+    CHECK(metric_value(sidecar, "instructions") == "1");
+    CHECK(metric_value(sidecar, "elapsed_ms") == "0");
+    CHECK(metric_value(sidecar, "instructions_per_second") == "0.000000");
+    CHECK(metric_value(sidecar, "compressed_bytes") == raw_bytes);
+    CHECK(metric_value(sidecar, "compression_ratio") == "1.000000");
+    CHECK(metric_value(sidecar, "buffer_swaps") == "1");
+    CHECK(text.find("buffer_swaps=1 ") != std::string::npos);
     for (std::string_view key : {"cache_hits", "cache_misses", "buffer_swaps",
                                  "producer_waits", "producer_wait_ns"}) {
-        assert(!metric_value(sidecar, key).empty());
+        CHECK(!metric_value(sidecar, key).empty());
     }
 
-    assert(::unlink((writer.path() + ".metrics").c_str()) == 0);
-    assert(::unlink(writer.path().c_str()) == 0);
-    assert(::rmdir(directory.c_str()) == 0);
+    CHECK(::unlink((writer.path() + ".metrics").c_str()) == 0);
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void emits_memory_without_hot_path_allocations() {
+    const std::string directory = make_temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 8192;
+    TraceMetrics metrics{};
+    TextTraceWriter writer(options, &metrics);
+    const TraceContext context = trace_context(directory);
+    MemoryRecord memory{};
+    memory.type = 'w';
+    memory.address = 0x2000;
+    memory.size = 8;
+    memory.value = 0x42;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    const size_t allocations_before = g_allocations.load(std::memory_order_relaxed);
+    CHECK(writer.memory(context, context.module_base + 0x10, memory));
+    CHECK(g_allocations.load(std::memory_order_relaxed) == allocations_before);
+    CHECK(writer.end(0, true, 1));
+    CHECK(writer.close());
+
+    const std::string text = read_text_file(writer.path());
+    CHECK(text.find("MEM libdemo_target.so+0x10 type=w addr=0x2000 size=8 value=0x42\n") !=
+           std::string::npos);
+    CHECK(::unlink((writer.path() + ".metrics").c_str()) == 0);
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
 }
 
 void rejects_invalid_lifecycle_transitions_and_open_failures() {
@@ -271,28 +360,28 @@ void rejects_invalid_lifecycle_transitions_and_open_failures() {
     options.buffer_bytes = 4096;
     TraceMetrics metrics{};
     TextTraceWriter unopened(options, &metrics);
-    assert(!unopened.end(0, false, 1));
-    assert(!unopened.close());
-    assert(!unopened.close());
+    CHECK(!unopened.end(0, false, 1));
+    CHECK(!unopened.close());
+    CHECK(!unopened.close());
 
     TraceContext bad_context = trace_context("/dev/null/not-a-directory");
     TextTraceWriter failed_open(options, &metrics);
-    assert(!failed_open.open(bad_context));
-    assert(!failed_open.begin(bad_context));
-    assert(!failed_open.end(0, false, 1));
-    assert(!failed_open.close());
-    assert(!failed_open.close());
+    CHECK(!failed_open.open(bad_context));
+    CHECK(!failed_open.begin(bad_context));
+    CHECK(!failed_open.end(0, false, 1));
+    CHECK(!failed_open.close());
+    CHECK(!failed_open.close());
 
     const std::string directory = make_temporary_directory();
     const TraceContext context = trace_context(directory);
     TextTraceWriter incomplete(options, &metrics);
-    assert(incomplete.open(context));
-    assert(!incomplete.close());
-    assert(!incomplete.end(0, false, 1));
-    assert(!incomplete.begin(context));
-    assert(::access((incomplete.path() + ".metrics").c_str(), F_OK) != 0);
-    assert(::unlink(incomplete.path().c_str()) == 0);
-    assert(::rmdir(directory.c_str()) == 0);
+    CHECK(incomplete.open(context));
+    CHECK(!incomplete.close());
+    CHECK(!incomplete.end(0, false, 1));
+    CHECK(!incomplete.begin(context));
+    CHECK(::access((incomplete.path() + ".metrics").c_str(), F_OK) != 0);
+    CHECK(::unlink(incomplete.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
 }
 
 void retries_interrupted_and_partial_sidecar_writes() {
@@ -306,17 +395,17 @@ void retries_interrupted_and_partial_sidecar_writes() {
     const TraceContext context = trace_context(directory);
 
     set_io_fault(IoFaultMode::SidecarInterruptedAndPartial);
-    assert(writer.open(context));
-    assert(writer.begin(context));
-    assert(writer.end(0, true, 3));
-    assert(writer.close());
-    assert(g_fault_write_calls.load(std::memory_order_relaxed) >= 3);
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.end(0, true, 3));
+    CHECK(writer.close());
+    CHECK(g_fault_write_calls.load(std::memory_order_relaxed) >= 3);
     set_io_fault(IoFaultMode::None);
-    assert(metric_value(read_text_file(writer.path() + ".metrics"), "elapsed_ms") == "3");
+    CHECK(metric_value(read_text_file(writer.path() + ".metrics"), "elapsed_ms") == "3");
 
-    assert(::unlink((writer.path() + ".metrics").c_str()) == 0);
-    assert(::unlink(writer.path().c_str()) == 0);
-    assert(::rmdir(directory.c_str()) == 0);
+    CHECK(::unlink((writer.path() + ".metrics").c_str()) == 0);
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
 }
 
 void removes_partial_sidecar_after_write_error() {
@@ -330,16 +419,16 @@ void removes_partial_sidecar_after_write_error() {
     const TraceContext context = trace_context(directory);
 
     set_io_fault(IoFaultMode::SidecarWriteError);
-    assert(writer.open(context));
-    assert(writer.begin(context));
-    assert(writer.end(0, true, 3));
-    assert(!writer.close());
-    assert(!writer.close());
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.end(0, true, 3));
+    CHECK(!writer.close());
+    CHECK(!writer.close());
     set_io_fault(IoFaultMode::None);
-    assert(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
+    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
 
-    assert(::unlink(writer.path().c_str()) == 0);
-    assert(::rmdir(directory.c_str()) == 0);
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
 }
 
 void reports_async_trace_write_failure_without_publishing_metrics() {
@@ -353,17 +442,17 @@ void reports_async_trace_write_failure_without_publishing_metrics() {
     const TraceContext context = trace_context(directory);
 
     set_io_fault(IoFaultMode::TraceWriteError);
-    assert(writer.open(context));
-    assert(writer.begin(context));
-    assert(writer.instruction(context, instruction_record()));
-    assert(writer.end(0, false, 4));
-    assert(!writer.close());
-    assert(!writer.close());
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.instruction(context, instruction_record()));
+    CHECK(writer.end(0, false, 4));
+    CHECK(!writer.close());
+    CHECK(!writer.close());
     set_io_fault(IoFaultMode::None);
-    assert(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
+    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
 
-    assert(::unlink(writer.path().c_str()) == 0);
-    assert(::rmdir(directory.c_str()) == 0);
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
 }
 
 void latches_facade_encoding_failures_for_semantic_callers() {
@@ -376,16 +465,18 @@ void latches_facade_encoding_failures_for_semantic_callers() {
     TextTraceWriter writer(options, &metrics);
     TraceContext context = trace_context(directory);
 
-    assert(writer.open(context));
-    assert(writer.begin(context));
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
     context.target_so = std::string(kMaxInstructionLineBytes, 'm');
-    assert(!writer.instruction(context, instruction_record()));
-    assert(writer.failed());
-    assert(!writer.close());
-    assert(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
+    CHECK(!writer.instruction(context, instruction_record()));
+    CHECK(writer.failed());
+    CHECK(!writer.end(0, false, 5));
+    CHECK(!writer.close());
+    CHECK(!writer.close());
+    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
 
-    assert(::unlink(writer.path().c_str()) == 0);
-    assert(::rmdir(directory.c_str()) == 0);
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
 }
 
 } // namespace
@@ -393,6 +484,7 @@ void latches_facade_encoding_failures_for_semantic_callers() {
 int main() {
     emits_ordered_compressed_trace_and_closes_idempotently();
     emits_decodable_uncompressed_trace_with_consistent_final_metrics();
+    emits_memory_without_hot_path_allocations();
     rejects_invalid_lifecycle_transitions_and_open_failures();
     retries_interrupted_and_partial_sidecar_writes();
     removes_partial_sidecar_after_write_error();

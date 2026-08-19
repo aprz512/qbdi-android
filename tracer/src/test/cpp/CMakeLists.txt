@@ -53,3 +53,9 @@ target_link_options(text_trace_writer_test PRIVATE
     -Wl,--wrap=open
     -Wl,--wrap=write
     -Wl,--wrap=close)
+
+add_trace_test(trace_callback_gate_test
+    trace_callback_gate_test.cpp)
+
+add_trace_test(trace_number_formatter_test
+    trace_number_formatter_test.cpp)

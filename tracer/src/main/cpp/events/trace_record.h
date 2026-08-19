@@ -7,6 +7,7 @@
 #include <cstdint>
 
 constexpr size_t kTraceGprCount = 34;
+constexpr size_t kMaxRegisterNameBytes = 16;
 constexpr size_t kMaxMemoryRecords = 8;
 constexpr size_t kMaxHexdumpBytes = 64;
 constexpr size_t kMaxInstructionLineBytes = 4096;
@@ -27,6 +28,9 @@ struct InstructionRecord {
     // Borrowed: when non-null, this object and its fixed character arrays must remain readable and
     // unchanged across both TraceEncoder measure and write passes.
     const CachedInstruction *decoded = nullptr;
+    // Borrowed display identities supplied by the decoder (for example W0, LR, SP, NZCV, PC).
+    // Each non-null name must remain readable across both encoder passes.
+    std::array<const char *, kTraceGprCount> register_names{};
     std::array<uint64_t, kTraceGprCount> before{};
     std::array<uint64_t, kTraceGprCount> after{};
     std::array<MemoryRecord, kMaxMemoryRecords> memory{};

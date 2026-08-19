@@ -1,6 +1,7 @@
 #include "events/text_trace_writer.h"
 
 #include "core/logging.h"
+#include "events/trace_number_formatter.h"
 
 #include <cerrno>
 #include <chrono>
@@ -88,24 +89,10 @@ bool write_rate_metric(int fd, const char *key, unsigned __int128 numerator,
     }
     if (used >= sizeof(line) - 1U) return false;
     line[used++] = '=';
-
-    const unsigned __int128 whole = denominator == 0 ? 0 : numerator / denominator;
-    unsigned __int128 remainder = denominator == 0 ? 0 : numerator % denominator;
-    char digits[48];
-    size_t digit_count = 0;
-    unsigned __int128 value = whole;
-    do {
-        digits[digit_count++] = static_cast<char>('0' + value % 10U);
-        value /= 10U;
-    } while (value != 0);
-    if (digit_count > sizeof(line) - used - 8U) return false;
-    while (digit_count != 0) line[used++] = digits[--digit_count];
-    line[used++] = '.';
-    for (size_t index = 0; index < 6; ++index) {
-        const unsigned __int128 digit = denominator == 0 ? 0 : (remainder * 10U) / denominator;
-        remainder = denominator == 0 ? 0 : (remainder * 10U) % denominator;
-        line[used++] = static_cast<char>('0' + digit);
-    }
+    const FixedSixResult result =
+        format_fixed_six(line + used, sizeof(line) - used - 1U, numerator, denominator);
+    if (!result.ok) return false;
+    used += result.size;
     line[used++] = '\n';
     return write_all(fd, line, used);
 }
@@ -175,20 +162,14 @@ bool TextTraceWriter::instruction(const TraceContext &context, const Instruction
 
 bool TextTraceWriter::memory(const TraceContext &context, uintptr_t pc,
                              const MemoryRecord &record) {
-    char offset[2 * sizeof(uintptr_t) + 1]{};
+    if (!opened_ || !began_ || ended_ || close_called_) return false;
     const uintptr_t relative_pc = pc >= context.module_base ? pc - context.module_base : 0;
-    const int offset_size = std::snprintf(offset, sizeof(offset), "%lx",
-                                          static_cast<unsigned long>(relative_pc));
-    char detail[160];
-    const int detail_size = std::snprintf(
-        detail, sizeof(detail), "type=%c addr=0x%lx size=%u value=0x%llx", record.type,
-        static_cast<unsigned long>(record.address), static_cast<unsigned int>(record.size),
-        static_cast<unsigned long long>(record.value));
-    if (offset_size < 0 || static_cast<size_t>(offset_size) >= sizeof(offset) ||
-        detail_size < 0 || static_cast<size_t>(detail_size) >= sizeof(detail)) {
-        return fail();
-    }
-    return append_encoded_event("MEM", context.target_so + "+0x" + offset, detail);
+    char encoded[kMaxInstructionLineBytes];
+    const EncodeResult result = encoder_.encode_memory(encoded, sizeof(encoded),
+                                                        context.target_so.c_str(), relative_pc,
+                                                        record);
+    if (!result.ok || !writer_.append(std::string_view(encoded, result.size))) return fail();
+    return true;
 }
 
 bool TextTraceWriter::append_encoded_event(std::string_view event_type, std::string_view name,
@@ -227,10 +208,12 @@ bool TextTraceWriter::write_raw_line(const std::string &line) {
 bool TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
     if (!opened_ || !began_ || ended_ || close_called_) return false;
     elapsed_ms_ = elapsed_ms > 0 ? static_cast<uint64_t>(elapsed_ms) : 0;
+    if (facade_failed_ || writer_.failed()) return false;
     WritableSpan span = writer_.reserve(kMaxTraceEndLineBytes);
     if (span.data == nullptr) return fail();
 
     TraceMetrics footer_metrics = producer_metrics_snapshot(*metrics_);
+    ++footer_metrics.buffer_swaps;
     EncodeResult measured{};
     for (size_t attempt = 0; attempt < 32; ++attempt) {
         measured = encoder_.encode_end(nullptr, 0, ok, retval, elapsed_ms_, footer_metrics);
@@ -291,7 +274,8 @@ bool TextTraceWriter::close() {
 
     const bool trace_ok = writer_.finish();
     opened_ = false;
-    close_result_ = trace_ok && ended_ && write_metrics_sidecar();
+    close_result_ = trace_ok && ended_ && !facade_failed_ && !writer_.failed() &&
+                    write_metrics_sidecar();
     if (ended_ && !close_result_) facade_failed_ = true;
     return close_result_;
 }

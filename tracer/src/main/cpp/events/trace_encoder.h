@@ -21,6 +21,10 @@ public:
     EncodeResult encode_instruction(char *output, size_t capacity, const char *module_name,
                                     const InstructionRecord &record) const noexcept;
 
+    EncodeResult encode_memory(char *output, size_t capacity, const char *module_name,
+                               uintptr_t relative_pc,
+                               const MemoryRecord &record) const noexcept;
+
     EncodeResult encode_begin(char *output, size_t capacity, const TraceContext &context,
                               TraceProfile profile, bool compression_enabled,
                               size_t effective_buffer_bytes) const noexcept;

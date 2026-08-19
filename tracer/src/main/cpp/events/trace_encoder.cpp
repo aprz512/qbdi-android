@@ -1,4 +1,5 @@
 #include "events/trace_encoder.h"
+#include "events/trace_number_formatter.h"
 
 #include <algorithm>
 #include <limits>
@@ -88,6 +89,15 @@ bool append_c_string(AppendBuffer &buffer, const char *value, size_t maximum) no
     return append_bytes(buffer, value, bounded_length(value, maximum));
 }
 
+bool append_register_name(AppendBuffer &buffer, const InstructionRecord &record,
+                          size_t index) noexcept {
+    const char *name = record.register_names[index];
+    if (name != nullptr && name[0] != '\0') {
+        return append_c_string(buffer, name, kMaxRegisterNameBytes);
+    }
+    return append_char(buffer, 'X') && append_dec_u64(buffer, index);
+}
+
 const char *profile_name(TraceProfile profile) noexcept {
     switch (profile) {
         case TraceProfile::Fast: return "fast";
@@ -99,16 +109,10 @@ const char *profile_name(TraceProfile profile) noexcept {
 
 bool append_rate(AppendBuffer &buffer, unsigned __int128 numerator,
                  unsigned __int128 denominator) noexcept {
-    if (denominator == 0) return append_literal(buffer, "0.000000");
-    const unsigned __int128 whole = numerator / denominator;
-    unsigned __int128 remainder = numerator % denominator;
-    if (!append_dec_u64(buffer, static_cast<uint64_t>(whole)) || !append_char(buffer, '.')) return false;
-    for (size_t index = 0; index < 6; ++index) {
-        const uint64_t digit = static_cast<uint64_t>((remainder * 10U) / denominator);
-        remainder = (remainder * 10U) % denominator;
-        if (!append_char(buffer, static_cast<char>('0' + digit))) return false;
-    }
-    return true;
+    char formatted[kMaxFixedSixBytes];
+    const FixedSixResult result =
+        format_fixed_six(formatted, sizeof(formatted), numerator, denominator);
+    return result.ok && append_bytes(buffer, formatted, result.size);
 }
 
 template <typename Emit>
@@ -168,8 +172,8 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
             } else if (!append_char(buffer, ' ')) {
                 return false;
             }
-            if (!append_char(buffer, 'X') || !append_dec_u64(buffer, index) ||
-                !append_literal(buffer, "=0x") || !append_hex_u64(buffer, record.before[index])) {
+            if (!append_register_name(buffer, record, index) || !append_literal(buffer, "=0x") ||
+                !append_hex_u64(buffer, record.before[index])) {
                 return false;
             }
         }
@@ -183,8 +187,8 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
             } else if (!append_char(buffer, ' ')) {
                 return false;
             }
-            if (!append_char(buffer, 'X') || !append_dec_u64(buffer, index) ||
-                !append_literal(buffer, "=0x") || !append_hex_u64(buffer, record.after[index])) {
+            if (!append_register_name(buffer, record, index) || !append_literal(buffer, "=0x") ||
+                !append_hex_u64(buffer, record.after[index])) {
                 return false;
             }
         }
@@ -214,12 +218,33 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
     return append_char(buffer, '\n');
 }
 
+bool append_memory(AppendBuffer &buffer, const char *module_name, uintptr_t relative_pc,
+                   const MemoryRecord &record) noexcept {
+    const char *module = module_name == nullptr ? "<unknown>" : module_name;
+    return append_literal(buffer, "MEM ") &&
+           append_c_string(buffer, module, kMaxInstructionLineBytes) &&
+           append_literal(buffer, "+0x") && append_hex_u64(buffer, relative_pc) &&
+           append_literal(buffer, " type=") && append_char(buffer, record.type) &&
+           append_literal(buffer, " addr=0x") && append_hex_u64(buffer, record.address) &&
+           append_literal(buffer, " size=") && append_dec_u64(buffer, record.size) &&
+           append_literal(buffer, " value=0x") && append_hex_u64(buffer, record.value) &&
+           append_char(buffer, '\n');
+}
+
 } // namespace
 
 EncodeResult TraceEncoder::encode_instruction(char *output, size_t capacity, const char *module_name,
                                               const InstructionRecord &record) const noexcept {
     return encode_atomic(output, capacity, kMaxInstructionLineBytes, [&](AppendBuffer &buffer) {
         return append_instruction(buffer, module_name, record);
+    });
+}
+
+EncodeResult TraceEncoder::encode_memory(char *output, size_t capacity, const char *module_name,
+                                         uintptr_t relative_pc,
+                                         const MemoryRecord &record) const noexcept {
+    return encode_atomic(output, capacity, kMaxInstructionLineBytes, [&](AppendBuffer &buffer) {
+        return append_memory(buffer, module_name, relative_pc, record);
     });
 }
 
@@ -253,6 +278,7 @@ EncodeResult TraceEncoder::encode_end(char *output, size_t capacity, bool ok, ui
                append_dec_u64(buffer, metrics.raw_bytes) && append_literal(buffer, " cache_hit_rate=") &&
                append_rate(buffer, metrics.cache_hits,
                            static_cast<unsigned __int128>(metrics.cache_hits) + metrics.cache_misses) &&
+               append_literal(buffer, " buffer_swaps=") && append_dec_u64(buffer, metrics.buffer_swaps) &&
                append_literal(buffer, " producer_waits=") && append_dec_u64(buffer, metrics.producer_waits) &&
                append_literal(buffer, " producer_wait_ns=") && append_dec_u64(buffer, metrics.producer_wait_ns) &&
                append_char(buffer, '\n');
