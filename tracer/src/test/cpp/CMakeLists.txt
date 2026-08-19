@@ -88,3 +88,9 @@ add_trace_test(trace_callback_gate_test
 
 add_trace_test(trace_number_formatter_test
     trace_number_formatter_test.cpp)
+
+add_trace_test(tracer_entry_proxy_test
+    tracer_entry_proxy_test.cpp
+    ../../main/cpp/tracer_entry.cpp
+    ../../main/cpp/core/trace_config.cpp)
+target_link_libraries(tracer_entry_proxy_test PRIVATE Threads::Threads)

@@ -13,4 +13,5 @@ CachedInstruction decode_arm64_fallback(uint32_t opcode,
 
 InstructionView resolve_arm64_instruction(
         uintptr_t address, InstructionCache *cache, InstructionCache::Decoder decoder,
-        void *decoder_data, CachedInstruction *scratch) noexcept;
+        void *decoder_data, CachedInstruction *scratch,
+        bool decode_memory = false) noexcept;

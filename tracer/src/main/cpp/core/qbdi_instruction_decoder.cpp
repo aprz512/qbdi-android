@@ -147,7 +147,7 @@ CachedInstruction decode_arm64_fallback(uint32_t opcode, bool decode_memory) noe
 
 InstructionView resolve_arm64_instruction(
         uintptr_t address, InstructionCache *cache, InstructionCache::Decoder decoder,
-        void *decoder_data, CachedInstruction *scratch) noexcept {
+        void *decoder_data, CachedInstruction *scratch, bool decode_memory) noexcept {
     if (scratch == nullptr) return {address, nullptr};
 
     uint32_t opcode = 0;
@@ -155,19 +155,20 @@ InstructionView resolve_arm64_instruction(
         *scratch = CachedInstruction{};
         copy_bounded(scratch->mnemonic, "<unreadable>");
         copy_bounded(scratch->disassembly, "<unreadable>");
+        scratch->requires_slow_memory_path = decode_memory;
         return {address, scratch};
     }
 
     if (opcode == 0 || cache == nullptr) {
         *scratch = CachedInstruction{};
         const bool decoded = decoder != nullptr && decoder(opcode, decoder_data, scratch);
-        if (!decoded) *scratch = decode_arm64_fallback(opcode);
+        if (!decoded) *scratch = decode_arm64_fallback(opcode, decode_memory);
         scratch->opcode = opcode;
         return {address, scratch};
     }
 
     const CachedInstruction *resolved = cache->resolve(opcode, decoder, decoder_data, scratch);
     if (resolved != nullptr) return {address, resolved};
-    *scratch = decode_arm64_fallback(opcode);
+    *scratch = decode_arm64_fallback(opcode, decode_memory);
     return {address, scratch};
 }

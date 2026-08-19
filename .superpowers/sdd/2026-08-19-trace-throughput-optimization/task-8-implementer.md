@@ -32,6 +32,20 @@
   proxy lock during arbitrary target execution could deadlock independent scenes and that a
   kernel-selected-but-not-yet-entered handler escaped the original quiescence counter. Each was
   repaired before final verification.
+- Formal review after the first commit supplied seven new RED cases. A host-linked proxy test
+  initially failed on absent registration gates/test seams and now deterministically holds an old
+  entrant between registry lookup and registration while a new config/module install races it.
+  Additional RED cases cover unhook failure side effects/value/exactly-once execution, concurrent
+  bypass lifetime, rehook failure recovery, same-address metadata/module replacement, and the
+  256-stub bound.
+- Formal signal RED tests reproduced `_exit` instead of `WIFSIGNALED`, incomplete prior-handler
+  masks/one-shot semantics, and teardown waiting behind a gated surviving handler. Fork tests now
+  cover stale `SIG_DFL`, `SIG_IGN`, `sa_handler`, `sa_sigaction`, `sa_mask`, automatic self-block,
+  `SA_NODEFER`, `SA_RESETHAND`, errno, and an empty newer marker. The gated finish test completes
+  before the prior handler is released.
+- Release parsing and execute-only decode RED tests were written first: Release must reject a
+  runtime-constructed debug option, while unreadable instructions in a memory-enabled profile must
+  request the slow memory path without changing cache metrics.
 
 ## GREEN
 
@@ -46,19 +60,26 @@
   Output, crash-sidecar, virtual-stack/GPR, module, essential callback, memory instrumentation, and
   zero-block call failures return `{false, 0}`; runtime writer failures only disable callbacks and
   preserve a successfully executed target's value.
-- The proxy unhooks successfully before either QBDI or native fallback. The global registry lock is
-  held only long enough to copy stable shared hook/config state. Each hook owns its transition mutex
-  and active-proxy count; already-entered proxies share the safe unhooked window, and the final one
-  applies any installer update deferred during that window and rehooks. No registry or transition
-  mutex is held while QBDI, fallback, or arbitrary target code executes, so independent hooked
-  scenes cannot deadlock one another and duplicate installation cannot close an active safe window.
+- Proxy entry now performs lookup, active registration, and an immutable
+  hook/config/scene/module/target snapshot in one `g_lock -> transition_mutex` transaction, matching
+  installer order, before releasing both locks for arbitrary execution. Each installed hook stores
+  its matching config generation. Installer updates during an active window are deferred as one
+  config/scene/module unit and applied by the final entrant. Same-address updates unhook/reinstall
+  rather than preserving a potentially stale module handle. Scene indices at or above 256 are
+  rejected before addressing the fixed stub region.
+- A verified non-null ShadowHook original trampoline is retained with each live hook. When unhook
+  fails, the proxy skips QBDI and calls that bypass through `call_target_arm64` exactly once;
+  concurrent failed-unhook entrants keep one active bypass window so no entrant invalidates another
+  trampoline. Successful unhook/setup failure calls the direct unhooked target. Rehook failure
+  leaves coherent direct-target state and is retried without corrupting a later install.
 - `call_target_arm64` saves FP/LR on a 16-byte-aligned stack, preserves its target/argument inputs in
   caller-saved scratch registers, restores `x0`-`x7` and captured indirect-result `x8`, calls with
   `blr`, restores the frame, and returns target `x0`. Fixed 8-byte proxy stubs save `x0`-`x7` and
   original `x8` before entering C++ and derive their scene index from the stub address.
 - Instruction fetch now uses `safe_read_memory`. Unreadable instructions emit owned
   `<unreadable>` metadata, and readable zero words use an uncached owned `.inst 0x00000000` path;
-  neither changes cache metrics. When QBDI analysis is absent, the native decoder handles only
+  neither changes cache metrics. Unreadable metadata requests the conservative slow memory path
+  whenever memory tracing is enabled. When QBDI analysis is absent, the native decoder handles only
   stable NOP, direct B/BL, and RET facts; everything else is honestly `.inst` and uses the slow
   memory path when memory tracing is enabled. No QBDI pointer is retained.
 - Each active run pre-opens `<trace>.crash`. The process admits one active marker session; a second
@@ -66,24 +87,33 @@
   handler thunk and state generation. The handler saves errno, increments its generation's
   lock-free active count, atomically exchanges only that generation's fd, makes exactly one
   fixed-size write attempt, restores the prior action, re-raises, restores errno, and leaves the
-  active count. It performs no close, flush, compression, lock, allocation, or logging. Teardown
-  clears its fd, restores only handlers it still owns, waits for entered handlers, closes, and
-  unlinks empty/invalid markers; a handler selected before teardown but entered later can touch
-  only immutable old state and cannot replace or write a newer run. Exactly one valid record is
-  retained.
+  active count. It performs no close, flush, compression, lock, allocation, or logging. Stale
+  deliveries are requeued through the kernel with a private token; a newer tracer generation skips
+  its fd. Custom and ignored prior actions never replace the process-wide active disposition:
+  forwarding explicitly recreates the prior mask, automatic self-block/`SA_NODEFER`,
+  `SA_RESETHAND`, `SA_SIGINFO`, and restart/on-stack outer flags. `SIG_DFL` alone installs the true
+  default and re-raises, preserving signal wait status/core behavior. If tagged queueing fails, the
+  immutable old generation invokes its effective prior action with the same semantics rather than
+  emitting an untagged signal that could consume the newer fd. No retired thunk is reinstalled.
+- Teardown atomically claims an untouched fd, or retires a handler-owned fd without spinning.
+  Immutable generation state stays valid, and later normal open/finish work reaps descriptors only
+  after the entered-handler count reaches zero. Thus a blocking/surviving prior handler cannot hold
+  `finish()` or the next run hostage, while empty/invalid markers are still removed and exactly one
+  valid fixed record is retained.
 - Short write, zero write, and EINTR are deliberately not retried in signal context. Such records
   are invalid; normal teardown removes them, and consumers must accept only exact-size records with
   the stable magic, supported signal, and positive tid. Pull-tool interpretation remains Task 10.
-- `test_fail_setup=1` exists only under `#ifndef NDEBUG`. Debug parsing activates the deterministic
-  setup failure. Release optimization removes the field, failure branch, option literal, and log
-  string; it cannot alter target execution in Release.
+- The entire `test_fail_setup=1` parser branch and field exist only under `#ifndef NDEBUG`. Debug
+  parsing activates deterministic setup failure; Release rejects the field as unknown and contains
+  neither the option nor injected-failure log string.
 
 ## Verification
 
-- Normal host native build/test: 12/12 passed.
-- Strict host native build/test (`-Wall -Wextra -Werror`): 12/12 passed.
-- Release host native build/test: 12/12 passed.
-- ASan+UBSan host native build/test with leak detection and halt-on-error: 12/12 passed.
+- Normal host native build/test: 13/13 passed.
+- Strict host native build/test (`-Wall -Wextra -Werror`): 13/13 passed.
+- Release host native build/test: 13/13 passed; the always-on Release parser assertion rejects the
+  debug-only field.
+- ASan+UBSan host native build/test with leak detection and halt-on-error: 13/13 passed.
 - Android Debug: `:tracer:assembleDebug` and `:app:assembleDebug` passed.
 - Android Release: `:tracer:assembleRelease` and `:app:assembleRelease` passed.
 - ARM64 symbol/disassembly inspection found global `call_target_arm64` (52 bytes), a 2048-byte
@@ -91,8 +121,9 @@
   FP/LR save/restore, all eight argument loads, original `x8` restore, and `blr` target execution.
 - Debug/Release string inspection found the injected-failure log only in Debug and neither the
   option nor injected-failure log in Release.
-- Independent focused re-review reported Ready with no remaining Critical or Important
-  correctness issues after the hook-window and crash-generation concurrency fixes.
+- The initial focused review passed its narrower concurrency scope; formal review then found the
+  seven RED cases recorded above. Final formal re-review reported Ready with no remaining Critical
+  or Important blockers; its focused strict crash-forwarding and proxy tests also passed.
 - `git diff --check` passed.
 - `adb devices` returned no connected devices. Per the brief, no device fallback-hash result is
   claimed; host seam, Debug/Release compile, and Release disassembly are the available evidence.
@@ -100,6 +131,7 @@
 ## Commit
 
 - `fix: preserve target behavior on trace failures`
+- `fix: close trace failure race gaps`
 
 ## Deviations and Risks
 

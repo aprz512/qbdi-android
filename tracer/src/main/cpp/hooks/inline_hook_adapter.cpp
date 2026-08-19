@@ -15,12 +15,28 @@ bool init_inline_hook() {
 bool hook_function_address(uintptr_t target, void *replacement, HookHandle *handle) {
     if (target == 0 || replacement == nullptr || handle == nullptr) return false;
     handle->target = target;
+    handle->stub = nullptr;
+    handle->original = nullptr;
+    handle->residual_hook = false;
     handle->stub = shadowhook_hook_func_addr(reinterpret_cast<void *>(target), replacement,
                                              &handle->original);
     if (handle->stub == nullptr) {
         int err = shadowhook_get_errno();
         QTRACE_E("hook 0x%lx failed: %d %s", static_cast<unsigned long>(target), err,
                  shadowhook_to_errmsg(err));
+        return false;
+    }
+    if (handle->original == nullptr) {
+        QTRACE_E("hook 0x%lx returned no original bypass",
+                 static_cast<unsigned long>(target));
+        if (shadowhook_unhook(handle->stub) == 0) {
+            handle->stub = nullptr;
+            handle->target = 0;
+        } else {
+            handle->residual_hook = true;
+            QTRACE_E("cleanup unhook 0x%lx failed; preserving residual hook ownership",
+                     static_cast<unsigned long>(target));
+        }
         return false;
     }
     QTRACE_I("hooked 0x%lx original=%p", static_cast<unsigned long>(target), handle->original);
@@ -37,5 +53,6 @@ bool unhook_function(HookHandle *handle) {
         return false;
     }
     handle->stub = nullptr;
+    handle->residual_hook = false;
     return true;
 }

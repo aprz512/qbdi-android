@@ -6,6 +6,7 @@ struct HookHandle {
     void *stub = nullptr;
     void *original = nullptr;
     uintptr_t target = 0;
+    bool residual_hook = false;
 };
 
 bool init_inline_hook();

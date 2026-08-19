@@ -180,7 +180,7 @@ InstructionView InstructionCollector::resolve(QBDI::VM *vm,
     const uintptr_t address = gpr != nullptr ? gpr->pc : 0;
     QbdiDecoderRequest request{vm, decode_memory_};
     return resolve_arm64_instruction(address, cache_, decode_current_instruction,
-                                     &request, &uncached_);
+                                     &request, &uncached_, decode_memory_);
 }
 
 RegisterSnapshot InstructionCollector::snapshot(const QBDI::GPRState &gpr,

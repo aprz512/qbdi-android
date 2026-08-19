@@ -171,9 +171,10 @@ void unreadable_and_zero_opcodes_bypass_cache_accounting() {
     InstructionCache cache(1);
     CachedInstruction scratch{};
     const InstructionView unreadable = resolve_arm64_instruction(
-            1, &cache, decode_fallback, nullptr, &scratch);
+            1, &cache, decode_fallback, nullptr, &scratch, true);
     assert(unreadable.decoded == &scratch);
     assert(std::strcmp(unreadable.decoded->mnemonic, "<unreadable>") == 0);
+    assert(unreadable.decoded->requires_slow_memory_path);
     assert(cache.metrics().hits == 0);
     assert(cache.metrics().misses == 0);
 
@@ -184,7 +185,7 @@ void unreadable_and_zero_opcodes_bypass_cache_accounting() {
     assert(page != MAP_FAILED);
     *static_cast<uint32_t *>(page) = 0;
     const InstructionView zero = resolve_arm64_instruction(
-            reinterpret_cast<uintptr_t>(page), &cache, decode_fallback, nullptr, &scratch);
+            reinterpret_cast<uintptr_t>(page), &cache, decode_fallback, nullptr, &scratch, true);
     assert(zero.decoded == &scratch);
     assert(std::strcmp(zero.decoded->disassembly, ".inst 0x00000000") == 0);
     assert(cache.metrics().hits == 0);
