@@ -48,6 +48,9 @@ int sh_inst_hook(sh_inst_t *self, uintptr_t target_addr, sh_addr_info_t *addr_in
 int sh_inst_rehook(sh_inst_t *self, uintptr_t target_addr, sh_addr_info_t *addr_info, uintptr_t new_addr,
                    bool is_to_interceptor, sh_recorder_trace_t *trace);
 int sh_inst_unhook(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias);
+int sh_inst_unhook_retain(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias,
+                          void **retained);
+void sh_inst_release_retained(void *retained);
 
 void sh_inst_free_after_dlclose(sh_inst_t *self, uintptr_t target_addr);
 

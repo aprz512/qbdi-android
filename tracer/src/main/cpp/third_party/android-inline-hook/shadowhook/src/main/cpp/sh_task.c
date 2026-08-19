@@ -495,9 +495,10 @@ end:
   return r;
 }
 
-int sh_task_undo_and_destroy(sh_task_t *self, uintptr_t caller_addr) {
+static int sh_task_undo_and_destroy_impl(sh_task_t *self, uintptr_t caller_addr,
+                                         void **retained) {
   pthread_mutex_lock(&sh_tasks_lock);
-  TAILQ_REMOVE(&sh_tasks, self, link);
+  if (NULL == retained) TAILQ_REMOVE(&sh_tasks, self, link);
   sh_ref_increment_count(&self->ref);
   pthread_mutex_unlock(&sh_tasks_lock);
 
@@ -523,7 +524,11 @@ int sh_task_undo_and_destroy(sh_task_t *self, uintptr_t caller_addr) {
 
   // do unhook or unintercept
   if (SH_TASK_HOOK == self->type)
-    r = sh_switch_unhook(self->target_addr, self->typed.hook.new_addr, self->typed.hook.flags, &trace);
+    r = NULL == retained
+                ? sh_switch_unhook(self->target_addr, self->typed.hook.new_addr,
+                                   self->typed.hook.flags, &trace)
+                : sh_switch_unhook_retain(self->target_addr, self->typed.hook.new_addr,
+                                          self->typed.hook.flags, &trace, retained);
   else
     r = sh_switch_unintercept(self->target_addr, self->typed.intercept.pre, self->typed.intercept.data,
                               &trace);
@@ -531,8 +536,26 @@ int sh_task_undo_and_destroy(sh_task_t *self, uintptr_t caller_addr) {
 end:
   sh_recorder_add_unop(r, SH_TASK_HOOK == self->type ? SH_RECORDER_OP_UNHOOK : SH_RECORDER_OP_UNINTERCEPT,
                        (uintptr_t)self, caller_addr, NULL, &trace);
-  sh_task_delayed_destroy(self);
+  if (NULL == retained || 0 == r) {
+    if (NULL != retained) {
+      pthread_mutex_lock(&sh_tasks_lock);
+      TAILQ_REMOVE(&sh_tasks, self, link);
+      pthread_mutex_unlock(&sh_tasks_lock);
+    }
+    sh_task_delayed_destroy(self);
+  }
   sh_ref_unlock(&self->ref);
   sh_ref_decrement_count(&self->ref);
   return r;
+}
+
+int sh_task_undo_and_destroy(sh_task_t *self, uintptr_t caller_addr) {
+  return sh_task_undo_and_destroy_impl(self, caller_addr, NULL);
+}
+
+int sh_task_undo_and_destroy_retain(sh_task_t *self, uintptr_t caller_addr,
+                                    void **retained) {
+  if (NULL == retained) return SHADOWHOOK_ERRNO_INVALID_ARG;
+  *retained = NULL;
+  return sh_task_undo_and_destroy_impl(self, caller_addr, retained);
 }

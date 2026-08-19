@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <signal.h>
 #include <string>
+#include <sys/types.h>
 
 struct CrashMarker {
     uint32_t magic = 0;
@@ -16,6 +17,10 @@ constexpr uint32_t kCrashMarkerMagic = 0x51435248U;
 static_assert(sizeof(CrashMarker) == 12);
 
 bool valid_crash_marker(const CrashMarker &marker) noexcept;
+
+void crash_marker_atfork_prepare() noexcept;
+void crash_marker_atfork_parent() noexcept;
+void crash_marker_atfork_child() noexcept;
 
 class CrashMarkerSession {
 public:
@@ -41,4 +46,5 @@ private:
     bool opened_ = false;
     bool finish_called_ = false;
     bool finish_result_ = false;
+    pid_t owner_pid_ = -1;
 };

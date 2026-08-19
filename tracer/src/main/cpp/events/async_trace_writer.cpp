@@ -518,7 +518,7 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
     }
 
     impl_->metrics = metrics;
-    impl_->fd = impl_->backend->open_file(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC,
+    impl_->fd = impl_->backend->open_file(path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC,
                                          0644);
     if (impl_->fd < 0) {
         latch_failure(impl_, errno == 0 ? EIO : errno);

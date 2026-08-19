@@ -4,6 +4,8 @@
 #include <csignal>
 #include <fcntl.h>
 #include <mutex>
+#include <new>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
@@ -39,11 +41,19 @@ struct CrashHandlerState {
 using CrashSignalHandler = void (*)(int, siginfo_t *, void *);
 CrashHandlerState g_handler_states[kMaxHandlerGenerations]{};
 size_t g_next_handler_generation = 0;
+std::once_flag g_atfork_once;
 
 #if defined(QTRACE_HOST_TEST)
 using CrashHandlerTestGate = void (*)();
 CrashHandlerTestGate g_handler_test_gate = nullptr;
 #endif
+
+void install_atfork_once() {
+    std::call_once(g_atfork_once, [] {
+        (void)::pthread_atfork(crash_marker_atfork_prepare, crash_marker_atfork_parent,
+                               crash_marker_atfork_child);
+    });
+}
 
 size_t signal_index(int signal_number) noexcept {
     for (size_t index = 0; index < 5; ++index) {
@@ -98,10 +108,6 @@ void invoke_previous_preserving_semantics(CrashHandlerState &state, size_t index
             invoke_previous_preserving_semantics(state, index, signal_number, info, context);
             return;
         }
-        struct sigaction defaults{};
-        defaults.sa_handler = SIG_DFL;
-        sigemptyset(&defaults.sa_mask);
-        (void)::sigaction(signal_number, &defaults, nullptr);
     }
 
     sigset_t saved_mask{};
@@ -255,11 +261,48 @@ bool valid_crash_marker(const CrashMarker &marker) noexcept {
            signal_index(marker.signal) < 5;
 }
 
+void crash_marker_atfork_prepare() noexcept {
+    g_session_mutex.lock();
+}
+
+void crash_marker_atfork_parent() noexcept {
+    g_session_mutex.unlock();
+}
+
+void crash_marker_atfork_child() noexcept {
+    for (size_t generation = 0; generation < g_next_handler_generation; ++generation) {
+        CrashHandlerState &state = g_handler_states[generation];
+        for (size_t index = 0; index < 5; ++index) {
+            struct sigaction current{};
+            if (__atomic_load_n(&state.owns_disposition[index], __ATOMIC_ACQUIRE) != 0 &&
+                ::sigaction(kCrashSignals[index], nullptr, &current) == 0 &&
+                handler_is_ours(current, g_handler_table[generation])) {
+                (void)::sigaction(kCrashSignals[index], &state.previous[index], nullptr);
+            }
+            __atomic_store_n(&state.owns_disposition[index], 0, __ATOMIC_RELEASE);
+        }
+        const int active_fd = __atomic_exchange_n(&state.active_fd, -1, __ATOMIC_ACQ_REL);
+        if (active_fd >= 0) (void)::close(active_fd);
+        if (state.retired_fd >= 0 && state.retired_fd != active_fd) {
+            (void)::close(state.retired_fd);
+        }
+        state.retired_fd = -1;
+        state.retired = false;
+        state.active_handlers = 0;
+    }
+    g_session_owned = false;
+    g_owner_generation = static_cast<size_t>(-1);
+    g_session_mutex.unlock();
+    g_session_mutex.~mutex();
+    new (&g_session_mutex) std::mutex();
+}
+
 CrashMarkerSession::~CrashMarkerSession() {
     finish();
 }
 
 bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
+    install_atfork_once();
     if (opened_ || finish_called_ || trace_path.empty()) {
         latch_error(&error_code_, EINVAL);
         return false;
@@ -300,7 +343,6 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
 
     struct sigaction replacement{};
     replacement.sa_sigaction = g_handler_table[handler_slot_];
-    sigemptyset(&replacement.sa_mask);
     for (size_t index = 0; index < kSignalCount; ++index) {
         if (::sigaction(kCrashSignals[index], nullptr, &previous_[index]) != 0) {
             latch_error(&error_code_, errno);
@@ -321,8 +363,10 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
             return false;
         }
         handler_state.previous[index] = previous_[index];
+        replacement.sa_mask = previous_[index].sa_mask;
         replacement.sa_flags = SA_SIGINFO |
-                               (previous_[index].sa_flags & (SA_RESTART | SA_ONSTACK));
+                               (previous_[index].sa_flags &
+                                (SA_RESTART | SA_ONSTACK | SA_NODEFER | SA_RESETHAND));
         if (::sigaction(kCrashSignals[index], &replacement, nullptr) != 0) {
             latch_error(&error_code_, errno);
             for (size_t prior = 0; prior < index; ++prior) {
@@ -346,6 +390,7 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
     }
 
     opened_ = true;
+    owner_pid_ = ::getpid();
     return true;
 }
 
@@ -353,6 +398,14 @@ bool CrashMarkerSession::finish() noexcept {
     if (finish_called_) return finish_result_;
     finish_called_ = true;
     if (!opened_) return false;
+    if (owner_pid_ != ::getpid()) {
+        // The atfork child callback already detached and closed the duplicated fd.
+        // Never let a copied parent session close a child fd that reused its number.
+        fd_ = -1;
+        opened_ = false;
+        finish_result_ = true;
+        return true;
+    }
 
     std::lock_guard<std::mutex> lock(g_session_mutex);
     CrashHandlerState &handler_state = g_handler_states[handler_slot_];

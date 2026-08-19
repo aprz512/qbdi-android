@@ -128,6 +128,13 @@ void *shadowhook_hook_sym_name_callback(const char *lib_name, const char *sym_na
                                         void **orig_addr, shadowhook_hooked_t hooked, void *hooked_arg);
 int shadowhook_unhook(void *stub);
 
+// Internal qtrace integration: detach a UNIQUE-mode hook while retaining every
+// executable allocation reachable from its original trampoline. The returned
+// opaque generation resource must outlive any thread that could have entered the
+// detached proxy. This symbol has hidden visibility and is not public ShadowHook API.
+__attribute__((visibility("hidden")))
+int shadowhook_unhook_qtrace_retain(void *stub, void **retained);
+
 // hook with flags
 #define SHADOWHOOK_HOOK_DEFAULT          0  // 0b0000
 #define SHADOWHOOK_HOOK_WITH_SHARED_MODE 1  // 0b0001

@@ -18,6 +18,7 @@ bool hook_function_address(uintptr_t target, void *replacement, HookHandle *hand
     handle->stub = nullptr;
     handle->original = nullptr;
     handle->retained_original = nullptr;
+    handle->retained_resource = nullptr;
     handle->residual_hook = false;
     handle->stub = shadowhook_hook_func_addr(reinterpret_cast<void *>(target), replacement,
                                              &handle->original);
@@ -47,7 +48,8 @@ bool hook_function_address(uintptr_t target, void *replacement, HookHandle *hand
 
 bool unhook_function(HookHandle *handle) {
     if (handle == nullptr || handle->stub == nullptr) return true;
-    int result = shadowhook_unhook(handle->stub);
+    void *retained = nullptr;
+    int result = shadowhook_unhook_qtrace_retain(handle->stub, &retained);
     if (result != 0) {
         int err = shadowhook_get_errno();
         QTRACE_E("unhook 0x%lx failed: %d %s", static_cast<unsigned long>(handle->target), err,
@@ -55,6 +57,7 @@ bool unhook_function(HookHandle *handle) {
         return false;
     }
     handle->stub = nullptr;
+    handle->retained_resource = retained;
     handle->residual_hook = false;
     return true;
 }

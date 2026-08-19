@@ -44,6 +44,11 @@ add_trace_test(code_rule_test
     code_rule_test.cpp
     ../../main/cpp/rules/code_rule.cpp)
 
+add_trace_test(shadowhook_retention_contract_test
+    shadowhook_retention_contract_test.cpp)
+target_compile_definitions(shadowhook_retention_contract_test PRIVATE
+    QTRACE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp/third_party/android-inline-hook/shadowhook/src/main/cpp")
+
 add_trace_test(trace_encoder_test
     trace_encoder_test.cpp
     ../../main/cpp/events/trace_encoder.cpp)

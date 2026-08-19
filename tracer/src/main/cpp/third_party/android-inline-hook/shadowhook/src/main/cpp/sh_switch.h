@@ -36,6 +36,8 @@ void sh_switch_init(void);
 int sh_switch_hook(uintptr_t target_addr, sh_addr_info_t *addr_info, uintptr_t new_addr, uintptr_t *orig_addr,
                    size_t flags, sh_recorder_trace_t *trace);
 int sh_switch_unhook(uintptr_t target_addr, uintptr_t new_addr, size_t flags, sh_recorder_trace_t *trace);
+int sh_switch_unhook_retain(uintptr_t target_addr, uintptr_t new_addr, size_t flags,
+                            sh_recorder_trace_t *trace, void **retained);
 
 int sh_switch_hook_invisible(uintptr_t target_addr, sh_addr_info_t *addr_info, uintptr_t new_addr,
                              uintptr_t *orig_addr, sh_recorder_trace_t *trace);

@@ -248,12 +248,20 @@ static bool sh_switch_is_hooked(sh_switch_t *self) {
   return 0 != self->start_addr;
 }
 
-static int sh_switch_inst_unhook(sh_switch_t *self) {
-  int r = sh_inst_unhook(&self->inst, self->target_addr, (uintptr_t)self->addr_info.dli_fbase);
+static int sh_switch_inst_unhook_impl(sh_switch_t *self, void **retained) {
+  int r = NULL == retained
+                  ? sh_inst_unhook(&self->inst, self->target_addr,
+                                   (uintptr_t)self->addr_info.dli_fbase)
+                  : sh_inst_unhook_retain(&self->inst, self->target_addr,
+                                          (uintptr_t)self->addr_info.dli_fbase, retained);
   if (0 != r) return r;
 
   if (self->addr_info.is_proc_start) sh_safe_set_orig_addr(self->target_addr, 0);
   return 0;
+}
+
+static int sh_switch_inst_unhook(sh_switch_t *self) {
+  return sh_switch_inst_unhook_impl(self, NULL);
 }
 
 static void sh_switch_inst_free_after_dlclose(sh_switch_t *self) {
@@ -745,7 +753,8 @@ int sh_switch_hook_invisible(uintptr_t target_addr, sh_addr_info_t *addr_info, u
   return r;
 }
 
-static int sh_switch_unhook_unique(uintptr_t target_addr, sh_recorder_trace_t *trace) {
+static int sh_switch_unhook_unique_impl(uintptr_t target_addr, sh_recorder_trace_t *trace,
+                                        void **retained) {
   sh_switch_t *self = sh_switch_find(target_addr);
   if (NULL == self) return SHADOWHOOK_ERRNO_UNHOOK_NOTFOUND;
   int r;
@@ -754,13 +763,22 @@ static int sh_switch_unhook_unique(uintptr_t target_addr, sh_recorder_trace_t *t
 
   if (!sh_ref_is_destroyed(&self->ref) && sh_switch_is_hooked(self)) {
     if (SH_SWITCH_HOOK_MODE_UNIQUE == self->hook_mode) {
-      self->hook_mode = SH_SWITCH_HOOK_MODE_NONE;
-      __atomic_store_n(&self->proxy_addr, 0, __ATOMIC_RELEASE);
       r = 0;
       if (0 == self->interceptors_size) {
-        r = sh_switch_inst_unhook(self);
-        sh_switch_remove_and_destroy(self);
+        r = sh_switch_inst_unhook_impl(self, retained);
+        if (0 == r) {
+          self->hook_mode = SH_SWITCH_HOOK_MODE_NONE;
+          __atomic_store_n(&self->proxy_addr, 0, __ATOMIC_RELEASE);
+          sh_switch_remove_and_destroy(self);
+        }
       } else {
+        // A retained original is meaningful only when the physical hook is detached.
+        if (NULL != retained) {
+          r = SHADOWHOOK_ERRNO_MODE_CONFLICT;
+          goto end;
+        }
+        self->hook_mode = SH_SWITCH_HOOK_MODE_NONE;
+        __atomic_store_n(&self->proxy_addr, 0, __ATOMIC_RELEASE);
         sh_switch_record_proxy_and_interceptor(self, trace);
       }
     } else {
@@ -770,9 +788,14 @@ static int sh_switch_unhook_unique(uintptr_t target_addr, sh_recorder_trace_t *t
     r = SHADOWHOOK_ERRNO_UNHOOK_NOTFOUND;
   }
 
+end:
   sh_ref_unlock(&self->ref);
   sh_ref_decrement_count(&self->ref);
   return r;
+}
+
+static int sh_switch_unhook_unique(uintptr_t target_addr, sh_recorder_trace_t *trace) {
+  return sh_switch_unhook_unique_impl(target_addr, trace, NULL);
 }
 
 static int sh_switch_unhook_multi(uintptr_t target_addr, uintptr_t new_addr, sh_recorder_trace_t *trace) {
@@ -853,6 +876,14 @@ int sh_switch_unhook(uintptr_t target_addr, uintptr_t new_addr, size_t flags, sh
     SH_LOG_INFO("switch: unhook in %s mode OK: target_addr %" PRIxPTR ", new_addr %" PRIxPTR, hook_mode_str,
                 target_addr, new_addr);
   return r;
+}
+
+int sh_switch_unhook_retain(uintptr_t target_addr, uintptr_t new_addr, size_t flags,
+                            sh_recorder_trace_t *trace, void **retained) {
+  if (NULL == retained || SHADOWHOOK_HOOK_WITH_UNIQUE_MODE != sh_switch_get_hook_mode(flags))
+    return SHADOWHOOK_ERRNO_INVALID_ARG;
+  *retained = NULL;
+  return sh_switch_unhook_unique_impl(target_addr, trace, retained);
 }
 
 static int sh_switch_intercept_impl(uintptr_t target_addr, sh_addr_info_t *addr_info,

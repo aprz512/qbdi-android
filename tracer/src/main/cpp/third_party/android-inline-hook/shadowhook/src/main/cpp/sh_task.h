@@ -52,3 +52,4 @@ void sh_task_destroy(sh_task_t *self);
 
 int sh_task_do(sh_task_t *self);
 int sh_task_undo_and_destroy(sh_task_t *self, uintptr_t caller_addr);
+int sh_task_undo_and_destroy_retain(sh_task_t *self, uintptr_t caller_addr, void **retained);

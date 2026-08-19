@@ -52,6 +52,14 @@
   failed to link on absent generation-identity seams. New crash tests then failed the old behavior
   by requiring `EBUSY` during a gated retired handler, same-inode preservation, exact in-process
   info/context pointers, and real `SEGV_ACCERR` address/context payloads.
+- The next architectural review found that retaining only ShadowHook's entry trampoline was not
+  sufficient when relocated instructions branch through `island_rewrite`, and that global
+  `sh_enter_free()` suppression leaked resources for unrelated clients. A focused contract test
+  was added first to require normal reclamation and qtrace-only ownership of every executable
+  dependency.
+- New RED regressions cover a delayed saved `SA_RESETHAND|SA_NODEFER` thunk after a newer generation,
+  fork while proxy registration holds the registry lock, fork with an active crash session, and
+  repeated artifact reservations without inode/content aliasing.
 
 ## GREEN
 
@@ -112,14 +120,28 @@
 - The entire `test_fail_setup=1` parser branch and field exist only under `#ifndef NDEBUG`. Debug
   parsing activates deterministic setup failure; Release rejects the field as unknown and contains
   neither the option nor injected-failure log string.
+- ShadowHook retention is now scoped to a hidden qtrace-only UNIQUE-mode unhook. Normal hooks again
+  return entry/island allocations; a bounded 4096-slot qtrace resource moves the ARM64 entry,
+  island-enter, and rewrite-island together. Failed retained unhooks keep their task and physical
+  switch coherent for retry, and each non-reused generation pins its module until process exit.
+- Crash wrappers inherit the prior mask plus kernel-applied `SA_NODEFER` and `SA_RESETHAND`. The
+  kernel consumes one-shot disposition state when selecting the wrapper, so delayed old thunks make
+  no later disposition write that could clobber a new/external handler.
+- Hook and crash globals install `pthread_atfork` lifecycles. The child reinitializes inherited
+  locks, detaches tracing to the saved bypass, restores owned dispositions, closes duplicate crash
+  fds without unlinking parent artifacts, and clears inherited crash ownership. Inherited session
+  objects are PID-tagged and inert in the child, while a target that forks skips the detached
+  child's inherited proxy postamble instead of underflowing parent accounting.
+- Trace paths include a process-local sequence. The writer prepares a path, reserves the crash
+  sidecar first, and creates the trace with `O_EXCL`; no collision path uses `O_TRUNC`.
 
 ## Verification
 
-- Normal host native build/test: 13/13 passed.
-- Strict host native build/test (`-Wall -Wextra -Werror`): 13/13 passed.
-- Release host native build/test: 13/13 passed; the always-on Release parser assertion rejects the
+- Normal host native build/test: 14/14 passed.
+- Strict host native build/test (`-Wall -Wextra -Werror`): 14/14 passed.
+- Release host native build/test: 14/14 passed; the always-on Release parser assertion rejects the
   debug-only field.
-- ASan+UBSan host native build/test with leak detection and halt-on-error: 13/13 passed.
+- ASan+UBSan host native build/test with leak detection and halt-on-error: 14/14 passed.
 - Android Debug: `:tracer:assembleDebug` and `:app:assembleDebug` passed.
 - Android Release: `:tracer:assembleRelease` and `:app:assembleRelease` passed.
 - ARM64 symbol/disassembly inspection found global `call_target_arm64` (52 bytes), a 32768-byte
@@ -133,6 +155,10 @@
 - Second formal re-review's architectural REDs are covered by the earliest-stub, retained-bypass,
   exact-context, real-fault, retirement, same-path, and generation-exhaustion tests. Focused strict
   proxy races passed 100/100 and crash races passed 20/20 after repair.
+- Release symbol inspection shows the qtrace retained-unhook API is local/hidden while normal
+  `shadowhook_unhook` remains public; ARM64 bridge/stub disassembly remains ABI-correct.
+- Final independent scoped re-review reported Ready with no Critical or Important blockers after
+  checking normal-unhook failure cleanup, inherited session destruction, and target-initiated fork.
 - `git diff --check` passed.
 - `adb devices` returned no connected devices. Per the brief, no device fallback-hash result is
   claimed; host seam, Debug/Release compile, and Release disassembly are the available evidence.
@@ -142,6 +168,7 @@
 - `fix: preserve target behavior on trace failures`
 - `fix: close trace failure race gaps`
 - `fix: retain trace failure generations`
+- `fix: preserve trace generations across lifecycle edges`
 
 ## Deviations and Risks
 
@@ -162,7 +189,8 @@
   deschedule before its first instruction. The bounded pool admits 1024 runs per process; exhaustion
   is a deterministic `ENOSPC` trace-setup failure and therefore preserves the target through native
   fallback instead of risking a stale handler touching newer state.
-- Hook proxy identities and ShadowHook rewritten entries are also never reused. Their 4096-entry
-  bound is deterministic; exhaustion leaves the target unhooked and preserves native execution.
+- Hook proxy identities and only their qtrace-owned retained ShadowHook resources are never reused.
+  Both pools are bounded at 4096; ordinary ShadowHook users retain normal allocator reuse.
+  Exhaustion leaves the target unhooked and preserves native execution.
 - Pull tooling was intentionally not changed because the task payload assigns interpretation to
   Task 10. The binary record layout and validation helper are stable now.

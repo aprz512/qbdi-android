@@ -698,7 +698,22 @@ int sh_inst_rehook(sh_inst_t *self, uintptr_t target_addr, sh_addr_info_t *addr_
   }
 }
 
-int sh_inst_unhook(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias) {
+static int sh_inst_unhook_impl(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias,
+                               void **retained) {
+  static uintptr_t retained_pool[4096];
+  static int retained_used[4096];
+  uintptr_t *owned = NULL;
+  if (NULL != retained) {
+    for (size_t index = 0; index < 4096; ++index) {
+      int expected = 0;
+      if (__atomic_compare_exchange_n(&retained_used[index], &expected, 1, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        owned = &retained_pool[index];
+        break;
+      }
+    }
+    if (NULL == owned) return SHADOWHOOK_ERRNO_OOM;
+  }
   int r;
   bool is_thumb = SH_UTIL_IS_THUMB(target_addr);
   if (is_thumb) target_addr = SH_UTIL_CLEAR_BIT0(target_addr);
@@ -708,20 +723,54 @@ int sh_inst_unhook(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias) 
     r = memcmp((void *)target_addr, self->exit, self->backup_len);
   }
   SH_SIG_CATCH() {
+    if (NULL != owned)
+      __atomic_store_n(&retained_used[owned - retained_pool], 0, __ATOMIC_RELEASE);
     return SHADOWHOOK_ERRNO_UNHOOK_CMP_CRASH;
   }
   SH_SIG_EXIT
-  if (0 != r) return SHADOWHOOK_ERRNO_UNHOOK_TRAMPO_MISMATCH;
-  if (0 != (r = sh_util_write_inst(target_addr, self->backup, self->backup_len))) return r;
+  if (0 != r) {
+    if (NULL != owned)
+      __atomic_store_n(&retained_used[owned - retained_pool], 0, __ATOMIC_RELEASE);
+    return SHADOWHOOK_ERRNO_UNHOOK_TRAMPO_MISMATCH;
+  }
+  if (0 != (r = sh_util_write_inst(target_addr, self->backup, self->backup_len))) {
+    if (NULL != owned)
+      __atomic_store_n(&retained_used[owned - retained_pool], 0, __ATOMIC_RELEASE);
+    return r;
+  }
 
   // free memory space for island-exit
   if (0 != self->island_exit.addr) sh_island_free(&self->island_exit, load_bias);
 
-  // free memory space for enter
-  sh_enter_free(self->enter);
+  if (NULL != owned) {
+    *owned = self->enter;
+    self->enter = 0;
+    *retained = owned;
+  } else {
+    sh_enter_free(self->enter);
+  }
 
   SH_LOG_INFO("%s: unhook OK. target %" PRIxPTR, is_thumb ? "thumb" : "a32", target_addr);
   return 0;
+}
+
+int sh_inst_unhook(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias) {
+  return sh_inst_unhook_impl(self, target_addr, load_bias, NULL);
+}
+
+int sh_inst_unhook_retain(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias,
+                          void **retained) {
+  if (NULL == retained) return SHADOWHOOK_ERRNO_INVALID_ARG;
+  *retained = NULL;
+  return sh_inst_unhook_impl(self, target_addr, load_bias, retained);
+}
+
+void sh_inst_release_retained(void *retained) {
+  uintptr_t *owned = retained;
+  if (NULL == owned) return;
+  if (0 != *owned) sh_enter_free(*owned);
+  // ARM32 qtrace generations retain for process lifetime, like the non-reused
+  // proxy identity. The bounded pool is reclaimed by the OS at process exit.
 }
 
 void sh_inst_free_after_dlclose(sh_inst_t *self, uintptr_t target_addr) {

@@ -68,14 +68,18 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         QTRACE_E("test-injected trace setup failure");
     } else
 #endif
-    if (!state.writer.open(state.context)) {
+    if (!state.writer.prepare(state.context)) {
         trace_setup_ok = false;
         state.session.observe_trace_setup(false);
-        QTRACE_E("open trace file failed");
+        QTRACE_E("prepare trace artifact failed");
     } else if (!state.crash_marker.open(state.writer.path())) {
         trace_setup_ok = false;
         state.session.observe_trace_setup(false);
         QTRACE_E("open crash marker failed");
+    } else if (!state.writer.open_prepared()) {
+        trace_setup_ok = false;
+        state.session.observe_trace_setup(false);
+        QTRACE_E("open trace file failed");
     } else if (!state.writer.begin(state.context)) {
         trace_setup_ok = false;
         state.session.observe_trace_setup(false);

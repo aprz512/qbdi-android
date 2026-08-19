@@ -4,6 +4,7 @@
 #include "events/trace_number_formatter.h"
 
 #include <cerrno>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <fcntl.h>
@@ -14,6 +15,7 @@
 namespace {
 
 constexpr size_t kMaxTraceEndLineBytes = 512;
+std::atomic<uint64_t> g_artifact_sequence{0};
 
 bool mkdirs(const std::string &path) {
     if (path.empty() || path == "/") return true;
@@ -55,6 +57,7 @@ std::string trace_filename(const TraceContext &context, bool compressed) {
     if (count < 0 || static_cast<size_t>(count) >= sizeof(offset)) return {};
     return std::to_string(millis) + "_" + std::to_string(context.pid) + "_" +
            std::to_string(context.tid) + "_" + context.scene_name + "_0x" + offset +
+           "_" + std::to_string(g_artifact_sequence.fetch_add(1, std::memory_order_relaxed)) +
            (compressed ? ".trace.txt.lz4" : ".trace.txt");
 }
 
@@ -130,13 +133,22 @@ bool TextTraceWriter::writable_event_state() const {
 }
 
 bool TextTraceWriter::open(const TraceContext &context) {
+    return prepare(context) && open_prepared();
+}
+
+bool TextTraceWriter::prepare(const TraceContext &context) {
     if (opened_ || close_called_ || metrics_ == nullptr) return false;
     const std::string directory = trace_directory(context);
     const std::string filename = trace_filename(context, options_.compression_enabled);
     if (directory.empty() || filename.empty() || !mkdirs(directory)) return fail();
 
     path_ = directory + "/" + filename;
-    if (::unlink((path_ + ".metrics").c_str()) != 0 && errno != ENOENT) return fail();
+    prepared_ = true;
+    return true;
+}
+
+bool TextTraceWriter::open_prepared() {
+    if (!prepared_ || opened_ || close_called_ || metrics_ == nullptr) return false;
     *metrics_ = {};
     if (!writer_.open(path_, options_, metrics_)) {
         QTRACE_E("open trace file failed: %s", path_.c_str());

@@ -817,6 +817,114 @@ void real_fault_preserves_siginfo_code_address_and_context() {
     CHECK(::rmdir(directory) == 0);
 }
 
+void delayed_old_reset_handler_cannot_clobber_a_new_generation() {
+    char path[] = "/tmp/qtrace-crash-reset-generation-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string first_path = std::string(directory) + "/first";
+    const std::string second_path = std::string(directory) + "/second";
+
+    struct sigaction reset{};
+    reset.sa_handler = forwarding_handler;
+    sigemptyset(&reset.sa_mask);
+    reset.sa_flags = SA_RESETHAND | SA_NODEFER;
+    struct sigaction old_abort{};
+    CHECK(sigaction(SIGABRT, &reset, &old_abort) == 0);
+    CrashMarkerSession first;
+    CHECK(first.open(first_path));
+    struct sigaction old_thunk{};
+    CHECK(sigaction(SIGABRT, nullptr, &old_thunk) == 0);
+    CHECK((old_thunk.sa_flags & SA_RESETHAND) != 0);
+    CHECK((old_thunk.sa_flags & SA_NODEFER) != 0);
+    CHECK(first.finish());
+
+    CrashMarkerSession second;
+    CHECK(second.open(second_path));
+    struct sigaction new_thunk{};
+    CHECK(sigaction(SIGABRT, nullptr, &new_thunk) == 0);
+    g_forwarded_signals = 0;
+    old_thunk.sa_sigaction(SIGABRT, nullptr, nullptr);
+    CHECK(g_forwarded_signals == 1);
+    struct sigaction after_old{};
+    CHECK(sigaction(SIGABRT, nullptr, &after_old) == 0);
+    CHECK(after_old.sa_sigaction == new_thunk.sa_sigaction);
+    CHECK(second.finish());
+    CHECK(sigaction(SIGABRT, &old_abort, nullptr) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
+void fork_detaches_inherited_crash_session_without_touching_parent_artifact() {
+    char path[] = "/tmp/qtrace-crash-atfork-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string parent_path = std::string(directory) + "/parent";
+    const std::string child_path = std::string(directory) + "/child";
+    CrashMarkerSession parent;
+    CHECK(parent.open(parent_path));
+    struct stat before{};
+    CHECK(::stat((parent_path + ".crash").c_str(), &before) == 0);
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        if (!parent.finish()) _exit(90);
+        CrashMarkerSession child_session;
+        if (!child_session.open(child_path)) _exit(91);
+        if (!child_session.finish()) _exit(92);
+        _exit(0);
+    }
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    struct stat after{};
+    CHECK(::stat((parent_path + ".crash").c_str(), &after) == 0);
+    CHECK(after.st_dev == before.st_dev && after.st_ino == before.st_ino);
+    CHECK(after.st_size == 0);
+    CHECK(parent.finish());
+    CHECK(::rmdir(directory) == 0);
+}
+
+void artifact_names_are_unique_before_exclusive_trace_creation() {
+    char path[] = "/tmp/qtrace-artifact-pair-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    TraceOptions trace_options = options();
+    trace_options.compression_enabled = false;
+    TraceMetrics first_metrics{};
+    TextTraceWriter first(trace_options, &first_metrics);
+    CHECK(first.prepare(context(directory)));
+    CrashMarkerSession first_marker;
+    CHECK(first_marker.open(first.path()));
+    CHECK(first.open_prepared());
+    CHECK(first.begin(context(directory)));
+    CHECK(first.end(7, true, 1));
+    CHECK(first.close());
+    CHECK(first_marker.finish());
+    struct stat before{};
+    CHECK(::stat(first.path().c_str(), &before) == 0);
+
+    TraceMetrics second_metrics{};
+    TextTraceWriter second(trace_options, &second_metrics);
+    CHECK(second.prepare(context(directory)));
+    CHECK(second.path() != first.path());
+    CrashMarkerSession second_marker;
+    CHECK(second_marker.open(second.path()));
+    CHECK(second.open_prepared());
+    CHECK(second.begin(context(directory)));
+    CHECK(second.end(8, true, 1));
+    CHECK(second.close());
+    CHECK(second_marker.finish());
+    struct stat after{};
+    CHECK(::stat(first.path().c_str(), &after) == 0);
+    CHECK(after.st_dev == before.st_dev && after.st_ino == before.st_ino &&
+          after.st_size == before.st_size);
+    CHECK(::unlink(first.path().c_str()) == 0);
+    CHECK(::unlink(second.path().c_str()) == 0);
+    CHECK(::unlink((first.path() + ".metrics").c_str()) == 0);
+    if (::unlink((second.path() + ".metrics").c_str()) != 0) CHECK(errno == ENOENT);
+    CHECK(::rmdir(directory) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -838,5 +946,8 @@ int main() {
     custom_siginfo_receives_the_original_payload_and_context();
     retired_handler_blocks_new_sessions_and_same_path_reuse();
     real_fault_preserves_siginfo_code_address_and_context();
+    delayed_old_reset_handler_cannot_clobber_a_new_generation();
+    fork_detaches_inherited_crash_session_without_touching_parent_artifact();
+    artifact_names_are_unique_before_exclusive_trace_creation();
     return 0;
 }

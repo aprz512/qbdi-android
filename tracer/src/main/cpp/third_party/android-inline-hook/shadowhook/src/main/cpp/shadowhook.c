@@ -353,6 +353,24 @@ err:
   SH_ERRNO_SET_RET_FAIL(r);
 }
 
+__attribute__((visibility("hidden")))
+int shadowhook_unhook_qtrace_retain(void *stub, void **retained) {
+  const void *caller_addr = __builtin_return_address(0);
+  sh_errno_reset();
+
+  int r;
+  if (__predict_false(NULL == stub || NULL == retained))
+    GOTO_ERR(SHADOWHOOK_ERRNO_INVALID_ARG);
+  *retained = NULL;
+  if (__predict_false(0 != (r = shadowhook_check_avail()))) goto err;
+  r = sh_task_undo_and_destroy_retain((sh_task_t *)stub, (uintptr_t)caller_addr, retained);
+  if (0 != r) goto err;
+  SH_ERRNO_SET_RET_ERRNUM(SHADOWHOOK_ERRNO_OK);
+
+err:
+  SH_ERRNO_SET_RET_FAIL(r);
+}
+
 static void *shadowhook_intercept_addr_impl(const char *api_name, void *target_addr,
                                             shadowhook_interceptor_t pre, void *data, uint32_t flags,
                                             bool is_sym_addr, bool is_proc_start, uintptr_t caller_addr,

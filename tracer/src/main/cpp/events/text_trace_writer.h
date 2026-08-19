@@ -21,6 +21,8 @@ public:
     TextTraceWriter &operator=(const TextTraceWriter &) = delete;
 
     bool open(const TraceContext &context);
+    bool prepare(const TraceContext &context);
+    bool open_prepared();
     bool begin(const TraceContext &context);
     bool instruction(const TraceContext &context, const InstructionRecord &record);
     bool memory(const TraceContext &context, uintptr_t pc, const MemoryRecord &record);
@@ -57,5 +59,6 @@ private:
     bool close_called_ = false;
     bool close_result_ = false;
     bool facade_failed_ = false;
+    bool prepared_ = false;
     int facade_error_code_ = 0;
 };

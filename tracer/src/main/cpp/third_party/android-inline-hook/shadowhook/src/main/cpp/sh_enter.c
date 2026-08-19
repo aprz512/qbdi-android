@@ -48,9 +48,5 @@ uintptr_t sh_enter_alloc(void) {
 }
 
 void sh_enter_free(uintptr_t enter) {
-  // qtrace assigns a never-reused proxy identity to every installed hook generation.
-  // A thread may already have branched into that old proxy before C++ can register
-  // the invocation. Keep its rewritten original entry executable for the process
-  // lifetime instead of returning it to the delayed-reuse pool.
-  (void)enter;
+  sh_trampo_free(&sh_enter_trampo_mgr, enter);
 }

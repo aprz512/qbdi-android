@@ -13,6 +13,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <sys/wait.h>
+#include <unistd.h>
 
 extern "C" uint64_t trace_proxy_dispatch(size_t index, const uint64_t args[8],
                                           uint64_t indirect_result);
@@ -50,6 +52,7 @@ bool g_fail_next_hook = false;
 bool g_install_residual_hook = false;
 std::atomic<size_t> g_old_calls{0};
 std::atomic<size_t> g_new_calls{0};
+int g_nested_fork_status = -1;
 
 std::mutex g_gate_mutex;
 std::condition_variable g_gate_condition;
@@ -74,6 +77,14 @@ uint64_t new_target(uint64_t value, uint64_t, uint64_t, uint64_t,
                     uint64_t, uint64_t, uint64_t, uint64_t) {
     ++g_new_calls;
     return value + 0x200;
+}
+
+uint64_t forking_target(uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t, uint64_t, uint64_t, uint64_t) {
+    const pid_t child = ::fork();
+    if (child == 0) return 0xCAFE;
+    if (child < 0 || ::waitpid(child, &g_nested_fork_status, 0) != child) return 0;
+    return 0xBEEF;
 }
 
 void registration_gate() {
@@ -423,6 +434,60 @@ void residual_hook_without_an_original_never_branches_to_null() {
     CHECK(g_unhook_calls == 1);
 }
 
+void fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock() {
+    reset_fakes();
+    const TraceConfig config = config_named("fork-generation");
+    const SceneConfig scene = scene_named("fork-generation",
+                                          reinterpret_cast<uintptr_t>(old_target));
+    trace_proxy_test_reset(config);
+    CHECK(trace_proxy_test_update(config, scene, module_named("fork-module")));
+    trace_proxy_test_set_registration_gate(registration_gate);
+
+    uint64_t args[8]{9};
+    std::thread entrant([&] { (void)trace_proxy_dispatch(0, args, 0); });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_registration_entered; });
+    }
+    std::atomic<bool> fork_started{false};
+    int child_status = -1;
+    std::thread forker([&] {
+        fork_started = true;
+        const pid_t child = ::fork();
+        if (child == 0) {
+            const size_t runner_before = g_runner_calls;
+            const uint64_t value = trace_proxy_dispatch(0, args, 0);
+            _exit(value == 0x109 && g_runner_calls == runner_before ? 0 : 93);
+        }
+        if (child < 0 || ::waitpid(child, &child_status, 0) != child) child_status = -1;
+    });
+    while (!fork_started.load()) std::this_thread::yield();
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_registration = true;
+    }
+    g_gate_condition.notify_all();
+    entrant.join();
+    forker.join();
+    trace_proxy_test_set_registration_gate(nullptr);
+    CHECK(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+}
+
+void target_fork_child_skips_inherited_proxy_postamble() {
+    reset_fakes();
+    g_nested_fork_status = -1;
+    const TraceConfig config = config_named("target-fork");
+    const SceneConfig scene = scene_named("target-fork",
+                                          reinterpret_cast<uintptr_t>(forking_target));
+    trace_proxy_test_reset(config);
+    CHECK(trace_proxy_test_update(config, scene, module_named("fork-module")));
+    uint64_t args[8]{};
+    const uint64_t result = trace_proxy_dispatch(0, args, 0);
+    if (result == 0xCAFE) _exit(0);
+    CHECK(result == 0xBEEF);
+    CHECK(WIFEXITED(g_nested_fork_status) && WEXITSTATUS(g_nested_fork_status) == 0);
+}
+
 } // namespace
 
 bool init_inline_hook() { return true; }
@@ -508,5 +573,7 @@ int main() {
     scene_indices_outside_the_stub_region_are_rejected();
     proxy_generation_identities_are_never_reused_and_exhaust_safely();
     residual_hook_without_an_original_never_branches_to_null();
+    fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock();
+    target_fork_child_skips_inherited_proxy_postamble();
     return 0;
 }

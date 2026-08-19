@@ -400,7 +400,40 @@ int sh_inst_rehook(sh_inst_t *self, uintptr_t target_addr, sh_addr_info_t *addr_
   }
 }
 
-int sh_inst_unhook(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias) {
+typedef struct {
+  uintptr_t enter;
+  sh_island_t island_enter;
+  sh_island_t island_rewrite;
+  uintptr_t load_bias;
+} sh_inst_retained_t;
+
+#define SH_INST_RETAINED_MAX 4096
+static sh_inst_retained_t sh_inst_retained_pool[SH_INST_RETAINED_MAX];
+static int sh_inst_retained_used[SH_INST_RETAINED_MAX];
+
+static sh_inst_retained_t *sh_inst_retained_claim(void) {
+  for (size_t i = 0; i < SH_INST_RETAINED_MAX; ++i) {
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&sh_inst_retained_used[i], &expected, 1, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      return &sh_inst_retained_pool[i];
+  }
+  return NULL;
+}
+
+static void sh_inst_retained_unclaim(sh_inst_retained_t *owned) {
+  const size_t index = (size_t)(owned - sh_inst_retained_pool);
+  memset(owned, 0, sizeof(*owned));
+  __atomic_store_n(&sh_inst_retained_used[index], 0, __ATOMIC_RELEASE);
+}
+
+static int sh_inst_unhook_impl(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias,
+                               void **retained) {
+  sh_inst_retained_t *owned = NULL;
+  if (NULL != retained) {
+    owned = sh_inst_retained_claim();
+    if (NULL == owned) return SHADOWHOOK_ERRNO_OOM;
+  }
   int r;
 
   // restore the instructions at the target address
@@ -408,22 +441,58 @@ int sh_inst_unhook(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias) 
     r = memcmp((void *)target_addr, self->exit, self->backup_len);
   }
   SH_SIG_CATCH() {
+    if (NULL != owned) sh_inst_retained_unclaim(owned);
     return SHADOWHOOK_ERRNO_UNHOOK_CMP_CRASH;
   }
   SH_SIG_EXIT
-  if (0 != r) return SHADOWHOOK_ERRNO_UNHOOK_TRAMPO_MISMATCH;
-  if (0 != (r = sh_util_write_inst(target_addr, self->backup, self->backup_len))) return r;
+  if (0 != r) {
+    if (NULL != owned) sh_inst_retained_unclaim(owned);
+    return SHADOWHOOK_ERRNO_UNHOOK_TRAMPO_MISMATCH;
+  }
+  if (0 != (r = sh_util_write_inst(target_addr, self->backup, self->backup_len))) {
+    if (NULL != owned) sh_inst_retained_unclaim(owned);
+    return r;
+  }
 
   // free memory space for island-exit and island-enter
   if (0 != self->island_exit.addr) sh_island_free(&self->island_exit, load_bias);
-  if (0 != self->island_enter.addr) sh_island_free(&self->island_enter, load_bias);
-  if (0 != self->island_rewrite.addr) sh_island_free(&self->island_rewrite, load_bias);
-
-  // free memory space for enter
-  sh_enter_free(self->enter);
+  if (NULL != owned) {
+    owned->enter = self->enter;
+    owned->island_enter = self->island_enter;
+    owned->island_rewrite = self->island_rewrite;
+    owned->load_bias = load_bias;
+    memset(&self->island_enter, 0, sizeof(self->island_enter));
+    memset(&self->island_rewrite, 0, sizeof(self->island_rewrite));
+    self->enter = 0;
+    *retained = owned;
+  } else {
+    if (0 != self->island_enter.addr) sh_island_free(&self->island_enter, load_bias);
+    if (0 != self->island_rewrite.addr) sh_island_free(&self->island_rewrite, load_bias);
+    sh_enter_free(self->enter);
+  }
 
   SH_LOG_INFO("a64: unhook OK. target %" PRIxPTR, target_addr);
   return 0;
+}
+
+int sh_inst_unhook(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias) {
+  return sh_inst_unhook_impl(self, target_addr, load_bias, NULL);
+}
+
+int sh_inst_unhook_retain(sh_inst_t *self, uintptr_t target_addr, uintptr_t load_bias,
+                          void **retained) {
+  if (NULL == retained) return SHADOWHOOK_ERRNO_INVALID_ARG;
+  *retained = NULL;
+  return sh_inst_unhook_impl(self, target_addr, load_bias, retained);
+}
+
+void sh_inst_release_retained(void *retained) {
+  sh_inst_retained_t *owned = retained;
+  if (NULL == owned) return;
+  if (0 != owned->island_enter.addr) sh_island_free(&owned->island_enter, owned->load_bias);
+  if (0 != owned->island_rewrite.addr) sh_island_free(&owned->island_rewrite, owned->load_bias);
+  if (0 != owned->enter) sh_enter_free(owned->enter);
+  sh_inst_retained_unclaim(owned);
 }
 
 void sh_inst_free_after_dlclose(sh_inst_t *self, uintptr_t target_addr) {
