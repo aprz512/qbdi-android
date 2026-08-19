@@ -18,6 +18,8 @@ __attribute__((visibility("hidden"))) std::string demo_jni_case(JNIEnv *env, job
 __attribute__((visibility("hidden"))) std::string demo_libc_case();
 __attribute__((visibility("hidden"))) uint64_t demo_algorithm_case(const uint8_t *data, size_t size);
 __attribute__((visibility("hidden"))) std::string demo_integrity_case();
+__attribute__((noinline, visibility("default"))) uint64_t demo_benchmark_case(uint64_t iterations,
+                                                                                 uint64_t seed);
 
 }
 

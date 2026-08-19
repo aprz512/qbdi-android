@@ -5,4 +5,5 @@ object NativeDemo {
     external fun runLibcCase(): String
     external fun runAlgorithmCase(): String
     external fun runIntegrityCase(): String
+    external fun runBenchmarkCase(): String
 }

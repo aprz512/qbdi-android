@@ -302,7 +302,7 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
             out << hexdump_lines(args[4], len < 64 ? len : 64);
     }
 
-    return out;
+    return out.str();
 }
 
 // ── format_leave: 出口 ──────────────────────────────────────

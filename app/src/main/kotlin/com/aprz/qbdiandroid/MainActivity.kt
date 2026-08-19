@@ -61,7 +61,8 @@ private fun QbdiDemoApp() {
         onRunJni = { runScene("Trace JNI Case") { NativeDemo.runJniCase() } },
         onRunLibc = { runScene("Trace Libc Case") { NativeDemo.runLibcCase() } },
         onRunAlgorithm = { runScene("Trace Algorithm Case") { NativeDemo.runAlgorithmCase() } },
-        onRunIntegrity = { runScene("Trace Integrity Case") { NativeDemo.runIntegrityCase() } }
+        onRunIntegrity = { runScene("Trace Integrity Case") { NativeDemo.runIntegrityCase() } },
+        onRunBenchmark = { runScene("Run Trace Benchmark") { NativeDemo.runBenchmarkCase() } }
     )
 }
 
@@ -72,6 +73,7 @@ private fun QbdiDemoScreen(
     onRunLibc: () -> Unit,
     onRunAlgorithm: () -> Unit,
     onRunIntegrity: () -> Unit,
+    onRunBenchmark: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     MaterialTheme {
@@ -97,6 +99,7 @@ private fun QbdiDemoScreen(
                 SceneButton(label = "Trace Libc Case", onClick = onRunLibc)
                 SceneButton(label = "Trace Algorithm Case", onClick = onRunAlgorithm)
                 SceneButton(label = "Trace Integrity Case", onClick = onRunIntegrity)
+                SceneButton(label = "Run Trace Benchmark", onClick = onRunBenchmark)
                 OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                     Text(
                         text = output,
@@ -127,6 +130,7 @@ private fun QbdiDemoScreenPreview() {
         onRunJni = {},
         onRunLibc = {},
         onRunAlgorithm = {},
-        onRunIntegrity = {}
+        onRunIntegrity = {},
+        onRunBenchmark = {}
     )
 }

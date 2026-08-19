@@ -39,6 +39,15 @@ static jstring native_run_integrity_case(JNIEnv *env, jobject /* thiz */) {
     return to_jstring(env, demo_integrity_case());
 }
 
+static jstring native_run_benchmark_case(JNIEnv *env, jobject /* thiz */) {
+    constexpr uint64_t kIterations = 8192;
+    constexpr uint64_t kSeed = 0x514244492d626173ULL;
+    const uint64_t result = demo_benchmark_case(kIterations, kSeed);
+    std::ostringstream summary;
+    summary << "benchmark: iterations=" << kIterations << ", result=0x" << std::hex << result;
+    return to_jstring(env, summary.str());
+}
+
 JNINativeMethod kNativeMethods[] = {
     {const_cast<char *>("runJniCase"), const_cast<char *>("()Ljava/lang/String;"),
      reinterpret_cast<void *>(native_run_jni_case)},
@@ -48,6 +57,8 @@ JNINativeMethod kNativeMethods[] = {
      reinterpret_cast<void *>(native_run_algorithm_case)},
     {const_cast<char *>("runIntegrityCase"), const_cast<char *>("()Ljava/lang/String;"),
      reinterpret_cast<void *>(native_run_integrity_case)},
+    {const_cast<char *>("runBenchmarkCase"), const_cast<char *>("()Ljava/lang/String;"),
+     reinterpret_cast<void *>(native_run_benchmark_case)},
 };
 
 __attribute__((constructor)) void native_constructor() {

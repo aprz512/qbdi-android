@@ -9,7 +9,9 @@
 
 #include <QBDI/State.h>
 #include <dlfcn.h>
+#if !defined(__ANDROID__)
 #include <execinfo.h>
+#endif
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -215,6 +217,8 @@ namespace {
             need_bt = std::find(g_bt_funcs.begin(), g_bt_funcs.end(),
                                 std::string(t_active_jni.func->name)) != g_bt_funcs.end();
         }
+        // Android NDK does not expose execinfo's backtrace APIs.
+#if !defined(__ANDROID__)
         if (need_bt) {
             void *bt_buf[32];
             int n = backtrace(bt_buf, 32);
@@ -235,6 +239,9 @@ namespace {
                 writer->write_raw_line(JniFormatter::format_backtrace(frames));
             }
         }
+#else
+        (void) need_bt;
+#endif
     }
 
     // ── emit_jni_leave: JNI 返回 → 格式化输出 leave + 更新状态 ──

@@ -21,6 +21,7 @@ TraceConfig default_trace_config() {
             {2, "libc",      0},
             {3, "algorithm", 0},
             {4, "integrity", 0},
+            {5, "benchmark", 0},
     };
     return config;
 }

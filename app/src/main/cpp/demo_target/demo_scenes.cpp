@@ -29,6 +29,11 @@ std::string read_property(const char *name) {
     return std::string(value, static_cast<size_t>(length));
 }
 
+__attribute__((noinline)) uint64_t benchmark_helper(uint64_t state) {
+    state ^= state >> 29U;
+    return state * 0x94d049bb133111ebULL;
+}
+
 } // namespace
 
 extern "C" uint64_t demo_init_stage() {
@@ -132,6 +137,29 @@ extern "C" uint64_t demo_algorithm_case(const uint8_t *data, size_t size) {
     state *= 0xc4ceb9fe1a85ec53ULL;
     state ^= state >> 29U;
     return state;
+}
+
+extern "C" uint64_t demo_benchmark_case(uint64_t iterations, uint64_t seed) {
+    std::array<uint64_t, 512> working_set{};
+    uint64_t state = seed ^ 0x9e3779b97f4a7c15ULL;
+
+    for (uint64_t index = 0; index < iterations; ++index) {
+        const size_t slot = static_cast<size_t>((state ^ index) & (working_set.size() - 1));
+        const uint64_t loaded = working_set[slot];
+        state ^= loaded + index + 0x9e3779b97f4a7c15ULL;
+        state = (state << 17U) | (state >> 47U);
+        if ((state & 1U) != 0U) {
+            state ^= 0xff51afd7ed558ccdULL;
+        } else {
+            state += 0xc4ceb9fe1a85ec53ULL;
+        }
+        working_set[slot] = state;
+        if ((index & 255U) == 255U) {
+            state = benchmark_helper(state);
+        }
+    }
+
+    return state ^ working_set[static_cast<size_t>(state & (working_set.size() - 1))];
 }
 
 extern "C" std::string demo_integrity_case() {
