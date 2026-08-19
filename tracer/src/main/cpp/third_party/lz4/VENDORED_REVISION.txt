@@ -1,0 +1,4 @@
+Project: LZ4
+Version: v1.10.0
+Source: https://github.com/lz4/lz4/releases/tag/v1.10.0
+License: BSD-2-Clause (library)

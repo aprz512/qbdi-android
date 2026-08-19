@@ -1,0 +1,65 @@
+#pragma once
+
+#include "core/trace_config.h"
+#include "events/trace_metrics.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <pthread.h>
+#include <string>
+#include <string_view>
+#include <sys/types.h>
+
+enum class BufferState : uint8_t { Free, Filling, Ready, Writing };
+
+struct WritableSpan {
+    char *data = nullptr;
+    size_t capacity = 0;
+};
+
+class TraceWriterBackend {
+public:
+    virtual ~TraceWriterBackend() = default;
+
+    virtual int open_file(const char *path, int flags, unsigned int mode) noexcept;
+    virtual ssize_t write_file(int fd, const void *data, size_t size) noexcept;
+    virtual int close_file(int fd) noexcept;
+};
+
+class TraceFaultInjector {
+public:
+    virtual ~TraceFaultInjector() = default;
+
+    virtual bool fail_buffer_allocation(size_t per_buffer_bytes) noexcept;
+    virtual bool fail_compression_allocation(size_t bytes) noexcept;
+    virtual int create_consumer_thread(pthread_t *thread, void *(*entry)(void *),
+                                       void *argument) noexcept;
+    virtual bool fail_lz4_operation() noexcept;
+    virtual void producer_waiting() noexcept;
+    virtual void consumer_released_buffer() noexcept;
+};
+
+size_t choose_trace_buffer_bytes(uint64_t physical_bytes, size_t requested_bytes,
+                                 bool auto_size) noexcept;
+
+struct AsyncTraceWriterImpl;
+
+class AsyncTraceWriter {
+public:
+    explicit AsyncTraceWriter(TraceWriterBackend *backend = nullptr,
+                              TraceFaultInjector *faults = nullptr) noexcept;
+    ~AsyncTraceWriter();
+
+    AsyncTraceWriter(const AsyncTraceWriter &) = delete;
+    AsyncTraceWriter &operator=(const AsyncTraceWriter &) = delete;
+
+    bool open(const std::string &path, const TraceOptions &options, TraceMetrics *metrics);
+    WritableSpan reserve(size_t minimum);
+    void commit(size_t bytes);
+    bool append(std::string_view bytes);
+    bool finish();
+    bool failed() const;
+
+private:
+    AsyncTraceWriterImpl *impl_ = nullptr;
+};

@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(qbdi_tracer_native_tests LANGUAGES CXX)
+project(qbdi_tracer_native_tests LANGUAGES C CXX)
 enable_testing()
+
+set(LZ4_ROOT ../../main/cpp/third_party/lz4/lib)
+add_library(lz4_static STATIC
+    ${LZ4_ROOT}/lz4.c
+    ${LZ4_ROOT}/lz4frame.c
+    ${LZ4_ROOT}/lz4hc.c
+    ${LZ4_ROOT}/xxhash.c)
+target_compile_features(lz4_static PRIVATE c_std_99)
+target_include_directories(lz4_static PUBLIC ${LZ4_ROOT})
 
 function(add_trace_test name)
     add_executable(${name} ${ARGN})
@@ -27,3 +36,9 @@ add_trace_test(code_rule_test
 add_trace_test(trace_encoder_test
     trace_encoder_test.cpp
     ../../main/cpp/events/trace_encoder.cpp)
+
+find_package(Threads REQUIRED)
+add_trace_test(async_trace_writer_test
+    async_trace_writer_test.cpp
+    ../../main/cpp/events/async_trace_writer.cpp)
+target_link_libraries(async_trace_writer_test PRIVATE lz4_static Threads::Threads)

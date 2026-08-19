@@ -6,6 +6,15 @@ set(ANDROID_16KB_PAGE_LINK_OPTIONS "-Wl,-z,max-page-size=16384")
 
 set(QBDI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qbdi)
 set(SHADOWHOOK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/android-inline-hook/shadowhook/src/main/cpp)
+set(LZ4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lz4/lib)
+
+add_library(lz4_static STATIC
+        ${LZ4_ROOT}/lz4.c
+        ${LZ4_ROOT}/lz4frame.c
+        ${LZ4_ROOT}/lz4hc.c
+        ${LZ4_ROOT}/xxhash.c)
+target_compile_features(lz4_static PRIVATE c_std_99)
+target_include_directories(lz4_static PUBLIC ${LZ4_ROOT})
 
 if(${ANDROID_ABI} STREQUAL "arm64-v8a")
     set(SHADOWHOOK_ARCH "arm64")
@@ -45,6 +54,7 @@ add_library(qbdi_tracer SHARED
         core/instruction_cache.cpp
         core/safe_memory.cpp
         events/text_trace_writer.cpp
+        events/async_trace_writer.cpp
         events/trace_encoder.cpp
         core/trace_config.cpp
         hooks/inline_hook_adapter.cpp
@@ -65,5 +75,6 @@ target_include_directories(qbdi_tracer PRIVATE
 target_link_libraries(qbdi_tracer PRIVATE
         qbdi_static
         shadowhook_static
+        lz4_static
         android
         log)
