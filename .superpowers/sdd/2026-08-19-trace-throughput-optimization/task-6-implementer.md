@@ -45,6 +45,22 @@ Base: `a0c77499a16c7c3c41b13a3f1c3eec49a74a74d9`
 
 `perf: collect instructions with one pre callback`
 
+Follow-up repair: `fix: count instruction cache lookups once`
+
+## Formal Review Repair
+
+- RED: added a combined cache/QBDI-decoder seam test. Compilation failed because
+  `InstructionCache::resolve` did not exist.
+- GREEN: added `resolve` plus non-accounting `populate_after_miss`. One cold lookup now records one
+  miss and one decoder/analysis call; the hot lookup records one hit and no decoder call; a cold
+  collision records one additional miss and one collision. Existing accounting `insert` behavior
+  and tests remain unchanged.
+- The production collector uses the tested combined seam. Disabled caches and failed population
+  return the owned decoded scratch value after one accounted miss.
+- Fresh normal, strict, and ASan/UBSan native matrices passed 10/10; tracer and app debug assemblies
+  passed. Follow-up independent review found no Critical or Important findings.
+- Unreadable-PC recovery remains assigned to Task 8.
+
 ## Deviations and Risks
 
 - Added a small `qbdi_instruction_decoder` source/test boundary beyond the brief's enumerated files

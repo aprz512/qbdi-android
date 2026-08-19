@@ -16,6 +16,20 @@ const QBDI::AnalysisType kRequiredAnalysis = static_cast<QBDI::AnalysisType>(
         QBDI::ANALYSIS_INSTRUCTION | QBDI::ANALYSIS_DISASSEMBLY |
         QBDI::ANALYSIS_OPERANDS);
 
+struct QbdiDecoderRequest {
+    QBDI::VM *vm = nullptr;
+};
+
+bool decode_current_instruction(uint32_t opcode, void *data,
+                                CachedInstruction *decoded) noexcept {
+    auto *request = static_cast<QbdiDecoderRequest *>(data);
+    if (request == nullptr || request->vm == nullptr || decoded == nullptr) return false;
+    const QBDI::InstAnalysis *analysis = request->vm->getInstAnalysis(kRequiredAnalysis);
+    if (analysis == nullptr) return false;
+    *decoded = decode_qbdi_instruction(opcode, *analysis);
+    return true;
+}
+
 } // namespace
 
 InstructionCollector::InstructionCollector(InstructionCache *cache, TextTraceWriter *writer,
@@ -120,22 +134,16 @@ InstructionView InstructionCollector::resolve(QBDI::VM *vm,
     if (address != 0) {
         std::memcpy(&opcode, reinterpret_cast<const void *>(address), sizeof(opcode));
         if (cache_ != nullptr) {
-            if (const CachedInstruction *cached = cache_->find(opcode); cached != nullptr) {
-                return {address, cached};
-            }
+            QbdiDecoderRequest request{vm};
+            const CachedInstruction *decoded = cache_->resolve(
+                    opcode, decode_current_instruction, &request, &uncached_);
+            return {address, decoded != nullptr ? decoded : &uncached_};
         }
     }
 
-    const QBDI::InstAnalysis *analysis = vm != nullptr ? vm->getInstAnalysis(kRequiredAnalysis)
-                                                       : nullptr;
-    uncached_ = analysis != nullptr ? decode_qbdi_instruction(opcode, *analysis)
-                                    : CachedInstruction{};
-    uncached_.opcode = opcode;
-    if (analysis != nullptr && address != 0 && cache_ != nullptr && cache_->enabled()) {
-        if (const CachedInstruction *cached = cache_->insert(uncached_); cached != nullptr) {
-            return {address, cached};
-        }
-    }
+    uncached_ = {};
+    QbdiDecoderRequest request{vm};
+    decode_current_instruction(opcode, &request, &uncached_);
     return {address, &uncached_};
 }
 

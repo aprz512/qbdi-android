@@ -11,6 +11,19 @@ bool has_flag(InstructionFlags flags, InstructionFlags expected) {
     return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(expected)) != 0;
 }
 
+struct CountingAnalysisSource {
+    const QBDI::InstAnalysis *analysis = nullptr;
+    uint32_t calls = 0;
+};
+
+bool decode_counted(uint32_t opcode, void *data, CachedInstruction *decoded) noexcept {
+    auto *source = static_cast<CountingAnalysisSource *>(data);
+    ++source->calls;
+    if (source->analysis == nullptr || decoded == nullptr) return false;
+    *decoded = decode_qbdi_instruction(opcode, *source->analysis);
+    return true;
+}
+
 void decodes_scaled_branch_metadata_and_owned_strings() {
     char mnemonic[] = "B";
     char disassembly[] = "b #16";
@@ -77,9 +90,45 @@ void maps_mixed_aliases_and_arm64_special_registers() {
     assert(has_flag(decoded.flags, InstructionFlags::Return));
 }
 
+void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
+    char mnemonic[] = "NOP";
+    char disassembly[] = "nop";
+    QBDI::InstAnalysis analysis{};
+    analysis.mnemonic = mnemonic;
+    analysis.disassembly = disassembly;
+
+    InstructionCache cache(1);
+    CountingAnalysisSource source{&analysis};
+    CachedInstruction scratch{};
+    const CachedInstruction *cold =
+            cache.resolve(0xd503201f, decode_counted, &source, &scratch);
+    assert(cold != nullptr);
+    assert(source.calls == 1);
+    assert(cache.metrics().misses == 1);
+    assert(cache.metrics().hits == 0);
+    assert(cache.metrics().collisions == 0);
+
+    const CachedInstruction *hot =
+            cache.resolve(0xd503201f, decode_counted, &source, &scratch);
+    assert(hot == cold);
+    assert(source.calls == 1);
+    assert(cache.metrics().misses == 1);
+    assert(cache.metrics().hits == 1);
+    assert(cache.metrics().collisions == 0);
+
+    const CachedInstruction *collision =
+            cache.resolve(0xd503205f, decode_counted, &source, &scratch);
+    assert(collision == cold);
+    assert(source.calls == 2);
+    assert(cache.metrics().misses == 2);
+    assert(cache.metrics().hits == 1);
+    assert(cache.metrics().collisions == 1);
+}
+
 } // namespace
 
 int main() {
     decodes_scaled_branch_metadata_and_owned_strings();
     maps_mixed_aliases_and_arm64_special_registers();
+    resolves_one_cold_then_one_hot_opcode_with_exact_accounting();
 }

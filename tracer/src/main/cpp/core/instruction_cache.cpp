@@ -113,19 +113,45 @@ const CachedInstruction *InstructionCache::insert(const CachedInstruction &instr
     Slot &slot = slots_[slot_index(instruction.opcode, slot_count_ - 1U)];
     if (slot.entry_plus_one != 0 && slot.opcode == instruction.opcode) {
         ++metrics_.hits;
-        CachedInstruction *cached = entry(slot.entry_plus_one);
-        if (cached != nullptr) *cached = instruction;
+    } else {
+        ++metrics_.misses;
+        if (slot.entry_plus_one != 0) ++metrics_.collisions;
+    }
+    return store(instruction);
+}
+
+const CachedInstruction *InstructionCache::populate_after_miss(
+        const CachedInstruction &instruction) noexcept {
+    return enabled() ? store(instruction) : nullptr;
+}
+
+const CachedInstruction *InstructionCache::resolve(uint32_t opcode, Decoder decoder,
+                                                   void *decoder_data,
+                                                   CachedInstruction *scratch) noexcept {
+    if (const CachedInstruction *cached = find(opcode); cached != nullptr) return cached;
+    if (decoder == nullptr || scratch == nullptr) return nullptr;
+
+    *scratch = {};
+    scratch->opcode = opcode;
+    if (!decoder(opcode, decoder_data, scratch)) return nullptr;
+    scratch->opcode = opcode;
+    if (const CachedInstruction *cached = populate_after_miss(*scratch); cached != nullptr) {
         return cached;
     }
+    return scratch;
+}
 
-    ++metrics_.misses;
+const CachedInstruction *InstructionCache::store(
+        const CachedInstruction &instruction) noexcept {
+    if (!enabled()) return nullptr;
+
+    Slot &slot = slots_[slot_index(instruction.opcode, slot_count_ - 1U)];
     CachedInstruction *cached = nullptr;
     if (slot.entry_plus_one == 0) {
         cached = allocate_entry();
         if (cached == nullptr) return nullptr;
         slot.entry_plus_one = next_entry_index_;
     } else {
-        ++metrics_.collisions;
         cached = entry(slot.entry_plus_one);
     }
 

@@ -53,6 +53,9 @@ struct InstructionCacheMetrics {
 
 class InstructionCache {
 public:
+    using Decoder = bool (*)(uint32_t opcode, void *data,
+                             CachedInstruction *instruction) noexcept;
+
     static constexpr uint32_t kPreferredSlotCount = 1U << 22U;
 
     explicit InstructionCache(uint32_t requested_slot_count = kPreferredSlotCount) noexcept;
@@ -68,6 +71,10 @@ public:
 
     const CachedInstruction *find(uint32_t opcode) noexcept;
     const CachedInstruction *insert(const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *populate_after_miss(
+            const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *resolve(uint32_t opcode, Decoder decoder, void *decoder_data,
+                                     CachedInstruction *scratch) noexcept;
 
 private:
     struct Slot {
@@ -88,6 +95,7 @@ private:
     CachedInstruction *allocate_entry() noexcept;
     CachedInstruction *entry(uint32_t entry_plus_one) noexcept;
     const CachedInstruction *entry(uint32_t entry_plus_one) const noexcept;
+    const CachedInstruction *store(const CachedInstruction &instruction) noexcept;
 
     Slot *slots_ = nullptr;
     uint32_t slot_count_ = 0;
