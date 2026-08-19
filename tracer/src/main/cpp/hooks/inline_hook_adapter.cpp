@@ -17,6 +17,7 @@ bool hook_function_address(uintptr_t target, void *replacement, HookHandle *hand
     handle->target = target;
     handle->stub = nullptr;
     handle->original = nullptr;
+    handle->retained_original = nullptr;
     handle->residual_hook = false;
     handle->stub = shadowhook_hook_func_addr(reinterpret_cast<void *>(target), replacement,
                                              &handle->original);
@@ -39,6 +40,7 @@ bool hook_function_address(uintptr_t target, void *replacement, HookHandle *hand
         }
         return false;
     }
+    handle->retained_original = handle->original;
     QTRACE_I("hooked 0x%lx original=%p", static_cast<unsigned long>(target), handle->original);
     return true;
 }

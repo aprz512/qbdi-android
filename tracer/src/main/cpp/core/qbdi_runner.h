@@ -14,6 +14,9 @@ struct TraceInvocation {
     SceneConfig scene;
     ModuleRange module;
     uintptr_t target_address = 0;
+    // May select a retained hook-generation trampoline while target_address keeps
+    // the logical scene address used by trace metadata and instrumentation ranges.
+    uintptr_t execution_address = 0;
     std::array<uint64_t, 8> args{};
     uint64_t indirect_result = 0;
 };

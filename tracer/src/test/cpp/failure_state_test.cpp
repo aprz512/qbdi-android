@@ -12,20 +12,25 @@
 #include <future>
 #include <string>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <thread>
+#include <ucontext.h>
 #include <unistd.h>
 
 using CrashHandlerTestGate = void (*)();
 void crash_marker_test_set_handler_gate(CrashHandlerTestGate gate);
-void crash_marker_test_force_forward_failure(bool enabled);
 
 namespace {
 
 volatile sig_atomic_t g_forwarded_signals = 0;
 volatile sig_atomic_t g_mask_result = 0;
 volatile sig_atomic_t g_siginfo_result = 0;
+volatile sig_atomic_t g_exact_siginfo_result = 0;
+siginfo_t *g_expected_siginfo = nullptr;
+void *g_expected_context = nullptr;
+int g_fault_pipe_fd = -1;
 std::atomic<bool> g_handler_gate_entered{false};
 std::atomic<bool> g_release_handler_gate{false};
 std::atomic<bool> g_blocking_handler_entered{false};
@@ -59,6 +64,36 @@ void nodefer_mask_handler(int signal_number) {
 
 void siginfo_handler(int signal_number, siginfo_t *info, void *) {
     g_siginfo_result = signal_number == SIGABRT && info != nullptr ? 1 : -1;
+}
+
+void exact_siginfo_handler(int signal_number, siginfo_t *info, void *context) {
+    g_exact_siginfo_result =
+            signal_number == SIGSEGV && info == g_expected_siginfo &&
+                            context == g_expected_context && info != nullptr &&
+                            info->si_code == SEGV_MAPERR &&
+                            info->si_addr == reinterpret_cast<void *>(0x12345000)
+                    ? 1
+                    : -1;
+}
+
+struct FaultPayload {
+    int signal_number;
+    int code;
+    uintptr_t address;
+    int context_present;
+};
+
+void fault_payload_handler(int signal_number, siginfo_t *info, void *context) {
+    const FaultPayload payload{signal_number, info == nullptr ? 0 : info->si_code,
+                               info == nullptr
+                                       ? 0
+                                       : reinterpret_cast<uintptr_t>(info->si_addr),
+                               context == nullptr ? 0 : 1};
+    if (g_fault_pipe_fd >= 0) {
+        const ssize_t write_result = ::write(g_fault_pipe_fd, &payload, sizeof(payload));
+        (void)write_result;
+    }
+    _exit(0);
 }
 
 void handler_entry_gate() {
@@ -320,7 +355,7 @@ void delayed_handler_from_a_finished_run_cannot_touch_the_next_run() {
     CHECK(::rmdir(directory) == 0);
 }
 
-void failed_tagged_forward_uses_old_semantics_without_consuming_the_new_marker() {
+void delayed_custom_handler_uses_old_semantics_without_consuming_the_new_marker() {
     char path[] = "/tmp/qtrace-crash-forward-fail-XXXXXX";
     char *directory = mkdtemp(path);
     CHECK(directory != nullptr);
@@ -341,9 +376,7 @@ void failed_tagged_forward_uses_old_semantics_without_consuming_the_new_marker()
     CHECK(second.open(second_path));
 
     g_forwarded_signals = 0;
-    crash_marker_test_force_forward_failure(true);
     old_tracer.sa_sigaction(SIGABRT, nullptr, nullptr);
-    crash_marker_test_force_forward_failure(false);
     CHECK(g_forwarded_signals == 1);
     struct stat marker_status{};
     CHECK(::stat((second_path + ".crash").c_str(), &marker_status) == 0);
@@ -354,7 +387,7 @@ void failed_tagged_forward_uses_old_semantics_without_consuming_the_new_marker()
     CHECK(::rmdir(directory) == 0);
 }
 
-void failed_tagged_forward_preserves_stale_nodefer_mask() {
+void delayed_custom_handler_preserves_stale_nodefer_mask() {
     char path[] = "/tmp/qtrace-crash-forward-nodefer-XXXXXX";
     char *directory = mkdtemp(path);
     CHECK(directory != nullptr);
@@ -377,9 +410,7 @@ void failed_tagged_forward_preserves_stale_nodefer_mask() {
     CHECK(second.open(second_path));
 
     g_mask_result = 0;
-    crash_marker_test_force_forward_failure(true);
     old_tracer.sa_sigaction(SIGABRT, nullptr, nullptr);
-    crash_marker_test_force_forward_failure(false);
     CHECK(g_mask_result == 1);
     struct stat marker_status{};
     CHECK(::stat((second_path + ".crash").c_str(), &marker_status) == 0);
@@ -413,7 +444,6 @@ void stale_default_action_still_terminates_by_the_original_signal() {
         if (!first.finish()) _exit(104);
         CrashMarkerSession second;
         if (!second.open(second_path)) _exit(105);
-        crash_marker_test_force_forward_failure(true);
         old_handler.sa_sigaction(SIGABRT, nullptr, nullptr);
         _exit(106);
     }
@@ -646,6 +676,147 @@ void retired_forwarder_cannot_reinstall_after_a_blocking_custom_handler() {
     CHECK(::rmdir(directory) == 0);
 }
 
+void custom_siginfo_receives_the_original_payload_and_context() {
+    char path[] = "/tmp/qtrace-crash-context-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string trace_path = std::string(directory) + "/trace";
+
+    struct sigaction exact{};
+    exact.sa_sigaction = exact_siginfo_handler;
+    sigemptyset(&exact.sa_mask);
+    exact.sa_flags = SA_SIGINFO;
+    struct sigaction old_segv{};
+    CHECK(sigaction(SIGSEGV, &exact, &old_segv) == 0);
+
+    CrashMarkerSession session;
+    CHECK(session.open(trace_path));
+    struct sigaction installed{};
+    CHECK(sigaction(SIGSEGV, nullptr, &installed) == 0);
+    siginfo_t info{};
+    info.si_signo = SIGSEGV;
+    info.si_code = SEGV_MAPERR;
+    info.si_addr = reinterpret_cast<void *>(0x12345000);
+    ucontext_t context{};
+    g_expected_siginfo = &info;
+    g_expected_context = &context;
+    g_exact_siginfo_result = 0;
+    installed.sa_sigaction(SIGSEGV, &info, &context);
+    CHECK(g_exact_siginfo_result == 1);
+    CHECK(session.finish());
+
+    CHECK(sigaction(SIGSEGV, &old_segv, nullptr) == 0);
+    CHECK(::unlink((trace_path + ".crash").c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
+void retired_handler_blocks_new_sessions_and_same_path_reuse() {
+    char path[] = "/tmp/qtrace-crash-retired-path-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string trace_path = std::string(directory) + "/trace";
+    const std::string later_path = std::string(directory) + "/later";
+
+    struct sigaction blocking{};
+    blocking.sa_handler = blocking_handler;
+    sigemptyset(&blocking.sa_mask);
+    struct sigaction old_abort{};
+    CHECK(sigaction(SIGABRT, &blocking, &old_abort) == 0);
+    CrashMarkerSession first;
+    CHECK(first.open(trace_path));
+    struct sigaction installed{};
+    CHECK(sigaction(SIGABRT, nullptr, &installed) == 0);
+
+    g_handler_gate_entered = false;
+    g_release_handler_gate = false;
+    g_blocking_handler_entered = false;
+    g_release_blocking_handler = false;
+    crash_marker_test_set_handler_gate(handler_entry_gate);
+    std::thread delayed([&] { installed.sa_sigaction(SIGABRT, nullptr, nullptr); });
+    while (!g_handler_gate_entered.load()) std::this_thread::yield();
+    struct stat before{};
+    CHECK(::stat((trace_path + ".crash").c_str(), &before) == 0);
+    CHECK(first.finish());
+
+    CrashMarkerSession blocked;
+    CHECK(!blocked.open(trace_path));
+    CHECK(blocked.error_code() == EBUSY);
+    struct stat during{};
+    CHECK(::stat((trace_path + ".crash").c_str(), &during) == 0);
+    CHECK(during.st_dev == before.st_dev);
+    CHECK(during.st_ino == before.st_ino);
+
+    g_release_handler_gate = true;
+    while (!g_blocking_handler_entered.load()) std::this_thread::yield();
+    g_release_blocking_handler = true;
+    delayed.join();
+    crash_marker_test_set_handler_gate(nullptr);
+
+    CrashMarkerSession same_path;
+    CHECK(!same_path.open(trace_path));
+    CHECK(same_path.error_code() == EEXIST);
+    CrashMarkerSession later;
+    CHECK(later.open(later_path));
+    CHECK(later.finish());
+    CHECK(sigaction(SIGABRT, &old_abort, nullptr) == 0);
+    CHECK(::unlink((trace_path + ".crash").c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
+void real_fault_preserves_siginfo_code_address_and_context() {
+    char path[] = "/tmp/qtrace-crash-real-context-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string trace_path = std::string(directory) + "/trace";
+    int payload_pipe[2]{};
+    CHECK(::pipe(payload_pipe) == 0);
+
+    const pid_t child = fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        (void)::close(payload_pipe[0]);
+        g_fault_pipe_fd = payload_pipe[1];
+        struct sigaction prior{};
+        prior.sa_sigaction = fault_payload_handler;
+        sigemptyset(&prior.sa_mask);
+        prior.sa_flags = SA_SIGINFO;
+        if (::sigaction(SIGSEGV, &prior, nullptr) != 0) _exit(121);
+        CrashMarkerSession session;
+        if (!session.open(trace_path)) _exit(122);
+        const long page_size = ::sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) _exit(123);
+        void *page = ::mmap(nullptr, static_cast<size_t>(page_size), PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (page == MAP_FAILED) _exit(124);
+        const uintptr_t expected_address = reinterpret_cast<uintptr_t>(page);
+        if (::write(payload_pipe[1], &expected_address, sizeof(expected_address)) !=
+            static_cast<ssize_t>(sizeof(expected_address))) {
+            _exit(126);
+        }
+        *static_cast<volatile uint8_t *>(page) = 1;
+        _exit(125);
+    }
+
+    (void)::close(payload_pipe[1]);
+    uintptr_t expected_address = 0;
+    CHECK(::read(payload_pipe[0], &expected_address, sizeof(expected_address)) ==
+          static_cast<ssize_t>(sizeof(expected_address)));
+    FaultPayload payload{};
+    CHECK(::read(payload_pipe[0], &payload, sizeof(payload)) ==
+          static_cast<ssize_t>(sizeof(payload)));
+    (void)::close(payload_pipe[0]);
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+    CHECK(payload.signal_number == SIGSEGV);
+    CHECK(payload.code == SEGV_ACCERR);
+    CHECK(payload.address == expected_address);
+    CHECK(payload.context_present == 1);
+    CHECK(::unlink((trace_path + ".crash").c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -657,12 +828,15 @@ int main() {
     signal_writes_one_valid_fixed_size_marker_and_reraises();
     concurrent_session_is_rejected_and_multiple_signals_write_once();
     delayed_handler_from_a_finished_run_cannot_touch_the_next_run();
-    failed_tagged_forward_uses_old_semantics_without_consuming_the_new_marker();
-    failed_tagged_forward_preserves_stale_nodefer_mask();
+    delayed_custom_handler_uses_old_semantics_without_consuming_the_new_marker();
+    delayed_custom_handler_preserves_stale_nodefer_mask();
     stale_default_action_still_terminates_by_the_original_signal();
     stale_forwarding_preserves_mask_and_one_shot_reset_behavior();
     forwarded_handlers_keep_masks_nodefer_ignore_and_reset_semantics();
     finish_does_not_wait_for_a_stale_blocking_prior_handler();
     retired_forwarder_cannot_reinstall_after_a_blocking_custom_handler();
+    custom_siginfo_receives_the_original_payload_and_context();
+    retired_handler_blocks_new_sessions_and_same_path_reuse();
+    real_fault_preserves_siginfo_code_address_and_context();
     return 0;
 }

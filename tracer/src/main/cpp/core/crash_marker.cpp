@@ -17,6 +17,7 @@ static_assert(sizeof(kCrashSignals) / sizeof(kCrashSignals[0]) == 5);
 
 std::mutex g_session_mutex;
 bool g_session_owned = false;
+size_t g_owner_generation = static_cast<size_t>(-1);
 
 // A handler address can already have been selected by the kernel when finish() replaces
 // the sigaction. Give every run a distinct handler/state slot and never reuse it: a delayed
@@ -27,8 +28,10 @@ constexpr size_t kMaxHandlerGenerations = 1024;
 struct CrashHandlerState {
     int active_fd = -1;
     int active_handlers = 0;
+    int owns_disposition[5]{};
     int retired_fd = -1;
     std::string retired_path;
+    bool retired = false;
     int reset_consumed[5]{};
     struct sigaction previous[5]{};
 };
@@ -36,12 +39,10 @@ struct CrashHandlerState {
 using CrashSignalHandler = void (*)(int, siginfo_t *, void *);
 CrashHandlerState g_handler_states[kMaxHandlerGenerations]{};
 size_t g_next_handler_generation = 0;
-constexpr int kForwardedSignalMagic = 0x51434657;
 
 #if defined(QTRACE_HOST_TEST)
 using CrashHandlerTestGate = void (*)();
 CrashHandlerTestGate g_handler_test_gate = nullptr;
-bool g_force_forward_failure = false;
 #endif
 
 size_t signal_index(int signal_number) noexcept {
@@ -54,34 +55,6 @@ size_t signal_index(int signal_number) noexcept {
 bool handler_is_ours(const struct sigaction &action,
                      CrashSignalHandler expected) noexcept {
     return (action.sa_flags & SA_SIGINFO) != 0 && action.sa_sigaction == expected;
-}
-
-bool is_forwarded_signal(const siginfo_t *info) noexcept {
-    return info != nullptr && info->si_code == SI_QUEUE &&
-           info->si_value.sival_int == kForwardedSignalMagic &&
-           info->si_pid == static_cast<pid_t>(syscall(SYS_getpid));
-}
-
-bool queue_forwarded_signal(int signal_number) noexcept {
-#if defined(QTRACE_HOST_TEST)
-    if (g_force_forward_failure) return false;
-#endif
-    siginfo_t forwarded{};
-    forwarded.si_signo = signal_number;
-    forwarded.si_code = SI_QUEUE;
-    forwarded.si_pid = static_cast<pid_t>(syscall(SYS_getpid));
-    forwarded.si_uid = static_cast<uid_t>(syscall(SYS_getuid));
-    forwarded.si_value.sival_int = kForwardedSignalMagic;
-    long result = -1;
-    do {
-        result = syscall(SYS_rt_tgsigqueueinfo, forwarded.si_pid,
-                         static_cast<pid_t>(syscall(SYS_gettid)), signal_number,
-                         &forwarded);
-    } while (result != 0 && errno == EINTR);
-    // Never fall back to an untagged signal: a newer generation would mistake it for a
-    // real crash and consume its marker fd. Failure leaves the immutable old generation
-    // retired without perturbing the active run.
-    return result == 0;
 }
 
 struct sigaction effective_previous(CrashHandlerState &state, size_t index) noexcept {
@@ -125,6 +98,10 @@ void invoke_previous_preserving_semantics(CrashHandlerState &state, size_t index
             invoke_previous_preserving_semantics(state, index, signal_number, info, context);
             return;
         }
+        struct sigaction defaults{};
+        defaults.sa_handler = SIG_DFL;
+        sigemptyset(&defaults.sa_mask);
+        (void)::sigaction(signal_number, &defaults, nullptr);
     }
 
     sigset_t saved_mask{};
@@ -160,10 +137,7 @@ void crash_marker_handler_for_generation(size_t generation, int signal_number,
     CrashHandlerState &state = g_handler_states[generation];
     static_assert(__atomic_always_lock_free(sizeof(int), nullptr));
     (void)__atomic_add_fetch(&state.active_handlers, 1, __ATOMIC_ACQ_REL);
-    const bool forwarded = is_forwarded_signal(info);
-    const int fd = forwarded
-                           ? -1
-                           : __atomic_exchange_n(&state.active_fd, -1, __ATOMIC_ACQ_REL);
+    const int fd = __atomic_exchange_n(&state.active_fd, -1, __ATOMIC_ACQ_REL);
     if (fd >= 0) {
         const CrashMarker marker{kCrashMarkerMagic, signal_number,
                                  static_cast<int32_t>(syscall(SYS_gettid))};
@@ -177,31 +151,19 @@ void crash_marker_handler_for_generation(size_t generation, int signal_number,
 #endif
     const size_t index = signal_index(signal_number);
     if (index < 5) {
-        struct sigaction current{};
-        const bool still_installed =
-                ::sigaction(signal_number, nullptr, &current) == 0 &&
-                handler_is_ours(current, self);
-        if (still_installed && forwarded) {
-            invoke_previous_preserving_semantics(state, index, signal_number, info, context);
-        } else if (still_installed) {
+        const bool owns_disposition = __atomic_exchange_n(
+                &state.owns_disposition[index], 0, __ATOMIC_ACQ_REL) != 0;
+        if (owns_disposition) {
+            struct sigaction current{};
             const struct sigaction previous = effective_previous(state, index);
-            if (::sigaction(signal_number, &previous, nullptr) == 0) {
-                (void)::raise(signal_number);
-            } else {
-                if (!queue_forwarded_signal(signal_number)) {
-                    invoke_previous_preserving_semantics(state, index, signal_number,
-                                                         info, context);
-                }
-            }
-        } else {
-            // Re-enter the currently installed action through the kernel so SIG_DFL, SIG_IGN,
-            // masks, SA_NODEFER, SA_RESETHAND, and SA_SIGINFO are applied normally. A newer
-            // tracer handler recognizes this token and skips its fd before forwarding again.
-            if (!queue_forwarded_signal(signal_number)) {
-                invoke_previous_preserving_semantics(state, index, signal_number,
-                                                     info, context);
+            if (::sigaction(signal_number, nullptr, &current) == 0 &&
+                handler_is_ours(current, self)) {
+                (void)::sigaction(signal_number, &previous, nullptr);
             }
         }
+        // Custom prior actions receive the exact kernel-provided objects. No synthetic
+        // signal is queued and no later generation is consulted.
+        invoke_previous_preserving_semantics(state, index, signal_number, info, context);
     }
     errno = saved_errno;
     (void)__atomic_sub_fetch(&state.active_handlers, 1, __ATOMIC_ACQ_REL);
@@ -229,39 +191,54 @@ void latch_error(int *destination, int value) noexcept {
 bool finish_marker_file(int fd, const std::string &path, int *error_code) noexcept {
     bool ok = true;
     struct stat status{};
+    bool have_identity = false;
     bool retain = false;
     if (::fstat(fd, &status) != 0) {
         latch_error(error_code, errno);
         ok = false;
-    } else if (status.st_size == static_cast<off_t>(sizeof(CrashMarker))) {
-        CrashMarker marker{};
-        retain = ::pread(fd, &marker, sizeof(marker), 0) ==
-                         static_cast<ssize_t>(sizeof(marker)) &&
-                 valid_crash_marker(marker);
+    } else {
+        have_identity = true;
+        if (status.st_size == static_cast<off_t>(sizeof(CrashMarker))) {
+            CrashMarker marker{};
+            retain = ::pread(fd, &marker, sizeof(marker), 0) ==
+                             static_cast<ssize_t>(sizeof(marker)) &&
+                     valid_crash_marker(marker);
+        }
     }
     if (::close(fd) != 0) {
         latch_error(error_code, errno);
         ok = false;
     }
-    if (!retain && ::unlink(path.c_str()) != 0 && errno != ENOENT) {
-        latch_error(error_code, errno);
-        ok = false;
+    if (!retain && have_identity) {
+        struct stat path_status{};
+        if (::lstat(path.c_str(), &path_status) == 0) {
+            if (path_status.st_dev == status.st_dev && path_status.st_ino == status.st_ino &&
+                ::unlink(path.c_str()) != 0 && errno != ENOENT) {
+                latch_error(error_code, errno);
+                ok = false;
+            }
+        } else if (errno != ENOENT) {
+            latch_error(error_code, errno);
+            ok = false;
+        }
     }
     return ok;
 }
 
-void reap_retired_generations() noexcept {
-    for (size_t generation = 0; generation < g_next_handler_generation; ++generation) {
-        CrashHandlerState &state = g_handler_states[generation];
-        if (state.retired_fd < 0 ||
-            __atomic_load_n(&state.active_handlers, __ATOMIC_ACQUIRE) != 0) {
-            continue;
-        }
-        const int fd = state.retired_fd;
-        state.retired_fd = -1;
-        int ignored_error = 0;
-        (void)finish_marker_file(fd, state.retired_path, &ignored_error);
+void reap_retired_generation() noexcept {
+    if (!g_session_owned || g_owner_generation >= g_next_handler_generation) return;
+    CrashHandlerState &state = g_handler_states[g_owner_generation];
+    if (!state.retired || state.retired_fd < 0 ||
+        __atomic_load_n(&state.active_handlers, __ATOMIC_ACQUIRE) != 0) {
+        return;
     }
+    const int fd = state.retired_fd;
+    state.retired_fd = -1;
+    state.retired = false;
+    int ignored_error = 0;
+    (void)finish_marker_file(fd, state.retired_path, &ignored_error);
+    g_session_owned = false;
+    g_owner_generation = static_cast<size_t>(-1);
 }
 
 } // namespace
@@ -271,9 +248,6 @@ void crash_marker_test_set_handler_gate(CrashHandlerTestGate gate) {
     g_handler_test_gate = gate;
 }
 
-void crash_marker_test_force_forward_failure(bool enabled) {
-    g_force_forward_failure = enabled;
-}
 #endif
 
 bool valid_crash_marker(const CrashMarker &marker) noexcept {
@@ -292,7 +266,7 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
     }
 
     std::lock_guard<std::mutex> lock(g_session_mutex);
-    reap_retired_generations();
+    reap_retired_generation();
     if (g_session_owned) {
         latch_error(&error_code_, EBUSY);
         finish_called_ = true;
@@ -301,10 +275,11 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
     g_session_owned = true;
 
     path_ = trace_path + ".crash";
-    fd_ = ::open(path_.c_str(), O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC | O_APPEND, 0644);
+    fd_ = ::open(path_.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_APPEND, 0644);
     if (fd_ < 0) {
         latch_error(&error_code_, errno);
         g_session_owned = false;
+        g_owner_generation = static_cast<size_t>(-1);
         finish_called_ = true;
         return false;
     }
@@ -314,10 +289,12 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
         fd_ = -1;
         (void)::unlink(path_.c_str());
         g_session_owned = false;
+        g_owner_generation = static_cast<size_t>(-1);
         finish_called_ = true;
         return false;
     }
     handler_slot_ = g_next_handler_generation++;
+    g_owner_generation = handler_slot_;
     CrashHandlerState &handler_state = g_handler_states[handler_slot_];
     __atomic_store_n(&handler_state.active_fd, fd_, __ATOMIC_RELEASE);
 
@@ -331,10 +308,15 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
                 (void)::sigaction(kCrashSignals[prior], &previous_[prior], nullptr);
             }
             __atomic_store_n(&handler_state.active_fd, -1, __ATOMIC_RELEASE);
+            for (size_t prior = 0; prior < index; ++prior) {
+                __atomic_store_n(&handler_state.owns_disposition[prior], 0,
+                                 __ATOMIC_RELEASE);
+            }
             (void)::close(fd_);
             fd_ = -1;
             (void)::unlink(path_.c_str());
             g_session_owned = false;
+            g_owner_generation = static_cast<size_t>(-1);
             finish_called_ = true;
             return false;
         }
@@ -347,14 +329,20 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
                 (void)::sigaction(kCrashSignals[prior], &previous_[prior], nullptr);
             }
             __atomic_store_n(&handler_state.active_fd, -1, __ATOMIC_RELEASE);
+            for (size_t prior = 0; prior < index; ++prior) {
+                __atomic_store_n(&handler_state.owns_disposition[prior], 0,
+                                 __ATOMIC_RELEASE);
+            }
             (void)::close(fd_);
             fd_ = -1;
             (void)::unlink(path_.c_str());
             g_session_owned = false;
+            g_owner_generation = static_cast<size_t>(-1);
             finish_called_ = true;
             return false;
         }
         installed_[index] = true;
+        __atomic_store_n(&handler_state.owns_disposition[index], 1, __ATOMIC_RELEASE);
     }
 
     opened_ = true;
@@ -376,11 +364,14 @@ bool CrashMarkerSession::finish() noexcept {
     bool ok = true;
     for (size_t index = 0; index < kSignalCount; ++index) {
         if (!installed_[index]) continue;
+        const bool owns_disposition = __atomic_exchange_n(
+                &handler_state.owns_disposition[index], 0, __ATOMIC_ACQ_REL) != 0;
         struct sigaction current{};
         if (::sigaction(kCrashSignals[index], nullptr, &current) != 0) {
             latch_error(&error_code_, errno);
             ok = false;
-        } else if (handler_is_ours(current, g_handler_table[handler_slot_])) {
+        } else if (owns_disposition &&
+                   handler_is_ours(current, g_handler_table[handler_slot_])) {
             const struct sigaction previous = effective_previous(handler_state, index);
             if (::sigaction(kCrashSignals[index], &previous, nullptr) != 0) {
                 latch_error(&error_code_, errno);
@@ -397,11 +388,15 @@ bool CrashMarkerSession::finish() noexcept {
         // state remains valid forever and a later non-signal operation reaps it after exit.
         handler_state.retired_fd = fd_;
         handler_state.retired_path = path_;
+        handler_state.retired = true;
     }
     fd_ = -1;
 
     opened_ = false;
-    g_session_owned = false;
+    if (!handler_state.retired) {
+        g_session_owned = false;
+        g_owner_generation = static_cast<size_t>(-1);
+    }
     finish_result_ = ok;
     return finish_result_;
 }

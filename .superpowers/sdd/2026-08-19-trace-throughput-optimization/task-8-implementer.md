@@ -46,6 +46,12 @@
 - Release parsing and execute-only decode RED tests were written first: Release must reject a
   runtime-constructed debug option, while unreadable instructions in a memory-enabled profile must
   request the slow memory path without changing cache metrics.
+- Second formal re-review exposed the earlier gate's blind window before C++ dispatch, ShadowHook
+  trampoline reuse after unhook, a signal-disposition query/use race, retired sidecar pathname
+  aliasing, and synthetic `SA_SIGINFO` payload/context loss. The new earliest-entry test initially
+  failed to link on absent generation-identity seams. New crash tests then failed the old behavior
+  by requiring `EBUSY` during a gated retired handler, same-inode preservation, exact in-process
+  info/context pointers, and real `SEGV_ACCERR` address/context payloads.
 
 ## GREEN
 
@@ -60,14 +66,15 @@
   Output, crash-sidecar, virtual-stack/GPR, module, essential callback, memory instrumentation, and
   zero-block call failures return `{false, 0}`; runtime writer failures only disable callbacks and
   preserve a successfully executed target's value.
-- Proxy entry now performs lookup, active registration, and an immutable
-  hook/config/scene/module/target snapshot in one `g_lock -> transition_mutex` transaction, matching
-  installer order, before releasing both locks for arbitrary execution. Each installed hook stores
-  its matching config generation. Installer updates during an active window are deferred as one
-  config/scene/module unit and applied by the final entrant. Same-address updates unhook/reinstall
-  rather than preserving a potentially stale module handle. Scene indices at or above 256 are
-  rejected before addressing the fixed stub region.
-- A verified non-null ShadowHook original trampoline is retained with each live hook. When unhook
+- Every hook installation now consumes a never-reused proxy identity before the target can branch
+  to it. The 8-byte ARM64 stub encodes that identity before C++ lookup, and its immutable
+  config/scene/module/target generation remains allocated for the process lifetime. A delayed old
+  stub therefore cannot resolve a new same-index install. Active updates remain deferred, while a
+  pre-dispatch old generation uses its retained original entry. Scene indices remain bounded at
+  256; proxy generations are separately bounded at 4096 and fail safely on exhaustion.
+- A verified non-null ShadowHook original trampoline is retained with each hook generation, and a
+  `RTLD_NOLOAD` guard retains its module mapping. ShadowHook rewritten entries are intentionally
+  never returned to its allocator, bounding retained executable storage to roughly 1 MiB. When unhook
   fails, the proxy skips QBDI and calls that bypass through `call_target_arm64` exactly once;
   concurrent failed-unhook entrants keep one active bypass window so no entrant invalidates another
   trampoline. Successful unhook/setup failure calls the direct unhooked target. Rehook failure
@@ -75,31 +82,30 @@
 - `call_target_arm64` saves FP/LR on a 16-byte-aligned stack, preserves its target/argument inputs in
   caller-saved scratch registers, restores `x0`-`x7` and captured indirect-result `x8`, calls with
   `blr`, restores the frame, and returns target `x0`. Fixed 8-byte proxy stubs save `x0`-`x7` and
-  original `x8` before entering C++ and derive their scene index from the stub address.
+  original `x8` before entering C++ and derive their immutable generation identity from the stub
+  address.
 - Instruction fetch now uses `safe_read_memory`. Unreadable instructions emit owned
   `<unreadable>` metadata, and readable zero words use an uncached owned `.inst 0x00000000` path;
   neither changes cache metrics. Unreadable metadata requests the conservative slow memory path
   whenever memory tracing is enabled. When QBDI analysis is absent, the native decoder handles only
   stable NOP, direct B/BL, and RET facts; everything else is honestly `.inst` and uses the slow
   memory path when memory tracing is enabled. No QBDI pointer is retained.
-- Each active run pre-opens `<trace>.crash`. The process admits one active marker session; a second
+- Each active run exclusively creates `<trace>.crash`. The process admits one active marker session;
+  a second
   returns `EBUSY` and falls back natively. Every run receives a distinct, never-reused SA_SIGINFO
   handler thunk and state generation. The handler saves errno, increments its generation's
   lock-free active count, atomically exchanges only that generation's fd, makes exactly one
-  fixed-size write attempt, restores the prior action, re-raises, restores errno, and leaves the
-  active count. It performs no close, flush, compression, lock, allocation, or logging. Stale
-  deliveries are requeued through the kernel with a private token; a newer tracer generation skips
-  its fd. Custom and ignored prior actions never replace the process-wide active disposition:
-  forwarding explicitly recreates the prior mask, automatic self-block/`SA_NODEFER`,
-  `SA_RESETHAND`, `SA_SIGINFO`, and restart/on-stack outer flags. `SIG_DFL` alone installs the true
-  default and re-raises, preserving signal wait status/core behavior. If tagged queueing fails, the
-  immutable old generation invokes its effective prior action with the same semantics rather than
-  emitting an untagged signal that could consume the newer fd. No retired thunk is reinstalled.
+  fixed-size write attempt, atomically relinquishes only its signal disposition, restores errno,
+  and leaves the active count. It performs no close, flush, compression, lock, allocation, or
+  logging. No synthetic signal is queued: custom `SA_SIGINFO` actions receive the exact original
+  `siginfo_t *` and `ucontext_t *`, with original fault code/address, while mask, automatic
+  self-block/`SA_NODEFER`, `SA_RESETHAND`, `SIG_IGN`, and errno semantics are recreated. `SIG_DFL`
+  installs the true default and re-raises, preserving signal wait status/core behavior.
 - Teardown atomically claims an untouched fd, or retires a handler-owned fd without spinning.
-  Immutable generation state stays valid, and later normal open/finish work reaps descriptors only
-  after the entered-handler count reaches zero. Thus a blocking/surviving prior handler cannot hold
-  `finish()` or the next run hostage, while empty/invalid markers are still removed and exactly one
-  valid fixed record is retained.
+  Immutable generation state stays valid, and a new session returns `EBUSY` until the entered old
+  handler exits. Exclusive creation prevents pathname/inode reuse; cleanup compares the path inode
+  with the generation-owned fd before unlinking. Thus a blocking prior handler cannot hold
+  `finish()`, while it also cannot overlap a newer crash generation.
 - Short write, zero write, and EINTR are deliberately not retried in signal context. Such records
   are invalid; normal teardown removes them, and consumers must accept only exact-size records with
   the stable magic, supported signal, and positive tid. Pull-tool interpretation remains Task 10.
@@ -116,14 +122,17 @@
 - ASan+UBSan host native build/test with leak detection and halt-on-error: 13/13 passed.
 - Android Debug: `:tracer:assembleDebug` and `:app:assembleDebug` passed.
 - Android Release: `:tracer:assembleRelease` and `:app:assembleRelease` passed.
-- ARM64 symbol/disassembly inspection found global `call_target_arm64` (52 bytes), a 2048-byte
+- ARM64 symbol/disassembly inspection found global `call_target_arm64` (52 bytes), a 32768-byte
   fixed-stride proxy-stub region, and the common dispatcher. Release instructions confirm aligned
   FP/LR save/restore, all eight argument loads, original `x8` restore, and `blr` target execution.
 - Debug/Release string inspection found the injected-failure log only in Debug and neither the
   option nor injected-failure log in Release.
 - The initial focused review passed its narrower concurrency scope; formal review then found the
-  seven RED cases recorded above. Final formal re-review reported Ready with no remaining Critical
-  or Important blockers; its focused strict crash-forwarding and proxy tests also passed.
+  seven RED cases recorded above. The first formal re-review reported Ready on those repairs before
+  the second review identified the earlier pre-dispatch and signal-retirement architectural gaps.
+- Second formal re-review's architectural REDs are covered by the earliest-stub, retained-bypass,
+  exact-context, real-fault, retirement, same-path, and generation-exhaustion tests. Focused strict
+  proxy races passed 100/100 and crash races passed 20/20 after repair.
 - `git diff --check` passed.
 - `adb devices` returned no connected devices. Per the brief, no device fallback-hash result is
   claimed; host seam, Debug/Release compile, and Release disassembly are the available evidence.
@@ -132,6 +141,7 @@
 
 - `fix: preserve target behavior on trace failures`
 - `fix: close trace failure race gaps`
+- `fix: retain trace failure generations`
 
 ## Deviations and Risks
 
@@ -152,5 +162,7 @@
   deschedule before its first instruction. The bounded pool admits 1024 runs per process; exhaustion
   is a deterministic `ENOSPC` trace-setup failure and therefore preserves the target through native
   fallback instead of risking a stale handler touching newer state.
+- Hook proxy identities and ShadowHook rewritten entries are also never reused. Their 4096-entry
+  bound is deterministic; exhaustion leaves the target unhooked and preserves native execution.
 - Pull tooling was intentionally not changed because the task payload assigns interpretation to
   Task 10. The binary record layout and validation helper are stable now.

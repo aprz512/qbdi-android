@@ -101,7 +101,10 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     if (execution_setup_ok) {
         for (int i = 0; i < 8; ++i) QBDI_GPR_SET(gpr, i, invocation.args[i]);
         gpr->x8 = invocation.indirect_result;
-        gpr->pc = invocation.target_address;
+        const uintptr_t execution_address = invocation.execution_address != 0
+                                                    ? invocation.execution_address
+                                                    : invocation.target_address;
+        gpr->pc = execution_address;
 
         if (invocation.scene.end_offset > 0) {
             uintptr_t range_start = invocation.module.start + invocation.scene.offset;
@@ -163,7 +166,10 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
             args.reserve(invocation.args.size());
             for (uint64_t arg: invocation.args) args.push_back(arg);
 
-            target.succeeded = vm.call(&retVal, invocation.target_address, args);
+            const uintptr_t execution_address = invocation.execution_address != 0
+                                                        ? invocation.execution_address
+                                                        : invocation.target_address;
+            target.succeeded = vm.call(&retVal, execution_address, args);
             target.ran = target.succeeded;
             target.return_value = retVal;
             if (target.ran) collector.finish_last(*gpr);

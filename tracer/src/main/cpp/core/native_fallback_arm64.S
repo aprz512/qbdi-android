@@ -24,7 +24,7 @@ call_target_arm64:
 .type trace_proxy_stubs, %function
 trace_proxy_stubs:
 // Each entry is exactly two instructions; tracer_entry.cpp uses the same 8-byte stride.
-.rept 256
+.rept 4096
     adr x16, .
     b trace_proxy_common
 .endr

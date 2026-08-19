@@ -7,6 +7,11 @@
 #include "hooks/inline_hook_adapter.h"
 
 #include <cstring>
+#include <array>
+#include <atomic>
+#if defined(__ANDROID__)
+#include <dlfcn.h>
+#endif
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -23,31 +28,48 @@ struct InstalledSceneHook {
     TraceConfig pending_config;
     SceneConfig pending_scene;
     ModuleRange pending_module;
+    void *module_guard = nullptr;
     size_t active_proxy_calls = 0;
+    size_t proxy_generation = 0;
     bool pending_install = false;
     bool unhook_failed_window = false;
     bool installed = false;
+    bool retired = false;
 };
 
 static std::mutex g_lock;
 static TraceConfig g_config = default_trace_config();
-static std::vector<std::shared_ptr<InstalledSceneHook>> g_hooks;
 static bool g_configured = false;
 static uint64_t g_config_generation = 0;
 
 static constexpr size_t kMaxScenes = 256;
+static constexpr size_t kMaxProxyGenerations = 4096;
 static constexpr size_t kProxyStubBytes = 8;
+static std::array<std::shared_ptr<InstalledSceneHook>, kMaxScenes> g_scene_hooks;
+static std::array<std::shared_ptr<InstalledSceneHook>, kMaxProxyGenerations>
+        g_hook_generations;
+static size_t g_next_proxy_generation = 0;
 
 #if defined(QTRACE_HOST_TEST)
 using RegistrationGate = void (*)();
 static RegistrationGate g_registration_gate = nullptr;
+static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
 #endif
 
-static void *proxy_for_index(size_t index);
+static void *proxy_for_generation(size_t generation);
+static bool create_hook_generation_locked(const TraceConfig &config,
+                                          const SceneConfig &scene,
+                                          const ModuleRange &module);
+static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
+                                      const ModuleRange &module);
 extern "C" char trace_proxy_stubs[];
 
-extern "C" uint64_t trace_proxy_dispatch(size_t index, const uint64_t args[8],
+extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[8],
                                           uint64_t indirect_result) {
+#if defined(QTRACE_HOST_TEST)
+    const RegistrationGate stub_gate = g_stub_entry_gate.load(std::memory_order_acquire);
+    if (stub_gate != nullptr) stub_gate();
+#endif
     std::shared_ptr<InstalledSceneHook> hook;
     TraceInvocation invocation;
     TraceConfig config;
@@ -55,11 +77,12 @@ extern "C" uint64_t trace_proxy_dispatch(size_t index, const uint64_t args[8],
     bool use_original_bypass = false;
     {
         std::lock_guard<std::mutex> registry_guard(g_lock);
-        if (index >= g_hooks.size() || g_hooks[index] == nullptr) {
-            QTRACE_E("trace proxy for invalid scene index=%zu", index);
+        if (generation >= g_next_proxy_generation ||
+            g_hook_generations[generation] == nullptr) {
+            QTRACE_E("trace proxy for invalid generation=%zu", generation);
             return 0;
         }
-        hook = g_hooks[index];
+        hook = g_hook_generations[generation];
 #if defined(QTRACE_HOST_TEST)
         if (g_registration_gate != nullptr) g_registration_gate();
 #endif
@@ -68,23 +91,30 @@ extern "C" uint64_t trace_proxy_dispatch(size_t index, const uint64_t args[8],
         invocation.scene = hook->scene;
         invocation.module = hook->module;
         invocation.target_address = hook->module.start + hook->scene.offset;
+        invocation.execution_address = invocation.target_address;
         std::memcpy(invocation.args.data(), args, sizeof(invocation.args));
         invocation.indirect_result = indirect_result;
         execution_target = invocation.target_address;
-        if (hook->installed) {
+        if (hook->retired) {
+            execution_target = reinterpret_cast<uintptr_t>(hook->hook.retained_original);
+            invocation.execution_address = execution_target;
+        } else if (hook->installed) {
             if (hook->unhook_failed_window) {
-                execution_target = reinterpret_cast<uintptr_t>(hook->hook.original);
+                execution_target = reinterpret_cast<uintptr_t>(hook->hook.retained_original);
+                invocation.execution_address = execution_target;
                 use_original_bypass = true;
             } else if (!unhook_function(&hook->hook)) {
-                if (hook->hook.original == nullptr) {
-                    QTRACE_E("residual hook has no safe original bypass index=%zu", index);
+                if (hook->hook.retained_original == nullptr) {
+                    QTRACE_E("residual hook has no safe original bypass generation=%zu",
+                             generation);
                     return 0;
                 }
-                execution_target = reinterpret_cast<uintptr_t>(hook->hook.original);
+                execution_target = reinterpret_cast<uintptr_t>(hook->hook.retained_original);
+                invocation.execution_address = execution_target;
                 use_original_bypass = true;
                 hook->unhook_failed_window = true;
-                QTRACE_E("trace proxy using original bypass after unhook failure index=%zu",
-                         index);
+                QTRACE_E("trace proxy using original bypass after unhook failure generation=%zu",
+                         generation);
             } else {
                 hook->installed = false;
             }
@@ -94,33 +124,43 @@ extern "C" uint64_t trace_proxy_dispatch(size_t index, const uint64_t args[8],
     }
 
     TraceRunResult traced{};
-    if (!use_original_bypass) traced = run_with_qbdi(config, invocation);
+    if (execution_target != 0 && !use_original_bypass) {
+        traced = run_with_qbdi(config, invocation);
+    }
     const uint64_t result = traced.target_executed
                                     ? traced.value
-                                    : call_target_arm64(execution_target, invocation.args.data(),
-                                                        invocation.indirect_result);
+                                    : execution_target != 0
+                                              ? call_target_arm64(
+                                                        execution_target,
+                                                        invocation.args.data(),
+                                                        invocation.indirect_result)
+                                              : 0;
     {
+        std::lock_guard<std::mutex> registry_guard(g_lock);
         std::lock_guard<std::mutex> transition_guard(hook->transition_mutex);
         --hook->active_proxy_calls;
         if (hook->active_proxy_calls == 0) {
-            if (hook->pending_install) {
+            if (!hook->retired && hook->pending_install) {
                 if (hook->installed && !unhook_function(&hook->hook)) {
                     hook->unhook_failed_window = false;
                     return result;
                 }
                 hook->installed = false;
                 hook->unhook_failed_window = false;
-                hook->config = std::move(hook->pending_config);
-                hook->scene = std::move(hook->pending_scene);
-                hook->module = std::move(hook->pending_module);
+                hook->retired = true;
+                const TraceConfig pending_config = std::move(hook->pending_config);
+                const SceneConfig pending_scene = std::move(hook->pending_scene);
+                const ModuleRange pending_module = std::move(hook->pending_module);
                 hook->pending_install = false;
-            }
-            if (!hook->installed) {
-                const uintptr_t target = hook->module.start + hook->scene.offset;
-                const bool hooked = hook_function_address(target, proxy_for_index(index),
-                                                          &hook->hook);
-                hook->installed = hooked || hook->hook.residual_hook;
-            } else {
+                (void)create_hook_generation_locked(pending_config, pending_scene,
+                                                    pending_module);
+            } else if (!hook->retired && !hook->installed) {
+                // Every physical hook installation gets a distinct proxy identity.
+                // A thread may still be paused in this generation's old stub.
+                hook->retired = true;
+                (void)create_hook_generation_locked(hook->config, hook->scene,
+                                                    hook->module);
+            } else if (!hook->retired) {
                 hook->unhook_failed_window = false;
             }
         }
@@ -128,9 +168,43 @@ extern "C" uint64_t trace_proxy_dispatch(size_t index, const uint64_t args[8],
     return result;
 }
 
-static void *proxy_for_index(size_t index) {
-    if (index >= kMaxScenes) return nullptr;
-    return trace_proxy_stubs + index * kProxyStubBytes;
+static void *proxy_for_generation(size_t generation) {
+    if (generation >= kMaxProxyGenerations) return nullptr;
+    return trace_proxy_stubs + generation * kProxyStubBytes;
+}
+
+static bool create_hook_generation_locked(const TraceConfig &config,
+                                          const SceneConfig &scene,
+                                          const ModuleRange &module) {
+    if (g_next_proxy_generation >= kMaxProxyGenerations) {
+        QTRACE_E("proxy generation capacity exhausted=%zu", kMaxProxyGenerations);
+        return false;
+    }
+    const size_t generation = g_next_proxy_generation++;
+    const std::shared_ptr<InstalledSceneHook> slot =
+            std::make_shared<InstalledSceneHook>();
+    slot->config = config;
+    slot->scene = scene;
+    slot->module = module;
+#if defined(__ANDROID__)
+    slot->module_guard = ::dlopen(module.path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    if (slot->module_guard == nullptr) {
+        const std::string module_name = basename_of(module.path);
+        slot->module_guard = ::dlopen(module_name.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    }
+    if (slot->module_guard == nullptr) {
+        QTRACE_E("cannot retain module generation path=%s", module.path.c_str());
+        return false;
+    }
+#endif
+    slot->proxy_generation = generation;
+    g_hook_generations[generation] = slot;
+    g_scene_hooks[scene.index] = slot;
+    const uintptr_t target = module.start + scene.offset;
+    const bool hooked = hook_function_address(target, proxy_for_generation(generation),
+                                              &slot->hook);
+    slot->installed = hooked || slot->hook.residual_hook;
+    return hooked;
 }
 
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
@@ -143,43 +217,35 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         QTRACE_E("scene index=%zu exceeds proxy stub capacity=%zu", scene.index, kMaxScenes);
         return false;
     }
-    if (scene.index >= g_hooks.size()) {
-        g_hooks.resize(scene.index + 1);
+    const std::shared_ptr<InstalledSceneHook> previous = g_scene_hooks[scene.index];
+    if (previous != nullptr) {
+        std::lock_guard<std::mutex> transition_guard(previous->transition_mutex);
+        if (previous->active_proxy_calls != 0) {
+            previous->pending_config = config;
+            previous->pending_scene = scene;
+            previous->pending_module = module;
+            previous->pending_install = true;
+            return true;
+        }
+        if (previous->installed && !unhook_function(&previous->hook)) return false;
+        previous->installed = false;
+        previous->unhook_failed_window = false;
+        previous->retired = true;
     }
-    if (g_hooks[scene.index] == nullptr) {
-        g_hooks[scene.index] = std::make_shared<InstalledSceneHook>();
-    }
-    const std::shared_ptr<InstalledSceneHook> &slot = g_hooks[scene.index];
-    std::lock_guard<std::mutex> transition_guard(slot->transition_mutex);
-    if (slot->active_proxy_calls != 0) {
-        slot->pending_config = config;
-        slot->pending_scene = scene;
-        slot->pending_module = module;
-        slot->pending_install = true;
-        return true;
-    }
-    if (slot->installed) {
-        if (!unhook_function(&slot->hook)) return false;
-        slot->installed = false;
-    }
-    slot->config = config;
-    slot->scene = scene;
-    slot->module = module;
-    slot->pending_install = false;
-    const uintptr_t target = module.start + scene.offset;
-    const bool hooked = hook_function_address(target, proxy_for_index(scene.index), &slot->hook);
-    slot->installed = hooked || slot->hook.residual_hook;
-    return hooked;
+    return create_hook_generation_locked(config, scene, module);
 }
 
 #if defined(QTRACE_HOST_TEST)
 void trace_proxy_test_reset(const TraceConfig &config) {
     std::lock_guard<std::mutex> guard(g_lock);
-    g_hooks.clear();
+    g_scene_hooks.fill(nullptr);
+    g_hook_generations.fill(nullptr);
+    g_next_proxy_generation = 0;
     g_config = config;
     ++g_config_generation;
     g_configured = true;
     g_registration_gate = nullptr;
+    g_stub_entry_gate.store(nullptr, std::memory_order_release);
 }
 
 bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene,
@@ -193,6 +259,18 @@ bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene
 void trace_proxy_test_set_registration_gate(RegistrationGate gate) {
     std::lock_guard<std::mutex> guard(g_lock);
     g_registration_gate = gate;
+}
+
+void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate) {
+    g_stub_entry_gate.store(gate, std::memory_order_release);
+}
+
+size_t trace_proxy_test_generation(size_t scene_index) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (scene_index >= kMaxScenes || g_scene_hooks[scene_index] == nullptr) {
+        return kMaxProxyGenerations;
+    }
+    return g_scene_hooks[scene_index]->proxy_generation;
 }
 #endif
 
