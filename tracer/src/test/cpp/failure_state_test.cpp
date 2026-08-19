@@ -21,6 +21,7 @@
 
 using CrashHandlerTestGate = void (*)();
 void crash_marker_test_set_handler_gate(CrashHandlerTestGate gate);
+void crash_marker_test_set_session_gate(CrashHandlerTestGate gate);
 
 namespace {
 
@@ -35,6 +36,8 @@ std::atomic<bool> g_handler_gate_entered{false};
 std::atomic<bool> g_release_handler_gate{false};
 std::atomic<bool> g_blocking_handler_entered{false};
 std::atomic<bool> g_release_blocking_handler{false};
+std::atomic<bool> g_session_gate_entered{false};
+std::atomic<bool> g_release_session_gate{false};
 
 void forwarding_handler(int) {
     g_forwarded_signals = static_cast<sig_atomic_t>(g_forwarded_signals + 1);
@@ -104,6 +107,62 @@ void handler_entry_gate() {
 void blocking_handler(int) {
     g_blocking_handler_entered = true;
     while (!g_release_blocking_handler.load()) std::this_thread::yield();
+}
+
+void session_lock_gate() {
+    g_session_gate_entered = true;
+    while (!g_release_session_gate.load()) std::this_thread::yield();
+}
+
+void selected_old_default_reaches_new_handler_without_overwriting_it() {
+    const pid_t child = ::fork();
+    if (child < 0) std::abort();
+    if (child == 0) {
+        char path[] = "/tmp/qtrace-crash-default-race-XXXXXX";
+        char *directory = mkdtemp(path);
+        if (directory == nullptr) _exit(141);
+        const std::string first_path = std::string(directory) + "/first";
+        const std::string cleanup_path = std::string(directory) + "/cleanup";
+        struct sigaction defaults{};
+        defaults.sa_handler = SIG_DFL;
+        sigemptyset(&defaults.sa_mask);
+        struct sigaction old_abort{};
+        if (::sigaction(SIGABRT, &defaults, &old_abort) != 0) _exit(142);
+        CrashMarkerSession first;
+        if (!first.open(first_path)) _exit(143);
+        g_handler_gate_entered = false;
+        g_release_handler_gate = false;
+        crash_marker_test_set_handler_gate(handler_entry_gate);
+        std::thread selected([] { (void)::raise(SIGABRT); });
+        while (!g_handler_gate_entered.load()) std::this_thread::yield();
+        if (!first.finish()) _exit(144);
+
+        struct sigaction replacement{};
+        replacement.sa_handler = forwarding_handler;
+        sigemptyset(&replacement.sa_mask);
+        if (::sigaction(SIGABRT, &replacement, nullptr) != 0) _exit(145);
+        g_forwarded_signals = 0;
+        g_release_handler_gate = true;
+        selected.join();
+        crash_marker_test_set_handler_gate(nullptr);
+        if (g_forwarded_signals != 1) _exit(146);
+        struct sigaction after{};
+        if (::sigaction(SIGABRT, nullptr, &after) != 0 ||
+            after.sa_handler != forwarding_handler) {
+            _exit(147);
+        }
+        CrashMarkerSession cleanup;
+        if (!cleanup.open(cleanup_path) || !cleanup.finish()) _exit(148);
+        (void)::sigaction(SIGABRT, &old_abort, nullptr);
+        (void)::unlink((first_path + ".crash").c_str());
+        (void)::rmdir(directory);
+        _exit(0);
+    }
+    int status = 0;
+    if (::waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        std::abort();
+    }
 }
 
 void check(bool condition, const char *expression, int line) {
@@ -454,7 +513,9 @@ void stale_default_action_still_terminates_by_the_original_signal() {
     CHECK(WTERMSIG(status) == SIGABRT);
     struct stat second_marker{};
     CHECK(::stat((second_path + ".crash").c_str(), &second_marker) == 0);
-    CHECK(second_marker.st_size == 0);
+    // The stale thunk only re-raises. The currently installed second generation
+    // owns that delivery and records it before its own saved default terminates.
+    CHECK(second_marker.st_size == static_cast<off_t>(sizeof(CrashMarker)));
     CHECK(::unlink((second_path + ".crash").c_str()) == 0);
     CHECK(::rmdir(directory) == 0);
 }
@@ -485,18 +546,15 @@ void stale_forwarding_preserves_mask_and_one_shot_reset_behavior() {
         if (sigaction(SIGABRT, &masked, nullptr) != 0) _exit(114);
         CrashMarkerSession second;
         if (!second.open(second_path)) _exit(115);
-        struct sigaction second_handler{};
-        if (sigaction(SIGABRT, nullptr, &second_handler) != 0) _exit(116);
-
         g_mask_result = 0;
         old_handler.sa_sigaction(SIGABRT, nullptr, nullptr);
         if (g_mask_result != 1) _exit(117);
         struct sigaction still_second{};
         if (sigaction(SIGABRT, nullptr, &still_second) != 0 ||
-            still_second.sa_sigaction != second_handler.sa_sigaction) {
+            still_second.sa_handler != SIG_DFL) {
             _exit(118);
         }
-        old_handler.sa_sigaction(SIGABRT, nullptr, nullptr);
+        (void)raise(SIGABRT);
         _exit(119);
     }
 
@@ -506,7 +564,7 @@ void stale_forwarding_preserves_mask_and_one_shot_reset_behavior() {
     CHECK(WTERMSIG(status) == SIGABRT);
     struct stat second_marker{};
     CHECK(::stat((second_path + ".crash").c_str(), &second_marker) == 0);
-    CHECK(second_marker.st_size == 0);
+    CHECK(second_marker.st_size == static_cast<off_t>(sizeof(CrashMarker)));
     CHECK(::unlink((second_path + ".crash").c_str()) == 0);
     CHECK(::rmdir(directory) == 0);
 }
@@ -860,22 +918,36 @@ void fork_detaches_inherited_crash_session_without_touching_parent_artifact() {
     const std::string parent_path = std::string(directory) + "/parent";
     const std::string child_path = std::string(directory) + "/child";
     CrashMarkerSession parent;
-    CHECK(parent.open(parent_path));
+    bool parent_opened = false;
+    g_session_gate_entered = false;
+    g_release_session_gate = false;
+    crash_marker_test_set_session_gate(session_lock_gate);
+    std::thread opening([&] { parent_opened = parent.open(parent_path); });
+    while (!g_session_gate_entered.load()) std::this_thread::yield();
+    std::atomic<bool> fork_started{false};
+    int status = -1;
+    std::thread forking([&] {
+        fork_started = true;
+        const pid_t child = ::fork();
+        if (child == 0) {
+            if (!parent.finish()) _exit(90);
+            CrashMarkerSession child_session;
+            if (child_session.open(child_path)) _exit(91);
+            if (child_session.error_code() != ECHILD) _exit(92);
+            if (::access((child_path + ".crash").c_str(), F_OK) == 0) _exit(93);
+            _exit(0);
+        }
+        if (child < 0 || ::waitpid(child, &status, 0) != child) status = -1;
+    });
+    while (!fork_started.load()) std::this_thread::yield();
+    g_release_session_gate = true;
+    opening.join();
+    crash_marker_test_set_session_gate(nullptr);
+    forking.join();
+    CHECK(parent_opened);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     struct stat before{};
     CHECK(::stat((parent_path + ".crash").c_str(), &before) == 0);
-
-    const pid_t child = ::fork();
-    CHECK(child >= 0);
-    if (child == 0) {
-        if (!parent.finish()) _exit(90);
-        CrashMarkerSession child_session;
-        if (!child_session.open(child_path)) _exit(91);
-        if (!child_session.finish()) _exit(92);
-        _exit(0);
-    }
-    int status = 0;
-    CHECK(::waitpid(child, &status, 0) == child);
-    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     struct stat after{};
     CHECK(::stat((parent_path + ".crash").c_str(), &after) == 0);
     CHECK(after.st_dev == before.st_dev && after.st_ino == before.st_ino);
@@ -932,20 +1004,24 @@ int main() {
     runtime_failures_preserve_the_first_code_and_finish_is_idempotent();
     metrics_sidecar_failure_is_stable_and_close_is_idempotent();
     setup_failure_is_distinct_from_a_legitimate_zero_return();
-    successful_run_removes_its_empty_crash_marker_and_restores_handlers();
+    // These subprocesses must establish their own crash session before this
+    // process installs its atfork lifecycle. Once installed, a fork child is
+    // intentionally detached and new trace setup fails safely.
+    selected_old_default_reaches_new_handler_without_overwriting_it();
     signal_writes_one_valid_fixed_size_marker_and_reraises();
+    stale_default_action_still_terminates_by_the_original_signal();
+    stale_forwarding_preserves_mask_and_one_shot_reset_behavior();
+    real_fault_preserves_siginfo_code_address_and_context();
+    successful_run_removes_its_empty_crash_marker_and_restores_handlers();
     concurrent_session_is_rejected_and_multiple_signals_write_once();
     delayed_handler_from_a_finished_run_cannot_touch_the_next_run();
     delayed_custom_handler_uses_old_semantics_without_consuming_the_new_marker();
     delayed_custom_handler_preserves_stale_nodefer_mask();
-    stale_default_action_still_terminates_by_the_original_signal();
-    stale_forwarding_preserves_mask_and_one_shot_reset_behavior();
     forwarded_handlers_keep_masks_nodefer_ignore_and_reset_semantics();
     finish_does_not_wait_for_a_stale_blocking_prior_handler();
     retired_forwarder_cannot_reinstall_after_a_blocking_custom_handler();
     custom_siginfo_receives_the_original_payload_and_context();
     retired_handler_blocks_new_sessions_and_same_path_reuse();
-    real_fault_preserves_siginfo_code_address_and_context();
     delayed_old_reset_handler_cannot_clobber_a_new_generation();
     fork_detaches_inherited_crash_session_without_touching_parent_artifact();
     artifact_names_are_unique_before_exclusive_trace_creation();

@@ -4,7 +4,6 @@
 #include <csignal>
 #include <fcntl.h>
 #include <mutex>
-#include <new>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -42,10 +41,13 @@ using CrashSignalHandler = void (*)(int, siginfo_t *, void *);
 CrashHandlerState g_handler_states[kMaxHandlerGenerations]{};
 size_t g_next_handler_generation = 0;
 std::once_flag g_atfork_once;
+volatile sig_atomic_t g_crash_child_detached = 0;
+volatile sig_atomic_t g_crash_prepare_locked = 0;
 
 #if defined(QTRACE_HOST_TEST)
 using CrashHandlerTestGate = void (*)();
 CrashHandlerTestGate g_handler_test_gate = nullptr;
+CrashHandlerTestGate g_session_test_gate = nullptr;
 #endif
 
 void install_atfork_once() {
@@ -84,20 +86,10 @@ void invoke_previous_preserving_semantics(CrashHandlerState &state, size_t index
     if (previous.sa_handler == SIG_IGN) return;
 
     if (previous.sa_handler == SIG_DFL) {
-        // Default behavior cannot be emulated with _exit: install the true default and
-        // re-raise so wait status/core semantics remain kernel-defined. This path does not
-        // return, so it cannot reinstall a retired tracer action.
-        if (::sigaction(signal_number, &previous, nullptr) == 0) {
-            sigset_t delivery_mask{};
-            if (context != nullptr) {
-                delivery_mask = static_cast<ucontext_t *>(context)->uc_sigmask;
-            } else {
-                (void)::sigprocmask(SIG_SETMASK, nullptr, &delivery_mask);
-                sigdelset(&delivery_mask, signal_number);
-            }
-            (void)::raise(signal_number);
-            (void)::sigprocmask(SIG_SETMASK, &delivery_mask, nullptr);
-        }
+        // The wrapper was installed with SA_RESETHAND, so the kernel reset its
+        // disposition before selecting this thunk. Re-raise only: if another owner
+        // installed meanwhile, the pending delivery reaches that current owner.
+        (void)::raise(signal_number);
         return;
     }
 
@@ -163,7 +155,7 @@ void crash_marker_handler_for_generation(size_t generation, int signal_number,
             struct sigaction current{};
             const struct sigaction previous = effective_previous(state, index);
             if (::sigaction(signal_number, nullptr, &current) == 0 &&
-                handler_is_ours(current, self)) {
+                handler_is_ours(current, self) && previous.sa_handler != SIG_DFL) {
                 (void)::sigaction(signal_number, &previous, nullptr);
             }
         }
@@ -254,6 +246,10 @@ void crash_marker_test_set_handler_gate(CrashHandlerTestGate gate) {
     g_handler_test_gate = gate;
 }
 
+void crash_marker_test_set_session_gate(CrashHandlerTestGate gate) {
+    g_session_test_gate = gate;
+}
+
 #endif
 
 bool valid_crash_marker(const CrashMarker &marker) noexcept {
@@ -262,14 +258,21 @@ bool valid_crash_marker(const CrashMarker &marker) noexcept {
 }
 
 void crash_marker_atfork_prepare() noexcept {
+    if (g_crash_child_detached != 0) return;
     g_session_mutex.lock();
+    g_crash_prepare_locked = 1;
 }
 
 void crash_marker_atfork_parent() noexcept {
+    if (g_crash_prepare_locked == 0) return;
+    g_crash_prepare_locked = 0;
     g_session_mutex.unlock();
 }
 
 void crash_marker_atfork_child() noexcept {
+    if (g_crash_prepare_locked == 0) return;
+    g_crash_child_detached = 1;
+    g_crash_prepare_locked = 0;
     for (size_t generation = 0; generation < g_next_handler_generation; ++generation) {
         CrashHandlerState &state = g_handler_states[generation];
         for (size_t index = 0; index < 5; ++index) {
@@ -286,15 +289,7 @@ void crash_marker_atfork_child() noexcept {
         if (state.retired_fd >= 0 && state.retired_fd != active_fd) {
             (void)::close(state.retired_fd);
         }
-        state.retired_fd = -1;
-        state.retired = false;
-        state.active_handlers = 0;
     }
-    g_session_owned = false;
-    g_owner_generation = static_cast<size_t>(-1);
-    g_session_mutex.unlock();
-    g_session_mutex.~mutex();
-    new (&g_session_mutex) std::mutex();
 }
 
 CrashMarkerSession::~CrashMarkerSession() {
@@ -302,6 +297,11 @@ CrashMarkerSession::~CrashMarkerSession() {
 }
 
 bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
+    if (g_crash_child_detached != 0) {
+        latch_error(&error_code_, ECHILD);
+        finish_called_ = true;
+        return false;
+    }
     install_atfork_once();
     if (opened_ || finish_called_ || trace_path.empty()) {
         latch_error(&error_code_, EINVAL);
@@ -309,6 +309,9 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
     }
 
     std::lock_guard<std::mutex> lock(g_session_mutex);
+#if defined(QTRACE_HOST_TEST)
+    if (g_session_test_gate != nullptr) g_session_test_gate();
+#endif
     reap_retired_generation();
     if (g_session_owned) {
         latch_error(&error_code_, EBUSY);
@@ -367,6 +370,9 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
         replacement.sa_flags = SA_SIGINFO |
                                (previous_[index].sa_flags &
                                 (SA_RESTART | SA_ONSTACK | SA_NODEFER | SA_RESETHAND));
+        if (previous_[index].sa_handler == SIG_DFL) {
+            replacement.sa_flags |= SA_RESETHAND;
+        }
         if (::sigaction(kCrashSignals[index], &replacement, nullptr) != 0) {
             latch_error(&error_code_, errno);
             for (size_t prior = 0; prior < index; ++prior) {

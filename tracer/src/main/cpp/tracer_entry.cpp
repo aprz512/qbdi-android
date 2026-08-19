@@ -7,6 +7,7 @@
 #include "hooks/inline_hook_adapter.h"
 
 #include <cstring>
+#include <csignal>
 #include <array>
 #include <atomic>
 #if defined(__ANDROID__)
@@ -14,7 +15,6 @@
 #endif
 #include <memory>
 #include <mutex>
-#include <new>
 #include <pthread.h>
 #include <thread>
 #include <unistd.h>
@@ -50,8 +50,9 @@ static constexpr size_t kProxyStubBytes = 8;
 static std::array<std::shared_ptr<InstalledSceneHook>, kMaxScenes> g_scene_hooks;
 static std::array<std::shared_ptr<InstalledSceneHook>, kMaxProxyGenerations>
         g_hook_generations;
+static std::array<InstalledSceneHook *, kMaxProxyGenerations> g_hook_generation_raw{};
 static size_t g_next_proxy_generation = 0;
-static bool g_child_detached = false;
+static volatile sig_atomic_t g_child_detached = 0;
 static size_t g_atfork_locked_generations = 0;
 
 #if defined(QTRACE_HOST_TEST)
@@ -70,6 +71,15 @@ extern "C" char trace_proxy_stubs[];
 
 extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[8],
                                           uint64_t indirect_result) {
+    if (g_child_detached != 0) {
+        if (generation >= kMaxProxyGenerations ||
+            g_hook_generation_raw[generation] == nullptr) {
+            return 0;
+        }
+        const uintptr_t target = reinterpret_cast<uintptr_t>(
+                g_hook_generation_raw[generation]->hook.retained_original);
+        return target == 0 ? 0 : call_target_arm64(target, args, indirect_result);
+    }
 #if defined(QTRACE_HOST_TEST)
     const RegistrationGate stub_gate = g_stub_entry_gate.load(std::memory_order_acquire);
     if (stub_gate != nullptr) stub_gate();
@@ -99,10 +109,9 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
         std::memcpy(invocation.args.data(), args, sizeof(invocation.args));
         invocation.indirect_result = indirect_result;
         execution_target = invocation.target_address;
-        if (g_child_detached || hook->retired) {
+        if (hook->retired) {
             execution_target = reinterpret_cast<uintptr_t>(hook->hook.retained_original);
             invocation.execution_address = execution_target;
-            use_original_bypass = g_child_detached;
         } else if (hook->installed) {
             if (hook->unhook_failed_window) {
                 execution_target = reinterpret_cast<uintptr_t>(hook->hook.retained_original);
@@ -140,12 +149,9 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                                                         invocation.args.data(),
                                                         invocation.indirect_result)
                                               : 0;
+    if (g_child_detached != 0) return result;
     {
         std::lock_guard<std::mutex> registry_guard(g_lock);
-        // If the traced target forked, the surviving child frame was counted in the
-        // parent's generation snapshot. The child atfork callback deliberately reset
-        // all counters and detached tracing, so this inherited frame has no postamble.
-        if (g_child_detached) return result;
         std::lock_guard<std::mutex> transition_guard(hook->transition_mutex);
         --hook->active_proxy_calls;
         if (hook->active_proxy_calls == 0) {
@@ -208,6 +214,7 @@ static bool create_hook_generation_locked(const TraceConfig &config,
 #endif
     slot->proxy_generation = generation;
     g_hook_generations[generation] = slot;
+    g_hook_generation_raw[generation] = slot.get();
     g_scene_hooks[scene.index] = slot;
     const uintptr_t target = module.start + scene.offset;
     const bool hooked = hook_function_address(target, proxy_for_generation(generation),
@@ -249,8 +256,9 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     std::lock_guard<std::mutex> guard(g_lock);
     g_scene_hooks.fill(nullptr);
     g_hook_generations.fill(nullptr);
+    g_hook_generation_raw.fill(nullptr);
     g_next_proxy_generation = 0;
-    g_child_detached = false;
+    g_child_detached = 0;
     g_config = config;
     ++g_config_generation;
     g_configured = true;
@@ -260,6 +268,7 @@ void trace_proxy_test_reset(const TraceConfig &config) {
 
 bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene,
                              const ModuleRange &module) {
+    if (g_child_detached != 0) return false;
     std::lock_guard<std::mutex> guard(g_lock);
     g_config = config;
     ++g_config_generation;
@@ -285,6 +294,7 @@ size_t trace_proxy_test_generation(size_t scene_index) {
 #endif
 
 static void tracer_atfork_prepare() {
+    if (g_child_detached != 0) return;
     g_lock.lock();
     g_atfork_locked_generations = 0;
     for (size_t generation = 0; generation < g_next_proxy_generation; ++generation) {
@@ -295,6 +305,7 @@ static void tracer_atfork_prepare() {
 }
 
 static void tracer_atfork_parent() {
+    if (g_child_detached != 0) return;
     size_t remaining = g_atfork_locked_generations;
     for (size_t generation = g_next_proxy_generation; generation-- > 0 && remaining != 0;) {
         if (g_hook_generations[generation] == nullptr) continue;
@@ -306,24 +317,12 @@ static void tracer_atfork_parent() {
 }
 
 static void tracer_atfork_child() {
-    g_configured = false;
-    g_child_detached = true;
-    for (size_t generation = 0; generation < g_next_proxy_generation; ++generation) {
-        if (g_hook_generations[generation] == nullptr) continue;
-        g_hook_generations[generation]->active_proxy_calls = 0;
-        g_hook_generations[generation]->pending_install = false;
-        g_hook_generations[generation]->transition_mutex.unlock();
-        g_hook_generations[generation]->transition_mutex.~mutex();
-        new (&g_hook_generations[generation]->transition_mutex) std::mutex();
-    }
-    g_atfork_locked_generations = 0;
-    g_lock.unlock();
-    g_lock.~mutex();
-    new (&g_lock) std::mutex();
+    g_child_detached = 1;
 }
 
 static void install_hooks_for_module(const ModuleRange &module,
                                      uint64_t expected_generation = 0) {
+    if (g_child_detached != 0) return;
     std::lock_guard<std::mutex> guard(g_lock);
     if (!g_configured || g_child_detached) return;
     if (expected_generation != 0 && expected_generation != g_config_generation) return;
@@ -349,10 +348,7 @@ static void install_hooks_when_ready(const TraceConfig &config, uint64_t generat
 
 extern "C" __attribute__((visibility("default"))) void
 qbdi_tracer_configure(const char *encoded_config) {
-    {
-        std::lock_guard<std::mutex> guard(g_lock);
-        if (g_child_detached) return;
-    }
+    if (g_child_detached != 0) return;
     TraceConfig config = parse_trace_config(encoded_config);
     if (!config.valid) {
         QTRACE_E("invalid tracer configuration: %s", config.error.c_str());
@@ -378,6 +374,7 @@ qbdi_tracer_configure(const char *encoded_config) {
 
 extern "C" __attribute__((visibility("default"))) void
 qbdi_tracer_install_module(const char *module_path, uintptr_t module_base, uintptr_t module_size) {
+    if (g_child_detached != 0) return;
     if (module_path == nullptr || module_base == 0 || module_size == 0) return;
 
     ModuleRange module;

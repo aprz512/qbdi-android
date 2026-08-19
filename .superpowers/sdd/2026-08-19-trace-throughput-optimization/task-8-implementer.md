@@ -60,6 +60,10 @@
 - New RED regressions cover a delayed saved `SA_RESETHAND|SA_NODEFER` thunk after a newer generation,
   fork while proxy registration holds the registry lock, fork with an active crash session, and
   repeated artifact reservations without inode/content aliasing.
+- Third re-review RED tests selected an old default-action wrapper, installed a newer handler while
+  its entry was gated, and reproduced termination from the old thunk's late `sigaction(SIG_DFL)`.
+  A child-callback contract test separately failed on mutex unlock/destruction/placement-new, while
+  lock-gated fork tests exercised the inherited registry, transition, and crash-session locks.
 
 ## GREEN
 
@@ -107,8 +111,9 @@
   and leaves the active count. It performs no close, flush, compression, lock, allocation, or
   logging. No synthetic signal is queued: custom `SA_SIGINFO` actions receive the exact original
   `siginfo_t *` and `ucontext_t *`, with original fault code/address, while mask, automatic
-  self-block/`SA_NODEFER`, `SA_RESETHAND`, `SIG_IGN`, and errno semantics are recreated. `SIG_DFL`
-  installs the true default and re-raises, preserving signal wait status/core behavior.
+  self-block/`SA_NODEFER`, `SA_RESETHAND`, `SIG_IGN`, and errno semantics are recreated. A saved
+  `SIG_DFL` gives the wrapper kernel-owned `SA_RESETHAND`; the thunk only re-raises, preserving
+  signal wait status without a late disposition write.
 - Teardown atomically claims an untouched fd, or retires a handler-owned fd without spinning.
   Immutable generation state stays valid, and a new session returns `EBUSY` until the entered old
   handler exits. Exclusive creation prevents pathname/inode reuse; cleanup compares the path inode
@@ -127,11 +132,12 @@
 - Crash wrappers inherit the prior mask plus kernel-applied `SA_NODEFER` and `SA_RESETHAND`. The
   kernel consumes one-shot disposition state when selecting the wrapper, so delayed old thunks make
   no later disposition write that could clobber a new/external handler.
-- Hook and crash globals install `pthread_atfork` lifecycles. The child reinitializes inherited
-  locks, detaches tracing to the saved bypass, restores owned dispositions, closes duplicate crash
-  fds without unlinking parent artifacts, and clears inherited crash ownership. Inherited session
-  objects are PID-tagged and inert in the child, while a target that forks skips the detached
-  child's inherited proxy postamble instead of underflowing parent accounting.
+- Hook and crash globals install `pthread_atfork` lifecycles. Prepare/parent use normal locking;
+  child callbacks use only lock-free `sig_atomic_t` state, atomic fd ownership, `close`, and
+  `sigaction` restoration—never mutex lifecycle or allocation. Child proxy/API paths detect detach
+  before inherited locks and call the generation-retained bypass exactly once; trace setup fails
+  safely with `ECHILD`. Parent artifacts remain untouched, inherited sessions are PID-inert, and
+  target-initiated fork skips the child proxy postamble before locking.
 - Trace paths include a process-local sequence. The writer prepares a path, reserves the crash
   sidecar first, and creates the trace with `O_EXCL`; no collision path uses `O_TRUNC`.
 
@@ -159,6 +165,10 @@
   `shadowhook_unhook` remains public; ARM64 bridge/stub disassembly remains ABI-correct.
 - Final independent scoped re-review reported Ready with no Critical or Important blockers after
   checking normal-unhook failure cleanup, inherited session destruction, and target-initiated fork.
+- Third-review focused races passed proxy/fork 100/100 and crash/signal/fork 50/50; the child
+  callback source contract confirms no mutex unlock, destruction, or placement-new remains.
+- Final scoped third re-review found no Critical or Important blockers in default forwarding,
+  child-callback safety, pre-lock detachment, or exact-once retained bypass execution.
 - `git diff --check` passed.
 - `adb devices` returned no connected devices. Per the brief, no device fallback-hash result is
   claimed; host seam, Debug/Release compile, and Release disassembly are the available evidence.
@@ -169,6 +179,7 @@
 - `fix: close trace failure race gaps`
 - `fix: retain trace failure generations`
 - `fix: preserve trace generations across lifecycle edges`
+- `fix: make crash and fork handoff race-safe`
 
 ## Deviations and Risks
 
