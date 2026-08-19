@@ -52,6 +52,7 @@ private:
     TraceFaultInjector *faults_ = nullptr;
     std::string path_;
     uint64_t elapsed_ms_ = 0;
+    uint64_t retval_ = 0;
     bool opened_ = false;
     bool began_ = false;
     bool ended_ = false;

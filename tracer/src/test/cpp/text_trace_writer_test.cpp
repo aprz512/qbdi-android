@@ -311,6 +311,7 @@ void emits_ordered_compressed_trace_and_closes_idempotently() {
 void emits_decodable_uncompressed_trace_with_consistent_final_metrics() {
     const std::string directory = make_temporary_directory();
     TraceOptions options{};
+    options.profile = TraceProfile::Balanced;
     options.compression_enabled = false;
     options.auto_buffer_size = false;
     options.buffer_bytes = 8192;
@@ -333,10 +334,16 @@ void emits_decodable_uncompressed_trace_with_consistent_final_metrics() {
     const std::string raw_bytes = metric_value(sidecar, "raw_bytes");
     CHECK(text.find("raw_bytes=" + raw_bytes + " ") != std::string::npos);
     CHECK(metric_value(sidecar, "instructions") == "1");
+    CHECK(metric_value(sidecar, "profile") == "balanced");
+    CHECK(metric_value(sidecar, "return") == "0x0");
     CHECK(metric_value(sidecar, "elapsed_ms") == "0");
     CHECK(metric_value(sidecar, "instructions_per_second") == "0.000000");
     CHECK(metric_value(sidecar, "compressed_bytes") == raw_bytes);
+    CHECK(metric_value(sidecar, "raw_bytes_per_second") == "0.000000");
+    CHECK(metric_value(sidecar, "disk_bytes_per_second") == "0.000000");
     CHECK(metric_value(sidecar, "compression_ratio") == "1.000000");
+    CHECK(metric_value(sidecar, "cache_hit_rate") == "0.000000");
+    CHECK(metric_value(sidecar, "effective_buffer_bytes") == "8192");
     CHECK(metric_value(sidecar, "buffer_swaps") == "1");
     CHECK(text.find("buffer_swaps=1 ") != std::string::npos);
     for (std::string_view key : {"cache_hits", "cache_misses", "buffer_swaps",

@@ -11,4 +11,5 @@ struct TraceMetrics {
     uint64_t buffer_swaps = 0;
     uint64_t producer_waits = 0;
     uint64_t producer_wait_ns = 0;
+    uint64_t effective_buffer_bytes = 0;
 };

@@ -81,6 +81,30 @@ bool write_unsigned_metric(int fd, const char *key, uint64_t value) {
            write_all(fd, line, static_cast<size_t>(size));
 }
 
+bool write_string_metric(int fd, const char *key, const char *value) {
+    char line[96];
+    const int size = std::snprintf(line, sizeof(line), "%s=%s\n", key, value);
+    return size > 0 && static_cast<size_t>(size) < sizeof(line) &&
+           write_all(fd, line, static_cast<size_t>(size));
+}
+
+bool write_hex_metric(int fd, const char *key, uint64_t value) {
+    char line[96];
+    const int size = std::snprintf(line, sizeof(line), "%s=0x%llx\n", key,
+                                   static_cast<unsigned long long>(value));
+    return size > 0 && static_cast<size_t>(size) < sizeof(line) &&
+           write_all(fd, line, static_cast<size_t>(size));
+}
+
+const char *metrics_profile_name(TraceProfile profile) {
+    switch (profile) {
+        case TraceProfile::Fast: return "fast";
+        case TraceProfile::Balanced: return "balanced";
+        case TraceProfile::Full: return "full";
+    }
+    return "unknown";
+}
+
 bool write_rate_metric(int fd, const char *key, unsigned __int128 numerator,
                        unsigned __int128 denominator) {
     char line[128];
@@ -154,6 +178,7 @@ bool TextTraceWriter::open_prepared() {
         QTRACE_E("open trace file failed: %s", path_.c_str());
         return fail(writer_.error_code());
     }
+    metrics_->effective_buffer_bytes = writer_.buffer_bytes();
     opened_ = true;
     return true;
 }
@@ -242,6 +267,7 @@ bool TextTraceWriter::write_raw_line(const std::string &line) {
 bool TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
     if (!opened_ || !began_ || ended_ || close_called_) return false;
     elapsed_ms_ = elapsed_ms > 0 ? static_cast<uint64_t>(elapsed_ms) : 0;
+    retval_ = retval;
     if (!healthy_writer_state()) return false;
     WritableSpan span = writer_.reserve(kMaxTraceEndLineBytes);
     if (span.data == nullptr) return fail();
@@ -293,20 +319,33 @@ bool TextTraceWriter::write_metrics_sidecar() {
         }
     }
 
-    bool ok = write_unsigned_metric(fd, "instructions", metrics_->instructions) &&
+    bool ok = write_string_metric(fd, "profile", metrics_profile_name(options_.profile)) &&
+              write_hex_metric(fd, "return", retval_) &&
+              write_unsigned_metric(fd, "instructions", metrics_->instructions) &&
               write_unsigned_metric(fd, "elapsed_ms", elapsed_ms_) &&
               write_rate_metric(fd, "instructions_per_second",
                                 static_cast<unsigned __int128>(metrics_->instructions) * 1000U,
                                 elapsed_ms_) &&
               write_unsigned_metric(fd, "raw_bytes", metrics_->raw_bytes) &&
               write_unsigned_metric(fd, "compressed_bytes", metrics_->compressed_bytes) &&
+              write_rate_metric(fd, "raw_bytes_per_second",
+                                static_cast<unsigned __int128>(metrics_->raw_bytes) * 1000U,
+                                elapsed_ms_) &&
+              write_rate_metric(fd, "disk_bytes_per_second",
+                                static_cast<unsigned __int128>(metrics_->compressed_bytes) * 1000U,
+                                elapsed_ms_) &&
               write_rate_metric(fd, "compression_ratio", metrics_->compressed_bytes,
                                 metrics_->raw_bytes) &&
               write_unsigned_metric(fd, "cache_hits", metrics_->cache_hits) &&
               write_unsigned_metric(fd, "cache_misses", metrics_->cache_misses) &&
+              write_rate_metric(fd, "cache_hit_rate", metrics_->cache_hits,
+                                static_cast<unsigned __int128>(metrics_->cache_hits) +
+                                    metrics_->cache_misses) &&
               write_unsigned_metric(fd, "buffer_swaps", metrics_->buffer_swaps) &&
               write_unsigned_metric(fd, "producer_waits", metrics_->producer_waits) &&
-              write_unsigned_metric(fd, "producer_wait_ns", metrics_->producer_wait_ns);
+              write_unsigned_metric(fd, "producer_wait_ns", metrics_->producer_wait_ns) &&
+              write_unsigned_metric(fd, "effective_buffer_bytes",
+                                    metrics_->effective_buffer_bytes);
     int operation_error = ok ? 0 : (errno == 0 ? EIO : errno);
     if (::close(fd) != 0 && ok) {
         operation_error = errno == 0 ? EIO : errno;
