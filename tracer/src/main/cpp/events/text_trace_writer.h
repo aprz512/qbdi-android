@@ -12,7 +12,9 @@
 
 class TextTraceWriter {
 public:
-    explicit TextTraceWriter(const TraceOptions &options, TraceMetrics *metrics);
+    explicit TextTraceWriter(const TraceOptions &options, TraceMetrics *metrics,
+                             TraceWriterBackend *backend = nullptr,
+                             TraceFaultInjector *faults = nullptr);
     ~TextTraceWriter();
 
     TextTraceWriter(const TextTraceWriter &) = delete;
@@ -28,11 +30,13 @@ public:
     bool write_raw_line(const std::string &line);
     bool end(uint64_t retval, bool ok, long elapsed_ms);
     bool close();
-    bool failed() const { return facade_failed_ || writer_.failed(); }
+    bool failed() const { return !healthy_writer_state(); }
 
     const std::string &path() const { return path_; }
 
 private:
+    bool healthy_writer_state() const;
+    bool writable_event_state() const;
     bool append_encoded_event(std::string_view event_type, std::string_view name,
                               std::string_view detail);
     bool write_metrics_sidecar() const;

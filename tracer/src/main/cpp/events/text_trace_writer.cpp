@@ -99,8 +99,9 @@ bool write_rate_metric(int fd, const char *key, unsigned __int128 numerator,
 
 } // namespace
 
-TextTraceWriter::TextTraceWriter(const TraceOptions &options, TraceMetrics *metrics)
-    : options_(options), metrics_(metrics) {}
+TextTraceWriter::TextTraceWriter(const TraceOptions &options, TraceMetrics *metrics,
+                                 TraceWriterBackend *backend, TraceFaultInjector *faults)
+    : options_(options), metrics_(metrics), writer_(backend, faults) {}
 
 TextTraceWriter::~TextTraceWriter() {
     close();
@@ -109,6 +110,14 @@ TextTraceWriter::~TextTraceWriter() {
 bool TextTraceWriter::fail() {
     facade_failed_ = true;
     return false;
+}
+
+bool TextTraceWriter::healthy_writer_state() const {
+    return !facade_failed_ && !writer_.failed();
+}
+
+bool TextTraceWriter::writable_event_state() const {
+    return opened_ && began_ && !ended_ && !close_called_ && healthy_writer_state();
 }
 
 bool TextTraceWriter::open(const TraceContext &context) {
@@ -129,7 +138,7 @@ bool TextTraceWriter::open(const TraceContext &context) {
 }
 
 bool TextTraceWriter::begin(const TraceContext &context) {
-    if (!opened_ || began_ || ended_ || close_called_) return false;
+    if (!opened_ || began_ || ended_ || close_called_ || !healthy_writer_state()) return false;
     const size_t effective_buffer_bytes = writer_.buffer_bytes();
     if (effective_buffer_bytes == 0) return fail();
     const EncodeResult measured = encoder_.encode_begin(
@@ -145,7 +154,7 @@ bool TextTraceWriter::begin(const TraceContext &context) {
 }
 
 bool TextTraceWriter::instruction(const TraceContext &context, const InstructionRecord &record) {
-    if (!opened_ || !began_ || ended_ || close_called_) return false;
+    if (!writable_event_state()) return false;
     WritableSpan span = writer_.reserve(kMaxInstructionLineBytes);
     if (span.data == nullptr) return fail();
     const EncodeResult result =
@@ -162,7 +171,7 @@ bool TextTraceWriter::instruction(const TraceContext &context, const Instruction
 
 bool TextTraceWriter::memory(const TraceContext &context, uintptr_t pc,
                              const MemoryRecord &record) {
-    if (!opened_ || !began_ || ended_ || close_called_) return false;
+    if (!writable_event_state()) return false;
     const uintptr_t relative_pc = pc >= context.module_base ? pc - context.module_base : 0;
     char encoded[kMaxInstructionLineBytes];
     const EncodeResult result = encoder_.encode_memory(encoded, sizeof(encoded),
@@ -174,7 +183,7 @@ bool TextTraceWriter::memory(const TraceContext &context, uintptr_t pc,
 
 bool TextTraceWriter::append_encoded_event(std::string_view event_type, std::string_view name,
                                            std::string_view detail) {
-    if (!opened_ || !began_ || ended_ || close_called_) return false;
+    if (!writable_event_state()) return false;
     const EncodeResult measured = encoder_.encode_event(nullptr, 0, event_type, name, detail);
     if (measured.size == 0) return fail();
     std::string encoded(measured.size, '\0');
@@ -186,6 +195,7 @@ bool TextTraceWriter::append_encoded_event(std::string_view event_type, std::str
 
 bool TextTraceWriter::call(const char *category, const std::string &name,
                            const std::string &detail) {
+    if (!writable_event_state()) return false;
     std::string qualified_name = category == nullptr ? std::string{} : std::string(category);
     if (!qualified_name.empty() && !name.empty()) qualified_name.push_back('.');
     qualified_name += name;
@@ -193,14 +203,17 @@ bool TextTraceWriter::call(const char *category, const std::string &name,
 }
 
 bool TextTraceWriter::rule(const std::string &name, const std::string &detail) {
+    if (!writable_event_state()) return false;
     return append_encoded_event("RULE", name, detail);
 }
 
 bool TextTraceWriter::error(const std::string &message) {
+    if (!writable_event_state()) return false;
     return append_encoded_event("ERROR", {}, message);
 }
 
 bool TextTraceWriter::write_raw_line(const std::string &line) {
+    if (!writable_event_state()) return false;
     const size_t size = !line.empty() && line.back() == '\n' ? line.size() - 1U : line.size();
     return append_encoded_event(std::string_view(line.data(), size), {}, {});
 }
@@ -208,7 +221,7 @@ bool TextTraceWriter::write_raw_line(const std::string &line) {
 bool TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
     if (!opened_ || !began_ || ended_ || close_called_) return false;
     elapsed_ms_ = elapsed_ms > 0 ? static_cast<uint64_t>(elapsed_ms) : 0;
-    if (facade_failed_ || writer_.failed()) return false;
+    if (!healthy_writer_state()) return false;
     WritableSpan span = writer_.reserve(kMaxTraceEndLineBytes);
     if (span.data == nullptr) return fail();
 
@@ -274,8 +287,7 @@ bool TextTraceWriter::close() {
 
     const bool trace_ok = writer_.finish();
     opened_ = false;
-    close_result_ = trace_ok && ended_ && !facade_failed_ && !writer_.failed() &&
-                    write_metrics_sidecar();
+    close_result_ = trace_ok && ended_ && healthy_writer_state() && write_metrics_sidecar();
     if (ended_ && !close_result_) facade_failed_ = true;
     return close_result_;
 }

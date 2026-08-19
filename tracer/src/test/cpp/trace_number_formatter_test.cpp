@@ -31,6 +31,11 @@ void formats_fixed_six_rates_without_allocation() {
     result = format_fixed_six(output, sizeof(output), large, 1);
     CHECK(result.ok);
     CHECK(std::string_view(output, result.size) == "18446744073709551615000.000000");
+
+    const unsigned __int128 maximum = ~static_cast<unsigned __int128>(0);
+    result = format_fixed_six(output, sizeof(output), maximum - 1U, maximum);
+    CHECK(result.ok);
+    CHECK(std::string_view(output, result.size) == "0.999999");
 }
 
 void rejects_small_output_without_partial_writes() {

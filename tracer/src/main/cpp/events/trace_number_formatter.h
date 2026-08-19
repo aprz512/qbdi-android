@@ -29,8 +29,20 @@ inline FixedSixResult format_fixed_six(char *output, size_t capacity,
     while (whole_size != 0) output[offset++] = reversed[--whole_size];
     output[offset++] = '.';
     for (size_t index = 0; index < 6; ++index) {
-        const unsigned __int128 digit = denominator == 0 ? 0 : (remainder * 10U) / denominator;
-        remainder = denominator == 0 ? 0 : (remainder * 10U) % denominator;
+        unsigned int digit = 0;
+        unsigned __int128 next_remainder = 0;
+        if (denominator != 0) {
+            const unsigned __int128 wrap_threshold = denominator - remainder;
+            for (unsigned int add = 0; add < 10; ++add) {
+                if (next_remainder >= wrap_threshold) {
+                    next_remainder -= wrap_threshold;
+                    ++digit;
+                } else {
+                    next_remainder += remainder;
+                }
+            }
+        }
+        remainder = next_remainder;
         output[offset++] = static_cast<char>('0' + digit);
     }
     return {true, offset};

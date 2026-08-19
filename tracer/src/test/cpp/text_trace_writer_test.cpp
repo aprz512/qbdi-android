@@ -37,6 +37,30 @@ void check(bool condition, const char *expression, int line) {
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
+class CountingBackend final : public TraceWriterBackend {
+public:
+    int open_file(const char *, int, unsigned int) noexcept override {
+        ++open_calls;
+        return 91;
+    }
+
+    ssize_t write_file(int, const void *, size_t size) noexcept override {
+        ++write_calls;
+        bytes_written += size;
+        return static_cast<ssize_t>(size);
+    }
+
+    int close_file(int) noexcept override {
+        ++close_calls;
+        return 0;
+    }
+
+    std::atomic<unsigned int> open_calls{0};
+    std::atomic<unsigned int> write_calls{0};
+    std::atomic<unsigned int> close_calls{0};
+    std::atomic<uint64_t> bytes_written{0};
+};
+
 bool has_suffix(const char *path, std::string_view suffix) {
     return path != nullptr && std::string_view(path).ends_with(suffix);
 }
@@ -462,7 +486,8 @@ void latches_facade_encoding_failures_for_semantic_callers() {
     options.auto_buffer_size = false;
     options.buffer_bytes = 4096;
     TraceMetrics metrics{};
-    TextTraceWriter writer(options, &metrics);
+    CountingBackend backend;
+    TextTraceWriter writer(options, &metrics, &backend);
     TraceContext context = trace_context(directory);
 
     CHECK(writer.open(context));
@@ -470,12 +495,29 @@ void latches_facade_encoding_failures_for_semantic_callers() {
     context.target_so = std::string(kMaxInstructionLineBytes, 'm');
     CHECK(!writer.instruction(context, instruction_record()));
     CHECK(writer.failed());
+    const uint64_t raw_bytes_after_failure = metrics.raw_bytes;
+    const size_t allocations_after_failure = g_allocations.load(std::memory_order_relaxed);
+    context.target_so = "libdemo_target.so";
+    MemoryRecord memory{};
+    constexpr char long_category[] =
+        "category-long-enough-to-require-qualified-name-allocation-after-the-latch";
+    CHECK(!writer.instruction(context, instruction_record()));
+    CHECK(!writer.memory(context, context.target_address, memory));
+    CHECK(!writer.call(long_category, "later", "detail"));
+    CHECK(!writer.rule("later", "detail"));
+    CHECK(!writer.error("later"));
+    CHECK(!writer.write_raw_line("LATER"));
+    CHECK(metrics.raw_bytes == raw_bytes_after_failure);
+    CHECK(g_allocations.load(std::memory_order_relaxed) == allocations_after_failure);
     CHECK(!writer.end(0, false, 5));
     CHECK(!writer.close());
     CHECK(!writer.close());
+    CHECK(backend.open_calls.load(std::memory_order_relaxed) == 1);
+    CHECK(backend.write_calls.load(std::memory_order_relaxed) == 1);
+    CHECK(backend.bytes_written.load(std::memory_order_relaxed) == raw_bytes_after_failure);
+    CHECK(backend.close_calls.load(std::memory_order_relaxed) == 1);
     CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
 
-    CHECK(::unlink(writer.path().c_str()) == 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
