@@ -64,6 +64,7 @@ target_link_libraries(async_trace_writer_test PRIVATE lz4_static Threads::Thread
 
 add_trace_test(text_trace_writer_test
     text_trace_writer_test.cpp
+    ../../main/cpp/core/trace_run_session.cpp
     ../../main/cpp/events/text_trace_writer.cpp
     ../../main/cpp/events/trace_encoder.cpp
     ../../main/cpp/events/async_trace_writer.cpp)

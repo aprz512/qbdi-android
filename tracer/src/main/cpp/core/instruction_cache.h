@@ -1,53 +1,9 @@
 #pragma once
 
-#include <array>
+#include "core/arm64_memory_operand.h"
+
 #include <cstddef>
 #include <cstdint>
-
-constexpr size_t kArm64RegisterCount = 34;
-constexpr size_t kMaxCapturedMemoryBytes = 64;
-
-struct RegisterSnapshot {
-    std::array<uint64_t, kArm64RegisterCount> values{};
-};
-
-enum class MemoryIndexExtend : uint8_t { None, Uxtw, Sxtw, Lsl, Sxtx };
-enum class MemoryAddressMode : uint8_t { Offset, PreIndex, PostIndex };
-enum class MemoryAccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
-enum class MemoryBytesState : uint8_t { NotCaptured, Available, Unavailable };
-
-struct MemoryBytes {
-    std::array<uint8_t, kMaxCapturedMemoryBytes> data{};
-    uint8_t size = 0;
-    MemoryBytesState state = MemoryBytesState::NotCaptured;
-};
-
-using MemoryReadFunction = bool (*)(uintptr_t, void *, size_t);
-
-size_t bounded_memory_capture_size(size_t access_size, size_t configured_limit) noexcept;
-void capture_memory_bytes(uintptr_t address, size_t access_size, size_t configured_limit,
-                          MemoryReadFunction reader, MemoryBytes *capture) noexcept;
-uint64_t truncate_memory_value(uint64_t value, uint32_t access_size,
-                               uint16_t access_flags) noexcept;
-
-struct MemoryOperand {
-    static constexpr uint8_t kNoRegister = UINT8_MAX;
-
-    uint8_t base_reg = kNoRegister;
-    uint8_t index_reg = kNoRegister;
-    MemoryIndexExtend extend = MemoryIndexExtend::None;
-    MemoryAddressMode address_mode = MemoryAddressMode::Offset;
-    uint8_t shift = 0;
-    MemoryAccessKind kind = MemoryAccessKind::Read;
-    uint32_t access_size = 0;
-    int64_t displacement = 0;
-    bool writeback = false;
-
-    bool try_effective_address(const RegisterSnapshot &registers,
-                               uintptr_t *address) const noexcept;
-    uintptr_t effective_address(const RegisterSnapshot &registers) const noexcept;
-    uintptr_t writeback_address(const RegisterSnapshot &registers) const noexcept;
-};
 
 enum class InstructionFlags : uint32_t {
     None = 0,
@@ -85,12 +41,6 @@ struct CachedInstruction {
 
     uintptr_t absolute_branch_target(uintptr_t pc) const;
 };
-
-bool cache_memory_operand(CachedInstruction *instruction,
-                          const MemoryOperand &operand) noexcept;
-bool decode_arm64_memory_operands(CachedInstruction *instruction, uint32_t opcode,
-                                  bool may_load, bool may_store, uint32_t load_size,
-                                  uint32_t store_size) noexcept;
 
 bool arm64_branch_displacement(int64_t instruction_units, int32_t *byte_displacement) noexcept;
 void cache_gpr_access(CachedInstruction *instruction, size_t index, const char *register_name,

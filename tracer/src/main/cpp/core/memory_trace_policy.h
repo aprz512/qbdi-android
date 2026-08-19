@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/instruction_cache.h"
+#include "core/memory_capture.h"
 #include "core/trace_config.h"
 #include "events/trace_record.h"
 

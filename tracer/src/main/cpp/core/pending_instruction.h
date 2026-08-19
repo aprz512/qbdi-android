@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/instruction_cache.h"
 #include "events/trace_record.h"
 
 #include <array>

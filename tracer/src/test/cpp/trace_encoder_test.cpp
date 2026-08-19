@@ -1,3 +1,4 @@
+#include "core/instruction_cache.h"
 #include "events/trace_encoder.h"
 
 #include <array>

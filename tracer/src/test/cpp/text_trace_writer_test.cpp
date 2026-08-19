@@ -1,5 +1,6 @@
+#include "core/instruction_cache.h"
 #include "events/text_trace_writer.h"
-#include "core/trace_callback_gate.h"
+#include "core/trace_run_session.h"
 #include "lz4frame.h"
 
 #include <atomic>
@@ -489,11 +490,12 @@ void failed_trace_footer_does_not_publish_success_metrics() {
     TraceMetrics metrics{};
     TextTraceWriter writer(options, &metrics);
     const TraceContext context = trace_context(directory);
-    TraceCallbackGate gate;
+    TraceRunSessionOutcome session;
 
     CHECK(writer.open(context));
     CHECK(writer.begin(context));
-    gate.observe_memory_instrumentation(true, false, false);
+    session.observe_trace_setup(true);
+    session.observe_memory_instrumentation(true, false, false);
     bool target_ran = false;
     const auto run_target = [&] {
         target_ran = true;
@@ -501,10 +503,15 @@ void failed_trace_footer_does_not_publish_success_metrics() {
     };
     const uint64_t target_retval = run_target();
     CHECK(target_ran);
-    CHECK(!gate.enabled());
-    CHECK(writer.end(target_retval,
-                     gate.completion_succeeded(true, writer.failed()), 4));
-    CHECK(writer.close());
+    session.observe_target_call(true, target_retval, writer.failed());
+    CHECK(!session.footer_success());
+    const bool end_ok = writer.end(session.return_value(),
+                                   session.footer_success(), 4);
+    const bool close_ok = writer.close();
+    session.observe_finalization(end_ok, close_ok);
+    CHECK(!session.completion_success());
+    CHECK(!session.should_log_success());
+    CHECK(session.return_value() == 73);
     CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
     const std::string text = read_text_file(writer.path());
     CHECK(text.find("TRACE_END status=failed ret=0x49") != std::string::npos);

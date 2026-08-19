@@ -1,3 +1,6 @@
+#include "core/arm64_memory_decoder.h"
+#include "core/arm64_memory_operand.h"
+
 #include "core/instruction_cache.h"
 
 #include <algorithm>

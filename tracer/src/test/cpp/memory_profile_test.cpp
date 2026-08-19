@@ -1,4 +1,8 @@
+#include "core/arm64_memory_decoder.h"
+#include "core/arm64_memory_operand.h"
 #include "core/instruction_cache.h"
+#include "core/memory_capture.h"
+#include "core/memory_types.h"
 #include "core/memory_trace_policy.h"
 #include "core/pending_instruction.h"
 #include "core/safe_memory.h"
@@ -436,7 +440,7 @@ void applies_hexdump_limits_per_normalized_access() {
     assert(captured.after.size == 8);
 }
 
-void reports_fixed_policy_overflow_and_registration_failures_honestly() {
+void reports_fixed_policy_overflow_honestly() {
     MemoryTracePolicy policy;
     CachedInstruction decoded{};
     decoded.memory_operand_count = CachedInstruction::kMaxMemoryOperands;
@@ -621,7 +625,7 @@ int main() {
     preserves_policy_records_through_more_than_eight_accesses();
     applies_post_rule_state_and_rejects_stopped_pre_work();
     applies_hexdump_limits_per_normalized_access();
-    reports_fixed_policy_overflow_and_registration_failures_honestly();
+    reports_fixed_policy_overflow_honestly();
     enforces_profile_and_hexdump_caps_with_safe_reads();
     encodes_byte_states_flags_and_overflow_in_exact_order();
     truncates_known_memory_values_to_access_width();

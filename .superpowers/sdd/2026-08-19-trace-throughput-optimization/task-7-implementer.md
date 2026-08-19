@@ -17,6 +17,9 @@
 - Independent repair review added three final RED slices: mixed-PC continuation filtering failed to
   compile without a policy-owned filter, registration failure lacked a connected runner-outcome
   scenario, and unconditional metadata broke the pre-existing format-2 exact encoder tests.
+- The formal re-review required a production runner seam. Its RED test failed at configuration
+  because `trace_run_session` did not exist; the public-cohesion compile test then failed because
+  focused ARM64 operand and memory-type headers did not exist.
 
 ## GREEN
 
@@ -55,6 +58,15 @@
   target return value is preserved. Failed traces do not publish a success metrics sidecar.
 - Expected-PC filtering is policy-owned and host-tested with a wrong-PC access injected between 11
   accepted accesses; the accepted records retain exact 8-attached plus 3-continuation order.
+- `TraceRunSessionOutcome` now owns trace setup, memory registration, target result/return value,
+  footer status, end/close finalization, completion/log decision, and returned value. The QBDI
+  runner consumes those decisions directly. Its connected production-seam test runs the target
+  after registration failure, preserves return value 73, writes a failed footer, publishes no
+  metrics sidecar, and selects the error-log decision.
+- Public declarations now match source ownership: memory kinds/byte state live in `memory_types.h`,
+  capture/truncation APIs in `memory_capture.h`, ARM64 formula layout in
+  `arm64_memory_operand.h`, and decoder entry points in `arm64_memory_decoder.h`.
+  `instruction_cache.h` retains only cache-owned interfaces/data. Cached layout is unchanged.
 
 ## Verification
 
@@ -73,6 +85,7 @@
 
 - `feat: add configurable memory trace profiles`
 - Repair: `fix: repair memory trace profile policy`
+- Connected runner repair: `fix: connect trace runner finalization`
 
 ## Deviations and Risks
 

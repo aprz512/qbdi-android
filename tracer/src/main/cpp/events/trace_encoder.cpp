@@ -1,4 +1,5 @@
 #include "events/trace_encoder.h"
+#include "core/instruction_cache.h"
 #include "events/trace_number_formatter.h"
 
 #include <algorithm>

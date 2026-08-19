@@ -1,9 +1,8 @@
 #include "core/qbdi_runner.h"
 #include "core/instruction_collector.h"
 #include "core/instruction_cache.h"
-#include "core/memory_trace_policy.h"
 #include "core/logging.h"
-#include "core/trace_callback_gate.h"
+#include "core/trace_run_session.h"
 #include "handlers/call_handlers.h"
 #include "rules/code_rule.h"
 
@@ -24,7 +23,7 @@ struct RunnerState {
     TextTraceWriter writer;
     CodeRuleEngine code_rules;
     ExecTransferMonitor exec_transfer;
-    TraceCallbackGate trace_gate;
+    TraceRunSessionOutcome session;
 };
 
 constexpr uint32_t kQbdiVirtualStackSize = 0x1000000;
@@ -38,8 +37,9 @@ static QBDI::VMAction
 on_exec_transfer(QBDI::VM *, const QBDI::VMState *vm_state, QBDI::GPRState *gpr,
                  QBDI::FPRState *, void *data) {
     auto *state = static_cast<RunnerState *>(data);
-    state->trace_gate.observe_failure(state->writer.failed());
-    return state->trace_gate.trace(QBDI::CONTINUE, [&] {
+    TraceCallbackGate *gate = state->session.callback_gate();
+    gate->observe_failure(state->writer.failed());
+    return gate->trace(QBDI::CONTINUE, [&] {
         emit_exec_transfer_event(&state->exec_transfer, vm_state, gpr, &state->writer);
         return !state->writer.failed();
     });
@@ -59,18 +59,20 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     register_user_code_rules(state.code_rules);
 
     if (!state.writer.open(state.context)) {
-        state.trace_gate.observe_failure(true);
+        state.session.observe_trace_setup(false);
         QTRACE_E("open trace file failed");
     } else if (!state.writer.begin(state.context)) {
-        state.trace_gate.observe_failure(true);
+        state.session.observe_trace_setup(false);
         state.writer.close();
         QTRACE_E("begin trace failed");
+    } else {
+        state.session.observe_trace_setup(true);
     }
 
     auto started = std::chrono::steady_clock::now();
     InstructionCache instruction_cache;
     InstructionCollector collector(&instruction_cache, &state.writer, &state.code_rules,
-                                   &state.context, &state.trace_gate, config.trace);
+                                   &state.context, state.session.callback_gate(), config.trace);
     QBDI::VM vm;
     QBDI::GPRState *gpr = vm.getGPRState();
 
@@ -116,11 +118,13 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
                                                     &collector)
                                           : QBDI::INVALID_EVENTID;
         const bool callback_valid = callback != QBDI::INVALID_EVENTID;
-        state.trace_gate.observe_memory_instrumentation(true, recording,
-                                                        callback_valid);
+        state.session.observe_memory_instrumentation(true, recording,
+                                                     callback_valid);
         if (!recording || !callback_valid) {
             state.writer.error("QBDI memory instrumentation unavailable");
         }
+    } else {
+        state.session.observe_memory_instrumentation(false, false, false);
     }
     vm.addVMEventCB(QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN, on_exec_transfer,
                     &state);
@@ -135,18 +139,19 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     state.metrics.cache_hits = instruction_cache.metrics().hits;
     state.metrics.cache_misses = instruction_cache.metrics().misses;
 
-    const bool trace_ok = state.trace_gate.completion_succeeded(
-            ok, state.writer.failed());
-    const bool end_ok = state.writer.end(retVal, trace_ok,
+    state.session.observe_target_call(ok, retVal, state.writer.failed());
+    const bool end_ok = state.writer.end(state.session.return_value(),
+                                         state.session.footer_success(),
                                          elapsed_ms_since(started));
     const bool close_ok = state.writer.close();
+    state.session.observe_finalization(end_ok, close_ok);
     QBDI::alignedFree(fakestack);
-    if (trace_ok && end_ok && close_ok) {
+    if (state.session.should_log_success()) {
         QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),
                  state.writer.path().c_str());
     } else {
         QTRACE_E("trace %s write failed path=%s", invocation.scene.name.c_str(),
                  state.writer.path().c_str());
     }
-    return retVal;
+    return state.session.return_value();
 }

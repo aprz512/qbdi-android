@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/instruction_cache.h"
+#include "core/arm64_memory_operand.h"
 
 #include <array>
 #include <cstddef>
@@ -11,6 +11,8 @@ constexpr size_t kMaxRegisterNameBytes = 16;
 constexpr size_t kMaxMemoryRecords = 8;
 constexpr size_t kMaxHexdumpBytes = kMaxCapturedMemoryBytes;
 constexpr size_t kMaxInstructionLineBytes = 4096;
+
+struct CachedInstruction;
 
 struct MemoryRecord {
     MemoryAccessKind kind = MemoryAccessKind::Read;

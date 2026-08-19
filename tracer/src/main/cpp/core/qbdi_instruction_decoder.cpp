@@ -1,4 +1,5 @@
 #include "core/qbdi_instruction_decoder.h"
+#include "core/arm64_memory_decoder.h"
 
 #include <cctype>
 #include <cstring>
