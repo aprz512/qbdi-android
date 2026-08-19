@@ -30,7 +30,8 @@ struct InstructionRecord {
     const CachedInstruction *decoded = nullptr;
     // Borrowed display identities supplied by the decoder (for example W0, LR, SP, NZCV, PC).
     // Each non-null name must remain readable across both encoder passes.
-    std::array<const char *, kTraceGprCount> register_names{};
+    std::array<const char *, kTraceGprCount> read_register_names{};
+    std::array<const char *, kTraceGprCount> write_register_names{};
     std::array<uint64_t, kTraceGprCount> before{};
     std::array<uint64_t, kTraceGprCount> after{};
     std::array<MemoryRecord, kMaxMemoryRecords> memory{};

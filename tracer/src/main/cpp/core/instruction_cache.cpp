@@ -1,5 +1,7 @@
 #include "core/instruction_cache.h"
 
+#include <cstring>
+#include <limits>
 #include <sys/mman.h>
 
 struct InstructionCache::MetadataChunk {
@@ -15,6 +17,47 @@ void *map_zeroed(std::size_t size) noexcept {
 }
 
 } // namespace
+
+bool arm64_branch_displacement(int64_t instruction_units,
+                               int32_t *byte_displacement) noexcept {
+    if (byte_displacement == nullptr) return false;
+    constexpr int64_t scale = 4;
+    if (instruction_units < std::numeric_limits<int32_t>::min() / scale ||
+        instruction_units > std::numeric_limits<int32_t>::max() / scale) {
+        return false;
+    }
+    *byte_displacement = static_cast<int32_t>(instruction_units * scale);
+    return true;
+}
+
+void cache_gpr_access(CachedInstruction *instruction, size_t index,
+                      const char *register_name, uint8_t width_bytes, bool reads,
+                      bool writes) noexcept {
+    if (instruction == nullptr || index >= CachedInstruction::kGprCount) return;
+
+    const auto update = [register_name, width_bytes](uint8_t &cached_width, char *cached_name) {
+        if (cached_width != 0 && width_bytes <= cached_width) return;
+        cached_width = width_bytes;
+        if (register_name == nullptr) return;
+        size_t character = 0;
+        while (character + 1U < CachedInstruction::kRegisterNameBytes &&
+               register_name[character] != '\0') {
+            cached_name[character] = register_name[character];
+            ++character;
+        }
+        cached_name[character] = '\0';
+    };
+
+    const uint64_t bit = 1ULL << index;
+    if (reads) {
+        instruction->read_gpr_mask |= bit;
+        update(instruction->read_gpr_widths[index], instruction->read_register_names[index]);
+    }
+    if (writes) {
+        instruction->write_gpr_mask |= bit;
+        update(instruction->write_gpr_widths[index], instruction->write_register_names[index]);
+    }
+}
 
 uintptr_t CachedInstruction::absolute_branch_target(uintptr_t pc) const {
     return static_cast<uintptr_t>(static_cast<intptr_t>(pc) + static_cast<intptr_t>(pc_relative_displacement));

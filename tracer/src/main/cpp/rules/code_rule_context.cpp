@@ -11,7 +11,7 @@ namespace {
 }
 
 CodeRuleContext::CodeRuleContext(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr,
-                                 const QBDI::InstAnalysis *instruction, const TraceContext *trace,
+                                 const InstructionView *instruction, const TraceContext *trace,
                                  TextTraceWriter *writer)
         : vm_(vm), gpr_(gpr), fpr_(fpr), instruction_(instruction), trace_(trace),
           writer_(writer) {}
@@ -35,30 +35,39 @@ bool CodeRuleContext::at_offset(uintptr_t expected_offset) const {
 }
 
 const char *CodeRuleContext::mnemonic() const {
-    return instruction_ != nullptr && instruction_->mnemonic != nullptr ? instruction_->mnemonic
-                                                                        : "";
+    return instruction_ != nullptr && instruction_->decoded != nullptr
+                   ? instruction_->decoded->mnemonic
+                   : "";
 }
 
 const char *CodeRuleContext::disassembly() const {
-    if (instruction_ == nullptr) return "";
-    if (instruction_->disassembly != nullptr) return instruction_->disassembly;
-    return instruction_->mnemonic != nullptr ? instruction_->mnemonic : "";
+    if (instruction_ == nullptr || instruction_->decoded == nullptr) return "";
+    if (instruction_->decoded->disassembly[0] != '\0') return instruction_->decoded->disassembly;
+    return instruction_->decoded->mnemonic;
 }
 
 bool CodeRuleContext::is_call() const {
-    return instruction_ != nullptr && instruction_->isCall;
+    return instruction_ != nullptr && instruction_->decoded != nullptr &&
+           (static_cast<uint32_t>(instruction_->decoded->flags) &
+            static_cast<uint32_t>(InstructionFlags::Call)) != 0;
 }
 
 bool CodeRuleContext::is_branch() const {
-    return instruction_ != nullptr && instruction_->isBranch;
+    return instruction_ != nullptr && instruction_->decoded != nullptr &&
+           (static_cast<uint32_t>(instruction_->decoded->flags) &
+            static_cast<uint32_t>(InstructionFlags::Branch)) != 0;
 }
 
 bool CodeRuleContext::is_return() const {
-    return instruction_ != nullptr && instruction_->isReturn;
+    return instruction_ != nullptr && instruction_->decoded != nullptr &&
+           (static_cast<uint32_t>(instruction_->decoded->flags) &
+            static_cast<uint32_t>(InstructionFlags::Return)) != 0;
 }
 
 QBDI::ConditionType CodeRuleContext::condition() const {
-    return instruction_ != nullptr ? instruction_->condition : QBDI::CONDITION_NONE;
+    return instruction_ != nullptr && instruction_->decoded != nullptr
+                   ? static_cast<QBDI::ConditionType>(instruction_->decoded->condition)
+                   : QBDI::CONDITION_NONE;
 }
 
 uint64_t CodeRuleContext::reg(size_t index) const {

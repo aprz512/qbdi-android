@@ -52,11 +52,11 @@ void preserves_architecture_register_display_names() {
     record.pc = 0x1020;
     record.module_base = 0x1000;
     record.decoded = &decoded;
-    record.register_names[0] = "W0";
-    record.register_names[30] = "LR";
-    record.register_names[31] = "SP";
-    record.register_names[32] = "NZCV";
-    record.register_names[33] = "PC";
+    record.read_register_names[0] = "W0";
+    record.read_register_names[30] = "LR";
+    record.read_register_names[31] = "SP";
+    record.write_register_names[32] = "NZCV";
+    record.write_register_names[33] = "PC";
     record.before[0] = 1;
     record.before[30] = 2;
     record.before[31] = 3;
@@ -70,6 +70,31 @@ void preserves_architecture_register_display_names() {
     assert(result.ok);
     assert(std::string_view(output, result.size) ==
            "8 libx.so+0x20 mov | R:W0=0x1 LR=0x2 SP=0x3 | W:NZCV=0x4 PC=0x5\n");
+}
+
+void preserves_distinct_read_and_write_aliases_for_one_physical_register() {
+    static CachedInstruction decoded{};
+    std::strcpy(decoded.mnemonic, "ldr");
+    decoded.read_gpr_mask = 1ULL;
+    decoded.write_gpr_mask = 1ULL;
+
+    InstructionRecord record{};
+    record.sequence = 9;
+    record.pc = 0x1024;
+    record.module_base = 0x1000;
+    record.decoded = &decoded;
+    record.read_register_names[0] = "X0";
+    record.write_register_names[0] = "W0";
+    record.before[0] = 0x123456789;
+    record.after[0] = 7;
+
+    char output[256]{};
+    TraceEncoder encoder;
+    const EncodeResult result =
+        encoder.encode_instruction(output, sizeof(output), "libx.so", record);
+    assert(result.ok);
+    assert(std::string_view(output, result.size) ==
+           "9 libx.so+0x24 ldr | R:X0=0x123456789 | W:W0=0x7\n");
 }
 
 void encodes_memory_event_exactly() {
@@ -216,6 +241,7 @@ void encodes_zero_cache_total_as_zero_rate() {
 int main() {
     encodes_instruction_exactly();
     preserves_architecture_register_display_names();
+    preserves_distinct_read_and_write_aliases_for_one_physical_register();
     encodes_memory_event_exactly();
     rejects_insufficient_instruction_buffer_without_writing();
     encodes_begin_end_and_semantic_event();

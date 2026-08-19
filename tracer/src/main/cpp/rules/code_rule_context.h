@@ -2,9 +2,9 @@
 
 #include "events/text_trace_writer.h"
 #include "events/trace_event.h"
+#include "core/instruction_cache.h"
 
 #include <QBDI.h>
-#include <QBDI/InstAnalysis.h>
 #include <QBDI/State.h>
 
 #include <cstddef>
@@ -14,7 +14,7 @@
 class CodeRuleContext {
 public:
     CodeRuleContext(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr,
-                    const QBDI::InstAnalysis *instruction, const TraceContext *trace,
+                    const InstructionView *instruction, const TraceContext *trace,
                     TextTraceWriter *writer);
 
     QBDI::VM *vm() const { return vm_; }
@@ -23,7 +23,7 @@ public:
 
     QBDI::FPRState *fpr() const { return fpr_; }
 
-    const QBDI::InstAnalysis *instruction() const { return instruction_; }
+    const InstructionView *instruction() const { return instruction_; }
 
     uintptr_t address() const;
 
@@ -87,7 +87,7 @@ private:
     QBDI::VM *vm_ = nullptr;
     QBDI::GPRState *gpr_ = nullptr;
     QBDI::FPRState *fpr_ = nullptr;
-    const QBDI::InstAnalysis *instruction_ = nullptr;
+    const InstructionView *instruction_ = nullptr;
     const TraceContext *trace_ = nullptr;
     TextTraceWriter *writer_ = nullptr;
 };

@@ -52,6 +52,9 @@ add_library(qbdi_tracer SHARED
         tracer_entry.cpp
         core/module_maps.cpp
         core/instruction_cache.cpp
+        core/qbdi_instruction_decoder.cpp
+        core/pending_instruction.cpp
+        core/instruction_collector.cpp
         core/safe_memory.cpp
         events/text_trace_writer.cpp
         events/async_trace_writer.cpp

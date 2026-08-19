@@ -7,6 +7,8 @@ enum class InstructionFlags : uint32_t {
     None = 0,
     Branch = 1U << 0U,
     PcRelative = 1U << 1U,
+    Call = 1U << 2U,
+    Return = 1U << 3U,
 };
 
 constexpr InstructionFlags operator|(InstructionFlags left, InstructionFlags right) {
@@ -14,17 +16,29 @@ constexpr InstructionFlags operator|(InstructionFlags left, InstructionFlags rig
 }
 
 struct CachedInstruction {
+    static constexpr size_t kGprCount = 34;
+    static constexpr size_t kRegisterNameBytes = 16;
+
     uint32_t opcode = 0;
     uint64_t read_gpr_mask = 0;
     uint64_t write_gpr_mask = 0;
+    uint8_t read_gpr_widths[kGprCount]{};
+    uint8_t write_gpr_widths[kGprCount]{};
     int32_t pc_relative_displacement = 0;
+    uint8_t condition = 0;
     InstructionFlags flags = InstructionFlags::None;
     char mnemonic[16]{};
     char operands[96]{};
     char disassembly[112]{};
+    char read_register_names[kGprCount][kRegisterNameBytes]{};
+    char write_register_names[kGprCount][kRegisterNameBytes]{};
 
     uintptr_t absolute_branch_target(uintptr_t pc) const;
 };
+
+bool arm64_branch_displacement(int64_t instruction_units, int32_t *byte_displacement) noexcept;
+void cache_gpr_access(CachedInstruction *instruction, size_t index, const char *register_name,
+                      uint8_t width_bytes, bool reads, bool writes) noexcept;
 
 struct InstructionView {
     uintptr_t address = 0;

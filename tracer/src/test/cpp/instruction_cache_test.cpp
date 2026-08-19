@@ -20,6 +20,34 @@ void multi_chunk_entries_resolve_through_the_fixed_index() {
     assert(cache.find(4096)->pc_relative_displacement == 4096);
 }
 
+void converts_qbdi_arm64_branch_units_to_byte_displacements() {
+    int32_t displacement = 0;
+    assert(arm64_branch_displacement(4, &displacement));
+    assert(displacement == 16);
+    assert(arm64_branch_displacement(-4, &displacement));
+    assert(displacement == -16);
+    assert(!arm64_branch_displacement((static_cast<int64_t>(INT32_MAX) / 4) + 1,
+                                      &displacement));
+    assert(!arm64_branch_displacement(1, nullptr));
+}
+
+void preserves_mixed_aliases_and_chooses_width_independently_of_operand_order() {
+    CachedInstruction decoded{};
+    cache_gpr_access(&decoded, 0, "W0", 4, true, false);
+    cache_gpr_access(&decoded, 0, "X0", 8, true, false);
+    cache_gpr_access(&decoded, 0, "W0", 4, false, true);
+    assert(std::strcmp(decoded.read_register_names[0], "X0") == 0);
+    assert(decoded.read_gpr_widths[0] == 8);
+    assert(std::strcmp(decoded.write_register_names[0], "W0") == 0);
+    assert(decoded.write_gpr_widths[0] == 4);
+
+    CachedInstruction reversed{};
+    cache_gpr_access(&reversed, 0, "X0", 8, true, false);
+    cache_gpr_access(&reversed, 0, "W0", 4, true, false);
+    assert(std::strcmp(reversed.read_register_names[0], "X0") == 0);
+    assert(reversed.read_gpr_widths[0] == 8);
+}
+
 } // namespace
 
 int main() {
@@ -50,4 +78,6 @@ int main() {
     assert(cache.find(collision.opcode) == replacement);
 
     multi_chunk_entries_resolve_through_the_fixed_index();
+    converts_qbdi_arm64_branch_units_to_byte_displacements();
+    preserves_mixed_aliases_and_chooses_width_independently_of_operand_order();
 }

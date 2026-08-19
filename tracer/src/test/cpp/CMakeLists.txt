@@ -29,6 +29,15 @@ add_trace_test(instruction_cache_test
     instruction_cache_test.cpp
     ../../main/cpp/core/instruction_cache.cpp)
 
+add_trace_test(instruction_collector_test
+    instruction_collector_test.cpp
+    ../../main/cpp/core/pending_instruction.cpp)
+
+add_trace_test(qbdi_instruction_decoder_test
+    qbdi_instruction_decoder_test.cpp
+    ../../main/cpp/core/qbdi_instruction_decoder.cpp
+    ../../main/cpp/core/instruction_cache.cpp)
+
 add_trace_test(code_rule_test
     code_rule_test.cpp
     ../../main/cpp/rules/code_rule.cpp)

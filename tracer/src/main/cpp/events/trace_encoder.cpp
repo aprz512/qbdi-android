@@ -90,8 +90,9 @@ bool append_c_string(AppendBuffer &buffer, const char *value, size_t maximum) no
 }
 
 bool append_register_name(AppendBuffer &buffer, const InstructionRecord &record,
-                          size_t index) noexcept {
-    const char *name = record.register_names[index];
+                          size_t index, bool write) noexcept {
+    const char *name = write ? record.write_register_names[index]
+                             : record.read_register_names[index];
     if (name != nullptr && name[0] != '\0') {
         return append_c_string(buffer, name, kMaxRegisterNameBytes);
     }
@@ -172,7 +173,8 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
             } else if (!append_char(buffer, ' ')) {
                 return false;
             }
-            if (!append_register_name(buffer, record, index) || !append_literal(buffer, "=0x") ||
+            if (!append_register_name(buffer, record, index, false) ||
+                !append_literal(buffer, "=0x") ||
                 !append_hex_u64(buffer, record.before[index])) {
                 return false;
             }
@@ -187,7 +189,8 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
             } else if (!append_char(buffer, ' ')) {
                 return false;
             }
-            if (!append_register_name(buffer, record, index) || !append_literal(buffer, "=0x") ||
+            if (!append_register_name(buffer, record, index, true) ||
+                !append_literal(buffer, "=0x") ||
                 !append_hex_u64(buffer, record.after[index])) {
                 return false;
             }
