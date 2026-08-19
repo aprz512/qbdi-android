@@ -7,6 +7,14 @@ const config = {
   remoteDir: '/data/local/tmp/qbdi-android',
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
+  trace: {
+    profile: 'fast',
+    compression: true,
+    lz4Level: 0,
+    autoBuffer: true,
+    bufferMb: 0,
+    hexdumpLimit: 32
+  },
   scenes: {
     init: { offset: '0x6AC90' },
     jni: { offset: '0x6DCA8' },
@@ -31,6 +39,13 @@ function loadLibrary(path) {
 
 function encodeConfig(cfg) {
   const parts = ['package=' + cfg.packageName, 'target=' + cfg.targetSo];
+  parts.push(
+    'profile=' + cfg.trace.profile,
+    'compression=' + (cfg.trace.compression ? '1' : '0'),
+    'lz4_level=' + cfg.trace.lz4Level,
+    'auto_buffer=' + (cfg.trace.autoBuffer ? '1' : '0'),
+    'buffer_mb=' + cfg.trace.bufferMb,
+    'hexdump_limit=' + cfg.trace.hexdumpLimit);
   for (const [name, scene] of Object.entries(cfg.scenes)) {
     parts.push(['scene=' + name, scene.offset].join(','));
   }

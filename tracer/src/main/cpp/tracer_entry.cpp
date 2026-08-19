@@ -116,8 +116,12 @@ static void install_hooks_when_ready(const TraceConfig &config) {
 
 extern "C" __attribute__((visibility("default"))) void
 qbdi_tracer_configure(const char *encoded_config) {
-    if (!init_inline_hook()) return;
     TraceConfig config = parse_trace_config(encoded_config);
+    if (!config.valid) {
+        QTRACE_E("invalid tracer configuration: %s", config.error.c_str());
+        return;
+    }
+    if (!init_inline_hook()) return;
     {
         std::lock_guard<std::mutex> guard(g_lock);
         g_config = config;

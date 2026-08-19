@@ -5,6 +5,14 @@ module.exports = {
   remoteDir: '/data/local/tmp/qbdi-android',
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
+  trace: {
+    profile: 'fast',
+    compression: true,
+    lz4Level: 0,
+    autoBuffer: true,
+    bufferMb: 0,
+    hexdumpLimit: 32
+  },
   scenes: {
     init: { offset: '0x6AC90' },
     jni: { offset: '0x6DCA8' },
