@@ -13,8 +13,8 @@ constexpr size_t kMaxHexdumpBytes = kMaxCapturedMemoryBytes;
 constexpr size_t kMaxInstructionLineBytes = 4096;
 
 struct MemoryRecord {
-    char type = 'r';
-    uint8_t access_type = 0;
+    MemoryAccessKind kind = MemoryAccessKind::Read;
+    bool metadata_available = false;
     uint16_t flags = 0;
     uintptr_t address = 0;
     uint32_t size = 0;

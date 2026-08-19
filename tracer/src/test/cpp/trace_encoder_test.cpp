@@ -99,7 +99,7 @@ void preserves_distinct_read_and_write_aliases_for_one_physical_register() {
 
 void encodes_memory_event_exactly() {
     MemoryRecord memory{};
-    memory.type = 'w';
+    memory.kind = MemoryAccessKind::Write;
     memory.address = 0x2000;
     memory.size = 8;
     memory.value = 0x42;
@@ -168,7 +168,7 @@ void bounds_memory_hexdump_and_null_inputs() {
     record.module_base = 0x1000;
     record.memory_count = static_cast<uint8_t>(kMaxMemoryRecords + 1U);
     for (size_t i = 0; i < kMaxMemoryRecords; ++i) {
-        record.memory[i].type = 'w';
+        record.memory[i].kind = MemoryAccessKind::Write;
         record.memory[i].address = 0x2000 + i;
         record.memory[i].size = 4;
         record.memory[i].value = i;
@@ -182,7 +182,8 @@ void bounds_memory_hexdump_and_null_inputs() {
     assert(result.ok);
     const std::string_view text(output, result.size);
     assert(text.starts_with("1 <unknown>+0x0 <undecoded>"));
-    assert(text.find("MEM:w addr=0x2000 size=4 value=0x0 hex=abab") != std::string_view::npos);
+    assert(text.find("MEM:w addr=0x2000 size=4 value=0x0 hex=abab") !=
+           std::string_view::npos);
     assert(text.find("MEM:w addr=0x2008") == std::string_view::npos);
     const size_t first_hex = text.find(" hex=");
     const size_t second_memory = text.find(" | MEM:", first_hex);

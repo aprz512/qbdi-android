@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/instruction_cache.h"
+#include "core/memory_trace_policy.h"
 #include "core/pending_instruction.h"
 #include "core/trace_config.h"
 
@@ -39,15 +40,7 @@ public:
 private:
     InstructionView resolve(QBDI::VM *vm, const QBDI::GPRState *gpr) noexcept;
     static RegisterSnapshot snapshot(const QBDI::GPRState &gpr, uint64_t mask) noexcept;
-    void capture_pre_memory(QBDI::VM *vm, const QBDI::GPRState &gpr) noexcept;
-    MemoryRecord memory_record(const QBDI::MemoryAccess &access) const noexcept;
-
-    struct PreMemoryCapture {
-        uintptr_t address = 0;
-        uint32_t access_size = 0;
-        uint8_t access_type = 0;
-        MemoryBytes bytes{};
-    };
+    void capture_pre_memory(QBDI::VM *vm) noexcept;
 
     InstructionCache *cache_ = nullptr;
     TextTraceWriter *writer_ = nullptr;
@@ -59,7 +52,6 @@ private:
     bool decode_memory_ = false;
     CachedInstruction uncached_{};
     InstructionView current_view_{};
-    std::array<PreMemoryCapture, CachedInstruction::kMaxMemoryOperands> pre_memory_{};
-    uint8_t pre_memory_count_ = 0;
+    MemoryTracePolicy memory_policy_{};
     PendingInstructionCollector pending_;
 };

@@ -33,6 +33,17 @@ bool decode_current_instruction(uint32_t opcode, void *data,
     return true;
 }
 
+MemoryAccessKind memory_kind(QBDI::MemoryAccessType type) noexcept {
+    if (type == QBDI::MEMORY_READ_WRITE) return MemoryAccessKind::ReadWrite;
+    return type == QBDI::MEMORY_WRITE ? MemoryAccessKind::Write
+                                      : MemoryAccessKind::Read;
+}
+
+NormalizedMemoryAccess normalize(const QBDI::MemoryAccess &access) noexcept {
+    return {access.instAddress, access.accessAddress, access.value, access.size,
+            memory_kind(access.type), static_cast<uint16_t>(access.flags)};
+}
+
 } // namespace
 
 InstructionCollector::InstructionCollector(InstructionCache *cache, TextTraceWriter *writer,
@@ -55,8 +66,6 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
     }
 
     current_view_ = resolve(vm, gpr);
-    pre_memory_count_ = 0;
-    if (profile_ == TraceProfile::Full && gpr != nullptr) capture_pre_memory(vm, *gpr);
     CodeRuleContext rule_context(
             vm, gpr, fpr, &current_view_, trace_,
             trace_gate_ != nullptr ? trace_gate_->writer_or_null(writer_) : writer_);
@@ -64,7 +73,20 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                           ? code_rules_->on_pre_instruction(rule_context)
                                           : QBDI::CONTINUE;
     if (trace_gate_ != nullptr && writer_ != nullptr) trace_gate_->observe_failure(writer_->failed());
-    if (action != QBDI::CONTINUE || gpr == nullptr) return action;
+    const bool continues = action == QBDI::CONTINUE && gpr != nullptr;
+    if (profile_ == TraceProfile::Full) {
+        const CachedInstruction empty{};
+        const CachedInstruction &decoded = current_view_.decoded != nullptr
+                                                   ? *current_view_.decoded
+                                                   : empty;
+        const RegisterSnapshot registers = gpr != nullptr
+                                                   ? snapshot(*gpr, UINT64_MAX)
+                                                   : RegisterSnapshot{};
+        memory_policy_.capture_after_rule(profile_, continues, decoded, registers,
+                                          hexdump_limit_, safe_read_memory);
+    }
+    if (!continues) return action;
+    if (profile_ == TraceProfile::Full) capture_pre_memory(vm);
 
     const uint64_t read_mask = current_view_.decoded != nullptr
                                        ? current_view_.decoded->read_gpr_mask
@@ -86,9 +108,14 @@ QBDI::VMAction InstructionCollector::on_memory(QBDI::VM *vm, QBDI::GPRState *gpr
                                                         ? snapshot(*gpr, pending_.pending_write_mask())
                                                         : RegisterSnapshot{};
         for (const auto &access: accesses) {
-            if (access.instAddress != current_view_.address) continue;
+            const NormalizedMemoryAccess normalized = normalize(access);
+            MemoryRecord memory{};
+            if (!memory_policy_.record_if_matches(
+                        current_view_.address, normalized, profile_, hexdump_limit_,
+                        safe_read_memory, &memory)) {
+                continue;
+            }
             matched = true;
-            const MemoryRecord memory = memory_record(access);
             if (gpr == nullptr || !pending_.append_or_emit_memory(memory, post_registers)) {
                 return false;
             }
@@ -177,88 +204,17 @@ RegisterSnapshot InstructionCollector::snapshot(const QBDI::GPRState &gpr,
     return result;
 }
 
-void InstructionCollector::capture_pre_memory(QBDI::VM *vm,
-                                              const QBDI::GPRState &gpr) noexcept {
-    if (current_view_.decoded == nullptr) return;
-    const RegisterSnapshot registers = snapshot(gpr, UINT64_MAX);
-    const size_t operand_count = std::min(
-            static_cast<size_t>(current_view_.decoded->memory_operand_count),
-            CachedInstruction::kMaxMemoryOperands);
-    for (size_t index = 0; index < operand_count; ++index) {
-        const MemoryOperand &operand = current_view_.decoded->memory_operands[index];
-        uintptr_t address = 0;
-        if (!operand.try_effective_address(registers, &address)) continue;
-        PreMemoryCapture &capture = pre_memory_[pre_memory_count_++];
-        capture.address = address;
-        capture.access_size = operand.access_size;
-        capture.access_type = operand.access_type;
-        capture_memory_bytes(address, operand.access_size, hexdump_limit_, safe_read_memory,
-                             &capture.bytes);
-    }
+void InstructionCollector::capture_pre_memory(QBDI::VM *vm) noexcept {
     if (!current_view_.decoded->requires_slow_memory_path || vm == nullptr ||
-        pre_memory_count_ >= pre_memory_.size()) {
+        memory_policy_.pre_capture_count() >=
+                MemoryTracePolicy::kMaxPreMemoryCaptures) {
         return;
     }
     const auto accesses = vm->getInstMemoryAccess();
     for (const auto &access: accesses) {
-        if (access.instAddress != current_view_.address ||
-            pre_memory_count_ >= pre_memory_.size()) {
-            continue;
-        }
-        bool duplicate = false;
-        for (size_t index = 0; index < pre_memory_count_; ++index) {
-            duplicate = duplicate ||
-                        (pre_memory_[index].address == access.accessAddress &&
-                         pre_memory_[index].access_size == access.size);
-        }
-        if (duplicate) continue;
-        PreMemoryCapture &capture = pre_memory_[pre_memory_count_++];
-        capture.address = access.accessAddress;
-        capture.access_size = access.size;
-        capture.access_type = static_cast<uint8_t>(access.type);
-        capture_memory_bytes(capture.address, capture.access_size, hexdump_limit_,
-                             safe_read_memory, &capture.bytes);
+        const NormalizedMemoryAccess normalized = normalize(access);
+        if (!memory_policy_.matches_instruction(current_view_.address, normalized)) continue;
+        memory_policy_.add_pre_access(normalized, hexdump_limit_,
+                                      safe_read_memory);
     }
-}
-
-MemoryRecord InstructionCollector::memory_record(
-        const QBDI::MemoryAccess &access) const noexcept {
-    MemoryRecord memory{};
-    memory.access_type = static_cast<uint8_t>(access.type);
-    memory.type = access.type == QBDI::MEMORY_WRITE ? 'w' : 'r';
-    memory.flags = static_cast<uint16_t>(access.flags);
-    memory.address = access.accessAddress;
-    memory.size = access.size;
-    memory.value = truncate_memory_value(access.value, access.size, memory.flags);
-
-    if (profile_ != TraceProfile::Full) return memory;
-    const size_t capture_size = bounded_memory_capture_size(access.size, hexdump_limit_);
-    if (capture_size == 0) return memory;
-    memory.before.state = MemoryBytesState::Unavailable;
-
-    for (size_t index = 0; index < pre_memory_count_; ++index) {
-        const PreMemoryCapture &capture = pre_memory_[index];
-        if (memory.address < capture.address) {
-            continue;
-        }
-        const uintptr_t offset = memory.address - capture.address;
-        if (offset > capture.access_size || capture_size > capture.access_size - offset) continue;
-        if (capture.bytes.state != MemoryBytesState::Available) {
-            memory.before.state = capture.bytes.state == MemoryBytesState::Unavailable
-                                          ? MemoryBytesState::Unavailable
-                                          : memory.before.state;
-            break;
-        }
-        if (offset > capture.bytes.size || capture_size > capture.bytes.size - offset) continue;
-        std::memcpy(memory.before.data.data(), capture.bytes.data.data() + offset, capture_size);
-        memory.before.size = static_cast<uint8_t>(capture_size);
-        memory.before.state = MemoryBytesState::Available;
-        break;
-    }
-
-    if ((memory.access_type & static_cast<uint8_t>(QBDI::MEMORY_WRITE)) != 0) {
-        capture_memory_bytes(memory.address, memory.size, hexdump_limit_, safe_read_memory,
-                             &memory.after);
-    }
-    return memory;
 }

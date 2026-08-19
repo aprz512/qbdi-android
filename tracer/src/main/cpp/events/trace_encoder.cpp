@@ -100,12 +100,28 @@ bool append_register_name(AppendBuffer &buffer, const InstructionRecord &record,
 }
 
 bool append_memory_type(AppendBuffer &buffer, const MemoryRecord &memory) noexcept {
-    switch (memory.access_type) {
-        case 1: return append_char(buffer, 'r');
-        case 2: return append_char(buffer, 'w');
-        case 3: return append_literal(buffer, "rw");
-        default: return append_char(buffer, memory.type);
+    switch (memory.kind) {
+        case MemoryAccessKind::Read: return append_char(buffer, 'r');
+        case MemoryAccessKind::Write: return append_char(buffer, 'w');
+        case MemoryAccessKind::ReadWrite: return append_literal(buffer, "rw");
     }
+    return false;
+}
+
+bool append_hex_bytes(AppendBuffer &buffer, const uint8_t *bytes,
+                      size_t size) noexcept {
+    for (size_t index = 0; index < size; ++index) {
+        const uint8_t value = bytes[index];
+        const uint8_t high = value >> 4U;
+        const uint8_t low = value & 0xfU;
+        if (!append_char(buffer, static_cast<char>(high < 10U ? '0' + high
+                                                              : 'a' + high - 10U)) ||
+            !append_char(buffer, static_cast<char>(low < 10U ? '0' + low
+                                                             : 'a' + low - 10U))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool append_memory_bytes(AppendBuffer &buffer, const char *label,
@@ -120,31 +136,17 @@ bool append_memory_bytes(AppendBuffer &buffer, const char *label,
     }
     const size_t size = std::min(static_cast<size_t>(bytes.size),
                                  kMaxCapturedMemoryBytes);
-    for (size_t index = 0; index < size; ++index) {
-        const uint8_t value = bytes.data[index];
-        const uint8_t high = value >> 4U;
-        const uint8_t low = value & 0xfU;
-        if (!append_char(buffer, static_cast<char>(high < 10U ? '0' + high
-                                                              : 'a' + high - 10U)) ||
-            !append_char(buffer, static_cast<char>(low < 10U ? '0' + low
-                                                             : 'a' + low - 10U))) {
-            return false;
-        }
-    }
-    return true;
+    return append_hex_bytes(buffer, bytes.data.data(), size);
 }
 
 bool append_memory_details(AppendBuffer &buffer,
                            const MemoryRecord &memory) noexcept {
-    if (memory.access_type != 0 || memory.flags != 0 ||
-        memory.before.state != MemoryBytesState::NotCaptured ||
-        memory.after.state != MemoryBytesState::NotCaptured) {
-        if (!append_literal(buffer, " flags=0x") ||
-            !append_hex_u64(buffer, memory.flags) ||
-            !append_memory_bytes(buffer, "pre", memory.before) ||
-            !append_memory_bytes(buffer, "post", memory.after)) {
-            return false;
-        }
+    if (!memory.metadata_available) return true;
+    if (!append_literal(buffer, " flags=0x") ||
+        !append_hex_u64(buffer, memory.flags) ||
+        !append_memory_bytes(buffer, "pre", memory.before) ||
+        !append_memory_bytes(buffer, "post", memory.after)) {
+        return false;
     }
     return true;
 }
@@ -259,15 +261,7 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
         }
         const size_t hexdump_size = std::min(static_cast<size_t>(memory.hexdump_size), kMaxHexdumpBytes);
         if (hexdump_size != 0 && !append_literal(buffer, " hex=")) return false;
-        for (size_t byte = 0; byte < hexdump_size; ++byte) {
-            const uint8_t value = memory.hexdump[byte];
-            const char high = static_cast<char>((value >> 4U) < 10U ? '0' + (value >> 4U)
-                                                                       : 'a' + ((value >> 4U) - 10U));
-            const uint8_t low_nibble = static_cast<uint8_t>(value & 0xfU);
-            const char low = static_cast<char>(low_nibble < 10U ? '0' + low_nibble
-                                                                : 'a' + (low_nibble - 10U));
-            if (!append_char(buffer, high) || !append_char(buffer, low)) return false;
-        }
+        if (!append_hex_bytes(buffer, memory.hexdump.data(), hexdump_size)) return false;
     }
     return append_char(buffer, '\n');
 }

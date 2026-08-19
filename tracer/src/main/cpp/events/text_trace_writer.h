@@ -51,6 +51,7 @@ private:
     bool opened_ = false;
     bool began_ = false;
     bool ended_ = false;
+    bool successful_end_ = false;
     bool close_called_ = false;
     bool close_result_ = false;
     bool facade_failed_ = false;

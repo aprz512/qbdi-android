@@ -1,6 +1,7 @@
 #include "core/qbdi_runner.h"
 #include "core/instruction_collector.h"
 #include "core/instruction_cache.h"
+#include "core/memory_trace_policy.h"
 #include "core/logging.h"
 #include "core/trace_callback_gate.h"
 #include "handlers/call_handlers.h"
@@ -114,9 +115,11 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
                                                     InstructionCollector::memory_callback,
                                                     &collector)
                                           : QBDI::INVALID_EVENTID;
-        if (!recording || callback == QBDI::INVALID_EVENTID) {
+        const bool callback_valid = callback != QBDI::INVALID_EVENTID;
+        state.trace_gate.observe_memory_instrumentation(true, recording,
+                                                        callback_valid);
+        if (!recording || !callback_valid) {
             state.writer.error("QBDI memory instrumentation unavailable");
-            state.trace_gate.observe_failure(true);
         }
     }
     vm.addVMEventCB(QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN, on_exec_transfer,
@@ -132,10 +135,13 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     state.metrics.cache_hits = instruction_cache.metrics().hits;
     state.metrics.cache_misses = instruction_cache.metrics().misses;
 
-    const bool end_ok = state.writer.end(retVal, ok, elapsed_ms_since(started));
+    const bool trace_ok = state.trace_gate.completion_succeeded(
+            ok, state.writer.failed());
+    const bool end_ok = state.writer.end(retVal, trace_ok,
+                                         elapsed_ms_since(started));
     const bool close_ok = state.writer.close();
     QBDI::alignedFree(fakestack);
-    if (end_ok && close_ok) {
+    if (trace_ok && end_ok && close_ok) {
         QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),
                  state.writer.path().c_str());
     } else {

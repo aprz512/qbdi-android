@@ -13,6 +13,7 @@ struct RegisterSnapshot {
 
 enum class MemoryIndexExtend : uint8_t { None, Uxtw, Sxtw, Lsl, Sxtx };
 enum class MemoryAddressMode : uint8_t { Offset, PreIndex, PostIndex };
+enum class MemoryAccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
 enum class MemoryBytesState : uint8_t { NotCaptured, Available, Unavailable };
 
 struct MemoryBytes {
@@ -37,7 +38,7 @@ struct MemoryOperand {
     MemoryIndexExtend extend = MemoryIndexExtend::None;
     MemoryAddressMode address_mode = MemoryAddressMode::Offset;
     uint8_t shift = 0;
-    uint8_t access_type = 0;
+    MemoryAccessKind kind = MemoryAccessKind::Read;
     uint32_t access_size = 0;
     int64_t displacement = 0;
     bool writeback = false;

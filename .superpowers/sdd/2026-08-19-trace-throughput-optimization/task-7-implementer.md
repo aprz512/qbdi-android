@@ -10,6 +10,13 @@
 - Added review-driven regression cases before fixes. They failed on the absent lossless
   continuation API; the SIMD slow-path and `MEMORY_MINIMUM_SIZE` cases also failed against the
   then-current behavior.
+- After the formal review, added policy-level regressions before the repair. The initial build
+  failed because the QBDI-independent policy seam and focused ARM64 source did not exist. Follow-up
+  RED cases exposed aggregate 64-byte capture, non-temporal-pair writeback reporting, the honest
+  per-operand bound, and registration-failure final-status/sidecar behavior.
+- Independent repair review added three final RED slices: mixed-PC continuation filtering failed to
+  compile without a policy-owned filter, registration failure lacked a connected runner-outcome
+  scenario, and unconditional metadata broke the pre-existing format-2 exact encoder tests.
 
 ## GREEN
 
@@ -31,6 +38,23 @@
 - Added exact encoding for `r`, `w`, and `rw`, raw flags, `pre=`, `post=`, and unavailable markers.
 - Checked QBDI recording and callback registration failures and latched trace failure instead of
   silently producing memory-free balanced/full traces.
+- The formal-review repair splits each retained formula into the exact consecutive, at-most-8-byte
+  accesses emitted by QBDI. Four 64-byte architectural operands therefore fit a fixed 32-entry PRE
+  policy with the hexdump limit applied independently to each actual access. Accesses beyond that
+  explicit bound remain ordered with unavailable PRE bytes.
+- Added exact formulas for STNP mode 0 and Advanced SIMD single-structure/lane forms, including
+  immediate/register post-index writeback. Moved ARM64 formula decoding out of the cache source and
+  moved matching/capture into a fixed QBDI-independent policy seam.
+- PRE formula capture now runs after a continuing PRE CodeRule and before pending begin/input
+  register capture. STOP/BREAK clears PRE policy state and creates no pending instruction. Fast
+  performs neither policy work nor QBDI memory setup.
+- Replaced the dual character/numeric memory type with one `MemoryAccessKind`, and centralized the
+  bounded hexadecimal-byte encoder. An explicit `metadata_available` boundary preserves legacy
+  format-2 memory lines while QBDI records carry flags and PRE/POST fields.
+- Memory instrumentation setup failure now contributes to the final failed trace status while the
+  target return value is preserved. Failed traces do not publish a success metrics sidecar.
+- Expected-PC filtering is policy-owned and host-tested with a wrong-PC access injected between 11
+  accepted accesses; the accepted records retain exact 8-attached plus 3-continuation order.
 
 ## Verification
 
@@ -39,13 +63,16 @@
   `qbdi_instruction_decoder_test` passed after implementation.
 - Normal native suite: 11/11 passed.
 - Strict native suite (`-Wall -Wextra -Werror`): 11/11 passed.
+- Release native suite: 11/11 passed.
 - ASan/UBSan native suite: 11/11 passed with leak detection and UBSan halt enabled.
 - Android tracer: `./gradlew :tracer:assembleDebug` completed with `BUILD SUCCESSFUL`.
 - `git diff --check` passed.
+- Independent repair re-review reported no Critical or Important findings and `Ready: yes`.
 
 ## Commit
 
 - `feat: add configurable memory trace profiles`
+- Repair: `fix: repair memory trace profile policy`
 
 ## Deviations and Risks
 
@@ -57,8 +84,8 @@
   collector/QBDI integration. Fixed write-only forms, including Advanced SIMD structure
   post-index forms, use cached formulas because QBDI omits writes from PRE access queries. The
   slow supplement uses QBDI PRE read addresses after cached formulas.
-- Unsupported ARM64 memory classes deliberately avoid incomplete formulas. Only four formula/slow
-  accesses receive PRE snapshots; later or uncomputable accesses remain ordered and are explicitly
-  marked unavailable before bytes.
+- Unsupported ARM64 memory classes deliberately avoid incomplete formulas. The policy retains up
+  to eight QBDI-sized accesses for each of four formulas (32 total); later or uncomputable accesses
+  remain ordered and are explicitly marked unavailable before bytes.
 - Task 8 opcode safe-read/crash-sidecar work was not implemented; the pre-existing opcode fetch is
   unchanged.

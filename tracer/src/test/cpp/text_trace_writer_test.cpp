@@ -1,4 +1,5 @@
 #include "events/text_trace_writer.h"
+#include "core/trace_callback_gate.h"
 #include "lz4frame.h"
 
 #include <atomic>
@@ -357,7 +358,7 @@ void emits_memory_without_hot_path_allocations() {
     TextTraceWriter writer(options, &metrics);
     const TraceContext context = trace_context(directory);
     MemoryRecord memory{};
-    memory.type = 'w';
+    memory.kind = MemoryAccessKind::Write;
     memory.address = 0x2000;
     memory.size = 8;
     memory.value = 0x42;
@@ -479,6 +480,39 @@ void reports_async_trace_write_failure_without_publishing_metrics() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+void failed_trace_footer_does_not_publish_success_metrics() {
+    const std::string directory = make_temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    TextTraceWriter writer(options, &metrics);
+    const TraceContext context = trace_context(directory);
+    TraceCallbackGate gate;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    gate.observe_memory_instrumentation(true, false, false);
+    bool target_ran = false;
+    const auto run_target = [&] {
+        target_ran = true;
+        return uint64_t{73};
+    };
+    const uint64_t target_retval = run_target();
+    CHECK(target_ran);
+    CHECK(!gate.enabled());
+    CHECK(writer.end(target_retval,
+                     gate.completion_succeeded(true, writer.failed()), 4));
+    CHECK(writer.close());
+    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
+    const std::string text = read_text_file(writer.path());
+    CHECK(text.find("TRACE_END status=failed ret=0x49") != std::string::npos);
+
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 void latches_facade_encoding_failures_for_semantic_callers() {
     const std::string directory = make_temporary_directory();
     TraceOptions options{};
@@ -531,5 +565,6 @@ int main() {
     retries_interrupted_and_partial_sidecar_writes();
     removes_partial_sidecar_after_write_error();
     reports_async_trace_write_failure_without_publishing_metrics();
+    failed_trace_footer_does_not_publish_success_metrics();
     latches_facade_encoding_failures_for_semantic_callers();
 }

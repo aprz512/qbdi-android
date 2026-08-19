@@ -253,6 +253,7 @@ bool TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
     writer_.commit(result.size);
     if (writer_.failed()) return fail();
     ended_ = true;
+    successful_end_ = ok;
     return true;
 }
 
@@ -287,7 +288,8 @@ bool TextTraceWriter::close() {
 
     const bool trace_ok = writer_.finish();
     opened_ = false;
-    close_result_ = trace_ok && ended_ && healthy_writer_state() && write_metrics_sidecar();
+    const bool metrics_ok = !successful_end_ || write_metrics_sidecar();
+    close_result_ = trace_ok && ended_ && healthy_writer_state() && metrics_ok;
     if (ended_ && !close_result_) facade_failed_ = true;
     return close_result_;
 }

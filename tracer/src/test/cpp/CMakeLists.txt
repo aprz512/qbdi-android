@@ -36,6 +36,7 @@ add_trace_test(instruction_collector_test
 add_trace_test(qbdi_instruction_decoder_test
     qbdi_instruction_decoder_test.cpp
     ../../main/cpp/core/qbdi_instruction_decoder.cpp
+    ../../main/cpp/core/arm64_memory_operand.cpp
     ../../main/cpp/core/instruction_cache.cpp)
 
 add_trace_test(code_rule_test
@@ -49,6 +50,9 @@ add_trace_test(trace_encoder_test
 add_trace_test(memory_profile_test
     memory_profile_test.cpp
     ../../main/cpp/core/instruction_cache.cpp
+    ../../main/cpp/core/arm64_memory_operand.cpp
+    ../../main/cpp/core/memory_trace_policy.cpp
+    ../../main/cpp/core/pending_instruction.cpp
     ../../main/cpp/core/safe_memory.cpp
     ../../main/cpp/events/trace_encoder.cpp)
 
