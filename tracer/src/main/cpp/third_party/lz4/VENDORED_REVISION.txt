@@ -1,4 +1,5 @@
 Project: LZ4
 Version: v1.10.0
+Commit: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
 Source: https://github.com/lz4/lz4/releases/tag/v1.10.0
 License: BSD-2-Clause (library)

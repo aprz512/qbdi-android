@@ -22,6 +22,7 @@ Android arm64 demo project for showing how to use QBDI in an injected tracer.
 - Git LFS for `libQBDI.a`
 - QBDI v0.12.1 Android AARCH64 artifact committed under `tracer/src/main/cpp/third_party/qbdi/`
 - ByteDance ShadowHook source vendored under `tracer/src/main/cpp/third_party/android-inline-hook/`
+- LZ4 v1.10.0 (`ebb370ca83af193212df4dcbadcc5d87bc0de2f0`) vendored under `tracer/src/main/cpp/third_party/lz4/`
 
 ## Build
 
@@ -60,11 +61,40 @@ The constructor scene only traces reliably with spawn injection. For button scen
 
 ## Pull Traces
 
+Install the host `lz4` CLI, then use the pull helper. It accesses the app-private directory only
+through `adb exec-out run-as`, pulls the newest compressed trace and adjacent sidecars, and
+decompresses every complete LZ4 frame in order:
+
 ```bash
-adb shell run-as com.aprz.qbdiandroid ls files/qbdi-traces
-adb exec-out run-as com.aprz.qbdiandroid cat files/qbdi-traces/<trace-file> > trace.txt
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid --output pulled-traces
 ```
+
+Useful options:
+
+```bash
+# Select one listed artifact instead of the newest.
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --name <trace-file>.trace.txt.lz4 --output pulled-traces
+
+# Pull the compressed trace and sidecars without requiring host lz4.
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --compressed-only --output pulled-traces
+
+# Existing local outputs are protected unless replacement is explicit.
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --force --output pulled-traces
+```
+
+The tracer defaults to the `fast` profile. `balanced` enables QBDI memory metadata, while `full`
+also captures bounded pre/post memory bytes. Configure profiles and buffer sizing in
+`scripts/trace_config.js`; see [docs/trace-format.md](docs/trace-format.md) for the complete format,
+metrics, memory cost, decompression, and crash-recovery contract.
 
 ## Troubleshooting
 
 If Frida prints `need Gadget to attach on jailed Android`, use a rooted device with frida-server for this demo or embed/configure Frida Gadget before trying spawn injection. Constructor tracing depends on early spawn-style injection.
+
+If `pull_trace.py` reports that the host `lz4` CLI is missing, install LZ4 or repeat the pull with
+`--compressed-only`. If a crash marker accompanies a truncated final frame, the helper preserves
+only fully decoded frames as `*.partial.trace.txt` and exits with status 2; other pull failures use
+status 1.
