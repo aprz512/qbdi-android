@@ -23,6 +23,15 @@
 
 - `feat: add allocation-free trace encoder`
 
+## Review Repair
+
+- Replaced the saturating cache-total calculation with exact `unsigned __int128` arithmetic for
+  the denominator and fractional digits. The regression covers `2^63 + UINT64_MAX` and expects
+  `cache_hit_rate=0.333333`; the zero-total result remains `0.000000`.
+- Documented the two-pass borrowed-input precondition for module names, decoded instructions, and
+  semantic-event string views. Their memory must stay readable and unchanged through both passes.
+- Re-ran normal CTest, ASan/UBSan CTest, and the Android `arm64-v8a` native build after the repair.
+
 ## Deviations / Risks
 
 - System `cmake` and `ctest` were unavailable; used Android SDK CMake 3.22.1 equivalents.

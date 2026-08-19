@@ -16,6 +16,8 @@ struct EncodeResult {
 
 class TraceEncoder {
 public:
+    // module_name is borrowed. When non-null, it must be readable and unchanged for up to
+    // kMaxInstructionLineBytes bytes (or its terminating NUL), across both measure and write passes.
     EncodeResult encode_instruction(char *output, size_t capacity, const char *module_name,
                                     const InstructionRecord &record) const noexcept;
 
@@ -26,6 +28,8 @@ public:
     EncodeResult encode_end(char *output, size_t capacity, bool ok, uint64_t return_value,
                             uint64_t elapsed_ms, const TraceMetrics &metrics) const noexcept;
 
+    // event_type, name, and detail are borrowed and must remain readable and unchanged for their
+    // declared string_view extents across both measure and write passes.
     EncodeResult encode_event(char *output, size_t capacity, std::string_view event_type,
                               std::string_view name, std::string_view detail) const noexcept;
 };

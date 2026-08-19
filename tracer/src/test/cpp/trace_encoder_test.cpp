@@ -141,16 +141,25 @@ void rejects_instruction_lines_above_the_fixed_bound() {
     for (char c: output) assert(c == '?');
 }
 
-void saturates_cache_hit_rate_denominator_without_wrapping() {
+void encodes_cache_hit_rate_with_an_overflowing_counter_total() {
     TraceMetrics metrics{};
-    metrics.cache_hits = std::numeric_limits<uint64_t>::max();
-    metrics.cache_misses = 1;
+    metrics.cache_hits = 1ULL << 63U;
+    metrics.cache_misses = std::numeric_limits<uint64_t>::max();
     char output[256]{};
 
     TraceEncoder encoder;
     const EncodeResult result = encoder.encode_end(output, sizeof(output), true, 0, 0, metrics);
     assert(result.ok);
-    assert(std::string_view(output, result.size).find("cache_hit_rate=1.000000") !=
+    assert(std::string_view(output, result.size).find("cache_hit_rate=0.333333") !=
+           std::string_view::npos);
+}
+
+void encodes_zero_cache_total_as_zero_rate() {
+    char output[256]{};
+    TraceEncoder encoder;
+    const EncodeResult result = encoder.encode_end(output, sizeof(output), true, 0, 0, {});
+    assert(result.ok);
+    assert(std::string_view(output, result.size).find("cache_hit_rate=0.000000") !=
            std::string_view::npos);
 }
 
@@ -163,5 +172,6 @@ int main() {
     bounds_memory_hexdump_and_null_inputs();
     rejects_overflowing_records();
     rejects_instruction_lines_above_the_fixed_bound();
-    saturates_cache_hit_rate_denominator_without_wrapping();
+    encodes_cache_hit_rate_with_an_overflowing_counter_total();
+    encodes_zero_cache_total_as_zero_rate();
 }

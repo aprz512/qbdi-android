@@ -97,26 +97,18 @@ const char *profile_name(TraceProfile profile) noexcept {
     return "fast";
 }
 
-bool append_rate(AppendBuffer &buffer, uint64_t numerator, uint64_t denominator) noexcept {
+bool append_rate(AppendBuffer &buffer, unsigned __int128 numerator,
+                 unsigned __int128 denominator) noexcept {
     if (denominator == 0) return append_literal(buffer, "0.000000");
-    const uint64_t whole = numerator / denominator;
-    uint64_t remainder = numerator % denominator;
-    if (!append_dec_u64(buffer, whole) || !append_char(buffer, '.')) return false;
+    const unsigned __int128 whole = numerator / denominator;
+    unsigned __int128 remainder = numerator % denominator;
+    if (!append_dec_u64(buffer, static_cast<uint64_t>(whole)) || !append_char(buffer, '.')) return false;
     for (size_t index = 0; index < 6; ++index) {
-        const uint64_t digit = static_cast<uint64_t>((static_cast<unsigned __int128>(remainder) * 10U) /
-                                                     denominator);
-        remainder = static_cast<uint64_t>((static_cast<unsigned __int128>(remainder) * 10U) %
-                                          denominator);
+        const uint64_t digit = static_cast<uint64_t>((remainder * 10U) / denominator);
+        remainder = (remainder * 10U) % denominator;
         if (!append_char(buffer, static_cast<char>('0' + digit))) return false;
     }
     return true;
-}
-
-uint64_t saturated_add(uint64_t left, uint64_t right) noexcept {
-    if (right > std::numeric_limits<uint64_t>::max() - left) {
-        return std::numeric_limits<uint64_t>::max();
-    }
-    return left + right;
 }
 
 template <typename Emit>
@@ -260,7 +252,7 @@ EncodeResult TraceEncoder::encode_end(char *output, size_t capacity, bool ok, ui
                append_dec_u64(buffer, metrics.instructions) && append_literal(buffer, " raw_bytes=") &&
                append_dec_u64(buffer, metrics.raw_bytes) && append_literal(buffer, " cache_hit_rate=") &&
                append_rate(buffer, metrics.cache_hits,
-                           saturated_add(metrics.cache_hits, metrics.cache_misses)) &&
+                           static_cast<unsigned __int128>(metrics.cache_hits) + metrics.cache_misses) &&
                append_literal(buffer, " producer_waits=") && append_dec_u64(buffer, metrics.producer_waits) &&
                append_literal(buffer, " producer_wait_ns=") && append_dec_u64(buffer, metrics.producer_wait_ns) &&
                append_char(buffer, '\n');

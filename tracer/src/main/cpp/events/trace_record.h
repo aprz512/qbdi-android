@@ -24,6 +24,8 @@ struct InstructionRecord {
     uint64_t sequence = 0;
     uintptr_t pc = 0;
     uintptr_t module_base = 0;
+    // Borrowed: when non-null, this object and its fixed character arrays must remain readable and
+    // unchanged across both TraceEncoder measure and write passes.
     const CachedInstruction *decoded = nullptr;
     std::array<uint64_t, kTraceGprCount> before{};
     std::array<uint64_t, kTraceGprCount> after{};
