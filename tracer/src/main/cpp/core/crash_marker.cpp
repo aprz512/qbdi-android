@@ -27,6 +27,10 @@ size_t g_owner_generation = static_cast<size_t>(-1);
 constexpr size_t kMaxHandlerGenerations = 1024;
 
 struct CrashHandlerState {
+    // Authoritative identity of the still-open descriptor for this generation.
+    // active_fd only controls the handler's one-write claim; retired_fd only
+    // controls deferred normal-context cleanup. Neither may erase ownership.
+    int owned_fd = -1;
     int active_fd = -1;
     int active_handlers = 0;
     int owns_disposition[5]{};
@@ -233,6 +237,7 @@ void reap_retired_generation() noexcept {
     const int fd = state.retired_fd;
     state.retired_fd = -1;
     state.retired = false;
+    (void)__atomic_exchange_n(&state.owned_fd, -1, __ATOMIC_ACQ_REL);
     int ignored_error = 0;
     (void)finish_marker_file(fd, state.retired_path, &ignored_error);
     g_session_owned = false;
@@ -284,11 +289,12 @@ void crash_marker_atfork_child() noexcept {
             }
             __atomic_store_n(&state.owns_disposition[index], 0, __ATOMIC_RELEASE);
         }
-        const int active_fd = __atomic_exchange_n(&state.active_fd, -1, __ATOMIC_ACQ_REL);
-        if (active_fd >= 0) (void)::close(active_fd);
-        if (state.retired_fd >= 0 && state.retired_fd != active_fd) {
-            (void)::close(state.retired_fd);
-        }
+        // owned_fd remains stable across the handler's active_fd claim and
+        // finish's retired_fd transition, so exactly one close covers every
+        // live ownership state without risking a second close after fd reuse.
+        const int owned_fd = __atomic_exchange_n(&state.owned_fd, -1, __ATOMIC_ACQ_REL);
+        (void)__atomic_exchange_n(&state.active_fd, -1, __ATOMIC_ACQ_REL);
+        if (owned_fd >= 0) (void)::close(owned_fd);
     }
 }
 
@@ -342,6 +348,7 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
     handler_slot_ = g_next_handler_generation++;
     g_owner_generation = handler_slot_;
     CrashHandlerState &handler_state = g_handler_states[handler_slot_];
+    __atomic_store_n(&handler_state.owned_fd, fd_, __ATOMIC_RELEASE);
     __atomic_store_n(&handler_state.active_fd, fd_, __ATOMIC_RELEASE);
 
     struct sigaction replacement{};
@@ -353,6 +360,7 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
                 (void)::sigaction(kCrashSignals[prior], &previous_[prior], nullptr);
             }
             __atomic_store_n(&handler_state.active_fd, -1, __ATOMIC_RELEASE);
+            __atomic_store_n(&handler_state.owned_fd, -1, __ATOMIC_RELEASE);
             for (size_t prior = 0; prior < index; ++prior) {
                 __atomic_store_n(&handler_state.owns_disposition[prior], 0,
                                  __ATOMIC_RELEASE);
@@ -379,6 +387,7 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
                 (void)::sigaction(kCrashSignals[prior], &previous_[prior], nullptr);
             }
             __atomic_store_n(&handler_state.active_fd, -1, __ATOMIC_RELEASE);
+            __atomic_store_n(&handler_state.owned_fd, -1, __ATOMIC_RELEASE);
             for (size_t prior = 0; prior < index; ++prior) {
                 __atomic_store_n(&handler_state.owns_disposition[prior], 0,
                                  __ATOMIC_RELEASE);
@@ -441,6 +450,7 @@ bool CrashMarkerSession::finish() noexcept {
     }
     if (fd_unclaimed ||
         __atomic_load_n(&handler_state.active_handlers, __ATOMIC_ACQUIRE) == 0) {
+        (void)__atomic_exchange_n(&handler_state.owned_fd, -1, __ATOMIC_ACQ_REL);
         ok = finish_marker_file(fd_, path_, &error_code_) && ok;
     } else {
         // The handler owns this descriptor. Retire it without waiting; immutable generation

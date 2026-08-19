@@ -217,6 +217,21 @@ TraceContext context(const std::string &directory) {
     return result;
 }
 
+int find_open_fd_for_path(const std::string &path) {
+    struct stat expected{};
+    if (::stat(path.c_str(), &expected) != 0) return -1;
+    const long open_max = ::sysconf(_SC_OPEN_MAX);
+    const int limit = open_max > 0 && open_max < 65536 ? static_cast<int>(open_max) : 4096;
+    for (int fd = 0; fd < limit; ++fd) {
+        struct stat candidate{};
+        if (::fstat(fd, &candidate) == 0 && candidate.st_dev == expected.st_dev &&
+            candidate.st_ino == expected.st_ino) {
+            return fd;
+        }
+    }
+    return -1;
+}
+
 void setup_failures_latch_their_code_and_finish_is_idempotent() {
     for (FailurePoint point : {FailurePoint::Allocation, FailurePoint::Synchronization,
                                FailurePoint::ThreadCreation,
@@ -956,6 +971,81 @@ void fork_detaches_inherited_crash_session_without_touching_parent_artifact() {
     CHECK(::rmdir(directory) == 0);
 }
 
+void fork_child_closes_marker_fd_already_claimed_by_live_handler() {
+    char path[] = "/tmp/qtrace-crash-claimed-fd-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string trace_path = std::string(directory) + "/trace";
+    const std::string marker_path = trace_path + ".crash";
+
+    struct sigaction forwarding{};
+    forwarding.sa_handler = forwarding_handler;
+    sigemptyset(&forwarding.sa_mask);
+    struct sigaction old_abort{};
+    CHECK(::sigaction(SIGABRT, &forwarding, &old_abort) == 0);
+    CrashMarkerSession session;
+    CHECK(session.open(trace_path));
+    const int marker_fd = find_open_fd_for_path(marker_path);
+    CHECK(marker_fd >= 0);
+
+    g_handler_gate_entered = false;
+    g_release_handler_gate = false;
+    crash_marker_test_set_handler_gate(handler_entry_gate);
+    std::thread handling([] { (void)::raise(SIGABRT); });
+    while (!g_handler_gate_entered.load()) std::this_thread::yield();
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        errno = 0;
+        const int result = ::fcntl(marker_fd, F_GETFD);
+        _exit(result == -1 && errno == EBADF ? 0 : 77);
+    }
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    const bool child_closed_fd = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+
+    g_release_handler_gate = true;
+    handling.join();
+    crash_marker_test_set_handler_gate(nullptr);
+    CHECK(session.finish());
+    CHECK(::sigaction(SIGABRT, &old_abort, nullptr) == 0);
+    CHECK(::unlink(marker_path.c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+    CHECK(child_closed_fd);
+}
+
+void fork_child_does_not_close_fd_reused_after_marker_finish() {
+    char path[] = "/tmp/qtrace-crash-reused-fd-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string trace_path = std::string(directory) + "/trace";
+    const std::string marker_path = trace_path + ".crash";
+    CrashMarkerSession session;
+    CHECK(session.open(trace_path));
+    const int marker_fd = find_open_fd_for_path(marker_path);
+    CHECK(marker_fd >= 3);
+    CHECK(session.finish());
+
+    int reused_fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+    CHECK(reused_fd >= 0);
+    if (reused_fd != marker_fd) {
+        CHECK(::dup2(reused_fd, marker_fd) == marker_fd);
+        CHECK(::close(reused_fd) == 0);
+        reused_fd = marker_fd;
+    }
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        _exit(::fcntl(reused_fd, F_GETFD) >= 0 ? 0 : 78);
+    }
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(::close(reused_fd) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
 void artifact_names_are_unique_before_exclusive_trace_creation() {
     char path[] = "/tmp/qtrace-artifact-pair-XXXXXX";
     char *directory = mkdtemp(path);
@@ -1024,6 +1114,8 @@ int main() {
     retired_handler_blocks_new_sessions_and_same_path_reuse();
     delayed_old_reset_handler_cannot_clobber_a_new_generation();
     fork_detaches_inherited_crash_session_without_touching_parent_artifact();
+    fork_child_closes_marker_fd_already_claimed_by_live_handler();
+    fork_child_does_not_close_fd_reused_after_marker_finish();
     artifact_names_are_unique_before_exclusive_trace_creation();
     return 0;
 }

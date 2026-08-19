@@ -64,6 +64,10 @@
   its entry was gated, and reproduced termination from the old thunk's late `sigaction(SIG_DFL)`.
   A child-callback contract test separately failed on mutex unlock/destruction/placement-new, while
   lock-gated fork tests exercised the inherited registry, transition, and crash-session locks.
+- Fourth re-review supplied one remaining fd-ownership RED: after the handler exchanged
+  `active_fd` and paused at its gate, a fork child still observed the marker descriptor with
+  `fcntl(F_GETFD)` (reviewer exit 77). The regression now requires `EBADF` and separately reuses
+  that descriptor number after normal finish to guard against closing an unrelated fd.
 
 ## GREEN
 
@@ -140,6 +144,11 @@
   target-initiated fork skips the child proxy postamble before locking.
 - Trace paths include a process-local sequence. The writer prepares a path, reserves the crash
   sidecar first, and creates the trace with `O_EXCL`; no collision path uses `O_TRUNC`.
+- Crash generations keep an authoritative `owned_fd` for the complete open-to-real-close lifetime.
+  `active_fd` is only the handler's one-write claim and `retired_fd` is only deferred normal cleanup.
+  Handler claim never clears ownership; rollback, clean finish, and retirement reap clear it before
+  close. The fork child atomically claims and closes `owned_fd` exactly once, covering a live
+  handler without a duplicate close after descriptor reuse.
 
 ## Verification
 
@@ -169,6 +178,10 @@
   callback source contract confirms no mutex unlock, destruction, or placement-new remains.
 - Final scoped third re-review found no Critical or Important blockers in default forwarding,
   child-callback safety, pre-lock detachment, or exact-once retained bypass execution.
+- Fourth-review claimed-handler/fork and fd-reuse regressions pass in all host matrices; repeated
+  strict crash/fork runs passed 50/50 without changing the child callback's async-safe primitives.
+- Independent fourth scoped review reported Ready with no Critical or Important findings after
+  auditing every `owned_fd` publish, claim, rollback, retirement, reap, and reuse transition.
 - `git diff --check` passed.
 - `adb devices` returned no connected devices. Per the brief, no device fallback-hash result is
   claimed; host seam, Debug/Release compile, and Release disassembly are the available evidence.
@@ -180,6 +193,7 @@
 - `fix: retain trace failure generations`
 - `fix: preserve trace generations across lifecycle edges`
 - `fix: make crash and fork handoff race-safe`
+- `fix: close claimed crash fd after fork`
 
 ## Deviations and Risks
 
