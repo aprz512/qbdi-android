@@ -20,6 +20,9 @@
 - The formal re-review required a production runner seam. Its RED test failed at configuration
   because `trace_run_session` did not exist; the public-cohesion compile test then failed because
   focused ARM64 operand and memory-type headers did not exist.
+- The final re-review exposed setup-time bypasses. Connected early-failure, registration-failure,
+  and success tests first failed to compile because the production session lacked execution-setup
+  state, a target-run policy, and one writer-owning `finalize()` interface.
 
 ## GREEN
 
@@ -67,6 +70,11 @@
   capture/truncation APIs in `memory_capture.h`, ARM64 formula layout in
   `arm64_memory_operand.h`, and decoder entry points in `arm64_memory_decoder.h`.
   `instruction_cache.h` retains only cache-owned interfaces/data. Cached layout is unchanged.
+- `TraceRunSessionOutcome::finalize()` is now the single authority that writes the footer, closes
+  the writer, decides completion/success logging, and supplies the outward return value. Virtual
+  stack and module setup failures record failed execution setup, skip the target, and reach this
+  same path with a defined zero return; registration failure still runs the target and preserves
+  its return value. The successful path uses the same production seam and publishes metrics.
 
 ## Verification
 
@@ -86,6 +94,7 @@
 - `feat: add configurable memory trace profiles`
 - Repair: `fix: repair memory trace profile policy`
 - Connected runner repair: `fix: connect trace runner finalization`
+- Finalizer authority repair: `fix: unify trace session finalization`
 
 ## Deviations and Risks
 

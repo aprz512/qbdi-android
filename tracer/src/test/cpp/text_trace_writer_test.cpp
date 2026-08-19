@@ -481,7 +481,7 @@ void reports_async_trace_write_failure_without_publishing_metrics() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
-void failed_trace_footer_does_not_publish_success_metrics() {
+void finalizes_early_setup_failure_without_running_target() {
     const std::string directory = make_temporary_directory();
     TraceOptions options{};
     options.compression_enabled = false;
@@ -495,27 +495,95 @@ void failed_trace_footer_does_not_publish_success_metrics() {
     CHECK(writer.open(context));
     CHECK(writer.begin(context));
     session.observe_trace_setup(true);
+    session.observe_execution_setup(false);
+    bool target_ran = false;
+    if (session.target_should_run()) target_ran = true;
+    session.observe_target_call({target_ran, false, 99}, writer.failed());
+    const TraceRunFinalization finalization = session.finalize(writer, 4);
+
+    CHECK(!target_ran);
+    CHECK(!finalization.target_ran);
+    CHECK(!finalization.footer_success);
+    CHECK(!finalization.completion_success);
+    CHECK(!finalization.should_log_success);
+    CHECK(finalization.outward_return_value == 0);
+    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
+    const std::string text = read_text_file(writer.path());
+    CHECK(text.find("TRACE_END status=failed ret=0x0") != std::string::npos);
+
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void finalizes_registration_failure_after_running_target() {
+    const std::string directory = make_temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    TextTraceWriter writer(options, &metrics);
+    const TraceContext context = trace_context(directory);
+    TraceRunSessionOutcome session;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    session.observe_trace_setup(true);
+    session.observe_execution_setup(true);
     session.observe_memory_instrumentation(true, false, false);
     bool target_ran = false;
     const auto run_target = [&] {
         target_ran = true;
         return uint64_t{73};
     };
+    CHECK(session.target_should_run());
     const uint64_t target_retval = run_target();
     CHECK(target_ran);
-    session.observe_target_call(true, target_retval, writer.failed());
-    CHECK(!session.footer_success());
-    const bool end_ok = writer.end(session.return_value(),
-                                   session.footer_success(), 4);
-    const bool close_ok = writer.close();
-    session.observe_finalization(end_ok, close_ok);
-    CHECK(!session.completion_success());
-    CHECK(!session.should_log_success());
-    CHECK(session.return_value() == 73);
+    session.observe_target_call({target_ran, true, target_retval}, writer.failed());
+    const TraceRunFinalization finalization = session.finalize(writer, 4);
+    CHECK(finalization.target_ran);
+    CHECK(!finalization.footer_success);
+    CHECK(!finalization.completion_success);
+    CHECK(!finalization.should_log_success);
+    CHECK(finalization.outward_return_value == 73);
     CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
     const std::string text = read_text_file(writer.path());
     CHECK(text.find("TRACE_END status=failed ret=0x49") != std::string::npos);
 
+    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void finalizes_success_with_one_authoritative_result() {
+    const std::string directory = make_temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    TextTraceWriter writer(options, &metrics);
+    const TraceContext context = trace_context(directory);
+    TraceRunSessionOutcome session;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    session.observe_trace_setup(true);
+    session.observe_execution_setup(true);
+    session.observe_memory_instrumentation(true, true, true);
+    CHECK(session.target_should_run());
+    session.observe_target_call({true, true, 91}, writer.failed());
+    const TraceRunFinalization finalization = session.finalize(writer, 6);
+
+    CHECK(finalization.target_ran);
+    CHECK(finalization.footer_success);
+    CHECK(finalization.completion_success);
+    CHECK(finalization.should_log_success);
+    CHECK(finalization.outward_return_value == 91);
+    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) == 0);
+    const std::string text = read_text_file(writer.path());
+    CHECK(text.find("TRACE_END status=ok ret=0x5b") != std::string::npos);
+
+    CHECK(::unlink((writer.path() + ".metrics").c_str()) == 0);
     CHECK(::unlink(writer.path().c_str()) == 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
@@ -572,6 +640,8 @@ int main() {
     retries_interrupted_and_partial_sidecar_writes();
     removes_partial_sidecar_after_write_error();
     reports_async_trace_write_failure_without_publishing_metrics();
-    failed_trace_footer_does_not_publish_success_metrics();
+    finalizes_early_setup_failure_without_running_target();
+    finalizes_registration_failure_after_running_target();
+    finalizes_success_with_one_authoritative_result();
     latches_facade_encoding_failures_for_semantic_callers();
 }

@@ -63,7 +63,6 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
         QTRACE_E("open trace file failed");
     } else if (!state.writer.begin(state.context)) {
         state.session.observe_trace_setup(false);
-        state.writer.close();
         QTRACE_E("begin trace failed");
     } else {
         state.session.observe_trace_setup(true);
@@ -77,81 +76,80 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     QBDI::GPRState *gpr = vm.getGPRState();
 
     uint8_t *fakestack = nullptr;
-    if (!QBDI::allocateVirtualStack(gpr, kQbdiVirtualStackSize, &fakestack)) {
+    bool execution_setup_ok =
+            QBDI::allocateVirtualStack(gpr, kQbdiVirtualStackSize, &fakestack);
+    if (!execution_setup_ok) {
         state.writer.error("allocateVirtualStack failed");
-        state.writer.end(0, false, elapsed_ms_since(started));
-        state.writer.close();
-        QTRACE_E("allocateVirtualStack failed");
-        return 0;
     }
 
-    for (int i = 0; i < 8; ++i) QBDI_GPR_SET(gpr, i, invocation.args[i]);
-    gpr->x8 = invocation.indirect_result;
-    gpr->pc = invocation.target_address;
+    if (execution_setup_ok) {
+        for (int i = 0; i < 8; ++i) QBDI_GPR_SET(gpr, i, invocation.args[i]);
+        gpr->x8 = invocation.indirect_result;
+        gpr->pc = invocation.target_address;
 
-    if (invocation.scene.end_offset > 0) {
-        uintptr_t range_start = invocation.module.start + invocation.scene.offset;
-        uintptr_t range_end = invocation.module.start + invocation.scene.end_offset;
-        vm.addInstrumentedRange(range_start, range_end);
-    } else if (!vm.addInstrumentedModuleFromAddr(invocation.target_address)) {
-        std::ostringstream error;
-        error << "addInstrumentedModuleFromAddr failed address=0x" << std::hex
-              << invocation.target_address;
-        state.writer.error(error.str());
-        state.writer.end(0, false, elapsed_ms_since(started));
-        state.writer.close();
-        QTRACE_E("addInstrumentedModuleFromAddr 0x%lx failed",
-                 static_cast<unsigned long>(invocation.target_address));
-        QBDI::alignedFree(fakestack);
-        return 0;
-    }
-    vm.addCodeCB(QBDI::PREINST, InstructionCollector::pre_callback, &collector);
-    if (state.code_rules.requires_immediate_post()) {
-        vm.addCodeCB(QBDI::POSTINST, InstructionCollector::post_callback, &collector);
-    }
-    if (config.trace.memory_enabled()) {
-        const bool recording = vm.recordMemoryAccess(QBDI::MEMORY_READ_WRITE);
-        const uint32_t callback = recording
-                                          ? vm.addMemAccessCB(
-                                                    QBDI::MEMORY_READ_WRITE,
-                                                    InstructionCollector::memory_callback,
-                                                    &collector)
-                                          : QBDI::INVALID_EVENTID;
-        const bool callback_valid = callback != QBDI::INVALID_EVENTID;
-        state.session.observe_memory_instrumentation(true, recording,
-                                                     callback_valid);
-        if (!recording || !callback_valid) {
-            state.writer.error("QBDI memory instrumentation unavailable");
+        if (invocation.scene.end_offset > 0) {
+            uintptr_t range_start = invocation.module.start + invocation.scene.offset;
+            uintptr_t range_end = invocation.module.start + invocation.scene.end_offset;
+            vm.addInstrumentedRange(range_start, range_end);
+        } else if (!vm.addInstrumentedModuleFromAddr(invocation.target_address)) {
+            std::ostringstream error;
+            error << "addInstrumentedModuleFromAddr failed address=0x" << std::hex
+                  << invocation.target_address;
+            state.writer.error(error.str());
+            execution_setup_ok = false;
         }
-    } else {
-        state.session.observe_memory_instrumentation(false, false, false);
     }
-    vm.addVMEventCB(QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN, on_exec_transfer,
-                    &state);
+    state.session.observe_execution_setup(execution_setup_ok);
 
-    QBDI::rword retVal = 0;
-    std::vector<QBDI::rword> args;
-    args.reserve(invocation.args.size());
-    for (uint64_t arg: invocation.args) args.push_back(arg);
+    TraceTargetOutcome target{};
+    if (state.session.target_should_run()) {
+        vm.addCodeCB(QBDI::PREINST, InstructionCollector::pre_callback, &collector);
+        if (state.code_rules.requires_immediate_post()) {
+            vm.addCodeCB(QBDI::POSTINST, InstructionCollector::post_callback, &collector);
+        }
+        if (config.trace.memory_enabled()) {
+            const bool recording = vm.recordMemoryAccess(QBDI::MEMORY_READ_WRITE);
+            const uint32_t callback = recording
+                                              ? vm.addMemAccessCB(
+                                                        QBDI::MEMORY_READ_WRITE,
+                                                        InstructionCollector::memory_callback,
+                                                        &collector)
+                                              : QBDI::INVALID_EVENTID;
+            const bool callback_valid = callback != QBDI::INVALID_EVENTID;
+            state.session.observe_memory_instrumentation(true, recording,
+                                                         callback_valid);
+            if (!recording || !callback_valid) {
+                state.writer.error("QBDI memory instrumentation unavailable");
+            }
+        } else {
+            state.session.observe_memory_instrumentation(false, false, false);
+        }
+        vm.addVMEventCB(QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN,
+                        on_exec_transfer, &state);
 
-    bool ok = vm.call(&retVal, invocation.target_address, args);
-    collector.finish_last(*gpr);
+        QBDI::rword retVal = 0;
+        std::vector<QBDI::rword> args;
+        args.reserve(invocation.args.size());
+        for (uint64_t arg: invocation.args) args.push_back(arg);
+
+        target.ran = true;
+        target.succeeded = vm.call(&retVal, invocation.target_address, args);
+        target.return_value = retVal;
+        collector.finish_last(*gpr);
+    }
     state.metrics.cache_hits = instruction_cache.metrics().hits;
     state.metrics.cache_misses = instruction_cache.metrics().misses;
 
-    state.session.observe_target_call(ok, retVal, state.writer.failed());
-    const bool end_ok = state.writer.end(state.session.return_value(),
-                                         state.session.footer_success(),
-                                         elapsed_ms_since(started));
-    const bool close_ok = state.writer.close();
-    state.session.observe_finalization(end_ok, close_ok);
-    QBDI::alignedFree(fakestack);
-    if (state.session.should_log_success()) {
+    state.session.observe_target_call(target, state.writer.failed());
+    const TraceRunFinalization finalization =
+            state.session.finalize(state.writer, elapsed_ms_since(started));
+    if (fakestack != nullptr) QBDI::alignedFree(fakestack);
+    if (finalization.should_log_success) {
         QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),
                  state.writer.path().c_str());
     } else {
         QTRACE_E("trace %s write failed path=%s", invocation.scene.name.c_str(),
                  state.writer.path().c_str());
     }
-    return state.session.return_value();
+    return finalization.outward_return_value;
 }

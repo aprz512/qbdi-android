@@ -4,6 +4,22 @@
 
 #include <cstdint>
 
+class TextTraceWriter;
+
+struct TraceTargetOutcome {
+    bool ran = false;
+    bool succeeded = false;
+    uint64_t return_value = 0;
+};
+
+struct TraceRunFinalization {
+    uint64_t outward_return_value = 0;
+    bool target_ran = false;
+    bool footer_success = false;
+    bool completion_success = false;
+    bool should_log_success = false;
+};
+
 class TraceRunSessionOutcome {
 public:
     TraceCallbackGate *callback_gate() noexcept { return &callback_gate_; }
@@ -13,21 +29,17 @@ public:
     void observe_memory_instrumentation(bool memory_enabled,
                                         bool recording_enabled,
                                         bool callback_valid) noexcept;
-    void observe_target_call(bool succeeded, uint64_t return_value,
+    void observe_execution_setup(bool succeeded) noexcept;
+    bool target_should_run() const noexcept;
+    void observe_target_call(TraceTargetOutcome outcome,
                              bool writer_failed) noexcept;
-    void observe_finalization(bool footer_written,
-                              bool writer_closed) noexcept;
-
-    bool footer_success() const noexcept { return footer_success_; }
-    bool completion_success() const noexcept;
-    bool should_log_success() const noexcept { return completion_success(); }
-    uint64_t return_value() const noexcept { return return_value_; }
+    TraceRunFinalization finalize(TextTraceWriter &writer, long elapsed_ms);
 
 private:
     TraceCallbackGate callback_gate_{};
-    uint64_t return_value_ = 0;
-    bool footer_success_ = false;
-    bool footer_written_ = false;
-    bool writer_closed_ = false;
+    TraceTargetOutcome target_{};
+    TraceRunFinalization finalization_{};
+    bool execution_setup_observed_ = false;
+    bool execution_setup_succeeded_ = false;
     bool finalized_ = false;
 };
