@@ -49,6 +49,7 @@ public:
 
     bool enabled() const { return slots_ != nullptr; }
     uint32_t slot_count() const { return slot_count_; }
+    uint32_t metadata_chunk_count() const { return metadata_chunk_count_; }
     const InstructionCacheMetrics &metrics() const { return metrics_; }
 
     const CachedInstruction *find(uint32_t opcode) noexcept;
@@ -78,6 +79,9 @@ private:
     uint32_t slot_count_ = 0;
     uint32_t next_entry_index_ = 0;
     std::size_t slots_mapping_size_ = 0;
-    MetadataChunk *metadata_chunks_ = nullptr;
+    MetadataChunk **metadata_chunk_index_ = nullptr;
+    uint32_t metadata_chunk_index_size_ = 0;
+    uint32_t metadata_chunk_count_ = 0;
+    std::size_t metadata_chunk_index_mapping_size_ = 0;
     InstructionCacheMetrics metrics_{};
 };

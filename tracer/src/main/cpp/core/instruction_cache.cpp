@@ -3,7 +3,6 @@
 #include <sys/mman.h>
 
 struct InstructionCache::MetadataChunk {
-    MetadataChunk *next;
     std::size_t mapping_size;
     CachedInstruction entries[kMetadataEntriesPerChunk];
 };
@@ -35,10 +34,12 @@ InstructionCache::InstructionCache(uint32_t requested_slot_count) noexcept {
 }
 
 InstructionCache::~InstructionCache() {
-    while (metadata_chunks_ != nullptr) {
-        MetadataChunk *chunk = metadata_chunks_;
-        metadata_chunks_ = chunk->next;
-        munmap(chunk, chunk->mapping_size);
+    for (uint32_t index = 0; index < metadata_chunk_index_size_; ++index) {
+        MetadataChunk *chunk = metadata_chunk_index_[index];
+        if (chunk != nullptr) munmap(chunk, chunk->mapping_size);
+    }
+    if (metadata_chunk_index_ != nullptr) {
+        munmap(metadata_chunk_index_, metadata_chunk_index_mapping_size_);
     }
     if (slots_ != nullptr) munmap(slots_, slots_mapping_size_);
 }
@@ -104,9 +105,23 @@ bool InstructionCache::allocate_slots(uint32_t count) noexcept {
     Slot *slots = static_cast<Slot *>(map_zeroed(mapping_size));
     if (slots == nullptr) return false;
 
+    const uint32_t metadata_chunk_index_size = static_cast<uint32_t>(
+            (static_cast<uint64_t>(count) + kMetadataEntriesPerChunk - 1U) / kMetadataEntriesPerChunk);
+    const std::size_t metadata_chunk_index_mapping_size =
+            static_cast<std::size_t>(metadata_chunk_index_size) * sizeof(MetadataChunk *);
+    MetadataChunk **metadata_chunk_index =
+            static_cast<MetadataChunk **>(map_zeroed(metadata_chunk_index_mapping_size));
+    if (metadata_chunk_index == nullptr) {
+        munmap(slots, mapping_size);
+        return false;
+    }
+
     slots_ = slots;
     slot_count_ = count;
     slots_mapping_size_ = mapping_size;
+    metadata_chunk_index_ = metadata_chunk_index;
+    metadata_chunk_index_size_ = metadata_chunk_index_size;
+    metadata_chunk_index_mapping_size_ = metadata_chunk_index_mapping_size;
     return true;
 }
 
@@ -116,21 +131,16 @@ CachedInstruction *InstructionCache::allocate_entry() noexcept {
     const uint32_t entry_index = next_entry_index_;
     const uint32_t chunk_index = entry_index / kMetadataEntriesPerChunk;
     const uint32_t entry_offset = entry_index % kMetadataEntriesPerChunk;
-    MetadataChunk *chunk = metadata_chunks_;
-    for (uint32_t index = 0; index < chunk_index && chunk != nullptr; ++index) chunk = chunk->next;
+    if (chunk_index >= metadata_chunk_index_size_) return nullptr;
+    MetadataChunk *chunk = metadata_chunk_index_[chunk_index];
 
     if (chunk == nullptr) {
         const std::size_t mapping_size = sizeof(MetadataChunk);
         chunk = static_cast<MetadataChunk *>(map_zeroed(mapping_size));
         if (chunk == nullptr) return nullptr;
         chunk->mapping_size = mapping_size;
-        if (metadata_chunks_ == nullptr) {
-            metadata_chunks_ = chunk;
-        } else {
-            MetadataChunk *last_chunk = metadata_chunks_;
-            while (last_chunk->next != nullptr) last_chunk = last_chunk->next;
-            last_chunk->next = chunk;
-        }
+        metadata_chunk_index_[chunk_index] = chunk;
+        ++metadata_chunk_count_;
     }
 
     ++next_entry_index_;
@@ -146,7 +156,7 @@ const CachedInstruction *InstructionCache::entry(uint32_t entry_plus_one) const 
     const uint32_t entry_index = entry_plus_one - 1U;
     const uint32_t chunk_index = entry_index / kMetadataEntriesPerChunk;
     const uint32_t entry_offset = entry_index % kMetadataEntriesPerChunk;
-    const MetadataChunk *chunk = metadata_chunks_;
-    for (uint32_t index = 0; index < chunk_index && chunk != nullptr; ++index) chunk = chunk->next;
+    if (chunk_index >= metadata_chunk_index_size_) return nullptr;
+    const MetadataChunk *chunk = metadata_chunk_index_[chunk_index];
     return chunk == nullptr ? nullptr : &chunk->entries[entry_offset];
 }

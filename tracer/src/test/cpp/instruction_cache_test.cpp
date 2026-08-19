@@ -3,6 +3,25 @@
 #include <cassert>
 #include <cstring>
 
+namespace {
+
+void multi_chunk_entries_resolve_through_the_fixed_index() {
+    InstructionCache cache(8192);
+    CachedInstruction instruction{};
+
+    for (uint32_t opcode = 0; opcode <= 4096; ++opcode) {
+        instruction.opcode = opcode;
+        instruction.pc_relative_displacement = static_cast<int32_t>(opcode);
+        assert(cache.insert(instruction) != nullptr);
+    }
+
+    assert(cache.metadata_chunk_count() == 2);
+    assert(cache.find(0)->pc_relative_displacement == 0);
+    assert(cache.find(4096)->pc_relative_displacement == 4096);
+}
+
+} // namespace
+
 int main() {
     InstructionCache cache(1);
     assert(cache.enabled());
@@ -29,4 +48,6 @@ int main() {
     assert(cache.metrics().collisions == 1);
     assert(cache.find(branch.opcode) == nullptr);
     assert(cache.find(collision.opcode) == replacement);
+
+    multi_chunk_entries_resolve_through_the_fixed_index();
 }
