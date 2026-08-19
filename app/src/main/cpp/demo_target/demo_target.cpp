@@ -40,7 +40,7 @@ static jstring native_run_integrity_case(JNIEnv *env, jobject /* thiz */) {
 }
 
 static jstring native_run_benchmark_case(JNIEnv *env, jobject /* thiz */) {
-    constexpr uint64_t kIterations = 8192;
+    constexpr uint64_t kIterations = 256;
     constexpr uint64_t kSeed = 0x514244492d626173ULL;
     const uint64_t result = demo_benchmark_case(kIterations, kSeed);
     std::ostringstream summary;

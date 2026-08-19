@@ -5,7 +5,7 @@ const config = {
   remoteDir: '/data/local/tmp/qbdi-android',
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
-  iterations: 8192,
+  iterations: 256,
   seed: '0x514244492d626173'
 };
 

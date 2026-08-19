@@ -56,6 +56,10 @@ def select_newest_benchmark_trace(names: Iterable[str]) -> str:
     raise ValueError("no uncompressed benchmark trace found")
 
 
+def frida_endpoint(port: int) -> str:
+    return f"127.0.0.1:{port}"
+
+
 def median_report(runs: list[dict[str, int | str]]) -> dict[str, float | int | str]:
     """Return medians for raw metrics and throughput derived from every measured run."""
     if not runs:
@@ -113,8 +117,9 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
         messages.append(message)
 
     adb(args, "shell", "am", "force-stop", args.package)
+    adb(args, "forward", f"tcp:{args.frida_port}", f"tcp:{args.frida_port}")
     manager = frida.get_device_manager()
-    device = manager.add_remote_device(args.frida_device)
+    device = manager.add_remote_device(args.frida_device or frida_endpoint(args.frida_port))
     pid = device.spawn([args.package])
     session = device.attach(pid)
     script = session.create_script(source)
@@ -158,7 +163,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", default="com.aprz.qbdiandroid")
     parser.add_argument("--device", default="192.168.50.53:5555", help="adb serial")
-    parser.add_argument("--frida-device", default="192.168.50.53:27042", help="Frida server host:port")
+    parser.add_argument("--frida-device", help="override the adb-forwarded Frida server endpoint")
+    parser.add_argument("--frida-port", type=int, default=27042)
     parser.add_argument("--adb", default="adb")
     parser.add_argument("--agent", default=str(Path(__file__).with_name("benchmark_trace.js")))
     parser.add_argument("--runs", type=int, default=5)

@@ -2,6 +2,7 @@ import unittest
 
 from scripts.benchmark_trace import (
     ensure_stable_return,
+    frida_endpoint,
     median_report,
     parse_legacy_trace,
     select_newest_benchmark_trace,
@@ -52,6 +53,9 @@ TRACE_END status=ok ret=0x42 elapsed_ms=20 bytes=0
             "1710000000001_100_100_benchmark_0x20.trace.txt",
             select_newest_benchmark_trace(names),
         )
+
+    def test_uses_the_adb_forwarded_frida_endpoint(self):
+        self.assertEqual("127.0.0.1:27042", frida_endpoint(27042))
 
 
 if __name__ == "__main__":
