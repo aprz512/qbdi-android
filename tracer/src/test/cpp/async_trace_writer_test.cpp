@@ -2,12 +2,14 @@
 #include "lz4frame.h"
 
 #include <atomic>
-#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -17,6 +19,14 @@
 namespace {
 
 using namespace std::chrono_literals;
+
+void check(bool condition, const char *expression, int line) {
+    if (condition) return;
+    std::fprintf(stderr, "CHECK failed at line %d: %s\n", line, expression);
+    std::abort();
+}
+
+#define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
 class MemoryBackend : public TraceWriterBackend {
 public:
@@ -75,7 +85,7 @@ public:
 
     void wait_until_entered() {
         std::unique_lock<std::mutex> lock(gate_mutex);
-        assert(gate_changed.wait_for(lock, 5s, [&] { return entered; }));
+        CHECK(gate_changed.wait_for(lock, 5s, [&] { return entered; }));
     }
 
     void release() {
@@ -108,7 +118,7 @@ public:
 
     void wait_until_entered() {
         std::unique_lock<std::mutex> lock(gate_mutex);
-        assert(changed.wait_for(lock, 5s, [&] { return entered; }));
+        CHECK(changed.wait_for(lock, 5s, [&] { return entered; }));
     }
 
     void release() {
@@ -135,7 +145,7 @@ public:
 
     void wait_until_producer_waits() {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(changed.wait_for(lock, 5s, [&] { return waiting; }));
+        CHECK(changed.wait_for(lock, 5s, [&] { return waiting; }));
     }
 
 private:
@@ -163,12 +173,12 @@ public:
 
     void wait_for_producer_wait_count(unsigned int expected) {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(changed.wait_for(lock, 5s, [&] { return producer_wait_count >= expected; }));
+        CHECK(changed.wait_for(lock, 5s, [&] { return producer_wait_count >= expected; }));
     }
 
     void wait_until_consumer_is_blocked() {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(changed.wait_for(lock, 5s, [&] { return blocked_consumer_once; }));
+        CHECK(changed.wait_for(lock, 5s, [&] { return blocked_consumer_once; }));
     }
 
     void release_consumer() {
@@ -203,6 +213,19 @@ public:
         return TraceFaultInjector::create_consumer_thread(thread, entry, argument);
     }
 
+    int join_consumer_thread(pthread_t thread, void **result) noexcept override {
+        {
+            std::lock_guard<std::mutex> lock(lz4_mutex);
+            ++join_attempts;
+            lz4_changed.notify_all();
+            if (join_failures_remaining != 0) {
+                --join_failures_remaining;
+                return EINVAL;
+            }
+        }
+        return TraceFaultInjector::join_consumer_thread(thread, result);
+    }
+
     bool fail_lz4_operation() noexcept override {
         std::unique_lock<std::mutex> lock(lz4_mutex);
         if (block_lz4) {
@@ -215,7 +238,7 @@ public:
 
     void wait_until_lz4_entered() {
         std::unique_lock<std::mutex> lock(lz4_mutex);
-        assert(lz4_changed.wait_for(lock, 5s, [&] { return lz4_entered; }));
+        CHECK(lz4_changed.wait_for(lock, 5s, [&] { return lz4_entered; }));
     }
 
     void release_lz4() {
@@ -224,11 +247,28 @@ public:
         lz4_changed.notify_all();
     }
 
+    void consumer_thread_exited() noexcept override {
+        std::lock_guard<std::mutex> lock(lz4_mutex);
+        consumer_exited = true;
+        lz4_changed.notify_all();
+    }
+
+    void wait_until_consumer_exits() {
+        std::unique_lock<std::mutex> lock(lz4_mutex);
+        CHECK(lz4_changed.wait_for(lock, 5s, [&] { return consumer_exited; }));
+    }
+
+    void wait_for_join_attempts(unsigned int expected) {
+        std::unique_lock<std::mutex> lock(lz4_mutex);
+        CHECK(lz4_changed.wait_for(lock, 5s, [&] { return join_attempts >= expected; }));
+    }
+
     size_t allowed_buffer_bytes = static_cast<size_t>(-1);
     bool compression_allocation_fails = false;
     bool lz4_fails = false;
     bool block_lz4 = false;
     int thread_error = 0;
+    unsigned int join_failures_remaining = 0;
     size_t compression_allocation_bytes = 0;
     std::vector<size_t> allocation_attempts;
 
@@ -237,6 +277,8 @@ private:
     std::condition_variable lz4_changed;
     bool lz4_entered = false;
     bool lz4_released = false;
+    bool consumer_exited = false;
+    unsigned int join_attempts = 0;
 };
 
 TraceOptions options_with_buffer(size_t bytes) {
@@ -255,7 +297,7 @@ std::vector<char> decompress_concatenated_frames(const std::vector<char> &compre
 
     while (input_offset < compressed.size()) {
         LZ4F_dctx *context = nullptr;
-        assert(!LZ4F_isError(LZ4F_createDecompressionContext(&context, LZ4F_VERSION)));
+        CHECK(!LZ4F_isError(LZ4F_createDecompressionContext(&context, LZ4F_VERSION)));
         size_t result = 1;
         while (result != 0) {
             char chunk[32768];
@@ -263,8 +305,8 @@ std::vector<char> decompress_concatenated_frames(const std::vector<char> &compre
             size_t destination_size = sizeof(chunk);
             result = LZ4F_decompress(context, chunk, &destination_size,
                                      compressed.data() + input_offset, &source_size, nullptr);
-            assert(!LZ4F_isError(result));
-            assert(source_size != 0 || destination_size != 0 || result == 0);
+            CHECK(!LZ4F_isError(result));
+            CHECK(source_size != 0 || destination_size != 0 || result == 0);
             input_offset += source_size;
             decoded.insert(decoded.end(), chunk, chunk + destination_size);
         }
@@ -275,47 +317,51 @@ std::vector<char> decompress_concatenated_frames(const std::vector<char> &compre
 }
 
 void sizes_each_buffer_exactly() {
-    assert(choose_trace_buffer_bytes(4ULL << 30, 0, true) == (64ULL << 20));
-    assert(choose_trace_buffer_bytes(8ULL << 30, 0, true) == (128ULL << 20));
-    assert(choose_trace_buffer_bytes(4ULL << 30, 32ULL << 20, false) == (32ULL << 20));
+    CHECK(choose_trace_buffer_bytes(0, 0, true) == (64ULL << 20));
+    CHECK(choose_trace_buffer_bytes(1ULL << 30, 0, true) == (64ULL << 20));
+    CHECK(choose_trace_buffer_bytes(4ULL << 30, 0, true) == (64ULL << 20));
+    CHECK(choose_trace_buffer_bytes(6ULL << 30, 0, true) == (64ULL << 20));
+    CHECK(choose_trace_buffer_bytes((8ULL << 30) - 1, 0, true) == (64ULL << 20));
+    CHECK(choose_trace_buffer_bytes(8ULL << 30, 0, true) == (128ULL << 20));
+    CHECK(choose_trace_buffer_bytes(4ULL << 30, 32ULL << 20, false) == (32ULL << 20));
 
     MemoryBackend backend;
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend);
-    assert(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
     WritableSpan first = writer.reserve(1);
-    assert(first.data != nullptr);
-    assert(first.capacity == 4096);
+    CHECK(first.data != nullptr);
+    CHECK(first.capacity == 4096);
     std::memset(first.data, 'x', 17);
     writer.commit(17);
     WritableSpan second = writer.reserve(1);
-    assert(second.data == first.data + 17);
-    assert(second.capacity == 4096 - 17);
+    CHECK(second.data == first.data + 17);
+    CHECK(second.capacity == 4096 - 17);
     writer.commit(0);
-    assert(writer.finish());
+    CHECK(writer.finish());
 }
 
 void appends_large_payloads_as_exact_concatenated_frames() {
     MemoryBackend backend;
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend);
-    assert(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
 
     std::string expected;
     for (char marker : {'A', 'B', 'C'}) {
         std::string payload(10 * 1024, marker);
         expected += payload;
-        assert(writer.append(payload));
+        CHECK(writer.append(payload));
     }
-    assert(writer.finish());
+    CHECK(writer.finish());
 
     size_t frames = 0;
     std::vector<char> decoded = decompress_concatenated_frames(backend.copy_output(), &frames);
-    assert(std::string(decoded.begin(), decoded.end()) == expected);
-    assert(frames >= 3);
-    assert(metrics.buffer_swaps >= 2);
-    assert(metrics.raw_bytes == expected.size());
-    assert(metrics.compressed_bytes > 0);
+    CHECK(std::string(decoded.begin(), decoded.end()) == expected);
+    CHECK(frames >= 3);
+    CHECK(metrics.buffer_swaps >= 2);
+    CHECK(metrics.raw_bytes == expected.size());
+    CHECK(metrics.compressed_bytes > 0);
 }
 
 void retries_interrupted_writes() {
@@ -323,15 +369,15 @@ void retries_interrupted_writes() {
     backend.interrupt_once = true;
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend);
-    assert(writer.open("memory", options_with_buffer(4096), &metrics));
-    assert(writer.append("retry me"));
-    assert(writer.finish());
-    assert(backend.write_calls >= 2);
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.append("retry me"));
+    CHECK(writer.finish());
+    CHECK(backend.write_calls >= 2);
 
     size_t frames = 0;
     const auto decoded = decompress_concatenated_frames(backend.copy_output(), &frames);
-    assert(std::string(decoded.begin(), decoded.end()) == "retry me");
-    assert(frames == 1);
+    CHECK(std::string(decoded.begin(), decoded.end()) == "retry me");
+    CHECK(frames == 1);
 }
 
 void preserves_publication_order_when_buffer_zero_is_republished() {
@@ -339,7 +385,7 @@ void preserves_publication_order_when_buffer_zero_is_republished() {
     OrderingFaults faults;
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend, &faults);
-    assert(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
 
     const std::string expected = std::string(4096, 'A') + std::string(4096, 'B') +
                                  std::string(4096, 'C') + "!";
@@ -357,13 +403,13 @@ void preserves_publication_order_when_buffer_zero_is_republished() {
     faults.wait_for_producer_wait_count(2);
     faults.release_consumer();
     producer.join();
-    assert(producer_result.load(std::memory_order_acquire));
-    assert(writer.finish());
+    CHECK(producer_result.load(std::memory_order_acquire));
+    CHECK(writer.finish());
 
     size_t frames = 0;
     const auto decoded = decompress_concatenated_frames(backend.copy_output(), &frames);
-    assert(std::string(decoded.begin(), decoded.end()) == expected);
-    assert(frames == 4);
+    CHECK(std::string(decoded.begin(), decoded.end()) == expected);
+    CHECK(frames == 4);
 }
 
 void enospc_releases_a_waiting_producer() {
@@ -371,11 +417,11 @@ void enospc_releases_a_waiting_producer() {
     WaitingFaults faults;
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend, &faults);
-    assert(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
 
     std::atomic<char *> reserve_result{reinterpret_cast<char *>(1)};
     std::thread producer([&] {
-        assert(writer.append(std::string(2 * 4096, 'z')));
+        CHECK(writer.append(std::string(2 * 4096, 'z')));
         reserve_result.store(writer.reserve(1).data, std::memory_order_release);
     });
 
@@ -383,11 +429,12 @@ void enospc_releases_a_waiting_producer() {
     faults.wait_until_producer_waits();
     backend.release();
     producer.join();
-    assert(reserve_result.load(std::memory_order_acquire) == nullptr);
-    assert(writer.failed());
-    assert(!writer.finish());
-    assert(metrics.producer_waits >= 1);
-    assert(metrics.raw_bytes == 2 * 4096);
+    CHECK(reserve_result.load(std::memory_order_acquire) == nullptr);
+    CHECK(writer.failed());
+    CHECK(!writer.finish());
+    CHECK(metrics.producer_waits >= 1);
+    CHECK(metrics.producer_wait_ns > 0);
+    CHECK(metrics.raw_bytes == 2 * 4096);
 }
 
 void allocation_falls_back_to_eight_mib_per_buffer() {
@@ -396,13 +443,13 @@ void allocation_falls_back_to_eight_mib_per_buffer() {
     faults.allowed_buffer_bytes = 8ULL << 20;
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend, &faults);
-    assert(writer.open("memory", options_with_buffer(16ULL << 20), &metrics));
+    CHECK(writer.open("memory", options_with_buffer(16ULL << 20), &metrics));
     WritableSpan span = writer.reserve(1);
-    assert(span.capacity == (8ULL << 20));
+    CHECK(span.capacity == (8ULL << 20));
     writer.commit(0);
-    assert((faults.allocation_attempts ==
+    CHECK((faults.allocation_attempts ==
             std::vector<size_t>{16ULL << 20, 64ULL << 20, 32ULL << 20, 8ULL << 20}));
-    assert(writer.finish());
+    CHECK(writer.finish());
 }
 
 void open_reports_allocation_thread_and_backend_failures() {
@@ -411,30 +458,30 @@ void open_reports_allocation_thread_and_backend_failures() {
 
     SelectiveFaults allocation_faults;
     AsyncTraceWriter allocation_writer(&backend, &allocation_faults);
-    assert(!allocation_writer.open("memory", options_with_buffer(4096), &metrics));
-    assert(allocation_writer.failed());
+    CHECK(!allocation_writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(allocation_writer.failed());
 
     SelectiveFaults scratch_faults;
     scratch_faults.allowed_buffer_bytes = 4096;
     scratch_faults.compression_allocation_fails = true;
     AsyncTraceWriter scratch_writer(&backend, &scratch_faults);
-    assert(!scratch_writer.open("memory", options_with_buffer(4096), &metrics));
-    assert(scratch_writer.failed());
-    assert(scratch_faults.compression_allocation_bytes > 0);
-    assert(scratch_faults.compression_allocation_bytes < (2ULL << 20));
+    CHECK(!scratch_writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(scratch_writer.failed());
+    CHECK(scratch_faults.compression_allocation_bytes > 0);
+    CHECK(scratch_faults.compression_allocation_bytes < (2ULL << 20));
 
     SelectiveFaults thread_faults;
     thread_faults.allowed_buffer_bytes = 4096;
     thread_faults.thread_error = EAGAIN;
     AsyncTraceWriter thread_writer(&backend, &thread_faults);
-    assert(!thread_writer.open("memory", options_with_buffer(4096), &metrics));
-    assert(thread_writer.failed());
+    CHECK(!thread_writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(thread_writer.failed());
 
     MemoryBackend failing_backend;
     failing_backend.open_error = EACCES;
     AsyncTraceWriter backend_writer(&failing_backend);
-    assert(!backend_writer.open("memory", options_with_buffer(4096), &metrics));
-    assert(backend_writer.failed());
+    CHECK(!backend_writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(backend_writer.failed());
 }
 
 void lz4_failures_release_resources_and_reject_later_appends() {
@@ -445,40 +492,70 @@ void lz4_failures_release_resources_and_reject_later_appends() {
     faults.block_lz4 = true;
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend, &faults);
-    assert(writer.open("memory", options_with_buffer(4096), &metrics));
-    assert(writer.append(std::string(8192, 'q')));
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.append(std::string(8192, 'q')));
     faults.wait_until_lz4_entered();
     faults.release_lz4();
-    assert(!writer.finish());
-    assert(writer.failed());
-    assert(!writer.append("later"));
+    CHECK(!writer.finish());
+    CHECK(writer.failed());
+    CHECK(!writer.append("later"));
+}
+
+void failed_join_retains_resources_until_consumer_exit_is_observed() {
+    MemoryBackend backend;
+    SelectiveFaults faults;
+    faults.allowed_buffer_bytes = 4096;
+    faults.block_lz4 = true;
+    faults.join_failures_remaining = 1;
+    TraceMetrics metrics{};
+
+    auto writer = std::make_unique<AsyncTraceWriter>(&backend, &faults);
+    CHECK(writer->open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer->append(std::string(8192, 'j')));
+    faults.wait_until_lz4_entered();
+    CHECK(!writer->finish());
+    CHECK(writer->failed());
+    CHECK(!writer->finish());
+    CHECK(backend.close_calls.load() == 0);
+
+    std::atomic<bool> destructor_returned{false};
+    std::thread destroyer([&] {
+        writer.reset();
+        destructor_returned.store(true, std::memory_order_release);
+    });
+    faults.wait_for_join_attempts(2);
+    CHECK(!destructor_returned.load(std::memory_order_acquire));
+    faults.release_lz4();
+    destroyer.join();
+    CHECK(destructor_returned.load(std::memory_order_acquire));
+    CHECK(backend.close_calls.load() == 1);
 }
 
 void finish_is_idempotent_and_invalid_calls_are_rejected() {
     MemoryBackend backend;
     TraceMetrics metrics{};
     AsyncTraceWriter unopened(&backend);
-    assert(unopened.reserve(1).data == nullptr);
-    assert(!unopened.append("x"));
-    assert(!unopened.finish());
+    CHECK(unopened.reserve(1).data == nullptr);
+    CHECK(!unopened.append("x"));
+    CHECK(!unopened.finish());
 
     AsyncTraceWriter writer(&backend);
-    assert(writer.open("memory", options_with_buffer(4096), &metrics));
-    assert(!writer.open("again", options_with_buffer(4096), &metrics));
-    assert(writer.reserve(0).data == nullptr);
-    assert(writer.append("done"));
-    assert(writer.finish());
-    assert(writer.finish());
-    assert(!writer.append("too late"));
-    assert(writer.reserve(1).data == nullptr);
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(!writer.open("again", options_with_buffer(4096), &metrics));
+    CHECK(writer.reserve(0).data == nullptr);
+    CHECK(writer.append("done"));
+    CHECK(writer.finish());
+    CHECK(writer.finish());
+    CHECK(!writer.append("too late"));
+    CHECK(writer.reserve(1).data == nullptr);
 
     AsyncTraceWriter invalid_commit(&backend);
-    assert(invalid_commit.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(invalid_commit.open("memory", options_with_buffer(4096), &metrics));
     WritableSpan reserved = invalid_commit.reserve(4);
-    assert(reserved.capacity >= 4);
+    CHECK(reserved.capacity >= 4);
     invalid_commit.commit(reserved.capacity + 1);
-    assert(invalid_commit.failed());
-    assert(!invalid_commit.finish());
+    CHECK(invalid_commit.failed());
+    CHECK(!invalid_commit.finish());
 }
 
 } // namespace
@@ -492,6 +569,7 @@ int main() {
     allocation_falls_back_to_eight_mib_per_buffer();
     open_reports_allocation_thread_and_backend_failures();
     lz4_failures_release_resources_and_reject_later_appends();
+    failed_join_retains_resources_until_consumer_exit_is_observed();
     finish_is_idempotent_and_invalid_calls_are_rejected();
     return 0;
 }

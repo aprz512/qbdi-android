@@ -70,6 +70,10 @@ int TraceFaultInjector::create_consumer_thread(pthread_t *thread, void *(*entry)
     return pthread_create(thread, nullptr, entry, argument);
 }
 
+int TraceFaultInjector::join_consumer_thread(pthread_t thread, void **result) noexcept {
+    return pthread_join(thread, result);
+}
+
 bool TraceFaultInjector::fail_lz4_operation() noexcept {
     return false;
 }
@@ -78,16 +82,12 @@ void TraceFaultInjector::producer_waiting() noexcept {}
 
 void TraceFaultInjector::consumer_released_buffer() noexcept {}
 
+void TraceFaultInjector::consumer_thread_exited() noexcept {}
+
 size_t choose_trace_buffer_bytes(uint64_t physical_bytes, size_t requested_bytes,
                                  bool auto_size) noexcept {
     if (!auto_size) return requested_bytes;
-    if (physical_bytes == 0) return 64ULL * kMiB;
-
-    uint64_t selected = physical_bytes / 64;
-    selected = std::max<uint64_t>(selected, 8ULL * kMiB);
-    selected = std::min<uint64_t>(selected, 128ULL * kMiB);
-    selected -= selected % kMiB;
-    return static_cast<size_t>(selected);
+    return physical_bytes < (8ULL << 30) ? 64ULL * kMiB : 128ULL * kMiB;
 }
 
 struct AsyncTraceWriterImpl {
@@ -130,10 +130,13 @@ struct AsyncTraceWriterImpl {
     int fd = -1;
     pthread_t consumer_thread{};
     bool consumer_started = false;
+    std::atomic<bool> consumer_exited{false};
     bool opened = false;
     bool producer_done = false;
     bool finish_called = false;
     bool finish_result = false;
+    bool resources_released = false;
+    int join_error = 0;
     int active_buffer = -1;
     bool reservation_active = false;
     size_t reservation_capacity = 0;
@@ -175,6 +178,17 @@ void close_backend(AsyncTraceWriterImpl *impl) noexcept {
         impl->error.compare_exchange_strong(expected, close_error, std::memory_order_relaxed);
     }
     impl->fd = -1;
+}
+
+void release_consumer_resources(AsyncTraceWriterImpl *impl) noexcept {
+    if (impl->resources_released) return;
+    if (impl->compression_context != nullptr) {
+        LZ4F_freeCompressionContext(impl->compression_context);
+        impl->compression_context = nullptr;
+    }
+    release_mappings(impl);
+    close_backend(impl);
+    impl->resources_released = true;
 }
 
 void set_failure_locked(AsyncTraceWriterImpl *impl, int error_code) noexcept {
@@ -254,6 +268,7 @@ bool write_frame(AsyncTraceWriterImpl *impl, const char *data, size_t size) noex
 
 void *consumer_entry(void *argument) noexcept {
     auto *impl = static_cast<AsyncTraceWriterImpl *>(argument);
+    TraceFaultInjector *faults = impl->faults;
     for (;;) {
         pthread_mutex_lock(&impl->mutex);
         int ready_index = -1;
@@ -296,8 +311,10 @@ void *consumer_entry(void *argument) noexcept {
         }
         pthread_cond_broadcast(&impl->free_changed);
         pthread_mutex_unlock(&impl->mutex);
-        impl->faults->consumer_released_buffer();
+        faults->consumer_released_buffer();
     }
+    faults->consumer_thread_exited();
+    impl->consumer_exited.store(true, std::memory_order_release);
     return nullptr;
 }
 
@@ -386,6 +403,12 @@ bool publish_and_acquire(AsyncTraceWriterImpl *impl) noexcept {
     bool counted_wait = false;
     for (;;) {
         if (impl->error.load(std::memory_order_acquire) != 0) {
+            if (counted_wait && impl->metrics != nullptr) {
+                const uint64_t wait_ended = monotonic_nanoseconds();
+                if (wait_ended >= wait_started) {
+                    impl->metrics->producer_wait_ns += wait_ended - wait_started;
+                }
+            }
             pthread_mutex_unlock(&impl->mutex);
             return false;
         }
@@ -422,6 +445,23 @@ AsyncTraceWriter::AsyncTraceWriter(TraceWriterBackend *backend, TraceFaultInject
 AsyncTraceWriter::~AsyncTraceWriter() {
     if (impl_ != nullptr) {
         if (impl_->opened && !impl_->finish_called) finish();
+        if (impl_->consumer_started) {
+            const int retry_result =
+                impl_->faults->join_consumer_thread(impl_->consumer_thread, nullptr);
+            if (retry_result != 0) {
+                // A second unjoinable result still cannot let caller-owned seams or metrics die
+                // under the consumer. Wait only for its terminal ownership publication, then
+                // retain the complete implementation rather than risking resource UAF.
+                while (!impl_->consumer_exited.load(std::memory_order_acquire)) {
+                    timespec pause{0, 1000000};
+                    while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
+                }
+                impl_ = nullptr;
+                return;
+            }
+            impl_->consumer_started = false;
+            release_consumer_resources(impl_);
+        }
         delete impl_;
     }
 }
@@ -557,15 +597,22 @@ bool AsyncTraceWriter::finish() {
     pthread_mutex_unlock(&impl_->mutex);
 
     if (impl_->consumer_started) {
-        pthread_join(impl_->consumer_thread, nullptr);
-        impl_->consumer_started = false;
+        const int join_result =
+            impl_->faults->join_consumer_thread(impl_->consumer_thread, nullptr);
+        if (join_result == 0) {
+            impl_->consumer_started = false;
+        } else {
+            impl_->join_error = join_result;
+            int expected = 0;
+            impl_->error.compare_exchange_strong(expected, join_result, std::memory_order_release,
+                                                 std::memory_order_relaxed);
+            impl_->opened = false;
+            impl_->finish_called = true;
+            impl_->finish_result = false;
+            return false;
+        }
     }
-    if (impl_->compression_context != nullptr) {
-        LZ4F_freeCompressionContext(impl_->compression_context);
-        impl_->compression_context = nullptr;
-    }
-    release_mappings(impl_);
-    close_backend(impl_);
+    release_consumer_resources(impl_);
 
     impl_->opened = false;
     impl_->finish_called = true;

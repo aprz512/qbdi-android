@@ -34,9 +34,11 @@ public:
     virtual bool fail_compression_allocation(size_t bytes) noexcept;
     virtual int create_consumer_thread(pthread_t *thread, void *(*entry)(void *),
                                        void *argument) noexcept;
+    virtual int join_consumer_thread(pthread_t thread, void **result) noexcept;
     virtual bool fail_lz4_operation() noexcept;
     virtual void producer_waiting() noexcept;
     virtual void consumer_released_buffer() noexcept;
+    virtual void consumer_thread_exited() noexcept;
 };
 
 size_t choose_trace_buffer_bytes(uint64_t physical_bytes, size_t requested_bytes,
