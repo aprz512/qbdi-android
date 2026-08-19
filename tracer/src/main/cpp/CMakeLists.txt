@@ -45,6 +45,7 @@ add_library(qbdi_tracer SHARED
         core/instruction_cache.cpp
         core/safe_memory.cpp
         events/text_trace_writer.cpp
+        events/trace_encoder.cpp
         core/trace_config.cpp
         hooks/inline_hook_adapter.cpp
         core/qbdi_runner.cpp

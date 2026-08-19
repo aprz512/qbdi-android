@@ -23,3 +23,7 @@ add_trace_test(instruction_cache_test
 add_trace_test(code_rule_test
     code_rule_test.cpp
     ../../main/cpp/rules/code_rule.cpp)
+
+add_trace_test(trace_encoder_test
+    trace_encoder_test.cpp
+    ../../main/cpp/events/trace_encoder.cpp)
