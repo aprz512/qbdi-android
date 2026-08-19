@@ -61,6 +61,7 @@ public:
     bool append(std::string_view bytes);
     bool finish();
     bool failed() const;
+    size_t buffer_bytes() const noexcept;
 
 private:
     AsyncTraceWriterImpl *impl_ = nullptr;

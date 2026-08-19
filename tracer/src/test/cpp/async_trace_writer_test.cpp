@@ -444,6 +444,7 @@ void allocation_falls_back_to_eight_mib_per_buffer() {
     TraceMetrics metrics{};
     AsyncTraceWriter writer(&backend, &faults);
     CHECK(writer.open("memory", options_with_buffer(16ULL << 20), &metrics));
+    CHECK(writer.buffer_bytes() == (8ULL << 20));
     WritableSpan span = writer.reserve(1);
     CHECK(span.capacity == (8ULL << 20));
     writer.commit(0);

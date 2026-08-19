@@ -623,3 +623,7 @@ bool AsyncTraceWriter::finish() {
 bool AsyncTraceWriter::failed() const {
     return impl_ == nullptr || impl_->error.load(std::memory_order_acquire) != 0;
 }
+
+size_t AsyncTraceWriter::buffer_bytes() const noexcept {
+    return impl_ != nullptr && impl_->opened && !impl_->finish_called ? impl_->buffer_bytes : 0;
+}

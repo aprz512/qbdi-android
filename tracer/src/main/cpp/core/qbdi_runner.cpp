@@ -6,51 +6,26 @@
 #include <QBDI.h>
 #include <QBDI/State.h>
 #include <chrono>
-#include <csignal>
+#include <cstdio>
 #include <sstream>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
 
 struct RunnerState {
+    explicit RunnerState(const TraceOptions &options) : writer(options, &metrics) {}
+
     TraceContext context;
     SceneConfig scene;
+    TraceMetrics metrics;
     TextTraceWriter writer;
     CodeRuleEngine code_rules;
     ExecTransferMonitor exec_transfer;
     uint64_t sequence = 0;
+    bool writer_failed = false;
 };
 
 constexpr uint32_t kQbdiVirtualStackSize = 0x1000000;
-
-static thread_local TextTraceWriter *t_active_writer = nullptr;
-static struct sigaction s_prev_sigsegv;
-static struct sigaction s_prev_sigabrt;
-
-static void on_crash_signal(int sig, siginfo_t *, void *) {
-    if (t_active_writer) {
-        t_active_writer->flush();
-        t_active_writer->write_crash_marker(sig);
-        t_active_writer = nullptr;
-    }
-    struct sigaction *prev = (sig == SIGSEGV) ? &s_prev_sigsegv : &s_prev_sigabrt;
-    sigaction(sig, prev, nullptr);
-    raise(sig);
-}
-
-static void install_crash_handlers() {
-    struct sigaction sa{};
-    sa.sa_sigaction = on_crash_signal;
-    sa.sa_flags = SA_SIGINFO;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, &s_prev_sigsegv);
-    sigaction(SIGABRT, &sa, &s_prev_sigabrt);
-}
-
-static void remove_crash_handlers() {
-    sigaction(SIGSEGV, &s_prev_sigsegv, nullptr);
-    sigaction(SIGABRT, &s_prev_sigabrt, nullptr);
-}
 
 static long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
     auto ended = std::chrono::steady_clock::now();
@@ -61,12 +36,15 @@ static QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRStat
     auto *state = static_cast<RunnerState *>(data);
     const auto accesses = vm->getInstMemoryAccess();
     for (const auto &access: accesses) {
-        MemoryAccessText mem;
+        MemoryRecord mem;
         mem.type = access.type == QBDI::MEMORY_WRITE ? 'w' : 'r';
         mem.address = access.accessAddress;
         mem.size = access.size;
         mem.value = access.value;
-        state->writer.memory(state->context, gpr->pc, mem);
+        if (!state->writer.memory(state->context, gpr->pc, mem)) {
+            state->writer_failed = true;
+            return QBDI::STOP;
+        }
     }
     return QBDI::CONTINUE;
 }
@@ -79,25 +57,43 @@ on_pre_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr, void 
 
     CodeRuleContext rule_context(vm, gpr, fpr, analysis, &state->context, &state->writer);
     QBDI::VMAction rule_action = state->code_rules.on_pre_instruction(rule_context);
+    if (state->writer.failed()) {
+        state->writer_failed = true;
+        return QBDI::STOP;
+    }
     if (rule_action != QBDI::CONTINUE) return rule_action;
 
-    InstructionText inst;
-    inst.sequence = ++state->sequence;
-    inst.pc = analysis->address;
-    inst.disassembly =
-            analysis->disassembly != nullptr ? analysis->disassembly : analysis->mnemonic;
+    CachedInstruction decoded{};
+    const char *disassembly = analysis->disassembly != nullptr ? analysis->disassembly
+                                                               : analysis->mnemonic;
+    if (disassembly != nullptr) {
+        std::snprintf(decoded.disassembly, sizeof(decoded.disassembly), "%s", disassembly);
+    }
 
-    std::ostringstream reads;
-    for (uint8_t i = 0; i < analysis->numOperands; ++i) {
-        const auto &op = analysis->operands[i];
-        if (op.type == QBDI::OPERAND_GPR && op.regCtxIdx >= 0 &&
-            (op.regAccess == QBDI::REGISTER_READ || op.regAccess == QBDI::REGISTER_READ_WRITE)) {
-            reads << op.regName << "=0x" << std::hex << QBDI_GPR_GET(gpr, op.regCtxIdx) << " ";
+    InstructionRecord record{};
+    record.sequence = ++state->sequence;
+    record.pc = analysis->address;
+    record.module_base = state->context.module_base;
+    record.decoded = &decoded;
+    for (uint8_t index = 0; index < analysis->numOperands; ++index) {
+        const auto &operand = analysis->operands[index];
+        if (operand.type != QBDI::OPERAND_GPR || operand.regCtxIdx < 0 ||
+            static_cast<size_t>(operand.regCtxIdx) >= kTraceGprCount) {
+            continue;
+        }
+        const uint64_t bit = 1ULL << static_cast<unsigned int>(operand.regCtxIdx);
+        if (operand.regAccess == QBDI::REGISTER_READ ||
+            operand.regAccess == QBDI::REGISTER_READ_WRITE) {
+            decoded.read_gpr_mask |= bit;
+            record.before[static_cast<size_t>(operand.regCtxIdx)] =
+                QBDI_GPR_GET(gpr, operand.regCtxIdx);
         }
     }
-    inst.reads = reads.str();
 
-    state->writer.instruction(state->context, inst);
+    if (!state->writer.instruction(state->context, record)) {
+        state->writer_failed = true;
+        return QBDI::STOP;
+    }
     return QBDI::CONTINUE;
 }
 
@@ -108,7 +104,12 @@ on_post_instruction(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr, void
             QBDI::ANALYSIS_INSTRUCTION | QBDI::ANALYSIS_DISASSEMBLY | QBDI::ANALYSIS_OPERANDS);
 
     CodeRuleContext rule_context(vm, gpr, fpr, analysis, &state->context, &state->writer);
-    return state->code_rules.on_post_instruction(rule_context);
+    const QBDI::VMAction action = state->code_rules.on_post_instruction(rule_context);
+    if (state->writer.failed()) {
+        state->writer_failed = true;
+        return QBDI::STOP;
+    }
+    return action;
 }
 
 static QBDI::VMAction
@@ -116,11 +117,15 @@ on_exec_transfer(QBDI::VM *, const QBDI::VMState *vm_state, QBDI::GPRState *gpr,
                  QBDI::FPRState *, void *data) {
     auto *state = static_cast<RunnerState *>(data);
     emit_exec_transfer_event(&state->exec_transfer, vm_state, gpr, &state->writer);
+    if (state->writer.failed()) {
+        state->writer_failed = true;
+        return QBDI::STOP;
+    }
     return QBDI::CONTINUE;
 }
 
 uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation) {
-    RunnerState state;
+    RunnerState state(config.trace);
     state.context.package_name = config.package_name;
     state.context.scene_name = invocation.scene.name;
     state.context.target_so = config.target_so;
@@ -136,7 +141,11 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
         QTRACE_E("open trace file failed");
         return 0;
     }
-    state.writer.begin(state.context);
+    if (!state.writer.begin(state.context)) {
+        state.writer.close();
+        QTRACE_E("begin trace failed");
+        return 0;
+    }
 
     auto started = std::chrono::steady_clock::now();
     QBDI::VM vm;
@@ -146,6 +155,7 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     if (!QBDI::allocateVirtualStack(gpr, kQbdiVirtualStackSize, &fakestack)) {
         state.writer.error("allocateVirtualStack failed");
         state.writer.end(0, false, elapsed_ms_since(started));
+        state.writer.close();
         QTRACE_E("allocateVirtualStack failed");
         return 0;
     }
@@ -164,6 +174,7 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
               << invocation.target_address;
         state.writer.error(error.str());
         state.writer.end(0, false, elapsed_ms_since(started));
+        state.writer.close();
         QTRACE_E("addInstrumentedModuleFromAddr 0x%lx failed",
                  static_cast<unsigned long>(invocation.target_address));
         QBDI::alignedFree(fakestack);
@@ -181,15 +192,18 @@ uint64_t run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocat
     args.reserve(invocation.args.size());
     for (uint64_t arg: invocation.args) args.push_back(arg);
 
-    t_active_writer = &state.writer;
-    install_crash_handlers();
     bool ok = vm.call(&retVal, invocation.target_address, args);
-    remove_crash_handlers();
-    t_active_writer = nullptr;
 
-    state.writer.end(retVal, ok, elapsed_ms_since(started));
+    ok = ok && !state.writer_failed;
+    const bool end_ok = state.writer.end(retVal, ok, elapsed_ms_since(started));
+    const bool close_ok = state.writer.close();
     QBDI::alignedFree(fakestack);
-    QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),
-             state.writer.path().c_str());
+    if (end_ok && close_ok) {
+        QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),
+                 state.writer.path().c_str());
+    } else {
+        QTRACE_E("trace %s write failed path=%s", invocation.scene.name.c_str(),
+                 state.writer.path().c_str());
+    }
     return retVal;
 }

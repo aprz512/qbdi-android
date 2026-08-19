@@ -1,139 +1,297 @@
 #include "events/text_trace_writer.h"
+
 #include "core/logging.h"
 
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
-#include <cstring>
 #include <fcntl.h>
-#include <sstream>
+#include <limits>
 #include <sys/stat.h>
 #include <unistd.h>
 
-static bool mkdirs(const std::string &path) {
+namespace {
+
+constexpr size_t kMaxTraceEndLineBytes = 512;
+
+bool mkdirs(const std::string &path) {
     if (path.empty() || path == "/") return true;
-    if (mkdir(path.c_str(), 0755) == 0 || errno == EEXIST) return true;
-    size_t slash = path.find_last_of('/');
-    if (slash == std::string::npos) return false;
-    if (!mkdirs(path.substr(0, slash))) return false;
-    return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+    if (::mkdir(path.c_str(), 0755) == 0 || errno == EEXIST) return true;
+    const size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos || !mkdirs(path.substr(0, slash))) return false;
+    return ::mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
 }
 
-static bool write_all(int fd, const char *data, size_t size) {
-    size_t written = 0;
-    while (written < size) {
-        ssize_t result = write(fd, data + written, size - written);
+bool write_all(int fd, const char *data, size_t size) {
+    size_t offset = 0;
+    while (offset < size) {
+        const ssize_t result = ::write(fd, data + offset, size - offset);
         if (result < 0) {
             if (errno == EINTR) continue;
             return false;
         }
-        written += static_cast<size_t>(result);
+        if (result == 0) {
+            errno = EIO;
+            return false;
+        }
+        offset += static_cast<size_t>(result);
     }
     return true;
 }
 
-TextTraceWriter::TextTraceWriter(size_t flush_threshold) : flush_threshold_(flush_threshold) {
-    buffer_.reserve(flush_threshold_ + 4096);
+std::string trace_directory(const TraceContext &context) {
+    if (!context.output_directory.empty()) return context.output_directory;
+    return "/data/data/" + context.package_name + "/files/qbdi-traces";
 }
 
+std::string trace_filename(const TraceContext &context, bool compressed) {
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const long long millis =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    char offset[2 * sizeof(uintptr_t) + 1]{};
+    const int count = std::snprintf(offset, sizeof(offset), "%lx",
+                                    static_cast<unsigned long>(context.target_offset));
+    if (count < 0 || static_cast<size_t>(count) >= sizeof(offset)) return {};
+    return std::to_string(millis) + "_" + std::to_string(context.pid) + "_" +
+           std::to_string(context.tid) + "_" + context.scene_name + "_0x" + offset +
+           (compressed ? ".trace.txt.lz4" : ".trace.txt");
+}
+
+TraceMetrics producer_metrics_snapshot(const TraceMetrics &metrics) {
+    TraceMetrics snapshot{};
+    snapshot.instructions = metrics.instructions;
+    snapshot.raw_bytes = metrics.raw_bytes;
+    snapshot.cache_hits = metrics.cache_hits;
+    snapshot.cache_misses = metrics.cache_misses;
+    snapshot.buffer_swaps = metrics.buffer_swaps;
+    snapshot.producer_waits = metrics.producer_waits;
+    snapshot.producer_wait_ns = metrics.producer_wait_ns;
+    return snapshot;
+}
+
+bool write_unsigned_metric(int fd, const char *key, uint64_t value) {
+    char line[96];
+    const int size = std::snprintf(line, sizeof(line), "%s=%llu\n", key,
+                                   static_cast<unsigned long long>(value));
+    return size > 0 && static_cast<size_t>(size) < sizeof(line) &&
+           write_all(fd, line, static_cast<size_t>(size));
+}
+
+bool write_rate_metric(int fd, const char *key, unsigned __int128 numerator,
+                       unsigned __int128 denominator) {
+    char line[128];
+    size_t used = 0;
+    while (key[used] != '\0') {
+        if (used >= sizeof(line) - 1U) return false;
+        line[used] = key[used];
+        ++used;
+    }
+    if (used >= sizeof(line) - 1U) return false;
+    line[used++] = '=';
+
+    const unsigned __int128 whole = denominator == 0 ? 0 : numerator / denominator;
+    unsigned __int128 remainder = denominator == 0 ? 0 : numerator % denominator;
+    char digits[48];
+    size_t digit_count = 0;
+    unsigned __int128 value = whole;
+    do {
+        digits[digit_count++] = static_cast<char>('0' + value % 10U);
+        value /= 10U;
+    } while (value != 0);
+    if (digit_count > sizeof(line) - used - 8U) return false;
+    while (digit_count != 0) line[used++] = digits[--digit_count];
+    line[used++] = '.';
+    for (size_t index = 0; index < 6; ++index) {
+        const unsigned __int128 digit = denominator == 0 ? 0 : (remainder * 10U) / denominator;
+        remainder = denominator == 0 ? 0 : (remainder * 10U) % denominator;
+        line[used++] = static_cast<char>('0' + digit);
+    }
+    line[used++] = '\n';
+    return write_all(fd, line, used);
+}
+
+} // namespace
+
+TextTraceWriter::TextTraceWriter(const TraceOptions &options, TraceMetrics *metrics)
+    : options_(options), metrics_(metrics) {}
+
 TextTraceWriter::~TextTraceWriter() {
-    flush();
-    if (fd_ >= 0) close(fd_);
+    close();
+}
+
+bool TextTraceWriter::fail() {
+    facade_failed_ = true;
+    return false;
 }
 
 bool TextTraceWriter::open(const TraceContext &context) {
-    char dir[256];
-    snprintf(dir, sizeof(dir), "/data/data/%s/files/qbdi-traces", context.package_name.c_str());
-    if (!mkdirs(dir)) return false;
+    if (opened_ || close_called_ || metrics_ == nullptr) return false;
+    const std::string directory = trace_directory(context);
+    const std::string filename = trace_filename(context, options_.compression_enabled);
+    if (directory.empty() || filename.empty() || !mkdirs(directory)) return fail();
 
-    auto now = std::chrono::system_clock::now().time_since_epoch();
-    long long millis = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-    char file[512];
-    snprintf(file, sizeof(file), "%s/%lld_%d_%d_%s_0x%lx.trace.txt", dir, millis, context.pid,
-             context.tid, context.scene_name.c_str(),
-             static_cast<unsigned long>(context.target_offset));
-    path_ = file;
-    fd_ = ::open(path_.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
-    return fd_ >= 0;
-}
-
-void TextTraceWriter::begin(const TraceContext &context) {
-    std::ostringstream out;
-    out << "TRACE_BEGIN scene=" << context.scene_name
-        << " target=" << context.target_so << "+0x" << std::hex << context.target_offset
-        << " base=0x" << context.module_base
-        << " address=0x" << context.target_address
-        << " pid=" << std::dec << context.pid
-        << " tid=" << context.tid << "\n";
-    append(out.str());
-}
-
-void TextTraceWriter::instruction(const TraceContext &context, const InstructionText &inst) {
-    std::ostringstream out;
-    out << std::dec << inst.sequence << " " << context.target_so << "+0x" << std::hex
-        << (inst.pc - context.module_base) << " " << inst.disassembly;
-    if (!inst.reads.empty()) out << " | R:" << inst.reads;
-    if (!inst.writes.empty()) out << " | W:" << inst.writes;
-    for (const auto &mem: inst.memory) {
-        out << " | MEM:" << mem.type << " addr=0x" << mem.address
-            << " size=" << std::dec << mem.size << " value=0x" << std::hex << mem.value;
+    path_ = directory + "/" + filename;
+    if (::unlink((path_ + ".metrics").c_str()) != 0 && errno != ENOENT) return fail();
+    *metrics_ = {};
+    if (!writer_.open(path_, options_, metrics_)) {
+        QTRACE_E("open trace file failed: %s", path_.c_str());
+        return fail();
     }
-    out << "\n";
-    append(out.str());
+    opened_ = true;
+    return true;
 }
 
-void
-TextTraceWriter::memory(const TraceContext &context, uintptr_t pc, const MemoryAccessText &mem) {
-    std::ostringstream out;
-    out << "MEM " << context.target_so << "+0x" << std::hex << (pc - context.module_base)
-        << " type=" << mem.type << " addr=0x" << mem.address
-        << " size=" << std::dec << mem.size << " value=0x" << std::hex << mem.value << "\n";
-    append(out.str());
+bool TextTraceWriter::begin(const TraceContext &context) {
+    if (!opened_ || began_ || ended_ || close_called_) return false;
+    const size_t effective_buffer_bytes = writer_.buffer_bytes();
+    if (effective_buffer_bytes == 0) return fail();
+    const EncodeResult measured = encoder_.encode_begin(
+        nullptr, 0, context, options_.profile, options_.compression_enabled, effective_buffer_bytes);
+    if (measured.size == 0) return fail();
+    std::string encoded(measured.size, '\0');
+    const EncodeResult result = encoder_.encode_begin(
+        encoded.data(), encoded.size(), context, options_.profile, options_.compression_enabled,
+        effective_buffer_bytes);
+    if (!result.ok || !writer_.append(encoded)) return fail();
+    began_ = true;
+    return true;
 }
 
-void
-TextTraceWriter::call(const char *category, const std::string &name, const std::string &detail) {
-    append(std::string("CALL ") + category + "." + name + " " + detail + "\n");
+bool TextTraceWriter::instruction(const TraceContext &context, const InstructionRecord &record) {
+    if (!opened_ || !began_ || ended_ || close_called_) return false;
+    WritableSpan span = writer_.reserve(kMaxInstructionLineBytes);
+    if (span.data == nullptr) return fail();
+    const EncodeResult result =
+        encoder_.encode_instruction(span.data, span.capacity, context.target_so.c_str(), record);
+    if (!result.ok) {
+        writer_.commit(0);
+        return fail();
+    }
+    writer_.commit(result.size);
+    if (writer_.failed()) return fail();
+    ++metrics_->instructions;
+    return true;
 }
 
-void TextTraceWriter::rule(const std::string &name, const std::string &detail) {
-    append("RULE " + name + " " + detail + "\n");
+bool TextTraceWriter::memory(const TraceContext &context, uintptr_t pc,
+                             const MemoryRecord &record) {
+    char offset[2 * sizeof(uintptr_t) + 1]{};
+    const uintptr_t relative_pc = pc >= context.module_base ? pc - context.module_base : 0;
+    const int offset_size = std::snprintf(offset, sizeof(offset), "%lx",
+                                          static_cast<unsigned long>(relative_pc));
+    char detail[160];
+    const int detail_size = std::snprintf(
+        detail, sizeof(detail), "type=%c addr=0x%lx size=%u value=0x%llx", record.type,
+        static_cast<unsigned long>(record.address), static_cast<unsigned int>(record.size),
+        static_cast<unsigned long long>(record.value));
+    if (offset_size < 0 || static_cast<size_t>(offset_size) >= sizeof(offset) ||
+        detail_size < 0 || static_cast<size_t>(detail_size) >= sizeof(detail)) {
+        return fail();
+    }
+    return append_encoded_event("MEM", context.target_so + "+0x" + offset, detail);
 }
 
-void TextTraceWriter::error(const std::string &message) {
-    append("ERROR " + message + "\n");
+bool TextTraceWriter::append_encoded_event(std::string_view event_type, std::string_view name,
+                                           std::string_view detail) {
+    if (!opened_ || !began_ || ended_ || close_called_) return false;
+    const EncodeResult measured = encoder_.encode_event(nullptr, 0, event_type, name, detail);
+    if (measured.size == 0) return fail();
+    std::string encoded(measured.size, '\0');
+    const EncodeResult result =
+        encoder_.encode_event(encoded.data(), encoded.size(), event_type, name, detail);
+    if (!result.ok || !writer_.append(encoded)) return fail();
+    return true;
 }
 
-void TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
-    std::ostringstream out;
-    out << "TRACE_END status=" << (ok ? "ok" : "failed") << " ret=0x" << std::hex << retval
-        << " elapsed_ms=" << std::dec << elapsed_ms << " bytes=" << buffer_.size() << "\n";
-    append(out.str());
-    flush();
+bool TextTraceWriter::call(const char *category, const std::string &name,
+                           const std::string &detail) {
+    std::string qualified_name = category == nullptr ? std::string{} : std::string(category);
+    if (!qualified_name.empty() && !name.empty()) qualified_name.push_back('.');
+    qualified_name += name;
+    return append_encoded_event("CALL", qualified_name, detail);
 }
 
-void TextTraceWriter::append(const std::string &line) {
-    buffer_ += line;
-    if (buffer_.size() >= flush_threshold_) flush();
+bool TextTraceWriter::rule(const std::string &name, const std::string &detail) {
+    return append_encoded_event("RULE", name, detail);
 }
 
-void TextTraceWriter::flush() {
-    if (fd_ >= 0 && !buffer_.empty()) {
-        if (!write_all(fd_, buffer_.data(), buffer_.size())) {
-            QTRACE_E("trace write failed: %s", strerror(errno));
+bool TextTraceWriter::error(const std::string &message) {
+    return append_encoded_event("ERROR", {}, message);
+}
+
+bool TextTraceWriter::write_raw_line(const std::string &line) {
+    const size_t size = !line.empty() && line.back() == '\n' ? line.size() - 1U : line.size();
+    return append_encoded_event(std::string_view(line.data(), size), {}, {});
+}
+
+bool TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
+    if (!opened_ || !began_ || ended_ || close_called_) return false;
+    elapsed_ms_ = elapsed_ms > 0 ? static_cast<uint64_t>(elapsed_ms) : 0;
+    WritableSpan span = writer_.reserve(kMaxTraceEndLineBytes);
+    if (span.data == nullptr) return fail();
+
+    TraceMetrics footer_metrics = producer_metrics_snapshot(*metrics_);
+    EncodeResult measured{};
+    for (size_t attempt = 0; attempt < 32; ++attempt) {
+        measured = encoder_.encode_end(nullptr, 0, ok, retval, elapsed_ms_, footer_metrics);
+        if (measured.size == 0 || metrics_->raw_bytes >
+                                      std::numeric_limits<uint64_t>::max() - measured.size) {
+            writer_.commit(0);
+            return fail();
         }
-        buffer_.clear();
+        const uint64_t final_raw_bytes = metrics_->raw_bytes + measured.size;
+        if (footer_metrics.raw_bytes == final_raw_bytes) break;
+        footer_metrics.raw_bytes = final_raw_bytes;
     }
+    if (footer_metrics.raw_bytes != metrics_->raw_bytes + measured.size ||
+        measured.size > span.capacity) {
+        writer_.commit(0);
+        return fail();
+    }
+    const EncodeResult result =
+        encoder_.encode_end(span.data, span.capacity, ok, retval, elapsed_ms_, footer_metrics);
+    if (!result.ok) {
+        writer_.commit(0);
+        return fail();
+    }
+    writer_.commit(result.size);
+    if (writer_.failed()) return fail();
+    ended_ = true;
+    return true;
 }
 
-void TextTraceWriter::write_crash_marker(int signal) {
-    if (fd_ < 0) return;
-    const char *msg = (signal == SIGSEGV)
-        ? "TRACE_END status=crashed signal=SIGSEGV\n"
-        : "TRACE_END status=crashed signal=SIGABRT\n";
-    write(fd_, msg, strlen(msg));
+bool TextTraceWriter::write_metrics_sidecar() const {
+    const std::string sidecar = path_ + ".metrics";
+    const int fd = ::open(sidecar.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+    if (fd < 0) return false;
+
+    bool ok = write_unsigned_metric(fd, "instructions", metrics_->instructions) &&
+              write_unsigned_metric(fd, "elapsed_ms", elapsed_ms_) &&
+              write_rate_metric(fd, "instructions_per_second",
+                                static_cast<unsigned __int128>(metrics_->instructions) * 1000U,
+                                elapsed_ms_) &&
+              write_unsigned_metric(fd, "raw_bytes", metrics_->raw_bytes) &&
+              write_unsigned_metric(fd, "compressed_bytes", metrics_->compressed_bytes) &&
+              write_rate_metric(fd, "compression_ratio", metrics_->compressed_bytes,
+                                metrics_->raw_bytes) &&
+              write_unsigned_metric(fd, "cache_hits", metrics_->cache_hits) &&
+              write_unsigned_metric(fd, "cache_misses", metrics_->cache_misses) &&
+              write_unsigned_metric(fd, "buffer_swaps", metrics_->buffer_swaps) &&
+              write_unsigned_metric(fd, "producer_waits", metrics_->producer_waits) &&
+              write_unsigned_metric(fd, "producer_wait_ns", metrics_->producer_wait_ns);
+    if (::close(fd) != 0) ok = false;
+    if (!ok) ::unlink(sidecar.c_str());
+    return ok;
 }
 
-void TextTraceWriter::write_raw_line(const std::string &line) {
-    append(line);
+bool TextTraceWriter::close() {
+    if (close_called_) return close_result_;
+    close_called_ = true;
+    if (!opened_) return false;
+
+    const bool trace_ok = writer_.finish();
+    opened_ = false;
+    close_result_ = trace_ok && ended_ && write_metrics_sidecar();
+    if (ended_ && !close_result_) facade_failed_ = true;
+    return close_result_;
 }
