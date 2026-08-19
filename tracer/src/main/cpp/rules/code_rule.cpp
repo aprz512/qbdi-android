@@ -37,3 +37,10 @@ QBDI::VMAction CodeRuleEngine::on_post_instruction(CodeRuleContext &context) {
     }
     return QBDI::CONTINUE;
 }
+
+bool CodeRuleEngine::requires_immediate_post() const {
+    for (const auto &rule: rules_) {
+        if (rule->requires_immediate_post()) return true;
+    }
+    return false;
+}

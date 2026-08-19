@@ -42,6 +42,7 @@ set_target_properties(qbdi_static PROPERTIES
 add_library(qbdi_tracer SHARED
         tracer_entry.cpp
         core/module_maps.cpp
+        core/instruction_cache.cpp
         core/safe_memory.cpp
         events/text_trace_writer.cpp
         core/trace_config.cpp

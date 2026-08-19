@@ -17,6 +17,9 @@ public:
     virtual QBDI::VMAction on_pre_instruction(CodeRuleContext &context);
 
     virtual QBDI::VMAction on_post_instruction(CodeRuleContext &context);
+
+    virtual bool requires_immediate_post() const { return false; }
+
 };
 
 class OffsetCodeRule : public CodeRule {
@@ -38,6 +41,8 @@ public:
     QBDI::VMAction on_pre_instruction(CodeRuleContext &context);
 
     QBDI::VMAction on_post_instruction(CodeRuleContext &context);
+
+    bool requires_immediate_post() const;
 
 private:
     std::vector<std::unique_ptr<CodeRule>> rules_;
