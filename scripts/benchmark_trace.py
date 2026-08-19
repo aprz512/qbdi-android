@@ -60,6 +60,16 @@ def frida_endpoint(port: int) -> str:
     return f"127.0.0.1:{port}"
 
 
+def throughput_metrics(run: dict[str, int | str]) -> dict[str, float]:
+    elapsed_ms = int(run["elapsed_ms"])
+    if elapsed_ms <= 0:
+        raise ValueError("elapsed_ms must be positive for throughput")
+    return {
+        "instructions_per_second": int(run["instructions"]) * 1000.0 / elapsed_ms,
+        "raw_mib_per_second": int(run["raw_bytes"]) * 1000.0 / elapsed_ms / (1024 * 1024),
+    }
+
+
 def median_report(runs: list[dict[str, int | str]]) -> dict[str, float | int | str]:
     """Return medians for raw metrics and throughput derived from every measured run."""
     if not runs:
@@ -76,13 +86,12 @@ def median_report(runs: list[dict[str, int | str]]) -> dict[str, float | int | s
         if "instructions" in run and "raw_bytes" in run and int(run.get("elapsed_ms", 0)) > 0
     ]
     if throughput_runs:
+        throughput_values = [throughput_metrics(run) for run in throughput_runs]
         report["instructions_per_second"] = statistics.median(
-            int(run["instructions"]) * 1000.0 / int(run["elapsed_ms"])
-            for run in throughput_runs
+            metrics["instructions_per_second"] for metrics in throughput_values
         )
         report["raw_mib_per_second"] = statistics.median(
-            int(run["raw_bytes"]) * 1000.0 / int(run["elapsed_ms"]) / (1024 * 1024)
-            for run in throughput_runs
+            metrics["raw_mib_per_second"] for metrics in throughput_values
         )
     return report
 
@@ -185,7 +194,7 @@ def main() -> int:
     stable_return = ensure_stable_return([str(warmup["return"]), *[str(run["return"]) for run in runs]])
     report = median_report(runs)
     report["return"] = stable_return
-    report["runs"] = runs
+    report["runs"] = [{**run, **throughput_metrics(run)} for run in runs]
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 

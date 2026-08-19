@@ -6,6 +6,7 @@ from scripts.benchmark_trace import (
     median_report,
     parse_legacy_trace,
     select_newest_benchmark_trace,
+    throughput_metrics,
 )
 
 
@@ -56,6 +57,24 @@ TRACE_END status=ok ret=0x42 elapsed_ms=20 bytes=0
 
     def test_uses_the_adb_forwarded_frida_endpoint(self):
         self.assertEqual("127.0.0.1:27042", frida_endpoint(27042))
+
+    def test_derives_every_baseline_run_throughput_from_raw_metrics(self):
+        expected = {
+            1937: (11212.18, 1.16144),
+            1886: (11515.38, 1.19285),
+            1978: (10979.78, 1.13736),
+            2226: (9756.51, 1.01065),
+            1931: (11247.02, 1.16505),
+        }
+
+        for elapsed_ms, (instructions_per_second, raw_mib_per_second) in expected.items():
+            metrics = throughput_metrics({
+                "instructions": 21718,
+                "raw_bytes": 2358988,
+                "elapsed_ms": elapsed_ms,
+            })
+            self.assertAlmostEqual(instructions_per_second, metrics["instructions_per_second"], places=2)
+            self.assertAlmostEqual(raw_mib_per_second, metrics["raw_mib_per_second"], places=5)
 
 
 if __name__ == "__main__":
