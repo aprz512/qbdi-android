@@ -18,6 +18,29 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.lz4_frames import (
+        DecodeResult,
+        Lz4FileScan,
+        Lz4FrameScan,
+        PullTraceError,
+        decode_lz4_file,
+        decode_lz4_frames,
+        scan_lz4_file,
+        split_lz4_frames,
+    )
+except ModuleNotFoundError:  # Support direct execution as scripts/pull_trace.py.
+    from lz4_frames import (  # type: ignore[no-redef]
+        DecodeResult,
+        Lz4FileScan,
+        Lz4FrameScan,
+        PullTraceError,
+        decode_lz4_file,
+        decode_lz4_frames,
+        scan_lz4_file,
+        split_lz4_frames,
+    )
+
 
 CRASH_MARKER_MAGIC = 0x51435248
 CRASH_MARKER = struct.Struct("<Iii")
@@ -33,10 +56,6 @@ EXIT_ERROR = 1
 EXIT_PARTIAL = 2
 
 
-class PullTraceError(RuntimeError):
-    """An artifact cannot be pulled or validated safely."""
-
-
 @dataclasses.dataclass(frozen=True)
 class CrashMarker:
     signal: int
@@ -50,24 +69,6 @@ class TraceArtifact:
     metrics_name: str | None = None
     crash_name: str | None = None
     crash_marker: CrashMarker | None = None
-
-
-@dataclasses.dataclass(frozen=True)
-class Lz4FrameScan:
-    frames: tuple[bytes, ...]
-    truncated: bool
-
-
-@dataclasses.dataclass(frozen=True)
-class Lz4FileScan:
-    ranges: tuple[tuple[int, int], ...]
-    truncated: bool
-
-
-@dataclasses.dataclass(frozen=True)
-class DecodeResult:
-    data: bytes
-    truncated: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -187,265 +188,6 @@ def classify_artifacts(artifacts: Mapping[str, bytes]) -> dict[str, TraceArtifac
             crash_marker=marker,
         )
     return traces
-
-
-LZ4_MAGIC = b"\x04\x22\x4d\x18"
-LZ4_SKIPPABLE_MAGIC = b"\x50\x2a\x4d\x18"
-LZ4_BLOCK_MAXIMUMS = {
-    4: 64 * 1024,
-    5: 256 * 1024,
-    6: 1024 * 1024,
-    7: 4 * 1024 * 1024,
-}
-
-
-def _is_lz4_skippable_magic_prefix(magic: bytes) -> bool:
-    return bool(magic) and magic[0] & 0xF0 == 0x50 and (
-        len(magic) == 1 or magic[1:] == LZ4_SKIPPABLE_MAGIC[1:len(magic)]
-    )
-
-
-def _memory_scan_result(frames: list[bytes], truncated: bool) -> Lz4FrameScan:
-    if not frames:
-        raise PullTraceError("compressed artifact has no complete LZ4 frame")
-    return Lz4FrameScan(tuple(frames), truncated)
-
-
-def _file_scan_result(
-    ranges: list[tuple[int, int]], truncated: bool
-) -> Lz4FileScan:
-    if not ranges:
-        raise PullTraceError("compressed artifact has no complete LZ4 frame")
-    return Lz4FileScan(tuple(ranges), truncated)
-
-
-def split_lz4_frames(data: bytes) -> Lz4FrameScan:
-    """Split standard LZ4 frames without treating a truncated tail as complete."""
-    frames: list[bytes] = []
-    cursor = 0
-    total = len(data)
-    while cursor < total:
-        frame_start = cursor
-        magic_bytes = min(4, total - cursor)
-        magic = data[cursor:cursor + magic_bytes]
-        standard_prefix = magic == LZ4_MAGIC[:magic_bytes]
-        skippable_prefix = _is_lz4_skippable_magic_prefix(magic)
-        if not standard_prefix and not skippable_prefix:
-            raise PullTraceError(f"invalid LZ4 frame magic at byte {cursor}")
-        if magic_bytes < 4:
-            return _memory_scan_result(frames, True)
-        cursor += 4
-        if skippable_prefix:
-            if total - cursor < 4:
-                return _memory_scan_result(frames, True)
-            payload_bytes = int.from_bytes(data[cursor:cursor + 4], "little")
-            cursor += 4
-            if total - cursor < payload_bytes:
-                return _memory_scan_result(frames, True)
-            cursor += payload_bytes
-            continue
-        if total - cursor < 2:
-            return _memory_scan_result(frames, True)
-        flags = data[cursor]
-        block_descriptor = data[cursor + 1]
-        cursor += 2
-        if flags >> 6 != 1 or flags & 0x02:
-            raise PullTraceError(f"invalid LZ4 frame flags at byte {frame_start}")
-        block_maximum = LZ4_BLOCK_MAXIMUMS.get((block_descriptor >> 4) & 0x07)
-        if block_maximum is None or block_descriptor & 0x8F:
-            raise PullTraceError(f"invalid LZ4 block descriptor at byte {frame_start}")
-        optional_header = (8 if flags & 0x08 else 0) + (4 if flags & 0x01 else 0)
-        if total - cursor < optional_header + 1:
-            return _memory_scan_result(frames, True)
-        cursor += optional_header + 1  # content size/dictionary id plus header checksum
-
-        while True:
-            if total - cursor < 4:
-                return _memory_scan_result(frames, True)
-            block_word = int.from_bytes(data[cursor:cursor + 4], "little")
-            cursor += 4
-            if block_word == 0:
-                if flags & 0x04:
-                    if total - cursor < 4:
-                        return _memory_scan_result(frames, True)
-                    cursor += 4
-                frames.append(data[frame_start:cursor])
-                break
-            block_size = block_word & 0x7FFFFFFF
-            if block_size > block_maximum:
-                raise PullTraceError(f"invalid LZ4 block size at byte {cursor - 4}")
-            trailer = 4 if flags & 0x10 else 0
-            if total - cursor < block_size + trailer:
-                return _memory_scan_result(frames, True)
-            cursor += block_size + trailer
-    return _memory_scan_result(frames, False)
-
-
-def scan_lz4_file(path: Path) -> Lz4FileScan:
-    """Locate complete frames using bounded reads and seeks."""
-    ranges: list[tuple[int, int]] = []
-    total = path.stat().st_size
-    with path.open("rb") as stream:
-        while stream.tell() < total:
-            frame_start = stream.tell()
-            magic = stream.read(4)
-            standard_prefix = LZ4_MAGIC[:len(magic)] == magic
-            skippable_prefix = _is_lz4_skippable_magic_prefix(magic)
-            if not standard_prefix and not skippable_prefix:
-                raise PullTraceError(f"invalid LZ4 frame magic at byte {frame_start}")
-            if len(magic) < 4:
-                return _file_scan_result(ranges, True)
-            if skippable_prefix:
-                size_bytes = stream.read(4)
-                if len(size_bytes) < 4:
-                    return _file_scan_result(ranges, True)
-                payload_bytes = int.from_bytes(size_bytes, "little")
-                if total - stream.tell() < payload_bytes:
-                    return _file_scan_result(ranges, True)
-                stream.seek(payload_bytes, os.SEEK_CUR)
-                continue
-            descriptor = stream.read(2)
-            if len(descriptor) < 2:
-                return _file_scan_result(ranges, True)
-            flags, block_descriptor = descriptor
-            if flags >> 6 != 1 or flags & 0x02:
-                raise PullTraceError(f"invalid LZ4 frame flags at byte {frame_start}")
-            block_maximum = LZ4_BLOCK_MAXIMUMS.get((block_descriptor >> 4) & 0x07)
-            if block_maximum is None or block_descriptor & 0x8F:
-                raise PullTraceError(f"invalid LZ4 block descriptor at byte {frame_start}")
-            optional_header = (8 if flags & 0x08 else 0) + (4 if flags & 0x01 else 0)
-            if len(stream.read(optional_header + 1)) < optional_header + 1:
-                return _file_scan_result(ranges, True)
-            while True:
-                block_offset = stream.tell()
-                block_header = stream.read(4)
-                if len(block_header) < 4:
-                    return _file_scan_result(ranges, True)
-                block_word = int.from_bytes(block_header, "little")
-                if block_word == 0:
-                    if flags & 0x04 and len(stream.read(4)) < 4:
-                        return _file_scan_result(ranges, True)
-                    ranges.append((frame_start, stream.tell()))
-                    break
-                block_size = block_word & 0x7FFFFFFF
-                if block_size > block_maximum:
-                    raise PullTraceError(f"invalid LZ4 block size at byte {block_offset}")
-                bytes_to_skip = block_size + (4 if flags & 0x10 else 0)
-                if total - stream.tell() < bytes_to_skip:
-                    return _file_scan_result(ranges, True)
-                stream.seek(bytes_to_skip, os.SEEK_CUR)
-    return _file_scan_result(ranges, False)
-
-
-def decode_lz4_frames(
-    data: bytes,
-    lz4: str,
-    runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
-) -> DecodeResult:
-    """Decode every complete frame separately, preserving their stream order."""
-    scan = split_lz4_frames(data)
-    output = bytearray()
-    for index, frame in enumerate(scan.frames):
-        command = [lz4, "-d", "-c"]
-        try:
-            completed = runner(
-                command,
-                input=frame,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-            )
-        except FileNotFoundError as error:
-            raise PullTraceError(
-                "host lz4 CLI is required for decompression; install the 'lz4' command "
-                "or use --compressed-only"
-            ) from error
-        if completed.returncode != 0:
-            stderr = completed.stderr.decode("utf-8", errors="replace")
-            raise PullTraceError(
-                f"lz4 decompression failed for frame {index + 1}: {stderr.strip()}"
-            )
-        output.extend(completed.stdout)
-    return DecodeResult(bytes(output), scan.truncated)
-
-
-def decode_lz4_file(source: Path, output: Path, lz4: str) -> bool:
-    """Stream complete frames through one host lz4 process each."""
-    executable = shutil.which(lz4)
-    if executable is None:
-        raise PullTraceError(
-            "host lz4 CLI is required for decompression; install the 'lz4' command "
-            "or use --compressed-only"
-        )
-    scan = scan_lz4_file(source)
-    with source.open("rb") as compressed, output.open("wb") as decoded:
-        for index, (start, end) in enumerate(scan.ranges):
-            compressed.seek(start)
-            try:
-                process = subprocess.Popen(
-                    [executable, "-d", "-c"],
-                    stdin=subprocess.PIPE,
-                    stdout=decoded,
-                    stderr=subprocess.PIPE,
-                )
-            except OSError as error:
-                raise PullTraceError(f"cannot start host lz4 CLI: {error}") from error
-            assert process.stdin is not None
-            assert process.stderr is not None
-            remaining = end - start
-            write_error: BrokenPipeError | None = None
-            reaped = False
-            try:
-                try:
-                    while remaining:
-                        chunk = compressed.read(min(1024 * 1024, remaining))
-                        if not chunk:
-                            raise PullTraceError("compressed trace changed while decoding")
-                        process.stdin.write(chunk)
-                        remaining -= len(chunk)
-                except BrokenPipeError as error:
-                    write_error = error
-                finally:
-                    try:
-                        process.stdin.close()
-                    except BrokenPipeError as error:
-                        write_error = error
-                with process.stderr:
-                    stderr = process.stderr.read().decode("utf-8", errors="replace")
-                return_code = process.wait()
-                reaped = True
-            except Exception as error:
-                if not reaped:
-                    try:
-                        if process.poll() is None:
-                            process.terminate()
-                    except Exception:
-                        pass
-                    try:
-                        process.wait()
-                    except Exception:
-                        pass
-                raise PullTraceError(
-                    f"lz4 decompression failed for frame {index + 1}: {error}"
-                ) from error
-            except BaseException:
-                if not reaped:
-                    try:
-                        if process.poll() is None:
-                            process.terminate()
-                    except Exception:
-                        pass
-                    try:
-                        process.wait()
-                    except Exception:
-                        pass
-                raise
-            if write_error is not None or return_code != 0:
-                raise PullTraceError(
-                    f"lz4 decompression failed for frame {index + 1}: {stderr.strip()}"
-                )
-    return scan.truncated
 
 
 def _temporary_path(directory: Path) -> Path:
