@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <signal.h>
 #include <string>
+#include <string_view>
 #include <sys/types.h>
 
 struct CrashMarker {
@@ -34,7 +35,7 @@ public:
     CrashMarkerSession(const CrashMarkerSession &) = delete;
     CrashMarkerSession &operator=(const CrashMarkerSession &) = delete;
 
-    bool open(const std::string &trace_path) noexcept;
+    bool open(std::string_view trace_path) noexcept;
     bool finish() noexcept;
     int error_code() const noexcept { return error_code_; }
 

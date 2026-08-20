@@ -7,7 +7,7 @@
 #include "core/pending_instruction.h"
 #include "core/safe_memory.h"
 #include "core/trace_config.h"
-#include "events/trace_encoder.h"
+#include "events/binary_trace_encoder.h"
 
 #include <array>
 #include <cassert>
@@ -571,34 +571,36 @@ void encodes_byte_states_flags_and_overflow_in_exact_order() {
     record.memory[0].after.state = MemoryBytesState::Unavailable;
     record.memory[0].kind = MemoryAccessKind::ReadWrite;
 
-    TraceEncoder encoder;
-    std::array<char, kMaxInstructionLineBytes> output{};
-    EncodeResult encoded = encoder.encode_instruction(output.data(), output.size(), "libx.so", record);
-    assert(encoded.ok);
-    std::string text(output.data(), encoded.size);
-    assert(text.starts_with(
-            "3 libx.so+0x10 <undecoded> | MEM:rw addr=0x2000 size=1 value=0x0 flags=0x5 pre=abcd post=<unavailable>"));
-
-    for (size_t index = kMaxMemoryRecords; index < kMaxMemoryRecords + 3U; ++index) {
-        const MemoryRecord continuation = memory(0x2000 + index,
-                                                 MemoryAccessKind::Write);
-        encoded = encoder.encode_memory(output.data(), output.size(), "libx.so", 0x10,
-                                        continuation);
-        assert(encoded.ok);
-        text.append(output.data(), encoded.size);
-    }
-    constexpr std::array<std::string_view, kMaxMemoryRecords + 3U> addresses{
-            "2000", "2001", "2002", "2003", "2004", "2005",
-            "2006", "2007", "2008", "2009", "200a"};
-    size_t cursor = 0;
+    BinaryTraceEncoder encoder;
+    std::array<uint8_t, kBinaryMaxMemoryRecordBytes> output{};
     for (size_t index = 0; index < kMaxMemoryRecords + 3U; ++index) {
-        const std::string needle = "addr=0x" + std::string(addresses[index]);
-        const size_t found = text.find(needle, cursor);
-        assert(found != std::string::npos);
-        cursor = found + needle.size();
+        const MemoryRecord event = index < kMaxMemoryRecords
+                                           ? record.memory[index]
+                                           : memory(0x2000 + index,
+                                                    MemoryAccessKind::Write);
+        const BinaryEncodeResult encoded = encoder.encode_memory(
+                output.data(), output.size(), 7, 0x10, event);
+        assert(encoded.ok);
+        assert(output[0] == static_cast<uint8_t>(BinaryRecordType::Memory));
+        assert(output[8] == 7);
+        assert(output[12] == 0x10);
+        assert(output[20] == static_cast<uint8_t>(event.kind));
+        uint64_t encoded_address = 0;
+        for (size_t byte = 0; byte < sizeof(encoded_address); ++byte) {
+            encoded_address |= static_cast<uint64_t>(output[24 + byte]) << (byte * 8U);
+        }
+        assert(encoded_address == 0x2000 + index);
+        if (index == 0) {
+            assert(output[21] == 1);
+            assert(output[22] == 5);
+            assert(output[44] == static_cast<uint8_t>(MemoryBytesState::Available));
+            assert(output[45] == 2);
+            assert(output[46] == 0xab);
+            assert(output[47] == 0xcd);
+            assert(output[48] == static_cast<uint8_t>(MemoryBytesState::Unavailable));
+            assert(output[49] == 0);
+        }
     }
-    assert(text.find("MEM libx.so+0x10 type=w addr=0x2008 size=1 value=0x8 flags=0x0\n") !=
-           std::string::npos);
 }
 
 void truncates_known_memory_values_to_access_width() {

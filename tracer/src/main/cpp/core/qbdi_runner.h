@@ -2,7 +2,7 @@
 
 #include "core/module_maps.h"
 #include "core/trace_config.h"
-#include "events/text_trace_writer.h"
+#include "events/binary_trace_writer.h"
 
 #include <array>
 #include <cstdint>

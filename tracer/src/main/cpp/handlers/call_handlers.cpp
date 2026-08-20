@@ -21,6 +21,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -138,6 +139,21 @@ namespace {
 
     // QBDI 是单线程执行的, 用 thread_local 存储当前活跃的 JNI 调用
     static thread_local ActiveJniCall t_active_jni;
+    constexpr size_t kJniCallChunkBytes = 3072;
+
+    bool emit_chunked_call(BinaryTraceWriter *writer, const char *category,
+                           std::string_view name, std::string_view detail) {
+        if (writer == nullptr || writer->failed()) return false;
+        if (detail.empty()) return writer->call(category, name, detail);
+        size_t offset = 0;
+        while (offset < detail.size()) {
+            const size_t count = std::min(kJniCallChunkBytes,
+                                          detail.size() - offset);
+            if (!writer->call(category, name, detail.substr(offset, count))) return false;
+            offset += count;
+        }
+        return true;
+    }
 
     // ── JNI 状态更新 ──
     void update_jni_state(const JniFuncInfo &func, const uint64_t *args, uint64_t retval) {
@@ -190,7 +206,7 @@ namespace {
     }
 
     // ── emit_jni_enter: 检测到 JNI 调用 → 格式化输出 enter ──
-    void emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr, TextTraceWriter *writer) {
+    void emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr, BinaryTraceWriter *writer) {
         uintptr_t env = QBDI_GPR_GET(gpr, 0);
         ensure_jni_map_built(env);
 
@@ -208,7 +224,11 @@ namespace {
         int num_args = static_cast<int>(t_active_jni.func->args.size());
         std::string line = fmt.format_enter(t_active_jni.tid, t_active_jni.enter_ms,
                                              *t_active_jni.func, t_active_jni.args, num_args);
-        writer->write_raw_line(line);
+        emit_chunked_call(writer, "jni-enter", t_active_jni.func->name, line);
+        if (writer->failed()) {
+            t_active_jni = ActiveJniCall{};
+            return;
+        }
 
         // ── 回溯: 检查是否需要打印调用栈 ──
         bool need_bt = false;
@@ -236,7 +256,9 @@ namespace {
             }
             free(symbols);
             if (!frames.empty()) {
-                writer->write_raw_line(JniFormatter::format_backtrace(frames));
+                emit_chunked_call(writer, "jni-backtrace", t_active_jni.func->name,
+                                  JniFormatter::format_backtrace(frames));
+                if (writer->failed()) t_active_jni = ActiveJniCall{};
             }
         }
 #else
@@ -245,7 +267,7 @@ namespace {
     }
 
     // ── emit_jni_leave: JNI 返回 → 格式化输出 leave + 更新状态 ──
-    void emit_jni_leave(QBDI::GPRState *gpr, TextTraceWriter *writer) {
+    void emit_jni_leave(QBDI::GPRState *gpr, BinaryTraceWriter *writer) {
         if (t_active_jni.func == nullptr) return;
 
         uint64_t retval = QBDI_GPR_GET(gpr, 0);
@@ -254,7 +276,7 @@ namespace {
         JniFormatter fmt;
         std::string line = fmt.format_leave(t_active_jni.tid, t_active_jni.enter_ms,
                                              *t_active_jni.func, retval);
-        writer->write_raw_line(line);
+        emit_chunked_call(writer, "jni-leave", t_active_jni.func->name, line);
 
         t_active_jni = ActiveJniCall{};
     }
@@ -275,7 +297,7 @@ namespace {
     }
 
     PendingExecTransfer
-    emit_non_jni_call(uintptr_t target, QBDI::GPRState *state, TextTraceWriter *writer) {
+    emit_non_jni_call(uintptr_t target, QBDI::GPRState *state, BinaryTraceWriter *writer) {
         PendingExecTransfer pending;
         pending.target = target;
 
@@ -306,7 +328,7 @@ namespace {
     }
 
     void emit_non_jni_return(const PendingExecTransfer &pending, QBDI::GPRState *state,
-                              TextTraceWriter *writer) {
+                              BinaryTraceWriter *writer) {
         if (state == nullptr || writer == nullptr || pending.name.empty()) return;
         std::ostringstream detail;
         detail << pending.category << "." << pending.name << " target=0x" << std::hex
@@ -323,14 +345,16 @@ void set_jni_backtrace_funcs(const std::vector<std::string> &funcs) {
 
 // ── 公开接口 ──
 void emit_exec_transfer_event(ExecTransferMonitor *monitor, const QBDI::VMState *vm_state,
-                              QBDI::GPRState *state, TextTraceWriter *writer) {
+                              QBDI::GPRState *state, BinaryTraceWriter *writer) {
     if (monitor == nullptr || vm_state == nullptr || state == nullptr || writer == nullptr) return;
+    if (writer->failed()) return;
 
     uintptr_t target = state->pc;
 
     if ((vm_state->event & QBDI::EXEC_TRANSFER_CALL) != 0) {
         // 1) 尝试 JNI 匹配 → 走 jnitrace 风格格式化
         emit_jni_enter(target, state, writer);
+        if (writer->failed()) return;
         if (t_active_jni.func != nullptr) {
             // JNI 调用已追踪，压一个占位 pending 用于配对 return
             PendingExecTransfer placeholder;
@@ -343,6 +367,7 @@ void emit_exec_transfer_event(ExecTransferMonitor *monitor, const QBDI::VMState 
 
         // 2) 非 JNI — 走原有逻辑
         PendingExecTransfer pending = emit_non_jni_call(target, state, writer);
+        if (writer->failed()) return;
         if (!pending.name.empty()) monitor->pending.push_back(std::move(pending));
     }
 

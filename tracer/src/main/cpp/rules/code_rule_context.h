@@ -1,6 +1,6 @@
 #pragma once
 
-#include "events/text_trace_writer.h"
+#include "events/binary_trace_writer.h"
 #include "events/trace_event.h"
 #include "core/instruction_cache.h"
 
@@ -15,7 +15,7 @@ class CodeRuleContext {
 public:
     CodeRuleContext(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr,
                     const InstructionView *instruction, const TraceContext *trace,
-                    TextTraceWriter *writer);
+                    BinaryTraceWriter *writer);
 
     QBDI::VM *vm() const { return vm_; }
 
@@ -89,5 +89,5 @@ private:
     QBDI::FPRState *fpr_ = nullptr;
     const InstructionView *instruction_ = nullptr;
     const TraceContext *trace_ = nullptr;
-    TextTraceWriter *writer_ = nullptr;
+    BinaryTraceWriter *writer_ = nullptr;
 };

@@ -1,5 +1,6 @@
 #include "core/qbdi_runner_lifecycle.h"
-#include "events/text_trace_writer.h"
+#include "events/binary_trace_format.h"
+#include "events/binary_trace_writer.h"
 #include "lz4frame.h"
 
 #include <atomic>
@@ -153,6 +154,34 @@ std::string decompress_frames(const std::vector<char> &compressed) {
     return decoded;
 }
 
+uint16_t read_u16(const std::string &bytes, size_t offset) {
+    CHECK(offset + 2 <= bytes.size());
+    return static_cast<uint16_t>(static_cast<uint8_t>(bytes[offset])) |
+           static_cast<uint16_t>(static_cast<uint8_t>(bytes[offset + 1])) << 8U;
+}
+
+uint32_t read_u32(const std::string &bytes, size_t offset) {
+    CHECK(offset + 4 <= bytes.size());
+    return static_cast<uint32_t>(static_cast<uint8_t>(bytes[offset])) |
+           static_cast<uint32_t>(static_cast<uint8_t>(bytes[offset + 1])) << 8U |
+           static_cast<uint32_t>(static_cast<uint8_t>(bytes[offset + 2])) << 16U |
+           static_cast<uint32_t>(static_cast<uint8_t>(bytes[offset + 3])) << 24U;
+}
+
+bool contains_record(const std::string &stream, BinaryRecordType expected) {
+    if (stream.size() < kBinaryStreamHeaderBytes || stream.compare(0, 4, "QTRB") != 0)
+        return false;
+    size_t offset = kBinaryStreamHeaderBytes;
+    while (offset + kBinaryRecordHeaderBytes <= stream.size()) {
+        const auto type = static_cast<BinaryRecordType>(read_u16(stream, offset));
+        const size_t payload = read_u32(stream, offset + 4);
+        if (payload > stream.size() - offset - kBinaryRecordHeaderBytes) return false;
+        if (type == expected) return true;
+        offset += kBinaryRecordHeaderBytes + payload;
+    }
+    return false;
+}
+
 void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
     char directory_template[] = "/tmp/qtrace-runner-fork-XXXXXX";
     char *directory = ::mkdtemp(directory_template);
@@ -174,22 +203,23 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
     context.output_directory = directory;
 
     RecordingPosixBackend backend;
-    TextTraceWriter writer(options, &metrics, &backend, &gate);
+    BinaryTraceWriter writer(options, &metrics, &backend, &gate);
     CHECK(writer.prepare(context));
-    const std::string path = writer.path();
+    const std::string path(writer.path());
     CHECK(writer.open_prepared());
     CHECK(backend.opened_fd >= 0);
     CHECK(writer.begin(context));
-    CHECK(writer.write_raw_line(std::string(4096, 'g')));
+    CHECK(writer.call("stress", "publication-a", std::string(3000, 'g')));
+    CHECK(writer.call("stress", "publication-b", std::string(1000, 'h')));
     gate.wait_until_entered();
 
     TraceMetrics secondary_metrics{};
     TraceContext secondary_context = context;
     secondary_context.scene_name = "fork-secondary";
     RecordingPosixBackend secondary_backend;
-    TextTraceWriter secondary_writer(options, &secondary_metrics, &secondary_backend);
+    BinaryTraceWriter secondary_writer(options, &secondary_metrics, &secondary_backend);
     CHECK(secondary_writer.prepare(secondary_context));
-    const std::string secondary_path = secondary_writer.path();
+    const std::string secondary_path(secondary_writer.path());
     CHECK(secondary_writer.open_prepared());
     CHECK(secondary_backend.opened_fd >= 0);
     CHECK(secondary_writer.begin(secondary_context));
@@ -205,8 +235,8 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
         if (::fcntl(secondary_backend.opened_fd, F_GETFD) != -1 || errno != EBADF) _exit(88);
         const int reused = reuse_fd_with_dev_null(backend.opened_fd);
         if (reused != backend.opened_fd) _exit(83);
-        secondary_writer.~TextTraceWriter();
-        writer.~TextTraceWriter();
+        secondary_writer.~BinaryTraceWriter();
+        writer.~BinaryTraceWriter();
         if (::fcntl(reused, F_GETFD) < 0) _exit(84);
         (void)::close(reused);
         _exit(0);
@@ -224,8 +254,8 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
         if (::fcntl(backend.opened_fd, F_GETFD) < 0) _exit(86);
         errno = 0;
         if (::fcntl(secondary_backend.opened_fd, F_GETFD) != -1 || errno != EBADF) _exit(89);
-        secondary_writer.~TextTraceWriter();
-        writer.~TextTraceWriter();
+        secondary_writer.~BinaryTraceWriter();
+        writer.~BinaryTraceWriter();
         if (::fcntl(backend.opened_fd, F_GETFD) < 0) _exit(87);
         (void)::close(backend.opened_fd);
         _exit(0);
@@ -249,9 +279,14 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
     CHECK(WEXITSTATUS(child_status) == 0);
     const std::string trace = decompress_frames(read_file(path));
     const std::string secondary_trace = decompress_frames(read_file(secondary_path));
-    CHECK(trace.find("TRACE_BEGIN") != std::string::npos);
-    CHECK(trace.find("TRACE_END status=ok ret=0xbeef") != std::string::npos);
-    CHECK(secondary_trace.find("TRACE_END status=ok ret=0xbeef") != std::string::npos);
+    CHECK(std::string_view(path).ends_with(".trace.bin.lz4"));
+    CHECK(std::string_view(secondary_path).ends_with(".trace.bin.lz4"));
+    CHECK(trace.compare(0, 4, "QTRB") == 0);
+    CHECK(secondary_trace.compare(0, 4, "QTRB") == 0);
+    CHECK(contains_record(trace, BinaryRecordType::TraceBegin));
+    CHECK(contains_record(trace, BinaryRecordType::Call));
+    CHECK(contains_record(trace, BinaryRecordType::TraceEnd));
+    CHECK(contains_record(secondary_trace, BinaryRecordType::TraceEnd));
     CHECK(::access((path + ".metrics").c_str(), F_OK) == 0);
     CHECK(::access((secondary_path + ".metrics").c_str(), F_OK) == 0);
 

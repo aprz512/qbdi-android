@@ -35,7 +35,7 @@ struct RunnerState {
 
     TraceContext context;
     TraceMetrics metrics;
-    TextTraceWriter writer;
+    BinaryTraceWriter writer;
     CodeRuleEngine code_rules;
     ExecTransferMonitor exec_transfer;
     TraceRunSessionOutcome session;
@@ -244,11 +244,11 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
             state.session.finalize(state.writer, elapsed_ms_since(started));
     const bool crash_marker_finished = state.crash_marker.finish();
     if (finalization.should_log_success && crash_marker_finished) {
-        QTRACE_I("trace %s complete path=%s", invocation.scene->name.c_str(),
-                 state.writer.path().c_str());
+        QTRACE_I("trace %s complete path=%.*s", invocation.scene->name.c_str(),
+                 static_cast<int>(state.writer.path().size()), state.writer.path().data());
     } else {
-        QTRACE_E("trace %s write failed path=%s", invocation.scene->name.c_str(),
-                 state.writer.path().c_str());
+        QTRACE_E("trace %s write failed path=%.*s", invocation.scene->name.c_str(),
+                 static_cast<int>(state.writer.path().size()), state.writer.path().data());
     }
     return {finalization.target_ran, finalization.outward_return_value};
 }

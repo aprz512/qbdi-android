@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-class TextTraceWriter;
+class BinaryTraceWriter;
 
 struct TraceTargetOutcome {
     bool ran = false;
@@ -33,7 +33,7 @@ public:
     bool target_should_run() const noexcept;
     void observe_target_call(TraceTargetOutcome outcome,
                              bool writer_failed) noexcept;
-    TraceRunFinalization finalize(TextTraceWriter &writer, long elapsed_ms);
+    TraceRunFinalization finalize(BinaryTraceWriter &writer, long elapsed_ms);
 
 private:
     TraceCallbackGate callback_gate_{};

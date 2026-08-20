@@ -42,8 +42,8 @@ struct InstructionRecord {
     uint64_t sequence = 0;
     uintptr_t pc = 0;
     uintptr_t module_base = 0;
-    // Borrowed: when non-null, this object and its fixed character arrays must remain readable and
-    // unchanged across both TraceEncoder measure and write passes.
+    // Borrowed: when non-null, this object and its fixed character arrays must remain readable
+    // through binary encoding.
     const CachedInstruction *decoded = nullptr;
     DenseRegisterValues reads{};
     DenseRegisterValues writes{};

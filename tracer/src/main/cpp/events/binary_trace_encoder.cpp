@@ -432,7 +432,7 @@ BinaryEncodeResult BinaryTraceEncoder::encode_end(
     append_u64(buffer, return_value);
     append_u64(buffer, elapsed_ms);
     append_u64(buffer, metrics.instructions);
-    append_u64(buffer, metrics.raw_bytes);
+    append_u64(buffer, metrics.encoded_bytes);
     append_u64(buffer, metrics.compressed_bytes);
     append_u64(buffer, metrics.cache_hits);
     append_u64(buffer, metrics.cache_misses);

@@ -316,7 +316,7 @@ void semantic_events_have_exact_golden_bytes() {
 void trace_end_has_exact_golden_bytes() {
     TraceMetrics metrics{};
     metrics.instructions = 1;
-    metrics.raw_bytes = 2;
+    metrics.encoded_bytes = 2;
     metrics.compressed_bytes = 3;
     metrics.cache_hits = 4;
     metrics.cache_misses = 5;

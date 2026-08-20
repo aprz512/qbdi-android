@@ -1,5 +1,5 @@
 #include "core/trace_run_session.h"
-#include "events/text_trace_writer.h"
+#include "events/binary_trace_writer.h"
 
 void TraceRunSessionOutcome::observe_trace_setup(bool succeeded) noexcept {
     trace_setup_observed_ = true;
@@ -35,7 +35,7 @@ void TraceRunSessionOutcome::observe_target_call(TraceTargetOutcome outcome,
     callback_gate_.observe_failure(writer_failed);
 }
 
-TraceRunFinalization TraceRunSessionOutcome::finalize(TextTraceWriter &writer,
+TraceRunFinalization TraceRunSessionOutcome::finalize(BinaryTraceWriter &writer,
                                                       long elapsed_ms) {
     if (finalized_) return finalization_;
 

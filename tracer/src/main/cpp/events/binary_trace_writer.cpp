@@ -298,9 +298,10 @@ bool BinaryTraceWriter::begin(const TraceContext &context) {
     return true;
 }
 
-bool BinaryTraceWriter::instruction(const TraceContext &, const InstructionRecord &record) {
+bool BinaryTraceWriter::instruction(const TraceContext &context, const InstructionRecord &record) {
     if (!writable_event_state()) return false;
     if (record.decoded == nullptr) return fail(EINVAL);
+    if (record.memory_count > record.memory.size()) return fail(EINVAL);
     const uint32_t metadata_id = record.decoded->opcode;
     if (dictionary_.needs_instruction_definition(record.decoded->opcode)) {
         WritableSpan definition_span = writer_.reserve(kBinaryMaxInstructionDefinitionRecordBytes);
@@ -329,6 +330,9 @@ bool BinaryTraceWriter::instruction(const TraceContext &, const InstructionRecor
     writer_.commit(result.size);
     if (writer_.failed()) return fail();
     ++metrics_->instructions;
+    for (size_t index = 0; index < record.memory_count; ++index) {
+        if (!memory(context, record.pc, record.memory[index])) return false;
+    }
     return true;
 }
 
@@ -349,8 +353,8 @@ bool BinaryTraceWriter::memory(const TraceContext &context, uintptr_t pc,
     return writer_.failed() ? fail() : true;
 }
 
-bool BinaryTraceWriter::append_call(const char *category, const std::string &name,
-                                    const std::string &detail) {
+bool BinaryTraceWriter::append_call(const char *category, std::string_view name,
+                                    std::string_view detail) {
     if (!writable_event_state()) return false;
     const std::string_view category_view = category == nullptr ? std::string_view{} : category;
     if (category_view.size() > kBinaryMaxCallCategoryBytes ||
@@ -371,8 +375,8 @@ bool BinaryTraceWriter::append_call(const char *category, const std::string &nam
     return writer_.failed() ? fail() : true;
 }
 
-bool BinaryTraceWriter::call(const char *category, const std::string &name,
-                             const std::string &detail) {
+bool BinaryTraceWriter::call(const char *category, std::string_view name,
+                             std::string_view detail) {
     return append_call(category, name, detail);
 }
 

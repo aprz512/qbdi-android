@@ -12,7 +12,7 @@ namespace {
 
 CodeRuleContext::CodeRuleContext(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr,
                                  const InstructionView *instruction, const TraceContext *trace,
-                                 TextTraceWriter *writer)
+                                 BinaryTraceWriter *writer)
         : vm_(vm), gpr_(gpr), fpr_(fpr), instruction_(instruction), trace_(trace),
           writer_(writer) {}
 

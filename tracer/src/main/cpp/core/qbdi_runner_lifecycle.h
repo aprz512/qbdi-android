@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-class TextTraceWriter;
+class BinaryTraceWriter;
 
 using QbdiTargetCall = bool (*)(void *opaque, uint64_t *return_value);
 
@@ -13,4 +13,4 @@ struct QbdiTargetCallResult {
 };
 
 QbdiTargetCallResult run_qbdi_target_call(QbdiTargetCall call, void *opaque,
-                                          TextTraceWriter *writer) noexcept;
+                                          BinaryTraceWriter *writer) noexcept;

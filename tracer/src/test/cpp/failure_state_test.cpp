@@ -1,7 +1,7 @@
 #include "core/crash_marker.h"
 #include "core/qbdi_runner.h"
 #include "events/async_trace_writer.h"
-#include "events/text_trace_writer.h"
+#include "events/binary_trace_writer.h"
 
 #include <cerrno>
 #include <atomic>
@@ -270,7 +270,7 @@ void metrics_sidecar_failure_is_stable_and_close_is_idempotent() {
     MemoryBackend backend;
     FakeFaultInjector faults(FailurePoint::MetricsSidecar, EDQUOT);
     TraceMetrics metrics{};
-    TextTraceWriter writer(options(), &metrics, &backend, &faults);
+    BinaryTraceWriter writer(options(), &metrics, &backend, &faults);
     const TraceContext trace = context(directory);
     CHECK(writer.open(trace));
     CHECK(writer.begin(trace));
@@ -1053,37 +1053,39 @@ void artifact_names_are_unique_before_exclusive_trace_creation() {
     TraceOptions trace_options = options();
     trace_options.compression_enabled = false;
     TraceMetrics first_metrics{};
-    TextTraceWriter first(trace_options, &first_metrics);
+    BinaryTraceWriter first(trace_options, &first_metrics);
     CHECK(first.prepare(context(directory)));
+    const std::string first_path(first.path());
     CrashMarkerSession first_marker;
-    CHECK(first_marker.open(first.path()));
+    CHECK(first_marker.open(first_path));
     CHECK(first.open_prepared());
     CHECK(first.begin(context(directory)));
     CHECK(first.end(7, true, 1));
     CHECK(first.close());
     CHECK(first_marker.finish());
     struct stat before{};
-    CHECK(::stat(first.path().c_str(), &before) == 0);
+    CHECK(::stat(first_path.c_str(), &before) == 0);
 
     TraceMetrics second_metrics{};
-    TextTraceWriter second(trace_options, &second_metrics);
+    BinaryTraceWriter second(trace_options, &second_metrics);
     CHECK(second.prepare(context(directory)));
-    CHECK(second.path() != first.path());
+    const std::string second_path(second.path());
+    CHECK(second_path != first_path);
     CrashMarkerSession second_marker;
-    CHECK(second_marker.open(second.path()));
+    CHECK(second_marker.open(second_path));
     CHECK(second.open_prepared());
     CHECK(second.begin(context(directory)));
     CHECK(second.end(8, true, 1));
     CHECK(second.close());
     CHECK(second_marker.finish());
     struct stat after{};
-    CHECK(::stat(first.path().c_str(), &after) == 0);
+    CHECK(::stat(first_path.c_str(), &after) == 0);
     CHECK(after.st_dev == before.st_dev && after.st_ino == before.st_ino &&
           after.st_size == before.st_size);
-    CHECK(::unlink(first.path().c_str()) == 0);
-    CHECK(::unlink(second.path().c_str()) == 0);
-    CHECK(::unlink((first.path() + ".metrics").c_str()) == 0);
-    if (::unlink((second.path() + ".metrics").c_str()) != 0) CHECK(errno == ENOENT);
+    CHECK(::unlink(first_path.c_str()) == 0);
+    CHECK(::unlink(second_path.c_str()) == 0);
+    CHECK(::unlink((first_path + ".metrics").c_str()) == 0);
+    if (::unlink((second_path + ".metrics").c_str()) != 0) CHECK(errno == ENOENT);
     CHECK(::rmdir(directory) == 0);
 }
 

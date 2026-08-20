@@ -28,7 +28,7 @@ public:
     bool begin(const TraceContext &context);
     bool instruction(const TraceContext &context, const InstructionRecord &record);
     bool memory(const TraceContext &context, uintptr_t pc, const MemoryRecord &record);
-    bool call(const char *category, const std::string &name, const std::string &detail);
+    bool call(const char *category, std::string_view name, std::string_view detail);
     bool rule(const std::string &name, const std::string &detail);
     bool error(const std::string &message);
     bool end(uint64_t retval, bool ok, long elapsed_ms);
@@ -42,8 +42,8 @@ public:
 private:
     bool healthy_writer_state() const;
     bool writable_event_state() const;
-    bool append_call(const char *category, const std::string &name,
-                     const std::string &detail);
+    bool append_call(const char *category, std::string_view name,
+                     std::string_view detail);
     bool append_event(BinaryRecordType type, std::string_view name,
                       std::string_view detail);
     bool write_metrics_sidecar();

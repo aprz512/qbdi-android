@@ -8,6 +8,7 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,11 +17,27 @@
 #include <string_view>
 #include <condition_variable>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 namespace {
+
+enum class IoFaultMode : int {
+    None,
+    SidecarInterruptedAndPartial,
+    SidecarWriteError,
+};
+
+std::atomic<IoFaultMode> g_io_fault_mode{IoFaultMode::None};
+std::atomic<int> g_sidecar_fd{-1};
+std::atomic<unsigned int> g_fault_write_calls{0};
+std::atomic<size_t> g_allocations{0};
+
+bool has_suffix(const char *path, std::string_view suffix) {
+    return path != nullptr && std::string_view(path).ends_with(suffix);
+}
 
 void check(bool condition, const char *expression, int line) {
     if (condition) return;
@@ -29,6 +46,87 @@ void check(bool condition, const char *expression, int line) {
 }
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
+
+} // namespace
+
+void *operator new(size_t size) {
+    g_allocations.fetch_add(1, std::memory_order_relaxed);
+    void *allocation = std::malloc(size);
+    if (allocation == nullptr) std::abort();
+    return allocation;
+}
+
+void *operator new[](size_t size) { return ::operator new(size); }
+
+void *operator new(size_t size, const std::nothrow_t &) noexcept {
+    g_allocations.fetch_add(1, std::memory_order_relaxed);
+    return std::malloc(size);
+}
+
+void *operator new[](size_t size, const std::nothrow_t &tag) noexcept {
+    return ::operator new(size, tag);
+}
+
+void operator delete(void *allocation) noexcept { std::free(allocation); }
+void operator delete[](void *allocation) noexcept { ::operator delete(allocation); }
+void operator delete(void *allocation, size_t) noexcept { std::free(allocation); }
+void operator delete[](void *allocation, size_t) noexcept { ::operator delete(allocation); }
+void operator delete(void *allocation, const std::nothrow_t &) noexcept {
+    std::free(allocation);
+}
+void operator delete[](void *allocation, const std::nothrow_t &) noexcept {
+    ::operator delete(allocation);
+}
+
+extern "C" int __real_open(const char *path, int flags, ...);
+extern "C" ssize_t __real_write(int fd, const void *data, size_t size);
+extern "C" int __real_close(int fd);
+
+extern "C" int __wrap_open(const char *path, int flags, ...) {
+    mode_t mode = 0;
+    if ((flags & O_CREAT) != 0) {
+        va_list args;
+        va_start(args, flags);
+        mode = static_cast<mode_t>(va_arg(args, int));
+        va_end(args);
+    }
+    const int fd = __real_open(path, flags, mode);
+    if (fd >= 0 && has_suffix(path, ".metrics") &&
+        g_io_fault_mode.load(std::memory_order_relaxed) != IoFaultMode::None) {
+        g_sidecar_fd.store(fd, std::memory_order_relaxed);
+    }
+    return fd;
+}
+
+extern "C" ssize_t __wrap_write(int fd, const void *data, size_t size) {
+    if (fd == g_sidecar_fd.load(std::memory_order_relaxed)) {
+        const unsigned int call =
+                g_fault_write_calls.fetch_add(1, std::memory_order_relaxed);
+        const IoFaultMode mode = g_io_fault_mode.load(std::memory_order_relaxed);
+        if (mode == IoFaultMode::SidecarInterruptedAndPartial) {
+            if (call == 0) {
+                errno = EINTR;
+                return -1;
+            }
+            if (call == 1 && size > 1) return __real_write(fd, data, size / 2U);
+        } else if (mode == IoFaultMode::SidecarWriteError) {
+            if (call == 0 && size > 1) return __real_write(fd, data, size / 2U);
+            errno = EIO;
+            return -1;
+        }
+    }
+    return __real_write(fd, data, size);
+}
+
+extern "C" int __wrap_close(int fd) { return __real_close(fd); }
+
+namespace {
+
+void set_io_fault(IoFaultMode mode) {
+    g_sidecar_fd.store(-1, std::memory_order_relaxed);
+    g_fault_write_calls.store(0, std::memory_order_relaxed);
+    g_io_fault_mode.store(mode, std::memory_order_relaxed);
+}
 
 class CountingBackend final : public TraceWriterBackend {
 public:
@@ -408,6 +506,175 @@ void uncompressed_stream_uses_binary_suffix_and_exact_byte_counts() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+void instruction_memory_and_continuations_keep_producer_order() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.profile = TraceProfile::Full;
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    CachedInstruction decoded{};
+    decoded.opcode = 0xf9400020U;
+    std::strcpy(decoded.mnemonic, "ldr");
+
+    InstructionRecord record = instruction(1, &decoded);
+    record.memory_count = 2;
+    record.memory[0].kind = MemoryAccessKind::Read;
+    record.memory[0].metadata_available = true;
+    record.memory[0].address = 0x2000;
+    record.memory[0].size = 8;
+    record.memory[0].value = 0x11;
+    record.memory[1] = record.memory[0];
+    record.memory[1].address = 0x2008;
+    record.memory[1].value = 0x22;
+    MemoryRecord continuation = record.memory[0];
+    continuation.address = 0x2010;
+    continuation.value = 0x33;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.instruction(context, record));
+    CHECK(writer.memory(context, record.pc, continuation));
+    CHECK(writer.end(0x44, true, 2));
+    CHECK(writer.close());
+
+    const std::vector<uint8_t> stream = read_bytes(artifact_path(writer));
+    CHECK(stream[8] == static_cast<uint8_t>(TraceProfile::Full));
+    const std::vector<BinaryRecordType> types = record_types(stream);
+    const auto instruction_position =
+            std::find(types.begin(), types.end(), BinaryRecordType::Instruction);
+    CHECK(instruction_position != types.end());
+    CHECK(static_cast<size_t>(types.end() - instruction_position) >= 5);
+    CHECK(instruction_position[1] == BinaryRecordType::Memory);
+    CHECK(instruction_position[2] == BinaryRecordType::Memory);
+    CHECK(instruction_position[3] == BinaryRecordType::Memory);
+    CHECK(instruction_position[4] == BinaryRecordType::TraceEnd);
+
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void sidecar_retries_eintr_and_partial_writes() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+
+    set_io_fault(IoFaultMode::SidecarInterruptedAndPartial);
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.end(0, true, 3));
+    CHECK(writer.close());
+    CHECK(g_fault_write_calls.load(std::memory_order_relaxed) >= 3);
+    set_io_fault(IoFaultMode::None);
+    CHECK(metric_value(read_text(sidecar_path(writer)), "elapsed_ms") == "3");
+
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void sidecar_write_error_removes_partial_file() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+
+    set_io_fault(IoFaultMode::SidecarWriteError);
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.end(0, true, 3));
+    CHECK(!writer.close());
+    CHECK(!writer.close());
+    CHECK(writer.error_code() == EIO);
+    set_io_fault(IoFaultMode::None);
+    CHECK(::access(sidecar_path(writer).c_str(), F_OK) != 0);
+
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void invalid_lifecycle_transitions_fail_closed() {
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter unopened(options, &metrics);
+    CHECK(!unopened.end(0, false, 1));
+    CHECK(!unopened.close());
+    CHECK(!unopened.close());
+
+    TraceContext bad_context = context_for("/dev/null/not-a-directory");
+    BinaryTraceWriter failed_open(options, &metrics);
+    CHECK(!failed_open.open(bad_context));
+    CHECK(!failed_open.begin(bad_context));
+    CHECK(!failed_open.end(0, false, 1));
+    CHECK(!failed_open.close());
+    CHECK(!failed_open.close());
+
+    const std::string directory = temporary_directory();
+    const TraceContext context = context_for(directory);
+    BinaryTraceWriter incomplete(options, &metrics);
+    CHECK(incomplete.open(context));
+    const std::string path(incomplete.path());
+    CHECK(!incomplete.close());
+    CHECK(!incomplete.end(0, false, 1));
+    CHECK(!incomplete.begin(context));
+    CHECK(::access((path + ".metrics").c_str(), F_OK) != 0);
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void instruction_and_memory_hot_path_allocate_nothing() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.profile = TraceProfile::Full;
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 8192;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    CachedInstruction decoded{};
+    decoded.opcode = 0xf9400020U;
+    decoded.read_gpr_mask = 1U;
+    decoded.read_gpr_widths[0] = 8;
+    std::strcpy(decoded.read_register_names[0], "X0");
+    InstructionRecord record = instruction(1, &decoded);
+    record.reads.count = 1;
+    record.reads.values[0] = 0x1234;
+    record.memory_count = 1;
+    record.memory[0].kind = MemoryAccessKind::Read;
+    record.memory[0].address = 0x2000;
+    record.memory[0].size = 8;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    const size_t allocations_before = g_allocations.load(std::memory_order_relaxed);
+    CHECK(writer.instruction(context, record));
+    CHECK(writer.memory(context, record.pc, record.memory[0]));
+    CHECK(g_allocations.load(std::memory_order_relaxed) == allocations_before);
+    CHECK(writer.end(0, true, 1));
+    CHECK(writer.close());
+
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 void encoding_failure_latches_and_does_no_later_event_work() {
     const std::string directory = temporary_directory();
     TraceOptions options{};
@@ -651,6 +918,11 @@ void padded_footer_is_total_for_exact_cycle_and_adversarial_prefixes() {
 int main() {
     compressed_stream_definitions_footer_and_metrics_v2_are_consistent();
     uncompressed_stream_uses_binary_suffix_and_exact_byte_counts();
+    instruction_memory_and_continuations_keep_producer_order();
+    sidecar_retries_eintr_and_partial_writes();
+    sidecar_write_error_removes_partial_file();
+    invalid_lifecycle_transitions_fail_closed();
+    instruction_and_memory_hot_path_allocate_nothing();
     encoding_failure_latches_and_does_no_later_event_work();
     failed_definition_is_not_committed();
     async_write_error_preserves_first_error_and_suppresses_metrics();

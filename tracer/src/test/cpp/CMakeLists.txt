@@ -50,9 +50,10 @@ target_compile_definitions(shadowhook_retention_contract_test PRIVATE
     QTRACE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp/third_party/android-inline-hook/shadowhook/src/main/cpp"
     QTRACE_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp")
 
-add_trace_test(trace_encoder_test
-    trace_encoder_test.cpp
-    ../../main/cpp/events/trace_encoder.cpp)
+add_trace_test(production_trace_contract_test
+    production_trace_contract_test.cpp)
+target_compile_definitions(production_trace_contract_test PRIVATE
+    QTRACE_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp")
 
 add_trace_test(binary_trace_encoder_test
     binary_trace_encoder_test.cpp
@@ -69,7 +70,7 @@ add_trace_test(memory_profile_test
     ../../main/cpp/core/memory_trace_policy.cpp
     ../../main/cpp/core/pending_instruction.cpp
     ../../main/cpp/core/safe_memory.cpp
-    ../../main/cpp/events/trace_encoder.cpp)
+    ../../main/cpp/events/binary_trace_encoder.cpp)
 
 find_package(Threads REQUIRED)
 add_trace_test(binary_trace_writer_test
@@ -80,6 +81,10 @@ add_trace_test(binary_trace_writer_test
     ../../main/cpp/events/trace_dictionary.cpp
     ../../main/cpp/events/async_trace_writer.cpp)
 target_link_libraries(binary_trace_writer_test PRIVATE lz4_static Threads::Threads)
+target_link_options(binary_trace_writer_test PRIVATE
+    -Wl,--wrap=open
+    -Wl,--wrap=write
+    -Wl,--wrap=close)
 
 add_trace_test(async_trace_writer_test
     async_trace_writer_test.cpp
@@ -87,34 +92,33 @@ add_trace_test(async_trace_writer_test
     ../../main/cpp/events/async_trace_writer.cpp)
 target_link_libraries(async_trace_writer_test PRIVATE lz4_static Threads::Threads)
 
-add_trace_test(text_trace_writer_test
-    text_trace_writer_test.cpp
-    ../../main/cpp/core/trace_run_session.cpp
-    ../../main/cpp/core/trace_process_lifecycle.cpp
-    ../../main/cpp/events/text_trace_writer.cpp
-    ../../main/cpp/events/trace_encoder.cpp
-    ../../main/cpp/events/async_trace_writer.cpp)
-target_link_libraries(text_trace_writer_test PRIVATE lz4_static Threads::Threads)
-target_link_options(text_trace_writer_test PRIVATE
-    -Wl,--wrap=open
-    -Wl,--wrap=write
-    -Wl,--wrap=close)
-
 add_trace_test(qbdi_runner_lifecycle_test
     qbdi_runner_lifecycle_test.cpp
     ../../main/cpp/core/qbdi_runner_lifecycle.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
-    ../../main/cpp/events/text_trace_writer.cpp
-    ../../main/cpp/events/trace_encoder.cpp
+    ../../main/cpp/events/binary_trace_writer.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp
+    ../../main/cpp/events/trace_dictionary.cpp
     ../../main/cpp/events/async_trace_writer.cpp)
 target_link_libraries(qbdi_runner_lifecycle_test PRIVATE lz4_static Threads::Threads)
+
+add_trace_test(trace_run_session_test
+    trace_run_session_test.cpp
+    ../../main/cpp/core/trace_run_session.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
+    ../../main/cpp/events/binary_trace_writer.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp
+    ../../main/cpp/events/trace_dictionary.cpp
+    ../../main/cpp/events/async_trace_writer.cpp)
+target_link_libraries(trace_run_session_test PRIVATE lz4_static Threads::Threads)
 
 add_trace_test(failure_state_test
     failure_state_test.cpp
     ../../main/cpp/core/crash_marker.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
-    ../../main/cpp/events/text_trace_writer.cpp
-    ../../main/cpp/events/trace_encoder.cpp
+    ../../main/cpp/events/binary_trace_writer.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp
+    ../../main/cpp/events/trace_dictionary.cpp
     ../../main/cpp/events/async_trace_writer.cpp)
 target_link_libraries(failure_state_test PRIVATE lz4_static Threads::Threads)
 

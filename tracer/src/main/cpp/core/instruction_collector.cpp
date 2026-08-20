@@ -4,7 +4,7 @@
 #include "core/safe_memory.h"
 #include "core/trace_callback_gate.h"
 #include "core/trace_process_lifecycle.h"
-#include "events/text_trace_writer.h"
+#include "events/binary_trace_writer.h"
 #include "rules/code_rule.h"
 
 #include <QBDI/InstAnalysis.h>
@@ -48,7 +48,7 @@ NormalizedMemoryAccess normalize(const QBDI::MemoryAccess &access) noexcept {
 
 } // namespace
 
-InstructionCollector::InstructionCollector(InstructionCache *cache, TextTraceWriter *writer,
+InstructionCollector::InstructionCollector(InstructionCache *cache, BinaryTraceWriter *writer,
                                            CodeRuleEngine *code_rules,
                                            const TraceContext *trace,
                                            TraceCallbackGate *trace_gate,
@@ -65,8 +65,11 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                             QBDI::FPRState *fpr) {
     if (trace_gate_ != nullptr && writer_ != nullptr) trace_gate_->observe_failure(writer_->failed());
 
-    if (gpr != nullptr && pending_.has_pending()) {
+    const bool tracing_before_rule = trace_gate_ == nullptr || trace_gate_->enabled();
+    if (tracing_before_rule && gpr != nullptr && pending_.has_pending()) {
         pending_.complete_pending(snapshot(*gpr, pending_.pending_write_mask()));
+        if (trace_gate_ != nullptr && writer_ != nullptr)
+            trace_gate_->observe_failure(writer_->failed());
     }
 
     current_view_ = resolve(vm, gpr);
@@ -78,7 +81,8 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                           : QBDI::CONTINUE;
     if (trace_gate_ != nullptr && writer_ != nullptr) trace_gate_->observe_failure(writer_->failed());
     const bool continues = action == QBDI::CONTINUE && gpr != nullptr;
-    if (profile_ == TraceProfile::Full) {
+    const bool tracing_after_rule = trace_gate_ == nullptr || trace_gate_->enabled();
+    if (tracing_after_rule && profile_ == TraceProfile::Full) {
         const CachedInstruction empty{};
         const CachedInstruction &decoded = current_view_.decoded != nullptr
                                                    ? *current_view_.decoded
@@ -90,6 +94,7 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                           hexdump_limit_, safe_read_memory);
     }
     if (!continues) return action;
+    if (!tracing_after_rule) return action;
     if (profile_ == TraceProfile::Full) capture_pre_memory(vm);
 
     const uint64_t read_mask = current_view_.decoded != nullptr
@@ -143,6 +148,7 @@ QBDI::VMAction InstructionCollector::on_post(QBDI::VM *vm, QBDI::GPRState *gpr,
 }
 
 void InstructionCollector::finish_last(const QBDI::GPRState &gpr) noexcept {
+    if (trace_gate_ != nullptr && !trace_gate_->enabled()) return;
     if (!pending_.has_pending()) return;
     pending_.finish_last(snapshot(gpr, pending_.pending_write_mask()));
 }
@@ -179,7 +185,9 @@ bool InstructionCollector::emit_memory_continuation(
         uintptr_t pc, const MemoryRecord &record) {
     if (writer_ == nullptr || trace_ == nullptr) return false;
     if (trace_gate_ != nullptr && !trace_gate_->enabled()) return true;
-    return writer_->memory(*trace_, pc, record);
+    const bool emitted = writer_->memory(*trace_, pc, record);
+    if (trace_gate_ != nullptr) trace_gate_->observe_failure(writer_->failed());
+    return emitted;
 }
 
 InstructionView InstructionCollector::resolve(QBDI::VM *vm,

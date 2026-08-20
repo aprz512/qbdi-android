@@ -317,7 +317,7 @@ CrashMarkerSession::~CrashMarkerSession() {
     finish();
 }
 
-bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
+bool CrashMarkerSession::open(std::string_view trace_path) noexcept {
     if (g_crash_child_detached != 0) {
         latch_error(&error_code_, ECHILD);
         finish_called_ = true;
@@ -345,7 +345,8 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
     }
     g_session_owned = true;
 
-    path_ = trace_path + ".crash";
+    path_.assign(trace_path.data(), trace_path.size());
+    path_.append(".crash");
     fd_ = ::open(path_.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_APPEND, 0644);
     if (fd_ < 0) {
         latch_error(&error_code_, errno);
