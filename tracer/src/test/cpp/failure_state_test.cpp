@@ -1087,6 +1087,20 @@ void artifact_names_are_unique_before_exclusive_trace_creation() {
     CHECK(::rmdir(directory) == 0);
 }
 
+void atfork_install_failure_prevents_opening_a_crash_marker_fd() {
+    char path[] = "/tmp/qtrace-crash-atfork-failure-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string trace_path = std::string(directory) + "/trace";
+    crash_marker_test_force_atfork_error(ENOMEM);
+    CrashMarkerSession session;
+    CHECK(!session.open(trace_path));
+    CHECK(session.error_code() == ENOMEM);
+    CHECK(::access((trace_path + ".crash").c_str(), F_OK) != 0);
+    CHECK(errno == ENOENT);
+    CHECK(::rmdir(directory) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -1117,5 +1131,6 @@ int main() {
     fork_child_closes_marker_fd_already_claimed_by_live_handler();
     fork_child_does_not_close_fd_reused_after_marker_finish();
     artifact_names_are_unique_before_exclusive_trace_creation();
+    atfork_install_failure_prevents_opening_a_crash_marker_fd();
     return 0;
 }

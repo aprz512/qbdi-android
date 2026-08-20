@@ -32,10 +32,11 @@ public:
     bool write_raw_line(const std::string &line);
     bool end(uint64_t retval, bool ok, long elapsed_ms);
     bool close();
+    void detach_after_fork_child() noexcept;
     bool failed() const { return !healthy_writer_state(); }
     int error_code() const noexcept;
 
-    const std::string &path() const { return path_; }
+    const std::string &path() const;
 
 private:
     bool healthy_writer_state() const;
@@ -50,7 +51,7 @@ private:
     TraceEncoder encoder_;
     AsyncTraceWriter writer_;
     TraceFaultInjector *faults_ = nullptr;
-    std::string path_;
+    std::string *path_ = nullptr;
     uint64_t elapsed_ms_ = 0;
     uint64_t retval_ = 0;
     bool opened_ = false;

@@ -1,4 +1,5 @@
 #include "events/async_trace_writer.h"
+#include "core/trace_process_lifecycle.h"
 #include "lz4frame.h"
 
 #include <atomic>
@@ -561,6 +562,16 @@ void finish_is_idempotent_and_invalid_calls_are_rejected() {
     CHECK(!invalid_commit.finish());
 }
 
+void lifecycle_install_failure_prevents_opening_an_owned_fd() {
+    trace_process_test_force_lifecycle_error(ENOMEM);
+    MemoryBackend backend;
+    TraceMetrics metrics{};
+    AsyncTraceWriter writer(&backend);
+    CHECK(!writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.error_code() == ENOMEM);
+    CHECK(backend.open_calls.load() == 0);
+}
+
 } // namespace
 
 int main() {
@@ -574,5 +585,6 @@ int main() {
     lz4_failures_release_resources_and_reject_later_appends();
     failed_join_retains_resources_until_consumer_exit_is_observed();
     finish_is_idempotent_and_invalid_calls_are_rejected();
+    lifecycle_install_failure_prevents_opening_an_owned_fd();
     return 0;
 }

@@ -66,12 +66,14 @@ add_trace_test(memory_profile_test
 find_package(Threads REQUIRED)
 add_trace_test(async_trace_writer_test
     async_trace_writer_test.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/events/async_trace_writer.cpp)
 target_link_libraries(async_trace_writer_test PRIVATE lz4_static Threads::Threads)
 
 add_trace_test(text_trace_writer_test
     text_trace_writer_test.cpp
     ../../main/cpp/core/trace_run_session.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/events/text_trace_writer.cpp
     ../../main/cpp/events/trace_encoder.cpp
     ../../main/cpp/events/async_trace_writer.cpp)
@@ -81,9 +83,19 @@ target_link_options(text_trace_writer_test PRIVATE
     -Wl,--wrap=write
     -Wl,--wrap=close)
 
+add_trace_test(qbdi_runner_lifecycle_test
+    qbdi_runner_lifecycle_test.cpp
+    ../../main/cpp/core/qbdi_runner_lifecycle.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
+    ../../main/cpp/events/text_trace_writer.cpp
+    ../../main/cpp/events/trace_encoder.cpp
+    ../../main/cpp/events/async_trace_writer.cpp)
+target_link_libraries(qbdi_runner_lifecycle_test PRIVATE lz4_static Threads::Threads)
+
 add_trace_test(failure_state_test
     failure_state_test.cpp
     ../../main/cpp/core/crash_marker.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/events/text_trace_writer.cpp
     ../../main/cpp/events/trace_encoder.cpp
     ../../main/cpp/events/async_trace_writer.cpp)
@@ -99,5 +111,13 @@ add_trace_test(tracer_entry_proxy_test
     tracer_entry_proxy_test.cpp
     ../../main/cpp/tracer_entry.cpp
     ../../main/cpp/core/module_maps.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/core/trace_config.cpp)
 target_link_libraries(tracer_entry_proxy_test PRIVATE Threads::Threads)
+target_link_options(tracer_entry_proxy_test PRIVATE
+    -Wl,--wrap=_Znwm
+    -Wl,--wrap=_ZnwmRKSt9nothrow_t
+    -Wl,--wrap=_ZdlPv
+    -Wl,--wrap=_ZdlPvm
+    -Wl,--wrap=_ZdaPv
+    -Wl,--wrap=_ZdaPvm)

@@ -365,23 +365,52 @@ def decode_lz4_file(source: Path, output: Path, lz4: str) -> bool:
             assert process.stderr is not None
             remaining = end - start
             write_error: BrokenPipeError | None = None
+            reaped = False
             try:
-                while remaining:
-                    chunk = compressed.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        raise PullTraceError("compressed trace changed while decoding")
-                    process.stdin.write(chunk)
-                    remaining -= len(chunk)
-            except BrokenPipeError as error:
-                write_error = error
-            finally:
                 try:
-                    process.stdin.close()
+                    while remaining:
+                        chunk = compressed.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise PullTraceError("compressed trace changed while decoding")
+                        process.stdin.write(chunk)
+                        remaining -= len(chunk)
                 except BrokenPipeError as error:
                     write_error = error
-            with process.stderr:
-                stderr = process.stderr.read().decode("utf-8", errors="replace")
-            return_code = process.wait()
+                finally:
+                    try:
+                        process.stdin.close()
+                    except BrokenPipeError as error:
+                        write_error = error
+                with process.stderr:
+                    stderr = process.stderr.read().decode("utf-8", errors="replace")
+                return_code = process.wait()
+                reaped = True
+            except Exception as error:
+                if not reaped:
+                    try:
+                        if process.poll() is None:
+                            process.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        process.wait()
+                    except Exception:
+                        pass
+                raise PullTraceError(
+                    f"lz4 decompression failed for frame {index + 1}: {error}"
+                ) from error
+            except BaseException:
+                if not reaped:
+                    try:
+                        if process.poll() is None:
+                            process.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        process.wait()
+                    except Exception:
+                        pass
+                raise
             if write_error is not None or return_code != 0:
                 raise PullTraceError(
                     f"lz4 decompression failed for frame {index + 1}: {stderr.strip()}"

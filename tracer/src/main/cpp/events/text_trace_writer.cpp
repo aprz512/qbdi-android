@@ -1,6 +1,7 @@
 #include "events/text_trace_writer.h"
 
 #include "core/logging.h"
+#include "core/trace_process_lifecycle.h"
 #include "events/trace_number_formatter.h"
 
 #include <cerrno>
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <limits>
+#include <new>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -129,10 +131,30 @@ bool write_rate_metric(int fd, const char *key, unsigned __int128 numerator,
 
 TextTraceWriter::TextTraceWriter(const TraceOptions &options, TraceMetrics *metrics,
                                  TraceWriterBackend *backend, TraceFaultInjector *faults)
-    : options_(options), metrics_(metrics), writer_(backend, faults), faults_(faults) {}
+    : options_(options), metrics_(metrics), writer_(backend, faults), faults_(faults),
+      path_(new (std::nothrow) std::string) {}
 
 TextTraceWriter::~TextTraceWriter() {
+    if (trace_process_child_detached()) {
+        detach_after_fork_child();
+        return;
+    }
     close();
+    delete path_;
+    path_ = nullptr;
+}
+
+const std::string &TextTraceWriter::path() const {
+    static const std::string empty;
+    return path_ != nullptr ? *path_ : empty;
+}
+
+void TextTraceWriter::detach_after_fork_child() noexcept {
+    writer_.detach_after_fork_child();
+    path_ = nullptr;
+    opened_ = false;
+    close_called_ = true;
+    close_result_ = true;
 }
 
 bool TextTraceWriter::fail(int error_code) {
@@ -162,21 +184,23 @@ bool TextTraceWriter::open(const TraceContext &context) {
 }
 
 bool TextTraceWriter::prepare(const TraceContext &context) {
-    if (opened_ || close_called_ || metrics_ == nullptr) return false;
+    if (opened_ || close_called_ || metrics_ == nullptr || path_ == nullptr) return false;
     const std::string directory = trace_directory(context);
     const std::string filename = trace_filename(context, options_.compression_enabled);
     if (directory.empty() || filename.empty() || !mkdirs(directory)) return fail();
 
-    path_ = directory + "/" + filename;
+    *path_ = directory + "/" + filename;
     prepared_ = true;
     return true;
 }
 
 bool TextTraceWriter::open_prepared() {
-    if (!prepared_ || opened_ || close_called_ || metrics_ == nullptr) return false;
+    if (!prepared_ || opened_ || close_called_ || metrics_ == nullptr || path_ == nullptr) {
+        return false;
+    }
     *metrics_ = {};
-    if (!writer_.open(path_, options_, metrics_)) {
-        QTRACE_E("open trace file failed: %s", path_.c_str());
+    if (!writer_.open(*path_, options_, metrics_)) {
+        QTRACE_E("open trace file failed: %s", path_->c_str());
         return fail(writer_.error_code());
     }
     metrics_->effective_buffer_bytes = writer_.buffer_bytes();
@@ -306,7 +330,8 @@ bool TextTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
 }
 
 bool TextTraceWriter::write_metrics_sidecar() {
-    const std::string sidecar = path_ + ".metrics";
+    if (path_ == nullptr) return fail(ECHILD);
+    const std::string sidecar = *path_ + ".metrics";
     const int fd = ::open(sidecar.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0) return fail(errno);
 
@@ -369,7 +394,7 @@ bool TextTraceWriter::close() {
     if (!trace_ok) fail(writer_.error_code());
     opened_ = false;
     const bool metrics_ok = !successful_end_ || !trace_ok || write_metrics_sidecar();
-    if (!trace_ok) (void)::unlink((path_ + ".metrics").c_str());
+    if (!trace_ok && path_ != nullptr) (void)::unlink((*path_ + ".metrics").c_str());
     close_result_ = trace_ok && ended_ && healthy_writer_state() && metrics_ok;
     if (ended_ && !close_result_) facade_failed_ = true;
     return close_result_;

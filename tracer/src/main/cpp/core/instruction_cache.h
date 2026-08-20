@@ -13,6 +13,12 @@ enum class InstructionFlags : uint32_t {
     Return = 1U << 3U,
 };
 
+enum class PcRelativeKind : uint8_t {
+    None,
+    CurrentPc,
+    CurrentPage,
+};
+
 constexpr InstructionFlags operator|(InstructionFlags left, InstructionFlags right) {
     return static_cast<InstructionFlags>(static_cast<uint32_t>(left) | static_cast<uint32_t>(right));
 }
@@ -27,7 +33,8 @@ struct CachedInstruction {
     uint64_t write_gpr_mask = 0;
     uint8_t read_gpr_widths[kGprCount]{};
     uint8_t write_gpr_widths[kGprCount]{};
-    int32_t pc_relative_displacement = 0;
+    int64_t pc_relative_displacement = 0;
+    PcRelativeKind pc_relative_kind = PcRelativeKind::None;
     uint8_t condition = 0;
     InstructionFlags flags = InstructionFlags::None;
     char mnemonic[16]{};
@@ -39,10 +46,18 @@ struct CachedInstruction {
     uint8_t memory_operand_count = 0;
     bool requires_slow_memory_path = false;
 
-    uintptr_t absolute_branch_target(uintptr_t pc) const;
+    uintptr_t absolute_branch_target(uintptr_t pc) const {
+        const uintptr_t base = pc_relative_kind == PcRelativeKind::CurrentPage
+                                       ? pc & ~static_cast<uintptr_t>(0xfffU)
+                                       : pc;
+        return static_cast<uintptr_t>(static_cast<uint64_t>(base) +
+                                      static_cast<uint64_t>(pc_relative_displacement));
+    }
 };
 
 bool arm64_branch_displacement(int64_t instruction_units, int32_t *byte_displacement) noexcept;
+bool decode_arm64_pc_relative(uint32_t opcode, PcRelativeKind *kind,
+                              int64_t *byte_displacement) noexcept;
 void cache_gpr_access(CachedInstruction *instruction, size_t index, const char *register_name,
                       uint8_t width_bytes, bool reads, bool writes) noexcept;
 
@@ -72,21 +87,20 @@ public:
 
     bool enabled() const { return slots_ != nullptr; }
     uint32_t slot_count() const { return slot_count_; }
+    uint32_t metadata_entry_count() const { return next_entry_index_; }
     uint32_t metadata_chunk_count() const { return metadata_chunk_count_; }
     const InstructionCacheMetrics &metrics() const { return metrics_; }
 
-    const CachedInstruction *find(uintptr_t address, uint32_t opcode) noexcept;
-    const CachedInstruction *insert(uintptr_t address,
-                                    const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *find(uint32_t opcode) noexcept;
+    const CachedInstruction *insert(const CachedInstruction &instruction) noexcept;
     const CachedInstruction *populate_after_miss(
-            uintptr_t address, const CachedInstruction &instruction) noexcept;
-    const CachedInstruction *resolve(uintptr_t address, uint32_t opcode, Decoder decoder,
-                                     void *decoder_data,
+            const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *resolve(uint32_t opcode, Decoder decoder, void *decoder_data,
                                      CachedInstruction *scratch) noexcept;
 
 private:
     struct Slot {
-        uintptr_t address;
+        uint32_t opcode;
         uint32_t entry_plus_one;
     };
 
@@ -97,14 +111,13 @@ private:
     static constexpr uint32_t kMetadataEntriesPerChunk = 4096;
 
     static bool is_power_of_two(uint32_t value);
-    static uint32_t slot_index(uintptr_t address, uint32_t opcode, uint32_t mask);
+    static uint32_t slot_index(uint32_t opcode, uint32_t mask);
 
     bool allocate_slots(uint32_t count) noexcept;
     CachedInstruction *allocate_entry() noexcept;
     CachedInstruction *entry(uint32_t entry_plus_one) noexcept;
     const CachedInstruction *entry(uint32_t entry_plus_one) const noexcept;
-    const CachedInstruction *store(uintptr_t address,
-                                   const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *store(const CachedInstruction &instruction) noexcept;
 
     Slot *slots_ = nullptr;
     uint32_t slot_count_ = 0;

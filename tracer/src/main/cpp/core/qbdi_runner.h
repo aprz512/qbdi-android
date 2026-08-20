@@ -11,8 +11,10 @@ using GenericTargetFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uin
                                      uint64_t, uint64_t);
 
 struct TraceInvocation {
-    SceneConfig scene;
-    ModuleRange module;
+    // Hook-generation metadata is immutable after installation. The proxy runtime's
+    // shared ownership keeps these allocation-free views alive for the whole call.
+    const SceneConfig *scene = nullptr;
+    const ModuleRange *module = nullptr;
     uintptr_t target_address = 0;
     // May select a retained hook-generation trampoline while target_address keeps
     // the logical scene address used by trace metadata and instrumentation ranges.

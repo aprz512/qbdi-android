@@ -1,7 +1,13 @@
 import unittest
 import subprocess
+import sys
+import tempfile
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import scripts.benchmark_trace as benchmark_trace
 
 from scripts.benchmark_trace import (
     compare_to_baseline,
@@ -405,6 +411,143 @@ effective_buffer_bytes=67108864
         self.assertEqual(Decimal("0.1"), cache_diagnosis["cache_miss_fraction"])
         self.assertEqual("undetermined", encoding_diagnosis["dominant_cost"])
         self.assertIn("raw_bytes_per_second", encoding_diagnosis)
+
+    def test_invoke_benchmark_releases_every_owned_frida_resource_on_failures(self):
+        class FakeScript:
+            def __init__(self, stage, calls):
+                self.stage = stage
+                self.calls = calls
+                self.callback = None
+
+            def on(self, _event, callback):
+                self.calls["on"] += 1
+                self.callback = callback
+                if self.stage == "on":
+                    raise RuntimeError("on failed")
+
+            def load(self):
+                self.calls["load"] += 1
+                if self.stage == "load":
+                    raise RuntimeError("load failed")
+                if self.stage == "agent":
+                    self.callback({
+                        "type": "send",
+                        "payload": {"type": "benchmark-error", "error": "agent failed"},
+                    }, None)
+                if self.stage == "result":
+                    self.callback({
+                        "type": "send",
+                        "payload": {"type": "benchmark-result", "return": "0xBEEF"},
+                    }, None)
+
+            def unload(self):
+                self.calls["unload"] += 1
+
+        class FakeSession:
+            def __init__(self, stage, calls):
+                self.stage = stage
+                self.calls = calls
+
+            def create_script(self, _source):
+                self.calls["create"] += 1
+                if self.stage == "create":
+                    raise RuntimeError("create failed")
+                return FakeScript(self.stage, self.calls)
+
+            def detach(self):
+                self.calls["detach"] += 1
+
+        class FakeDevice:
+            def __init__(self, stage, calls):
+                self.stage = stage
+                self.calls = calls
+                self.script = None
+
+            def spawn(self, _argv):
+                self.calls["spawn"] += 1
+                return 41
+
+            def attach(self, _pid):
+                self.calls["attach"] += 1
+                if self.stage == "attach":
+                    raise RuntimeError("attach failed")
+                return FakeSession(self.stage, self.calls)
+
+            def resume(self, _pid):
+                self.calls["resume"] += 1
+                if self.stage == "resume":
+                    raise RuntimeError("resume failed")
+
+            def kill(self, _pid):
+                self.calls["kill"] += 1
+
+        class FakeManager:
+            def __init__(self, device):
+                self.device = device
+
+            def add_remote_device(self, _endpoint):
+                return self.device
+
+        class FakeFrida:
+            def __init__(self, device):
+                self.manager = FakeManager(device)
+
+            def get_device_manager(self):
+                return self.manager
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Path(directory) / "agent.js"
+            agent.write_text("agent", encoding="utf-8")
+            for stage, expected in {
+                "attach": {"unload": 0, "detach": 0, "kill": 1},
+                "create": {"unload": 0, "detach": 1, "kill": 1},
+                "on": {"unload": 1, "detach": 1, "kill": 1},
+                "load": {"unload": 1, "detach": 1, "kill": 1},
+                "resume": {"unload": 1, "detach": 1, "kill": 1},
+                "agent": {"unload": 1, "detach": 1, "kill": 1},
+                "timeout": {"unload": 1, "detach": 1, "kill": 1},
+            }.items():
+                with self.subTest(stage=stage):
+                    calls = {name: 0 for name in (
+                        "spawn", "attach", "create", "on", "load", "resume",
+                        "unload", "detach", "kill",
+                    )}
+                    device = FakeDevice(stage, calls)
+                    args = SimpleNamespace(
+                        package="com.example.app", frida_port=27042, frida_device=None,
+                        agent=str(agent), profile="fast", legacy=False,
+                        test_buffer_bytes=None, test_fail_setup=False,
+                        timeout=0.1 if stage == "agent" else 0,
+                    )
+                    with patch.dict(sys.modules, {"frida": FakeFrida(device)}), \
+                         patch.object(benchmark_trace, "adb"), \
+                         patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
+                         patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
+                         patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
+                        with self.assertRaises(RuntimeError):
+                            benchmark_trace.invoke_benchmark(args)
+                    for name, count in expected.items():
+                        self.assertEqual(count, calls[name], (stage, name, calls))
+
+            calls = {name: 0 for name in (
+                "spawn", "attach", "create", "on", "load", "resume",
+                "unload", "detach", "kill",
+            )}
+            device = FakeDevice("result", calls)
+            args = SimpleNamespace(
+                package="com.example.app", frida_port=27042, frida_device=None,
+                agent=str(agent), profile="fast", legacy=False,
+                test_buffer_bytes=None, test_fail_setup=False, timeout=0.1,
+            )
+            with patch.dict(sys.modules, {"frida": FakeFrida(device)}), \
+                 patch.object(benchmark_trace, "adb"), \
+                 patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
+                 patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
+                 patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
+                self.assertEqual("0xbeef", benchmark_trace.invoke_benchmark(args))
+            self.assertEqual(1, calls["unload"])
+            self.assertEqual(1, calls["detach"])
+            self.assertEqual(0, calls["kill"])
 
 
 if __name__ == "__main__":

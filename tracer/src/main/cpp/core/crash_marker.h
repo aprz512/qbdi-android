@@ -22,6 +22,10 @@ void crash_marker_atfork_prepare() noexcept;
 void crash_marker_atfork_parent() noexcept;
 void crash_marker_atfork_child() noexcept;
 
+#if defined(QTRACE_HOST_TEST)
+void crash_marker_test_force_atfork_error(int error_code) noexcept;
+#endif
+
 class CrashMarkerSession {
 public:
     CrashMarkerSession() = default;

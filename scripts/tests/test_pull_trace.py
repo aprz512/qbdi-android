@@ -6,6 +6,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
+
+import scripts.pull_trace as pull_trace
 
 from scripts.pull_trace import (
     AdbArtifactClient,
@@ -276,6 +279,108 @@ class Lz4FrameTests(unittest.TestCase):
             self.assertEqual(b"first", output.read_bytes())
             with self.assertRaisesRegex(PullTraceError, "host lz4 CLI"):
                 decode_lz4_file(source, output, str(directory_path / "missing-lz4"))
+
+    def test_file_decoder_terminates_and_reaps_started_process_on_stream_exception(self):
+        class FailingStdin:
+            def write(self, _data):
+                raise OSError("write exploded")
+
+            def close(self):
+                pass
+
+        class FakeStderr:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b""
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FailingStdin()
+                self.stderr = FakeStderr()
+                self.terminate_calls = 0
+                self.wait_calls = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def wait(self):
+                self.wait_calls += 1
+                return 0
+
+        frame = uncompressed_lz4_frame(b"payload")
+        process = FakeProcess()
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            executable = directory_path / "fake-lz4"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            source = directory_path / "trace.lz4"
+            source.write_bytes(frame)
+            with patch.object(pull_trace.subprocess, "Popen", return_value=process):
+                with self.assertRaisesRegex(PullTraceError, "frame 1"):
+                    decode_lz4_file(source, directory_path / "trace.txt", str(executable))
+
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(1, process.wait_calls)
+
+    def test_file_decoder_reaps_when_reading_decoder_diagnostics_raises(self):
+        class FakeStdin:
+            def write(self, data):
+                return len(data)
+
+            def close(self):
+                pass
+
+        class FailingStderr:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                raise OSError("stderr exploded")
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = FakeStdin()
+                self.stderr = FailingStderr()
+                self.terminate_calls = 0
+                self.wait_calls = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def wait(self):
+                self.wait_calls += 1
+                return 0
+
+        frame = uncompressed_lz4_frame(b"payload")
+        process = FakeProcess()
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            executable = directory_path / "fake-lz4"
+            executable.write_text("#!/bin/sh\n", encoding="utf-8")
+            executable.chmod(0o755)
+            source = directory_path / "trace.lz4"
+            source.write_bytes(frame)
+            with patch.object(pull_trace.subprocess, "Popen", return_value=process):
+                with self.assertRaisesRegex(PullTraceError, "frame 1"):
+                    decode_lz4_file(source, directory_path / "trace.txt", str(executable))
+
+        self.assertEqual(1, process.terminate_calls)
+        self.assertEqual(1, process.wait_calls)
 
 
 class PullArtifactTests(unittest.TestCase):

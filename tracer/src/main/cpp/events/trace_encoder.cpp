@@ -3,6 +3,7 @@
 #include "events/trace_number_formatter.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -204,7 +205,25 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
                                                     sizeof(record.decoded->operands));
         const size_t disassembly_size = bounded_length(record.decoded->disassembly,
                                                        sizeof(record.decoded->disassembly));
-        if (mnemonic_size != 0) {
+        if (mnemonic_size != 0 &&
+            record.decoded->pc_relative_kind != PcRelativeKind::None) {
+            if (!append_bytes(buffer, record.decoded->mnemonic, mnemonic_size) ||
+                !append_char(buffer, ' ')) {
+                return false;
+            }
+            const char *last_comma = std::strrchr(record.decoded->operands, ',');
+            if (last_comma != nullptr) {
+                const size_t prefix_size =
+                        static_cast<size_t>(last_comma - record.decoded->operands) + 1U;
+                if (!append_bytes(buffer, record.decoded->operands, prefix_size) ||
+                    !append_char(buffer, ' ')) {
+                    return false;
+                }
+            }
+            if (!append_hex_prefix(buffer, record.decoded->absolute_branch_target(record.pc))) {
+                return false;
+            }
+        } else if (mnemonic_size != 0) {
             if (!append_bytes(buffer, record.decoded->mnemonic, mnemonic_size)) return false;
             if (operands_size != 0 &&
                 (!append_char(buffer, ' ') ||

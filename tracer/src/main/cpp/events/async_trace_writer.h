@@ -73,6 +73,7 @@ public:
     void commit(size_t bytes);
     bool append(std::string_view bytes);
     bool finish();
+    void detach_after_fork_child() noexcept;
     bool failed() const;
     int error_code() const noexcept;
     size_t buffer_bytes() const noexcept;

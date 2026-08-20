@@ -54,6 +54,42 @@ void copy_disassembly(const QBDI::InstAnalysis &analysis,
     copy_bounded(decoded.operands, cursor);
 }
 
+void normalize_pc_relative_text(CachedInstruction &decoded) noexcept {
+    char display_mnemonic[sizeof(decoded.mnemonic)]{};
+    const char *mnemonic_end = decoded.disassembly;
+    while (*mnemonic_end != '\0' &&
+           !std::isspace(static_cast<unsigned char>(*mnemonic_end))) {
+        ++mnemonic_end;
+    }
+    const size_t display_mnemonic_size = std::min(
+            static_cast<size_t>(mnemonic_end - decoded.disassembly),
+            sizeof(display_mnemonic) - 1U);
+    std::memcpy(display_mnemonic, decoded.disassembly, display_mnemonic_size);
+
+    char normalized_operands[sizeof(decoded.operands)]{};
+    const char *last_comma = std::strrchr(decoded.operands, ',');
+    size_t prefix_size = 0;
+    if (last_comma != nullptr) {
+        prefix_size = static_cast<size_t>(last_comma - decoded.operands) + 1U;
+        prefix_size = std::min(prefix_size, sizeof(normalized_operands) - 2U);
+        std::memcpy(normalized_operands, decoded.operands, prefix_size);
+        normalized_operands[prefix_size++] = ' ';
+    }
+    std::snprintf(normalized_operands + prefix_size,
+                  sizeof(normalized_operands) - prefix_size, "#%lld",
+                  static_cast<long long>(decoded.pc_relative_displacement));
+    copy_bounded(decoded.operands, normalized_operands);
+    if (decoded.mnemonic[0] == '\0') {
+        char opcode[24]{};
+        std::snprintf(opcode, sizeof(opcode), "0x%08x", decoded.opcode);
+        format_fallback(&decoded, ".inst", opcode);
+        return;
+    }
+    std::snprintf(decoded.disassembly, sizeof(decoded.disassembly), "%s %s",
+                  display_mnemonic[0] != '\0' ? display_mnemonic : decoded.mnemonic,
+                  decoded.operands);
+}
+
 void copy_register_access(const QBDI::OperandAnalysis &operand,
                           CachedInstruction &decoded) noexcept {
     if (operand.type != QBDI::OPERAND_GPR || operand.regCtxIdx < 0 ||
@@ -79,6 +115,7 @@ CachedInstruction decode_qbdi_instruction(uint32_t opcode,
     if (analysis.isCall) decoded.flags = decoded.flags | InstructionFlags::Call;
     if (analysis.isReturn) decoded.flags = decoded.flags | InstructionFlags::Return;
 
+    bool saw_pc_relative_operand = false;
     if (analysis.operands != nullptr) {
         for (uint8_t index = 0; index < analysis.numOperands; ++index) {
             const QBDI::OperandAnalysis &operand = analysis.operands[index];
@@ -86,13 +123,18 @@ CachedInstruction decode_qbdi_instruction(uint32_t opcode,
             const bool pc_relative =
                     (static_cast<unsigned int>(operand.flag) &
                      static_cast<unsigned int>(QBDI::OPERANDFLAG_PCREL)) != 0;
-            if (operand.type == QBDI::OPERAND_IMM && pc_relative &&
-                (analysis.isBranch || analysis.isCall) &&
-                arm64_branch_displacement(operand.value,
-                                          &decoded.pc_relative_displacement)) {
-                decoded.flags = decoded.flags | InstructionFlags::PcRelative;
-            }
+            saw_pc_relative_operand = saw_pc_relative_operand || pc_relative;
         }
+    }
+
+    if (decode_arm64_pc_relative(opcode, &decoded.pc_relative_kind,
+                                 &decoded.pc_relative_displacement)) {
+        decoded.flags = decoded.flags | InstructionFlags::PcRelative;
+        normalize_pc_relative_text(decoded);
+    } else if (saw_pc_relative_operand) {
+        char operand[24]{};
+        std::snprintf(operand, sizeof(operand), "0x%08x", opcode);
+        format_fallback(&decoded, ".inst", operand);
     }
 
     constexpr size_t flags_index = QBDI::REG_FLAG;
@@ -116,13 +158,13 @@ CachedInstruction decode_arm64_fallback(uint32_t opcode, bool decode_memory) noe
 
     if ((opcode & 0x7c000000U) == 0x14000000U) {
         const bool call = (opcode & 0x80000000U) != 0;
-        const int32_t signed_immediate = static_cast<int32_t>(opcode << 6U) >> 6U;
-        decoded.pc_relative_displacement = signed_immediate * 4;
+        (void)decode_arm64_pc_relative(opcode, &decoded.pc_relative_kind,
+                                      &decoded.pc_relative_displacement);
         decoded.flags = InstructionFlags::Branch | InstructionFlags::PcRelative;
         if (call) decoded.flags = decoded.flags | InstructionFlags::Call;
         char operand[32]{};
-        std::snprintf(operand, sizeof(operand), "#%d",
-                      decoded.pc_relative_displacement);
+        std::snprintf(operand, sizeof(operand), "#%lld",
+                      static_cast<long long>(decoded.pc_relative_displacement));
         format_fallback(&decoded, call ? "bl" : "b", operand);
         return decoded;
     }
@@ -192,8 +234,7 @@ InstructionView Arm64InstructionResolver::resolve(
         return {address, scratch};
     }
 
-    const CachedInstruction *resolved = cache->resolve(address, opcode, decoder, decoder_data,
-                                                        scratch);
+    const CachedInstruction *resolved = cache->resolve(opcode, decoder, decoder_data, scratch);
     if (resolved != nullptr) return {address, resolved};
     *scratch = decode_arm64_fallback(opcode, decode_memory);
     return {address, scratch};

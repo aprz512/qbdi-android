@@ -1,5 +1,7 @@
 #include "events/async_trace_writer.h"
 
+#include "core/trace_process_lifecycle.h"
+
 #include "lz4frame.h"
 
 #include <algorithm>
@@ -134,6 +136,8 @@ struct AsyncTraceWriterImpl {
     LZ4F_cctx *compression_context = nullptr;
     LZ4F_preferences_t preferences{};
     int fd = -1;
+    size_t fd_registry_slot = kInvalidTraceWriterFdSlot;
+    pid_t owner_pid = -1;
     pthread_t consumer_thread{};
     bool consumer_started = false;
     std::atomic<bool> consumer_exited{false};
@@ -186,10 +190,14 @@ void release_mappings(AsyncTraceWriterImpl *impl) noexcept {
 
 void close_backend(AsyncTraceWriterImpl *impl) noexcept {
     if (impl->fd < 0) return;
+    trace_writer_fd_registry_lock();
+    trace_writer_fd_unregister_locked(impl->fd_registry_slot, impl->fd);
+    impl->fd_registry_slot = kInvalidTraceWriterFdSlot;
     if (impl->backend->close_file(impl->fd) != 0) {
         int close_error = errno == 0 ? EIO : errno;
         latch_failure(impl, close_error);
     }
+    trace_writer_fd_registry_unlock();
     impl->fd = -1;
 }
 
@@ -483,6 +491,11 @@ AsyncTraceWriter::AsyncTraceWriter(TraceWriterBackend *backend, TraceFaultInject
 
 AsyncTraceWriter::~AsyncTraceWriter() {
     if (impl_ != nullptr) {
+        if (trace_process_child_detached() ||
+            (impl_->owner_pid > 0 && impl_->owner_pid != ::getpid())) {
+            detach_after_fork_child();
+            return;
+        }
         if (impl_->opened && !impl_->finish_called) finish();
         if (impl_->consumer_started) {
             const int retry_result =
@@ -507,6 +520,20 @@ AsyncTraceWriter::~AsyncTraceWriter() {
 
 bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options,
                             TraceMetrics *metrics) {
+    if (trace_process_child_detached()) {
+        if (impl_ != nullptr) {
+            latch_failure(impl_, ECHILD);
+            impl_->finish_called = true;
+        }
+        return false;
+    }
+    if (!install_trace_process_lifecycle()) {
+        if (impl_ != nullptr) {
+            latch_failure(impl_, trace_process_lifecycle_error());
+            impl_->finish_called = true;
+        }
+        return false;
+    }
     if (impl_ == nullptr || impl_->opened || impl_->finish_called || metrics == nullptr ||
         path.empty()) {
         return false;
@@ -518,8 +545,19 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
     }
 
     impl_->metrics = metrics;
-    impl_->fd = impl_->backend->open_file(path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC,
-                                         0644);
+    impl_->owner_pid = ::getpid();
+    trace_writer_fd_registry_lock();
+    impl_->fd = impl_->backend->open_file(
+            path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+    if (impl_->fd >= 0) {
+        impl_->fd_registry_slot = trace_writer_fd_register_locked(impl_->fd);
+        if (impl_->fd_registry_slot == kInvalidTraceWriterFdSlot) {
+            (void)impl_->backend->close_file(impl_->fd);
+            impl_->fd = -1;
+            errno = EMFILE;
+        }
+    }
+    trace_writer_fd_registry_unlock();
     if (impl_->fd < 0) {
         latch_failure(impl_, errno == 0 ? EIO : errno);
         impl_->finish_called = true;
@@ -560,6 +598,11 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
     impl_->consumer_started = true;
     impl_->opened = true;
     return true;
+}
+
+void AsyncTraceWriter::detach_after_fork_child() noexcept {
+    if (impl_ == nullptr) return;
+    impl_ = nullptr;
 }
 
 WritableSpan AsyncTraceWriter::reserve(size_t minimum) {

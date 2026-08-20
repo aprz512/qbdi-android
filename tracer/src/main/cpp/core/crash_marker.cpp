@@ -1,5 +1,6 @@
 #include "core/crash_marker.h"
 
+#include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
@@ -44,7 +45,8 @@ struct CrashHandlerState {
 using CrashSignalHandler = void (*)(int, siginfo_t *, void *);
 CrashHandlerState g_handler_states[kMaxHandlerGenerations]{};
 size_t g_next_handler_generation = 0;
-std::once_flag g_atfork_once;
+pthread_once_t g_atfork_once = PTHREAD_ONCE_INIT;
+std::atomic<int> g_atfork_error{EAGAIN};
 volatile sig_atomic_t g_crash_child_detached = 0;
 volatile sig_atomic_t g_crash_prepare_locked = 0;
 
@@ -54,11 +56,19 @@ CrashHandlerTestGate g_handler_test_gate = nullptr;
 CrashHandlerTestGate g_session_test_gate = nullptr;
 #endif
 
-void install_atfork_once() {
-    std::call_once(g_atfork_once, [] {
-        (void)::pthread_atfork(crash_marker_atfork_prepare, crash_marker_atfork_parent,
-                               crash_marker_atfork_child);
-    });
+void register_atfork() noexcept {
+    g_atfork_error.store(
+            ::pthread_atfork(crash_marker_atfork_prepare, crash_marker_atfork_parent,
+                             crash_marker_atfork_child),
+            std::memory_order_release);
+}
+
+bool install_atfork_once() noexcept {
+    const int once_error = ::pthread_once(&g_atfork_once, register_atfork);
+    if (once_error != 0) {
+        g_atfork_error.store(once_error, std::memory_order_release);
+    }
+    return g_atfork_error.load(std::memory_order_acquire) == 0;
 }
 
 size_t signal_index(int signal_number) noexcept {
@@ -255,6 +265,11 @@ void crash_marker_test_set_session_gate(CrashHandlerTestGate gate) {
     g_session_test_gate = gate;
 }
 
+void crash_marker_test_force_atfork_error(int error_code) noexcept {
+    g_atfork_error.store(error_code == 0 ? EIO : error_code,
+                         std::memory_order_release);
+}
+
 #endif
 
 bool valid_crash_marker(const CrashMarker &marker) noexcept {
@@ -308,7 +323,11 @@ bool CrashMarkerSession::open(const std::string &trace_path) noexcept {
         finish_called_ = true;
         return false;
     }
-    install_atfork_once();
+    if (!install_atfork_once()) {
+        latch_error(&error_code_, g_atfork_error.load(std::memory_order_acquire));
+        finish_called_ = true;
+        return false;
+    }
     if (opened_ || finish_called_ || trace_path.empty()) {
         latch_error(&error_code_, EINVAL);
         return false;

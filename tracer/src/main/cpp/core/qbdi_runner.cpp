@@ -3,6 +3,8 @@
 #include "core/instruction_collector.h"
 #include "core/instruction_cache.h"
 #include "core/logging.h"
+#include "core/qbdi_runner_lifecycle.h"
+#include "core/trace_process_lifecycle.h"
 #include "core/trace_run_session.h"
 #include "handlers/call_handlers.h"
 #include "rules/code_rule.h"
@@ -10,16 +12,28 @@
 #include <QBDI.h>
 #include <QBDI/State.h>
 #include <chrono>
+#include <memory>
+#include <new>
 #include <sstream>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
 
 struct RunnerState {
-    explicit RunnerState(const TraceOptions &options) : writer(options, &metrics) {}
+    RunnerState(const TraceConfig &config, const TraceInvocation &invocation)
+        : writer(config.trace, &metrics) {
+        context.package_name = config.package_name;
+        context.scene_name = invocation.scene->name;
+        context.target_so = config.target_so;
+        context.module_base = invocation.module->start;
+        context.target_offset = invocation.scene->offset;
+        context.target_address = invocation.target_address;
+        context.pid = getpid();
+        context.tid = static_cast<int>(syscall(SYS_gettid));
+        register_user_code_rules(code_rules);
+    }
 
     TraceContext context;
-    SceneConfig scene;
     TraceMetrics metrics;
     TextTraceWriter writer;
     CodeRuleEngine code_rules;
@@ -27,6 +41,43 @@ struct RunnerState {
     TraceRunSessionOutcome session;
     CrashMarkerSession crash_marker;
 };
+
+struct RunnerRuntime {
+    RunnerRuntime(const TraceConfig &config, const TraceInvocation &invocation)
+        : state(config, invocation),
+          collector(&instruction_cache, &state.writer, &state.code_rules, &state.context,
+                    state.session.callback_gate(), config.trace, *invocation.module),
+          call_arguments(invocation.args.begin(), invocation.args.end()) {}
+
+    ~RunnerRuntime() {
+        if (fakestack != nullptr) QBDI::alignedFree(fakestack);
+    }
+
+    RunnerState state;
+    InstructionCache instruction_cache;
+    InstructionCollector collector;
+    QBDI::VM vm;
+    std::vector<QBDI::rword> call_arguments;
+    uint8_t *fakestack = nullptr;
+};
+
+struct QbdiCallRequest {
+    QBDI::VM *vm = nullptr;
+    uintptr_t address = 0;
+    std::vector<QBDI::rword> *arguments = nullptr;
+};
+
+bool call_qbdi_target(void *opaque, uint64_t *return_value) {
+    auto *request = static_cast<QbdiCallRequest *>(opaque);
+    if (request == nullptr || request->vm == nullptr || request->arguments == nullptr ||
+        return_value == nullptr) {
+        return false;
+    }
+    QBDI::rword value = 0;
+    const bool succeeded = request->vm->call(&value, request->address, *request->arguments);
+    *return_value = static_cast<uint64_t>(value);
+    return succeeded;
+}
 
 constexpr uint32_t kQbdiVirtualStackSize = 0x1000000;
 
@@ -38,6 +89,7 @@ static long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
 static QBDI::VMAction
 on_exec_transfer(QBDI::VM *, const QBDI::VMState *vm_state, QBDI::GPRState *gpr,
                  QBDI::FPRState *, void *data) {
+    if (trace_process_child_detached()) return QBDI::CONTINUE;
     auto *state = static_cast<RunnerState *>(data);
     TraceCallbackGate *gate = state->session.callback_gate();
     gate->observe_failure(state->writer.failed());
@@ -48,17 +100,14 @@ on_exec_transfer(QBDI::VM *, const QBDI::VMState *vm_state, QBDI::GPRState *gpr,
 }
 
 TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation) {
-    RunnerState state(config.trace);
-    state.context.package_name = config.package_name;
-    state.context.scene_name = invocation.scene.name;
-    state.context.target_so = config.target_so;
-    state.context.module_base = invocation.module.start;
-    state.context.target_offset = invocation.scene.offset;
-    state.context.target_address = invocation.target_address;
-    state.scene = invocation.scene;
-    state.context.pid = getpid();
-    state.context.tid = static_cast<int>(syscall(SYS_gettid));
-    register_user_code_rules(state.code_rules);
+    if (invocation.scene == nullptr || invocation.module == nullptr) return {};
+    std::unique_ptr<RunnerRuntime> runtime(
+            new (std::nothrow) RunnerRuntime(config, invocation));
+    if (runtime == nullptr) return {};
+    RunnerState &state = runtime->state;
+    InstructionCache &instruction_cache = runtime->instruction_cache;
+    InstructionCollector &collector = runtime->collector;
+    QBDI::VM &vm = runtime->vm;
 
     bool trace_setup_ok = true;
 #ifndef NDEBUG
@@ -89,16 +138,10 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     }
 
     auto started = std::chrono::steady_clock::now();
-    InstructionCache instruction_cache;
-    InstructionCollector collector(&instruction_cache, &state.writer, &state.code_rules,
-                                   &state.context, state.session.callback_gate(), config.trace,
-                                   invocation.module);
-    QBDI::VM vm;
     QBDI::GPRState *gpr = vm.getGPRState();
 
-    uint8_t *fakestack = nullptr;
     bool execution_setup_ok = trace_setup_ok && gpr != nullptr &&
-            QBDI::allocateVirtualStack(gpr, kQbdiVirtualStackSize, &fakestack);
+            QBDI::allocateVirtualStack(gpr, kQbdiVirtualStackSize, &runtime->fakestack);
     if (!execution_setup_ok) {
         state.writer.error("allocateVirtualStack failed");
     }
@@ -111,12 +154,12 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
                                                     : invocation.target_address;
         gpr->pc = execution_address;
 
-        if (invocation.scene.end_offset > 0) {
+        if (invocation.scene->end_offset > 0) {
             uintptr_t range_start = 0;
             uintptr_t range_end = 0;
-            if (!module_offset_address(invocation.module, invocation.scene.offset, false,
+            if (!module_offset_address(*invocation.module, invocation.scene->offset, false,
                                        &range_start) ||
-                !module_offset_address(invocation.module, invocation.scene.end_offset, true,
+                !module_offset_address(*invocation.module, invocation.scene->end_offset, true,
                                        &range_end) ||
                 range_end <= range_start) {
                 state.writer.error("scene instrumentation range is outside retained module");
@@ -175,17 +218,20 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         }
 
         if (state.session.target_should_run()) {
-            QBDI::rword retVal = 0;
-            std::vector<QBDI::rword> args;
-            args.reserve(invocation.args.size());
-            for (uint64_t arg: invocation.args) args.push_back(arg);
-
             const uintptr_t execution_address = invocation.execution_address != 0
                                                         ? invocation.execution_address
                                                         : invocation.target_address;
-            target.succeeded = vm.call(&retVal, execution_address, args);
-            target.ran = target.succeeded;
-            target.return_value = retVal;
+            QbdiCallRequest request{&vm, execution_address, &runtime->call_arguments};
+            const QbdiTargetCallResult call =
+                    run_qbdi_target_call(call_qbdi_target, &request, &state.writer);
+            if (call.child_detached) {
+                const TraceRunResult child_result{call.succeeded, call.return_value};
+                (void)runtime.release();
+                return child_result;
+            }
+            target.succeeded = call.succeeded;
+            target.ran = call.succeeded;
+            target.return_value = call.return_value;
             if (target.ran) collector.finish_last(*gpr);
         }
     }
@@ -197,12 +243,11 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     const TraceRunFinalization finalization =
             state.session.finalize(state.writer, elapsed_ms_since(started));
     const bool crash_marker_finished = state.crash_marker.finish();
-    if (fakestack != nullptr) QBDI::alignedFree(fakestack);
     if (finalization.should_log_success && crash_marker_finished) {
-        QTRACE_I("trace %s complete path=%s", invocation.scene.name.c_str(),
+        QTRACE_I("trace %s complete path=%s", invocation.scene->name.c_str(),
                  state.writer.path().c_str());
     } else {
-        QTRACE_E("trace %s write failed path=%s", invocation.scene.name.c_str(),
+        QTRACE_E("trace %s write failed path=%s", invocation.scene->name.c_str(),
                  state.writer.path().c_str());
     }
     return {finalization.target_ran, finalization.outward_return_value};

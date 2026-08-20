@@ -1,16 +1,20 @@
 #include "core/module_maps.h"
 #include "core/native_fallback_arm64.h"
 #include "core/qbdi_runner.h"
+#include "core/trace_process_lifecycle.h"
 #include "core/trace_config.h"
 #include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
 
 #include <atomic>
 #include <condition_variable>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <chrono>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <sys/wait.h>
@@ -40,12 +44,57 @@ void check(bool condition, const char *expression, int line) {
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
+volatile sig_atomic_t g_fail_on_child_delete = 0;
+volatile sig_atomic_t g_fail_next_nothrow_allocation = 0;
+std::atomic<size_t> g_throwing_allocation_calls{0};
+
+extern "C" void *__real__Znwm(std::size_t);
+extern "C" void *__wrap__Znwm(std::size_t size) {
+    g_throwing_allocation_calls.fetch_add(1, std::memory_order_relaxed);
+    return __real__Znwm(size);
+}
+
+extern "C" void *__real__ZnwmRKSt9nothrow_t(std::size_t, const std::nothrow_t &);
+extern "C" void *__wrap__ZnwmRKSt9nothrow_t(
+        std::size_t size, const std::nothrow_t &tag) {
+    if (g_fail_next_nothrow_allocation != 0) {
+        g_fail_next_nothrow_allocation = 0;
+        return nullptr;
+    }
+    return __real__ZnwmRKSt9nothrow_t(size, tag);
+}
+
+extern "C" void __real__ZdlPv(void *);
+extern "C" void __wrap__ZdlPv(void *pointer) {
+    if (g_fail_on_child_delete != 0) _exit(96);
+    __real__ZdlPv(pointer);
+}
+
+extern "C" void __real__ZdlPvm(void *, std::size_t);
+extern "C" void __wrap__ZdlPvm(void *pointer, std::size_t size) {
+    if (g_fail_on_child_delete != 0) _exit(96);
+    __real__ZdlPvm(pointer, size);
+}
+
+extern "C" void __real__ZdaPv(void *);
+extern "C" void __wrap__ZdaPv(void *pointer) {
+    if (g_fail_on_child_delete != 0) _exit(96);
+    __real__ZdaPv(pointer);
+}
+
+extern "C" void __real__ZdaPvm(void *, std::size_t);
+extern "C" void __wrap__ZdaPvm(void *pointer, std::size_t size) {
+    if (g_fail_on_child_delete != 0) _exit(96);
+    __real__ZdaPvm(pointer, size);
+}
+
 namespace {
 
 std::mutex g_fake_mutex;
 TraceInvocation g_seen_invocation;
 TraceConfig g_seen_config;
 size_t g_runner_calls = 0;
+size_t g_allocations_at_runner_entry = 0;
 size_t g_bridge_calls = 0;
 size_t g_hook_calls = 0;
 size_t g_unhook_calls = 0;
@@ -55,6 +104,8 @@ bool g_install_residual_hook = false;
 std::atomic<size_t> g_old_calls{0};
 std::atomic<size_t> g_new_calls{0};
 int g_nested_fork_status = -1;
+bool g_runner_forks = false;
+pid_t g_runner_fork_child = -1;
 std::vector<ModuleRange> g_fake_maps;
 
 std::mutex g_gate_mutex;
@@ -109,12 +160,18 @@ void reset_fakes() {
     g_seen_invocation = {};
     g_seen_config = {};
     g_runner_calls = 0;
+    g_allocations_at_runner_entry = 0;
     g_bridge_calls = 0;
     g_hook_calls = 0;
     g_unhook_calls = 0;
     g_fail_unhook = false;
     g_fail_next_hook = false;
     g_install_residual_hook = false;
+    g_runner_forks = false;
+    g_runner_fork_child = -1;
+    g_fail_on_child_delete = 0;
+    g_fail_next_nothrow_allocation = 0;
+    g_throwing_allocation_calls.store(0, std::memory_order_relaxed);
     g_old_calls = 0;
     g_new_calls = 0;
     g_fake_maps.clear();
@@ -196,12 +253,12 @@ void branch_before_dispatch_keeps_its_generation_snapshot_and_bypass() {
 
     CHECK(old_result == 0x105);
     CHECK(g_seen_config.package_name == "old-generation");
-    CHECK(g_seen_invocation.scene.name == "old-generation");
-    CHECK(g_seen_invocation.module.path == "old-module");
+    CHECK(g_seen_invocation.scene->name == "old-generation");
+    CHECK(g_seen_invocation.module->path == "old-module");
     CHECK(trace_proxy_dispatch(new_generation, args, 0x77) == 0x105);
     CHECK(g_seen_config.package_name == "new-generation");
-    CHECK(g_seen_invocation.scene.name == "new-generation");
-    CHECK(g_seen_invocation.module.path == "new-module");
+    CHECK(g_seen_invocation.scene->name == "new-generation");
+    CHECK(g_seen_invocation.module->path == "new-module");
 }
 
 void entrant_registration_and_snapshot_are_atomic_with_install() {
@@ -263,16 +320,16 @@ void entrant_registration_and_snapshot_are_atomic_with_install() {
     CHECK(g_old_calls == 1);
     CHECK(g_new_calls == 0);
     CHECK(g_seen_config.package_name == "old-config");
-    CHECK(g_seen_invocation.scene.name == "old-scene");
-    CHECK(g_seen_invocation.module.path == "old-module");
+    CHECK(g_seen_invocation.scene->name == "old-scene");
+    CHECK(g_seen_invocation.module->path == "old-module");
 
     CHECK(trace_proxy_dispatch(trace_proxy_test_generation(new_scene.index), args, 0x99) ==
           0x207);
     CHECK(g_new_calls == 1);
     CHECK(g_seen_config.package_name == "new-config");
-    CHECK(g_seen_invocation.scene.name == "new-scene");
-    CHECK(g_seen_invocation.scene.end_offset == new_scene.end_offset);
-    CHECK(g_seen_invocation.module.path == "new-module");
+    CHECK(g_seen_invocation.scene->name == "new-scene");
+    CHECK(g_seen_invocation.scene->end_offset == new_scene.end_offset);
+    CHECK(g_seen_invocation.module->path == "new-module");
 }
 
 void unhook_failure_uses_the_saved_original_exactly_once() {
@@ -391,10 +448,10 @@ void same_address_updates_replace_all_metadata_and_hook_generation() {
     CHECK(trace_proxy_dispatch(trace_proxy_test_generation(second_scene.index), args, 0) ==
           0x103);
     CHECK(g_seen_config.package_name == "second-config");
-    CHECK(g_seen_invocation.scene.name == "second");
-    CHECK(g_seen_invocation.scene.end_offset == second_scene.end_offset);
-    CHECK(g_seen_invocation.module.path == "reloaded-module");
-    CHECK(g_seen_invocation.module.end == UINTPTR_MAX);
+    CHECK(g_seen_invocation.scene->name == "second");
+    CHECK(g_seen_invocation.scene->end_offset == second_scene.end_offset);
+    CHECK(g_seen_invocation.module->path == "reloaded-module");
+    CHECK(g_seen_invocation.module->end == UINTPTR_MAX);
 }
 
 void duplicate_install_for_one_configuration_generation_is_idempotent() {
@@ -641,6 +698,92 @@ void target_fork_child_skips_inherited_proxy_postamble() {
     CHECK(WIFEXITED(g_nested_fork_status) && WEXITSTATUS(g_nested_fork_status) == 0);
 }
 
+void traced_runner_fork_child_performs_no_proxy_deallocation() {
+    reset_fakes();
+    const TraceConfig config = config_named(
+            "traced-runner-fork-with-non-small-string-storage");
+    const SceneConfig scene = scene_named(
+            "traced-runner-fork-with-non-small-string-storage",
+            reinterpret_cast<uintptr_t>(old_target));
+    trace_proxy_test_reset(config);
+    CHECK(trace_proxy_test_update(config, scene, module_named(
+            "traced-runner-fork-module-with-non-small-string-storage")));
+    g_runner_forks = true;
+
+    uint64_t args[8]{};
+    const uint64_t result = trace_proxy_dispatch(0, args, 0);
+    if (result == 0xCAFE) _exit(0);
+    CHECK(result == 0xBEEF);
+
+    int status = -1;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    pid_t waited = 0;
+    while ((waited = ::waitpid(g_runner_fork_child, &status, WNOHANG)) == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        ::usleep(1000);
+    }
+    if (waited == 0) {
+        (void)::kill(g_runner_fork_child, SIGKILL);
+        waited = ::waitpid(g_runner_fork_child, &status, 0);
+    }
+    CHECK(waited == g_runner_fork_child);
+    CHECK(WIFEXITED(status));
+    if (WEXITSTATUS(status) != 0) {
+        std::fprintf(stderr, "traced runner child exit=%d\n", WEXITSTATUS(status));
+    }
+    CHECK(WEXITSTATUS(status) == 0);
+}
+
+void proxy_runtime_allocation_failure_executes_the_target_once() {
+    reset_fakes();
+    const TraceConfig config = config_named("proxy-runtime-allocation-failure");
+    const SceneConfig scene = scene_named(
+            "proxy-runtime-allocation-failure",
+            reinterpret_cast<uintptr_t>(old_target));
+    trace_proxy_test_reset(config);
+    CHECK(trace_proxy_test_update(config, scene, module_named("allocation-failure-module")));
+
+    uint64_t args[8]{29};
+    g_fail_next_nothrow_allocation = 1;
+    CHECK(trace_proxy_dispatch(0, args, 0x1234) == 0x11D);
+    CHECK(g_old_calls == 1);
+    CHECK(g_runner_calls == 0);
+}
+
+void proxy_runtime_snapshot_performs_no_throwing_allocation() {
+    reset_fakes();
+    const TraceConfig config = config_named(
+            "proxy-runtime-zero-copy-snapshot-with-long-storage");
+    const SceneConfig scene = scene_named(
+            "proxy-runtime-zero-copy-snapshot-with-long-storage",
+            reinterpret_cast<uintptr_t>(old_target));
+    trace_proxy_test_reset(config);
+    CHECK(trace_proxy_test_update(config, scene, module_named(
+            "proxy-runtime-zero-copy-module-with-long-storage")));
+
+    uint64_t args[8]{31};
+    g_throwing_allocation_calls.store(0, std::memory_order_relaxed);
+    CHECK(trace_proxy_dispatch(0, args, 0) == 0x11F);
+    CHECK(g_allocations_at_runner_entry == 0);
+    CHECK(g_old_calls == 1);
+}
+
+void atfork_install_failure_bypasses_tracing_and_executes_target_once() {
+    reset_fakes();
+    const TraceConfig config = config_named("atfork-registration-failure");
+    const SceneConfig scene = scene_named(
+            "atfork-registration-failure", reinterpret_cast<uintptr_t>(old_target));
+    trace_proxy_test_reset(config);
+    CHECK(trace_proxy_test_update(config, scene, module_named("atfork-failure-module")));
+
+    trace_process_test_force_lifecycle_error(ENOMEM);
+    uint64_t args[8]{37};
+    CHECK(trace_proxy_dispatch(0, args, 0) == 0x125);
+    CHECK(g_old_calls == 1);
+    CHECK(g_runner_calls == 0);
+    CHECK(!trace_proxy_test_update(config, scene, module_named("must-not-install")));
+}
+
 } // namespace
 
 bool init_inline_hook() { return true; }
@@ -681,8 +824,20 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     {
         std::lock_guard<std::mutex> lock(g_fake_mutex);
         ++g_runner_calls;
+        g_allocations_at_runner_entry =
+                g_throwing_allocation_calls.load(std::memory_order_relaxed);
         g_seen_config = config;
         g_seen_invocation = invocation;
+    }
+    if (g_runner_forks) {
+        const pid_t child = ::fork();
+        if (child == 0) {
+            g_fail_on_child_delete = 1;
+            return {true, 0xCAFE};
+        }
+        if (child < 0) return {true, 0};
+        g_runner_fork_child = child;
+        return {true, 0xBEEF};
     }
     std::unique_lock<std::mutex> gate_lock(g_gate_mutex);
     if (g_use_runner_gate) {
@@ -730,5 +885,9 @@ int main() {
     residual_hook_without_an_original_never_branches_to_null();
     fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock();
     target_fork_child_skips_inherited_proxy_postamble();
+    traced_runner_fork_child_performs_no_proxy_deallocation();
+    proxy_runtime_allocation_failure_executes_the_target_once();
+    proxy_runtime_snapshot_performs_no_throwing_allocation();
+    atfork_install_failure_bypasses_tracing_and_executes_target_once();
     return 0;
 }

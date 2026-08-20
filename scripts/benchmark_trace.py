@@ -469,33 +469,55 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
     adb(args, "forward", f"tcp:{args.frida_port}", f"tcp:{args.frida_port}")
     manager = frida.get_device_manager()
     device = manager.add_remote_device(args.frida_device or frida_endpoint(args.frida_port))
-    pid = device.spawn([args.package])
-    session = device.attach(pid)
-    script = session.create_script(source)
-    script.on("message", on_message)
-    script.load()
-    device.resume(pid)
-
-    deadline = time.monotonic() + args.timeout
+    pid: int | None = None
+    session: Any | None = None
+    script: Any | None = None
     result: str | None = None
-    while time.monotonic() < deadline:
-        for message in messages:
-            if message.get("type") != "send":
-                continue
-            payload = message.get("payload")
-            if isinstance(payload, dict) and payload.get("type") == "benchmark-result":
-                result = str(payload["return"])
+    cleanup_error: BaseException | None = None
+    try:
+        pid = device.spawn([args.package])
+        session = device.attach(pid)
+        script = session.create_script(source)
+        script.on("message", on_message)
+        script.load()
+        device.resume(pid)
+
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            for message in messages:
+                if message.get("type") != "send":
+                    continue
+                payload = message.get("payload")
+                if isinstance(payload, dict) and payload.get("type") == "benchmark-result":
+                    result = str(payload["return"])
+                    break
+                if isinstance(payload, dict) and payload.get("type") == "benchmark-error":
+                    raise RuntimeError(str(payload.get("error", "benchmark agent failed")))
+            if result is not None:
                 break
-            if isinstance(payload, dict) and payload.get("type") == "benchmark-error":
-                raise RuntimeError(str(payload.get("error", "benchmark agent failed")))
-        if result is not None:
-            break
-        time.sleep(0.05)
-    script.unload()
-    session.detach()
-    if result is None:
-        raise RuntimeError(f"benchmark agent timed out after {args.timeout:g} seconds")
-    return result.lower()
+            time.sleep(0.05)
+        if result is None:
+            raise RuntimeError(f"benchmark agent timed out after {args.timeout:g} seconds")
+        return result.lower()
+    finally:
+        active_exception = sys.exc_info()[0] is not None
+        if script is not None:
+            try:
+                script.unload()
+            except BaseException as error:  # cleanup must not prevent later owners releasing
+                cleanup_error = cleanup_error or error
+        if session is not None:
+            try:
+                session.detach()
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+        if pid is not None and (result is None or cleanup_error is not None):
+            try:
+                device.kill(pid)
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+        if cleanup_error is not None and not active_exception:
+            raise RuntimeError(f"failed to release benchmark process: {cleanup_error}") from cleanup_error
 
 
 def run_once(args: argparse.Namespace) -> dict[str, int | Decimal | str]:

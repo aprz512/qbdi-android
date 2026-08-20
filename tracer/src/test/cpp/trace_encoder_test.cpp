@@ -42,6 +42,54 @@ void encodes_instruction_exactly() {
            "7 libx.so+0x10 add x0, x1, x2 | R:X1=0x2 X2=0x3 | W:X0=0x5\n");
 }
 
+void renders_pc_relative_target_from_each_instruction_address() {
+    static CachedInstruction decoded{};
+    std::strcpy(decoded.mnemonic, "b");
+    std::strcpy(decoded.operands, "#16");
+    std::strcpy(decoded.disassembly, "b #16");
+    decoded.flags = InstructionFlags::Branch | InstructionFlags::PcRelative;
+    decoded.pc_relative_kind = PcRelativeKind::CurrentPc;
+    decoded.pc_relative_displacement = 16;
+
+    InstructionRecord record{};
+    record.sequence = 1;
+    record.module_base = 0x1000;
+    record.decoded = &decoded;
+    char output[128]{};
+    TraceEncoder encoder;
+
+    record.pc = 0x1010;
+    EncodeResult result = encoder.encode_instruction(output, sizeof(output), "libx.so", record);
+    assert(result.ok);
+    assert(std::string_view(output, result.size) == "1 libx.so+0x10 b 0x1020\n");
+
+    record.pc = 0x2010;
+    result = encoder.encode_instruction(output, sizeof(output), "libx.so", record);
+    assert(result.ok);
+    assert(std::string_view(output, result.size) == "1 libx.so+0x1010 b 0x2020\n");
+}
+
+void renders_pc_relative_register_prefix_and_page_target() {
+    static CachedInstruction decoded{};
+    std::strcpy(decoded.mnemonic, "adrp");
+    std::strcpy(decoded.operands, "x7, #4096");
+    decoded.pc_relative_kind = PcRelativeKind::CurrentPage;
+    decoded.pc_relative_displacement = 0x1000;
+
+    InstructionRecord record{};
+    record.sequence = 2;
+    record.pc = 0x12345;
+    record.module_base = 0x12000;
+    record.decoded = &decoded;
+    char output[128]{};
+    TraceEncoder encoder;
+    const EncodeResult result =
+            encoder.encode_instruction(output, sizeof(output), "libx.so", record);
+    assert(result.ok);
+    assert(std::string_view(output, result.size) ==
+           "2 libx.so+0x345 adrp x7, 0x13000\n");
+}
+
 void preserves_architecture_register_display_names() {
     static CachedInstruction decoded{};
     std::strcpy(decoded.mnemonic, "mov");
@@ -242,6 +290,8 @@ void encodes_zero_cache_total_as_zero_rate() {
 
 int main() {
     encodes_instruction_exactly();
+    renders_pc_relative_target_from_each_instruction_address();
+    renders_pc_relative_register_prefix_and_page_target();
     preserves_architecture_register_display_names();
     preserves_distinct_read_and_write_aliases_for_one_physical_register();
     encodes_memory_event_exactly();

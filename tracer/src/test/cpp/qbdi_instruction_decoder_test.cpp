@@ -118,7 +118,7 @@ void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
     CountingAnalysisSource source{&analysis};
     CachedInstruction scratch{};
     const CachedInstruction *cold =
-            cache.resolve(0x7100001000ULL, 0xd503201f, decode_counted, &source, &scratch);
+            cache.resolve(0xd503201f, decode_counted, &source, &scratch);
     assert(cold != nullptr);
     assert(source.calls == 1);
     assert(cache.metrics().misses == 1);
@@ -126,7 +126,7 @@ void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
     assert(cache.metrics().collisions == 0);
 
     const CachedInstruction *hot =
-            cache.resolve(0x7100001000ULL, 0xd503201f, decode_counted, &source, &scratch);
+            cache.resolve(0xd503201f, decode_counted, &source, &scratch);
     assert(hot == cold);
     assert(source.calls == 1);
     assert(cache.metrics().misses == 1);
@@ -134,12 +134,38 @@ void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
     assert(cache.metrics().collisions == 0);
 
     const CachedInstruction *collision =
-            cache.resolve(0x7100001000ULL, 0xd503205f, decode_counted, &source, &scratch);
+            cache.resolve(0xd503205f, decode_counted, &source, &scratch);
     assert(collision == cold);
     assert(source.calls == 2);
     assert(cache.metrics().misses == 2);
     assert(cache.metrics().hits == 1);
     assert(cache.metrics().collisions == 1);
+}
+
+void shares_one_decode_across_many_program_counters() {
+    char mnemonic[] = "NOP";
+    char disassembly[] = "nop";
+    QBDI::InstAnalysis analysis{};
+    analysis.mnemonic = mnemonic;
+    analysis.disassembly = disassembly;
+
+    InstructionCache cache(1024);
+    CountingAnalysisSource source{&analysis};
+    CachedInstruction scratch{};
+    constexpr uintptr_t kBasePc = 0x7100000000ULL;
+    const CachedInstruction *first = nullptr;
+    for (uint32_t index = 0; index < 100000; ++index) {
+        const CachedInstruction *decoded =
+                cache.resolve(0xd503201fU, decode_counted, &source, &scratch);
+        const InstructionView view{kBasePc + static_cast<uintptr_t>(index) * 4U, decoded};
+        if (first == nullptr) first = view.decoded;
+        assert(view.decoded == first);
+    }
+    assert(source.calls == 1);
+    assert(cache.metadata_entry_count() == 1);
+    assert(cache.metadata_chunk_count() == 1);
+    assert(cache.metrics().misses == 1);
+    assert(cache.metrics().hits == 99999);
 }
 
 void decodes_memory_formulas_only_when_the_profile_requests_them() {
@@ -279,6 +305,7 @@ int main() {
     decodes_scaled_branch_metadata_and_owned_strings();
     maps_mixed_aliases_and_arm64_special_registers();
     resolves_one_cold_then_one_hot_opcode_with_exact_accounting();
+    shares_one_decode_across_many_program_counters();
     decodes_memory_formulas_only_when_the_profile_requests_them();
     falls_back_to_owned_conservative_arm64_metadata();
     unreadable_and_zero_opcodes_bypass_cache_accounting();

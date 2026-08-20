@@ -3,6 +3,7 @@
 #include "core/qbdi_instruction_decoder.h"
 #include "core/safe_memory.h"
 #include "core/trace_callback_gate.h"
+#include "core/trace_process_lifecycle.h"
 #include "events/text_trace_writer.h"
 #include "rules/code_rule.h"
 
@@ -147,16 +148,19 @@ void InstructionCollector::finish_last(const QBDI::GPRState &gpr) noexcept {
 
 QBDI::VMAction InstructionCollector::pre_callback(QBDI::VM *vm, QBDI::GPRState *gpr,
                                                   QBDI::FPRState *fpr, void *data) {
+    if (trace_process_child_detached()) return QBDI::CONTINUE;
     return static_cast<InstructionCollector *>(data)->on_pre(vm, gpr, fpr);
 }
 
 QBDI::VMAction InstructionCollector::memory_callback(QBDI::VM *vm, QBDI::GPRState *gpr,
                                                      QBDI::FPRState *, void *data) {
+    if (trace_process_child_detached()) return QBDI::CONTINUE;
     return static_cast<InstructionCollector *>(data)->on_memory(vm, gpr);
 }
 
 QBDI::VMAction InstructionCollector::post_callback(QBDI::VM *vm, QBDI::GPRState *gpr,
                                                    QBDI::FPRState *fpr, void *data) {
+    if (trace_process_child_detached()) return QBDI::CONTINUE;
     return static_cast<InstructionCollector *>(data)->on_post(vm, gpr, fpr);
 }
 

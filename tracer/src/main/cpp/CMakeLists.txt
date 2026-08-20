@@ -55,6 +55,8 @@ add_library(qbdi_tracer SHARED
         core/arm64_memory_operand.cpp
         core/memory_trace_policy.cpp
         core/trace_run_session.cpp
+        core/trace_process_lifecycle.cpp
+        core/qbdi_runner_lifecycle.cpp
         core/qbdi_instruction_decoder.cpp
         core/pending_instruction.cpp
         core/instruction_collector.cpp
