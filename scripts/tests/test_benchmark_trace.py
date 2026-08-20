@@ -324,6 +324,30 @@ effective_buffer_bytes=67108864
         with self.assertRaisesRegex(ValueError, "test buffer"):
             configure_agent_source(source, "balanced", False, 8192)
 
+    def test_rejects_custom_agent_without_test_config_for_requested_test_options(self):
+        custom_agent = "const profile = '__QTRACE_PROFILE__'; const compression = '__QTRACE_COMPRESSION__';"
+
+        for test_buffer_bytes, test_fail_setup in ((4096, False), (None, True), (4096, True)):
+            with self.subTest(test_buffer_bytes=test_buffer_bytes, test_fail_setup=test_fail_setup):
+                with self.assertRaisesRegex(ValueError, "__QTRACE_TEST_CONFIG__ exactly once"):
+                    configure_agent_source(
+                        custom_agent, "balanced", False, test_buffer_bytes, test_fail_setup
+                    )
+
+    def test_allows_custom_agent_without_test_config_when_no_test_option_is_requested(self):
+        custom_agent = "const profile = '__QTRACE_PROFILE__'; const compression = '__QTRACE_COMPRESSION__';"
+
+        self.assertEqual(
+            "const profile = 'fast'; const compression = '1';",
+            configure_agent_source(custom_agent, "fast"),
+        )
+
+    def test_rejects_duplicate_test_config_marker_when_test_option_is_requested(self):
+        duplicate = "__QTRACE_PROFILE__ __QTRACE_TEST_CONFIG__ __QTRACE_TEST_CONFIG__"
+
+        with self.assertRaisesRegex(ValueError, "__QTRACE_TEST_CONFIG__ exactly once"):
+            configure_agent_source(duplicate, "balanced", False, 4096)
+
     def test_benchmark_agent_loads_the_tracer_through_the_application_loader(self):
         source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(
             encoding="utf-8"

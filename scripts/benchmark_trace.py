@@ -265,6 +265,10 @@ def configure_agent_source(
         test_options.append(f"test_buffer_bytes={test_buffer_bytes}")
     if test_fail_setup:
         test_options.append("test_fail_setup=1")
+    if test_options and source.count("__QTRACE_TEST_CONFIG__") != 1:
+        raise ValueError(
+            "benchmark agent must contain __QTRACE_TEST_CONFIG__ exactly once when test options are requested"
+        )
     test_config = "" if not test_options else ";" + ";".join(test_options)
     return source.replace("__QTRACE_PROFILE__", profile).replace(
         "__QTRACE_COMPRESSION__", "0" if legacy else "1"
