@@ -8,7 +8,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <string_view>
 
 namespace {
@@ -178,8 +177,7 @@ void append_memory_bytes(AppendBuffer &buffer, const MemoryBytes &bytes) noexcep
 }
 
 bool semantic_event_type(BinaryRecordType type) noexcept {
-    return type == BinaryRecordType::Call || type == BinaryRecordType::Rule ||
-           type == BinaryRecordType::Error;
+    return type == BinaryRecordType::Rule || type == BinaryRecordType::Error;
 }
 
 } // namespace
@@ -206,17 +204,15 @@ BinaryEncodeResult BinaryTraceEncoder::encode_stream_header(
 
 BinaryEncodeResult BinaryTraceEncoder::encode_begin(
         uint8_t *output, size_t capacity, const TraceContext &context,
-        size_t effective_buffer_bytes) const noexcept {
+        const TraceBeginInfo &info) const noexcept {
+    uint8_t profile_value = 0;
+    if (!valid_profile(info.profile, &profile_value)) return {};
     if (context.scene_name.size() > kBinaryMaxContextStringBytes ||
-        context.target_so.size() > kBinaryMaxContextStringBytes ||
-        context.package_name.size() > kBinaryMaxContextStringBytes) {
+        context.target_so.size() > kBinaryMaxContextStringBytes) {
         return {};
     }
-    if constexpr (sizeof(size_t) > sizeof(uint64_t)) {
-        if (effective_buffer_bytes > std::numeric_limits<uint64_t>::max()) return {};
-    }
     const size_t payload_bytes = kBinaryTraceBeginFixedPayloadBytes + context.scene_name.size() +
-                                 context.target_so.size() + context.package_name.size();
+                                 context.target_so.size();
     const size_t required = kBinaryRecordHeaderBytes + payload_bytes;
     const BinaryEncodeResult result = preflight(output, capacity, required);
     if (!result.ok) return result;
@@ -226,12 +222,14 @@ BinaryEncodeResult BinaryTraceEncoder::encode_begin(
     append_u64(buffer, static_cast<uint64_t>(context.module_base));
     append_u64(buffer, static_cast<uint64_t>(context.target_offset));
     append_u64(buffer, static_cast<uint64_t>(context.target_address));
-    append_u64(buffer, static_cast<uint64_t>(effective_buffer_bytes));
     append_u32(buffer, static_cast<uint32_t>(context.pid));
     append_u32(buffer, static_cast<uint32_t>(context.tid));
+    append_u8(buffer, profile_value);
+    append_u8(buffer, info.compression_enabled ? 1U : 0U);
+    append_u64(buffer, info.effective_buffer_bytes);
+    append_u64(buffer, info.run_id);
     append_string(buffer, context.scene_name);
     append_string(buffer, context.target_so);
-    append_string(buffer, context.package_name);
     return {true, buffer.offset};
 }
 
@@ -311,7 +309,7 @@ BinaryEncodeResult BinaryTraceEncoder::encode_instruction_definition(
 }
 
 BinaryEncodeResult BinaryTraceEncoder::encode_instruction(
-        uint8_t *output, size_t capacity, uint32_t module_id,
+        uint8_t *output, size_t capacity, uint32_t module_id, uint32_t metadata_id,
         const InstructionRecord &record) const noexcept {
     if (record.decoded == nullptr || record.pc < record.module_base ||
         (record.decoded->read_gpr_mask & ~kValidGprMask) != 0 ||
@@ -332,7 +330,7 @@ BinaryEncodeResult BinaryTraceEncoder::encode_instruction(
     append_u64(buffer, record.sequence);
     append_u32(buffer, module_id);
     append_u64(buffer, static_cast<uint64_t>(record.pc - record.module_base));
-    append_u32(buffer, record.decoded->opcode);
+    append_u32(buffer, metadata_id);
     append_u8(buffer, read_count);
     append_u8(buffer, write_count);
     for (size_t index = 0; index < kTraceGprCount; ++index) {
@@ -376,6 +374,28 @@ BinaryEncodeResult BinaryTraceEncoder::encode_memory(
     return {true, buffer.offset};
 }
 
+BinaryEncodeResult BinaryTraceEncoder::encode_call(
+        uint8_t *output, size_t capacity, std::string_view category, std::string_view name,
+        std::string_view detail) const noexcept {
+    if (category.size() > kBinaryMaxCallCategoryBytes ||
+        name.size() > kBinaryMaxCallNameBytes ||
+        detail.size() > kBinaryMaxEventDetailBytes) {
+        return {};
+    }
+    const size_t payload_bytes = kBinaryCallFixedPayloadBytes + category.size() + name.size() +
+                                 detail.size();
+    const size_t required = kBinaryRecordHeaderBytes + payload_bytes;
+    const BinaryEncodeResult result = preflight(output, capacity, required);
+    if (!result.ok) return result;
+
+    AppendBuffer buffer{output};
+    append_record_header(buffer, BinaryRecordType::Call, payload_bytes);
+    append_string(buffer, category);
+    append_string(buffer, name);
+    append_string(buffer, detail);
+    return {true, buffer.offset};
+}
+
 BinaryEncodeResult BinaryTraceEncoder::encode_event(
         uint8_t *output, size_t capacity, BinaryRecordType type, std::string_view name,
         std::string_view detail) const noexcept {
@@ -383,7 +403,7 @@ BinaryEncodeResult BinaryTraceEncoder::encode_event(
         detail.size() > kBinaryMaxEventDetailBytes) {
         return {};
     }
-    const size_t payload_bytes = kBinaryEventFixedPayloadBytes + name.size() + detail.size();
+    const size_t payload_bytes = kBinaryRuleErrorFixedPayloadBytes + name.size() + detail.size();
     const size_t required = kBinaryRecordHeaderBytes + payload_bytes;
     const BinaryEncodeResult result = preflight(output, capacity, required);
     if (!result.ok) return result;

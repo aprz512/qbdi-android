@@ -151,18 +151,28 @@ struct BinaryEncodeResult {
     size_t size = 0;
 };
 
+struct TraceBeginInfo {
+    TraceProfile profile = TraceProfile::Fast;
+    bool compression_enabled = true;
+    uint64_t run_id = 0;
+    uint64_t effective_buffer_bytes = 0;
+};
+
 class BinaryTraceEncoder {
 public:
     BinaryEncodeResult encode_stream_header(uint8_t *, size_t, TraceProfile) const noexcept;
-    BinaryEncodeResult encode_begin(uint8_t *, size_t, const TraceContext &, size_t) const noexcept;
+    BinaryEncodeResult encode_begin(uint8_t *, size_t, const TraceContext &,
+                                    const TraceBeginInfo &) const noexcept;
     BinaryEncodeResult encode_module_definition(uint8_t *, size_t, uint32_t,
                                                 std::string_view, uintptr_t) const noexcept;
     BinaryEncodeResult encode_instruction_definition(uint8_t *, size_t, uint32_t,
                                                      const CachedInstruction &) const noexcept;
-    BinaryEncodeResult encode_instruction(uint8_t *, size_t, uint32_t,
+    BinaryEncodeResult encode_instruction(uint8_t *, size_t, uint32_t, uint32_t,
                                           const InstructionRecord &) const noexcept;
     BinaryEncodeResult encode_memory(uint8_t *, size_t, uint32_t, uintptr_t,
                                      const MemoryRecord &) const noexcept;
+    BinaryEncodeResult encode_call(uint8_t *, size_t, std::string_view,
+                                   std::string_view, std::string_view) const noexcept;
     BinaryEncodeResult encode_event(uint8_t *, size_t, BinaryRecordType,
                                     std::string_view, std::string_view) const noexcept;
     BinaryEncodeResult encode_end(uint8_t *, size_t, bool, uint64_t, uint64_t,
@@ -172,7 +182,7 @@ public:
 
 - [ ] **Step 1: Write exact-byte RED tests**
 
-Require magic QTRB, version 1, little-endian marker, pointer width, exact eight-byte record headers, golden bytes for all nine types, exact payload sizes, all PC-relative kinds, memory states, and no partial output when capacity is one byte short.
+Require magic QTRB, version 1, little-endian marker, pointer width, exact eight-byte record headers, golden bytes for all nine types, exact payload sizes, all PC-relative kinds, memory states, and no partial output when capacity is one byte short. `TRACE_BEGIN` must encode profile, compression state, run ID, and effective buffer size and must not encode package name. Pair an instruction definition and reference with a metadata ID different from the opcode. Encode CALL category, name, and detail as three separately length-prefixed strings; Rule and Error retain two-string payloads. Every independently bounded string family needs an over-limit atomic-failure test, and maximum-size cases must assert both `ok` and exact size.
 
 ~~~cpp
 uint8_t bytes[4096]{};
@@ -181,6 +191,13 @@ CHECK(header.ok);
 CHECK(std::memcmp(bytes, "QTRB", 4) == 0);
 CHECK(bytes[4] == 1);
 CHECK(bytes[6] == 1);
+
+TraceBeginInfo begin_info{TraceProfile::Fast, true, 0x1122334455667788ULL, 4096};
+const auto begin = encoder.encode_begin(bytes, sizeof(bytes), context, begin_info);
+CHECK(begin.ok);
+
+const auto call = encoder.encode_call(bytes, sizeof(bytes), "jni", "find", "resolved");
+CHECK(call.ok);
 
 uint8_t too_small[7]{};
 CHECK(!encoder.encode_end(too_small, sizeof(too_small), true, 0x42, 7, metrics).ok);
@@ -213,7 +230,7 @@ Repeat with -Wall -Wextra -Werror and with -fsanitize=address,undefined -fno-omi
 - [ ] **Step 5: Commit**
 
 ~~~bash
-git add tracer/src/main/cpp/events/binary_trace_format.h   tracer/src/main/cpp/events/binary_trace_encoder.h   tracer/src/main/cpp/events/binary_trace_encoder.cpp   tracer/src/test/cpp/binary_trace_encoder_test.cpp tracer/src/test/cpp/CMakeLists.txt
+git add docs/superpowers/plans/2026-08-20-binary-trace-format.md   tracer/src/main/cpp/events/binary_trace_format.h   tracer/src/main/cpp/events/binary_trace_encoder.h   tracer/src/main/cpp/events/binary_trace_encoder.cpp   tracer/src/test/cpp/binary_trace_encoder_test.cpp tracer/src/test/cpp/CMakeLists.txt
 git commit -m "feat(trace): add QTRB binary encoder"
 ~~~
 

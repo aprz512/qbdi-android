@@ -56,7 +56,7 @@ void stream_header_is_exact_and_tagged() {
 
 void trace_begin_has_exact_golden_bytes() {
     TraceContext context{};
-    context.package_name = "p";
+    context.package_name = "not-on-the-wire";
     context.scene_name = "s";
     context.target_so = "t";
     context.module_base = 0x0102030405060708ULL;
@@ -64,19 +64,26 @@ void trace_begin_has_exact_golden_bytes() {
     context.target_address = 0x2122232425262728ULL;
     context.pid = 0x31323334;
     context.tid = 0x41424344;
+    TraceBeginInfo info{};
+    info.profile = TraceProfile::Balanced;
+    info.compression_enabled = true;
+    info.effective_buffer_bytes = 0x5152535455565758ULL;
+    info.run_id = 0x6162636465666768ULL;
 
     uint8_t bytes[128]{};
     const BinaryEncodeResult result =
-            BinaryTraceEncoder{}.encode_begin(bytes, sizeof(bytes), context, 0x5152535455565758ULL);
+            BinaryTraceEncoder{}.encode_begin(bytes, sizeof(bytes), context, info);
     CHECK(result.ok);
     check_bytes(bytes, result.size, {
-        0x01, 0x00, 0x00, 0x00, 0x31, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00,
         0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
         0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
         0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21,
-        0x58, 0x57, 0x56, 0x55, 0x54, 0x53, 0x52, 0x51,
         0x34, 0x33, 0x32, 0x31, 0x44, 0x43, 0x42, 0x41,
-        0x01, 0x00, 's', 0x01, 0x00, 't', 0x01, 0x00, 'p',
+        0x01, 0x01,
+        0x58, 0x57, 0x56, 0x55, 0x54, 0x53, 0x52, 0x51,
+        0x68, 0x67, 0x66, 0x65, 0x64, 0x63, 0x62, 0x61,
+        0x01, 0x00, 's', 0x01, 0x00, 't',
     });
 }
 
@@ -190,18 +197,55 @@ void instruction_has_exact_golden_bytes_and_dense_values() {
     record.after[30] = 0x3132333435363738ULL;
 
     uint8_t bytes[96]{};
-    const BinaryEncodeResult result =
-            BinaryTraceEncoder{}.encode_instruction(bytes, sizeof(bytes), 0xaabbccddU, record);
+    const BinaryEncodeResult result = BinaryTraceEncoder{}.encode_instruction(
+            bytes, sizeof(bytes), 0xaabbccddU, 0x88776655U, record);
     CHECK(result.ok);
     check_bytes(bytes, result.size, {
         0x04, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00,
         0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
         0xdd, 0xcc, 0xbb, 0xaa,
         0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x11, 0x22, 0x33, 0x44, 0x02, 0x01,
+        0x55, 0x66, 0x77, 0x88, 0x02, 0x01,
         0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12, 0x11,
         0x28, 0x27, 0x26, 0x25, 0x24, 0x23, 0x22, 0x21,
         0x38, 0x37, 0x36, 0x35, 0x34, 0x33, 0x32, 0x31,
+    });
+}
+
+void definition_and_instruction_share_an_explicit_metadata_id() {
+    CachedInstruction decoded{};
+    decoded.opcode = 0x11223344U;
+    InstructionRecord record{};
+    record.sequence = 1;
+    record.decoded = &decoded;
+
+    constexpr uint32_t kMetadataId = 0x88776655U;
+    uint8_t definition[64]{};
+    const BinaryEncodeResult definition_result =
+            BinaryTraceEncoder{}.encode_instruction_definition(
+                    definition, sizeof(definition), kMetadataId, decoded);
+    CHECK(definition_result.ok);
+    check_bytes(definition, definition_result.size, {
+        0x03, 0x00, 0x00, 0x00, 0x2e, 0x00, 0x00, 0x00,
+        0x55, 0x66, 0x77, 0x88, 0x44, 0x33, 0x22, 0x11,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    });
+
+    uint8_t reference[64]{};
+    const BinaryEncodeResult reference_result = BinaryTraceEncoder{}.encode_instruction(
+            reference, sizeof(reference), 0xaabbccddU, kMetadataId, record);
+    CHECK(reference_result.ok);
+    check_bytes(reference, reference_result.size, {
+        0x04, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xdd, 0xcc, 0xbb, 0xaa,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x55, 0x66, 0x77, 0x88, 0x00, 0x00,
     });
 }
 
@@ -247,12 +291,12 @@ void semantic_events_have_exact_golden_bytes() {
     const BinaryTraceEncoder encoder;
     uint8_t bytes[32]{};
 
-    BinaryEncodeResult result = encoder.encode_event(
-            bytes, sizeof(bytes), BinaryRecordType::Call, "n", "d");
+    BinaryEncodeResult result = encoder.encode_call(
+            bytes, sizeof(bytes), "c", "n", "d");
     CHECK(result.ok);
     check_bytes(bytes, result.size, {
-        0x06, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
-        0x01, 0x00, 'n', 0x01, 0x00, 'd',
+        0x06, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+        0x01, 0x00, 'c', 0x01, 0x00, 'n', 0x01, 0x00, 'd',
     });
 
     result = encoder.encode_event(bytes, sizeof(bytes), BinaryRecordType::Rule, "r", "x");
@@ -308,12 +352,12 @@ void trace_end_has_exact_golden_bytes() {
 
 template <typename Encode>
 void check_one_byte_short_is_atomic(const Encode &encode) {
-    std::array<uint8_t, kBinaryMaxEventRecordBytes> full{};
+    std::array<uint8_t, kBinaryMaxRecordBytes> full{};
     const BinaryEncodeResult measured = encode(full.data(), full.size());
     CHECK(measured.ok);
     CHECK(measured.size > 0);
 
-    std::array<uint8_t, kBinaryMaxEventRecordBytes> short_output{};
+    std::array<uint8_t, kBinaryMaxRecordBytes> short_output{};
     std::fill(short_output.begin(), short_output.end(), 0xa5);
     const BinaryEncodeResult short_result =
             encode(short_output.data(), measured.size - 1U);
@@ -325,9 +369,9 @@ void check_one_byte_short_is_atomic(const Encode &encode) {
 
 void every_encoding_is_atomic_when_capacity_is_one_byte_short() {
     TraceContext context{};
-    context.package_name = "p";
     context.scene_name = "s";
     context.target_so = "t";
+    TraceBeginInfo begin_info{};
     CachedInstruction decoded{};
     decoded.opcode = 1;
     InstructionRecord instruction{};
@@ -340,7 +384,7 @@ void every_encoding_is_atomic_when_capacity_is_one_byte_short() {
         return encoder.encode_stream_header(output, capacity, TraceProfile::Fast);
     });
     check_one_byte_short_is_atomic([&](uint8_t *output, size_t capacity) {
-        return encoder.encode_begin(output, capacity, context, 1);
+        return encoder.encode_begin(output, capacity, context, begin_info);
     });
     check_one_byte_short_is_atomic([&](uint8_t *output, size_t capacity) {
         return encoder.encode_module_definition(output, capacity, 1, "m", 2);
@@ -349,13 +393,15 @@ void every_encoding_is_atomic_when_capacity_is_one_byte_short() {
         return encoder.encode_instruction_definition(output, capacity, 1, decoded);
     });
     check_one_byte_short_is_atomic([&](uint8_t *output, size_t capacity) {
-        return encoder.encode_instruction(output, capacity, 1, instruction);
+        return encoder.encode_instruction(output, capacity, 1, 2, instruction);
     });
     check_one_byte_short_is_atomic([&](uint8_t *output, size_t capacity) {
         return encoder.encode_memory(output, capacity, 1, 2, memory);
     });
-    for (const BinaryRecordType type : {BinaryRecordType::Call, BinaryRecordType::Rule,
-                                        BinaryRecordType::Error}) {
+    check_one_byte_short_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_call(output, capacity, "c", "n", "d");
+    });
+    for (const BinaryRecordType type : {BinaryRecordType::Rule, BinaryRecordType::Error}) {
         check_one_byte_short_is_atomic([&](uint8_t *output, size_t capacity) {
             return encoder.encode_event(output, capacity, type, "n", "d");
         });
@@ -370,58 +416,103 @@ void every_encoding_is_atomic_when_capacity_is_one_byte_short() {
                       [](uint8_t value) { return value == 0; }));
 }
 
+template <typename Encode>
+void check_rejection_is_atomic(const Encode &encode) {
+    std::array<uint8_t, kBinaryMaxRecordBytes> output{};
+    std::fill(output.begin(), output.end(), 0x5a);
+    const BinaryEncodeResult result = encode(output.data(), output.size());
+    CHECK(!result.ok);
+    CHECK(std::all_of(output.begin(), output.end(),
+                      [](uint8_t value) { return value == 0x5a; }));
+}
+
 void rejects_invalid_or_oversized_inputs_without_writing() {
     BinaryTraceEncoder encoder;
-    std::array<uint8_t, kBinaryMaxEventRecordBytes> output{};
-    std::fill(output.begin(), output.end(), 0x5a);
+    TraceContext context{};
+    TraceBeginInfo begin_info{};
+    const std::string oversized_context(kBinaryMaxContextStringBytes + 1U, 's');
+    context.scene_name = oversized_context;
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_begin(output, capacity, context, begin_info);
+    });
+    context.scene_name.clear();
+    context.target_so = oversized_context;
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_begin(output, capacity, context, begin_info);
+    });
 
-    std::string oversized_name(kBinaryMaxEventNameBytes + 1U, 'n');
-    BinaryEncodeResult result = encoder.encode_event(
-            output.data(), output.size(), BinaryRecordType::Call, oversized_name, "detail");
-    CHECK(!result.ok);
-    CHECK(std::all_of(output.begin(), output.end(), [](uint8_t value) { return value == 0x5a; }));
+    const std::string oversized_module(kBinaryMaxModuleNameBytes + 1U, 'm');
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_module_definition(output, capacity, 1, oversized_module, 0);
+    });
 
-    result = encoder.encode_event(output.data(), output.size(), BinaryRecordType::TraceBegin,
-                                  "name", "detail");
-    CHECK(!result.ok);
-    CHECK(std::all_of(output.begin(), output.end(), [](uint8_t value) { return value == 0x5a; }));
+    const std::string oversized_category(kBinaryMaxCallCategoryBytes + 1U, 'c');
+    const std::string oversized_call_name(kBinaryMaxCallNameBytes + 1U, 'n');
+    const std::string oversized_event_name(kBinaryMaxEventNameBytes + 1U, 'n');
+    const std::string oversized_detail(kBinaryMaxEventDetailBytes + 1U, 'd');
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_call(output, capacity, oversized_category, "name", "detail");
+    });
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_call(output, capacity, "category", oversized_call_name, "detail");
+    });
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_call(output, capacity, "category", "name", oversized_detail);
+    });
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_event(output, capacity, BinaryRecordType::Rule,
+                                    oversized_event_name, "detail");
+    });
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_event(output, capacity, BinaryRecordType::Error,
+                                    "name", oversized_detail);
+    });
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_event(output, capacity, BinaryRecordType::Call, "name", "detail");
+    });
 
     MemoryRecord memory{};
     memory.before.state = MemoryBytesState::Unavailable;
     memory.before.size = 1;
-    result = encoder.encode_memory(output.data(), output.size(), 1, 2, memory);
-    CHECK(!result.ok);
-    CHECK(std::all_of(output.begin(), output.end(), [](uint8_t value) { return value == 0x5a; }));
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_memory(output, capacity, 1, 2, memory);
+    });
 
     CachedInstruction decoded{};
     decoded.memory_operand_count = CachedInstruction::kMaxMemoryOperands + 1U;
-    result = encoder.encode_instruction_definition(output.data(), output.size(), 1, decoded);
-    CHECK(!result.ok);
-    CHECK(std::all_of(output.begin(), output.end(), [](uint8_t value) { return value == 0x5a; }));
+    check_rejection_is_atomic([&](uint8_t *output, size_t capacity) {
+        return encoder.encode_instruction_definition(output, capacity, 1, decoded);
+    });
+}
+
+void check_exact_size(BinaryEncodeResult result, size_t expected) {
+    CHECK(result.ok);
+    CHECK(result.size == expected);
 }
 
 void declared_record_maxima_are_exact_and_encodable() {
-    CHECK(kBinaryMaxTraceBeginRecordBytes == 819);
+    CHECK(kBinaryMaxTraceBeginRecordBytes == 572);
     CHECK(kBinaryMaxModuleDefinitionRecordBytes == 277);
     CHECK(kBinaryMaxInstructionDefinitionRecordBytes == 1646);
     CHECK(kBinaryMaxInstructionRecordBytes == 578);
     CHECK(kBinaryMaxMemoryRecordBytes == 176);
-    CHECK(kBinaryMaxEventRecordBytes == 4363);
+    CHECK(kBinaryMaxCallRecordBytes == 4620);
+    CHECK(kBinaryMaxRuleErrorRecordBytes == 4363);
     CHECK(kBinaryTraceEndRecordBytes == 105);
 
     const BinaryTraceEncoder encoder;
-    std::array<uint8_t, kBinaryMaxEventRecordBytes> output{};
+    std::array<uint8_t, kBinaryMaxRecordBytes> output{};
 
     TraceContext context{};
     context.scene_name.assign(kBinaryMaxContextStringBytes, 's');
     context.target_so.assign(kBinaryMaxContextStringBytes, 't');
-    context.package_name.assign(kBinaryMaxContextStringBytes, 'p');
-    CHECK(encoder.encode_begin(output.data(), output.size(), context, 0).size ==
-          kBinaryMaxTraceBeginRecordBytes);
+    TraceBeginInfo begin_info{};
+    check_exact_size(encoder.encode_begin(output.data(), output.size(), context, begin_info),
+                     kBinaryMaxTraceBeginRecordBytes);
 
     const std::string module(kBinaryMaxModuleNameBytes, 'm');
-    CHECK(encoder.encode_module_definition(output.data(), output.size(), 1, module, 0).size ==
-          kBinaryMaxModuleDefinitionRecordBytes);
+    check_exact_size(encoder.encode_module_definition(output.data(), output.size(), 1, module, 0),
+                     kBinaryMaxModuleDefinitionRecordBytes);
 
     CachedInstruction decoded{};
     decoded.read_gpr_mask = (1ULL << kTraceGprCount) - 1U;
@@ -432,28 +523,34 @@ void declared_record_maxima_are_exact_and_encodable() {
     std::memset(decoded.read_register_names, 'r', sizeof(decoded.read_register_names));
     std::memset(decoded.write_register_names, 'w', sizeof(decoded.write_register_names));
     decoded.memory_operand_count = CachedInstruction::kMaxMemoryOperands;
-    CHECK(encoder.encode_instruction_definition(output.data(), output.size(), 1, decoded).size ==
-          kBinaryMaxInstructionDefinitionRecordBytes);
+    check_exact_size(encoder.encode_instruction_definition(output.data(), output.size(), 1, decoded),
+                     kBinaryMaxInstructionDefinitionRecordBytes);
 
     InstructionRecord instruction{};
     instruction.decoded = &decoded;
-    CHECK(encoder.encode_instruction(output.data(), output.size(), 1, instruction).size ==
-          kBinaryMaxInstructionRecordBytes);
+    check_exact_size(encoder.encode_instruction(output.data(), output.size(), 1, 2, instruction),
+                     kBinaryMaxInstructionRecordBytes);
 
     MemoryRecord memory{};
     memory.before.state = MemoryBytesState::Available;
     memory.before.size = kMaxCapturedMemoryBytes;
     memory.after.state = MemoryBytesState::Available;
     memory.after.size = kMaxCapturedMemoryBytes;
-    CHECK(encoder.encode_memory(output.data(), output.size(), 1, 0, memory).size ==
-          kBinaryMaxMemoryRecordBytes);
+    check_exact_size(encoder.encode_memory(output.data(), output.size(), 1, 0, memory),
+                     kBinaryMaxMemoryRecordBytes);
 
+    const std::string call_category(kBinaryMaxCallCategoryBytes, 'c');
+    const std::string call_name(kBinaryMaxCallNameBytes, 'n');
     const std::string event_name(kBinaryMaxEventNameBytes, 'n');
     const std::string event_detail(kBinaryMaxEventDetailBytes, 'd');
-    CHECK(encoder.encode_event(output.data(), output.size(), BinaryRecordType::Error,
-                               event_name, event_detail).size == kBinaryMaxEventRecordBytes);
-    CHECK(encoder.encode_end(output.data(), output.size(), true, 0, 0, {}).size ==
-          kBinaryTraceEndRecordBytes);
+    check_exact_size(encoder.encode_call(output.data(), output.size(), call_category,
+                                         call_name, event_detail),
+                     kBinaryMaxCallRecordBytes);
+    check_exact_size(encoder.encode_event(output.data(), output.size(), BinaryRecordType::Error,
+                                          event_name, event_detail),
+                     kBinaryMaxRuleErrorRecordBytes);
+    check_exact_size(encoder.encode_end(output.data(), output.size(), true, 0, 0, {}),
+                     kBinaryTraceEndRecordBytes);
 }
 
 } // namespace
@@ -466,6 +563,7 @@ int main() {
     instruction_definition_preserves_pc_relative_kinds_and_displacement();
     instruction_definition_preserves_static_registers_and_memory_operands();
     instruction_has_exact_golden_bytes_and_dense_values();
+    definition_and_instruction_share_an_explicit_metadata_id();
     memory_has_exact_golden_bytes_and_all_capture_states();
     semantic_events_have_exact_golden_bytes();
     trace_end_has_exact_golden_bytes();
