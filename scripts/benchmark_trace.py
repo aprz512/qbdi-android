@@ -202,6 +202,119 @@ def parse_baseline_report(document: str) -> dict[str, int | str]:
     }
 
 
+FORMAT_TWO_BASELINE_COLUMNS = (
+    "Profile",
+    "Measured elapsed values (ms)",
+    "Median elapsed ms",
+    "Artifact",
+    "Compressed bytes",
+    "Decoded bytes",
+    "Instructions",
+    "Return",
+    "Decoded event count",
+    "First sequence",
+    "Last sequence",
+    "Footer",
+    "Artifact SHA-256",
+)
+FORMAT_TWO_INTEGER_COLUMNS = {
+    "Median elapsed ms": "elapsed_ms",
+    "Compressed bytes": "compressed_bytes",
+    "Decoded bytes": "decoded_bytes",
+    "Instructions": "instructions",
+    "Decoded event count": "decoded_event_count",
+}
+FORMAT_TWO_PROFILES = ("fast", "balanced", "full")
+
+
+def _baseline_markdown_cells(line: str) -> list[str]:
+    if not line.startswith("|") or not line.rstrip().endswith("|"):
+        raise ValueError("invalid baseline table row")
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _format_two_baseline_rows(document: str) -> list[dict[str, int | str]]:
+    heading = "## Current format-2 artifact baselines"
+    start = document.find(heading)
+    if start < 0:
+        raise ValueError("baseline document has no Current format-2 artifact baselines table")
+    table_lines: list[str] = []
+    for line in document[start + len(heading):].splitlines():
+        if line.startswith("#"):
+            break
+        if line.startswith("|"):
+            table_lines.append(line)
+    if len(table_lines) < 3:
+        raise ValueError("baseline table has no profile rows")
+
+    columns = _baseline_markdown_cells(table_lines[0])
+    if tuple(columns) != FORMAT_TWO_BASELINE_COLUMNS:
+        raise ValueError("baseline table has missing columns")
+    separator = _baseline_markdown_cells(table_lines[1])
+    if len(separator) != len(columns) or any(not re.fullmatch(r":?-{3,}:?", cell) for cell in separator):
+        raise ValueError("baseline table has invalid column separator")
+
+    rows: list[dict[str, int | str]] = []
+    seen_profiles: set[str] = set()
+    for line in table_lines[2:]:
+        cells = _baseline_markdown_cells(line)
+        if len(cells) != len(columns):
+            raise ValueError("baseline table row has missing columns")
+        values = dict(zip(columns, cells, strict=True))
+        profile = values["Profile"]
+        if profile not in FORMAT_TWO_PROFILES:
+            raise ValueError(f"baseline table has unknown profile: {profile}")
+        if profile in seen_profiles:
+            raise ValueError(f"baseline table has duplicate profile: {profile}")
+        seen_profiles.add(profile)
+
+        row: dict[str, int | str] = {
+            "profile": profile,
+            "elapsed_values_ms": values["Measured elapsed values (ms)"],
+            "artifact": values["Artifact"],
+            "return": values["Return"].lower(),
+            "first_sequence": values["First sequence"],
+            "last_sequence": values["Last sequence"],
+            "footer": values["Footer"],
+            "artifact_sha256": values["Artifact SHA-256"],
+        }
+        for column, key in FORMAT_TWO_INTEGER_COLUMNS.items():
+            value = values[column]
+            if re.fullmatch(r"\d+", value) is None:
+                raise ValueError(f"baseline table has invalid integer for {column}")
+            row[key] = int(value)
+        rows.append(row)
+    return rows
+
+
+def parse_baseline_document(document: str) -> dict[str, str]:
+    """Extract the format-2 baseline device identity from its Markdown document."""
+    identity: dict[str, str] = {}
+    for label, key in (
+        ("Device model", "device_model"),
+        ("Device product", "device_product"),
+        ("Android version", "android_version"),
+        ("ABI", "abi"),
+        ("Build type", "build_type"),
+    ):
+        match = re.search(rf"^\| {re.escape(label)} \|\s*(.*?)\s*\|$", document, re.MULTILINE)
+        if match is None or not match.group(1).strip():
+            raise ValueError(f"baseline document has no {label}")
+        identity[key] = match.group(1).strip().strip("`")
+    return identity
+
+
+def parse_profile_baseline(document: str, profile: str) -> dict[str, int | str]:
+    """Return one validated profile row from the current format-2 Markdown baseline."""
+    if profile not in FORMAT_TWO_PROFILES:
+        raise ValueError(f"unknown profile: {profile}")
+    rows = _format_two_baseline_rows(document)
+    for row in rows:
+        if row["profile"] == profile:
+            return row
+    raise ValueError(f"baseline table has no {profile} profile")
+
+
 def ensure_same_device(
     baseline: dict[str, int | str], current: dict[str, str]
 ) -> None:

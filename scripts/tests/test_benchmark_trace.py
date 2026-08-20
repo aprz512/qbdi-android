@@ -143,6 +143,40 @@ producer_wait_ns=0
 effective_buffer_bytes=67108864
 """
 
+    def test_binary_trace_baseline_has_all_profiles_and_size_fields(self):
+        path = Path("docs/benchmarks/binary-trace-baseline.md")
+        text = path.read_text(encoding="utf-8")
+        identity = benchmark_trace.parse_baseline_document(text)
+        self.assertEqual("Pixel 6", identity["device_model"])
+        self.assertEqual("oriole", identity["device_product"])
+        self.assertEqual("16", identity["android_version"])
+        for profile in ("fast", "balanced", "full"):
+            row = benchmark_trace.parse_profile_baseline(text, profile)
+            self.assertGreater(row["compressed_bytes"], 0)
+            self.assertEqual(21718, row["instructions"])
+            self.assertEqual("0x5745c858653f5a7f", row["return"])
+
+    def test_binary_trace_baseline_parser_rejects_invalid_tables(self):
+        table = """## Current format-2 artifact baselines
+
+| Profile | Measured elapsed values (ms) | Median elapsed ms | Artifact | Compressed bytes | Decoded bytes | Instructions | Return | Decoded event count | First sequence | Last sequence | Footer | Artifact SHA-256 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fast | 1, 2, 3, 4, 5 | 3 | fast.trace.txt.lz4 | 100 | 200 | 21718 | 0x5745c858653f5a7f | 21718 | 1 start | 21718 end | TRACE_END status=ok | abc |
+"""
+
+        with self.assertRaisesRegex(ValueError, "unknown profile"):
+            benchmark_trace.parse_profile_baseline(table.replace("| fast |", "| unknown |"), "fast")
+        with self.assertRaisesRegex(ValueError, "duplicate profile"):
+            benchmark_trace.parse_profile_baseline(table + table.splitlines()[-1] + "\n", "fast")
+        with self.assertRaisesRegex(ValueError, "missing columns"):
+            benchmark_trace.parse_profile_baseline(
+                table.replace("| Compressed bytes |", "| Size |"), "fast"
+            )
+        with self.assertRaisesRegex(ValueError, "invalid integer"):
+            benchmark_trace.parse_profile_baseline(
+                table.replace("| 3 | fast.trace", "| three | fast.trace"), "fast"
+            )
+
     def test_parses_and_validates_every_optimized_metric(self):
         current = parse_metrics(self.METRICS)
 
