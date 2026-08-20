@@ -68,7 +68,9 @@ class Lz4FrameTests(unittest.TestCase):
             path = Path(directory) / "trace.lz4"
             path.write_bytes(artifact)
             file_scan = scan_lz4_file(path)
-        self.assertEqual(tuple(expected_ranges), file_scan.ranges)
+        expected_complete = expected_ranges[-1][1] if truncated else len(artifact)
+        self.assertEqual(expected_complete, file_scan.complete_bytes)
+        self.assertEqual(len(expected_ranges), file_scan.standard_frames)
         self.assertEqual(truncated, file_scan.truncated)
 
     def test_all_skippable_magics_are_ignored_between_standard_frames(self):
@@ -521,13 +523,8 @@ int main(int argc, char **argv) {
             output = directory_path / "real.bin"
             source.write_bytes(artifact)
             scan = scan_lz4_file(source)
-            self.assertEqual(
-                (
-                    (len(leading), len(leading) + len(first)),
-                    (len(leading) + len(first), len(leading) + len(first) + len(second)),
-                ),
-                scan.ranges,
-            )
+            self.assertEqual(len(artifact), scan.complete_bytes)
+            self.assertEqual(2, scan.standard_frames)
             self.assertFalse(decode_lz4_file(source, output, str(self.executable)))
             self.assertEqual(bytes(payload) + second_payload, output.read_bytes())
 

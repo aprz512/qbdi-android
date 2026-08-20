@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 try:
-    from scripts.lz4_frames import PullTraceError, decode_lz4_file
+    from scripts.lz4_frames import PullTraceError, decode_lz4_file, scan_lz4_file
     from scripts.trace_binary import (
         BinaryTraceError,
         ConversionStats,
@@ -19,7 +19,9 @@ try:
         _convert_binary_stream,
     )
 except ModuleNotFoundError:  # Support direct execution as scripts/trace_convert.py.
-    from lz4_frames import PullTraceError, decode_lz4_file  # type: ignore[no-redef]
+    from lz4_frames import (  # type: ignore[no-redef]
+        PullTraceError, decode_lz4_file, scan_lz4_file,
+    )
     from trace_binary import (  # type: ignore[no-redef]
         BinaryTraceError,
         ConversionStats,
@@ -31,38 +33,101 @@ except ModuleNotFoundError:  # Support direct execution as scripts/trace_convert
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_PARTIAL = 2
+MAX_SIDECAR_BYTES = 64 * 1024
+MAX_SIDECAR_LINE_BYTES = 256
+MAX_SIDECAR_KEY_BYTES = 64
+MAX_SIDECAR_VALUE_BYTES = 128
+MAX_SIDECAR_FIELDS = 19
+REQUIRED_SIDECAR_KEYS = frozenset((
+    "metrics_version", "profile", "return", "instructions", "elapsed_ms",
+    "encoded_bytes", "compressed_bytes", "cache_hits", "cache_misses",
+    "cache_collisions", "buffer_swaps", "producer_waits", "producer_wait_ns",
+    "effective_buffer_bytes",
+))
+OPTIONAL_SIDECAR_KEYS = frozenset((
+    "instructions_per_second", "encoded_bytes_per_second", "disk_bytes_per_second",
+    "compression_ratio", "cache_hit_rate",
+))
+assert MAX_SIDECAR_FIELDS == len(REQUIRED_SIDECAR_KEYS | OPTIONAL_SIDECAR_KEYS)
 
 
 def _temporary_path(directory: Path, suffix: str) -> Path:
     descriptor, name = tempfile.mkstemp(prefix=".trace-convert-", suffix=suffix, dir=directory)
-    os.close(descriptor)
+    try:
+        os.close(descriptor)
+    except BaseException:
+        try:
+            Path(name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return Path(name)
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _publish(temporary: Path, destination: Path, force: bool) -> None:
     if force:
         os.replace(temporary, destination)
-        return
-    try:
-        os.link(temporary, destination)
-    except FileExistsError as error:
-        raise BinaryTraceError(f"output already exists: {destination}") from error
-    temporary.unlink()
+    else:
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as error:
+            raise BinaryTraceError(f"output already exists: {destination}") from error
+        temporary.unlink()
+    _fsync_directory(destination.parent)
 
 
 def _parse_sidecar(path: Path) -> dict[str, str]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError as error:
-        raise BinaryTraceError("metrics sidecar is not valid UTF-8") from error
+    if path.stat().st_size > MAX_SIDECAR_BYTES:
+        raise BinaryTraceError("metrics sidecar exceeds size limit")
     values: dict[str, str] = {}
-    for number, line in enumerate(lines, 1):
-        if not line or "=" not in line:
-            raise BinaryTraceError(f"invalid metrics sidecar line {number}")
-        key, value = line.split("=", 1)
-        if not key or key in values:
-            raise BinaryTraceError(f"duplicate metrics sidecar key {key!r}")
-        values[key] = value
+    total = 0
+    with path.open("rb") as stream:
+        for number in range(1, MAX_SIDECAR_FIELDS + 2):
+            raw = stream.readline(MAX_SIDECAR_LINE_BYTES + 1)
+            if not raw:
+                break
+            if number > MAX_SIDECAR_FIELDS:
+                raise BinaryTraceError("metrics sidecar exceeds field count limit")
+            total += len(raw)
+            if total > MAX_SIDECAR_BYTES or len(raw) > MAX_SIDECAR_LINE_BYTES:
+                raise BinaryTraceError("metrics sidecar exceeds line or file limit")
+            if not raw.endswith(b"\n"):
+                raise BinaryTraceError(f"unterminated metrics sidecar line {number}")
+            line = raw[:-1]
+            if not line or b"=" not in line:
+                raise BinaryTraceError(f"invalid metrics sidecar line {number}")
+            key_bytes, value_bytes = line.split(b"=", 1)
+            if (not key_bytes or len(key_bytes) > MAX_SIDECAR_KEY_BYTES
+                    or len(value_bytes) > MAX_SIDECAR_VALUE_BYTES):
+                raise BinaryTraceError(f"metrics sidecar field {number} exceeds limit")
+            try:
+                key = key_bytes.decode("ascii")
+                value = value_bytes.decode("ascii")
+            except UnicodeDecodeError as error:
+                raise BinaryTraceError("metrics sidecar is not ASCII") from error
+            if key not in REQUIRED_SIDECAR_KEYS | OPTIONAL_SIDECAR_KEYS:
+                raise BinaryTraceError(f"unknown metrics sidecar key {key!r}")
+            if key in values:
+                raise BinaryTraceError(f"duplicate metrics sidecar key {key!r}")
+            values[key] = value
+    missing = REQUIRED_SIDECAR_KEYS - values.keys()
+    if missing:
+        raise BinaryTraceError(
+            f"metrics sidecar is missing {sorted(missing)[0]}"
+        )
+    for key in OPTIONAL_SIDECAR_KEYS & values.keys():
+        whole, separator, fraction = values[key].partition(".")
+        if (separator != "." or not whole.isdigit() or len(fraction) != 6
+                or not fraction.isdigit()):
+            raise BinaryTraceError(f"invalid metrics sidecar value for {key}")
     return values
 
 
@@ -179,6 +244,10 @@ def convert_binary_file(source: Path, destination: Path, *, lz4: str | None,
             details = dataclasses.replace(
                 details, stats=dataclasses.replace(details.stats, partial=True)
             )
+        if details.compression_enabled != compressed:
+            raise BinaryTraceError(
+                "TRACE_BEGIN compression flag does not match artifact container"
+            )
         if (not details.stats.partial and details.footer is not None
                 and details.footer.compressed_bytes != source.stat().st_size):
             raise BinaryTraceError(
@@ -229,9 +298,16 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.source is None:
         parser.error("the following arguments are required: source")
     source: Path = arguments.source
-    destination = arguments.output or _default_output(source, arguments.crash_marked)
     lz4 = arguments.lz4 if source.name.endswith(".lz4") else None
     try:
+        recovered = False
+        if (arguments.output is None and arguments.crash_marked
+                and source.name.endswith(".trace.bin.lz4")):
+            try:
+                recovered = scan_lz4_file(source).truncated
+            except PullTraceError as error:
+                raise BinaryTraceError(str(error)) from error
+        destination = arguments.output or _default_output(source, recovered)
         stats = convert_binary_file(
             source, destination, lz4=lz4, crash_marked=arguments.crash_marked,
             force=arguments.force,

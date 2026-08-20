@@ -118,6 +118,7 @@ class _Footer:
 class _ConversionDetails:
     stats: ConversionStats
     profile: str
+    compression_enabled: bool
     footer: _Footer | None
 
 
@@ -337,6 +338,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
     instruction_count = 0
     text_bytes = 0
     begin_effective_buffer = 0
+    begin_compression: bool | None = None
     footer: _Footer | None = None
     pending_call: _PendingCall | None = None
 
@@ -381,6 +383,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
                 raise BinaryTraceError("invalid TRACE_BEGIN compression state")
             began = True
             begin_effective_buffer = effective_buffer
+            begin_compression = bool(compression)
             emit(
                 f"TRACE_BEGIN format=3 scene={_quoted(scene)} target={_quoted(target)} "
                 f"target_offset={_hex(target_offset)} base={_hex(module_base)} "
@@ -577,7 +580,10 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
     if not ended and not allow_partial:
         raise BinaryTraceError("missing TRACE_END")
     stats = ConversionStats(instruction_count, text_bytes, not ended)
-    return _ConversionDetails(stats, PROFILE_NAMES[profile_value], footer)
+    assert begin_compression is not None
+    return _ConversionDetails(
+        stats, PROFILE_NAMES[profile_value], begin_compression, footer
+    )
 
 
 def convert_binary_stream(source: BinaryIO, output: TextIO, *,

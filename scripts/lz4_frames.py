@@ -35,7 +35,8 @@ class Lz4FrameScan:
 
 @dataclasses.dataclass(frozen=True)
 class Lz4FileScan:
-    ranges: tuple[tuple[int, int], ...]
+    complete_bytes: int
+    standard_frames: int
     truncated: bool
 
 
@@ -51,14 +52,19 @@ def _is_skippable_magic_prefix(magic: bytes) -> bool:
     )
 
 
-def _scan_stream(stream: BinaryIO, total: int) -> Lz4FileScan:
-    """Scan a seekable stream; ranges contain standard frames, omitting skippable padding."""
-    ranges: list[tuple[int, int]] = []
+def _scan_stream(
+    stream: BinaryIO,
+    total: int,
+    on_standard_frame: Callable[[int, int, int], None] | None = None,
+) -> Lz4FileScan:
+    """Scan a seekable stream and optionally consume each standard frame immediately."""
+    complete_bytes = 0
+    standard_frames = 0
 
     def result(truncated: bool) -> Lz4FileScan:
-        if not ranges:
+        if standard_frames == 0:
             raise PullTraceError("compressed artifact has no complete LZ4 frame")
-        return Lz4FileScan(tuple(ranges), truncated)
+        return Lz4FileScan(complete_bytes, standard_frames, truncated)
 
     while stream.tell() < total:
         frame_start = stream.tell()
@@ -79,6 +85,7 @@ def _scan_stream(stream: BinaryIO, total: int) -> Lz4FileScan:
             if payload_bytes > remaining:
                 return result(True)
             stream.seek(payload_bytes, os.SEEK_CUR)
+            complete_bytes = stream.tell()
             continue
 
         descriptor = stream.read(2)
@@ -104,7 +111,12 @@ def _scan_stream(stream: BinaryIO, total: int) -> Lz4FileScan:
             if block_word == 0:
                 if flags & 0x04 and len(stream.read(4)) < 4:
                     return result(True)
-                ranges.append((frame_start, stream.tell()))
+                frame_end = stream.tell()
+                standard_frames += 1
+                complete_bytes = frame_end
+                if on_standard_frame is not None:
+                    on_standard_frame(standard_frames, frame_start, frame_end)
+                    stream.seek(frame_end)
                 break
             block_size = block_word & 0x7FFFFFFF
             if block_size > block_maximum:
@@ -118,7 +130,7 @@ def _scan_stream(stream: BinaryIO, total: int) -> Lz4FileScan:
 
 
 def scan_lz4_file(path: Path) -> Lz4FileScan:
-    """Validate and index every complete standard frame using bounded reads."""
+    """Validate a file with memory independent of its standard-frame count."""
     total = path.stat().st_size
     with path.open("rb") as stream:
         return _scan_stream(stream, total)
@@ -126,8 +138,12 @@ def scan_lz4_file(path: Path) -> Lz4FileScan:
 
 def split_lz4_frames(data: bytes) -> Lz4FrameScan:
     """Return complete standard frames without exposing a truncated final frame."""
-    scan = _scan_stream(io.BytesIO(data), len(data))
-    return Lz4FrameScan(tuple(data[start:end] for start, end in scan.ranges), scan.truncated)
+    ranges: list[tuple[int, int]] = []
+    scan = _scan_stream(
+        io.BytesIO(data), len(data),
+        lambda _index, start, end: ranges.append((start, end)),
+    )
+    return Lz4FrameScan(tuple(data[start:end] for start, end in ranges), scan.truncated)
 
 
 def decode_lz4_frames(
@@ -183,9 +199,8 @@ def decode_lz4_file(source: Path, output: Path, executable: str) -> bool:
             "host lz4 CLI is required for decompression; install the 'lz4' command "
             "or use --compressed-only"
         )
-    scan = scan_lz4_file(source)
     with source.open("rb") as compressed, output.open("wb") as decoded:
-        for index, (start, end) in enumerate(scan.ranges):
+        def decode_frame(index: int, start: int, end: int) -> None:
             compressed.seek(start)
             try:
                 process = subprocess.Popen(
@@ -224,7 +239,7 @@ def decode_lz4_file(source: Path, output: Path, executable: str) -> bool:
                 if not reaped:
                     _terminate_and_reap(process)
                 raise PullTraceError(
-                    f"lz4 decompression failed for frame {index + 1}: {error}"
+                    f"lz4 decompression failed for frame {index}: {error}"
                 ) from error
             except BaseException:
                 if not reaped:
@@ -232,6 +247,7 @@ def decode_lz4_file(source: Path, output: Path, executable: str) -> bool:
                 raise
             if write_error is not None or return_code != 0:
                 raise PullTraceError(
-                    f"lz4 decompression failed for frame {index + 1}: {stderr.strip()}"
+                    f"lz4 decompression failed for frame {index}: {stderr.strip()}"
                 )
+        scan = _scan_stream(compressed, source.stat().st_size, decode_frame)
     return scan.truncated

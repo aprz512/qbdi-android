@@ -30,9 +30,10 @@ def stream_header(profile: int = 2, **changes: int) -> bytes:
                        values["reserved"], values["size"], values["features"])
 
 
-def begin(profile: int = 2) -> bytes:
+def begin(profile: int = 2, *, compression: int = 1) -> bytes:
     payload = struct.pack(
-        "<QQQIIBBQQ", 0x100000, 0x40, 0x100040, 12, 13, profile, 1, 4096, 7
+        "<QQQIIBBQQ", 0x100000, 0x40, 0x100040, 12, 13, profile,
+        compression, 4096, 7
     ) + text('scene\n"x') + text("lib.so")
     return record(1, payload)
 
@@ -65,10 +66,36 @@ def instruction(sequence: int = 1, module_id: int = 1,
     return record(4, payload)
 
 
+def mixed_width_definition() -> bytes:
+    read_mask = (1 << 1) | (1 << 30)
+    write_mask = (1 << 2) | (1 << 31) | (1 << 33)
+    fixed = struct.pack(
+        "<IIQQqIBBBB", 123, 0xAA, read_mask, write_mask, 0, 0, 0, 0, 0, 0
+    )
+    registers = (
+        struct.pack("<B", 4) + text("W1")
+        + struct.pack("<B", 8) + text("LR")
+        + struct.pack("<B", 4) + text("W2")
+        + struct.pack("<B", 8) + text("SP")
+        + struct.pack("<B", 8) + text("PC")
+    )
+    return record(3, fixed + text("ADD") + text("w2, w1, #1") + text("") + registers)
+
+
+def mixed_width_instruction() -> bytes:
+    payload = struct.pack("<QIQIBB", 1, 1, 0x2345, 123, 2, 3)
+    return record(4, payload + struct.pack("<QQQQQ", 0x11, 0x22, 0x33, 0x44, 0x55))
+
+
 def memory() -> bytes:
     fixed = struct.pack("<IQBBHQIQ", 1, 0x2345, 3, 1, 0x12, 0x2000, 4, 0xAB)
     states = struct.pack("<BB", 1, 2) + b"\x00\xff" + struct.pack("<BB", 2, 0)
     return record(5, fixed + states)
+
+
+def uncaptured_memory(address: int) -> bytes:
+    fixed = struct.pack("<IQBBHQIQ", 1, 0x2345, 1, 0, 0, address, 1, address)
+    return record(5, fixed + b"\0\0\0\0")
 
 
 def call(category: bytes | str = "jni", name: bytes | str = "Find",
@@ -93,9 +120,10 @@ def footer(*, instructions: int = 1, encoded_bytes: int = 0,
     return record(9, struct.pack("<BQQ" + "Q" * 10, 1, 0x55, 17, *metrics))
 
 
-def complete_stream(*events: bytes, profile: int = 2,
+def complete_stream(*events: bytes, profile: int = 2, compression: int = 1,
                     compressed_bytes: int | None = None) -> bytes:
-    prefix = stream_header(profile) + begin(profile) + module() + b"".join(events)
+    prefix = (stream_header(profile) + begin(profile, compression=compression)
+              + module() + b"".join(events))
     first_footer = footer(instructions=sum(item[:2] == b"\x04\x00" for item in events))
     total = len(prefix) + len(first_footer)
     return prefix + footer(
@@ -149,8 +177,34 @@ class BinaryTraceConversionTests(unittest.TestCase):
     def test_profile_names_are_stable_for_all_wire_values(self):
         for profile, name in enumerate(("fast", "balanced", "full")):
             with self.subTest(profile=name):
-                output, _ = self.convert(complete_stream(profile=profile))
+                output, _ = self.convert(complete_stream(
+                    call("profile", name, "detail"), event(7, "rule", name),
+                    event(8, "error", name), profile=profile,
+                ))
                 self.assertIn(f"profile={name}", output.splitlines()[0])
+                self.assertIn(f'name="{name}"', output)
+
+    def test_dense_register_order_preserves_w_lr_sp_and_pc_widths(self):
+        output, _ = self.convert(complete_stream(
+            mixed_width_definition(), mixed_width_instruction()
+        ))
+        line = next(line for line in output.splitlines() if line.startswith("INST "))
+        self.assertIn("reads=[W1:4=0x11,LR:8=0x22]", line)
+        self.assertIn("writes=[W2:4=0x33,SP:8=0x44,PC:8=0x55]", line)
+
+    def test_more_than_eight_memory_continuations_preserve_order_and_not_captured(self):
+        addresses = list(range(0x3000, 0x300A))
+        output, _ = self.convert(complete_stream(
+            *(uncaptured_memory(address) for address in addresses)
+        ))
+        lines = [line for line in output.splitlines() if line.startswith("MEMORY ")]
+        self.assertEqual(10, len(lines))
+        self.assertEqual(
+            addresses,
+            [int(line.split(" address=", 1)[1].split(" ", 1)[0], 16) for line in lines],
+        )
+        self.assertTrue(all("before=<not-captured> after=<not-captured>" in line
+                            for line in lines))
 
     def test_accepts_ordinary_short_reads_at_every_stream_boundary(self):
         data = complete_stream(instruction_definition(), instruction())
@@ -246,6 +300,26 @@ class BinaryTraceConversionTests(unittest.TestCase):
         }
         for message, events in cases.items():
             with self.subTest(message=message), self.assertRaisesRegex(BinaryTraceError, message):
+                self.convert(complete_stream(*events))
+
+    def test_rejects_explicit_incomplete_duplicate_out_of_order_and_oversized_calls(self):
+        incomplete = stream_header() + begin() + module() + chunk(1, 4, 0, 2, b"ab")
+        with self.assertRaisesRegex(BinaryTraceError, "incomplete CALL"):
+            self.convert(incomplete, partial=True)
+        cases = (
+            ("duplicate or out of order", (
+                chunk(1, 6, 0, 3, b"ab"), chunk(1, 6, 0, 3, b"cd")
+            )),
+            ("duplicate or out of order", (
+                chunk(1, 6, 0, 3, b"ab"), chunk(1, 6, 2, 3, b"cd")
+            )),
+            ("invalid CALL chunk metadata", (
+                chunk(1, (1 << 20) + 1, 0, 2, b"ab"),
+            )),
+        )
+        for message, events in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    BinaryTraceError, message):
                 self.convert(complete_stream(*events))
 
     def test_rejects_record_after_footer_unknown_record_and_missing_footer(self):
