@@ -341,6 +341,35 @@ bool measure_frame(AsyncTraceWriterImpl *impl, const char *data, size_t size,
     return true;
 }
 
+bool write_skippable_frame(AsyncTraceWriterImpl *impl, size_t frame_bytes) noexcept {
+    constexpr uint32_t kSkippableMagic = 0x184d2a50U;
+    constexpr size_t kHeaderBytes = 8;
+    if (frame_bytes < kHeaderBytes || frame_bytes - kHeaderBytes > UINT32_MAX) {
+        errno = EINVAL;
+        return false;
+    }
+    const uint32_t payload_bytes = static_cast<uint32_t>(frame_bytes - kHeaderBytes);
+    char header[kHeaderBytes] = {
+        static_cast<char>(kSkippableMagic), static_cast<char>(kSkippableMagic >> 8U),
+        static_cast<char>(kSkippableMagic >> 16U), static_cast<char>(kSkippableMagic >> 24U),
+        static_cast<char>(payload_bytes), static_cast<char>(payload_bytes >> 8U),
+        static_cast<char>(payload_bytes >> 16U), static_cast<char>(payload_bytes >> 24U),
+    };
+    if (payload_bytes == 0)
+        return write_all(impl, header, sizeof(header), FailurePoint::FinalWrite);
+    if (!write_all(impl, header, sizeof(header))) return false;
+    const char zeros[256]{};
+    size_t remaining = payload_bytes;
+    while (remaining != 0) {
+        const size_t chunk = std::min(remaining, sizeof(zeros));
+        const FailurePoint point = chunk == remaining ? FailurePoint::FinalWrite
+                                                      : FailurePoint::None;
+        if (!write_all(impl, zeros, chunk, point)) return false;
+        remaining -= chunk;
+    }
+    return true;
+}
+
 void *consumer_entry(void *argument) noexcept {
     auto *impl = static_cast<AsyncTraceWriterImpl *>(argument);
     TraceFaultInjector *faults = impl->faults;
@@ -761,8 +790,8 @@ bool AsyncTraceWriter::drain() {
     return true;
 }
 
-bool AsyncTraceWriter::projected_file_bytes(std::string_view final_record, uint64_t *bytes) {
-    if (impl_ == nullptr || bytes == nullptr || final_record.empty() || !impl_->opened ||
+bool AsyncTraceWriter::final_file_target(size_t final_record_bytes, uint64_t *bytes) {
+    if (impl_ == nullptr || bytes == nullptr || final_record_bytes == 0 || !impl_->opened ||
         impl_->finish_called || impl_->reservation_active || impl_->active_buffer < 0 ||
         impl_->buffers[impl_->active_buffer].used != 0 ||
         impl_->error.load(std::memory_order_acquire) != 0) {
@@ -773,21 +802,63 @@ bool AsyncTraceWriter::projected_file_bytes(std::string_view final_record, uint6
             return false;
     }
     const uint64_t prefix = impl_->compressed_bytes.load(std::memory_order_acquire);
-    uint64_t final_bytes = final_record.size();
-    if (impl_->preferences.compressionLevel != INT_MIN &&
-        !measure_frame(impl_, final_record.data(), final_record.size(), &final_bytes)) {
-        latch_failure(impl_, errno == 0 ? EIO : errno);
-        return false;
+    uint64_t suffix_bytes = final_record_bytes;
+    if (impl_->preferences.compressionLevel != INT_MIN) {
+        impl_->preferences.frameInfo.contentSize =
+                static_cast<unsigned long long>(final_record_bytes);
+        const size_t frame_bound =
+                LZ4F_compressFrameBound(final_record_bytes, &impl_->preferences);
+        if (LZ4F_isError(frame_bound) || frame_bound > UINT64_MAX - 8U) {
+            latch_failure(impl_, EOVERFLOW);
+            return false;
+        }
+        suffix_bytes = static_cast<uint64_t>(frame_bound) + 8U;
     }
-    if (prefix > UINT64_MAX - final_bytes) {
+    if (prefix > UINT64_MAX - suffix_bytes) {
         latch_failure(impl_, EOVERFLOW);
         return false;
     }
-    *bytes = prefix + final_bytes;
+    *bytes = prefix + suffix_bytes;
     return true;
 }
 
-bool AsyncTraceWriter::finish() {
+bool AsyncTraceWriter::final_frame_padding(std::string_view final_record, size_t *bytes) {
+    if (impl_ == nullptr || bytes == nullptr || final_record.empty() || !impl_->opened ||
+        impl_->finish_called || impl_->reservation_active || impl_->active_buffer < 0 ||
+        impl_->buffers[impl_->active_buffer].used != 0 ||
+        impl_->error.load(std::memory_order_acquire) != 0) {
+        return false;
+    }
+    for (int index = 0; index < 2; ++index) {
+        if (index != impl_->active_buffer && impl_->buffers[index].state != BufferState::Free)
+            return false;
+    }
+    if (impl_->preferences.compressionLevel == INT_MIN) {
+        *bytes = 0;
+        return true;
+    }
+    uint64_t measured = 0;
+    if (!measure_frame(impl_, final_record.data(), final_record.size(), &measured)) {
+        latch_failure(impl_, errno == 0 ? EIO : errno);
+        return false;
+    }
+    impl_->preferences.frameInfo.contentSize =
+            static_cast<unsigned long long>(final_record.size());
+    const size_t frame_bound = LZ4F_compressFrameBound(final_record.size(), &impl_->preferences);
+    if (LZ4F_isError(frame_bound) || measured > frame_bound) {
+        latch_failure(impl_, EOVERFLOW);
+        return false;
+    }
+    const uint64_t padding = static_cast<uint64_t>(frame_bound) + 8U - measured;
+    if (padding < 8U || padding - 8U > UINT32_MAX || padding > SIZE_MAX) {
+        latch_failure(impl_, EOVERFLOW);
+        return false;
+    }
+    *bytes = static_cast<size_t>(padding);
+    return true;
+}
+
+bool AsyncTraceWriter::finish(size_t skippable_frame_bytes) {
     if (impl_ == nullptr) return false;
     if (impl_->finish_called) return impl_->finish_result;
     if (!impl_->opened) return false;
@@ -826,6 +897,10 @@ bool AsyncTraceWriter::finish() {
             impl_->finish_result = false;
             return false;
         }
+    }
+    if (impl_->error.load(std::memory_order_acquire) == 0 && skippable_frame_bytes != 0 &&
+        !write_skippable_frame(impl_, skippable_frame_bytes)) {
+        latch_failure(impl_, errno == 0 ? EIO : errno);
     }
     release_consumer_resources(impl_);
 

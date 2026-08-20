@@ -155,6 +155,37 @@ class AdbArtifactClientTests(unittest.TestCase):
 
 
 class Lz4FrameTests(unittest.TestCase):
+    def test_skippable_padding_is_complete_ignored_framing(self):
+        first = uncompressed_lz4_frame(b"first")
+        second = uncompressed_lz4_frame(b"second")
+        padding = b"\x50\x2a\x4d\x18" + (7).to_bytes(4, "little") + b"\0" * 7
+
+        def runner(command, **kwargs):
+            frame = kwargs["input"]
+            payload_size = int.from_bytes(frame[7:11], "little") & 0x7FFFFFFF
+            return subprocess.CompletedProcess(
+                command, 0, stdout=frame[11:11 + payload_size], stderr=b""
+            )
+
+        artifact = first + padding + second
+        scan = split_lz4_frames(artifact)
+        decoded = decode_lz4_frames(artifact, lz4="test-lz4", runner=runner)
+        self.assertEqual((first, second), scan.frames)
+        self.assertFalse(scan.truncated)
+        self.assertEqual(b"firstsecond", decoded.data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "padded.lz4"
+            path.write_bytes(artifact)
+            file_scan = scan_lz4_file(path)
+            self.assertEqual(((0, len(first)),
+                              (len(first) + len(padding), len(artifact))), file_scan.ranges)
+            self.assertFalse(file_scan.truncated)
+
+        truncated = split_lz4_frames(first + padding[:-1])
+        self.assertEqual((first,), truncated.frames)
+        self.assertTrue(truncated.truncated)
+
     def test_splits_and_decodes_concatenated_frames_in_order(self):
         first = uncompressed_lz4_frame(b"first")
         second = uncompressed_lz4_frame(b"second")

@@ -3,8 +3,10 @@
 #include "events/binary_trace_writer.h"
 #include "lz4frame.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -197,6 +199,39 @@ uint64_t u64(const std::vector<uint8_t> &bytes, size_t offset) {
     return value;
 }
 
+class Lz4FrameMeasurer {
+public:
+    Lz4FrameMeasurer() {
+        preferences.frameInfo.contentSize = kBinaryTraceEndRecordBytes;
+        CHECK(!LZ4F_isError(LZ4F_createCompressionContext(&context, LZ4F_VERSION)));
+        const size_t bound = LZ4F_compressBound(kBinaryTraceEndRecordBytes, &preferences);
+        scratch.resize(std::max(bound, static_cast<size_t>(LZ4F_HEADER_SIZE_MAX)));
+    }
+
+    ~Lz4FrameMeasurer() { LZ4F_freeCompressionContext(context); }
+
+    size_t measure(const std::array<uint8_t, kBinaryTraceEndRecordBytes> &footer) {
+        size_t total = LZ4F_compressBegin(context, scratch.data(), scratch.size(), &preferences);
+        CHECK(!LZ4F_isError(total));
+        size_t produced = LZ4F_compressUpdate(context, scratch.data(), scratch.size(),
+                                              footer.data(), footer.size(), nullptr);
+        CHECK(!LZ4F_isError(produced));
+        total += produced;
+        produced = LZ4F_compressEnd(context, scratch.data(), scratch.size(), nullptr);
+        CHECK(!LZ4F_isError(produced));
+        return total + produced;
+    }
+
+    size_t bound() const {
+        return LZ4F_compressFrameBound(kBinaryTraceEndRecordBytes, &preferences);
+    }
+
+private:
+    LZ4F_cctx *context = nullptr;
+    LZ4F_preferences_t preferences{};
+    std::vector<uint8_t> scratch;
+};
+
 std::vector<BinaryRecordType> record_types(const std::vector<uint8_t> &bytes) {
     CHECK(bytes.size() >= kBinaryStreamHeaderBytes);
     std::vector<BinaryRecordType> types;
@@ -285,6 +320,13 @@ void compressed_stream_definitions_footer_and_metrics_v2_are_consistent() {
 
     size_t frames = 0;
     const std::vector<uint8_t> compressed = read_bytes(artifact_path(writer));
+    const std::array<uint8_t, 4> skippable_magic{0x50, 0x2a, 0x4d, 0x18};
+    const auto padding = std::find_end(compressed.begin(), compressed.end(),
+                                       skippable_magic.begin(), skippable_magic.end());
+    CHECK(padding != compressed.end());
+    const size_t padding_offset = static_cast<size_t>(padding - compressed.begin());
+    CHECK(compressed.size() - padding_offset >= 8);
+    CHECK(u32(compressed, padding_offset + 4) == compressed.size() - padding_offset - 8);
     const std::vector<uint8_t> decoded_stream = decompress_frames(compressed, &frames);
     CHECK(frames >= 1);
     CHECK(std::memcmp(decoded_stream.data(), "QTRB", 4) == 0);
@@ -553,6 +595,57 @@ void end_waits_for_consumer_before_snapshotting_compressed_bytes() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+void padded_footer_is_total_for_exact_cycle_and_adversarial_prefixes() {
+    BinaryTraceEncoder encoder;
+    Lz4FrameMeasurer measurer;
+    TraceMetrics metrics{};
+    metrics.instructions = 400;
+    metrics.encoded_bytes = 14000;
+    metrics.cache_hits = 390;
+    metrics.cache_misses = 10;
+    metrics.buffer_swaps = 4;
+    metrics.effective_buffer_bytes = 8192;
+    std::array<uint8_t, kBinaryTraceEndRecordBytes> footer{};
+    bool exact_cycle_found = false;
+    for (uint64_t nonce = 0; nonce < 1000000 && !exact_cycle_found; ++nonce) {
+        metrics.producer_wait_ns = nonce;
+        metrics.compressed_bytes = 175;
+        CHECK(encoder.encode_end(footer.data(), footer.size(), true, 0x42, 7, metrics).ok);
+        const size_t from_175 = measurer.measure(footer);
+        metrics.compressed_bytes = 176;
+        CHECK(encoder.encode_end(footer.data(), footer.size(), true, 0x42, 7, metrics).ok);
+        const size_t from_176 = measurer.measure(footer);
+        exact_cycle_found = from_175 == 90 && from_176 == 89;
+    }
+    CHECK(exact_cycle_found);
+    CHECK(86 + 90 == 176);
+    CHECK(86 + 89 == 175);
+
+    const uint64_t prefixes[] = {0, 1, 2, 85, 86, 87, 999, 4096, 65535, 999999};
+    for (const uint64_t prefix : prefixes) {
+        const uint64_t target = prefix + measurer.bound() + 8;
+        metrics.compressed_bytes = target;
+        CHECK(encoder.encode_end(footer.data(), footer.size(), true, 0x42, 7, metrics).ok);
+        const size_t actual = measurer.measure(footer);
+        CHECK(actual <= measurer.bound());
+        const uint64_t padding_bytes = target - prefix - actual;
+        CHECK(padding_bytes >= 8);
+        CHECK(prefix + actual + padding_bytes == target);
+    }
+    uint64_t state = 0x9e3779b97f4a7c15ULL;
+    for (size_t sample = 0; sample < 10000; ++sample) {
+        state = state * 6364136223846793005ULL + 1;
+        const uint64_t prefix = state % 1000000;
+        const uint64_t target = prefix + measurer.bound() + 8;
+        metrics.compressed_bytes = target;
+        CHECK(encoder.encode_end(footer.data(), footer.size(), true, 0x42, 7, metrics).ok);
+        const size_t actual = measurer.measure(footer);
+        CHECK(actual <= measurer.bound());
+        CHECK(target - prefix - actual >= 8);
+        CHECK(prefix + actual + (target - prefix - actual) == target);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -566,4 +659,5 @@ int main() {
     directory_creation_failure_preserves_errno();
     real_mkdir_failure_preserves_enotdir();
     end_waits_for_consumer_before_snapshotting_compressed_bytes();
+    padded_footer_is_total_for_exact_cycle_and_adversarial_prefixes();
 }

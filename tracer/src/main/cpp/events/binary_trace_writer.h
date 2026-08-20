@@ -61,6 +61,7 @@ private:
     uint64_t run_id_ = 0;
     uint64_t elapsed_ms_ = 0;
     uint64_t retval_ = 0;
+    size_t final_padding_bytes_ = 0;
     bool opened_ = false;
     bool began_ = false;
     bool ended_ = false;

@@ -77,10 +77,12 @@ public:
     // Publishes all producer bytes and waits until the consumer has completed every prior frame.
     // A fresh empty producer buffer is acquired before returning.
     bool drain();
-    // Requires a successful drain. Predicts the completed artifact size if final_record is the
-    // next and final independently framed publication, without writing it.
-    bool projected_file_bytes(std::string_view final_record, uint64_t *bytes);
-    bool finish();
+    // Requires a successful drain. Returns a content-independent completed-file target with
+    // enough space for the final frame and an exact standards-compliant skippable padding frame.
+    bool final_file_target(size_t final_record_bytes, uint64_t *bytes);
+    // Computes the exact skippable-frame length needed after final_record to reach that target.
+    bool final_frame_padding(std::string_view final_record, size_t *bytes);
+    bool finish(size_t skippable_frame_bytes = 0);
     void detach_after_fork_child() noexcept;
     bool failed() const;
     int error_code() const noexcept;

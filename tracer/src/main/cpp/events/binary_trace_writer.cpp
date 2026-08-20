@@ -412,25 +412,19 @@ bool BinaryTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
     TraceMetrics footer_metrics = producer_metrics_snapshot(*metrics_);
     footer_metrics.encoded_bytes += kBinaryTraceEndRecordBytes;
     ++footer_metrics.buffer_swaps;
-    uint8_t footer[kBinaryTraceEndRecordBytes];
-    BinaryEncodeResult result{};
-    bool converged = false;
-    for (size_t attempt = 0; attempt < 32; ++attempt) {
-        result = encoder_.encode_end(footer, sizeof(footer), ok, retval, elapsed_ms_,
-                                     footer_metrics);
-        if (!result.ok || result.size != sizeof(footer)) return fail(EINVAL);
-        uint64_t projected = 0;
-        if (!writer_.projected_file_bytes(
-                    {reinterpret_cast<const char *>(footer), sizeof(footer)}, &projected)) {
-            return fail(writer_.error_code());
-        }
-        if (footer_metrics.compressed_bytes == projected) {
-            converged = true;
-            break;
-        }
-        footer_metrics.compressed_bytes = projected;
+    if (!writer_.final_file_target(kBinaryTraceEndRecordBytes,
+                                   &footer_metrics.compressed_bytes)) {
+        return fail(writer_.error_code());
     }
-    if (!converged) return fail(EOVERFLOW);
+    uint8_t footer[kBinaryTraceEndRecordBytes];
+    const BinaryEncodeResult result = encoder_.encode_end(
+            footer, sizeof(footer), ok, retval, elapsed_ms_, footer_metrics);
+    if (!result.ok || result.size != sizeof(footer)) return fail(EINVAL);
+    if (!writer_.final_frame_padding(
+                {reinterpret_cast<const char *>(footer), sizeof(footer)},
+                &final_padding_bytes_)) {
+        return fail(writer_.error_code());
+    }
     WritableSpan span = writer_.reserve(sizeof(footer));
     if (span.data == nullptr) return fail();
     std::memcpy(span.data, footer, sizeof(footer));
@@ -503,7 +497,7 @@ bool BinaryTraceWriter::close() {
     if (close_called_) return close_result_;
     close_called_ = true;
     if (!opened_) return false;
-    const bool trace_ok = writer_.finish();
+    const bool trace_ok = writer_.finish(final_padding_bytes_);
     if (!trace_ok) fail(writer_.error_code());
     opened_ = false;
     const bool metrics_ok = !successful_end_ || !trace_ok || write_metrics_sidecar();

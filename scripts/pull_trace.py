@@ -190,12 +190,19 @@ def classify_artifacts(artifacts: Mapping[str, bytes]) -> dict[str, TraceArtifac
 
 
 LZ4_MAGIC = b"\x04\x22\x4d\x18"
+LZ4_SKIPPABLE_MAGIC = b"\x50\x2a\x4d\x18"
 LZ4_BLOCK_MAXIMUMS = {
     4: 64 * 1024,
     5: 256 * 1024,
     6: 1024 * 1024,
     7: 4 * 1024 * 1024,
 }
+
+
+def _is_lz4_skippable_magic_prefix(magic: bytes) -> bool:
+    return bool(magic) and magic[0] & 0xF0 == 0x50 and (
+        len(magic) == 1 or magic[1:] == LZ4_SKIPPABLE_MAGIC[1:len(magic)]
+    )
 
 
 def _memory_scan_result(frames: list[bytes], truncated: bool) -> Lz4FrameScan:
@@ -220,11 +227,23 @@ def split_lz4_frames(data: bytes) -> Lz4FrameScan:
     while cursor < total:
         frame_start = cursor
         magic_bytes = min(4, total - cursor)
-        if data[cursor:cursor + magic_bytes] != LZ4_MAGIC[:magic_bytes]:
+        magic = data[cursor:cursor + magic_bytes]
+        standard_prefix = magic == LZ4_MAGIC[:magic_bytes]
+        skippable_prefix = _is_lz4_skippable_magic_prefix(magic)
+        if not standard_prefix and not skippable_prefix:
             raise PullTraceError(f"invalid LZ4 frame magic at byte {cursor}")
         if magic_bytes < 4:
             return _memory_scan_result(frames, True)
         cursor += 4
+        if skippable_prefix:
+            if total - cursor < 4:
+                return _memory_scan_result(frames, True)
+            payload_bytes = int.from_bytes(data[cursor:cursor + 4], "little")
+            cursor += 4
+            if total - cursor < payload_bytes:
+                return _memory_scan_result(frames, True)
+            cursor += payload_bytes
+            continue
         if total - cursor < 2:
             return _memory_scan_result(frames, True)
         flags = data[cursor]
@@ -270,10 +289,21 @@ def scan_lz4_file(path: Path) -> Lz4FileScan:
         while stream.tell() < total:
             frame_start = stream.tell()
             magic = stream.read(4)
-            if LZ4_MAGIC[:len(magic)] != magic:
+            standard_prefix = LZ4_MAGIC[:len(magic)] == magic
+            skippable_prefix = _is_lz4_skippable_magic_prefix(magic)
+            if not standard_prefix and not skippable_prefix:
                 raise PullTraceError(f"invalid LZ4 frame magic at byte {frame_start}")
             if len(magic) < 4:
                 return _file_scan_result(ranges, True)
+            if skippable_prefix:
+                size_bytes = stream.read(4)
+                if len(size_bytes) < 4:
+                    return _file_scan_result(ranges, True)
+                payload_bytes = int.from_bytes(size_bytes, "little")
+                if total - stream.tell() < payload_bytes:
+                    return _file_scan_result(ranges, True)
+                stream.seek(payload_bytes, os.SEEK_CUR)
+                continue
             descriptor = stream.read(2)
             if len(descriptor) < 2:
                 return _file_scan_result(ranges, True)

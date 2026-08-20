@@ -136,6 +136,15 @@ the second buffer. The consumer compresses each publication as an independent LZ
 appends it to the artifact immediately. The final partial buffer is published during normal
 finalization.
 
+For a complete compressed run, `TRACE_END` is published in its own standard LZ4 frame. Its
+`compressed_bytes` field is the exact completed artifact size. To avoid a self-referential
+compressed-size fixed point, the producer selects the content-independent target
+`prior_frame_bytes + LZ4F_compressFrameBound(TRACE_END bytes) + 8`, then appends one standard LZ4
+skippable frame whose exact length fills the positive difference between that target and the
+actual `TRACE_END` frame. Skippable payload bytes are zero and have no decoded QTRB meaning. Host
+frame scanners accept and ignore complete skippable frames; a truncated skippable tail is a
+truncated final frame under the existing crash-marker recovery rule.
+
 A binary record never crosses a producer-buffer boundary. If the remaining span is too small, the
 writer publishes the current buffer before encoding that record. A record larger than the
 documented maximum fails the trace rather than partially encoding it.

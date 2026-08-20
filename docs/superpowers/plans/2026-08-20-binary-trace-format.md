@@ -476,7 +476,10 @@ Expected: ImportError for scripts.lz4_frames.
 
 - [ ] **Step 3: Extract one implementation**
 
-Move the scanner and decoder without behavior changes. Preserve standard-frame validation, Android crash handling in pull_trace, safe subprocess argv, bounded 1 MiB copying, and terminate/wait cleanup. Remove duplicate scanner code from pull_trace.py.
+Move the scanner and decoder without behavior changes. Preserve standard-frame validation,
+complete and truncated skippable-padding handling, Android crash handling in pull_trace, safe
+subprocess argv, bounded 1 MiB copying, and terminate/wait cleanup. Skippable frames contribute to
+artifact length but no decoded bytes. Remove duplicate scanner code from pull_trace.py.
 
 - [ ] **Step 4: Run framing and pull tests**
 
