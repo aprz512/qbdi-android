@@ -14,6 +14,8 @@ enum class BufferState : uint8_t { Free, Filling, Ready, Writing };
 
 enum class FailurePoint : uint8_t {
     None,
+    PathSetup,
+    DirectoryCreation,
     Allocation,
     Synchronization,
     ThreadCreation,
@@ -68,10 +70,16 @@ public:
     AsyncTraceWriter(const AsyncTraceWriter &) = delete;
     AsyncTraceWriter &operator=(const AsyncTraceWriter &) = delete;
 
-    bool open(const std::string &path, const TraceOptions &options, TraceMetrics *metrics);
+    bool open(std::string_view path, const TraceOptions &options, TraceMetrics *metrics);
     WritableSpan reserve(size_t minimum);
     void commit(size_t bytes);
     bool append(std::string_view bytes);
+    // Publishes all producer bytes and waits until the consumer has completed every prior frame.
+    // A fresh empty producer buffer is acquired before returning.
+    bool drain();
+    // Requires a successful drain. Predicts the completed artifact size if final_record is the
+    // next and final independently framed publication, without writing it.
+    bool projected_file_bytes(std::string_view final_record, uint64_t *bytes);
     bool finish();
     void detach_after_fork_child() noexcept;
     bool failed() const;

@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 class BinaryTraceWriter {
 public:
@@ -36,7 +37,7 @@ public:
 
     bool failed() const { return !healthy_writer_state(); }
     int error_code() const noexcept;
-    const std::string &path() const;
+    std::string_view path() const noexcept;
 
 private:
     bool healthy_writer_state() const;
@@ -54,7 +55,9 @@ private:
     TraceDictionary dictionary_;
     AsyncTraceWriter writer_;
     TraceFaultInjector *faults_ = nullptr;
-    std::string *path_ = nullptr;
+    static constexpr size_t kPathCapacity = 4096;
+    char path_[kPathCapacity]{};
+    size_t path_size_ = 0;
     uint64_t run_id_ = 0;
     uint64_t elapsed_ms_ = 0;
     uint64_t retval_ = 0;

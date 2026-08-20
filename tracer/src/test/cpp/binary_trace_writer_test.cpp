@@ -4,12 +4,17 @@
 #include "lz4frame.h"
 
 #include <cerrno>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <string>
 #include <string_view>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -60,6 +65,41 @@ public:
 
     FailurePoint selected = FailurePoint::None;
     int error_code = 0;
+};
+
+class BlockingBackend final : public TraceWriterBackend {
+public:
+    int open_file(const char *, int, unsigned int) noexcept override { return 92; }
+
+    ssize_t write_file(int, const void *, size_t size) noexcept override {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        changed.notify_all();
+        changed.wait(lock, [&] { return released; });
+        bytes += size;
+        return static_cast<ssize_t>(size);
+    }
+
+    int close_file(int) noexcept override { return 0; }
+
+    void wait_until_entered() {
+        std::unique_lock<std::mutex> lock(mutex);
+        CHECK(changed.wait_for(lock, std::chrono::seconds(5), [&] { return entered; }));
+    }
+
+    void release() {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+        changed.notify_all();
+    }
+
+    uint64_t bytes = 0;
+
+private:
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered = false;
+    bool released = false;
 };
 
 std::string temporary_directory() {
@@ -187,6 +227,32 @@ std::string metric_value(const std::string &metrics, std::string_view key) {
     return metrics.substr(value_begin, end - value_begin);
 }
 
+std::string artifact_path(const BinaryTraceWriter &writer) {
+    return std::string(writer.path());
+}
+
+std::string sidecar_path(const BinaryTraceWriter &writer) {
+    return artifact_path(writer) + ".metrics";
+}
+
+void check_footer_matches_sidecar(const std::vector<uint8_t> &stream,
+                                  const std::string &sidecar) {
+    const size_t payload = stream.size() - kBinaryTraceEndRecordBytes + kBinaryRecordHeaderBytes;
+    struct Field {
+        size_t offset;
+        const char *name;
+    };
+    for (const Field field : {Field{9, "elapsed_ms"}, Field{17, "instructions"},
+                              Field{25, "encoded_bytes"}, Field{33, "compressed_bytes"},
+                              Field{41, "cache_hits"}, Field{49, "cache_misses"},
+                              Field{57, "cache_collisions"}, Field{65, "buffer_swaps"},
+                              Field{73, "producer_waits"}, Field{81, "producer_wait_ns"},
+                              Field{89, "effective_buffer_bytes"}}) {
+        CHECK(u64(stream, payload + field.offset) ==
+              std::stoull(metric_value(sidecar, field.name)));
+    }
+}
+
 void compressed_stream_definitions_footer_and_metrics_v2_are_consistent() {
     const std::string directory = temporary_directory();
     TraceOptions options{};
@@ -218,7 +284,7 @@ void compressed_stream_definitions_footer_and_metrics_v2_are_consistent() {
     CHECK(writer.path().ends_with(".trace.bin.lz4"));
 
     size_t frames = 0;
-    const std::vector<uint8_t> compressed = read_bytes(writer.path());
+    const std::vector<uint8_t> compressed = read_bytes(artifact_path(writer));
     const std::vector<uint8_t> decoded_stream = decompress_frames(compressed, &frames);
     CHECK(frames >= 1);
     CHECK(std::memcmp(decoded_stream.data(), "QTRB", 4) == 0);
@@ -239,8 +305,11 @@ void compressed_stream_definitions_footer_and_metrics_v2_are_consistent() {
     const size_t footer_offset = decoded_stream.size() - kBinaryTraceEndRecordBytes;
     CHECK(u64(decoded_stream, footer_offset + kBinaryRecordHeaderBytes + 25) ==
           decoded_stream.size());
+    CHECK(u64(decoded_stream, footer_offset + kBinaryRecordHeaderBytes + 33) ==
+          compressed.size());
 
-    const std::string sidecar = read_text(writer.path() + ".metrics");
+    const std::string sidecar = read_text(sidecar_path(writer));
+    check_footer_matches_sidecar(decoded_stream, sidecar);
     CHECK(metric_value(sidecar, "metrics_version") == "2");
     CHECK(metric_value(sidecar, "profile") == "balanced");
     CHECK(metric_value(sidecar, "return") == "0x42");
@@ -258,8 +327,8 @@ void compressed_stream_definitions_footer_and_metrics_v2_are_consistent() {
         CHECK(!metric_value(sidecar, key).empty());
     }
 
-    CHECK(::unlink((writer.path() + ".metrics").c_str()) == 0);
-    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
@@ -280,16 +349,20 @@ void uncompressed_stream_uses_binary_suffix_and_exact_byte_counts() {
     CHECK(writer.end(0, true, 0));
     CHECK(writer.close());
     CHECK(writer.path().ends_with(".trace.bin"));
-    const std::vector<uint8_t> bytes = read_bytes(writer.path());
+    const std::vector<uint8_t> bytes = read_bytes(artifact_path(writer));
     CHECK(metrics.encoded_bytes == bytes.size());
     CHECK(metrics.compressed_bytes == bytes.size());
     CHECK(record_types(bytes).back() == BinaryRecordType::TraceEnd);
-    const std::string sidecar = read_text(writer.path() + ".metrics");
+    const size_t footer_offset = bytes.size() - kBinaryTraceEndRecordBytes;
+    CHECK(u64(bytes, footer_offset + kBinaryRecordHeaderBytes + 25) == bytes.size());
+    CHECK(u64(bytes, footer_offset + kBinaryRecordHeaderBytes + 33) == bytes.size());
+    const std::string sidecar = read_text(sidecar_path(writer));
+    check_footer_matches_sidecar(bytes, sidecar);
     CHECK(metric_value(sidecar, "encoded_bytes") == std::to_string(bytes.size()));
     CHECK(metric_value(sidecar, "compressed_bytes") == std::to_string(bytes.size()));
 
-    CHECK(::unlink((writer.path() + ".metrics").c_str()) == 0);
-    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
@@ -321,7 +394,7 @@ void encoding_failure_latches_and_does_no_later_event_work() {
     CHECK(!writer.close());
     CHECK(backend.open_calls == 1);
     CHECK(backend.close_calls == 1);
-    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
+    CHECK(::access(sidecar_path(writer).c_str(), F_OK) != 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
@@ -348,8 +421,8 @@ void failed_definition_is_not_committed() {
     CHECK(!writer.instruction(context, record));
     CHECK(metrics.encoded_bytes == bytes_before);
     CHECK(!writer.close());
-    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
-    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::access(sidecar_path(writer).c_str(), F_OK) != 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
@@ -367,14 +440,14 @@ void async_write_error_preserves_first_error_and_suppresses_metrics() {
 
     CHECK(writer.open(context));
     CHECK(writer.begin(context));
-    CHECK(writer.end(0x1234, true, 5));
+    CHECK(!writer.end(0x1234, true, 5));
     CHECK(!writer.close());
     CHECK(!writer.close());
     CHECK(writer.failed());
     CHECK(writer.error_code() == ENOSPC);
     CHECK(backend.write_calls == 1);
     CHECK(backend.close_calls == 1);
-    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
+    CHECK(::access(sidecar_path(writer).c_str(), F_OK) != 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
@@ -397,8 +470,86 @@ void sidecar_error_removes_partial_metrics_and_close_is_idempotent() {
     CHECK(!writer.close());
     CHECK(!writer.close());
     CHECK(writer.error_code() == EIO);
-    CHECK(::access((writer.path() + ".metrics").c_str(), F_OK) != 0);
-    CHECK(::unlink(writer.path().c_str()) == 0);
+    CHECK(::access(sidecar_path(writer).c_str(), F_OK) != 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void setup_allocation_failure_latches_enomem_without_artifacts() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    TraceMetrics metrics{};
+    PointFaults faults;
+    faults.selected = FailurePoint::PathSetup;
+    faults.error_code = ENOMEM;
+    BinaryTraceWriter writer(options, &metrics, nullptr, &faults);
+    const TraceContext context = context_for(directory);
+
+    CHECK(!writer.prepare(context));
+    CHECK(writer.failed());
+    CHECK(writer.error_code() == ENOMEM);
+    CHECK(!writer.open_prepared());
+    CHECK(!writer.begin(context));
+    CHECK(writer.path().empty());
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void directory_creation_failure_preserves_errno() {
+    TraceOptions options{};
+    TraceMetrics metrics{};
+    PointFaults faults;
+    faults.selected = FailurePoint::DirectoryCreation;
+    faults.error_code = EACCES;
+    BinaryTraceWriter writer(options, &metrics, nullptr, &faults);
+    const TraceContext context = context_for("/not-created/qbdi");
+
+    CHECK(!writer.prepare(context));
+    CHECK(writer.failed());
+    CHECK(writer.error_code() == EACCES);
+    CHECK(writer.path().empty());
+}
+
+void real_mkdir_failure_preserves_enotdir() {
+    TraceOptions options{};
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for("/dev/null/qbdi-traces");
+
+    CHECK(!writer.prepare(context));
+    CHECK(writer.failed());
+    CHECK(writer.error_code() == ENOTDIR);
+    CHECK(writer.path().empty());
+}
+
+void end_waits_for_consumer_before_snapshotting_compressed_bytes() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BlockingBackend backend;
+    BinaryTraceWriter writer(options, &metrics, &backend);
+    const TraceContext context = context_for(directory);
+    CachedInstruction decoded{};
+    decoded.opcode = 0xd503201fU;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    for (uint64_t sequence = 1; sequence <= 150; ++sequence)
+        CHECK(writer.instruction(context, instruction(sequence, &decoded)));
+    backend.wait_until_entered();
+    std::atomic<bool> end_returned{false};
+    std::thread ending([&] {
+        CHECK(writer.end(0x88, true, 9));
+        end_returned.store(true, std::memory_order_release);
+    });
+    CHECK(!end_returned.load(std::memory_order_acquire));
+    backend.release();
+    ending.join();
+    CHECK(writer.close());
+    CHECK(backend.bytes == metrics.compressed_bytes);
+    CHECK(::unlink((std::string(writer.path()) + ".metrics").c_str()) == 0);
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
@@ -411,4 +562,8 @@ int main() {
     failed_definition_is_not_committed();
     async_write_error_preserves_first_error_and_suppresses_metrics();
     sidecar_error_removes_partial_metrics_and_close_is_idempotent();
+    setup_allocation_failure_latches_enomem_without_artifacts();
+    directory_creation_failure_preserves_errno();
+    real_mkdir_failure_preserves_enotdir();
+    end_waits_for_consumer_before_snapshotting_compressed_bytes();
 }

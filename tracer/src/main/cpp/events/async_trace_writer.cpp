@@ -152,6 +152,7 @@ struct AsyncTraceWriterImpl {
     size_t reservation_capacity = 0;
     uint64_t next_publication_sequence = 1;
     std::atomic<int> error{0};
+    std::atomic<uint64_t> compressed_bytes{0};
     bool first_write_attempted = false;
     int synchronization_error = 0;
     bool mutex_initialized = false;
@@ -255,9 +256,8 @@ bool write_all(AsyncTraceWriterImpl *impl, const char *data, size_t size,
             return false;
         }
         written += static_cast<size_t>(result);
-        if (impl->metrics != nullptr) {
-            impl->metrics->compressed_bytes += static_cast<uint64_t>(result);
-        }
+        impl->compressed_bytes.fetch_add(static_cast<uint64_t>(result),
+                                         std::memory_order_relaxed);
     }
     return true;
 }
@@ -299,6 +299,45 @@ bool write_frame(AsyncTraceWriterImpl *impl, const char *data, size_t size) noex
         if (errno == 0) errno = EIO;
         return false;
     }
+    return true;
+}
+
+bool measure_frame(AsyncTraceWriterImpl *impl, const char *data, size_t size,
+                   uint64_t *measured) noexcept {
+    if (measured == nullptr || impl->compression_context == nullptr ||
+        impl->compression_scratch == nullptr) {
+        errno = EINVAL;
+        return false;
+    }
+    impl->preferences.frameInfo.contentSize = static_cast<unsigned long long>(size);
+    uint64_t total = 0;
+    size_t produced = LZ4F_compressBegin(impl->compression_context, impl->compression_scratch,
+                                         impl->compression_scratch_bytes, &impl->preferences);
+    if (LZ4F_isError(produced)) {
+        errno = EIO;
+        return false;
+    }
+    total += produced;
+    size_t offset = 0;
+    while (offset < size) {
+        const size_t input_bytes = std::min(kCompressionChunkBytes, size - offset);
+        produced = LZ4F_compressUpdate(impl->compression_context, impl->compression_scratch,
+                                       impl->compression_scratch_bytes, data + offset, input_bytes,
+                                       nullptr);
+        if (LZ4F_isError(produced) || total > UINT64_MAX - produced) {
+            errno = EIO;
+            return false;
+        }
+        total += produced;
+        offset += input_bytes;
+    }
+    produced = LZ4F_compressEnd(impl->compression_context, impl->compression_scratch,
+                                impl->compression_scratch_bytes, nullptr);
+    if (LZ4F_isError(produced) || total > UINT64_MAX - produced) {
+        errno = EIO;
+        return false;
+    }
+    *measured = total + produced;
     return true;
 }
 
@@ -518,7 +557,7 @@ AsyncTraceWriter::~AsyncTraceWriter() {
     }
 }
 
-bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options,
+bool AsyncTraceWriter::open(std::string_view path, const TraceOptions &options,
                             TraceMetrics *metrics) {
     if (trace_process_child_detached()) {
         if (impl_ != nullptr) {
@@ -544,11 +583,22 @@ bool AsyncTraceWriter::open(const std::string &path, const TraceOptions &options
         return false;
     }
 
+    constexpr size_t kMaxOpenPathBytes = 4095;
+    if (path.size() > kMaxOpenPathBytes) {
+        latch_failure(impl_, ENAMETOOLONG);
+        impl_->finish_called = true;
+        return false;
+    }
+    char open_path[kMaxOpenPathBytes + 1];
+    std::memcpy(open_path, path.data(), path.size());
+    open_path[path.size()] = '\0';
+
     impl_->metrics = metrics;
+    impl_->compressed_bytes.store(0, std::memory_order_relaxed);
     impl_->owner_pid = ::getpid();
     trace_writer_fd_registry_lock();
     impl_->fd = impl_->backend->open_file(
-            path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+            open_path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
     if (impl_->fd >= 0) {
         impl_->fd_registry_slot = trace_writer_fd_register_locked(impl_->fd);
         if (impl_->fd_registry_slot == kInvalidTraceWriterFdSlot) {
@@ -657,6 +707,86 @@ bool AsyncTraceWriter::append(std::string_view bytes) {
     return true;
 }
 
+bool AsyncTraceWriter::drain() {
+    if (impl_ == nullptr || !impl_->opened || impl_->finish_called ||
+        impl_->reservation_active || impl_->active_buffer < 0 ||
+        impl_->error.load(std::memory_order_acquire) != 0) {
+        return false;
+    }
+
+    pthread_mutex_lock(&impl_->mutex);
+    auto &active = impl_->buffers[impl_->active_buffer];
+    if (active.used != 0) {
+        active.publication_sequence = impl_->next_publication_sequence++;
+        active.state = BufferState::Ready;
+        if (impl_->metrics != nullptr) ++impl_->metrics->buffer_swaps;
+        pthread_cond_signal(&impl_->ready_changed);
+    } else {
+        active.state = BufferState::Free;
+    }
+    impl_->active_buffer = -1;
+
+    bool counted_wait = false;
+    uint64_t wait_started = 0;
+    for (;;) {
+        if (impl_->error.load(std::memory_order_acquire) != 0) {
+            if (counted_wait && impl_->metrics != nullptr) {
+                const uint64_t ended = monotonic_nanoseconds();
+                if (ended >= wait_started) impl_->metrics->producer_wait_ns += ended - wait_started;
+            }
+            pthread_mutex_unlock(&impl_->mutex);
+            return false;
+        }
+        bool all_free = true;
+        for (const auto &buffer : impl_->buffers) {
+            if (buffer.state != BufferState::Free) all_free = false;
+        }
+        if (all_free) break;
+        if (!counted_wait) {
+            counted_wait = true;
+            wait_started = monotonic_nanoseconds();
+            if (impl_->metrics != nullptr) ++impl_->metrics->producer_waits;
+        }
+        impl_->faults->producer_waiting();
+        pthread_cond_wait(&impl_->free_changed, &impl_->mutex);
+    }
+    if (counted_wait && impl_->metrics != nullptr) {
+        const uint64_t ended = monotonic_nanoseconds();
+        if (ended >= wait_started) impl_->metrics->producer_wait_ns += ended - wait_started;
+    }
+    impl_->buffers[0].used = 0;
+    impl_->buffers[0].state = BufferState::Filling;
+    impl_->active_buffer = 0;
+    pthread_mutex_unlock(&impl_->mutex);
+    return true;
+}
+
+bool AsyncTraceWriter::projected_file_bytes(std::string_view final_record, uint64_t *bytes) {
+    if (impl_ == nullptr || bytes == nullptr || final_record.empty() || !impl_->opened ||
+        impl_->finish_called || impl_->reservation_active || impl_->active_buffer < 0 ||
+        impl_->buffers[impl_->active_buffer].used != 0 ||
+        impl_->error.load(std::memory_order_acquire) != 0) {
+        return false;
+    }
+    for (int index = 0; index < 2; ++index) {
+        if (index != impl_->active_buffer && impl_->buffers[index].state != BufferState::Free)
+            return false;
+    }
+    const uint64_t prefix = impl_->compressed_bytes.load(std::memory_order_acquire);
+    uint64_t final_bytes = final_record.size();
+    if (impl_->preferences.compressionLevel != INT_MIN &&
+        !measure_frame(impl_, final_record.data(), final_record.size(), &final_bytes)) {
+        latch_failure(impl_, errno == 0 ? EIO : errno);
+        return false;
+    }
+    if (prefix > UINT64_MAX - final_bytes) {
+        latch_failure(impl_, EOVERFLOW);
+        return false;
+    }
+    *bytes = prefix + final_bytes;
+    return true;
+}
+
 bool AsyncTraceWriter::finish() {
     if (impl_ == nullptr) return false;
     if (impl_->finish_called) return impl_->finish_result;
@@ -698,6 +828,11 @@ bool AsyncTraceWriter::finish() {
         }
     }
     release_consumer_resources(impl_);
+
+    if (impl_->metrics != nullptr) {
+        impl_->metrics->compressed_bytes =
+                impl_->compressed_bytes.load(std::memory_order_acquire);
+    }
 
     impl_->opened = false;
     impl_->finish_called = true;
