@@ -52,8 +52,14 @@ adb shell run-as com.aprz.qbdiandroid cp \
 adb shell run-as com.aprz.qbdiandroid chmod 700 files/libqbdi_tracer.so
 python3 scripts/benchmark_trace.py --package com.aprz.qbdiandroid \
   --device <adb-serial> --profile balanced --runs 5 \
-  --compare docs/benchmarks/trace-throughput-baseline.md
+  --candidate-tracer out/arm64-v8a/libqbdi_tracer.so \
+  --compare docs/benchmarks/binary-trace-baseline.md
 ```
+
+`--compare` is acceptance mode: it uses one separate warmup and exactly five measured fresh
+processes, then checks package, build fingerprint, SELinux state, the staged/app-private tracer
+SHA-256, decoded event count, and exact first/last instruction identities. Runs without
+`--compare` are diagnostic only and do not constitute acceptance.
 
 ## Find Scene Offsets
 

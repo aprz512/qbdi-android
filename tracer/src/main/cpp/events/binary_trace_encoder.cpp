@@ -410,6 +410,8 @@ BinaryEncodeResult BinaryTraceEncoder::encode_call_chunk(
         info.chunk_index >= info.chunk_count || detail.empty() ||
         info.total_detail_bytes > kBinaryMaxLogicalCallDetailBytes ||
         info.total_detail_bytes <= detail.size() ||
+        info.total_detail_bytes < info.chunk_count ||
+        info.total_detail_bytes < detail.size() + info.chunk_count - 1U ||
         category.size() > kBinaryMaxCallCategoryBytes ||
         name.size() > kBinaryMaxCallNameBytes ||
         detail.size() > kBinaryMaxCallChunkDetailBytes) {
@@ -448,6 +450,34 @@ BinaryEncodeResult BinaryTraceEncoder::encode_event(
 
     AppendBuffer buffer{output};
     append_record_header(buffer, type, payload_bytes);
+    append_string(buffer, name);
+    append_string(buffer, detail);
+    return {true, buffer.offset};
+}
+
+BinaryEncodeResult BinaryTraceEncoder::encode_event_chunk(
+        uint8_t *output, size_t capacity, BinaryRecordType type, const EventChunkInfo &info,
+        std::string_view name, std::string_view detail) const noexcept {
+    if (!semantic_event_type(type) || info.event_id == 0 || info.chunk_count < 2 ||
+        info.chunk_index >= info.chunk_count || detail.empty() ||
+        info.total_detail_bytes > kBinaryMaxEventDetailBytes ||
+        info.total_detail_bytes <= detail.size() ||
+        info.total_detail_bytes < info.chunk_count ||
+        info.total_detail_bytes < detail.size() + info.chunk_count - 1U ||
+        name.size() > kBinaryMaxEventNameBytes ||
+        detail.size() > kBinaryMaxEventChunkDetailBytes) {
+        return {};
+    }
+    const size_t payload_bytes = kBinaryEventChunkFixedPayloadBytes + name.size() + detail.size();
+    const size_t required = kBinaryRecordHeaderBytes + payload_bytes;
+    const BinaryEncodeResult result = preflight(output, capacity, required);
+    if (!result.ok) return result;
+    AppendBuffer buffer{output};
+    append_record_header(buffer, type, payload_bytes, kBinaryEventChunkFlag);
+    append_u64(buffer, info.event_id);
+    append_u32(buffer, info.total_detail_bytes);
+    append_u16(buffer, info.chunk_index);
+    append_u16(buffer, info.chunk_count);
     append_string(buffer, name);
     append_string(buffer, detail);
     return {true, buffer.offset};

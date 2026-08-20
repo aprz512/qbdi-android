@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 import tempfile
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -23,11 +23,19 @@ try:
     from scripts.lz4_frames import PullTraceError, decode_lz4_file
     from scripts.trace_binary import BinaryTraceError
     from scripts.trace_convert import convert_binary_file
+    from scripts.trace_metrics import (
+        V1_INTEGER_FIELDS, V1_RATE_FIELDS, V2_INTEGER_FIELDS, V2_RATE_FIELDS,
+        parse_metrics,
+    )
 except ModuleNotFoundError:  # Support direct execution as scripts/benchmark_trace.py.
     from bounded_process import BoundedProcessError, capture_bounded  # type: ignore[no-redef]
     from lz4_frames import PullTraceError, decode_lz4_file  # type: ignore[no-redef]
     from trace_binary import BinaryTraceError  # type: ignore[no-redef]
     from trace_convert import convert_binary_file  # type: ignore[no-redef]
+    from trace_metrics import (  # type: ignore[no-redef]
+        V1_INTEGER_FIELDS, V1_RATE_FIELDS, V2_INTEGER_FIELDS, V2_RATE_FIELDS,
+        parse_metrics,
+    )
 
 
 TRACE_FOOTER = re.compile(
@@ -43,32 +51,9 @@ TEXT_TRACE_SUFFIX = ".trace.txt.lz4"
 BINARY_TRACE_SUFFIX = ".trace.bin.lz4"
 BINARY_RAW_SUFFIX = ".trace.bin"
 TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)
-COMMON_INTEGER_FIELDS = (
-    "instructions",
-    "elapsed_ms",
-    "compressed_bytes",
-    "cache_hits",
-    "cache_misses",
-    "cache_collisions",
-    "buffer_swaps",
-    "producer_waits",
-    "producer_wait_ns",
-    "effective_buffer_bytes",
-)
-COMMON_RATE_FIELDS = (
-    "instructions_per_second",
-    "disk_bytes_per_second",
-    "compression_ratio",
-    "cache_hit_rate",
-)
-V1_INTEGER_FIELDS = (*COMMON_INTEGER_FIELDS[:2], "raw_bytes", *COMMON_INTEGER_FIELDS[2:])
-V2_INTEGER_FIELDS = (*COMMON_INTEGER_FIELDS[:2], "encoded_bytes", *COMMON_INTEGER_FIELDS[2:])
-V1_RATE_FIELDS = (*COMMON_RATE_FIELDS[:1], "raw_bytes_per_second", *COMMON_RATE_FIELDS[1:])
-V2_RATE_FIELDS = (*COMMON_RATE_FIELDS[:1], "encoded_bytes_per_second", *COMMON_RATE_FIELDS[1:])
 # Compatibility aliases for existing v1 callers.
 OPTIMIZED_INTEGER_FIELDS = V1_INTEGER_FIELDS
 OPTIMIZED_RATE_FIELDS = V1_RATE_FIELDS
-UINT64_MAX = (1 << 64) - 1
 MAX_METRICS_BYTES = 64 * 1024
 PROFILE_RATE_TARGETS = {
     "fast": Decimal(1_000_000),
@@ -151,110 +136,6 @@ def select_exact_new_optimized_metrics(names: Iterable[str]) -> str:
     return selected
 
 
-def _expected_optimized_rates(metrics: dict[str, int | Decimal | str]) -> dict[str, Decimal]:
-    elapsed_ms = int(metrics["elapsed_ms"])
-    byte_field = "encoded_bytes" if int(metrics.get("metrics_version", 1)) == 2 else "raw_bytes"
-    rate_field = byte_field + "_per_second"
-    encoded_bytes = int(metrics[byte_field])
-    compressed_bytes = int(metrics["compressed_bytes"])
-    cache_hits = int(metrics["cache_hits"])
-    cache_lookups = cache_hits + int(metrics["cache_misses"])
-    return {
-        "instructions_per_second": (
-            Decimal(int(metrics["instructions"]) * 1000) / elapsed_ms
-            if elapsed_ms else Decimal(0)
-        ),
-        rate_field: (
-            Decimal(encoded_bytes * 1000) / elapsed_ms if elapsed_ms else Decimal(0)
-        ),
-        "disk_bytes_per_second": (
-            Decimal(compressed_bytes * 1000) / elapsed_ms if elapsed_ms else Decimal(0)
-        ),
-        "compression_ratio": (
-            Decimal(compressed_bytes) / encoded_bytes if encoded_bytes else Decimal(0)
-        ),
-        "cache_hit_rate": Decimal(cache_hits) / cache_lookups if cache_lookups else Decimal(0),
-    }
-
-
-def parse_metrics(sidecar: str | bytes) -> dict[str, int | Decimal | str]:
-    """Parse one completed optimized sidecar and validate its derived metrics."""
-    if isinstance(sidecar, bytes):
-        try:
-            sidecar = sidecar.decode("ascii")
-        except UnicodeDecodeError as error:
-            raise ValueError("metrics sidecar is not ASCII") from error
-    values: dict[str, str] = {}
-    for line in sidecar.splitlines():
-        if not line or "=" not in line:
-            raise ValueError("malformed metrics line")
-        key, value = line.split("=", 1)
-        if not key or not value or key in values:
-            raise ValueError(f"invalid or duplicate metrics key: {key}")
-        values[key] = value
-
-    version_text = values.get("metrics_version")
-    if version_text is None:
-        version = 1
-        integer_fields = V1_INTEGER_FIELDS
-        rate_fields = V1_RATE_FIELDS
-        forbidden = ("encoded_bytes", "encoded_bytes_per_second")
-    elif version_text == "2":
-        version = 2
-        integer_fields = V2_INTEGER_FIELDS
-        rate_fields = V2_RATE_FIELDS
-        forbidden = ("raw_bytes", "raw_bytes_per_second")
-    else:
-        raise ValueError("unsupported metrics_version")
-    mixed = [key for key in forbidden if key in values]
-    if mixed:
-        raise ValueError(f"metrics contract contains forbidden {mixed[0]}")
-    required = {"profile", "return", *integer_fields, *rate_fields}
-    if version == 2:
-        required.add("metrics_version")
-    missing = sorted(required - values.keys())
-    if missing:
-        raise ValueError("missing metrics fields: " + ", ".join(missing))
-    unknown = sorted(values.keys() - required)
-    if unknown:
-        raise ValueError("unknown metrics fields: " + ", ".join(unknown))
-    if values["profile"] not in ("fast", "balanced", "full"):
-        raise ValueError("invalid profile metric")
-    if re.fullmatch(r"0x[0-9a-fA-F]+", values["return"]) is None:
-        raise ValueError("invalid return metric")
-    if int(values["return"], 16) > UINT64_MAX:
-        raise ValueError("return metric exceeds uint64")
-
-    parsed: dict[str, int | Decimal | str] = {
-        "profile": values["profile"],
-        "return": values["return"].lower(),
-        "metrics_version": version,
-    }
-    try:
-        for key in integer_fields:
-            if re.fullmatch(r"\d+", values[key]) is None:
-                raise ValueError(f"{key} is not an unsigned integer")
-            parsed[key] = int(values[key])
-            if int(parsed[key]) < 0:
-                raise ValueError(f"{key} must not be negative")
-            if int(parsed[key]) > UINT64_MAX:
-                raise ValueError(f"{key} exceeds uint64")
-        for key in rate_fields:
-            if re.fullmatch(r"\d+\.\d{6}", values[key]) is None:
-                raise ValueError(f"{key} is not fixed-six decimal")
-            parsed[key] = Decimal(values[key])
-            if not Decimal(parsed[key]).is_finite() or Decimal(parsed[key]) < 0:
-                raise ValueError(f"{key} must be finite and non-negative")
-    except (ValueError, InvalidOperation) as error:
-        raise ValueError(f"invalid metrics value: {error}") from error
-
-    expected_rates = _expected_optimized_rates(parsed)
-    for key, expected in expected_rates.items():
-        if abs(Decimal(values[key]) - expected) >= Decimal("0.000001"):
-            raise ValueError(f"{key} is inconsistent with raw counters")
-    return parsed
-
-
 def compare_to_baseline(
     current: dict[str, int | Decimal | str], baseline: dict[str, int | Decimal | str]
 ) -> dict[str, Decimal]:
@@ -271,16 +152,21 @@ def compare_to_profile_baseline(
     runs: Iterable[dict[str, int | Decimal | str]],
 ) -> dict[str, Any]:
     measured = list(runs)
-    if not measured:
-        raise ValueError("binary acceptance requires measured runs")
+    if len(measured) != 5:
+        raise ValueError("binary acceptance requires exactly five measured runs")
     for run in measured:
         require_binary_acceptance_candidate(run)
     profile = str(current.get("profile", ""))
     if profile not in PROFILE_RATE_TARGETS or profile != str(baseline.get("profile", "")):
         raise ValueError("current and baseline profiles differ")
-    for key in ("instructions", "return"):
+    for key in ("instructions", "return", "decoded_event_count",
+                "first_instruction", "last_instruction"):
         if str(current.get(key, "")).lower() != str(baseline.get(key, "")).lower():
             raise ValueError(f"format-2 oracle mismatch for {key}")
+    for run in measured:
+        for key in ("decoded_event_count", "first_instruction", "last_instruction"):
+            if str(run.get(key, "")).lower() != str(baseline.get(key, "")).lower():
+                raise ValueError(f"format-2 oracle mismatch for {key}")
     rate = Decimal(current["instructions_per_second"])
     baseline_compressed = int(baseline["compressed_bytes"])
     compressed_values = [int(run["compressed_bytes"]) for run in measured]
@@ -404,8 +290,8 @@ def _format_two_baseline_rows(document: str) -> list[dict[str, int | str]]:
             "elapsed_values_ms": ", ".join(str(value) for value in elapsed_values),
             "artifact": values["Artifact"],
             "return": values["Return"].lower(),
-            "first_sequence": values["First sequence"],
-            "last_sequence": values["Last sequence"],
+            "first_instruction": values["First sequence"],
+            "last_instruction": values["Last sequence"],
             "footer": values["Footer"],
             "artifact_sha256": values["Artifact SHA-256"],
         }
@@ -428,6 +314,10 @@ def parse_baseline_document(document: str) -> dict[str, str]:
         ("ABI", "abi"),
         ("Android build type", "android_build_type"),
         ("App build type", "app_build_type"),
+        ("Build fingerprint", "build_fingerprint"),
+        ("SELinux", "selinux"),
+        ("Package", "package"),
+        ("Candidate tracer SHA-256", "candidate_tracer_sha256"),
     ):
         match = re.search(rf"^\| {re.escape(label)} \|\s*(.*?)\s*\|$", document, re.MULTILINE)
         if match is None or not match.group(1).strip():
@@ -468,6 +358,9 @@ def ensure_same_format_two_device(baseline: dict[str, str], current: dict[str, s
         "abi": "abi",
         "android_build_type": "android_build_type",
         "app_build_type": "app_build_type",
+        "build_fingerprint": "build_fingerprint",
+        "selinux": "selinux",
+        "package": "package",
     }
     mismatches = [
         f"{baseline_key}: baseline={baseline.get(baseline_key)!r} "
@@ -657,6 +550,13 @@ def median_report(
             report["converted_text_bytes"] = _integer_median(
                 int(run["converted_text_bytes"]) for run in runs
             )
+        for key in ("decoded_event_count", "first_instruction", "last_instruction"):
+            if all(key in run for run in runs):
+                values = {str(run[key]) for run in runs}
+                if len(values) != 1:
+                    raise ValueError(f"benchmark semantic oracle differs for {key}")
+                value = values.pop()
+                report[key] = int(value) if key == "decoded_event_count" else value
         return report
     for key in ("instructions", "elapsed_ms", "raw_bytes"):
         values = [int(run[key]) for run in runs if key in run]
@@ -743,6 +643,7 @@ def live_device_identity(args: argparse.Namespace) -> dict[str, str]:
         )
         app_build_type = classify_run_as_build_type(error.returncode, stderr)
 
+    selinux = adb(args, "shell", "getenforce", text=True).stdout.strip()
     return {
         "model": prop("ro.product.model"),
         "device": prop("ro.product.device"),
@@ -750,9 +651,35 @@ def live_device_identity(args: argparse.Namespace) -> dict[str, str]:
         "abi": prop("ro.product.cpu.abi"),
         "android_build_type": prop("ro.build.type"),
         "app_build_type": app_build_type,
+        "build_fingerprint": prop("ro.build.fingerprint"),
+        "selinux": selinux,
+        "package": args.package,
         # The older throughput baseline uses this key for application build configuration.
         "build_type": app_build_type,
     }
+
+
+def verify_candidate_tracer(args: argparse.Namespace, baseline: dict[str, str]) -> str:
+    configured = getattr(args, "candidate_tracer", None)
+    if not configured:
+        raise ValueError("binary acceptance requires --candidate-tracer")
+    candidate = Path(configured)
+    if not candidate.is_file():
+        raise ValueError(f"candidate tracer does not exist: {candidate}")
+    local_sha = _sha256_file(candidate)
+    expected = baseline.get("candidate_tracer_sha256", "").lower()
+    if local_sha != expected:
+        raise ValueError(
+            f"candidate tracer SHA-256 mismatch: baseline={expected} current={local_sha}"
+        )
+    completed = adb(
+        args, "exec-out", "run-as", args.package, "sha256sum",
+        "files/libqbdi_tracer.so", text=True,
+    )
+    match = re.fullmatch(r"([0-9a-fA-F]{64})\s+.*\s*", completed.stdout)
+    if match is None or match.group(1).lower() != local_sha:
+        raise ValueError("app-private candidate tracer SHA-256 does not match staged tracer")
+    return local_sha
 
 
 def newest_legacy_trace(
@@ -829,6 +756,39 @@ def _sha256_file(path: Path) -> str:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_FORMAT_THREE_INST = re.compile(
+    r'^INST seq=(\d+) module=("(?:[^"\\]|\\.)*") .*?relative_pc=(0x[0-9a-f]+) '
+    r'.*? asm=("(?:[^"\\]|\\.)*") '
+)
+
+
+def streaming_semantic_oracle(path: Path) -> dict[str, int | str]:
+    count = 0
+    first = ""
+    last = ""
+    with path.open("r", encoding="utf-8", errors="strict") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if len(line) > 1024 * 1024:
+                raise RuntimeError(f"converted line {line_number} exceeds size limit")
+            match = _FORMAT_THREE_INST.match(line)
+            if match is None:
+                continue
+            sequence = int(match.group(1))
+            module = json.loads(match.group(2))
+            asm = json.loads(match.group(4))
+            mnemonic = asm.split(None, 1)[0] if asm else ""
+            identity = f"{sequence} {module}+{match.group(3)} {mnemonic}"
+            if count == 0:
+                first = identity
+            last = identity
+            count += 1
+    return {
+        "decoded_event_count": count,
+        "first_instruction": first,
+        "last_instruction": last,
+    }
 
 
 def _validate_format_two_file(
@@ -912,6 +872,7 @@ def collect_and_validate_optimized_artifact(
             except (BinaryTraceError, PullTraceError) as error:
                 raise RuntimeError(f"binary artifact validation failed: {error}") from error
             result["converted_text_bytes"] = stats.converted_text_bytes
+            result.update(streaming_semantic_oracle(text))
         else:
             decoded = root / (artifact_name.removesuffix(TEXT_TRACE_SUFFIX) + ".trace.txt")
             try:
@@ -1068,6 +1029,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--profile", choices=("fast", "balanced", "full"), default="fast")
     parser.add_argument("--compare", help="checked-in baseline Markdown report")
+    parser.add_argument(
+        "--candidate-tracer",
+        help="exact staged libqbdi_tracer.so; required for binary acceptance comparison",
+    )
     parser.add_argument("--legacy", action="store_true", help="require uncompressed .trace.txt files")
     parser.add_argument(
         "--test-buffer-bytes", type=int,
@@ -1097,6 +1062,8 @@ def main() -> int:
     args = parse_args()
     if args.runs < 1:
         raise SystemExit("--runs must be at least one")
+    if args.compare and args.runs != 5:
+        raise ValueError("acceptance comparison requires exactly five measured runs")
     if args.test_fail_setup:
         if args.runs != 1:
             raise ValueError("--test-fail-setup requires --runs 1")
@@ -1107,12 +1074,15 @@ def main() -> int:
         return 0
     baseline: dict[str, int | str] | None = None
     profile_baseline: dict[str, int | str] | None = None
+    candidate_tracer_sha256: str | None = None
     if args.compare:
         baseline_document = Path(args.compare).read_text(encoding="utf-8")
         identity = live_device_identity(args)
         if "## Current format-2 artifact baselines" in baseline_document:
             profile_baseline = parse_profile_baseline(baseline_document, args.profile)
-            ensure_same_format_two_device(parse_baseline_document(baseline_document), identity)
+            baseline_identity = parse_baseline_document(baseline_document)
+            ensure_same_format_two_device(baseline_identity, identity)
+            candidate_tracer_sha256 = verify_candidate_tracer(args, baseline_identity)
         else:
             require_balanced_comparison(args.profile)
             baseline = parse_baseline_report(baseline_document)
@@ -1124,6 +1094,8 @@ def main() -> int:
     stable_return = ensure_stable_return([str(warmup["return"]), *[str(run["return"]) for run in runs]])
     report = median_report(runs)
     report["return"] = stable_return
+    if candidate_tracer_sha256 is not None:
+        report["candidate_tracer_sha256"] = candidate_tracer_sha256
     report["runs"] = (
         [{**run, **throughput_metrics(run)} for run in runs] if args.legacy else runs
     )

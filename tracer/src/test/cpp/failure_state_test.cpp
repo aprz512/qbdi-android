@@ -1103,6 +1103,17 @@ void atfork_install_failure_prevents_opening_a_crash_marker_fd() {
     CHECK(::rmdir(directory) == 0);
 }
 
+void crash_marker_path_overflow_latches_without_opening_or_allocating() {
+    const std::string oversized(4096, 'x');
+    CrashMarkerSession session;
+    CHECK(!session.open(oversized));
+    CHECK(session.error_code() == ENAMETOOLONG);
+    CHECK(!session.open("/tmp/later"));
+    CHECK(session.error_code() == ENAMETOOLONG);
+    CHECK(!session.finish());
+    CHECK(session.error_code() == ENAMETOOLONG);
+}
+
 } // namespace
 
 int main() {
@@ -1133,6 +1144,7 @@ int main() {
     fork_child_closes_marker_fd_already_claimed_by_live_handler();
     fork_child_does_not_close_fd_reused_after_marker_finish();
     artifact_names_are_unique_before_exclusive_trace_creation();
+    crash_marker_path_overflow_latches_without_opening_or_allocating();
     atfork_install_failure_prevents_opening_a_crash_marker_fd();
     return 0;
 }

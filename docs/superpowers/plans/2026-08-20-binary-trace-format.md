@@ -634,11 +634,11 @@ git commit -m "feat(trace): handle binary trace artifacts"
 - Consumes: completed writer, converter, pull integration, metrics v2, and Task 1 baseline.
 - Produces: user workflow, final protocol documentation, same-device evidence, and acceptance verdict.
 
-- [ ] **Step 1: Add documentation contract RED tests**
+- [x] **Step 1: Add documentation contract RED tests**
 
 Require the actual docs to contain .trace.bin.lz4, QTRB v1, metrics_version=2, trace_convert.py, pull_trace.py, app-private staging, format-2 compatibility, and crash partial semantics. Require binary trace output to be absent from explicit exclusions.
 
-- [ ] **Step 2: Update documentation**
+- [x] **Step 2: Update documentation**
 
 Document exact artifact names, header and record fields, limits, format-3 escaping/order, metrics v2, old compatibility, automatic pull conversion, manual conversion, crash partial behavior, and exit statuses.
 
@@ -647,7 +647,7 @@ python3 scripts/pull_trace.py --package com.aprz.qbdiandroid   --device 192.168.
 python3 scripts/trace_convert.py input.trace.bin.lz4 --output output.trace.txt
 ~~~
 
-- [ ] **Step 3: Run fresh host and Android matrices**
+- [x] **Step 3: Run fresh host and Android matrices**
 
 Configure/build/test native Debug, strict -Wall -Wextra -Werror, Release, and ASan+UBSan. Run all Python tests, Node syntax, Python byte compilation, and git diff --check. Then run:
 
@@ -657,13 +657,13 @@ Configure/build/test native Debug, strict -Wall -Wextra -Werror, Release, and AS
 
 Expected: every suite passes and Gradle reports BUILD SUCCESSFUL. Confirm the shared object is ELF64 AArch64 and Release contains no Debug-only option strings.
 
-- [ ] **Step 4: Run Pixel 6 acceptance**
+- [x] **Step 4: Run Pixel 6 acceptance**
 
 Stage the exact hashed Debug tracer into app-private storage; verify local/device SHA-256 and SELinux Enforcing. Run one warmup plus five fresh measured processes for fast, balanced, and full. Pull each median artifact and verify format 3, sequence 1..21718, footer/sidecar agreement, stable return, no crash marker, and compressed size no larger than Task 1.
 
 Run the existing large-workload iteration count. Require visible artifact growth during execution, normal target completion, stable return, and complete conversion. Record all elapsed values, medians, rates, encoded/compressed sizes, ratios, cache/wait counters, hashes, conversion results, and gate verdicts.
 
-- [ ] **Step 5: Commit acceptance evidence**
+- [x] **Step 5: Commit acceptance evidence**
 
 ~~~bash
 git add README.md docs/trace-format.md docs/benchmarks/binary-trace-baseline.md
@@ -689,3 +689,15 @@ Request an independent review against docs/superpowers/specs/2026-08-20-binary-t
 - Device speed/size evidence uses the same device, build, workload, and exact hashes.
 
 Resolve every Critical and Important finding with a RED/GREEN regression before integration.
+
+### Final repair wave (2026-08-21)
+
+- [x] Add reversible RULE/ERROR continuations that fit a 4096-byte producer buffer.
+- [x] Bound producer and host instruction definitions to 65,536 dense run-local IDs.
+- [x] Reclaim mappings, compression state, fd, and pthread ownership after two join failures.
+- [x] Require five measured acceptance runs, complete device/package/build/tracer identity, and a
+  streaming count/first/last instruction oracle.
+- [x] Share one strict suffix-aware v1/v2 metrics parser and recompute every fixed-six rate.
+- [x] Define minor-1 optional record namespace behavior while rejecting required extensions.
+- [x] Make crash-marker session and retired paths fixed-capacity under `-fno-exceptions`.
+- [x] Reject impossible continuation metadata and remove obsolete text-era instruction fields.

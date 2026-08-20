@@ -320,8 +320,11 @@ bool BinaryTraceWriter::instruction(const TraceContext &context, const Instructi
     if (!writable_event_state()) return false;
     if (record.decoded == nullptr) return fail(EINVAL);
     if (record.memory_count > record.memory.size()) return fail(EINVAL);
-    const uint32_t metadata_id = record.decoded->opcode;
-    if (dictionary_.needs_instruction_definition(record.decoded->opcode)) {
+    uint32_t metadata_id = 0;
+    bool needs_definition = false;
+    if (!dictionary_.resolve(record.decoded->opcode, &metadata_id, &needs_definition))
+        return fail(EOVERFLOW);
+    if (needs_definition) {
         WritableSpan definition_span = writer_.reserve(kBinaryMaxInstructionDefinitionRecordBytes);
         if (definition_span.data == nullptr) return fail();
         const BinaryEncodeResult definition = encoder_.encode_instruction_definition(
@@ -333,7 +336,8 @@ bool BinaryTraceWriter::instruction(const TraceContext &context, const Instructi
         }
         writer_.commit(definition.size);
         if (writer_.failed()) return fail();
-        dictionary_.commit_instruction_definition(record.decoded->opcode);
+        if (!dictionary_.commit_instruction_definition(record.decoded->opcode, metadata_id))
+            return fail(EOVERFLOW);
     }
 
     WritableSpan span = writer_.reserve(kBinaryMaxInstructionRecordBytes);
@@ -453,12 +457,50 @@ bool BinaryTraceWriter::append_event(BinaryRecordType type, std::string_view nam
     if (!writable_event_state()) return false;
     if (name.size() > kBinaryMaxEventNameBytes || detail.size() > kBinaryMaxEventDetailBytes)
         return fail(EINVAL);
+    if (detail.size() > kBinaryMaxEventChunkDetailBytes) {
+        size_t chunk_count = 0;
+        for (size_t offset = 0; offset < detail.size();
+             offset = call_chunk_end(detail, offset)) {
+            ++chunk_count;
+        }
+        if (chunk_count < 2 || chunk_count > UINT16_MAX) return fail(EINVAL);
+        uint64_t event_id = next_call_event_id_++;
+        if (event_id == 0) event_id = next_call_event_id_++;
+        size_t offset = 0;
+        for (size_t index = 0; index < chunk_count; ++index) {
+            const size_t end = call_chunk_end(detail, offset);
+            const EventChunkInfo chunk{event_id, static_cast<uint32_t>(detail.size()),
+                                       static_cast<uint16_t>(index),
+                                       static_cast<uint16_t>(chunk_count)};
+            if (!append_event_chunk(type, name, detail.substr(offset, end - offset), chunk))
+                return false;
+            offset = end;
+        }
+        return true;
+    }
     const size_t maximum = kBinaryRecordHeaderBytes + kBinaryRuleErrorFixedPayloadBytes +
                            name.size() + detail.size();
     WritableSpan span = writer_.reserve(maximum);
     if (span.data == nullptr) return fail();
     const BinaryEncodeResult result = encoder_.encode_event(
             reinterpret_cast<uint8_t *>(span.data), span.capacity, type, name, detail);
+    if (!result.ok) {
+        writer_.commit(0);
+        return fail(EINVAL);
+    }
+    writer_.commit(result.size);
+    return writer_.failed() ? fail() : true;
+}
+
+bool BinaryTraceWriter::append_event_chunk(BinaryRecordType type, std::string_view name,
+                                           std::string_view detail,
+                                           const EventChunkInfo &chunk) {
+    const size_t maximum = kBinaryRecordHeaderBytes + kBinaryEventChunkFixedPayloadBytes +
+                           name.size() + detail.size();
+    WritableSpan span = writer_.reserve(maximum);
+    if (span.data == nullptr) return fail();
+    const BinaryEncodeResult result = encoder_.encode_event_chunk(
+            reinterpret_cast<uint8_t *>(span.data), span.capacity, type, chunk, name, detail);
     if (!result.ok) {
         writer_.commit(0);
         return fail(EINVAL);

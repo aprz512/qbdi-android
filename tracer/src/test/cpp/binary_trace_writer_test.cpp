@@ -592,6 +592,51 @@ void uncompressed_stream_uses_binary_suffix_and_exact_byte_counts() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+void maximum_rule_and_error_survive_four_kib_buffers_in_order() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    const std::string name(kBinaryMaxEventNameBytes, 'n');
+    const std::string utf8 = std::string(3071, 'a') + "\xe2\x82\xac" +
+                             std::string(kBinaryMaxEventDetailBytes - 3074, 'b');
+    const std::string raw = std::string(3071, 'r') + std::string("\x80\xff\0", 3) +
+                            std::string(kBinaryMaxEventDetailBytes - 3074, 's');
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.rule(name, utf8));
+    CHECK(writer.error(raw));
+    CHECK(writer.end(0, true, 1));
+    CHECK(writer.close());
+
+    const std::vector<uint8_t> stream = read_bytes(artifact_path(writer));
+    std::vector<BinaryRecordType> semantic_types;
+    size_t offset = kBinaryStreamHeaderBytes;
+    while (offset < stream.size()) {
+        const auto type = static_cast<BinaryRecordType>(u16(stream, offset));
+        const uint16_t flags = u16(stream, offset + 2);
+        const size_t record_bytes = kBinaryRecordHeaderBytes + u32(stream, offset + 4);
+        CHECK(record_bytes <= 4096);
+        if (type == BinaryRecordType::Rule || type == BinaryRecordType::Error) {
+            CHECK(flags == kBinaryEventChunkFlag);
+            semantic_types.push_back(type);
+        }
+        offset += record_bytes;
+    }
+    CHECK((semantic_types == std::vector<BinaryRecordType>{
+            BinaryRecordType::Rule, BinaryRecordType::Rule,
+            BinaryRecordType::Error, BinaryRecordType::Error}));
+
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 void instruction_memory_and_continuations_keep_producer_order() {
     const std::string directory = temporary_directory();
     TraceOptions options{};
@@ -897,6 +942,56 @@ void failed_definition_is_not_committed() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+void metadata_dictionary_boundary_finalizes_65536_and_rejects_65537() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 64 * 1024;
+    const TraceContext context = context_for(directory);
+    std::string successful_path;
+    {
+        TraceMetrics metrics{};
+        BinaryTraceWriter writer(options, &metrics);
+        CachedInstruction decoded{};
+        CHECK(writer.open(context));
+        CHECK(writer.begin(context));
+        for (uint32_t opcode = 0; opcode < (1U << 16U); ++opcode) {
+            decoded.opcode = opcode;
+            CHECK(writer.instruction(context, instruction(opcode + 1ULL, &decoded)));
+        }
+        CHECK(writer.end(0x55, true, 1));
+        CHECK(writer.close());
+        CHECK(metrics.instructions == (1U << 16U));
+        successful_path = artifact_path(writer);
+        CHECK(record_types(read_bytes(successful_path)).back() == BinaryRecordType::TraceEnd);
+        CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+        CHECK(::unlink(successful_path.c_str()) == 0);
+    }
+    {
+        TraceMetrics metrics{};
+        BinaryTraceWriter writer(options, &metrics);
+        CachedInstruction decoded{};
+        CHECK(writer.open(context));
+        CHECK(writer.begin(context));
+        for (uint32_t opcode = 0; opcode < (1U << 16U); ++opcode) {
+            decoded.opcode = opcode;
+            CHECK(writer.instruction(context, instruction(opcode + 1ULL, &decoded)));
+        }
+        const uint64_t encoded_before = metrics.encoded_bytes;
+        decoded.opcode = 1U << 16U;
+        CHECK(!writer.instruction(context, instruction((1U << 16U) + 1ULL, &decoded)));
+        CHECK(writer.error_code() == EOVERFLOW);
+        CHECK(metrics.instructions == (1U << 16U));
+        CHECK(metrics.encoded_bytes == encoded_before);
+        const std::string failed_path = artifact_path(writer);
+        CHECK(!writer.close());
+        CHECK(::access((failed_path + ".metrics").c_str(), F_OK) != 0);
+        CHECK(::unlink(failed_path.c_str()) == 0);
+    }
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 void async_write_error_preserves_first_error_and_suppresses_metrics() {
     const std::string directory = temporary_directory();
     TraceOptions options{};
@@ -1080,6 +1175,7 @@ void padded_footer_is_total_for_exact_cycle_and_adversarial_prefixes() {
 int main() {
     compressed_stream_definitions_footer_and_metrics_v2_are_consistent();
     uncompressed_stream_uses_binary_suffix_and_exact_byte_counts();
+    maximum_rule_and_error_survive_four_kib_buffers_in_order();
     instruction_memory_and_continuations_keep_producer_order();
     sidecar_retries_eintr_and_partial_writes();
     sidecar_write_error_removes_partial_file();
@@ -1089,6 +1185,7 @@ int main() {
     oversized_logical_call_fails_before_writing_any_fragment();
     encoding_failure_latches_and_does_no_later_event_work();
     failed_definition_is_not_committed();
+    metadata_dictionary_boundary_finalizes_65536_and_rejects_65537();
     async_write_error_preserves_first_error_and_suppresses_metrics();
     sidecar_error_removes_partial_metrics_and_close_is_idempotent();
     setup_allocation_failure_latches_enomem_without_artifacts();

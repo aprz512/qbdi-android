@@ -10,8 +10,6 @@ constexpr size_t kTraceGprCount = kArm64RegisterCount;
 constexpr uint64_t kTraceValidGprMask = (1ULL << kTraceGprCount) - 1ULL;
 constexpr size_t kMaxRegisterNameBytes = 16;
 constexpr size_t kMaxMemoryRecords = 8;
-constexpr size_t kMaxHexdumpBytes = kMaxCapturedMemoryBytes;
-constexpr size_t kMaxInstructionLineBytes = 4096;
 
 struct CachedInstruction;
 
@@ -33,9 +31,6 @@ struct MemoryRecord {
     uint64_t value = 0;
     MemoryBytes before{};
     MemoryBytes after{};
-    // Legacy producer field retained for compatibility with semantic callers.
-    std::array<uint8_t, kMaxHexdumpBytes> hexdump{};
-    uint8_t hexdump_size = 0;
 };
 
 struct InstructionRecord {

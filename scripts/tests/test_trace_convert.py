@@ -54,10 +54,18 @@ def fake_lz4_executable(root: Path) -> Path:
 
 def metrics_sidecar(source: Path, extra: str = "") -> str:
     size = source.stat().st_size
+    def fixed_six(numerator: int, denominator: int) -> str:
+        whole, remainder = divmod(numerator, denominator)
+        return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
     return (
         "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
-        f"elapsed_ms=17\nencoded_bytes={size}\ncompressed_bytes={size}\n"
+        f"elapsed_ms=17\ninstructions_per_second=0.000000\n"
+        f"encoded_bytes={size}\ncompressed_bytes={size}\n"
+        f"encoded_bytes_per_second={fixed_six(size * 1000, 17)}\n"
+        f"disk_bytes_per_second={fixed_six(size * 1000, 17)}\n"
+        "compression_ratio=1.000000\n"
         "cache_hits=9\ncache_misses=1\ncache_collisions=0\n"
+        "cache_hit_rate=0.900000\n"
         "buffer_swaps=2\nproducer_waits=0\nproducer_wait_ns=0\n"
         "effective_buffer_bytes=4096\n" + extra
     )
@@ -162,7 +170,9 @@ class DocumentationContractTests(unittest.TestCase):
             "CALL": ("6", "0", "category string; name string; detail string", "6", "4620"),
             "CALL_CONTINUATION": ("6", "0x0001", "event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; category string; name string; detail_fragment string", "22", "3612"),
             "RULE": ("7", "0", "name string; detail string", "4", "4363"),
+            "RULE_CONTINUATION": ("7", "0x0001", "event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; name string; detail_fragment string", "20", "3355"),
             "ERROR": ("8", "0", "name string; detail string", "4", "4363"),
+            "ERROR_CONTINUATION": ("8", "0x0001", "event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; name string; detail_fragment string", "20", "3355"),
             "TRACE_END": ("9", "0", "success u8; return_value u64; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64", "97", "105"),
         }
         self.assertEqual(expected, {
@@ -205,6 +215,8 @@ class DocumentationContractTests(unittest.TestCase):
             "MEMORY": "kBinaryMaxMemoryRecordBytes",
             "CALL": "kBinaryMaxCallRecordBytes",
             "CALL_CONTINUATION": "kBinaryMaxCallChunkRecordBytes",
+            "RULE_CONTINUATION": "kBinaryMaxEventChunkRecordBytes",
+            "ERROR_CONTINUATION": "kBinaryMaxEventChunkRecordBytes",
             "RULE": "kBinaryMaxRuleErrorRecordBytes",
             "ERROR": "kBinaryMaxRuleErrorRecordBytes",
             "TRACE_END": "kBinaryTraceEndRecordBytes",
@@ -420,13 +432,33 @@ class TraceConvertFileTests(unittest.TestCase):
             source.write_bytes(raw_stream())
             (root / "run.trace.bin.metrics").write_text(
                 "metrics_version=2\nprofile=full\nreturn=0x999\ninstructions=0\n"
-                "elapsed_ms=17\nencoded_bytes=0\ncompressed_bytes=0\n"
+                "elapsed_ms=17\ninstructions_per_second=0.000000\n"
+                "encoded_bytes=0\ncompressed_bytes=0\n"
+                "encoded_bytes_per_second=0.000000\ndisk_bytes_per_second=0.000000\n"
+                "compression_ratio=0.000000\n"
                 "cache_hits=9\ncache_misses=1\ncache_collisions=0\n"
+                "cache_hit_rate=0.900000\n"
                 "buffer_swaps=2\nproducer_waits=0\nproducer_wait_ns=0\n"
                 "effective_buffer_bytes=4096\n", encoding="utf-8"
             )
             with self.assertRaisesRegex(BinaryTraceError, "sidecar mismatch.*return"):
                 convert_binary_file(source, root / "out.txt", lz4=None, crash_marked=False)
+
+    def test_rejects_well_formed_but_inconsistent_v2_rates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "run.trace.bin"
+            source.write_bytes(raw_stream())
+            sidecar = Path(str(source) + ".metrics")
+            sidecar.write_text(
+                metrics_sidecar(source).replace(
+                    "instructions_per_second=0.000000",
+                    "instructions_per_second=999999999.000000",
+                ), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(BinaryTraceError, "instructions_per_second.*inconsistent"):
+                convert_binary_file(source, root / "bad-rate.txt", lz4=None,
+                                    crash_marked=False)
 
     def test_cli_help(self):
         with self.assertRaises(SystemExit) as caught:
@@ -496,7 +528,9 @@ class TraceConvertFileTests(unittest.TestCase):
                                     crash_marked=False)
 
             sidecar.write_text(
-                metrics_sidecar(source, "cache_hit_rate=garbage\n"), encoding="utf-8"
+                metrics_sidecar(source).replace("cache_hit_rate=0.900000",
+                                                "cache_hit_rate=garbage"),
+                encoding="utf-8"
             )
             with self.assertRaisesRegex(BinaryTraceError, "invalid.*cache_hit_rate"):
                 convert_binary_file(source, root / "rate.txt", lz4=None,

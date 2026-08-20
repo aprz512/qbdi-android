@@ -32,6 +32,7 @@ try:
     )
     from scripts.trace_binary import BinaryTraceError
     from scripts.trace_convert import convert_binary_file
+    from scripts.trace_metrics import parse_metrics
 except ModuleNotFoundError:  # Support direct execution as scripts/pull_trace.py.
     from bounded_process import BoundedProcessError, capture_bounded  # type: ignore[no-redef]
     from lz4_frames import (  # type: ignore[no-redef]
@@ -46,6 +47,7 @@ except ModuleNotFoundError:  # Support direct execution as scripts/pull_trace.py
     )
     from trace_binary import BinaryTraceError  # type: ignore[no-redef]
     from trace_convert import convert_binary_file  # type: ignore[no-redef]
+    from trace_metrics import parse_metrics  # type: ignore[no-redef]
 
 
 CRASH_MARKER_MAGIC = 0x51435248
@@ -310,6 +312,11 @@ def pull_artifact_set(
         )
         for sidecar in sidecar_names
     }
+    if metrics_name in sidecars:
+        try:
+            parse_metrics(sidecars[metrics_name], name)
+        except ValueError as error:
+            raise PullTraceError(str(error)) from error
     classification = classify_artifacts({name: b"", **sidecars})[name]
     pulled: list[Path] = []
     compressed_temporary = _temporary_path(output_directory)

@@ -189,7 +189,15 @@ class PullArtifactTests(unittest.TestCase):
 
     def test_pulls_compressed_trace_and_sidecars_without_decompressing(self):
         name = "123_algorithm.trace.txt.lz4"
-        files = {name: b"compressed", name + ".metrics": b"instructions=1\n"}
+        metrics = (
+            b"profile=fast\nreturn=0x1\ninstructions=1\nelapsed_ms=1\n"
+            b"instructions_per_second=1000.000000\nraw_bytes=10\ncompressed_bytes=10\n"
+            b"raw_bytes_per_second=10000.000000\ndisk_bytes_per_second=10000.000000\n"
+            b"compression_ratio=1.000000\ncache_hits=1\ncache_misses=0\n"
+            b"cache_collisions=0\ncache_hit_rate=1.000000\nbuffer_swaps=1\n"
+            b"producer_waits=0\nproducer_wait_ns=0\neffective_buffer_bytes=4096\n"
+        )
+        files = {name: b"compressed", name + ".metrics": metrics}
         client = self.FakeClient(files)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -201,9 +209,27 @@ class PullArtifactTests(unittest.TestCase):
             self.assertEqual("complete", result.status)
             self.assertEqual(b"compressed", (Path(directory) / name).read_bytes())
             self.assertEqual(
-                b"instructions=1\n", (Path(directory) / (name + ".metrics")).read_bytes()
+                metrics, (Path(directory) / (name + ".metrics")).read_bytes()
             )
             self.assertEqual([name], client.streamed)
+
+    def test_rejects_mixed_generation_sidecar_before_publication(self):
+        name = "123_algorithm.trace.txt.lz4"
+        sidecar = (
+            b"metrics_version=2\nprofile=fast\nreturn=0x1\ninstructions=0\n"
+            b"elapsed_ms=1\ninstructions_per_second=0.000000\nencoded_bytes=1\n"
+            b"compressed_bytes=1\nencoded_bytes_per_second=1000.000000\n"
+            b"disk_bytes_per_second=1000.000000\ncompression_ratio=1.000000\n"
+            b"cache_hits=0\ncache_misses=0\ncache_collisions=0\ncache_hit_rate=0.000000\n"
+            b"buffer_swaps=1\nproducer_waits=0\nproducer_wait_ns=0\n"
+            b"effective_buffer_bytes=4096\n"
+        )
+        files = {name: b"compressed", name + ".metrics": sidecar}
+        client = self.FakeClient(files)
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+                PullTraceError, "metrics v2"):
+            pull_artifact_set(client, name, files, Path(directory), compressed_only=True)
+        self.assertEqual([], client.streamed)
 
     def test_never_overwrites_any_possible_output_without_force(self):
         name = "123_algorithm.trace.txt.lz4"

@@ -18,6 +18,7 @@ try:
         _ConversionDetails,
         _convert_binary_stream,
     )
+    from scripts.trace_metrics import MAX_METRICS_BYTES, parse_metrics
 except ModuleNotFoundError:  # Support direct execution as scripts/trace_convert.py.
     from lz4_frames import (  # type: ignore[no-redef]
         PullTraceError, decode_lz4_file, scan_lz4_file,
@@ -28,27 +29,12 @@ except ModuleNotFoundError:  # Support direct execution as scripts/trace_convert
         _ConversionDetails,
         _convert_binary_stream,
     )
+    from trace_metrics import MAX_METRICS_BYTES, parse_metrics  # type: ignore[no-redef]
 
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_PARTIAL = 2
-MAX_SIDECAR_BYTES = 64 * 1024
-MAX_SIDECAR_LINE_BYTES = 256
-MAX_SIDECAR_KEY_BYTES = 64
-MAX_SIDECAR_VALUE_BYTES = 128
-MAX_SIDECAR_FIELDS = 19
-REQUIRED_SIDECAR_KEYS = frozenset((
-    "metrics_version", "profile", "return", "instructions", "elapsed_ms",
-    "encoded_bytes", "compressed_bytes", "cache_hits", "cache_misses",
-    "cache_collisions", "buffer_swaps", "producer_waits", "producer_wait_ns",
-    "effective_buffer_bytes",
-))
-OPTIONAL_SIDECAR_KEYS = frozenset((
-    "instructions_per_second", "encoded_bytes_per_second", "disk_bytes_per_second",
-    "compression_ratio", "cache_hit_rate",
-))
-assert MAX_SIDECAR_FIELDS == len(REQUIRED_SIDECAR_KEYS | OPTIONAL_SIDECAR_KEYS)
 
 
 def _temporary_path(directory: Path, suffix: str) -> Path:
@@ -84,90 +70,19 @@ def _publish(temporary: Path, destination: Path, force: bool) -> None:
     _fsync_directory(destination.parent)
 
 
-def _parse_sidecar(path: Path) -> dict[str, str]:
-    if path.stat().st_size > MAX_SIDECAR_BYTES:
-        raise BinaryTraceError("metrics sidecar exceeds size limit")
-    values: dict[str, str] = {}
-    total = 0
-    with path.open("rb") as stream:
-        for number in range(1, MAX_SIDECAR_FIELDS + 2):
-            raw = stream.readline(MAX_SIDECAR_LINE_BYTES + 1)
-            if not raw:
-                break
-            if number > MAX_SIDECAR_FIELDS:
-                raise BinaryTraceError("metrics sidecar exceeds field count limit")
-            total += len(raw)
-            if total > MAX_SIDECAR_BYTES or len(raw) > MAX_SIDECAR_LINE_BYTES:
-                raise BinaryTraceError("metrics sidecar exceeds line or file limit")
-            if not raw.endswith(b"\n"):
-                raise BinaryTraceError(f"unterminated metrics sidecar line {number}")
-            line = raw[:-1]
-            if not line or b"=" not in line:
-                raise BinaryTraceError(f"invalid metrics sidecar line {number}")
-            key_bytes, value_bytes = line.split(b"=", 1)
-            if (not key_bytes or len(key_bytes) > MAX_SIDECAR_KEY_BYTES
-                    or len(value_bytes) > MAX_SIDECAR_VALUE_BYTES):
-                raise BinaryTraceError(f"metrics sidecar field {number} exceeds limit")
-            try:
-                key = key_bytes.decode("ascii")
-                value = value_bytes.decode("ascii")
-            except UnicodeDecodeError as error:
-                raise BinaryTraceError("metrics sidecar is not ASCII") from error
-            if key not in REQUIRED_SIDECAR_KEYS | OPTIONAL_SIDECAR_KEYS:
-                raise BinaryTraceError(f"unknown metrics sidecar key {key!r}")
-            if key in values:
-                raise BinaryTraceError(f"duplicate metrics sidecar key {key!r}")
-            values[key] = value
-    missing = REQUIRED_SIDECAR_KEYS - values.keys()
-    if missing:
-        raise BinaryTraceError(
-            f"metrics sidecar is missing {sorted(missing)[0]}"
-        )
-    for key in OPTIONAL_SIDECAR_KEYS & values.keys():
-        whole, separator, fraction = values[key].partition(".")
-        if (separator != "." or not whole.isdigit() or len(fraction) != 6
-                or not fraction.isdigit()):
-            raise BinaryTraceError(f"invalid metrics sidecar value for {key}")
-    return values
-
-
-def _sidecar_integer(values: dict[str, str], key: str, *, hexadecimal: bool = False) -> int:
-    raw = values.get(key)
-    if raw is None:
-        raise BinaryTraceError(f"metrics sidecar is missing {key}")
-    digits = raw[2:] if hexadecimal and raw.startswith("0x") else raw
-    valid = bool(digits) and all(
-        character in ("0123456789abcdefABCDEF" if hexadecimal else "0123456789")
-        for character in digits
-    )
-    if not valid or (hexadecimal and not raw.startswith("0x")):
-        raise BinaryTraceError(f"invalid metrics sidecar value for {key}")
-    try:
-        return int(digits, 16 if hexadecimal else 10)
-    except ValueError as error:
-        raise BinaryTraceError(f"invalid metrics sidecar value for {key}") from error
-
-
 def _validate_sidecar(path: Path, details: _ConversionDetails, artifact_size: int) -> None:
     footer = details.footer
     if footer is None:
         raise BinaryTraceError("complete metrics sidecar cannot accompany a partial trace")
-    values = _parse_sidecar(path)
+    if path.stat().st_size > MAX_METRICS_BYTES:
+        raise BinaryTraceError("metrics sidecar exceeds size limit")
+    try:
+        values = parse_metrics(path.read_bytes(), path.name.removesuffix(".metrics"))
+    except ValueError as error:
+        raise BinaryTraceError(str(error)) from error
     actual = {
-        "metrics_version": _sidecar_integer(values, "metrics_version"),
-        "profile": values.get("profile", ""),
-        "return": _sidecar_integer(values, "return", hexadecimal=True),
-        "instructions": _sidecar_integer(values, "instructions"),
-        "elapsed_ms": _sidecar_integer(values, "elapsed_ms"),
-        "encoded_bytes": _sidecar_integer(values, "encoded_bytes"),
-        "compressed_bytes": _sidecar_integer(values, "compressed_bytes"),
-        "cache_hits": _sidecar_integer(values, "cache_hits"),
-        "cache_misses": _sidecar_integer(values, "cache_misses"),
-        "cache_collisions": _sidecar_integer(values, "cache_collisions"),
-        "buffer_swaps": _sidecar_integer(values, "buffer_swaps"),
-        "producer_waits": _sidecar_integer(values, "producer_waits"),
-        "producer_wait_ns": _sidecar_integer(values, "producer_wait_ns"),
-        "effective_buffer_bytes": _sidecar_integer(values, "effective_buffer_bytes"),
+        **values,
+        "return": int(str(values["return"]), 16),
     }
     expected = {
         "metrics_version": 2,

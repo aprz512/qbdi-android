@@ -18,6 +18,7 @@ inline constexpr uint16_t kBinaryRecordFlags = 0;
 // CALL records with this flag are fragments of one logical CALL. Their payload starts with the
 // grouping fields documented below; ordinary short CALL records keep flags=0 and their v1 layout.
 inline constexpr uint16_t kBinaryCallChunkFlag = 1U << 0U;
+inline constexpr uint16_t kBinaryEventChunkFlag = 1U << 0U;
 inline constexpr uint32_t kBinaryRequiredFeatures = 0;
 
 // StreamHeader (16 bytes): magic[4], major u8, minor u8, endian u8, pointer_width u8,
@@ -125,6 +126,13 @@ inline constexpr size_t kBinaryRuleErrorFixedPayloadBytes = 4;
 inline constexpr size_t kBinaryMaxRuleErrorRecordBytes =
         kBinaryRecordHeaderBytes + kBinaryRuleErrorFixedPayloadBytes +
         kBinaryMaxEventNameBytes + kBinaryMaxEventDetailBytes;
+inline constexpr size_t kBinaryEventChunkMetadataBytes = 16;
+inline constexpr size_t kBinaryEventChunkFixedPayloadBytes =
+        kBinaryEventChunkMetadataBytes + kBinaryRuleErrorFixedPayloadBytes;
+inline constexpr size_t kBinaryMaxEventChunkDetailBytes = 3072;
+inline constexpr size_t kBinaryMaxEventChunkRecordBytes =
+        kBinaryRecordHeaderBytes + kBinaryEventChunkFixedPayloadBytes +
+        kBinaryMaxEventNameBytes + kBinaryMaxEventChunkDetailBytes;
 
 // Largest complete v1 record; useful for fixed scratch/test buffers.
 inline constexpr size_t kBinaryMaxRecordBytes = kBinaryMaxCallRecordBytes;
@@ -143,4 +151,5 @@ static_assert(kBinaryMaxMemoryRecordBytes == 176);
 static_assert(kBinaryMaxCallRecordBytes == 4620);
 static_assert(kBinaryMaxCallChunkRecordBytes == 3612);
 static_assert(kBinaryMaxRuleErrorRecordBytes == 4363);
+static_assert(kBinaryMaxEventChunkRecordBytes == 3355);
 static_assert(kBinaryTraceEndRecordBytes == 105);

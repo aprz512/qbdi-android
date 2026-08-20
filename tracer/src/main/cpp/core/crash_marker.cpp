@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
+#include <cstring>
 #include <mutex>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -36,7 +37,7 @@ struct CrashHandlerState {
     int active_handlers = 0;
     int owns_disposition[5]{};
     int retired_fd = -1;
-    std::string retired_path;
+    char retired_path[4102]{};
     bool retired = false;
     int reset_consumed[5]{};
     struct sigaction previous[5]{};
@@ -200,7 +201,7 @@ void latch_error(int *destination, int value) noexcept {
     if (*destination == 0) *destination = value == 0 ? EIO : value;
 }
 
-bool finish_marker_file(int fd, const std::string &path, int *error_code) noexcept {
+bool finish_marker_file(int fd, const char *path, int *error_code) noexcept {
     bool ok = true;
     struct stat status{};
     bool have_identity = false;
@@ -223,9 +224,9 @@ bool finish_marker_file(int fd, const std::string &path, int *error_code) noexce
     }
     if (!retain && have_identity) {
         struct stat path_status{};
-        if (::lstat(path.c_str(), &path_status) == 0) {
+        if (::lstat(path, &path_status) == 0) {
             if (path_status.st_dev == status.st_dev && path_status.st_ino == status.st_ino &&
-                ::unlink(path.c_str()) != 0 && errno != ENOENT) {
+                ::unlink(path) != 0 && errno != ENOENT) {
                 latch_error(error_code, errno);
                 ok = false;
             }
@@ -332,6 +333,12 @@ bool CrashMarkerSession::open(std::string_view trace_path) noexcept {
         latch_error(&error_code_, EINVAL);
         return false;
     }
+    constexpr size_t kCrashSuffixBytes = 6;
+    if (trace_path.size() > sizeof(path_) - kCrashSuffixBytes - 1U) {
+        latch_error(&error_code_, ENAMETOOLONG);
+        finish_called_ = true;
+        return false;
+    }
 
     std::lock_guard<std::mutex> lock(g_session_mutex);
 #if defined(QTRACE_HOST_TEST)
@@ -345,9 +352,11 @@ bool CrashMarkerSession::open(std::string_view trace_path) noexcept {
     }
     g_session_owned = true;
 
-    path_.assign(trace_path.data(), trace_path.size());
-    path_.append(".crash");
-    fd_ = ::open(path_.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_APPEND, 0644);
+    std::memcpy(path_, trace_path.data(), trace_path.size());
+    std::memcpy(path_ + trace_path.size(), ".crash", kCrashSuffixBytes);
+    path_size_ = trace_path.size() + kCrashSuffixBytes;
+    path_[path_size_] = '\0';
+    fd_ = ::open(path_, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_APPEND, 0644);
     if (fd_ < 0) {
         latch_error(&error_code_, errno);
         g_session_owned = false;
@@ -359,7 +368,7 @@ bool CrashMarkerSession::open(std::string_view trace_path) noexcept {
         latch_error(&error_code_, ENOSPC);
         (void)::close(fd_);
         fd_ = -1;
-        (void)::unlink(path_.c_str());
+        (void)::unlink(path_);
         g_session_owned = false;
         g_owner_generation = static_cast<size_t>(-1);
         finish_called_ = true;
@@ -387,7 +396,7 @@ bool CrashMarkerSession::open(std::string_view trace_path) noexcept {
             }
             (void)::close(fd_);
             fd_ = -1;
-            (void)::unlink(path_.c_str());
+            (void)::unlink(path_);
             g_session_owned = false;
             g_owner_generation = static_cast<size_t>(-1);
             finish_called_ = true;
@@ -414,7 +423,7 @@ bool CrashMarkerSession::open(std::string_view trace_path) noexcept {
             }
             (void)::close(fd_);
             fd_ = -1;
-            (void)::unlink(path_.c_str());
+            (void)::unlink(path_);
             g_session_owned = false;
             g_owner_generation = static_cast<size_t>(-1);
             finish_called_ = true;
@@ -476,7 +485,7 @@ bool CrashMarkerSession::finish() noexcept {
         // The handler owns this descriptor. Retire it without waiting; immutable generation
         // state remains valid forever and a later non-signal operation reaps it after exit.
         handler_state.retired_fd = fd_;
-        handler_state.retired_path = path_;
+        std::memcpy(handler_state.retired_path, path_, path_size_ + 1U);
         handler_state.retired = true;
     }
     fd_ = -1;

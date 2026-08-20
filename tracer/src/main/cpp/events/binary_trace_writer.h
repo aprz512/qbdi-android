@@ -48,6 +48,8 @@ private:
                            std::string_view detail, const CallChunkInfo &chunk);
     bool append_event(BinaryRecordType type, std::string_view name,
                       std::string_view detail);
+    bool append_event_chunk(BinaryRecordType type, std::string_view name,
+                            std::string_view detail, const EventChunkInfo &chunk);
     bool write_metrics_sidecar();
     bool fail(int error_code = 0);
 

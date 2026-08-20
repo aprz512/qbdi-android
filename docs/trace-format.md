@@ -61,8 +61,9 @@ RecordHeader {
 }
 ```
 
-Unless stated otherwise, `RecordHeader.flags` is zero. `CALL_CONTINUATION` uses the same type 6 as
-`CALL`, with flag `0x0001`; all other flag bits are unsupported. Signed `i64` values use their
+Unless stated otherwise, `RecordHeader.flags` is zero. `CALL_CONTINUATION`, `RULE_CONTINUATION`,
+and `ERROR_CONTINUATION` reuse their logical type with flag `0x0001`; all other flag bits are
+unsupported. Signed `i64` values use their
 two's-complement bit pattern. The fixed-size column follows the named encoder constants:
 `TRACE_BEGIN`, `MODULE_DEF`, `CALL`, `RULE`, and `ERROR` include their string-length prefixes;
 `INSTRUCTION_DEF` excludes its three string prefixes; `MEMORY` includes both state/length pairs.
@@ -81,7 +82,9 @@ definitions, or memory operands.
 | 6 | `CALL` | 0 | `category string; name string; detail string` | 6 | 4620 |
 | 6 | `CALL_CONTINUATION` | 0x0001 | `event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; category string; name string; detail_fragment string` | 22 | 3612 |
 | 7 | `RULE` | 0 | `name string; detail string` | 4 | 4363 |
+| 7 | `RULE_CONTINUATION` | 0x0001 | `event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; name string; detail_fragment string` | 20 | 3355 |
 | 8 | `ERROR` | 0 | `name string; detail string` | 4 | 4363 |
+| 8 | `ERROR_CONTINUATION` | 0x0001 | `event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; name string; detail_fragment string` | 20 | 3355 |
 | 9 | `TRACE_END` | 0 | `success u8; return_value u64; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64` | 97 | 105 |
 
 Maximum record bytes include the eight-byte `RecordHeader`. `TRACE_END.encoded_bytes` includes its
@@ -110,10 +113,17 @@ none/UXTW/SXTW/LSL/SXTX as 0–4; `address_mode` is offset/pre-index/post-index 
 as 0/1/2. Not-captured and unavailable require `byte_count=0`; available carries 0–64 bytes.
 `MEMORY.flags` and `INSTRUCTION_DEF.condition` preserve their producer `u16`/`u8` values.
 
+The producer assigns dense run-local `metadata_id` values `0..65535`. It latches `EOVERFLOW`
+before emitting definition 65,537, so every stream with a successful footer remains within the
+host's identical 65,536-definition bound.
+
 For `CALL_CONTINUATION`, `event_id` must be nonzero, `chunk_count>=2`, indexes are contiguous from
 zero, every fragment is nonempty and at most 3072 bytes, and all chunks repeat identical event ID,
 total, count, category, and name. `total_detail_bytes` must equal the reassembled detail and be no
 larger than 1 MiB. UTF-8 validation of detail occurs only after raw fragments are concatenated.
+`RULE_CONTINUATION` and `ERROR_CONTINUATION` use the same grouping rules, carry a repeated name,
+limit the logical detail to 4096 bytes, and use fragments of at most 3072 bytes. This keeps every
+physical semantic-event record below 4096 bytes while preserving the complete name/detail bytes.
 
 Definitions are control records and are emitted immediately before their first reference. They do
 not become visible text events. `INSTRUCTION` sequence numbers therefore remain continuous and all
@@ -126,13 +136,18 @@ visible instruction, memory, call, rule, and error events retain producer order.
 - CALL chunk detail: 3072 bytes; a complete logical CALL detail is at most 1 MiB.
 - Mnemonic/operands/disassembly/register name: 16/96/112/16 bytes.
 - Registers: 34; static memory operands: 4; captured before/after state: 64 bytes each.
-- Instruction dictionary entries and module dictionary entries: 65,536 each on the host.
+- Instruction dictionary entries: 65,536 on both producer and host; module entries: 65,536 host.
 - Largest record: 4620 bytes. A record never crosses a producer-buffer boundary.
 
-A CALL chunk group must be contiguous, start at index zero, keep identical event ID, total, count,
-category, and name, and contain every index exactly once. UTF-8 validation occurs after raw detail
-fragments are reassembled. Unknown required features, record flags, references, or incompatible
-versions fail closed.
+A continuation group must be contiguous, start at index zero, keep identical type, event ID, total,
+count, and name (plus CALL category), and contain every index exactly once. UTF-8 validation occurs
+after raw detail fragments are reassembled.
+
+Major version 1 accepts minor versions 0 and 1. Record types `0x8000..0xffff` are the optional
+extension namespace: a minor-1 decoder skips a well-framed, zero-flag unknown optional record only
+between `TRACE_BEGIN` and `TRACE_END` and never through a continuation group. Types below `0x8000`
+are required records. Unknown required feature bits, required record types, flags, references,
+lifecycle violations, minor versions above 1, or incompatible major versions fail closed.
 
 ## Text format 3
 
@@ -182,8 +197,10 @@ Binary sidecars begin with `metrics_version=2`. They contain:
 | `effective_buffer_bytes` | Actual capacity of each producer buffer after fallback. |
 
 The converter checks the footer against the artifact size and adjacent v2 sidecar before atomic
-publication. The pull/benchmark tools parse legacy format-2 v1 metrics only when
-`metrics_version` is absent and `raw_bytes` is present; mixed v1/v2 fields are rejected.
+publication. Pull, conversion, and benchmarking use one suffix-aware strict parser: legacy
+format-2 v1 metrics are valid only beside `.trace.txt.lz4` when `metrics_version` is absent and
+`raw_bytes` is present, while v2 is valid only beside QTRB artifacts. Mixed generations are
+rejected. All five fixed-six rates are mandatory and recomputed from validated counters.
 
 `elapsed_ms` stops after traced target execution and producer callbacks, before final writer drain,
 footer, and sidecar publication.

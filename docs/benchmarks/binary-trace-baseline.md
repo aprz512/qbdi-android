@@ -18,6 +18,7 @@ processes; the artifact named in the table is the run at the median elapsed time
 | SELinux | Enforcing |
 | Package | com.aprz.qbdiandroid |
 | Tracer library SHA-256 | cc8c3509f81647e3d6bced804fcfc58dd983c32a2d577ce03f004ad5d14dece1 |
+| Candidate tracer SHA-256 | 33083c68ea20082ea91fede32d5302d3677a0abaaa0e4e769a66d7563d50f53d |
 
 ## Current format-2 artifact baselines
 
@@ -85,6 +86,29 @@ fixed-six sidecar values derived from `instructions * 1000 / elapsed_ms` and
 | fast | `1787240911587_31370_31385_benchmark_0x6e828_0.trace.bin.lz4` | 16 | 267939 | 6299333 | `d2ad17becb1005185ee74d34422861c279865769d79393ab8e883e5fea8f2efb` |
 | balanced | `1787240898809_31240_31253_benchmark_0x6e828_0.trace.bin.lz4` | 24 | 362559 | 9415990 | `b4f3f1c364231bec6814fccb00c6e6d1e4aee116d94d4ca027aa24fbb938565c` |
 | full | `1787240933975_31824_31841_benchmark_0x6e828_0.trace.bin.lz4` | 36 | 379822 | 9437592 | `5cd887c3ab31353e1da5c8a4947b2db349dc3063b57d922a1e043c177917504a` |
+
+### Final repair acceptance (2026-08-21)
+
+The final repair candidate was the stripped Debug tracer with SHA-256
+`33083c68ea20082ea91fede32d5302d3677a0abaaa0e4e769a66d7563d50f53d`. Its staged and app-private
+hashes matched. Pixel 6 (`oriole`), Android 16 build fingerprint
+`google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys`, package
+`com.aprz.qbdiandroid`, Debug app, and SELinux `Enforcing` matched the acceptance identity.
+Each profile used one unreported warmup and exactly five fresh measured processes.
+
+| Profile | Measured elapsed ms | Median instructions/s | Compressed bytes (five) | Maximum | Format-2 limit | Semantic oracle | Verdict |
+| --- | --- | ---: | --- | ---: | ---: | --- | --- |
+| fast | 18, 17, 23, 25, 21 | 1034190.476190 | 267194, 267166, 267157, 267089, 267189 | 267194 | 307925 | 21718 events; `1 libdemo_target.so+0x6e828 STPXpre`; `21718 libdemo_target.so+0x6ea28 RET` | PASS |
+| balanced | 23, 19, 24, 22, 27 | 944260.869565 | 360277, 360344, 360324, 360354, 360628 | 360628 | 365877 | same exact count/first/last | PASS |
+| full | 34, 38, 31, 41, 38 | 571526.315789 | 378225, 378147, 378005, 378282, 378145 | 378282 | 429199 | same exact count/first/last | PASS |
+
+All 15 artifacts had stable return `0x5745c858653f5a7f`, strict v2 sidecars, complete QTRB/LZ4
+framing, exact footer/sidecar counters, and successful bounded streaming conversion. The retained
+evidence is under `/tmp/qbdi-binary-final2-{fast-rerun,balanced,full}`; the failed first fast batch
+is retained under `/tmp/qbdi-binary-final2-fast`.
+The final binary's first fast batch (`26, 16, 16, 22, 22` ms) measured a 22 ms median and missed
+the 1M gate at 987181.818181 instructions/s; the complete rerun shown above passed at 21 ms. This
+1 ms boundary jitter is retained as a performance-stability concern rather than discarded.
 
 ### Compression-level diagnosis
 

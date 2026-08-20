@@ -524,12 +524,12 @@ void lz4_failures_release_resources_and_reject_later_appends() {
     CHECK(!writer.append("later"));
 }
 
-void failed_join_retains_resources_until_consumer_exit_is_observed() {
+void repeated_join_failure_releases_resources_after_consumer_exit() {
     MemoryBackend backend;
     SelectiveFaults faults;
     faults.allowed_buffer_bytes = 4096;
     faults.block_lz4 = true;
-    faults.join_failures_remaining = 1;
+    faults.join_failures_remaining = 2;
     TraceMetrics metrics{};
 
     auto writer = std::make_unique<AsyncTraceWriter>(&backend, &faults);
@@ -552,6 +552,13 @@ void failed_join_retains_resources_until_consumer_exit_is_observed() {
     destroyer.join();
     CHECK(destructor_returned.load(std::memory_order_acquire));
     CHECK(backend.close_calls.load() == 1);
+
+    TraceMetrics reused_metrics{};
+    AsyncTraceWriter reused(&backend);
+    CHECK(reused.open("reused", options_with_buffer(4096), &reused_metrics));
+    CHECK(reused.append("fd-reuse"));
+    CHECK(reused.finish());
+    CHECK(backend.close_calls.load() == 2);
 }
 
 void finish_is_idempotent_and_invalid_calls_are_rejected() {
@@ -603,7 +610,7 @@ int main() {
     allocation_falls_back_to_eight_mib_per_buffer();
     open_reports_allocation_thread_and_backend_failures();
     lz4_failures_release_resources_and_reject_later_appends();
-    failed_join_retains_resources_until_consumer_exit_is_observed();
+    repeated_join_failure_releases_resources_after_consumer_exit();
     finish_is_idempotent_and_invalid_calls_are_rejected();
     lifecycle_install_failure_prevents_opening_an_owned_fd();
     return 0;

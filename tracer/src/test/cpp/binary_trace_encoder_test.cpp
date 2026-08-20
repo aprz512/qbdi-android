@@ -351,9 +351,44 @@ void chunked_call_has_reversible_golden_bytes_and_atomic_failures() {
                           [](uint8_t value) { return value == 0x5a; }));
     }
     std::fill(bytes.begin(), bytes.end(), 0x5a);
+    CHECK(!encoder.encode_call_chunk(bytes.data(), bytes.size(),
+                                     CallChunkInfo{1, 2, 0, 3}, "c", "n", "x").ok);
+    CHECK(std::all_of(bytes.begin(), bytes.end(),
+                      [](uint8_t value) { return value == 0x5a; }));
+    std::fill(bytes.begin(), bytes.end(), 0x5a);
+    CHECK(!encoder.encode_call_chunk(bytes.data(), bytes.size(),
+                                     CallChunkInfo{1, 3, 0, 3}, "c", "n", "xy").ok);
+    CHECK(std::all_of(bytes.begin(), bytes.end(),
+                      [](uint8_t value) { return value == 0x5a; }));
+    std::fill(bytes.begin(), bytes.end(), 0x5a);
     CHECK(!encoder.encode_call_chunk(
                            bytes.data(), bytes.size(), info, "c", "n",
                            std::string(kBinaryMaxCallChunkDetailBytes + 1U, 'x')).ok);
+    CHECK(std::all_of(bytes.begin(), bytes.end(),
+                      [](uint8_t value) { return value == 0x5a; }));
+}
+
+void chunked_rule_has_reversible_golden_bytes_and_atomic_failures() {
+    const BinaryTraceEncoder encoder;
+    const EventChunkInfo info{0x0102030405060708ULL, 4096, 1, 2};
+    std::array<uint8_t, 64> bytes{};
+    const BinaryEncodeResult encoded = encoder.encode_event_chunk(
+            bytes.data(), bytes.size(), BinaryRecordType::Rule, info, "r", "xyz");
+    CHECK(encoded.ok);
+    check_bytes(bytes.data(), encoded.size, {
+        0x07, 0x00, 0x01, 0x00, 0x18, 0x00, 0x00, 0x00,
+        0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+        0x00, 0x10, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00,
+        0x01, 0x00, 'r', 0x03, 0x00, 'x', 'y', 'z',
+    });
+    std::fill(bytes.begin(), bytes.end(), 0x5a);
+    CHECK(!encoder.encode_event_chunk(bytes.data(), bytes.size(), BinaryRecordType::Call,
+                                      info, "r", "xyz").ok);
+    CHECK(std::all_of(bytes.begin(), bytes.end(),
+                      [](uint8_t value) { return value == 0x5a; }));
+    std::fill(bytes.begin(), bytes.end(), 0x5a);
+    CHECK(!encoder.encode_event_chunk(bytes.data(), bytes.size(), BinaryRecordType::Error,
+                                      EventChunkInfo{1, 2, 0, 3}, "", "x").ok);
     CHECK(std::all_of(bytes.begin(), bytes.end(),
                       [](uint8_t value) { return value == 0x5a; }));
 }
@@ -619,6 +654,7 @@ int main() {
     memory_has_exact_golden_bytes_and_all_capture_states();
     semantic_events_have_exact_golden_bytes();
     chunked_call_has_reversible_golden_bytes_and_atomic_failures();
+    chunked_rule_has_reversible_golden_bytes_and_atomic_failures();
     trace_end_has_exact_golden_bytes();
     every_encoding_is_atomic_when_capacity_is_one_byte_short();
     rejects_invalid_or_oversized_inputs_without_writing();

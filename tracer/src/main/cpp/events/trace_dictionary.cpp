@@ -25,21 +25,51 @@ TraceDictionary::~TraceDictionary() {
     if (slots_ != nullptr) munmap(slots_, mapping_size_);
 }
 
-bool TraceDictionary::needs_instruction_definition(uint32_t opcode) const noexcept {
-    if (slots_ == nullptr) return true;
-    const Slot &slot = slots_[slot_index(opcode)];
-    return slot.occupied == 0 || slot.opcode != opcode;
+bool TraceDictionary::resolve(uint32_t opcode, uint32_t *metadata_id,
+                              bool *needs_definition) const noexcept {
+    if (slots_ == nullptr || metadata_id == nullptr || needs_definition == nullptr) return false;
+    uint32_t index = slot_index(opcode);
+    for (uint32_t probed = 0; probed < slot_count_; ++probed) {
+        const Slot &slot = slots_[index];
+        if (slot.occupied == 0) {
+            if (entry_count_ >= slot_count_) return false;
+            *metadata_id = entry_count_;
+            *needs_definition = true;
+            return true;
+        }
+        if (slot.opcode == opcode) {
+            *metadata_id = slot.metadata_id;
+            *needs_definition = false;
+            return true;
+        }
+        index = (index + 1U) & (slot_count_ - 1U);
+    }
+    return false;
 }
 
-void TraceDictionary::commit_instruction_definition(uint32_t opcode) noexcept {
-    if (slots_ == nullptr) return;
-    Slot &slot = slots_[slot_index(opcode)];
-    slot.opcode = opcode;
-    slot.occupied = 1;
+bool TraceDictionary::commit_instruction_definition(uint32_t opcode,
+                                                    uint32_t metadata_id) noexcept {
+    if (slots_ == nullptr || entry_count_ >= slot_count_ || metadata_id != entry_count_)
+        return false;
+    uint32_t index = slot_index(opcode);
+    for (uint32_t probed = 0; probed < slot_count_; ++probed) {
+        Slot &slot = slots_[index];
+        if (slot.occupied == 0) {
+            slot.opcode = opcode;
+            slot.metadata_id = metadata_id;
+            slot.occupied = 1;
+            ++entry_count_;
+            return true;
+        }
+        if (slot.opcode == opcode) return slot.metadata_id == metadata_id;
+        index = (index + 1U) & (slot_count_ - 1U);
+    }
+    return false;
 }
 
 void TraceDictionary::reset() noexcept {
     if (slots_ != nullptr) std::memset(slots_, 0, mapping_size_);
+    entry_count_ = 0;
 }
 
 bool TraceDictionary::is_power_of_two(uint32_t value) noexcept {

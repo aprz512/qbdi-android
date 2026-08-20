@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <signal.h>
-#include <string>
 #include <string_view>
 #include <sys/types.h>
 
@@ -41,8 +40,10 @@ public:
 
 private:
     static constexpr size_t kSignalCount = 5;
+    static constexpr size_t kPathCapacity = 4102;
 
-    std::string path_;
+    char path_[kPathCapacity]{};
+    size_t path_size_ = 0;
     int fd_ = -1;
     int error_code_ = 0;
     std::array<struct sigaction, kSignalCount> previous_{};

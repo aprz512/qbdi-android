@@ -35,6 +35,8 @@ MAX_REGISTER_NAME = 16
 MAX_MEMORY_OPERANDS = 4
 MAX_CAPTURED_MEMORY = 64
 MAX_DICTIONARY_ENTRIES = 1 << 16
+MAX_COMPATIBLE_MINOR = 1
+OPTIONAL_RECORD_TYPE_MIN = 0x8000
 VALID_INSTRUCTION_FLAGS = 0xF
 PROFILE_NAMES = ("fast", "balanced", "full")
 ACCESS_NAMES = {1: "read", 2: "write", 3: "readwrite"}
@@ -128,6 +130,17 @@ class _PendingCall:
     total: int
     count: int
     category: str
+    name: str
+    next_index: int
+    detail: bytearray
+
+
+@dataclasses.dataclass(slots=True)
+class _PendingEvent:
+    record_type: int
+    event_id: int
+    total: int
+    count: int
     name: str
     next_index: int
     detail: bytearray
@@ -315,7 +328,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
         raise BinaryTraceError("invalid QTRB magic")
     if major != 1:
         raise BinaryTraceError("unsupported major version")
-    if minor != 0:
+    if minor > MAX_COMPATIBLE_MINOR:
         raise BinaryTraceError("unsupported minor version")
     if endian != 1:
         raise BinaryTraceError("invalid endian marker")
@@ -341,6 +354,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
     begin_compression: bool | None = None
     footer: _Footer | None = None
     pending_call: _PendingCall | None = None
+    pending_event: _PendingEvent | None = None
 
     def emit(line: str) -> None:
         nonlocal text_bytes
@@ -359,14 +373,28 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
         if ended:
             raise BinaryTraceError("record after TRACE_END")
         is_chunk = record_type == 6 and flags == 1
+        is_event_chunk = record_type in (7, 8) and flags == 1
         if pending_call is not None and not is_chunk:
             raise BinaryTraceError("CALL chunks must be contiguous")
-        if record_type != 6 and flags != 0:
+        if pending_event is not None and not is_event_chunk:
+            raise BinaryTraceError("semantic event chunks must be contiguous")
+        if record_type not in (6, 7, 8) and flags != 0:
             raise BinaryTraceError("unknown flags")
         if record_type == 6 and flags not in (0, 1):
             raise BinaryTraceError("unknown flags")
+        if record_type in (7, 8) and flags not in (0, 1):
+            raise BinaryTraceError("unknown flags")
         if not began and record_type != 1:
             raise BinaryTraceError("TRACE_BEGIN must be first record")
+
+        if record_type >= OPTIONAL_RECORD_TYPE_MIN:
+            if minor == 0:
+                raise BinaryTraceError(f"unknown record type {record_type}")
+            if flags != 0:
+                raise BinaryTraceError("unknown flags")
+            continue
+        if record_type not in range(1, 10):
+            raise BinaryTraceError(f"unknown record type {record_type} (required record)")
 
         if record_type == 1:
             if flags or began:
@@ -537,7 +565,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
                         f"detail={_quoted(logical_detail)}"
                     )
                     pending_call = None
-        elif record_type in (7, 8):
+        elif record_type in (7, 8) and flags == 0:
             cursor = _Payload(payload, "RULE" if record_type == 7 else "ERROR")
             name = cursor.string(MAX_EVENT_NAME, "event name")
             detail = cursor.string(MAX_EVENT_DETAIL, "event detail")
@@ -546,6 +574,48 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
                 emit(f"RULE name={_quoted(name)} detail={_quoted(detail)}")
             else:
                 emit(f"ERROR name={_quoted(name)} detail={_quoted(detail)}")
+        elif record_type in (7, 8):
+            cursor = _Payload(payload, "RULE chunk" if record_type == 7 else "ERROR chunk")
+            event_id, total, index, count = cursor.unpack(CALL_CHUNK_FIXED)
+            name_raw = cursor.string_bytes(MAX_EVENT_NAME, "event name")
+            detail = cursor.string_bytes(MAX_CALL_CHUNK_DETAIL, "event detail fragment")
+            cursor.finish()
+            try:
+                name = name_raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise BinaryTraceError("event chunk name is not valid UTF-8") from error
+            if (event_id == 0 or count < 2 or index >= count or total > MAX_EVENT_DETAIL
+                    or not detail or total <= len(detail) or total < count):
+                raise BinaryTraceError("invalid semantic event chunk metadata")
+            if pending_event is None:
+                if index != 0:
+                    raise BinaryTraceError("semantic event chunk index must start at zero")
+                pending_event = _PendingEvent(
+                    record_type, event_id, total, count, name, 1, bytearray(detail)
+                )
+            else:
+                if (record_type, event_id, total, count, name) != (
+                        pending_event.record_type, pending_event.event_id,
+                        pending_event.total, pending_event.count, pending_event.name):
+                    raise BinaryTraceError("semantic event chunk metadata mismatch")
+                if index != pending_event.next_index:
+                    raise BinaryTraceError("semantic event chunk index is duplicate or out of order")
+                pending_event.detail.extend(detail)
+                pending_event.next_index += 1
+            assert pending_event is not None
+            if len(pending_event.detail) > pending_event.total:
+                raise BinaryTraceError("semantic event chunk total detail length exceeded")
+            if pending_event.next_index == pending_event.count:
+                if len(pending_event.detail) != pending_event.total:
+                    raise BinaryTraceError("semantic event chunk total detail length mismatch")
+                try:
+                    logical_detail = bytes(pending_event.detail).decode("utf-8")
+                except UnicodeDecodeError as error:
+                    raise BinaryTraceError("event detail is not valid UTF-8") from error
+                label = "RULE" if pending_event.record_type == 7 else "ERROR"
+                emit(f"{label} name={_quoted(pending_event.name)} "
+                     f"detail={_quoted(logical_detail)}")
+                pending_event = None
         elif record_type == 9:
             if flags or len(payload) != TRACE_END_FIXED.size:
                 raise BinaryTraceError("invalid TRACE_END payload")
@@ -575,6 +645,8 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
 
     if pending_call is not None:
         raise BinaryTraceError("incomplete CALL chunk group")
+    if pending_event is not None:
+        raise BinaryTraceError("incomplete semantic event chunk group")
     if not began:
         raise BinaryTraceError("missing TRACE_BEGIN")
     if not ended and not allow_partial:

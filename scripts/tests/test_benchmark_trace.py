@@ -232,64 +232,82 @@ effective_buffer_bytes=67108864
         )
 
     def test_profile_comparison_preserves_oracle_identity_and_uses_compressed_size(self):
-        run = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4"}
-        current = median_report([run])
+        oracle = {"decoded_event_count": 100000, "first_instruction": "1 lib.so+0x0 A",
+                  "last_instruction": "100000 lib.so+0x4 RET"}
+        run = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4", **oracle}
+        runs = [run] * 5
+        current = median_report(runs)
         current["return"] = "0x42"
         baseline = {
             "profile": "balanced", "instructions": 100000, "return": "0x42",
             "compressed_bytes": 1048576,
+            **oracle,
         }
 
-        comparison = compare_to_profile_baseline(current, baseline, [run])
+        comparison = compare_to_profile_baseline(current, baseline, runs)
 
         self.assertTrue(comparison["meets_rate_target"])
         self.assertTrue(comparison["meets_size_target"])
         with self.assertRaisesRegex(ValueError, "oracle.*return"):
-            compare_to_profile_baseline(current, {**baseline, "return": "0x43"}, [run])
+            compare_to_profile_baseline(current, {**baseline, "return": "0x43"}, runs)
         with self.assertRaisesRegex(ValueError, "oracle.*instructions"):
-            compare_to_profile_baseline(current, {**baseline, "instructions": 99999}, [run])
+            compare_to_profile_baseline(current, {**baseline, "instructions": 99999}, runs)
+        with self.assertRaisesRegex(ValueError, "exactly five"):
+            compare_to_profile_baseline(current, baseline, [run])
+        with self.assertRaisesRegex(ValueError, "first_instruction"):
+            compare_to_profile_baseline(current,
+                                        {**baseline, "first_instruction": "WRONG"}, runs)
 
     def test_acceptance_checks_every_compressed_binary_artifact_not_the_median(self):
+        oracle = {"decoded_event_count": 100000, "first_instruction": "1 start",
+                  "last_instruction": "100000 end"}
         first = {**parse_metrics(self.METRICS_V2), "compressed_bytes": 90,
-                 "trace": "first.trace.bin.lz4"}
+                 "trace": "first.trace.bin.lz4", **oracle}
         second = {**parse_metrics(self.METRICS_V2), "compressed_bytes": 110,
-                  "trace": "second.trace.bin.lz4"}
-        current = median_report([first, second])
+                  "trace": "second.trace.bin.lz4", **oracle}
+        runs = [first, first, first, first, second]
+        current = median_report(runs)
         current["return"] = "0x42"
         baseline = {"profile": "balanced", "instructions": 100000, "return": "0x42",
-                    "compressed_bytes": 100}
+                    "compressed_bytes": 100, **oracle}
 
-        comparison = compare_to_profile_baseline(current, baseline, [first, second])
+        comparison = compare_to_profile_baseline(current, baseline, runs)
 
-        self.assertEqual(Decimal("100"), current["compressed_bytes"])
-        self.assertEqual([True, False], comparison["per_run_size_targets"])
+        self.assertEqual(90, current["compressed_bytes"])
+        self.assertEqual([True, True, True, True, False], comparison["per_run_size_targets"])
         self.assertEqual(110, comparison["maximum_compressed_bytes"])
         self.assertFalse(comparison["meets_size_target"])
 
     def test_acceptance_requires_metrics_v2_compressed_qtrb_runs(self):
+        oracle = {"decoded_event_count": 100000, "first_instruction": "1 start",
+                  "last_instruction": "100000 end"}
         baseline = {"profile": "balanced", "instructions": 100000, "return": "0x42",
-                    "compressed_bytes": 20_000_000}
-        v2 = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4"}
-        report = median_report([v2])
+                    "compressed_bytes": 20_000_000, **oracle}
+        v2 = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4", **oracle}
+        report = median_report([v2] * 5)
         report["return"] = "0x42"
-        compare_to_profile_baseline(report, baseline, [v2])
+        compare_to_profile_baseline(report, baseline, [v2] * 5)
         v1 = {**parse_metrics(self.METRICS), "trace": "run.trace.txt.lz4"}
         raw = {**v2, "trace": "run.trace.bin"}
         for candidate, message in ((v1, "metrics_version=2"), (raw, "trace.bin.lz4")):
             with self.subTest(trace=candidate["trace"]), self.assertRaisesRegex(ValueError, message):
-                candidate_report = median_report([candidate])
+                candidate.update(oracle)
+                candidate_report = median_report([candidate] * 5)
                 candidate_report["return"] = "0x42"
-                compare_to_profile_baseline(candidate_report, baseline, [candidate])
+                compare_to_profile_baseline(candidate_report, baseline, [candidate] * 5)
 
     def test_format_two_device_identity_maps_to_live_device_fields(self):
         baseline = {
             "device_model": "Pixel 6", "device_product": "oriole",
             "android_version": "16", "abi": "arm64-v8a", "android_build_type": "user",
-            "app_build_type": "Debug",
+            "app_build_type": "Debug", "build_fingerprint": "fingerprint",
+            "selinux": "Enforcing", "package": "com.example",
         }
         current = {
             "model": "Pixel 6", "device": "oriole", "android": "16",
             "abi": "arm64-v8a", "android_build_type": "user", "app_build_type": "Debug",
+            "build_fingerprint": "fingerprint", "selinux": "Enforcing",
+            "package": "com.example",
         }
         ensure_same_format_two_device(baseline, current)
         with self.assertRaisesRegex(ValueError, "device_model"):
@@ -307,6 +325,8 @@ effective_buffer_bytes=67108864
         ensure_same_format_two_device(identity, {
             "model": "Pixel 6", "device": "oriole", "android": "16",
             "abi": "arm64-v8a", "android_build_type": "user", "app_build_type": "Debug",
+            "build_fingerprint": identity["build_fingerprint"],
+            "selinux": "Enforcing", "package": "com.aprz.qbdiandroid",
         })
         for profile in ("fast", "balanced", "full"):
             row = benchmark_trace.parse_profile_baseline(text, profile)
@@ -319,10 +339,18 @@ effective_buffer_bytes=67108864
             "ro.product.model": "Pixel 6", "ro.product.device": "oriole",
             "ro.build.version.release": "16", "ro.product.cpu.abi": "arm64-v8a",
             "ro.build.type": "user",
+            "ro.build.fingerprint": (
+                "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys"
+            ),
         }
 
         def fake_adb(_args, *command, **kwargs):
-            output = "uid=123\n" if "run-as" in command else properties[command[-1]] + "\n"
+            if "run-as" in command:
+                output = "uid=123\n"
+            elif "getenforce" in command:
+                output = "Enforcing\n"
+            else:
+                output = properties[command[-1]] + "\n"
             return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
         document = Path("docs/benchmarks/binary-trace-baseline.md").read_text(encoding="utf-8")
@@ -338,21 +366,28 @@ effective_buffer_bytes=67108864
     def test_cli_returns_acceptance_miss_and_preserves_json_verdict(self):
         run = {**parse_metrics(self.METRICS_V2), "profile": "balanced",
                "instructions": 21718, "return": "0x5745c858653f5a7f",
-               "compressed_bytes": 999_999_999, "trace": "run.trace.bin.lz4"}
+               "compressed_bytes": 999_999_999, "trace": "run.trace.bin.lz4",
+               "decoded_event_count": 21718,
+               "first_instruction": "1 libdemo_target.so+0x6e828 STPXpre",
+               "last_instruction": "21718 libdemo_target.so+0x6ea28 RET"}
         run["instructions_per_second"] = Decimal("21.718000")
         args = SimpleNamespace(
-            runs=1, test_fail_setup=False,
+            runs=5, test_fail_setup=False,
             compare="docs/benchmarks/binary-trace-baseline.md", profile="balanced",
-            legacy=False,
+            legacy=False, candidate_tracer="candidate.so",
         )
         identity = {
             "model": "Pixel 6", "device": "oriole", "android": "16",
             "abi": "arm64-v8a", "android_build_type": "user", "app_build_type": "Debug",
+            "build_fingerprint": (
+                "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys"
+            ), "selinux": "Enforcing", "package": "com.aprz.qbdiandroid",
         }
         output = io.StringIO()
         with patch.object(benchmark_trace, "parse_args", return_value=args), \
              patch.object(benchmark_trace, "live_device_identity", return_value=identity), \
-             patch.object(benchmark_trace, "run_once", side_effect=[run, run]), \
+             patch.object(benchmark_trace, "verify_candidate_tracer", return_value="a" * 64), \
+             patch.object(benchmark_trace, "run_once", side_effect=[run] * 6), \
              contextlib.redirect_stdout(output):
             status = benchmark_trace.main()
 

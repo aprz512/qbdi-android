@@ -569,18 +569,21 @@ AsyncTraceWriter::~AsyncTraceWriter() {
             const int retry_result =
                 impl_->faults->join_consumer_thread(impl_->consumer_thread, nullptr);
             if (retry_result != 0) {
-                // A second unjoinable result still cannot let caller-owned seams or metrics die
-                // under the consumer. Wait only for its terminal ownership publication, then
-                // retain the complete implementation rather than risking resource UAF.
+                // Caller-owned seams and metrics cannot die under the consumer. Once its release
+                // publication is visible, no thread accesses impl again; detach the terminated
+                // joinable thread and reclaim every owned resource normally.
                 while (!impl_->consumer_exited.load(std::memory_order_acquire)) {
                     timespec pause{0, 1000000};
                     while (nanosleep(&pause, &pause) != 0 && errno == EINTR) {}
                 }
-                impl_ = nullptr;
-                return;
+                (void)pthread_detach(impl_->consumer_thread);
+                impl_->consumer_started = false;
+                release_consumer_resources(impl_);
             }
-            impl_->consumer_started = false;
-            release_consumer_resources(impl_);
+            if (impl_->consumer_started) {
+                impl_->consumer_started = false;
+                release_consumer_resources(impl_);
+            }
         }
         delete impl_;
     }

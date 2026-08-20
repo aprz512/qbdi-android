@@ -11,13 +11,15 @@ public:
     TraceDictionary(const TraceDictionary &) = delete;
     TraceDictionary &operator=(const TraceDictionary &) = delete;
 
-    bool needs_instruction_definition(uint32_t opcode) const noexcept;
-    void commit_instruction_definition(uint32_t opcode) noexcept;
+    bool resolve(uint32_t opcode, uint32_t *metadata_id,
+                 bool *needs_definition) const noexcept;
+    bool commit_instruction_definition(uint32_t opcode, uint32_t metadata_id) noexcept;
     void reset() noexcept;
 
 private:
     struct Slot {
         uint32_t opcode;
+        uint32_t metadata_id;
         uint32_t occupied;
     };
 
@@ -27,4 +29,5 @@ private:
     Slot *slots_ = nullptr;
     uint32_t slot_count_ = 0;
     std::size_t mapping_size_ = 0;
+    uint32_t entry_count_ = 0;
 };

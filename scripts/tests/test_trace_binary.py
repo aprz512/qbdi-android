@@ -109,6 +109,12 @@ def chunk(event_id: int, total: int, index: int, count: int, detail: bytes,
     return record(6, payload + text(category) + text(name) + text(detail), flags=1)
 
 
+def event_chunk(kind: int, event_id: int, total: int, index: int, count: int,
+                detail: bytes, name: bytes = b"rule") -> bytes:
+    payload = struct.pack("<QIHH", event_id, total, index, count)
+    return record(kind, payload + text(name) + text(detail), flags=1)
+
+
 def event(kind: int, name: str, detail: str) -> bytes:
     return record(kind, text(name) + text(detail))
 
@@ -252,7 +258,7 @@ class BinaryTraceConversionTests(unittest.TestCase):
         mutations = {
             "magic": b"BAD!" + complete_stream()[4:],
             "major version": stream_header(major=2) + begin() + module(),
-            "minor version": stream_header(minor=1) + begin() + module(),
+            "minor version": stream_header(minor=2) + begin() + module(),
             "endian": stream_header(endian=2) + begin() + module(),
             "pointer width": stream_header(pointer=3) + begin() + module(),
             "reserved": stream_header(reserved=1) + begin() + module(),
@@ -321,6 +327,31 @@ class BinaryTraceConversionTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(
                     BinaryTraceError, message):
                 self.convert(complete_stream(*events))
+
+    def test_reassembles_rule_and_error_chunks_as_one_ordered_utf8_or_raw_event(self):
+        euro = "\u20ac".encode()
+        rendered, _ = self.convert(complete_stream(
+            event_chunk(7, 11, 6, 0, 2, b"abc"),
+            event_chunk(7, 11, 6, 1, 2, euro),
+            event_chunk(8, 12, 3, 0, 2, euro[:1]),
+            event_chunk(8, 12, 3, 1, 2, euro[1:]),
+        ))
+        lines = [line for line in rendered.splitlines()
+                 if line.startswith(("RULE ", "ERROR "))]
+        self.assertEqual('RULE name="rule" detail="abc€"', lines[0])
+        self.assertEqual('ERROR name="rule" detail="€"', lines[1])
+
+    def test_compatible_minor_skips_only_optional_namespace_records(self):
+        optional = record(0x8000, b"opaque")
+        rendered, _ = self.convert(complete_stream(optional).replace(
+            stream_header(), stream_header(minor=1), 1))
+        self.assertIn("TRACE_END", rendered)
+        with self.assertRaisesRegex(BinaryTraceError, "unknown.*required.*record"):
+            self.convert(complete_stream(record(10, b"opaque")).replace(
+                stream_header(), stream_header(minor=1), 1))
+        with self.assertRaisesRegex(BinaryTraceError, "required features"):
+            self.convert(complete_stream(optional).replace(
+                stream_header(), stream_header(minor=1, features=1), 1))
 
     def test_rejects_record_after_footer_unknown_record_and_missing_footer(self):
         complete = complete_stream()

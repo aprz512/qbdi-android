@@ -5,6 +5,8 @@
 #include <regex>
 #include <string>
 
+#include "events/trace_record.h"
+
 namespace {
 
 void check(bool condition, const char *expression, int line) {
@@ -41,8 +43,14 @@ void production_sources_have_only_the_binary_trace_facade() {
     CHECK(production.find("events/binary_trace_writer.cpp") != std::string::npos);
 }
 
+void instruction_event_model_has_no_text_hot_fields() {
+    CHECK(sizeof(MemoryRecord) == 168);
+    CHECK(sizeof(InstructionRecord) == 1944);
+}
+
 } // namespace
 
 int main() {
     production_sources_have_only_the_binary_trace_facade();
+    instruction_event_model_has_no_text_hot_fields();
 }
