@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import selectors
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 
@@ -57,51 +58,67 @@ def capture_bounded(
     )
     assert process.stdout is not None
     assert process.stderr is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    output = bytearray()
-    error_output = bytearray()
-    deadline = time.monotonic() + timeout
+    selector: selectors.BaseSelector | None = None
     completed = False
     try:
-        while selector.get_map():
+        try:
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+            output = bytearray()
+            error_output = bytearray()
+            deadline = time.monotonic() + timeout
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                ready = selector.select(remaining)
+                if not ready:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                for key, _events in ready:
+                    chunk = os.read(key.fileobj.fileno(), READ_CHUNK_BYTES)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.data == "stdout":
+                        if len(output) + len(chunk) > maximum_bytes:
+                            raise BoundedProcessError(
+                                f"subprocess output exceeds {maximum_bytes}-byte size limit"
+                            )
+                        output.extend(chunk)
+                    elif len(error_output) < MAX_STDERR_BYTES:
+                        remaining_error = MAX_STDERR_BYTES - len(error_output)
+                        error_output.extend(chunk[:remaining_error])
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(argv, timeout)
-            ready = selector.select(remaining)
-            if not ready:
-                raise subprocess.TimeoutExpired(argv, timeout)
-            for key, _events in ready:
-                chunk = os.read(key.fileobj.fileno(), READ_CHUNK_BYTES)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                if key.data == "stdout":
-                    if len(output) + len(chunk) > maximum_bytes:
-                        raise BoundedProcessError(
-                            f"subprocess output exceeds {maximum_bytes}-byte size limit"
-                        )
-                    output.extend(chunk)
-                elif len(error_output) < MAX_STDERR_BYTES:
-                    remaining_error = MAX_STDERR_BYTES - len(error_output)
-                    error_output.extend(chunk[:remaining_error])
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(argv, timeout)
-        returncode = process.wait(timeout=remaining)
-        completed = True
-        if returncode != 0:
-            detail = error_output.decode("utf-8", errors="replace").strip()
-            raise BoundedProcessError(
-                f"subprocess failed ({returncode}): {detail}",
-                returncode=returncode,
-                stderr=bytes(error_output),
-            )
-        return bytes(output)
+            returncode = process.wait(timeout=remaining)
+            completed = True
+            if returncode != 0:
+                detail = error_output.decode("utf-8", errors="replace").strip()
+                raise BoundedProcessError(
+                    f"subprocess failed ({returncode}): {detail}",
+                    returncode=returncode,
+                    stderr=bytes(error_output),
+                )
+            return bytes(output)
+        finally:
+            active_error = sys.exc_info()[1]
+            if selector is not None:
+                try:
+                    selector.close()
+                except BaseException:
+                    if active_error is None:
+                        raise
     finally:
-        selector.close()
+        active_error = sys.exc_info()[1]
         if not completed:
             _terminate_and_reap(process)
-        process.stdout.close()
-        process.stderr.close()
+        close_error: BaseException | None = None
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except BaseException as error:
+                close_error = close_error or error
+        if active_error is None and close_error is not None:
+            raise close_error

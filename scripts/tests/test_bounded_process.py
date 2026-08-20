@@ -2,11 +2,118 @@ import subprocess
 import sys
 import time
 import unittest
+from unittest.mock import patch
 
+import scripts.bounded_process as bounded_process
 from scripts.bounded_process import BoundedProcessError, capture_bounded
 
 
+class FakeStream:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class FakeProcess:
+    def __init__(self):
+        self.stdout = FakeStream()
+        self.stderr = FakeStream()
+        self.returncode = None
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_calls = 0
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminate_calls += 1
+        self.returncode = -15
+
+    def kill(self):
+        self.kill_calls += 1
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
+class FakeSelector:
+    def __init__(self, *, fail_register=0, select_error=None, close_error=None):
+        self.fail_register = fail_register
+        self.select_error = select_error
+        self.close_error = close_error
+        self.register_calls = 0
+        self.entries = {}
+
+    def register(self, stream, _events, data):
+        self.register_calls += 1
+        if self.register_calls == self.fail_register:
+            raise OSError(f"register {self.register_calls}")
+        self.entries[stream] = data
+
+    def get_map(self):
+        return self.entries
+
+    def select(self, _timeout):
+        if self.select_error is not None:
+            raise self.select_error
+        return []
+
+    def close(self):
+        if self.close_error is not None:
+            raise self.close_error
+
+
 class BoundedProcessTests(unittest.TestCase):
+    def assert_reaped(self, process):
+        self.assertEqual(1, process.terminate_calls)
+        self.assertGreaterEqual(process.wait_calls, 1)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    def test_selector_constructor_failure_reaps_child_and_preserves_error(self):
+        process = FakeProcess()
+        primary = RuntimeError("selector constructor")
+        with patch.object(bounded_process.subprocess, "Popen", return_value=process), \
+             patch.object(bounded_process.selectors, "DefaultSelector", side_effect=primary):
+            with self.assertRaisesRegex(RuntimeError, "selector constructor") as caught:
+                capture_bounded(["fake"], maximum_bytes=1, timeout=1)
+
+        self.assertIs(primary, caught.exception)
+        self.assert_reaped(process)
+
+    def test_each_selector_registration_failure_reaps_child(self):
+        for registration in (1, 2):
+            with self.subTest(registration=registration):
+                process = FakeProcess()
+                selector = FakeSelector(fail_register=registration)
+                with patch.object(bounded_process.subprocess, "Popen", return_value=process), \
+                     patch.object(bounded_process.selectors, "DefaultSelector",
+                                  return_value=selector):
+                    with self.assertRaisesRegex(OSError, f"register {registration}"):
+                        capture_bounded(["fake"], maximum_bytes=1, timeout=1)
+                self.assert_reaped(process)
+
+    def test_selector_close_failure_cannot_mask_primary_or_skip_reaping(self):
+        process = FakeProcess()
+        primary = ValueError("primary selector failure")
+        selector = FakeSelector(
+            select_error=primary, close_error=OSError("selector close failure")
+        )
+        with patch.object(bounded_process.subprocess, "Popen", return_value=process), \
+             patch.object(bounded_process.selectors, "DefaultSelector", return_value=selector):
+            with self.assertRaisesRegex(ValueError, "primary selector failure") as caught:
+                capture_bounded(["fake"], maximum_bytes=1, timeout=1)
+
+        self.assertIs(primary, caught.exception)
+        self.assert_reaped(process)
+
     def test_terminates_and_reaps_a_producer_immediately_at_the_limit(self):
         command = [
             sys.executable, "-c",
