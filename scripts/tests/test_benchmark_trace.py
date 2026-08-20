@@ -177,6 +177,24 @@ effective_buffer_bytes=67108864
                 table.replace("| 3 | fast.trace", "| three | fast.trace"), "fast"
             )
 
+    def test_binary_trace_baseline_parser_validates_five_elapsed_values(self):
+        table = """## Current format-2 artifact baselines
+
+| Profile | Measured elapsed values (ms) | Median elapsed ms | Artifact | Compressed bytes | Decoded bytes | Instructions | Return | Decoded event count | First sequence | Last sequence | Footer | Artifact SHA-256 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fast | 1, 2, 3, 4, 5 | 3 | fast.trace.txt.lz4 | 100 | 200 | 21718 | 0x5745c858653f5a7f | 21718 | 1 start | 21718 end | TRACE_END status=ok | abc |
+"""
+
+        self.assertEqual(
+            "1, 2, 3, 4, 5",
+            benchmark_trace.parse_profile_baseline(table, "fast")["elapsed_values_ms"],
+        )
+        with self.assertRaisesRegex(ValueError, "invalid elapsed value"):
+            benchmark_trace.parse_profile_baseline(table.replace("1, 2, 3, 4, 5", "1, 2, nope, 4, 5"), "fast")
+        for values in ("1, 2, 3, 4", "1, 2, 3, 4, 5, 6"):
+            with self.subTest(values=values), self.assertRaisesRegex(ValueError, "five elapsed values"):
+                benchmark_trace.parse_profile_baseline(table.replace("1, 2, 3, 4, 5", values), "fast")
+
     def test_parses_and_validates_every_optimized_metric(self):
         current = parse_metrics(self.METRICS)
 

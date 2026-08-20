@@ -268,9 +268,18 @@ def _format_two_baseline_rows(document: str) -> list[dict[str, int | str]]:
             raise ValueError(f"baseline table has duplicate profile: {profile}")
         seen_profiles.add(profile)
 
+        elapsed_values: list[int] = []
+        for value in values["Measured elapsed values (ms)"].split(","):
+            value = value.strip()
+            if re.fullmatch(r"\d+", value) is None:
+                raise ValueError("baseline table has invalid elapsed value")
+            elapsed_values.append(int(value))
+        if len(elapsed_values) != 5:
+            raise ValueError("baseline table must have exactly five elapsed values")
+
         row: dict[str, int | str] = {
             "profile": profile,
-            "elapsed_values_ms": values["Measured elapsed values (ms)"],
+            "elapsed_values_ms": ", ".join(str(value) for value in elapsed_values),
             "artifact": values["Artifact"],
             "return": values["Return"].lower(),
             "first_sequence": values["First sequence"],
