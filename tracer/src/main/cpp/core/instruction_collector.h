@@ -1,8 +1,8 @@
 #pragma once
 
-#include "core/instruction_cache.h"
 #include "core/memory_trace_policy.h"
 #include "core/pending_instruction.h"
+#include "core/qbdi_instruction_decoder.h"
 #include "core/trace_config.h"
 
 #include <QBDI.h>
@@ -19,7 +19,8 @@ public:
     InstructionCollector(InstructionCache *cache, TextTraceWriter *writer,
                          CodeRuleEngine *code_rules, const TraceContext *trace,
                          TraceCallbackGate *trace_gate,
-                         const TraceOptions &options) noexcept;
+                         const TraceOptions &options,
+                         const ModuleRange &retained_module) noexcept;
 
     QBDI::VMAction on_pre(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr);
     QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr);
@@ -50,6 +51,7 @@ private:
     TraceProfile profile_ = TraceProfile::Fast;
     size_t hexdump_limit_ = 0;
     bool decode_memory_ = false;
+    Arm64InstructionResolver resolver_{ModuleRange{}};
     CachedInstruction uncached_{};
     InstructionView current_view_{};
     MemoryTracePolicy memory_policy_{};

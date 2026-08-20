@@ -67,6 +67,7 @@ TraceMetrics producer_metrics_snapshot(const TraceMetrics &metrics) {
     snapshot.raw_bytes = metrics.raw_bytes;
     snapshot.cache_hits = metrics.cache_hits;
     snapshot.cache_misses = metrics.cache_misses;
+    snapshot.cache_collisions = metrics.cache_collisions;
     snapshot.buffer_swaps = metrics.buffer_swaps;
     snapshot.producer_waits = metrics.producer_waits;
     snapshot.producer_wait_ns = metrics.producer_wait_ns;
@@ -338,6 +339,7 @@ bool TextTraceWriter::write_metrics_sidecar() {
                                 metrics_->raw_bytes) &&
               write_unsigned_metric(fd, "cache_hits", metrics_->cache_hits) &&
               write_unsigned_metric(fd, "cache_misses", metrics_->cache_misses) &&
+              write_unsigned_metric(fd, "cache_collisions", metrics_->cache_collisions) &&
               write_rate_metric(fd, "cache_hit_rate", metrics_->cache_hits,
                                 static_cast<unsigned __int128>(metrics_->cache_hits) +
                                     metrics_->cache_misses) &&

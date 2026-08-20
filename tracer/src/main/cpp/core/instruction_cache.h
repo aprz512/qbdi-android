@@ -75,16 +75,18 @@ public:
     uint32_t metadata_chunk_count() const { return metadata_chunk_count_; }
     const InstructionCacheMetrics &metrics() const { return metrics_; }
 
-    const CachedInstruction *find(uint32_t opcode) noexcept;
-    const CachedInstruction *insert(const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *find(uintptr_t address, uint32_t opcode) noexcept;
+    const CachedInstruction *insert(uintptr_t address,
+                                    const CachedInstruction &instruction) noexcept;
     const CachedInstruction *populate_after_miss(
-            const CachedInstruction &instruction) noexcept;
-    const CachedInstruction *resolve(uint32_t opcode, Decoder decoder, void *decoder_data,
+            uintptr_t address, const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *resolve(uintptr_t address, uint32_t opcode, Decoder decoder,
+                                     void *decoder_data,
                                      CachedInstruction *scratch) noexcept;
 
 private:
     struct Slot {
-        uint32_t opcode;
+        uintptr_t address;
         uint32_t entry_plus_one;
     };
 
@@ -95,13 +97,14 @@ private:
     static constexpr uint32_t kMetadataEntriesPerChunk = 4096;
 
     static bool is_power_of_two(uint32_t value);
-    static uint32_t slot_index(uint32_t opcode, uint32_t mask);
+    static uint32_t slot_index(uintptr_t address, uint32_t opcode, uint32_t mask);
 
     bool allocate_slots(uint32_t count) noexcept;
     CachedInstruction *allocate_entry() noexcept;
     CachedInstruction *entry(uint32_t entry_plus_one) noexcept;
     const CachedInstruction *entry(uint32_t entry_plus_one) const noexcept;
-    const CachedInstruction *store(const CachedInstruction &instruction) noexcept;
+    const CachedInstruction *store(uintptr_t address,
+                                   const CachedInstruction &instruction) noexcept;
 
     Slot *slots_ = nullptr;
     uint32_t slot_count_ = 0;

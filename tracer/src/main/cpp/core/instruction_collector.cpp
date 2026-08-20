@@ -50,11 +50,13 @@ InstructionCollector::InstructionCollector(InstructionCache *cache, TextTraceWri
                                            CodeRuleEngine *code_rules,
                                            const TraceContext *trace,
                                            TraceCallbackGate *trace_gate,
-                                           const TraceOptions &options) noexcept
+                                           const TraceOptions &options,
+                                           const ModuleRange &retained_module) noexcept
         : cache_(cache), writer_(writer), code_rules_(code_rules), trace_(trace),
           trace_gate_(trace_gate), profile_(options.profile),
           hexdump_limit_(options.hexdump_limit),
           decode_memory_(options.memory_enabled()),
+          resolver_(retained_module),
           pending_(this, trace != nullptr ? trace->module_base : 0) {}
 
 QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
@@ -179,8 +181,8 @@ InstructionView InstructionCollector::resolve(QBDI::VM *vm,
                                               const QBDI::GPRState *gpr) noexcept {
     const uintptr_t address = gpr != nullptr ? gpr->pc : 0;
     QbdiDecoderRequest request{vm, decode_memory_};
-    return resolve_arm64_instruction(address, cache_, decode_current_instruction,
-                                     &request, &uncached_, decode_memory_);
+    return resolver_.resolve(address, cache_, decode_current_instruction,
+                             &request, &uncached_, decode_memory_);
 }
 
 RegisterSnapshot InstructionCollector::snapshot(const QBDI::GPRState &gpr,

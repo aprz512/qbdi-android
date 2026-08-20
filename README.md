@@ -39,6 +39,20 @@ adb shell mkdir -p /data/local/tmp/qbdi-android
 adb push out/arm64-v8a/libqbdi_tracer.so /data/local/tmp/qbdi-android/
 ```
 
+The benchmark agent loads the tracer through the application class loader so it shares the
+target's Android linker namespace and remains executable with SELinux Enforcing. Stage that copy
+in the debuggable app's private directory before running `benchmark_trace.py`:
+
+```bash
+adb push out/arm64-v8a/libqbdi_tracer.so /data/local/tmp/qbdi-tracer-stage.so
+adb shell run-as com.aprz.qbdiandroid cp \
+  /data/local/tmp/qbdi-tracer-stage.so files/libqbdi_tracer.so
+adb shell run-as com.aprz.qbdiandroid chmod 700 files/libqbdi_tracer.so
+python3 scripts/benchmark_trace.py --package com.aprz.qbdiandroid \
+  --device <adb-serial> --profile balanced --runs 5 \
+  --compare docs/benchmarks/trace-throughput-baseline.md
+```
+
 ## Find Scene Offsets
 
 Open the stripped `libdemo_target.so` in IDA or Ghidra. Use strings and call references to locate:

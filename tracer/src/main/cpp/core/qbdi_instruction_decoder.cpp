@@ -3,6 +3,7 @@
 #include "core/safe_memory.h"
 
 #include <cctype>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -145,13 +146,37 @@ CachedInstruction decode_arm64_fallback(uint32_t opcode, bool decode_memory) noe
     return decoded;
 }
 
-InstructionView resolve_arm64_instruction(
+Arm64InstructionResolver::Arm64InstructionResolver(const ModuleRange &retained_module,
+                                                   Arm64OpcodeFallback fallback) noexcept
+        : fallback_(fallback != nullptr ? fallback : safe_read_memory) {
+    direct_range_count_ = std::min(retained_module.readable_executable_range_count,
+                                   direct_ranges_.size());
+    std::copy_n(retained_module.readable_executable_ranges.begin(), direct_range_count_,
+                direct_ranges_.begin());
+}
+
+bool Arm64InstructionResolver::read_opcode(uintptr_t address, uint32_t *opcode) const noexcept {
+    if (opcode == nullptr) return false;
+    if ((address & (alignof(uint32_t) - 1U)) == 0) {
+        for (size_t i = 0; i < direct_range_count_; ++i) {
+            const AddressRange &range = direct_ranges_[i];
+            if (range.start < range.end && range.end - range.start >= sizeof(uint32_t) &&
+                address >= range.start && address <= range.end - sizeof(uint32_t)) {
+                *opcode = *reinterpret_cast<volatile const uint32_t *>(address);
+                return true;
+            }
+        }
+    }
+    return fallback_ != nullptr && fallback_(address, opcode, sizeof(*opcode));
+}
+
+InstructionView Arm64InstructionResolver::resolve(
         uintptr_t address, InstructionCache *cache, InstructionCache::Decoder decoder,
         void *decoder_data, CachedInstruction *scratch, bool decode_memory) noexcept {
     if (scratch == nullptr) return {address, nullptr};
 
     uint32_t opcode = 0;
-    if (!safe_read_memory(address, &opcode, sizeof(opcode))) {
+    if (!read_opcode(address, &opcode)) {
         *scratch = CachedInstruction{};
         copy_bounded(scratch->mnemonic, "<unreadable>");
         copy_bounded(scratch->disassembly, "<unreadable>");
@@ -167,8 +192,17 @@ InstructionView resolve_arm64_instruction(
         return {address, scratch};
     }
 
-    const CachedInstruction *resolved = cache->resolve(opcode, decoder, decoder_data, scratch);
+    const CachedInstruction *resolved = cache->resolve(address, opcode, decoder, decoder_data,
+                                                        scratch);
     if (resolved != nullptr) return {address, resolved};
     *scratch = decode_arm64_fallback(opcode, decode_memory);
     return {address, scratch};
+}
+
+InstructionView resolve_arm64_instruction(
+        uintptr_t address, InstructionCache *cache, InstructionCache::Decoder decoder,
+        void *decoder_data, CachedInstruction *scratch, bool decode_memory) noexcept {
+    const ModuleRange no_direct_range{};
+    Arm64InstructionResolver resolver(no_direct_range);
+    return resolver.resolve(address, cache, decoder, decoder_data, scratch, decode_memory);
 }

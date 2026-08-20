@@ -87,16 +87,17 @@ InstructionCache::~InstructionCache() {
     if (slots_ != nullptr) munmap(slots_, slots_mapping_size_);
 }
 
-const CachedInstruction *InstructionCache::find(uint32_t opcode) noexcept {
+const CachedInstruction *InstructionCache::find(uintptr_t address, uint32_t opcode) noexcept {
     if (!enabled()) {
         ++metrics_.misses;
         return nullptr;
     }
 
-    const Slot &slot = slots_[slot_index(opcode, slot_count_ - 1U)];
-    if (slot.entry_plus_one != 0 && slot.opcode == opcode) {
+    const Slot &slot = slots_[slot_index(address, opcode, slot_count_ - 1U)];
+    const CachedInstruction *cached = entry(slot.entry_plus_one);
+    if (cached != nullptr && slot.address == address && cached->opcode == opcode) {
         ++metrics_.hits;
-        return entry(slot.entry_plus_one);
+        return cached;
     }
 
     ++metrics_.misses;
@@ -104,48 +105,50 @@ const CachedInstruction *InstructionCache::find(uint32_t opcode) noexcept {
     return nullptr;
 }
 
-const CachedInstruction *InstructionCache::insert(const CachedInstruction &instruction) noexcept {
+const CachedInstruction *InstructionCache::insert(uintptr_t address,
+                                                   const CachedInstruction &instruction) noexcept {
     if (!enabled()) {
         ++metrics_.misses;
         return nullptr;
     }
 
-    Slot &slot = slots_[slot_index(instruction.opcode, slot_count_ - 1U)];
-    if (slot.entry_plus_one != 0 && slot.opcode == instruction.opcode) {
+    Slot &slot = slots_[slot_index(address, instruction.opcode, slot_count_ - 1U)];
+    const CachedInstruction *cached = entry(slot.entry_plus_one);
+    if (cached != nullptr && slot.address == address && cached->opcode == instruction.opcode) {
         ++metrics_.hits;
     } else {
         ++metrics_.misses;
         if (slot.entry_plus_one != 0) ++metrics_.collisions;
     }
-    return store(instruction);
+    return store(address, instruction);
 }
 
 const CachedInstruction *InstructionCache::populate_after_miss(
-        const CachedInstruction &instruction) noexcept {
-    return enabled() ? store(instruction) : nullptr;
+        uintptr_t address, const CachedInstruction &instruction) noexcept {
+    return enabled() ? store(address, instruction) : nullptr;
 }
 
-const CachedInstruction *InstructionCache::resolve(uint32_t opcode, Decoder decoder,
+const CachedInstruction *InstructionCache::resolve(uintptr_t address, uint32_t opcode, Decoder decoder,
                                                    void *decoder_data,
                                                    CachedInstruction *scratch) noexcept {
-    if (const CachedInstruction *cached = find(opcode); cached != nullptr) return cached;
+    if (const CachedInstruction *cached = find(address, opcode); cached != nullptr) return cached;
     if (decoder == nullptr || scratch == nullptr) return nullptr;
 
     *scratch = CachedInstruction{};
     scratch->opcode = opcode;
     if (!decoder(opcode, decoder_data, scratch)) return nullptr;
     scratch->opcode = opcode;
-    if (const CachedInstruction *cached = populate_after_miss(*scratch); cached != nullptr) {
+    if (const CachedInstruction *cached = populate_after_miss(address, *scratch); cached != nullptr) {
         return cached;
     }
     return scratch;
 }
 
-const CachedInstruction *InstructionCache::store(
-        const CachedInstruction &instruction) noexcept {
+const CachedInstruction *InstructionCache::store(uintptr_t address,
+                                                 const CachedInstruction &instruction) noexcept {
     if (!enabled()) return nullptr;
 
-    Slot &slot = slots_[slot_index(instruction.opcode, slot_count_ - 1U)];
+    Slot &slot = slots_[slot_index(address, instruction.opcode, slot_count_ - 1U)];
     CachedInstruction *cached = nullptr;
     if (slot.entry_plus_one == 0) {
         cached = allocate_entry();
@@ -157,7 +160,7 @@ const CachedInstruction *InstructionCache::store(
 
     if (cached == nullptr) return nullptr;
     *cached = instruction;
-    slot.opcode = instruction.opcode;
+    slot.address = address;
     return cached;
 }
 
@@ -165,8 +168,15 @@ bool InstructionCache::is_power_of_two(uint32_t value) {
     return value != 0 && (value & (value - 1U)) == 0;
 }
 
-uint32_t InstructionCache::slot_index(uint32_t opcode, uint32_t mask) {
-    return (opcode * 0x9E3779B1U) & mask;
+uint32_t InstructionCache::slot_index(uintptr_t address, uint32_t opcode, uint32_t mask) {
+    uint64_t mixed = static_cast<uint64_t>(address) ^
+                     (static_cast<uint64_t>(opcode) * 0x9e3779b97f4a7c15ULL);
+    mixed ^= mixed >> 30U;
+    mixed *= 0xbf58476d1ce4e5b9ULL;
+    mixed ^= mixed >> 27U;
+    mixed *= 0x94d049bb133111ebULL;
+    mixed ^= mixed >> 31U;
+    return static_cast<uint32_t>(mixed ^ (mixed >> 32U)) & mask;
 }
 
 bool InstructionCache::allocate_slots(uint32_t count) noexcept {

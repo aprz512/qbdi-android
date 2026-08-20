@@ -6,10 +6,10 @@
 #include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
 
-#include <cstring>
-#include <csignal>
 #include <array>
 #include <atomic>
+#include <csignal>
+#include <cstring>
 #if defined(__ANDROID__)
 #include <dlfcn.h>
 #endif
@@ -33,6 +33,8 @@ struct InstalledSceneHook {
     void *module_guard = nullptr;
     size_t active_proxy_calls = 0;
     size_t proxy_generation = 0;
+    uint64_t config_generation = 0;
+    uint64_t pending_config_generation = 0;
     bool pending_install = false;
     bool unhook_failed_window = false;
     bool installed = false;
@@ -64,9 +66,11 @@ static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
 static void *proxy_for_generation(size_t generation);
 static bool create_hook_generation_locked(const TraceConfig &config,
                                           const SceneConfig &scene,
-                                          const ModuleRange &module);
+                                          const ModuleRange &module,
+                                          uint64_t config_generation);
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
-                                      const ModuleRange &module);
+                                      const ModuleRange &module,
+                                      uint64_t config_generation);
 extern "C" char trace_proxy_stubs[];
 
 extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[8],
@@ -166,15 +170,19 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                 const TraceConfig pending_config = std::move(hook->pending_config);
                 const SceneConfig pending_scene = std::move(hook->pending_scene);
                 const ModuleRange pending_module = std::move(hook->pending_module);
+                const uint64_t pending_config_generation =
+                        hook->pending_config_generation;
                 hook->pending_install = false;
                 (void)create_hook_generation_locked(pending_config, pending_scene,
-                                                    pending_module);
+                                                    pending_module,
+                                                    pending_config_generation);
             } else if (!hook->retired && !hook->installed) {
                 // Every physical hook installation gets a distinct proxy identity.
                 // A thread may still be paused in this generation's old stub.
                 hook->retired = true;
                 (void)create_hook_generation_locked(hook->config, hook->scene,
-                                                    hook->module);
+                                                    hook->module,
+                                                    hook->config_generation);
             } else if (!hook->retired) {
                 hook->unhook_failed_window = false;
             }
@@ -190,9 +198,17 @@ static void *proxy_for_generation(size_t generation) {
 
 static bool create_hook_generation_locked(const TraceConfig &config,
                                           const SceneConfig &scene,
-                                          const ModuleRange &module) {
+                                          const ModuleRange &module,
+                                          uint64_t config_generation) {
     if (g_next_proxy_generation >= kMaxProxyGenerations) {
         QTRACE_E("proxy generation capacity exhausted=%zu", kMaxProxyGenerations);
+        return false;
+    }
+    uintptr_t target = 0;
+    if (!module_offset_address(module, scene.offset, false, &target)) {
+        QTRACE_E("scene %s offset=0x%lx outside module size=0x%lx", scene.name.c_str(),
+                 static_cast<unsigned long>(scene.offset),
+                 static_cast<unsigned long>(module.size()));
         return false;
     }
     const size_t generation = g_next_proxy_generation++;
@@ -201,6 +217,7 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     slot->config = config;
     slot->scene = scene;
     slot->module = module;
+    slot->config_generation = config_generation;
 #if defined(__ANDROID__)
     slot->module_guard = ::dlopen(module.path.c_str(), RTLD_NOW | RTLD_NOLOAD);
     if (slot->module_guard == nullptr) {
@@ -216,7 +233,6 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     g_hook_generations[generation] = slot;
     g_hook_generation_raw[generation] = slot.get();
     g_scene_hooks[scene.index] = slot;
-    const uintptr_t target = module.start + scene.offset;
     const bool hooked = hook_function_address(target, proxy_for_generation(generation),
                                               &slot->hook);
     slot->installed = hooked || slot->hook.residual_hook;
@@ -224,7 +240,8 @@ static bool create_hook_generation_locked(const TraceConfig &config,
 }
 
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
-                                      const ModuleRange &module) {
+                                      const ModuleRange &module,
+                                      uint64_t config_generation) {
     if (scene.offset == 0) {
         QTRACE_W("scene %s offset is 0, skip", scene.name.c_str());
         return false;
@@ -233,13 +250,32 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         QTRACE_E("scene index=%zu exceeds proxy stub capacity=%zu", scene.index, kMaxScenes);
         return false;
     }
+    uintptr_t target = 0;
+    if (!module_offset_address(module, scene.offset, false, &target)) return false;
+    if (scene.end_offset != 0) {
+        uintptr_t range_end = 0;
+        if (!module_offset_address(module, scene.end_offset, true, &range_end) ||
+            range_end <= target) {
+            return false;
+        }
+    }
     const std::shared_ptr<InstalledSceneHook> previous = g_scene_hooks[scene.index];
     if (previous != nullptr) {
         std::lock_guard<std::mutex> transition_guard(previous->transition_mutex);
+        uintptr_t previous_target = 0;
+        const bool previous_target_valid = module_offset_address(
+                previous->module, previous->scene.offset, false, &previous_target);
+        if (!previous->retired && previous->installed &&
+            previous->config_generation == config_generation &&
+            previous_target_valid && previous_target == target &&
+            basename_of(previous->module.path) == basename_of(module.path)) {
+            return true;
+        }
         if (previous->active_proxy_calls != 0) {
             previous->pending_config = config;
             previous->pending_scene = scene;
             previous->pending_module = module;
+            previous->pending_config_generation = config_generation;
             previous->pending_install = true;
             return true;
         }
@@ -248,7 +284,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         previous->unhook_failed_window = false;
         previous->retired = true;
     }
-    return create_hook_generation_locked(config, scene, module);
+    return create_hook_generation_locked(config, scene, module, config_generation);
 }
 
 #if defined(QTRACE_HOST_TEST)
@@ -272,7 +308,13 @@ bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene
     std::lock_guard<std::mutex> guard(g_lock);
     g_config = config;
     ++g_config_generation;
-    return install_scene_hook_locked(config, scene, module);
+    return install_scene_hook_locked(config, scene, module, g_config_generation);
+}
+
+bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
+                                             const ModuleRange &module) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    return install_scene_hook_locked(g_config, scene, module, g_config_generation);
 }
 
 void trace_proxy_test_set_registration_gate(RegistrationGate gate) {
@@ -330,14 +372,14 @@ static void install_hooks_for_module(const ModuleRange &module,
     QTRACE_I("target module %s base=0x%lx", g_config.target_so.c_str(),
              static_cast<unsigned long>(module.start));
     for (const auto &scene: g_config.scenes) {
-        install_scene_hook_locked(g_config, scene, module);
+        install_scene_hook_locked(g_config, scene, module, g_config_generation);
     }
 }
 
 static void install_hooks_when_ready(const TraceConfig &config, uint64_t generation) {
     for (int attempt = 0; attempt < 200; ++attempt) {
         ModuleRange module;
-        if (find_module_executable_range(config.target_so, &module)) {
+        if (find_loaded_module(config.target_so, 0, 0, &module)) {
             install_hooks_for_module(module, generation);
             return;
         }
@@ -378,10 +420,12 @@ qbdi_tracer_install_module(const char *module_path, uintptr_t module_base, uintp
     if (module_path == nullptr || module_base == 0 || module_size == 0) return;
 
     ModuleRange module;
-    module.start = module_base;
-    module.end = module_base + module_size;
-    module.permissions = "r-xp";
-    module.path = module_path;
+    if (!find_loaded_module(module_path, module_base, module_size, &module)) {
+        QTRACE_E("cannot validate observer module path=%s base=0x%lx size=0x%lx", module_path,
+                 static_cast<unsigned long>(module_base),
+                 static_cast<unsigned long>(module_size));
+        return;
+    }
 
     QTRACE_I("install hooks from observer module=%s base=0x%lx size=0x%lx", module_path,
              static_cast<unsigned long>(module.start), static_cast<unsigned long>(module.size()));

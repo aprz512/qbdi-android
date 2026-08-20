@@ -322,6 +322,7 @@ void emits_decodable_uncompressed_trace_with_consistent_final_metrics() {
     CHECK(writer.open(context));
     CHECK(writer.begin(context));
     CHECK(writer.instruction(context, instruction_record()));
+    metrics.cache_collisions = 7;
     CHECK(writer.end(0, true, 0));
     CHECK(writer.close());
     CHECK(writer.path().ends_with(".trace.txt"));
@@ -343,6 +344,7 @@ void emits_decodable_uncompressed_trace_with_consistent_final_metrics() {
     CHECK(metric_value(sidecar, "disk_bytes_per_second") == "0.000000");
     CHECK(metric_value(sidecar, "compression_ratio") == "1.000000");
     CHECK(metric_value(sidecar, "cache_hit_rate") == "0.000000");
+    CHECK(metric_value(sidecar, "cache_collisions") == "7");
     CHECK(metric_value(sidecar, "effective_buffer_bytes") == "8192");
     CHECK(metric_value(sidecar, "buffer_swaps") == "1");
     CHECK(text.find("buffer_swaps=1 ") != std::string::npos);

@@ -26,6 +26,8 @@ using RegistrationGate = void (*)();
 void trace_proxy_test_reset(const TraceConfig &config);
 bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene,
                              const ModuleRange &module);
+bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
+                                             const ModuleRange &module);
 void trace_proxy_test_set_registration_gate(RegistrationGate gate);
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate);
 size_t trace_proxy_test_generation(size_t scene_index);
@@ -53,6 +55,7 @@ bool g_install_residual_hook = false;
 std::atomic<size_t> g_old_calls{0};
 std::atomic<size_t> g_new_calls{0};
 int g_nested_fork_status = -1;
+std::vector<ModuleRange> g_fake_maps;
 
 std::mutex g_gate_mutex;
 std::condition_variable g_gate_condition;
@@ -114,6 +117,7 @@ void reset_fakes() {
     g_install_residual_hook = false;
     g_old_calls = 0;
     g_new_calls = 0;
+    g_fake_maps.clear();
     {
         std::lock_guard<std::mutex> gate_lock(g_gate_mutex);
         g_registration_entered = false;
@@ -145,7 +149,7 @@ SceneConfig scene_named(const char *name, uintptr_t target, size_t index = 0) {
     return scene;
 }
 
-ModuleRange module_named(const char *path, uintptr_t end = 0x100000) {
+ModuleRange module_named(const char *path, uintptr_t end = UINTPTR_MAX - 1U) {
     ModuleRange module;
     module.start = 0;
     module.end = end;
@@ -225,7 +229,7 @@ void entrant_registration_and_snapshot_are_atomic_with_install() {
     SceneConfig new_scene = scene_named("new-scene",
                                         reinterpret_cast<uintptr_t>(new_target));
     new_scene.end_offset += 8;
-    const ModuleRange new_module = module_named("new-module", 0x200000);
+    const ModuleRange new_module = module_named("new-module", UINTPTR_MAX);
     std::atomic<bool> installer_started{false};
     std::atomic<bool> installer_finished{false};
     std::thread installer([&] {
@@ -379,7 +383,7 @@ void same_address_updates_replace_all_metadata_and_hook_generation() {
     SceneConfig second_scene = scene_named("second", reinterpret_cast<uintptr_t>(old_target));
     second_scene.end_offset += 0x40;
     CHECK(trace_proxy_test_update(second_config, second_scene,
-                                   module_named("reloaded-module", 0x300000)));
+                                   module_named("reloaded-module", UINTPTR_MAX)));
     CHECK(g_hook_calls == initial_hook_calls + 1);
     CHECK(g_unhook_calls == 1);
 
@@ -390,7 +394,156 @@ void same_address_updates_replace_all_metadata_and_hook_generation() {
     CHECK(g_seen_invocation.scene.name == "second");
     CHECK(g_seen_invocation.scene.end_offset == second_scene.end_offset);
     CHECK(g_seen_invocation.module.path == "reloaded-module");
-    CHECK(g_seen_invocation.module.end == 0x300000);
+    CHECK(g_seen_invocation.module.end == UINTPTR_MAX);
+}
+
+void duplicate_install_for_one_configuration_generation_is_idempotent() {
+    reset_fakes();
+    const TraceConfig config = config_named("one-generation");
+    const SceneConfig scene = scene_named("one-generation",
+                                          reinterpret_cast<uintptr_t>(old_target));
+    const ModuleRange module = module_named("same-module");
+    trace_proxy_test_reset(config);
+
+    CHECK(trace_proxy_test_repeat_current_install(scene, module));
+    const size_t generation = trace_proxy_test_generation(scene.index);
+    CHECK(trace_proxy_test_repeat_current_install(scene, module));
+
+    CHECK(trace_proxy_test_generation(scene.index) == generation);
+    CHECK(g_hook_calls == 1);
+    CHECK(g_unhook_calls == 0);
+}
+
+void failed_same_generation_install_is_retried() {
+    reset_fakes();
+    const TraceConfig config = config_named("retry-generation");
+    const SceneConfig scene = scene_named("retry-generation",
+                                          reinterpret_cast<uintptr_t>(old_target));
+    const ModuleRange module = module_named("retry-module");
+    trace_proxy_test_reset(config);
+    g_fail_next_hook = true;
+
+    CHECK(!trace_proxy_test_repeat_current_install(scene, module));
+    const size_t failed_generation = trace_proxy_test_generation(scene.index);
+    CHECK(trace_proxy_test_repeat_current_install(scene, module));
+
+    CHECK(g_hook_calls == 2);
+    CHECK(trace_proxy_test_generation(scene.index) != failed_generation);
+}
+
+void duplicate_during_an_active_call_schedules_only_the_required_rehook() {
+    reset_fakes();
+    const TraceConfig config = config_named("active-duplicate");
+    const SceneConfig scene = scene_named("active-duplicate",
+                                          reinterpret_cast<uintptr_t>(old_target));
+    const ModuleRange module = module_named("active-module");
+    trace_proxy_test_reset(config);
+    CHECK(trace_proxy_test_repeat_current_install(scene, module));
+    const size_t first_generation = trace_proxy_test_generation(scene.index);
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_use_runner_gate = true;
+    }
+
+    uint64_t args[8]{23};
+    uint64_t result = 0;
+    std::thread active([&] { result = trace_proxy_dispatch(first_generation, args, 0); });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_runner_entered; });
+    }
+    CHECK(trace_proxy_test_repeat_current_install(scene, module));
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_runner = true;
+    }
+    g_gate_condition.notify_all();
+    active.join();
+
+    CHECK(result == 0x117);
+    CHECK(g_hook_calls == 2);
+    CHECK(g_unhook_calls == 1);
+    CHECK(trace_proxy_test_generation(scene.index) != first_generation);
+}
+
+void observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map() {
+    reset_fakes();
+    ModuleRange read_only;
+    read_only.start = 0x70000000;
+    read_only.end = 0x70001000;
+    read_only.file_offset = 0;
+    read_only.permissions = "r--p";
+    read_only.path = "/data/app/libtarget.so";
+    ModuleRange execute_only;
+    execute_only.start = 0x70001000;
+    execute_only.end = 0x70002000;
+    execute_only.file_offset = 0x1000;
+    execute_only.permissions = "--xp";
+    execute_only.path = read_only.path;
+    ModuleRange executable;
+    executable.start = 0x70002000;
+    executable.end = 0x70004000;
+    executable.file_offset = 0x2000;
+    executable.permissions = "r-xp";
+    executable.path = read_only.path;
+    g_fake_maps = {read_only, execute_only, executable};
+
+    ModuleRange normalized;
+    CHECK(normalize_module_ranges(g_fake_maps, executable.path, 0x70000000, 0x4000,
+                                  &normalized));
+    CHECK(normalized.start == 0x70000000);
+    CHECK(normalized.end == 0x70004000);
+    CHECK(normalized.readable_executable_range_count == 1);
+    CHECK(normalized.readable_executable_ranges[0].start == 0x70002000);
+    CHECK(normalized.readable_executable_ranges[0].end == 0x70004000);
+    CHECK(normalized.path == executable.path);
+
+    ModuleRange detached;
+    CHECK(normalize_module_ranges(g_fake_maps, "libtarget.so", 0, 0, &detached));
+    CHECK(detached.start == normalized.start);
+    CHECK(detached.readable_executable_range_count ==
+          normalized.readable_executable_range_count);
+
+    CHECK(!normalize_module_ranges(g_fake_maps, executable.path, UINTPTR_MAX - 1U, 4,
+                                   &normalized));
+
+    ModuleRange outside_observer = executable;
+    outside_observer.start = 0x70004000;
+    outside_observer.end = 0x70005000;
+    outside_observer.file_offset = 0x4000;
+    g_fake_maps.push_back(outside_observer);
+    CHECK(!normalize_module_ranges(g_fake_maps, executable.path, 0x70000000, 0x4000,
+                                   &normalized));
+    g_fake_maps.pop_back();
+
+    ModuleRange duplicate = executable;
+    duplicate.start = 0x71002000;
+    duplicate.end = 0x71004000;
+    duplicate.path = "/other/libtarget.so";
+    g_fake_maps.push_back(duplicate);
+    CHECK(!normalize_module_ranges(g_fake_maps, "libtarget.so", 0, 0, &normalized));
+}
+
+void scene_offsets_must_stay_inside_the_normalized_module() {
+    reset_fakes();
+    const TraceConfig config = config_named("bounded-scene");
+    trace_proxy_test_reset(config);
+    const ModuleRange module = module_named("bounded-module", 0x100);
+
+    SceneConfig outside = scene_named("outside", 0x100);
+    CHECK(!trace_proxy_test_repeat_current_install(outside, module));
+
+    SceneConfig bad_end = scene_named("bad-end", 0x80);
+    bad_end.end_offset = 0x101;
+    CHECK(!trace_proxy_test_repeat_current_install(bad_end, module));
+
+    uintptr_t address = 0;
+    CHECK(module_offset_address(module, 0xff, false, &address));
+    CHECK(address == 0xff);
+    CHECK(module_offset_address(module, 0x100, true, &address));
+    CHECK(address == 0x100);
+    CHECK(!module_offset_address(module, 0x100, false, &address));
+    CHECK(!module_offset_address(module, 0x101, true, &address));
 }
 
 void scene_indices_outside_the_stub_region_are_rejected() {
@@ -557,9 +710,6 @@ extern "C" uint64_t call_target_arm64(uintptr_t target, const uint64_t args[8], 
     return function(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
 }
 
-bool find_module_executable_range(const std::string &, ModuleRange *) { return false; }
-std::string basename_of(const std::string &path) { return path; }
-std::vector<ModuleRange> read_process_maps() { return {}; }
 void set_jni_backtrace_funcs(const std::vector<std::string> &) {}
 
 int main() {
@@ -570,6 +720,11 @@ int main() {
     every_physical_rehook_gets_a_new_proxy_identity();
     concurrent_unhook_failures_keep_the_original_bypass_alive();
     same_address_updates_replace_all_metadata_and_hook_generation();
+    duplicate_install_for_one_configuration_generation_is_idempotent();
+    failed_same_generation_install_is_retried();
+    duplicate_during_an_active_call_schedules_only_the_required_rehook();
+    observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map();
+    scene_offsets_must_stay_inside_the_normalized_module();
     scene_indices_outside_the_stub_region_are_rejected();
     proxy_generation_identities_are_never_reused_and_exhaust_safely();
     residual_hook_without_an_original_never_branches_to_null();

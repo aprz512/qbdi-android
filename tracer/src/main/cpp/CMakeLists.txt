@@ -75,7 +75,11 @@ add_library(qbdi_tracer SHARED
         jni/jni_formatter.cpp)
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
-target_compile_options(qbdi_tracer PRIVATE -Wall -Wextra)
+target_compile_options(qbdi_tracer PRIVATE
+        -Wall
+        -Wextra
+        $<$<CONFIG:Debug>:-O2>
+        $<$<CONFIG:Debug>:-g>)
 target_link_options(qbdi_tracer PRIVATE ${ANDROID_16KB_PAGE_LINK_OPTIONS})
 target_include_directories(qbdi_tracer PRIVATE
         ${QBDI_ROOT}/include

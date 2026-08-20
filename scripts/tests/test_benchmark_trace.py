@@ -1,6 +1,7 @@
 import unittest
 import subprocess
 from decimal import Decimal
+from pathlib import Path
 
 from scripts.benchmark_trace import (
     compare_to_baseline,
@@ -10,6 +11,7 @@ from scripts.benchmark_trace import (
     ensure_stable_return,
     fast_cost_diagnosis,
     frida_endpoint,
+    inject_java_bridge,
     is_missing_trace_directory,
     median_report,
     parse_legacy_trace,
@@ -126,6 +128,7 @@ disk_bytes_per_second=20971520.000000
 compression_ratio=0.100000
 cache_hits=90000
 cache_misses=10000
+cache_collisions=123
 cache_hit_rate=0.900000
 buffer_swaps=7
 producer_waits=0
@@ -148,6 +151,7 @@ effective_buffer_bytes=67108864
         self.assertEqual(Decimal("0.100000"), current["compression_ratio"])
         self.assertEqual(90_000, current["cache_hits"])
         self.assertEqual(10_000, current["cache_misses"])
+        self.assertEqual(123, current["cache_collisions"])
         self.assertEqual(Decimal("0.900000"), current["cache_hit_rate"])
         self.assertEqual(7, current["buffer_swaps"])
         self.assertEqual(0, current["producer_waits"])
@@ -187,7 +191,7 @@ effective_buffer_bytes=67108864
         for key in (
             "instructions", "elapsed_ms", "instructions_per_second", "raw_bytes",
             "compressed_bytes", "raw_bytes_per_second", "disk_bytes_per_second",
-            "compression_ratio", "cache_hits", "cache_misses", "cache_hit_rate",
+            "compression_ratio", "cache_hits", "cache_misses", "cache_collisions", "cache_hit_rate",
             "buffer_swaps", "producer_waits", "producer_wait_ns", "effective_buffer_bytes",
         ):
             self.assertIn(key, report)
@@ -225,6 +229,19 @@ effective_buffer_bytes=67108864
         )
         with self.assertRaisesRegex(ValueError, "run-as"):
             classify_run_as_build_type(1, "run-as: package not found")
+
+    def test_checked_in_baseline_is_a_valid_same_device_comparison_input(self):
+        document = Path(__file__).parents[2].joinpath(
+            "docs", "benchmarks", "trace-throughput-baseline.md"
+        ).read_text(encoding="utf-8")
+
+        baseline = parse_baseline_report(document)
+
+        self.assertEqual(
+            {"model": "Pixel 6", "device": "oriole", "android": "16",
+             "abi": "arm64-v8a", "build_type": "Debug", "elapsed_ms": 226},
+            baseline,
+        )
 
     def test_speedup_threshold_uses_exact_decimal_arithmetic(self):
         comparison = compare_to_baseline(
@@ -295,6 +312,21 @@ effective_buffer_bytes=67108864
         )
         with self.assertRaisesRegex(ValueError, "profile"):
             configure_agent_source(source, "invalid")
+
+    def test_benchmark_agent_loads_the_tracer_through_the_application_loader(self):
+        source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("ActivityThread.currentApplication()", source)
+        self.assertIn("load0.overload('java.lang.Class', 'java.lang.String')", source)
+        self.assertNotIn("Module.load(config.remoteDir + '/' + config.tracer)", source)
+
+    def test_injects_the_frida_java_bridge_before_the_benchmark_agent(self):
+        prepared = inject_java_bridge("var bridge = { available: true };", "send(Java.available);")
+
+        self.assertLess(prepared.index("var bridge"), prepared.index("send(Java.available)"))
+        self.assertIn("Object.defineProperty(globalThis, 'Java', { value: bridge });", prepared)
 
     def test_rejects_optimized_artifact_return_mismatch(self):
         metrics = parse_metrics(self.METRICS)

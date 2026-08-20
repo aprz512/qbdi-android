@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from importlib.resources import files
 import json
 import re
 import statistics
@@ -30,6 +31,7 @@ OPTIMIZED_INTEGER_FIELDS = (
     "compressed_bytes",
     "cache_hits",
     "cache_misses",
+    "cache_collisions",
     "buffer_swaps",
     "producer_waits",
     "producer_wait_ns",
@@ -241,6 +243,24 @@ def configure_agent_source(source: str, profile: str, legacy: bool = False) -> s
     )
 
 
+def inject_java_bridge(bridge_source: str, agent_source: str) -> str:
+    """Make the Frida Java bridge available to a benchmark agent created by Python."""
+    return (
+        bridge_source
+        + "\nObject.defineProperty(globalThis, 'Java', { value: bridge });\n"
+        + agent_source
+    )
+
+
+def java_bridge_source() -> str:
+    try:
+        return files("frida_tools").joinpath("bridges", "java.js").read_text(encoding="utf-8")
+    except (ModuleNotFoundError, FileNotFoundError) as error:
+        raise RuntimeError(
+            "Frida Java bridge is required; install the matching frida-tools package"
+        ) from error
+
+
 def fast_cost_diagnosis(
     metrics: dict[str, int | Decimal | str],
 ) -> dict[str, Decimal | str]:
@@ -402,9 +422,9 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
     except ImportError as error:
         raise RuntimeError("Frida Python bindings are required; install the matching 'frida' package") from error
 
-    source = configure_agent_source(
+    source = inject_java_bridge(java_bridge_source(), configure_agent_source(
         Path(args.agent).read_text(encoding="utf-8"), args.profile, args.legacy
-    )
+    ))
     messages: list[dict[str, Any]] = []
 
     def on_message(message: dict[str, Any], _data: Any) -> None:

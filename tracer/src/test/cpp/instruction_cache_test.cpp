@@ -5,19 +5,18 @@
 
 namespace {
 
-void multi_chunk_entries_resolve_through_the_fixed_index() {
+void allocates_multiple_metadata_chunks_under_hashed_indexing() {
     InstructionCache cache(8192);
     CachedInstruction instruction{};
 
-    for (uint32_t opcode = 0; opcode <= 4096; ++opcode) {
+    constexpr uintptr_t kBasePc = 0x7100000000ULL;
+    for (uint32_t opcode = 1; opcode <= 65536 && cache.metadata_chunk_count() < 2; ++opcode) {
         instruction.opcode = opcode;
         instruction.pc_relative_displacement = static_cast<int32_t>(opcode);
-        assert(cache.insert(instruction) != nullptr);
+        assert(cache.insert(kBasePc + (static_cast<uintptr_t>(opcode) * 4U), instruction) != nullptr);
     }
 
     assert(cache.metadata_chunk_count() == 2);
-    assert(cache.find(0)->pc_relative_displacement == 0);
-    assert(cache.find(4096)->pc_relative_displacement == 4096);
 }
 
 void converts_qbdi_arm64_branch_units_to_byte_displacements() {
@@ -48,11 +47,37 @@ void preserves_mixed_aliases_and_chooses_width_independently_of_operand_order() 
     assert(reversed.read_gpr_widths[0] == 8);
 }
 
+void distinguishes_same_opcode_at_pcs_with_matching_index_low_bits() {
+    InstructionCache cache(InstructionCache::kPreferredSlotCount);
+    assert(cache.enabled());
+
+    CachedInstruction instruction{};
+    instruction.opcode = 0xd503201fU;
+    constexpr uintptr_t kFirstPc = 0x7100000000ULL;
+    constexpr uintptr_t kSecondPc = kFirstPc + (1ULL << 22U);
+
+    const CachedInstruction *first = cache.insert(kFirstPc, instruction);
+    const CachedInstruction *second = cache.insert(kSecondPc, instruction);
+    assert(first != nullptr);
+    assert(second != nullptr);
+    assert(second != first);
+    assert(cache.metrics().misses == 2);
+    assert(cache.metrics().hits == 0);
+    assert(cache.metrics().collisions == 0);
+
+    assert(cache.find(kFirstPc, instruction.opcode) == first);
+    assert(cache.find(kSecondPc, instruction.opcode) == second);
+    assert(cache.metrics().hits == 2);
+    assert(cache.metrics().misses == 2);
+    assert(cache.metrics().collisions == 0);
+}
+
 } // namespace
 
 int main() {
     InstructionCache cache(1);
     assert(cache.enabled());
+    constexpr uintptr_t kBranchPc = 0x1000;
 
     CachedInstruction branch{};
     branch.opcode = 0x14000001;
@@ -61,23 +86,24 @@ int main() {
     branch.pc_relative_displacement = 4;
     branch.flags = InstructionFlags::Branch | InstructionFlags::PcRelative;
 
-    const CachedInstruction *stored = cache.insert(branch);
+    const CachedInstruction *stored = cache.insert(kBranchPc, branch);
     assert(stored != nullptr);
-    assert(cache.find(branch.opcode) == stored);
+    assert(cache.find(kBranchPc, branch.opcode) == stored);
     assert(stored->absolute_branch_target(0x1000) == 0x1004);
 
     CachedInstruction collision = branch;
     collision.opcode = branch.opcode + 8;
     std::strcpy(collision.mnemonic, "bl");
-    const CachedInstruction *replacement = cache.insert(collision);
+    const CachedInstruction *replacement = cache.insert(kBranchPc, collision);
     assert(replacement == stored);
     assert(cache.metrics().hits == 1);
     assert(cache.metrics().misses == 2);
     assert(cache.metrics().collisions == 1);
-    assert(cache.find(branch.opcode) == nullptr);
-    assert(cache.find(collision.opcode) == replacement);
+    assert(cache.find(kBranchPc, branch.opcode) == nullptr);
+    assert(cache.find(kBranchPc, collision.opcode) == replacement);
 
-    multi_chunk_entries_resolve_through_the_fixed_index();
+    allocates_multiple_metadata_chunks_under_hashed_indexing();
     converts_qbdi_arm64_branch_units_to_byte_displacements();
     preserves_mixed_aliases_and_chooses_width_independently_of_operand_order();
+    distinguishes_same_opcode_at_pcs_with_matching_index_low_bits();
 }

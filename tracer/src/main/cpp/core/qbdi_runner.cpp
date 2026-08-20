@@ -91,7 +91,8 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     auto started = std::chrono::steady_clock::now();
     InstructionCache instruction_cache;
     InstructionCollector collector(&instruction_cache, &state.writer, &state.code_rules,
-                                   &state.context, state.session.callback_gate(), config.trace);
+                                   &state.context, state.session.callback_gate(), config.trace,
+                                   invocation.module);
     QBDI::VM vm;
     QBDI::GPRState *gpr = vm.getGPRState();
 
@@ -111,9 +112,18 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         gpr->pc = execution_address;
 
         if (invocation.scene.end_offset > 0) {
-            uintptr_t range_start = invocation.module.start + invocation.scene.offset;
-            uintptr_t range_end = invocation.module.start + invocation.scene.end_offset;
-            vm.addInstrumentedRange(range_start, range_end);
+            uintptr_t range_start = 0;
+            uintptr_t range_end = 0;
+            if (!module_offset_address(invocation.module, invocation.scene.offset, false,
+                                       &range_start) ||
+                !module_offset_address(invocation.module, invocation.scene.end_offset, true,
+                                       &range_end) ||
+                range_end <= range_start) {
+                state.writer.error("scene instrumentation range is outside retained module");
+                execution_setup_ok = false;
+            } else {
+                vm.addInstrumentedRange(range_start, range_end);
+            }
         } else if (!vm.addInstrumentedModuleFromAddr(invocation.target_address)) {
             std::ostringstream error;
             error << "addInstrumentedModuleFromAddr failed address=0x" << std::hex
@@ -181,6 +191,7 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     }
     state.metrics.cache_hits = instruction_cache.metrics().hits;
     state.metrics.cache_misses = instruction_cache.metrics().misses;
+    state.metrics.cache_collisions = instruction_cache.metrics().collisions;
 
     state.session.observe_target_call(target, state.writer.failed());
     const TraceRunFinalization finalization =

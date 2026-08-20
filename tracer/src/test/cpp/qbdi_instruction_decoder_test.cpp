@@ -18,6 +18,15 @@ struct CountingAnalysisSource {
     uint32_t calls = 0;
 };
 
+uint32_t g_fallback_calls = 0;
+
+bool counting_fallback(uintptr_t address, void *buffer, size_t size) {
+    ++g_fallback_calls;
+    if (address == UINTPTR_MAX - 1U || buffer == nullptr || size != sizeof(uint32_t)) return false;
+    std::memcpy(buffer, reinterpret_cast<const void *>(address), size);
+    return true;
+}
+
 bool decode_counted(uint32_t opcode, void *data, CachedInstruction *decoded) noexcept {
     auto *source = static_cast<CountingAnalysisSource *>(data);
     ++source->calls;
@@ -109,7 +118,7 @@ void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
     CountingAnalysisSource source{&analysis};
     CachedInstruction scratch{};
     const CachedInstruction *cold =
-            cache.resolve(0xd503201f, decode_counted, &source, &scratch);
+            cache.resolve(0x7100001000ULL, 0xd503201f, decode_counted, &source, &scratch);
     assert(cold != nullptr);
     assert(source.calls == 1);
     assert(cache.metrics().misses == 1);
@@ -117,7 +126,7 @@ void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
     assert(cache.metrics().collisions == 0);
 
     const CachedInstruction *hot =
-            cache.resolve(0xd503201f, decode_counted, &source, &scratch);
+            cache.resolve(0x7100001000ULL, 0xd503201f, decode_counted, &source, &scratch);
     assert(hot == cold);
     assert(source.calls == 1);
     assert(cache.metrics().misses == 1);
@@ -125,7 +134,7 @@ void resolves_one_cold_then_one_hot_opcode_with_exact_accounting() {
     assert(cache.metrics().collisions == 0);
 
     const CachedInstruction *collision =
-            cache.resolve(0xd503205f, decode_counted, &source, &scratch);
+            cache.resolve(0x7100001000ULL, 0xd503205f, decode_counted, &source, &scratch);
     assert(collision == cold);
     assert(source.calls == 2);
     assert(cache.metrics().misses == 2);
@@ -193,6 +202,77 @@ void unreadable_and_zero_opcodes_bypass_cache_accounting() {
     assert(munmap(page, static_cast<size_t>(page_size)) == 0);
 }
 
+void resolver_uses_a_retained_readable_range_without_losing_fallback_contracts() {
+    const long page_size = sysconf(_SC_PAGESIZE);
+    assert(page_size > 0);
+    void *page = mmap(nullptr, static_cast<size_t>(page_size), PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(page != MAP_FAILED);
+    auto *words = static_cast<uint32_t *>(page);
+    words[0] = 0xd503201fU;
+
+    const uintptr_t address = reinterpret_cast<uintptr_t>(page);
+    ModuleRange retained{address, address + static_cast<uintptr_t>(page_size), 0, "r-xp",
+                         "libtarget.so"};
+    retained.readable_executable_ranges[0] = {address, address + sizeof(uint32_t)};
+    retained.readable_executable_range_count = 1;
+    Arm64InstructionResolver resolver(retained, counting_fallback);
+    InstructionCache cache(1);
+    char mnemonic[] = "NOP";
+    char disassembly[] = "nop";
+    QBDI::InstAnalysis analysis{};
+    analysis.mnemonic = mnemonic;
+    analysis.disassembly = disassembly;
+    CountingAnalysisSource source{&analysis};
+    CachedInstruction scratch{};
+    g_fallback_calls = 0;
+
+    const InstructionView cold = resolver.resolve(address, &cache, decode_counted, &source,
+                                                   &scratch);
+    assert(cold.decoded != nullptr);
+    assert(cold.decoded->opcode == 0xd503201fU);
+    assert(source.calls == 1);
+    assert(g_fallback_calls == 0);
+    assert(cache.metrics().misses == 1);
+
+    words[0] = 0x14000001U;
+    const InstructionView mutated = resolver.resolve(address, &cache, decode_counted, &source,
+                                                      &scratch);
+    assert(mutated.decoded != nullptr);
+    assert(mutated.decoded->opcode == 0x14000001U);
+    assert(source.calls == 2);
+    assert(g_fallback_calls == 0);
+    assert(cache.metrics().misses == 2);
+    assert(cache.metrics().collisions == 1);
+
+    words[1] = 0xd503201fU;
+    const InstructionView outside_exact_map = resolver.resolve(
+            address + sizeof(uint32_t), nullptr, decode_counted, &source, &scratch);
+    assert(outside_exact_map.decoded == &scratch);
+    assert(outside_exact_map.decoded->opcode == 0xd503201fU);
+    assert(g_fallback_calls == 1);
+
+    ModuleRange unreadable = retained;
+    unreadable.permissions = "--xp";
+    unreadable.readable_executable_range_count = 0;
+    Arm64InstructionResolver fallback_only(unreadable, counting_fallback);
+    g_fallback_calls = 0;
+    words[0] = 0;
+    const InstructionView zero = fallback_only.resolve(address, &cache, decode_counted, &source,
+                                                       &scratch);
+    assert(zero.decoded == &scratch);
+    assert(g_fallback_calls == 1);
+    assert(cache.metrics().misses == 2);
+
+    const InstructionView overflow = resolver.resolve(UINTPTR_MAX - 1U, &cache, decode_counted,
+                                                       &source, &scratch);
+    assert(overflow.decoded == &scratch);
+    assert(std::strcmp(overflow.decoded->mnemonic, "<unreadable>") == 0);
+    assert(g_fallback_calls == 2);
+    assert(cache.metrics().misses == 2);
+    assert(munmap(page, static_cast<size_t>(page_size)) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -202,4 +282,5 @@ int main() {
     decodes_memory_formulas_only_when_the_profile_requests_them();
     falls_back_to_owned_conservative_arm64_metadata();
     unreadable_and_zero_opcodes_bypass_cache_accounting();
+    resolver_uses_a_retained_readable_range_without_losing_fallback_contracts();
 }

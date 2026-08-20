@@ -2,7 +2,6 @@
 
 // Frida -l executes this source inside the spawned target process.
 const config = {
-  remoteDir: '/data/local/tmp/qbdi-android',
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
   profile: '__QTRACE_PROFILE__',
@@ -18,11 +17,35 @@ function findTracerExport(tracerModule, symbol) {
   return Module.getGlobalExportByName(symbol);
 }
 
+function loadTracerThroughApplicationLoader() {
+  if (!Java.available) {
+    throw new Error('Java runtime is required to load the tracer through the application loader');
+  }
+
+  Java.performNow(() => {
+    const ActivityThread = Java.use('android.app.ActivityThread');
+    const application = ActivityThread.currentApplication();
+    if (application === null) {
+      throw new Error('application is not ready for tracer loading');
+    }
+    const tracerPath = String(application.getFilesDir().getAbsolutePath()) + '/' + config.tracer;
+    const Runtime = Java.use('java.lang.Runtime');
+    Runtime.getRuntime().load0.overload('java.lang.Class', 'java.lang.String').call(
+      Runtime.getRuntime(), application.getClass(), tracerPath);
+  });
+
+  const tracer = Process.findModuleByName(config.tracer);
+  if (tracer === null) {
+    throw new Error('application loader did not map ' + config.tracer);
+  }
+  return tracer;
+}
+
 function startBenchmark(targetModule) {
   try {
     const benchmark = targetModule.getExportByName('demo_benchmark_case');
     const offset = benchmark.sub(targetModule.base);
-    const tracer = Module.load(config.remoteDir + '/' + config.tracer);
+    const tracer = loadTracerThroughApplicationLoader();
     const configure = new NativeFunction(
       findTracerExport(tracer, 'qbdi_tracer_configure'), 'void', ['pointer']);
     const install = new NativeFunction(
