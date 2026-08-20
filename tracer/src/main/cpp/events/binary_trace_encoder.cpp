@@ -6,6 +6,7 @@
 #include "events/trace_metrics.h"
 #include "events/trace_record.h"
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -318,6 +319,7 @@ BinaryEncodeResult BinaryTraceEncoder::encode_instruction(
     }
     const uint8_t read_count = mask_count(record.decoded->read_gpr_mask);
     const uint8_t write_count = mask_count(record.decoded->write_gpr_mask);
+    if (record.reads.count != read_count || record.writes.count != write_count) return {};
     const size_t payload_bytes = kBinaryInstructionFixedPayloadBytes +
                                  (static_cast<size_t>(read_count) + write_count) *
                                          sizeof(uint64_t);
@@ -333,15 +335,19 @@ BinaryEncodeResult BinaryTraceEncoder::encode_instruction(
     append_u32(buffer, metadata_id);
     append_u8(buffer, read_count);
     append_u8(buffer, write_count);
-    for (size_t index = 0; index < kTraceGprCount; ++index) {
-        if ((record.decoded->read_gpr_mask & (1ULL << index)) != 0) {
-            append_u64(buffer, record.before[index]);
-        }
+    size_t dense_index = 0;
+    uint64_t read_mask = record.decoded->read_gpr_mask;
+    while (read_mask != 0) {
+        static_cast<void>(std::countr_zero(read_mask));
+        append_u64(buffer, record.reads.values[dense_index++]);
+        read_mask &= read_mask - 1U;
     }
-    for (size_t index = 0; index < kTraceGprCount; ++index) {
-        if ((record.decoded->write_gpr_mask & (1ULL << index)) != 0) {
-            append_u64(buffer, record.after[index]);
-        }
+    dense_index = 0;
+    uint64_t write_mask = record.decoded->write_gpr_mask;
+    while (write_mask != 0) {
+        static_cast<void>(std::countr_zero(write_mask));
+        append_u64(buffer, record.writes.values[dense_index++]);
+        write_mask &= write_mask - 1U;
     }
     return {true, buffer.offset};
 }

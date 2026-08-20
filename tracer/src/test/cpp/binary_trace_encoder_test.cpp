@@ -192,9 +192,8 @@ void instruction_has_exact_golden_bytes_and_dense_values() {
     record.pc = 0x1020;
     record.module_base = 0x1000;
     record.decoded = &decoded;
-    record.before[1] = 0x1112131415161718ULL;
-    record.before[33] = 0x2122232425262728ULL;
-    record.after[30] = 0x3132333435363738ULL;
+    record.reads = {{{0x1112131415161718ULL, 0x2122232425262728ULL}}, 2};
+    record.writes = {{{0x3132333435363738ULL}}, 1};
 
     uint8_t bytes[96]{};
     const BinaryEncodeResult result = BinaryTraceEncoder{}.encode_instruction(
@@ -528,6 +527,8 @@ void declared_record_maxima_are_exact_and_encodable() {
 
     InstructionRecord instruction{};
     instruction.decoded = &decoded;
+    instruction.reads.count = kTraceGprCount;
+    instruction.writes.count = kTraceGprCount;
     check_exact_size(encoder.encode_instruction(output.data(), output.size(), 1, 2, instruction),
                      kBinaryMaxInstructionRecordBytes);
 

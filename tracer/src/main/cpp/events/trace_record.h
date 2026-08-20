@@ -14,6 +14,11 @@ constexpr size_t kMaxInstructionLineBytes = 4096;
 
 struct CachedInstruction;
 
+struct DenseRegisterValues {
+    std::array<uint64_t, kTraceGprCount> values{};
+    uint8_t count = 0;
+};
+
 struct MemoryRecord {
     MemoryAccessKind kind = MemoryAccessKind::Read;
     bool metadata_available = false;
@@ -35,12 +40,8 @@ struct InstructionRecord {
     // Borrowed: when non-null, this object and its fixed character arrays must remain readable and
     // unchanged across both TraceEncoder measure and write passes.
     const CachedInstruction *decoded = nullptr;
-    // Borrowed display identities supplied by the decoder (for example W0, LR, SP, NZCV, PC).
-    // Each non-null name must remain readable across both encoder passes.
-    std::array<const char *, kTraceGprCount> read_register_names{};
-    std::array<const char *, kTraceGprCount> write_register_names{};
-    std::array<uint64_t, kTraceGprCount> before{};
-    std::array<uint64_t, kTraceGprCount> after{};
+    DenseRegisterValues reads{};
+    DenseRegisterValues writes{};
     std::array<MemoryRecord, kMaxMemoryRecords> memory{};
     uint8_t memory_count = 0;
 };

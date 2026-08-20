@@ -58,6 +58,10 @@ add_trace_test(binary_trace_encoder_test
     binary_trace_encoder_test.cpp
     ../../main/cpp/events/binary_trace_encoder.cpp)
 
+add_trace_test(trace_dictionary_test
+    trace_dictionary_test.cpp
+    ../../main/cpp/events/trace_dictionary.cpp)
+
 add_trace_test(memory_profile_test
     memory_profile_test.cpp
     ../../main/cpp/core/instruction_cache.cpp

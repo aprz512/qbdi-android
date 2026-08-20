@@ -11,6 +11,7 @@
 #include <QBDI/State.h>
 
 #include <algorithm>
+#include <bit>
 
 namespace {
 
@@ -192,8 +193,11 @@ InstructionView InstructionCollector::resolve(QBDI::VM *vm,
 RegisterSnapshot InstructionCollector::snapshot(const QBDI::GPRState &gpr,
                                                 uint64_t mask) noexcept {
     RegisterSnapshot result{};
-    for (size_t index = 0; index < kTraceGprCount; ++index) {
-        if ((mask & (1ULL << index)) != 0) result.values[index] = QBDI_GPR_GET(&gpr, index);
+    mask &= (1ULL << kTraceGprCount) - 1ULL;
+    while (mask != 0) {
+        const size_t index = std::countr_zero(mask);
+        result.values[index] = QBDI_GPR_GET(&gpr, index);
+        mask &= mask - 1U;
     }
     return result;
 }

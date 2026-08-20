@@ -3,6 +3,7 @@
 #include "events/trace_number_formatter.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <limits>
 
@@ -91,10 +92,10 @@ bool append_c_string(AppendBuffer &buffer, const char *value, size_t maximum) no
     return append_bytes(buffer, value, bounded_length(value, maximum));
 }
 
-bool append_register_name(AppendBuffer &buffer, const InstructionRecord &record,
+bool append_register_name(AppendBuffer &buffer, const CachedInstruction &instruction,
                           size_t index, bool write) noexcept {
-    const char *name = write ? record.write_register_names[index]
-                             : record.read_register_names[index];
+    const char *name = write ? instruction.write_register_names[index]
+                             : instruction.read_register_names[index];
     if (name != nullptr && name[0] != '\0') {
         return append_c_string(buffer, name, kMaxRegisterNameBytes);
     }
@@ -188,6 +189,12 @@ EncodeResult encode_atomic(char *output, size_t capacity, size_t maximum_size, E
 
 bool append_instruction(AppendBuffer &buffer, const char *module_name,
                         const InstructionRecord &record) noexcept {
+    if (record.decoded != nullptr &&
+        (record.reads.count != std::popcount(record.decoded->read_gpr_mask) ||
+         record.writes.count != std::popcount(record.decoded->write_gpr_mask))) {
+        buffer.ok = false;
+        return false;
+    }
     const char *module = module_name == nullptr ? "<unknown>" : module_name;
     if (!append_dec_u64(buffer, record.sequence) || !append_char(buffer, ' ') ||
         !append_c_string(buffer, module, kMaxInstructionLineBytes) || !append_char(buffer, '+') ||
@@ -237,35 +244,43 @@ bool append_instruction(AppendBuffer &buffer, const char *module_name,
         }
 
         bool has_reads = false;
-        for (size_t index = 0; index < kTraceGprCount; ++index) {
-            if ((record.decoded->read_gpr_mask & (1ULL << index)) == 0) continue;
+        size_t dense_index = 0;
+        uint64_t read_mask = record.decoded->read_gpr_mask;
+        while (read_mask != 0) {
+            const size_t index = std::countr_zero(read_mask);
             if (!has_reads) {
                 if (!append_literal(buffer, " | R:")) return false;
                 has_reads = true;
             } else if (!append_char(buffer, ' ')) {
                 return false;
             }
-            if (!append_register_name(buffer, record, index, false) ||
+            if (dense_index >= record.reads.count ||
+                !append_register_name(buffer, *record.decoded, index, false) ||
                 !append_literal(buffer, "=0x") ||
-                !append_hex_u64(buffer, record.before[index])) {
+                !append_hex_u64(buffer, record.reads.values[dense_index++])) {
                 return false;
             }
+            read_mask &= read_mask - 1U;
         }
 
         bool has_writes = false;
-        for (size_t index = 0; index < kTraceGprCount; ++index) {
-            if ((record.decoded->write_gpr_mask & (1ULL << index)) == 0) continue;
+        dense_index = 0;
+        uint64_t write_mask = record.decoded->write_gpr_mask;
+        while (write_mask != 0) {
+            const size_t index = std::countr_zero(write_mask);
             if (!has_writes) {
                 if (!append_literal(buffer, " | W:")) return false;
                 has_writes = true;
             } else if (!append_char(buffer, ' ')) {
                 return false;
             }
-            if (!append_register_name(buffer, record, index, true) ||
+            if (dense_index >= record.writes.count ||
+                !append_register_name(buffer, *record.decoded, index, true) ||
                 !append_literal(buffer, "=0x") ||
-                !append_hex_u64(buffer, record.after[index])) {
+                !append_hex_u64(buffer, record.writes.values[dense_index++])) {
                 return false;
             }
+            write_mask &= write_mask - 1U;
         }
     }
 

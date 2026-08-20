@@ -21,9 +21,11 @@ InstructionRecord instruction_record() {
     record.pc = 0x1010;
     record.module_base = 0x1000;
     record.decoded = &decoded;
-    record.before[1] = 2;
-    record.before[2] = 3;
-    record.after[0] = 5;
+    record.reads.values[0] = 2;
+    record.reads.values[1] = 3;
+    record.reads.count = 2;
+    record.writes.values[0] = 5;
+    record.writes.count = 1;
 
     // The decoder lives for the duration of each test through this static fixture.
     static CachedInstruction fixture = decoded;
@@ -101,16 +103,13 @@ void preserves_architecture_register_display_names() {
     record.pc = 0x1020;
     record.module_base = 0x1000;
     record.decoded = &decoded;
-    record.read_register_names[0] = "W0";
-    record.read_register_names[30] = "LR";
-    record.read_register_names[31] = "SP";
-    record.write_register_names[32] = "NZCV";
-    record.write_register_names[33] = "PC";
-    record.before[0] = 1;
-    record.before[30] = 2;
-    record.before[31] = 3;
-    record.after[32] = 4;
-    record.after[33] = 5;
+    std::strcpy(decoded.read_register_names[0], "W0");
+    std::strcpy(decoded.read_register_names[30], "LR");
+    std::strcpy(decoded.read_register_names[31], "SP");
+    std::strcpy(decoded.write_register_names[32], "NZCV");
+    std::strcpy(decoded.write_register_names[33], "PC");
+    record.reads = {{{1, 2, 3}}, 3};
+    record.writes = {{{4, 5}}, 2};
 
     char output[256]{};
     TraceEncoder encoder;
@@ -132,10 +131,10 @@ void preserves_distinct_read_and_write_aliases_for_one_physical_register() {
     record.pc = 0x1024;
     record.module_base = 0x1000;
     record.decoded = &decoded;
-    record.read_register_names[0] = "X0";
-    record.write_register_names[0] = "W0";
-    record.before[0] = 0x123456789;
-    record.after[0] = 7;
+    std::strcpy(decoded.read_register_names[0], "X0");
+    std::strcpy(decoded.write_register_names[0], "W0");
+    record.reads = {{{0x123456789}}, 1};
+    record.writes = {{{7}}, 1};
 
     char output[256]{};
     TraceEncoder encoder;
@@ -264,6 +263,22 @@ void rejects_instruction_lines_above_the_fixed_bound() {
     for (char c: output) assert(c == '?');
 }
 
+void rejects_inconsistent_dense_register_counts_without_writing() {
+    static CachedInstruction decoded{};
+    decoded.read_gpr_mask = 1ULL << 3U;
+    std::strcpy(decoded.read_register_names[3], "X3");
+
+    InstructionRecord record{};
+    record.decoded = &decoded;
+    char output[64];
+    std::memset(output, '#', sizeof(output));
+
+    const EncodeResult result =
+            TraceEncoder{}.encode_instruction(output, sizeof(output), "libx.so", record);
+    assert(!result.ok);
+    for (char value : output) assert(value == '#');
+}
+
 void encodes_cache_hit_rate_with_an_overflowing_counter_total() {
     TraceMetrics metrics{};
     metrics.cache_hits = 1ULL << 63U;
@@ -300,6 +315,7 @@ int main() {
     bounds_memory_hexdump_and_null_inputs();
     rejects_overflowing_records();
     rejects_instruction_lines_above_the_fixed_bound();
+    rejects_inconsistent_dense_register_counts_without_writing();
     encodes_cache_hit_rate_with_an_overflowing_counter_total();
     encodes_zero_cache_total_as_zero_rate();
 }

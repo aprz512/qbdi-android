@@ -1,5 +1,6 @@
 #include "core/pending_instruction.h"
 
+#include <bit>
 #include <cstddef>
 
 namespace {
@@ -28,20 +29,12 @@ bool PendingInstructionCollector::begin(const InstructionView &instruction,
     pending_record_.module_base = module_base_;
     pending_record_.decoded = instruction.decoded;
     if (instruction.decoded != nullptr) {
-        for (size_t index = 0; index < kTraceGprCount; ++index) {
-            const uint64_t bit = 1ULL << index;
-            if ((instruction.decoded->read_gpr_mask & bit) != 0) {
-                pending_record_.before[index] = truncate_to_width(
-                        registers.values[index], instruction.decoded->read_gpr_widths[index]);
-            }
-            if (instruction.decoded->read_register_names[index][0] != '\0') {
-                pending_record_.read_register_names[index] =
-                        instruction.decoded->read_register_names[index];
-            }
-            if (instruction.decoded->write_register_names[index][0] != '\0') {
-                pending_record_.write_register_names[index] =
-                        instruction.decoded->write_register_names[index];
-            }
+        uint64_t mask = instruction.decoded->read_gpr_mask;
+        while (mask != 0) {
+            const size_t index = std::countr_zero(mask);
+            pending_record_.reads.values[pending_record_.reads.count++] = truncate_to_width(
+                    registers.values[index], instruction.decoded->read_gpr_widths[index]);
+            mask &= mask - 1U;
         }
     }
     pending_ = true;
@@ -92,12 +85,12 @@ uint64_t PendingInstructionCollector::pending_write_mask() const noexcept {
 
 bool PendingInstructionCollector::complete(const RegisterSnapshot &registers) noexcept {
     if (pending_record_.decoded != nullptr) {
-        for (size_t index = 0; index < kTraceGprCount; ++index) {
-            const uint64_t bit = 1ULL << index;
-            if ((pending_record_.decoded->write_gpr_mask & bit) != 0) {
-                pending_record_.after[index] = truncate_to_width(
-                        registers.values[index], pending_record_.decoded->write_gpr_widths[index]);
-            }
+        uint64_t mask = pending_record_.decoded->write_gpr_mask;
+        while (mask != 0) {
+            const size_t index = std::countr_zero(mask);
+            pending_record_.writes.values[pending_record_.writes.count++] = truncate_to_width(
+                    registers.values[index], pending_record_.decoded->write_gpr_widths[index]);
+            mask &= mask - 1U;
         }
     }
 

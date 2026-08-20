@@ -60,18 +60,18 @@ void delays_the_first_instruction_and_completes_it_at_the_next_pre() {
     assert(sink.records[0].sequence == 1);
     assert(sink.records[0].pc == 0x1010);
     assert(sink.records[0].module_base == 0x1000);
-    assert(sink.records[0].before[1] == 2);
-    assert(sink.records[0].before[2] == 3);
-    assert(sink.records[0].before[5] == 0);
-    assert(sink.records[0].after[0] == 5);
-    assert(sink.records[0].after[1] == 0);
+    assert(sink.records[0].reads.count == 2);
+    assert(sink.records[0].reads.values[0] == 2);
+    assert(sink.records[0].reads.values[1] == 3);
+    assert(sink.records[0].writes.count == 1);
+    assert(sink.records[0].writes.values[0] == 5);
 
     assert(collector.finish_last(snapshot({{0, 9}, {30, 0xfeed}})));
     assert(sink.records.size() == 2);
     assert(sink.records[1].sequence == 2);
-    assert(sink.records[1].after[0] == 0);
-    assert(sink.records[1].before[30] == 0);
-    assert(sink.records[1].before[0] == 0);
+    assert(sink.records[1].reads.count == 1);
+    assert(sink.records[1].reads.values[0] == 0);
+    assert(sink.records[1].writes.count == 0);
     assert(!collector.finish_last(snapshot({{0, 10}})));
     assert(sink.records.size() == 2);
 }
@@ -121,8 +121,8 @@ void separates_previous_completion_from_current_rule_mutation() {
     assert(collector.begin(view(0x3004, &current), snapshot({{0, 9}})));
     assert(collector.finish_last(snapshot({})));
 
-    assert(sink.records[0].after[0] == 7);
-    assert(sink.records[1].before[0] == 9);
+    assert(sink.records[0].writes.values[0] == 7);
+    assert(sink.records[1].reads.values[0] == 9);
 }
 
 void truncates_w_register_aliases_to_their_architectural_width() {
@@ -139,8 +139,29 @@ void truncates_w_register_aliases_to_their_architectural_width() {
     assert(collector.begin(view(0x4000, &instruction),
                            snapshot({{0, 0xaaaaaaaa12345678ULL}})));
     assert(collector.finish_last(snapshot({{1, 0xbbbbbbbb87654321ULL}})));
-    assert(sink.records[0].before[0] == 0x12345678);
-    assert(sink.records[0].after[1] == 0x87654321);
+    assert(sink.records[0].reads.count == 1);
+    assert(sink.records[0].reads.values[0] == 0x12345678);
+    assert(sink.records[0].writes.count == 1);
+    assert(sink.records[0].writes.values[0] == 0x87654321);
+}
+
+void stores_sparse_registers_densely_in_set_bit_order() {
+    CachedInstruction instruction{};
+    instruction.read_gpr_mask = (1ULL << 0U) | (1ULL << 8U) | (1ULL << 33U);
+    instruction.write_gpr_mask = (1ULL << 1U) | (1ULL << 30U);
+
+    RecordingSink sink;
+    PendingInstructionCollector collector(&sink, 0);
+    assert(collector.begin(view(0x1000, &instruction),
+                           snapshot({{0, 10}, {8, 20}, {33, 30}})));
+    assert(collector.complete_pending(snapshot({{1, 40}, {30, 50}})));
+    assert(sink.records[0].reads.count == 3);
+    assert(sink.records[0].reads.values[0] == 10);
+    assert(sink.records[0].reads.values[1] == 20);
+    assert(sink.records[0].reads.values[2] == 30);
+    assert(sink.records[0].writes.count == 2);
+    assert(sink.records[0].writes.values[0] == 40);
+    assert(sink.records[0].writes.values[1] == 50);
 }
 
 void attaches_only_the_fixed_memory_prefix_without_reordering() {
@@ -201,6 +222,7 @@ int main() {
     handles_zero_instruction_sequences();
     separates_previous_completion_from_current_rule_mutation();
     truncates_w_register_aliases_to_their_architectural_width();
+    stores_sparse_registers_densely_in_set_bit_order();
     attaches_only_the_fixed_memory_prefix_without_reordering();
     emits_more_than_eight_accesses_as_lossless_ordered_continuations();
 }
