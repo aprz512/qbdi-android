@@ -233,13 +233,43 @@ def ensure_artifact_return(
         )
 
 
-def configure_agent_source(source: str, profile: str, legacy: bool = False) -> str:
+def verify_setup_failure_smoke(
+    returned: str, expected_return: str, new_artifacts: Iterable[str]
+) -> str:
+    actual = returned.lower()
+    expected = expected_return.lower()
+    if actual != expected:
+        raise RuntimeError(
+            f"setup-failure fallback returned {actual}, expected untraced {expected}"
+        )
+    unexpected = list(new_artifacts)
+    if unexpected:
+        raise RuntimeError(
+            "setup-failure fallback published artifacts: " + ", ".join(unexpected)
+        )
+    return actual
+
+
+def configure_agent_source(
+    source: str, profile: str, legacy: bool = False, test_buffer_bytes: int | None = None,
+    test_fail_setup: bool = False,
+) -> str:
     if profile not in ("fast", "balanced", "full"):
         raise ValueError(f"invalid benchmark profile: {profile}")
     if "__QTRACE_PROFILE__" not in source:
         raise ValueError("benchmark agent has no profile placeholder")
+    if test_buffer_bytes not in (None, 4096):
+        raise ValueError("test buffer must be exactly 4096 bytes")
+    test_options: list[str] = []
+    if test_buffer_bytes is not None:
+        test_options.append(f"test_buffer_bytes={test_buffer_bytes}")
+    if test_fail_setup:
+        test_options.append("test_fail_setup=1")
+    test_config = "" if not test_options else ";" + ";".join(test_options)
     return source.replace("__QTRACE_PROFILE__", profile).replace(
         "__QTRACE_COMPRESSION__", "0" if legacy else "1"
+    ).replace(
+        "__QTRACE_TEST_CONFIG__", test_config,
     )
 
 
@@ -423,7 +453,8 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
         raise RuntimeError("Frida Python bindings are required; install the matching 'frida' package") from error
 
     source = inject_java_bridge(java_bridge_source(), configure_agent_source(
-        Path(args.agent).read_text(encoding="utf-8"), args.profile, args.legacy
+        Path(args.agent).read_text(encoding="utf-8"), args.profile, args.legacy,
+        args.test_buffer_bytes, args.test_fail_setup,
     ))
     messages: list[dict[str, Any]] = []
 
@@ -488,6 +519,13 @@ def run_once(args: argparse.Namespace) -> dict[str, int | Decimal | str]:
     return parsed
 
 
+def run_setup_failure_smoke(args: argparse.Namespace) -> str:
+    previous_names = set(trace_names(args))
+    returned = invoke_benchmark(args)
+    new_artifacts = [name for name in trace_names(args) if name not in previous_names]
+    return verify_setup_failure_smoke(returned, args.expected_return, new_artifacts)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", default="com.aprz.qbdiandroid")
@@ -501,6 +539,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", choices=("fast", "balanced", "full"), default="fast")
     parser.add_argument("--compare", help="checked-in baseline Markdown report")
     parser.add_argument("--legacy", action="store_true", help="require uncompressed .trace.txt files")
+    parser.add_argument(
+        "--test-buffer-bytes", type=int,
+        help="Debug-only test buffer size; only 4096 is accepted",
+    )
+    parser.add_argument(
+        "--test-fail-setup", action="store_true",
+        help="Debug-only test hook that forces trace setup failure",
+    )
+    parser.add_argument(
+        "--expected-return",
+        help="expected native fallback return for --test-fail-setup",
+    )
     return parser.parse_args()
 
 
@@ -517,6 +567,14 @@ def main() -> int:
     args = parse_args()
     if args.runs < 1:
         raise SystemExit("--runs must be at least one")
+    if args.test_fail_setup:
+        if args.runs != 1:
+            raise ValueError("--test-fail-setup requires --runs 1")
+        if args.expected_return is None:
+            raise ValueError("--test-fail-setup requires --expected-return")
+        returned = run_setup_failure_smoke(args)
+        print(render_report({"return": returned, "status": "native_fallback"}))
+        return 0
     baseline: dict[str, int | str] | None = None
     if args.compare:
         require_balanced_comparison(args.profile)

@@ -155,6 +155,14 @@ TraceConfig parse_trace_config(const char *encoded_config) {
             }
             config.trace.hexdump_limit = static_cast<size_t>(limit);
 #ifndef NDEBUG
+        } else if (part.rfind("test_buffer_bytes=", 0) == 0) {
+            const std::string value = part.substr(18);
+            unsigned long long bytes = 0;
+            if (!parse_decimal(value, &bytes) || bytes != 4096) {
+                return invalid_config(std::move(config), "invalid test_buffer_bytes: " + value);
+            }
+            config.trace.buffer_bytes = static_cast<size_t>(bytes);
+            config.trace.auto_buffer_size = false;
         } else if (part == "test_fail_setup=1") {
             config.test_fail_setup = true;
 #endif

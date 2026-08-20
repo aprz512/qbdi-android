@@ -64,10 +64,18 @@ int main() {
     TraceConfig test_failure = parse_trace_config("test_fail_setup=1");
     CHECK(test_failure.valid);
     CHECK(test_failure.test_fail_setup);
+
+    TraceConfig test_buffer = parse_trace_config("test_buffer_bytes=4096");
+    CHECK(test_buffer.valid);
+    CHECK(!test_buffer.trace.auto_buffer_size);
+    CHECK(test_buffer.trace.buffer_bytes == 4096);
+    assert_invalid("test_buffer_bytes=4095");
 #else
     const char release_test_failure[] = {
             't', 'e', 's', 't', '_', 'f', 'a', 'i', 'l', '_',
             's', 'e', 't', 'u', 'p', '=', '1', '\0'};
     assert_invalid(release_test_failure);
+    const char release_test_buffer[] = "test_buffer_bytes=4096";
+    assert_invalid(release_test_buffer);
 #endif
 }

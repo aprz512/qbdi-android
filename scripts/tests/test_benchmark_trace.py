@@ -23,6 +23,7 @@ from scripts.benchmark_trace import (
     select_newest_optimized_metrics,
     select_newest_benchmark_trace,
     throughput_metrics,
+    verify_setup_failure_smoke,
 )
 
 
@@ -304,14 +305,24 @@ effective_buffer_bytes=67108864
         )
 
     def test_configures_the_requested_profile_for_the_fresh_process_agent(self):
-        source = "const profile = '__QTRACE_PROFILE__';"
+        source = "const profile = '__QTRACE_PROFILE__'; const test = '__QTRACE_TEST_CONFIG__';"
 
         self.assertEqual(
-            "const profile = 'balanced';",
+            "const profile = 'balanced'; const test = '';",
             configure_agent_source(source, "balanced"),
+        )
+        self.assertEqual(
+            "const profile = 'balanced'; const test = ';test_buffer_bytes=4096';",
+            configure_agent_source(source, "balanced", False, 4096),
+        )
+        self.assertEqual(
+            "const profile = 'balanced'; const test = ';test_fail_setup=1';",
+            configure_agent_source(source, "balanced", False, None, True),
         )
         with self.assertRaisesRegex(ValueError, "profile"):
             configure_agent_source(source, "invalid")
+        with self.assertRaisesRegex(ValueError, "test buffer"):
+            configure_agent_source(source, "balanced", False, 8192)
 
     def test_benchmark_agent_loads_the_tracer_through_the_application_loader(self):
         source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(
@@ -335,6 +346,18 @@ effective_buffer_bytes=67108864
             ensure_artifact_return("0x43", metrics, "benchmark.trace.txt.lz4.metrics")
         with self.assertRaisesRegex(ValueError, "return"):
             parse_metrics(self.METRICS.replace("return=0x42", "return=0x10000000000000000"))
+
+    def test_verifies_setup_failure_without_publishing_artifacts(self):
+        self.assertEqual(
+            "0x20a128f3d199a008",
+            verify_setup_failure_smoke(
+                "0x20A128F3D199A008", "0x20a128f3d199a008", []
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "returned"):
+            verify_setup_failure_smoke("0x1", "0x2", [])
+        with self.assertRaisesRegex(RuntimeError, "artifacts"):
+            verify_setup_failure_smoke("0x2", "0x2", ["unexpected.metrics"])
 
     def test_identifies_measured_producer_wait_as_the_dominant_cost(self):
         metrics = parse_metrics(
