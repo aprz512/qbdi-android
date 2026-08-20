@@ -10,7 +10,9 @@ Android arm64 demo project for showing how to use QBDI in an injected tracer.
 - Button-driven scenes exercise JNI calls, libc calls, a custom algorithm, and integrity checks.
 - A separate `libqbdi_tracer.so` is injected with Frida spawn.
 - The tracer hooks scene entry offsets with ByteDance ShadowHook and executes them in QBDI.
-- Text traces are written to `/data/data/com.aprz.qbdiandroid/files/qbdi-traces/`.
+- Compact QTRB v1 traces are written to the app-private
+  `/data/data/com.aprz.qbdiandroid/files/qbdi-traces/` directory and converted to readable text on
+  the host.
 
 ## Dependencies
 
@@ -76,11 +78,12 @@ The constructor scene only traces reliably with spawn injection. For button scen
 ## Pull Traces
 
 Install the host `lz4` CLI, then use the pull helper. It accesses the app-private directory only
-through `adb exec-out run-as`, pulls the newest compressed trace and adjacent sidecars, and
-decompresses every complete LZ4 frame in order:
+through `adb exec-out run-as`, pulls the newest `.trace.bin.lz4` QTRB v1 artifact and adjacent
+`metrics_version=2` sidecar, validates them, and automatically converts them to text format 3:
 
 ```bash
-python3 scripts/pull_trace.py --package com.aprz.qbdiandroid --output pulled-traces
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --device 192.168.51.42:5555 --output pulled-traces
 ```
 
 Useful options:
@@ -88,7 +91,7 @@ Useful options:
 ```bash
 # Select one listed artifact instead of the newest.
 python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
-  --name <trace-file>.trace.txt.lz4 --output pulled-traces
+  --name <trace-file>.trace.bin.lz4 --output pulled-traces
 
 # Pull the compressed trace and sidecars without requiring host lz4.
 python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
@@ -97,7 +100,14 @@ python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
 # Existing local outputs are protected unless replacement is explicit.
 python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
   --force --output pulled-traces
+
+# Convert an already-pulled binary artifact manually.
+python3 scripts/trace_convert.py input.trace.bin.lz4 --output output.trace.txt
 ```
+
+Legacy format-2 `.trace.txt.lz4` files remain pullable. A valid crash marker with a truncated final
+LZ4 frame publishes only complete prior frames as `.partial.trace.txt` and exits with status 2;
+corruption or truncation without a marker exits with status 1 and publishes no text.
 
 The tracer defaults to the `fast` profile. `balanced` enables QBDI memory metadata, while `full`
 also captures bounded pre/post memory bytes. Configure profiles and buffer sizing in

@@ -61,6 +61,58 @@ def metrics_sidecar(source: Path, extra: str = "") -> str:
     )
 
 
+class DocumentationContractTests(unittest.TestCase):
+    def test_user_docs_describe_binary_workflow_and_compatibility(self):
+        root = Path(__file__).parents[2]
+        readme = root.joinpath("README.md").read_text(encoding="utf-8")
+        protocol = root.joinpath("docs", "trace-format.md").read_text(encoding="utf-8")
+        combined = readme + "\n" + protocol
+
+        for required in (
+            ".trace.bin.lz4",
+            "QTRB v1",
+            "metrics_version=2",
+            "trace_convert.py",
+            "pull_trace.py",
+            "app-private",
+            "format-2",
+            ".partial.trace.txt",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, combined)
+
+        exclusions = protocol.split("## Explicit exclusions", 1)[1]
+        self.assertNotIn("binary trace output", exclusions.lower())
+
+    def test_protocol_docs_cover_wire_limits_output_order_and_exit_statuses(self):
+        protocol = Path(__file__).parents[2].joinpath(
+            "docs", "trace-format.md"
+        ).read_text(encoding="utf-8")
+
+        for required in (
+            "RecordHeader",
+            "TRACE_BEGIN",
+            "MODULE_DEF",
+            "INSTRUCTION_DEF",
+            "INSTRUCTION",
+            "MEMORY",
+            "CALL",
+            "RULE",
+            "ERROR",
+            "TRACE_END",
+            "3072",
+            "1 MiB",
+            "format=3",
+            "escaping",
+            "field order",
+            "status 0",
+            "status 1",
+            "status 2",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, protocol)
+
+
 class TraceConvertFileTests(unittest.TestCase):
     def test_converts_raw_and_refuses_to_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:

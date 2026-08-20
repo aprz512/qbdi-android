@@ -1,168 +1,199 @@
-# Text Trace Format 2
+# QTRB v1 Binary Trace and Text Format 3
 
-Trace artifacts live in the debuggable app's private directory:
+Trace artifacts live in the debuggable app's app-private directory:
 
 ```text
 /data/data/<package>/files/qbdi-traces/
 ```
 
-The supported retrieval path is `scripts/pull_trace.py`. It enumerates and streams files with
-`adb exec-out run-as <package>`; it does not copy an intermediate file onto shared device storage.
+The production tracer writes a compact little-endian QTRB v1 event stream. Human-readable text is
+generated on the host, so hexadecimal, decimal, register-name, and disassembly rendering do not run
+on the traced thread.
 
 ## Artifact set
 
-A compressed run uses one unique basename and may have three adjacent files:
+Each run has a unique basename:
 
 ```text
 <epoch_ms>_<pid>_<tid>_<scene>_0x<target_offset>_<sequence>
 ```
 
-The final process-local sequence disambiguates runs that otherwise share the same millisecond,
-thread, scene, and target. The suffixes form the artifact set:
+The files are:
 
-- `<basename>.trace.txt.lz4` — concatenated, independent LZ4 frames containing UTF-8 text.
-- `<basename>.trace.txt.lz4.metrics` — final key/value metrics, present only after successful writer
-  finalization.
-- `<basename>.trace.txt.lz4.crash` — retained only after a handled fatal signal. Its binary
-  `CrashMarker` is exactly 12 little-endian bytes: magic `0x51435248`, signal number, and positive
-  thread ID. Valid signals are `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE`, and `SIGABRT`.
+- `<basename>.trace.bin.lz4`: production output, a sequence of independent LZ4 frames containing
+  QTRB v1 records. A final complete run also has one LZ4 skippable padding frame.
+- `<basename>.trace.bin`: Debug-only compression-off output.
+- `<artifact>.metrics`: metrics v2, published only after successful finalization.
+- `<artifact>.crash`: a 12-byte little-endian crash marker retained only after a handled fatal
+  signal. It contains magic `0x51435248`, the signal, and a positive TID.
+- `<basename>.trace.txt`: host-converted text format 3.
+- `<basename>.partial.trace.txt`: recoverable complete frames from a crash-truncated artifact.
 
-An absent or empty `.crash` file is not evidence of a crash. A nonempty marker with the wrong size,
-magic, signal, or thread ID is invalid and the pull tool rejects it rather than guessing.
+The pull tool also supports legacy format-2 `.trace.txt.lz4` artifacts and their v1 sidecars. It
+never treats a format-2 `raw_bytes` field as the format-3 `encoded_bytes` field.
 
-Successful uncompressed debug runs use `.trace.txt`; completed compressed runs use
-`.trace.txt.lz4` plus `.metrics`.
+## QTRB v1 stream
 
-## Header and records
-
-Every readable format-2 stream begins with:
-
-```text
-TRACE_BEGIN format=2 scene=<name> target=<module>+0x<offset> base=0x<address> address=0x<address> pid=<pid> tid=<tid> profile=<fast|balanced|full> compression=<0|1> effective_buffer_bytes=<bytes>
-```
-
-The fields identify the scene, target module-relative offset, loaded module base, absolute target
-address, process/thread, selected profile, compression state, and actual per-buffer capacity after
-allocation fallback.
-
-An instruction record is:
+All integers are little-endian and byte-packed. Strings are a `u16` byte length followed by UTF-8
+bytes without a terminator. The 16-byte stream header is:
 
 ```text
-<seq> <module>+0x<offset> <disassembly> | R:<name>=0x<value> ... | W:<name>=0x<value> ... | MEM:<r|w|rw> addr=0x<address> size=<bytes> value=0x<value> ...
+StreamHeader {
+  magic: "QTRB"[4]
+  major: u8 = 1
+  minor: u8 = 0
+  endian: u8 = 1
+  pointer_width: u8 = 4 | 8
+  profile: u8                 # fast=0, balanced=1, full=2
+  reserved: u8 = 0
+  header_bytes: u16 = 16
+  required_features: u32 = 0
+}
 ```
 
-Sequence numbers are monotonically increasing within a run. Register sections include only the
-decoded read/write set. Call, rule, and error events retain readable forms:
+Every record starts with this exact eight-byte header:
 
 ```text
-CALL libc.strlen x0=0x... preview="qbdi"
-CALL jni.FindClass name="java/lang/String"
-CALL return strlen target=0x... ret=0x...
-RULE set_equals_flag offset=0x... z=1
-ERROR <detail>
+RecordHeader {
+  type: u16
+  flags: u16
+  payload_bytes: u32
+}
 ```
 
-The normal footer is:
+The record types and payload field order are:
+
+| Type | Name | Payload fields in wire order |
+| ---: | --- | --- |
+| 1 | `TRACE_BEGIN` | module base `u64`, target offset `u64`, target address `u64`, PID `u32`, TID `u32`, profile `u8`, compression `u8`, effective buffer bytes `u64`, run ID `u64`, scene string, target string |
+| 2 | `MODULE_DEF` | module ID `u32`, module base `u64`, module-name string |
+| 3 | `INSTRUCTION_DEF` | metadata ID/opcode `u32`, read/write masks `u64`, PC displacement `i64`, flags `u32`, PC kind/condition/memory count/slow-path `u8`, mnemonic/operands/disassembly strings, dense register definitions, memory operands |
+| 4 | `INSTRUCTION` | sequence `u64`, module ID `u32`, relative PC `u64`, metadata ID `u32`, read/write counts `u8`, then dense `u64` values in mask-bit order |
+| 5 | `MEMORY` | module ID `u32`, relative PC `u64`, access kind/metadata flag, flags `u16`, address `u64`, size `u32`, value `u64`, then before/after state, length, and bytes |
+| 6 | `CALL` | category, name, and detail strings; chunked records prepend event ID `u64`, total length `u32`, index/count `u16` |
+| 7 | `RULE` | name and detail strings |
+| 8 | `ERROR` | name and detail strings |
+| 9 | `TRACE_END` | success `u8`, return/elapsed/instruction count/encoded bytes/compressed bytes/cache hits/cache misses/cache collisions/buffer swaps/producer waits/producer wait ns/effective buffer bytes as `u64` |
+
+Definitions are control records and are emitted immediately before their first reference. They do
+not become visible text events. `INSTRUCTION` sequence numbers therefore remain continuous and all
+visible instruction, memory, call, rule, and error events retain producer order.
+
+### Limits
+
+- Context, module, CALL category/name, and event names: 255 UTF-8 bytes each.
+- Ordinary event detail: 4096 bytes.
+- CALL chunk detail: 3072 bytes; a complete logical CALL detail is at most 1 MiB.
+- Mnemonic/operands/disassembly/register name: 16/96/112/16 bytes.
+- Registers: 34; static memory operands: 4; captured before/after state: 64 bytes each.
+- Instruction dictionary entries and module dictionary entries: 65,536 each on the host.
+- Largest record: 4620 bytes. A record never crosses a producer-buffer boundary.
+
+A CALL chunk group must be contiguous, start at index zero, keep identical event ID, total, count,
+category, and name, and contain every index exactly once. UTF-8 validation occurs after raw detail
+fragments are reassembled. Unknown required features, record flags, references, or incompatible
+versions fail closed.
+
+## Text format 3
+
+`scripts/trace_convert.py` writes UTF-8 with one visible event per line. Field order is fixed by
+format 3 and shown below:
 
 ```text
-TRACE_END status=<ok|failed> ret=0x<value> elapsed_ms=<ms> instructions=<count> raw_bytes=<bytes> cache_hit_rate=<ratio> buffer_swaps=<count> producer_waits=<count> producer_wait_ns=<ns>
+TRACE_BEGIN format=3 scene="..." target="..." target_offset=0x... base=0x... address=0x... pid=... tid=... profile=... compression=... effective_buffer_bytes=... run_id=...
+INST seq=1 module="..." module_base=0x... pc=0x... relative_pc=0x... metadata_id=... opcode=0x... asm="..." flags=0x... condition=... reads=[...] writes=[...] slow_memory_path=... memory_operands=[...]
+MEMORY module="..." module_base=0x... pc=0x... relative_pc=0x... kind=... metadata_available=... flags=0x... address=0x... size=... value=0x... before=... after=...
+CALL category="..." name="..." detail="..."
+RULE name="..." detail="..."
+ERROR name="..." detail="..."
+TRACE_END status=ok return=0x... elapsed_ms=... instructions=... encoded_bytes=... compressed_bytes=... cache_hits=... cache_misses=... cache_collisions=... buffer_swaps=... producer_waits=... producer_wait_ns=... effective_buffer_bytes=...
 ```
+
+String escaping is JSON string escaping without ASCII forcing: quotes, backslashes, and control
+characters use JSON escapes, while valid non-ASCII UTF-8 remains readable. Integers are decimal
+except fields shown with a `0x` prefix. PC-relative targets are rendered from the instruction PC
+using 64-bit wrapping and the recorded current-PC or current-page base kind.
 
 ## Profiles
 
-- `fast` (default) records instructions, decoded register reads/writes, semantic call/rule events,
-  and the header/footer. QBDI memory recording and memory operand decoding are disabled on this hot
-  path.
-- `balanced` adds QBDI memory access type (`r`, `w`, or `rw`), address, size, QBDI-provided value,
-  and access flags. An instruction with more than eight accesses uses ordered continuation `MEM`
-  records rather than dropping accesses.
-- `full` contains the balanced fields and bounded byte capture. `pre=` records bytes before the
-  access; write-capable accesses may also have `post=` bytes. `<unavailable>` means the requested
-  process memory could not be read safely. Available bytes are rendered as a compact hexadecimal
-  hexdump. `hexdump_limit` defaults to 32 bytes and is capped at 64.
+- `fast` records every instruction, decoded register read/write values, semantic CALL/RULE/ERROR
+  events, and begin/end records. QBDI memory collection is disabled.
+- `balanced` adds every QBDI memory access with kind, metadata availability, flags, address, size,
+  and value. More than eight accesses use ordered `MEMORY` continuation records.
+- `full` adds bounded before/after byte state. States are `<not-captured>`, `<unavailable>`, or a
+  lowercase hexadecimal byte string of at most 64 bytes.
 
-No profile silently samples, overwrites, or drops trace events. When both writer buffers are busy,
-the producer waits and accounts that backpressure.
+No profile samples, overwrites, drops, or reorders events. When both asynchronous buffers are busy,
+the producer waits and records that backpressure.
 
-## Metrics sidecar
+## Metrics v2
 
-The `.metrics` file contains all of the following keys:
+Binary sidecars begin with `metrics_version=2`. They contain:
 
 | Metric | Meaning |
 | --- | --- |
-| `profile` | `fast`, `balanced`, or `full`. |
-| `return` | Target return value in hexadecimal. |
-| `instructions` | Instruction records emitted. |
-| `elapsed_ms` | End-to-end traced target duration. |
+| `profile`, `return`, `instructions`, `elapsed_ms` | Run identity and result. |
 | `instructions_per_second` | `instructions * 1000 / elapsed_ms`. |
-| `raw_bytes` | Text bytes produced before compression. |
-| `compressed_bytes` | Bytes written to the `.lz4` file. |
-| `raw_bytes_per_second` | `raw_bytes * 1000 / elapsed_ms`. |
-| `disk_bytes_per_second` | `compressed_bytes * 1000 / elapsed_ms`. |
-| `compression_ratio` | `compressed_bytes / raw_bytes`; lower is smaller. |
-| `cache_hits` | Opcode-cache lookups served without decoding. |
-| `cache_misses` | Opcode-cache lookups that required decode/population. |
-| `cache_hit_rate` | `cache_hits / (cache_hits + cache_misses)`. |
-| `buffer_swaps` | Producer buffers published to the compression/writer thread. |
-| `producer_waits` | Times the producer found no free buffer. |
-| `producer_wait_ns` | Total measured time waiting for a free buffer. |
-| `effective_buffer_bytes` | Actual capacity of each of the two buffers. |
+| `encoded_bytes` | Uncompressed QTRB bytes, including header and footer. |
+| `compressed_bytes` | Exact `.trace.bin.lz4` artifact bytes, including final padding. |
+| `encoded_bytes_per_second`, `disk_bytes_per_second`, `compression_ratio` | Fixed-six derived rates. |
+| `cache_hits`, `cache_misses`, `cache_collisions`, `cache_hit_rate` | Decode-cache counters and rate. |
+| `buffer_swaps`, `producer_waits`, `producer_wait_ns` | Async writer/backpressure counters. |
+| `effective_buffer_bytes` | Actual capacity of each producer buffer after fallback. |
 
-High `producer_waits` or a large `producer_wait_ns / (elapsed_ms * 1,000,000)` ratio identifies
-compression/storage backpressure. Low producer wait with low instruction throughput points instead
-to the QBDI/decode/collection/encoding side. Within that side, a low `cache_hit_rate` indicates
-decode work; `raw_bytes_per_second` describes the encoder's output rate but is not an independent
-timing measurement, so it cannot alone prove the dominant cost. Compare runs with the same device,
-build, scene, profile, and return value.
+The converter checks the footer against the artifact size and adjacent v2 sidecar before atomic
+publication. The pull/benchmark tools parse legacy format-2 v1 metrics only when
+`metrics_version` is absent and `raw_bytes` is present; mixed v1/v2 fields are rejected.
 
-## Buffers and memory use
+## Pulling and conversion
+
+Automatic pull, validation, and conversion of the newest supported artifact:
+
+```bash
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --device 192.168.51.42:5555 --output pulled-traces
+```
+
+Use `--name <artifact>` to select a specific `.trace.bin.lz4`, `.trace.bin`, or legacy
+`.trace.txt.lz4`. Use `--compressed-only` to retain the original artifact and sidecars without
+conversion. Existing outputs require `--force`.
+
+Manual binary conversion:
+
+```bash
+python3 scripts/trace_convert.py input.trace.bin.lz4 --output output.trace.txt
+python3 scripts/trace_convert.py input.trace.bin --output output.trace.txt
+```
+
+Both tools use status 0 for complete success, status 1 for an error with no text publication, and
+status 2 for valid crash-partial recovery. `benchmark_trace.py --compare` also uses status 2 when
+a speed or size acceptance gate is missed while still printing the complete JSON verdict.
+
+## Crash partial semantics
+
+A complete run has a valid QTRB header, `TRACE_BEGIN`, continuous instruction sequence,
+`TRACE_END`, matching v2 sidecar, and no retained crash marker. A valid crash marker plus a
+truncated final LZ4 frame permits recovery of complete prior frames only. The tools publish
+`<basename>.partial.trace.txt`, omit an incomplete final record/frame, and return status 2.
+
+Truncation without a valid crash marker, corruption in a complete frame, invalid dictionaries or
+sequence, or sidecar/footer disagreement returns status 1 and publishes no text. A raw
+`.trace.bin` cannot use frame recovery. Unique temporary files, `fsync`, and atomic publication
+prevent a failed conversion from replacing a prior output.
+
+Writer/setup failures disable further trace work without changing the target's native result and
+never publish a success metrics sidecar.
+
+## Buffers
 
 The writer owns two buffers. Auto sizing selects 64 MiB per buffer below 8 GiB physical memory and
-128 MiB per buffer at or above 8 GiB: 128 MiB or 256 MiB of trace-buffer virtual memory in total.
-Explicit `buffer_mb` accepts 8–128 MiB per buffer. Allocation failure falls back through 64 MiB,
-32 MiB, and 8 MiB candidates; the header and metrics report the capacity actually obtained.
-
-Peak process use is greater than `2 * effective_buffer_bytes`: add the LZ4 context and roughly one
-compression-chunk scratch area, instruction cache, QBDI, ShadowHook, app, and runtime memory. Buffer
-pages are anonymous mappings and become resident as they are written.
-
-## Pulling and decompression
-
-Automatic retrieval and decompression:
-
-```bash
-python3 scripts/pull_trace.py --package com.aprz.qbdiandroid --output pulled-traces
-```
-
-The tool chooses the newest compressed trace unless `--name` is supplied, pulls its adjacent
-sidecars, validates a crash marker, scans frame boundaries, and invokes the host `lz4` CLI once for
-each complete frame in order. It never overwrites a local compressed, sidecar, normal-text, or
-partial-text output unless `--force` is present. Use `--compressed-only` when only the original
-artifacts are wanted or the host `lz4` command is unavailable.
-
-For a known-complete trace, the equivalent manual workflow is:
-
-```bash
-lz4 -d <basename>.trace.txt.lz4 <basename>.trace.txt
-```
-
-The file is a concatenation of LZ4 frames, which the CLI decodes in stream order.
-
-## Failure recovery
-
-A completed run has a valid `TRACE_BEGIN`, continuous instruction sequence, successful
-`TRACE_END`, matching `.metrics`, and no retained crash marker. If a valid crash marker coexists
-with a truncated final LZ4 frame, `pull_trace.py` decodes only prior complete frames, publishes
-`<basename>.partial.trace.txt`, and exits with status 2. It never publishes bytes from the incomplete
-frame. Truncation without a valid crash marker, a corrupt complete frame, or an invalid marker is a
-normal error (status 1), not recoverable partial output.
-
-Writer/setup failures disable tracing rather than changing the target's intended native result;
-the ARM64 fallback preserves x0–x8. A missing `.metrics` file therefore means the run did not reach
-successful writer finalization and must not be treated as a completed benchmark.
+128 MiB per buffer at or above 8 GiB. Explicit `buffer_mb` accepts 8–128 MiB; allocation fallback
+tries 64 MiB, 32 MiB, and 8 MiB. Debug accepts exactly 4096 bytes through the test-only override.
+The default `lz4_level=2` stays on LZ4's fast compressor while improving the fixed-width binary
+stream's compressed size; levels 3–12 select high-compression mode and are opt-in.
 
 ## Explicit exclusions
 
-This implementation does not include `O_DIRECT`, `io_uring`, sampling, binary trace output,
-child-thread tracing, or anonymous-range discovery. It keeps ordinary asynchronous `write`,
-lossless readable text after decompression, and module-scoped QBDI tracing.
+This implementation does not include `O_DIRECT`, `io_uring`, sampling, per-event file syscalls,
+per-record checksums, corrupt-byte repair, child-thread tracing, or anonymous-range discovery. It
+keeps QBDI, ordinary asynchronous `write`, independent LZ4 frames, and module-scoped tracing.

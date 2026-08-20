@@ -10,7 +10,7 @@ const config = {
   trace: {
     profile: 'fast',
     compression: true,
-    lz4Level: 0,
+    lz4Level: 2,
     autoBuffer: true,
     bufferMb: 0,
     hexdumpLimit: 32

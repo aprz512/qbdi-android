@@ -22,7 +22,7 @@ int main() {
     TraceConfig defaults = default_trace_config();
     CHECK(defaults.trace.profile == TraceProfile::Fast);
     CHECK(defaults.trace.compression_enabled);
-    CHECK(defaults.trace.lz4_level == 0);
+    CHECK(defaults.trace.lz4_level == 2);
     CHECK(defaults.trace.auto_buffer_size);
     CHECK(defaults.trace.buffer_bytes == 0);
     CHECK(defaults.trace.hexdump_limit == 32);
