@@ -357,6 +357,45 @@ class TraceConvertFileTests(unittest.TestCase):
             self.assertEqual(2, recovered.returncode, recovered.stderr)
             self.assertTrue((root / "partial.partial.trace.txt").exists())
 
+    def test_cli_normalizes_missing_and_unreadable_prescan_failures(self):
+        repository = Path(__file__).resolve().parents[2]
+        script = repository / "scripts/trace_convert.py"
+        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = (
+                ([str(root / "missing.trace.bin.lz4"), "--crash-marked"], "missing"),
+                ([str(root / "missing-explicit.trace.bin.lz4"), "--crash-marked",
+                  "--output", str(root / "explicit.txt")], "explicit"),
+                ([str(root / "missing.trace.bin")], "raw"),
+            )
+            unreadable = root / "unreadable.trace.bin.lz4"
+            unreadable.mkdir()
+            cases += (([str(unreadable), "--crash-marked"], "unreadable"),)
+
+            for arguments, label in cases:
+                with self.subTest(label=label):
+                    completed = subprocess.run(
+                        [sys.executable, str(script), *arguments], cwd=repository,
+                        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, check=False,
+                    )
+                    self.assertEqual(1, completed.returncode)
+                    self.assertTrue(completed.stderr.startswith("trace_convert: "))
+                    self.assertNotIn("Traceback", completed.stderr)
+            self.assertFalse((root / "explicit.txt").exists())
+            self.assertEqual([], list(root.glob(".trace-convert-*")))
+
+    def test_main_normalizes_prescan_permission_error(self):
+        stderr = io.StringIO()
+        with patch.object(trace_convert, "scan_lz4_file",
+                          side_effect=PermissionError("permission denied")):
+            with contextlib.redirect_stderr(stderr):
+                status = main(["denied.trace.bin.lz4", "--crash-marked"])
+        self.assertEqual(1, status)
+        self.assertTrue(stderr.getvalue().startswith("trace_convert: "))
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_publication_fsyncs_directory_after_destination_exists(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

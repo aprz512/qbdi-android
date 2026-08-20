@@ -307,6 +307,13 @@ def main(argv: list[str] | None = None) -> int:
                 recovered = scan_lz4_file(source).truncated
             except PullTraceError as error:
                 raise BinaryTraceError(str(error)) from error
+            except FileNotFoundError as error:
+                raise BinaryTraceError(f"binary trace does not exist: {source}") from error
+            except OSError as error:
+                detail = error.strerror or str(error)
+                raise BinaryTraceError(
+                    f"cannot read binary trace {source}: {detail}"
+                ) from error
         destination = arguments.output or _default_output(source, recovered)
         stats = convert_binary_file(
             source, destination, lz4=lz4, crash_marked=arguments.crash_marked,
