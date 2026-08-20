@@ -144,6 +144,33 @@ class Lz4FrameTests(unittest.TestCase):
         )
         self.assert_memory_file_scan(frame, ((0, len(frame)),))
 
+    def test_scanner_directly_validates_flg_and_bd_grammar(self):
+        frame = bytearray(uncompressed_lz4_frame(b"payload"))
+        for byte, message in ((0x20, "flags"), (0x62, "flags")):
+            with self.subTest(flg=byte), self.assertRaisesRegex(PullTraceError, message):
+                candidate = bytearray(frame)
+                candidate[4] = byte
+                split_lz4_frames(bytes(candidate))
+        for byte, message in ((0x30, "descriptor"), (0x41, "descriptor"),
+                              (0xC0, "descriptor")):
+            with self.subTest(bd=byte), self.assertRaisesRegex(PullTraceError, message):
+                candidate = bytearray(frame)
+                candidate[5] = byte
+                split_lz4_frames(bytes(candidate))
+
+    def test_scanner_directly_accounts_for_block_and_content_checksums(self):
+        first = uncompressed_lz4_frame(b"first")
+        checked = uncompressed_lz4_frame(
+            b"payload", flags=0x74, block_checksum=b"1234", content_checksum=b"5678"
+        )
+        self.assert_memory_file_scan(first + checked, ((0, len(first)),
+                                                       (len(first), len(first + checked))))
+        for removed in (1, 5):
+            with self.subTest(removed=removed):
+                self.assert_memory_file_scan(
+                    first + checked[:-removed], ((0, len(first)),), truncated=True
+                )
+
     def test_scanners_accept_zero_byte_raw_block_with_checksum(self):
         frame = uncompressed_lz4_frame(
             b"", flags=0x70, block_checksum=b"\x12\x34\x56\x78"

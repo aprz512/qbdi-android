@@ -52,7 +52,7 @@ def _is_skippable_magic_prefix(magic: bytes) -> bool:
 
 
 def _scan_stream(stream: BinaryIO, total: int) -> Lz4FileScan:
-    """Scan one seekable stream; ranges include standard frames and skip padding."""
+    """Scan a seekable stream; ranges contain standard frames, omitting skippable padding."""
     ranges: list[tuple[int, int]] = []
 
     def result(truncated: bool) -> Lz4FileScan:
