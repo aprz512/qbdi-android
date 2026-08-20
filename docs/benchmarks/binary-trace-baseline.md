@@ -47,8 +47,38 @@ Enforcing. Host conversion used LZ4 1.10.0. Default device compression was `lz4_
 
 Every measured artifact had `metrics_version=2`, 21,718 instructions, return
 `0x5745c858653f5a7f`, no crash marker, a continuous format-3 `INST seq=1..21718`, and exact
-TRACE_END/artifact/sidecar agreement. Each converted successfully. Representative median-elapsed
-artifacts were:
+TRACE_END/artifact/sidecar agreement. Each converted successfully.
+
+### Per-run measured evidence
+
+Run numbers are chronological after excluding the first artifact in each profile as the warmup.
+`Conversion=PASS` means the retained artifact converted without error; `Sequence` and
+`Footer/sidecar` record the converter's semantic and completion checks. SHA-256 covers the
+`.trace.bin.lz4` artifact itself.
+
+| Profile | Run | Artifact | SHA-256 | Elapsed ms | Instructions | Return | Instructions/s | Encoded bytes | Compressed bytes | Ratio | Cache hits | Cache misses | Cache collisions | Buffer swaps | Producer waits | Producer wait ns | Effective buffer bytes | Conversion | Converted bytes | Sequence | Footer/sidecar | Size limit | Size gate |
+| --- | ---: | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | ---: | --- |
+| fast | 1 | `1787240911587_31370_31385_benchmark_0x6e828_0.trace.bin.lz4` | `d2ad17becb1005185ee74d34422861c279865769d79393ab8e883e5fea8f2efb` | 16 | 21718 | `0x5745c858653f5a7f` | 1357375.000000 | 1096964 | 267939 | 0.244255 | 21608 | 110 | 0 | 2 | 1 | 16681031 | 67108864 | PASS | 6299333 | `1..21718` | PASS | 307925 | PASS |
+| fast | 2 | `1787240913061_31433_31446_benchmark_0x6e828_0.trace.bin.lz4` | `adcd80f45c8f4dac7db68ccde66b46f2fafe13a1c8b222856507627b6e7322a6` | 16 | 21718 | `0x5745c858653f5a7f` | 1357375.000000 | 1096964 | 267950 | 0.244265 | 21608 | 110 | 0 | 2 | 1 | 16476807 | 67108864 | PASS | 6299339 | `1..21718` | PASS | 307925 | PASS |
+| fast | 3 | `1787240916788_31528_31555_benchmark_0x6e828_0.trace.bin.lz4` | `9a5fa37309eda0b1b5c5d2dfa1884b5464cef33b13d60408fcae1116ac9edabc` | 27 | 21718 | `0x5745c858653f5a7f` | 804370.370370 | 1096964 | 267869 | 0.244191 | 21608 | 110 | 0 | 2 | 1 | 16530111 | 67108864 | PASS | 6299339 | `1..21718` | PASS | 307925 | PASS |
+| fast | 4 | `1787240918983_31602_31615_benchmark_0x6e828_0.trace.bin.lz4` | `d943f363bbf93e5c6ca1b57089707a7244545b5246d4677b12da861980daebc5` | 24 | 21718 | `0x5745c858653f5a7f` | 904916.666666 | 1096964 | 267931 | 0.244247 | 21608 | 110 | 0 | 2 | 1 | 22871013 | 67108864 | PASS | 6299339 | `1..21718` | PASS | 307925 | PASS |
+| fast | 5 | `1787240920335_31662_31682_benchmark_0x6e828_0.trace.bin.lz4` | `3d4687981491bc67e58e3a61ec43817f75d10a9390bc71eda31580013f40b3e2` | 16 | 21718 | `0x5745c858653f5a7f` | 1357375.000000 | 1096964 | 267943 | 0.244258 | 21608 | 110 | 0 | 2 | 1 | 16991008 | 67108864 | PASS | 6299339 | `1..21718` | PASS | 307925 | PASS |
+| balanced | 1 | `1787240887800_31000_31013_benchmark_0x6e828_0.trace.bin.lz4` | `833a16c0bbc5d604e4a69a8d2874a045317174f35a8a99c4c800b6e8b3d37568` | 28 | 21718 | `0x5745c858653f5a7f` | 775642.857142 | 1566635 | 362517 | 0.231398 | 21608 | 110 | 0 | 2 | 1 | 31400716 | 67108864 | PASS | 9415990 | `1..21718` | PASS | 365877 | PASS |
+| balanced | 2 | `1787240890209_31060_31073_benchmark_0x6e828_0.trace.bin.lz4` | `7cbdac5dac01d46f526cc03d4445a6ac55194d7bad6ec055126476e0a4fa1086` | 22 | 21718 | `0x5745c858653f5a7f` | 987181.818181 | 1566635 | 362679 | 0.231501 | 21608 | 110 | 0 | 2 | 1 | 22785279 | 67108864 | PASS | 9415990 | `1..21718` | PASS | 365877 | PASS |
+| balanced | 3 | `1787240893844_31118_31132_benchmark_0x6e828_0.trace.bin.lz4` | `d3f2c0198187b7c7d2fb0f3420042e0b3729526adafe00668775068923e1e0d5` | 25 | 21718 | `0x5745c858653f5a7f` | 868720.000000 | 1566635 | 362743 | 0.231542 | 21608 | 110 | 0 | 2 | 1 | 31288737 | 67108864 | PASS | 9415980 | `1..21718` | PASS | 365877 | PASS |
+| balanced | 4 | `1787240896306_31182_31195_benchmark_0x6e828_0.trace.bin.lz4` | `02b956e3936d46282bf8b12ce8031a74a161f194ae9b1cccaaec96021746bc78` | 20 | 21718 | `0x5745c858653f5a7f` | 1085900.000000 | 1566635 | 362469 | 0.231367 | 21608 | 110 | 0 | 2 | 1 | 22940674 | 67108864 | PASS | 9415990 | `1..21718` | PASS | 365877 | PASS |
+| balanced | 5 | `1787240898809_31240_31253_benchmark_0x6e828_0.trace.bin.lz4` | `b4f3f1c364231bec6814fccb00c6e6d1e4aee116d94d4ca027aa24fbb938565c` | 24 | 21718 | `0x5745c858653f5a7f` | 904916.666666 | 1566635 | 362559 | 0.231425 | 21608 | 110 | 0 | 2 | 1 | 25361979 | 67108864 | PASS | 9415990 | `1..21718` | PASS | 365877 | PASS |
+| full | 1 | `1787240933975_31824_31841_benchmark_0x6e828_0.trace.bin.lz4` | `5cd887c3ab31353e1da5c8a4947b2db349dc3063b57d922a1e043c177917504a` | 36 | 21718 | `0x5745c858653f5a7f` | 603277.777777 | 1672811 | 379822 | 0.227056 | 21608 | 110 | 0 | 2 | 1 | 24182251 | 67108864 | PASS | 9437592 | `1..21718` | PASS | 429199 | PASS |
+| full | 2 | `1787240938142_31887_31905_benchmark_0x6e828_0.trace.bin.lz4` | `03feac8f1e05da4f3f009df9c7827e13f051b50ac27212bb95173cebf20646f0` | 34 | 21718 | `0x5745c858653f5a7f` | 638764.705882 | 1672811 | 380009 | 0.227167 | 21608 | 110 | 0 | 2 | 1 | 24835897 | 67108864 | PASS | 9437602 | `1..21718` | PASS | 429199 | PASS |
+| full | 3 | `1787240941018_31951_31964_benchmark_0x6e828_0.trace.bin.lz4` | `6add8ce56cab6a18bec8d02f02762a11e188fc021f6c9e5fbd8cf4a8afde6755` | 36 | 21718 | `0x5745c858653f5a7f` | 603277.777777 | 1672811 | 379847 | 0.227071 | 21608 | 110 | 0 | 2 | 1 | 24475952 | 67108864 | PASS | 9437602 | `1..21718` | PASS | 429199 | PASS |
+| full | 4 | `1787240946286_32026_32089_benchmark_0x6e828_0.trace.bin.lz4` | `06f3f198c760ebcdb6218f848b035b03305a20fea69c6cc3fc4d7623c3911fac` | 33 | 21718 | `0x5745c858653f5a7f` | 658121.212121 | 1672811 | 379982 | 0.227151 | 21608 | 110 | 0 | 2 | 1 | 32406616 | 67108864 | PASS | 9437602 | `1..21718` | PASS | 429199 | PASS |
+| full | 5 | `1787240950285_32143_32156_benchmark_0x6e828_0.trace.bin.lz4` | `c4f18f95ae26e3e7716b84b138e0c6c2132a4a828cc295c2d1138262bdef10a9` | 38 | 21718 | `0x5745c858653f5a7f` | 571526.315789 | 1672811 | 380039 | 0.227185 | 21608 | 110 | 0 | 2 | 1 | 27008708 | 67108864 | PASS | 9437602 | `1..21718` | PASS | 429199 | PASS |
+
+The aggregate medians above are recomputed from these fifteen rows; per-run rate and ratio are the
+fixed-six sidecar values derived from `instructions * 1000 / elapsed_ms` and
+`compressed_bytes / encoded_bytes`.
+
+### Representative median-elapsed artifacts
 
 | Profile | Artifact | Elapsed ms | Compressed bytes | Converted bytes | SHA-256 |
 | --- | --- | ---: | ---: | ---: | --- |

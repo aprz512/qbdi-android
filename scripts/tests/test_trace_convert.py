@@ -1,11 +1,13 @@
 import contextlib
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import tracemalloc
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,25 +64,48 @@ def metrics_sidecar(source: Path, extra: str = "") -> str:
 
 
 class DocumentationContractTests(unittest.TestCase):
+    @staticmethod
+    def _table_after(document: str, heading: str) -> tuple[list[str], list[dict[str, str]]]:
+        parts = document.split(heading, 1)
+        if len(parts) != 2:
+            return [], []
+        section = parts[1]
+        table_lines = []
+        for line in section.splitlines():
+            if line.startswith("|"):
+                table_lines.append(line)
+            elif table_lines:
+                break
+        if not table_lines:
+            return [], []
+        header = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
+        rows = []
+        for line in table_lines[2:]:
+            values = [cell.strip().strip("`") for cell in line.strip("|").split("|")]
+            rows.append(dict(zip(header, values, strict=True)))
+        return header, rows
+
     def test_user_docs_describe_binary_workflow_and_compatibility(self):
         root = Path(__file__).parents[2]
         readme = root.joinpath("README.md").read_text(encoding="utf-8")
         protocol = root.joinpath("docs", "trace-format.md").read_text(encoding="utf-8")
-        combined = readme + "\n" + protocol
-
-        for required in (
-            ".trace.bin.lz4",
-            "QTRB v1",
-            "metrics_version=2",
-            "trace_convert.py",
-            "pull_trace.py",
-            "app-private",
-            "format-2",
-            ".partial.trace.txt",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, combined)
-
+        pull_section = readme.split("## Pull Traces", 1)[1]
+        self.assertIn(
+            "python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \\\n"
+            "  --device 192.168.51.42:5555 --output pulled-traces",
+            pull_section,
+        )
+        self.assertIn(
+            "python3 scripts/trace_convert.py input.trace.bin.lz4 --output output.trace.txt",
+            pull_section,
+        )
+        self.assertIn("metrics_version=2", pull_section)
+        self.assertIn("app-private", pull_section)
+        compatibility = protocol.split("## Artifact set", 1)[1].split("## QTRB v1 stream", 1)[0]
+        self.assertIn("format-2 `.trace.txt.lz4`", compatibility)
+        recovery = protocol.split("## Crash partial semantics", 1)[1].split("## Buffers", 1)[0]
+        self.assertIn("<basename>.partial.trace.txt", recovery)
+        self.assertIn("status 2", recovery)
         exclusions = protocol.split("## Explicit exclusions", 1)[1]
         self.assertNotIn("binary trace output", exclusions.lower())
 
@@ -88,29 +113,240 @@ class DocumentationContractTests(unittest.TestCase):
         protocol = Path(__file__).parents[2].joinpath(
             "docs", "trace-format.md"
         ).read_text(encoding="utf-8")
+        text_format = protocol.split("## Text format 3", 1)[1].split("## Profiles", 1)[0]
+        rendered = [line for line in text_format.splitlines() if line.startswith((
+            "TRACE_BEGIN ", "INST ", "MEMORY ", "CALL ", "RULE ", "ERROR ", "TRACE_END ",
+        ))]
+        self.assertEqual(7, len(rendered))
+        self.assertTrue(rendered[0].startswith("TRACE_BEGIN format=3 scene="))
+        self.assertIn("metadata_id=... opcode=0x...", rendered[1])
+        self.assertTrue(rendered[-1].startswith("TRACE_END status=ok return=0x..."))
+        self.assertIn("String escaping is JSON string escaping", text_format)
+        conversion = protocol.split("## Pulling and conversion", 1)[1].split(
+            "## Crash partial semantics", 1
+        )[0]
+        self.assertIn(
+            "status 0 for complete success, status 1 for an error with no text publication, and\n"
+            "status 2 for valid crash-partial recovery",
+            conversion,
+        )
 
-        for required in (
-            "RecordHeader",
-            "TRACE_BEGIN",
-            "MODULE_DEF",
-            "INSTRUCTION_DEF",
-            "INSTRUCTION",
-            "MEMORY",
-            "CALL",
-            "RULE",
-            "ERROR",
-            "TRACE_END",
-            "3072",
-            "1 MiB",
-            "format=3",
-            "escaping",
-            "field order",
-            "status 0",
-            "status 1",
-            "status 2",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, protocol)
+    def test_protocol_record_and_nested_layouts_are_field_exact(self):
+        protocol = Path(__file__).parents[2].joinpath(
+            "docs", "trace-format.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'StreamHeader {\n  magic: "QTRB"[4]\n  major: u8 = 1\n  minor: u8 = 0\n'
+            '  endian: u8 = 1\n  pointer_width: u8 = 4 | 8\n'
+            '  profile: u8                 # fast=0, balanced=1, full=2\n'
+            '  reserved: u8 = 0\n  header_bytes: u16 = 16\n'
+            '  required_features: u32 = 0\n}',
+            protocol,
+        )
+        self.assertIn(
+            "RecordHeader {\n  type: u16\n  flags: u16\n  payload_bytes: u32\n}",
+            protocol,
+        )
+        header, rows = self._table_after(protocol, "### Record payload layouts")
+        self.assertEqual(
+            ["Type", "Record", "Flags", "Payload fields in little-endian wire order",
+             "Fixed payload bytes", "Maximum record bytes"],
+            header,
+        )
+        expected = {
+            "TRACE_BEGIN": ("1", "0", "module_base u64; target_offset u64; target_address u64; pid u32; tid u32; profile u8; compression_enabled u8; effective_buffer_bytes u64; run_id u64; scene string; target string", "54", "572"),
+            "MODULE_DEF": ("2", "0", "module_id u32; module_base u64; module_name string", "14", "277"),
+            "INSTRUCTION_DEF": ("3", "0", "metadata_id u32; opcode u32; read_mask u64; write_mask u64; pc_displacement i64; instruction_flags u32; pc_kind u8; condition u8; memory_operand_count u8; slow_memory_path u8; mnemonic string; operands string; disassembly string; read register definitions; write register definitions; memory operands", "40", "1646"),
+            "INSTRUCTION": ("4", "0", "sequence u64; module_id u32; module_relative_pc u64; metadata_id u32; read_count u8; write_count u8; read values u64[read_count]; write values u64[write_count]", "26", "578"),
+            "MEMORY": ("5", "0", "module_id u32; module_relative_pc u64; access_kind u8; metadata_available u8; flags u16; address u64; access_size u32; value u64; before memory state; after memory state", "40", "176"),
+            "CALL": ("6", "0", "category string; name string; detail string", "6", "4620"),
+            "CALL_CONTINUATION": ("6", "0x0001", "event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; category string; name string; detail_fragment string", "22", "3612"),
+            "RULE": ("7", "0", "name string; detail string", "4", "4363"),
+            "ERROR": ("8", "0", "name string; detail string", "4", "4363"),
+            "TRACE_END": ("9", "0", "success u8; return_value u64; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64", "97", "105"),
+        }
+        self.assertEqual(expected, {
+            row["Record"]: (
+                row["Type"], row["Flags"],
+                row["Payload fields in little-endian wire order"],
+                row["Fixed payload bytes"], row["Maximum record bytes"],
+            ) for row in rows
+        })
+
+        wire_header = Path(__file__).parents[2].joinpath(
+            "tracer", "src", "main", "cpp", "events", "binary_trace_format.h"
+        ).read_text(encoding="utf-8")
+        direct_sizes = {
+            name: int(value) for name, value in re.findall(
+                r"inline constexpr size_t (kBinary\w+) =\s*(\d+);", wire_header
+            )
+        }
+        maximum_sizes = {
+            name: int(value) for name, value in re.findall(
+                r"static_assert\((kBinary\w+) == (\d+)\);", wire_header
+            )
+        }
+        fixed_constants = {
+            "TRACE_BEGIN": "kBinaryTraceBeginFixedPayloadBytes",
+            "MODULE_DEF": "kBinaryModuleDefinitionFixedPayloadBytes",
+            "INSTRUCTION_DEF": "kBinaryInstructionDefinitionFixedPayloadBytes",
+            "INSTRUCTION": "kBinaryInstructionFixedPayloadBytes",
+            "MEMORY": "kBinaryMemoryFixedPayloadBytes",
+            "CALL": "kBinaryCallFixedPayloadBytes",
+            "RULE": "kBinaryRuleErrorFixedPayloadBytes",
+            "ERROR": "kBinaryRuleErrorFixedPayloadBytes",
+            "TRACE_END": "kBinaryTraceEndPayloadBytes",
+        }
+        maximum_constants = {
+            "TRACE_BEGIN": "kBinaryMaxTraceBeginRecordBytes",
+            "MODULE_DEF": "kBinaryMaxModuleDefinitionRecordBytes",
+            "INSTRUCTION_DEF": "kBinaryMaxInstructionDefinitionRecordBytes",
+            "INSTRUCTION": "kBinaryMaxInstructionRecordBytes",
+            "MEMORY": "kBinaryMaxMemoryRecordBytes",
+            "CALL": "kBinaryMaxCallRecordBytes",
+            "CALL_CONTINUATION": "kBinaryMaxCallChunkRecordBytes",
+            "RULE": "kBinaryMaxRuleErrorRecordBytes",
+            "ERROR": "kBinaryMaxRuleErrorRecordBytes",
+            "TRACE_END": "kBinaryTraceEndRecordBytes",
+        }
+        rows_by_record = {row["Record"]: row for row in rows}
+        for record, constant in fixed_constants.items():
+            self.assertEqual(direct_sizes[constant],
+                             int(rows_by_record[record]["Fixed payload bytes"]))
+        call_chunk_fixed = (
+            direct_sizes["kBinaryCallChunkMetadataBytes"]
+            + direct_sizes["kBinaryCallFixedPayloadBytes"]
+        )
+        self.assertEqual(call_chunk_fixed,
+                         int(rows_by_record["CALL_CONTINUATION"]["Fixed payload bytes"]))
+        for record, constant in maximum_constants.items():
+            self.assertEqual(maximum_sizes[constant],
+                             int(rows_by_record[record]["Maximum record bytes"]))
+
+        nested_header, nested_rows = self._table_after(protocol, "### Nested wire layouts")
+        self.assertEqual(["Nested value", "Exact layout", "Limit"], nested_header)
+        self.assertEqual({
+            "string": ("byte_length u16; bytes[byte_length]", "65,535-byte wire maximum; semantic limits below"),
+            "register definition": ("width u8; name string", "34 read and 34 write definitions; ascending mask-bit order"),
+            "memory operand": ("base u8; index u8; extend u8; address_mode u8; shift u8; access_kind u8; writeback u8; access_size u32; displacement i64", "19 bytes; at most 4"),
+            "memory state": ("state u8; byte_count u8; bytes[byte_count]", "state 0/1/2; at most 64 bytes"),
+        }, {
+            row["Nested value"]: (row["Exact layout"], row["Limit"])
+            for row in nested_rows
+        })
+
+    def test_committed_acceptance_has_fifteen_auditable_measured_runs(self):
+        baseline = Path(__file__).parents[2].joinpath(
+            "docs", "benchmarks", "binary-trace-baseline.md"
+        ).read_text(encoding="utf-8")
+        header, rows = self._table_after(baseline, "### Per-run measured evidence")
+        self.assertEqual([
+            "Profile", "Run", "Artifact", "SHA-256", "Elapsed ms", "Instructions",
+            "Return", "Instructions/s", "Encoded bytes", "Compressed bytes", "Ratio",
+            "Cache hits", "Cache misses", "Cache collisions", "Buffer swaps",
+            "Producer waits", "Producer wait ns", "Effective buffer bytes",
+            "Conversion", "Converted bytes", "Sequence", "Footer/sidecar", "Size limit",
+            "Size gate",
+        ], header)
+        self.assertEqual(15, len(rows))
+
+        limits = {"fast": 307925, "balanced": 365877, "full": 429199}
+        encoded = {"fast": 1096964, "balanced": 1566635, "full": 1672811}
+        expected_medians = {
+            "fast": (16, Decimal("1357375.000000"), 267939),
+            "balanced": (24, Decimal("904916.666666"), 362559),
+            "full": (36, Decimal("603277.777777"), 379982),
+        }
+        artifact_pattern = re.compile(
+            r"^\d+_\d+_\d+_benchmark_0x6e828_0\.trace\.bin\.lz4$"
+        )
+        hash_pattern = re.compile(r"^[0-9a-f]{64}$")
+        self.assertEqual(15, len({row["Artifact"] for row in rows}))
+        self.assertEqual(15, len({row["SHA-256"] for row in rows}))
+        for profile in limits:
+            profile_rows = [row for row in rows if row["Profile"] == profile]
+            self.assertEqual(["1", "2", "3", "4", "5"],
+                             [row["Run"] for row in profile_rows])
+            elapsed_values = []
+            compressed_values = []
+            for row in profile_rows:
+                self.assertRegex(row["Artifact"], artifact_pattern)
+                self.assertRegex(row["SHA-256"], hash_pattern)
+                elapsed_ms = int(row["Elapsed ms"])
+                instructions = int(row["Instructions"])
+                rate = Decimal(row["Instructions/s"])
+                encoded_bytes = int(row["Encoded bytes"])
+                compressed_bytes = int(row["Compressed bytes"])
+                ratio = Decimal(row["Ratio"])
+                self.assertEqual(21718, instructions)
+                self.assertEqual("0x5745c858653f5a7f", row["Return"])
+                self.assertEqual(encoded[profile], encoded_bytes)
+                self.assertLessEqual(abs(rate - Decimal(instructions * 1000) / elapsed_ms),
+                                     Decimal("0.000001"))
+                self.assertLessEqual(abs(ratio - Decimal(compressed_bytes) / encoded_bytes),
+                                     Decimal("0.000001"))
+                self.assertEqual((21608, 110, 0), (
+                    int(row["Cache hits"]), int(row["Cache misses"]),
+                    int(row["Cache collisions"]),
+                ))
+                for counter in ("Buffer swaps", "Producer waits", "Producer wait ns",
+                                "Effective buffer bytes", "Converted bytes"):
+                    self.assertGreater(int(row[counter]), 0)
+                self.assertEqual("PASS", row["Conversion"])
+                self.assertEqual("1..21718", row["Sequence"])
+                self.assertEqual("PASS", row["Footer/sidecar"])
+                self.assertEqual(limits[profile], int(row["Size limit"]))
+                self.assertLessEqual(compressed_bytes, limits[profile])
+                self.assertEqual("PASS", row["Size gate"])
+                elapsed_values.append(elapsed_ms)
+                compressed_values.append(compressed_bytes)
+            elapsed_values.sort()
+            compressed_values.sort()
+            expected_elapsed, expected_rate, expected_compressed = expected_medians[profile]
+            self.assertEqual(expected_elapsed, elapsed_values[2])
+            self.assertLessEqual(
+                abs(expected_rate - Decimal(21718 * 1000) / elapsed_values[2]),
+                Decimal("0.000001"),
+            )
+            self.assertEqual(expected_compressed, compressed_values[2])
+
+        summary_header, summary_rows = self._table_after(
+            baseline, "## Accepted QTRB v1 results"
+        )
+        self.assertIn("Median elapsed ms", summary_header)
+        self.assertIn("Median instructions/s", summary_header)
+        self.assertIn("Median compressed bytes", summary_header)
+        self.assertIn("Maximum compressed bytes", summary_header)
+        self.assertEqual(3, len(summary_rows))
+        for summary in summary_rows:
+            profile = summary["Profile"]
+            profile_rows = [row for row in rows if row["Profile"] == profile]
+            elapsed_values = sorted(int(row["Elapsed ms"]) for row in profile_rows)
+            compressed_values = sorted(int(row["Compressed bytes"]) for row in profile_rows)
+            self.assertEqual(elapsed_values[2], int(summary["Median elapsed ms"]))
+            self.assertEqual(expected_medians[profile][1],
+                             Decimal(summary["Median instructions/s"]))
+            self.assertEqual(compressed_values[2], int(summary["Median compressed bytes"]))
+            self.assertEqual(compressed_values[-1], int(summary["Maximum compressed bytes"]))
+            self.assertEqual("PASS", summary["Every-size gate"])
+
+    def test_metrics_document_execution_timing_and_completion_boundaries(self):
+        protocol = Path(__file__).parents[2].joinpath(
+            "docs", "trace-format.md"
+        ).read_text(encoding="utf-8")
+        metrics = protocol.split("## Metrics v2", 1)[1].split("## Pulling and conversion", 1)[0]
+        metrics = " ".join(metrics.replace("`", "").split())
+        self.assertIn(
+            "elapsed_ms stops after traced target execution and producer callbacks, before final "
+            "writer drain, footer, and sidecar publication",
+            metrics,
+        )
+        self.assertIn("not end-to-end publication throughput", metrics)
+        self.assertIn("encoded_bytes is complete after TRACE_END is committed", metrics)
+        self.assertIn(
+            "compressed_bytes is complete after all frames, padding, drain, and close finish",
+            metrics,
+        )
 
 
 class TraceConvertFileTests(unittest.TestCase):

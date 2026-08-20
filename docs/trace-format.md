@@ -61,19 +61,59 @@ RecordHeader {
 }
 ```
 
-The record types and payload field order are:
+Unless stated otherwise, `RecordHeader.flags` is zero. `CALL_CONTINUATION` uses the same type 6 as
+`CALL`, with flag `0x0001`; all other flag bits are unsupported. Signed `i64` values use their
+two's-complement bit pattern. The fixed-size column follows the named encoder constants:
+`TRACE_BEGIN`, `MODULE_DEF`, `CALL`, `RULE`, and `ERROR` include their string-length prefixes;
+`INSTRUCTION_DEF` excludes its three string prefixes; `MEMORY` includes both state/length pairs.
+No fixed size includes variable string bytes, dense arrays, captured state bytes, register
+definitions, or memory operands.
 
-| Type | Name | Payload fields in wire order |
-| ---: | --- | --- |
-| 1 | `TRACE_BEGIN` | module base `u64`, target offset `u64`, target address `u64`, PID `u32`, TID `u32`, profile `u8`, compression `u8`, effective buffer bytes `u64`, run ID `u64`, scene string, target string |
-| 2 | `MODULE_DEF` | module ID `u32`, module base `u64`, module-name string |
-| 3 | `INSTRUCTION_DEF` | metadata ID/opcode `u32`, read/write masks `u64`, PC displacement `i64`, flags `u32`, PC kind/condition/memory count/slow-path `u8`, mnemonic/operands/disassembly strings, dense register definitions, memory operands |
-| 4 | `INSTRUCTION` | sequence `u64`, module ID `u32`, relative PC `u64`, metadata ID `u32`, read/write counts `u8`, then dense `u64` values in mask-bit order |
-| 5 | `MEMORY` | module ID `u32`, relative PC `u64`, access kind/metadata flag, flags `u16`, address `u64`, size `u32`, value `u64`, then before/after state, length, and bytes |
-| 6 | `CALL` | category, name, and detail strings; chunked records prepend event ID `u64`, total length `u32`, index/count `u16` |
-| 7 | `RULE` | name and detail strings |
-| 8 | `ERROR` | name and detail strings |
-| 9 | `TRACE_END` | success `u8`, return/elapsed/instruction count/encoded bytes/compressed bytes/cache hits/cache misses/cache collisions/buffer swaps/producer waits/producer wait ns/effective buffer bytes as `u64` |
+### Record payload layouts
+
+| Type | Record | Flags | Payload fields in little-endian wire order | Fixed payload bytes | Maximum record bytes |
+| ---: | --- | --- | --- | ---: | ---: |
+| 1 | `TRACE_BEGIN` | 0 | `module_base u64; target_offset u64; target_address u64; pid u32; tid u32; profile u8; compression_enabled u8; effective_buffer_bytes u64; run_id u64; scene string; target string` | 54 | 572 |
+| 2 | `MODULE_DEF` | 0 | `module_id u32; module_base u64; module_name string` | 14 | 277 |
+| 3 | `INSTRUCTION_DEF` | 0 | `metadata_id u32; opcode u32; read_mask u64; write_mask u64; pc_displacement i64; instruction_flags u32; pc_kind u8; condition u8; memory_operand_count u8; slow_memory_path u8; mnemonic string; operands string; disassembly string; read register definitions; write register definitions; memory operands` | 40 | 1646 |
+| 4 | `INSTRUCTION` | 0 | `sequence u64; module_id u32; module_relative_pc u64; metadata_id u32; read_count u8; write_count u8; read values u64[read_count]; write values u64[write_count]` | 26 | 578 |
+| 5 | `MEMORY` | 0 | `module_id u32; module_relative_pc u64; access_kind u8; metadata_available u8; flags u16; address u64; access_size u32; value u64; before memory state; after memory state` | 40 | 176 |
+| 6 | `CALL` | 0 | `category string; name string; detail string` | 6 | 4620 |
+| 6 | `CALL_CONTINUATION` | 0x0001 | `event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; category string; name string; detail_fragment string` | 22 | 3612 |
+| 7 | `RULE` | 0 | `name string; detail string` | 4 | 4363 |
+| 8 | `ERROR` | 0 | `name string; detail string` | 4 | 4363 |
+| 9 | `TRACE_END` | 0 | `success u8; return_value u64; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64` | 97 | 105 |
+
+Maximum record bytes include the eight-byte `RecordHeader`. `TRACE_END.encoded_bytes` includes its
+own 105 bytes. `TRACE_END.compressed_bytes` is the final artifact size, including the final LZ4
+skippable padding frame when compression is enabled. `TRACE_END.success` is 0 or 1.
+
+### Nested wire layouts
+
+| Nested value | Exact layout | Limit |
+| --- | --- | --- |
+| `string` | `byte_length u16; bytes[byte_length]` | 65,535-byte wire maximum; semantic limits below |
+| `register definition` | `width u8; name string` | 34 read and 34 write definitions; ascending mask-bit order |
+| `memory operand` | `base u8; index u8; extend u8; address_mode u8; shift u8; access_kind u8; writeback u8; access_size u32; displacement i64` | 19 bytes; at most 4 |
+| `memory state` | `state u8; byte_count u8; bytes[byte_count]` | state 0/1/2; at most 64 bytes |
+
+`INSTRUCTION_DEF.metadata_id` and `opcode` are independent `u32` fields. Only register-mask bits
+0–33 are valid. Read definitions precede write definitions, each in ascending set-bit order;
+`INSTRUCTION` dense values use those same orders and their counts must equal the respective
+popcounts. `instruction_flags` bits are branch `0x1`, PC-relative `0x2`, call `0x4`, and return
+`0x8`. `pc_kind` is none/current-PC/current-page as 0/1/2, while `slow_memory_path`,
+`compression_enabled`, `metadata_available`, and `writeback` are 0 or 1.
+
+A memory operand uses register indexes 0–33 or `255` for no register; `extend` is
+none/UXTW/SXTW/LSL/SXTX as 0–4; `address_mode` is offset/pre-index/post-index as 0–2; and
+`access_kind` is read/write/read-write as 1/2/3. A memory state is not-captured/available/unavailable
+as 0/1/2. Not-captured and unavailable require `byte_count=0`; available carries 0–64 bytes.
+`MEMORY.flags` and `INSTRUCTION_DEF.condition` preserve their producer `u16`/`u8` values.
+
+For `CALL_CONTINUATION`, `event_id` must be nonzero, `chunk_count>=2`, indexes are contiguous from
+zero, every fragment is nonempty and at most 3072 bytes, and all chunks repeat identical event ID,
+total, count, category, and name. `total_detail_bytes` must equal the reassembled detail and be no
+larger than 1 MiB. UTF-8 validation of detail occurs only after raw fragments are concatenated.
 
 Definitions are control records and are emitted immediately before their first reference. They do
 not become visible text events. `INSTRUCTION` sequence numbers therefore remain continuous and all
@@ -144,6 +184,14 @@ Binary sidecars begin with `metrics_version=2`. They contain:
 The converter checks the footer against the artifact size and adjacent v2 sidecar before atomic
 publication. The pull/benchmark tools parse legacy format-2 v1 metrics only when
 `metrics_version` is absent and `raw_bytes` is present; mixed v1/v2 fields are rejected.
+
+`elapsed_ms` stops after traced target execution and producer callbacks, before final writer drain,
+footer, and sidecar publication.
+Thus all three derived rates use hot-path elapsed time and are comparable with the format-2
+baseline, but they are not end-to-end publication throughput. `encoded_bytes` is complete after
+`TRACE_END` is committed. `compressed_bytes` is complete after all frames, padding, drain, and
+close finish. The large and 4 KiB acceptance runs separately exercise streaming, backpressure, and
+final drain behavior.
 
 ## Pulling and conversion
 
