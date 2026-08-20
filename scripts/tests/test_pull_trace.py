@@ -15,6 +15,7 @@ from scripts.pull_trace import (
     pull_artifact_set,
     select_trace_name,
 )
+from scripts.tests.test_trace_binary import complete_stream
 
 
 CRASH_MAGIC = 0x51435248
@@ -29,6 +30,23 @@ def crash_marker(signal_number=signal.SIGSEGV, tid=1234):
 
 
 class ArtifactClassificationTests(unittest.TestCase):
+    def test_classifies_text_compressed_binary_and_raw_binary_artifacts(self):
+        artifacts = {
+            "100.trace.txt.lz4": b"",
+            "100.trace.txt.lz4.metrics": b"v1",
+            "200.trace.bin.lz4": b"",
+            "200.trace.bin.lz4.metrics": b"v2",
+            "300.trace.bin": b"",
+            "300.trace.bin.metrics": b"v2",
+        }
+
+        traces = classify_artifacts(artifacts)
+
+        self.assertEqual(
+            {"100.trace.txt.lz4", "200.trace.bin.lz4", "300.trace.bin"}, set(traces)
+        )
+        self.assertTrue(all(trace.status == "complete" for trace in traces.values()))
+
     def test_classifies_complete_crashed_and_incomplete_traces(self):
         artifacts = {
             "123_algorithm.trace.txt.lz4": b"",
@@ -110,7 +128,7 @@ class AdbArtifactClientTests(unittest.TestCase):
             calls[0][0][:6],
         )
         self.assertEqual("ls", calls[0][0][6])
-        self.assertEqual("cat", calls[1][0][6])
+        self.assertEqual("head", calls[1][0][6])
         self.assertNotIn("shell", calls[0][0])
         self.assertFalse(calls[0][1].get("shell", False))
 
@@ -124,6 +142,25 @@ class AdbArtifactClientTests(unittest.TestCase):
             client.stream_file("123.trace.txt.lz4", output)
             output.seek(0)
             self.assertEqual(b"streamed", output.read())
+
+    def test_translates_adb_timeout_and_rejects_oversized_sidecars(self):
+        def timeout_runner(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        client = AdbArtifactClient(
+            package="com.example.app", timeout=0.25, runner=timeout_runner
+        )
+        with self.assertRaisesRegex(PullTraceError, "timed out after 0.25s"):
+            client.list_names()
+
+        client = AdbArtifactClient(
+            package="com.example.app",
+            runner=lambda command, **kwargs: subprocess.CompletedProcess(
+                command, 0, stdout=b"12345", stderr=b""
+            ),
+        )
+        with self.assertRaisesRegex(PullTraceError, "size limit"):
+            client.read_file("run.metrics", 4)
 
     def test_rejects_unsafe_package_and_remote_names_before_running_adb(self):
         with self.assertRaises(PullTraceError):
@@ -141,7 +178,7 @@ class PullArtifactTests(unittest.TestCase):
             self.files = files
             self.streamed = []
 
-        def read_file(self, name):
+        def read_file(self, name, maximum_bytes=64 * 1024):
             return self.files[name]
 
         def stream_file(self, name, output):
@@ -251,8 +288,54 @@ class PullArtifactTests(unittest.TestCase):
             self.assertFalse((Path(directory) / "123_algorithm.trace.txt").exists())
             self.assertFalse((Path(directory) / "123_algorithm.partial.trace.txt").exists())
 
+    def test_pulls_raw_binary_and_optionally_converts_it_atomically(self):
+        name = "123_algorithm.trace.bin"
+        binary = complete_stream(compression=0)
+        files = {name: binary}
+        client = self.FakeClient(files)
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = pull_artifact_set(client, name, files, Path(directory))
+
+            self.assertEqual(0, result.exit_code)
+            self.assertEqual(binary, (Path(directory) / name).read_bytes())
+            text = Path(directory) / "123_algorithm.trace.txt"
+            self.assertIn("TRACE_END status=ok", text.read_text(encoding="utf-8"))
+
+    def test_binary_conversion_failure_never_publishes_readable_output(self):
+        name = "123_algorithm.trace.bin"
+        client = self.FakeClient({name: b"not-qtrb"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(PullTraceError):
+                pull_artifact_set(client, name, client.files, Path(directory))
+            self.assertFalse((Path(directory) / "123_algorithm.trace.txt").exists())
+
+    def test_stream_error_removes_temporary_and_publishes_no_artifact(self):
+        name = "123_algorithm.trace.bin"
+
+        class FailingClient(self.FakeClient):
+            def stream_file(self, artifact, output):
+                output.write(b"partial")
+                raise PullTraceError("adb stream failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(PullTraceError, "stream failed"):
+                pull_artifact_set(FailingClient({name: b"ignored"}), name, [name], root)
+            self.assertEqual([], list(root.iterdir()))
+
 
 class CommandLineTests(unittest.TestCase):
+    def test_selects_binary_by_listing_order_without_suffix_priority(self):
+        names = [
+            "300_benchmark.trace.bin.lz4.metrics",
+            "300_benchmark.trace.bin.lz4",
+            "200_benchmark.trace.txt.lz4",
+        ]
+
+        self.assertEqual("300_benchmark.trace.bin.lz4", select_trace_name(names))
+
     def test_selects_latest_trace_or_an_explicit_existing_name(self):
         names = [
             "new.trace.txt.lz4.metrics",
@@ -281,6 +364,22 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("status=incomplete", stdout.getvalue())
         self.assertIn(name, stdout.getvalue())
         self.assertEqual("", stderr.getvalue())
+
+    def test_raw_binary_cli_pulls_and_converts_end_to_end_without_lz4(self):
+        name = "new.trace.bin"
+        client = PullArtifactTests.FakeClient({name: complete_stream(compression=0)})
+        client.list_names = lambda: [name]
+        stdout = StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stdout):
+            exit_code = main(
+                ["--package", "com.example.app", "--output", directory],
+                client_factory=lambda **kwargs: client,
+                lz4_finder=lambda command: None,
+            )
+
+            self.assertEqual(0, exit_code)
+            self.assertIn("TRACE_END status=ok", (Path(directory) / "new.trace.txt").read_text())
+        self.assertIn("output=", stdout.getvalue())
 
     def test_cli_clearly_reports_missing_lz4(self):
         name = "new.trace.txt.lz4"

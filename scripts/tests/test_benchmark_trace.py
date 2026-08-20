@@ -6,14 +6,18 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from scripts.tests.test_trace_binary import complete_stream
 
 import scripts.benchmark_trace as benchmark_trace
 
 from scripts.benchmark_trace import (
     compare_to_baseline,
+    compare_to_profile_baseline,
     classify_run_as_build_type,
     configure_agent_source,
+    collect_and_validate_optimized_artifact,
     ensure_artifact_return,
+    ensure_metrics_container,
     ensure_stable_return,
     fast_cost_diagnosis,
     frida_endpoint,
@@ -26,7 +30,9 @@ from scripts.benchmark_trace import (
     require_balanced_comparison,
     render_report,
     ensure_same_device,
+    ensure_same_format_two_device,
     select_newest_optimized_metrics,
+    select_exact_new_optimized_metrics,
     select_newest_benchmark_trace,
     throughput_metrics,
     verify_setup_failure_smoke,
@@ -103,6 +109,19 @@ TRACE_END status=ok ret=0x42 elapsed_ms=7 instructions=1 raw_bytes=200 cache_hit
         self.assertTrue(is_missing_trace_directory(missing))
         self.assertFalse(is_missing_trace_directory(denied))
 
+    def test_device_listing_rejects_unsafe_names_and_unbounded_output(self):
+        args = SimpleNamespace(package="com.example.app")
+        with patch.object(
+            benchmark_trace, "adb",
+            return_value=subprocess.CompletedProcess([], 0, stdout="../trace.bin\n", stderr=""),
+        ), self.assertRaisesRegex(RuntimeError, "unsafe artifact"):
+            benchmark_trace.trace_names(args)
+        with patch.object(
+            benchmark_trace, "adb",
+            return_value=subprocess.CompletedProcess([], 0, stdout="x" * (1024 * 1024 + 1), stderr=""),
+        ), self.assertRaisesRegex(RuntimeError, "size limit"):
+            benchmark_trace.trace_names(args)
+
     def test_derives_every_baseline_run_throughput_from_raw_metrics(self):
         expected = {
             1937: (11212.18, 1.16144),
@@ -142,6 +161,102 @@ producer_waits=0
 producer_wait_ns=0
 effective_buffer_bytes=67108864
 """
+    METRICS_V2 = """metrics_version=2
+profile=balanced
+return=0x42
+instructions=100000
+elapsed_ms=50
+instructions_per_second=2000000.000000
+encoded_bytes=10485760
+compressed_bytes=1048576
+encoded_bytes_per_second=209715200.000000
+disk_bytes_per_second=20971520.000000
+compression_ratio=0.100000
+cache_hits=90000
+cache_misses=10000
+cache_collisions=123
+cache_hit_rate=0.900000
+buffer_swaps=7
+producer_waits=0
+producer_wait_ns=0
+effective_buffer_bytes=67108864
+"""
+
+    def test_parses_exact_metrics_v2_without_redefining_raw_bytes(self):
+        current = parse_metrics(self.METRICS_V2)
+
+        self.assertEqual(2, current["metrics_version"])
+        self.assertEqual(10_485_760, current["encoded_bytes"])
+        self.assertEqual(Decimal("209715200.000000"), current["encoded_bytes_per_second"])
+        self.assertNotIn("raw_bytes", current)
+
+    def test_rejects_mixed_or_unknown_metrics_contracts(self):
+        with self.assertRaisesRegex(ValueError, "raw_bytes"):
+            parse_metrics(self.METRICS_V2 + "raw_bytes=10485760\n")
+        with self.assertRaisesRegex(ValueError, "encoded_bytes"):
+            parse_metrics(self.METRICS + "encoded_bytes=10485760\n")
+        with self.assertRaisesRegex(ValueError, "metrics_version"):
+            parse_metrics(self.METRICS_V2.replace("metrics_version=2", "metrics_version=3"))
+
+    def test_rejects_metrics_container_version_mismatch_without_fallback(self):
+        v1 = parse_metrics(self.METRICS)
+        v2 = parse_metrics(self.METRICS_V2)
+        ensure_metrics_container(v1, "run.trace.txt.lz4")
+        ensure_metrics_container(v2, "run.trace.bin.lz4")
+        ensure_metrics_container(v2, "run.trace.bin")
+        with self.assertRaisesRegex(RuntimeError, "v1"):
+            ensure_metrics_container(v1, "run.trace.bin.lz4")
+        with self.assertRaisesRegex(RuntimeError, "v2"):
+            ensure_metrics_container(v2, "run.trace.txt.lz4")
+
+    def test_v2_medians_preserve_decimal_rates_and_full_uint64(self):
+        maximum = self.METRICS_V2.replace(
+            "producer_wait_ns=0", "producer_wait_ns=18446744073709551615"
+        )
+        report = median_report([parse_metrics(maximum)])
+
+        self.assertEqual(18446744073709551615, report["producer_wait_ns"])
+        self.assertIsInstance(report["encoded_bytes_per_second"], Decimal)
+        lower = parse_metrics(self.METRICS_V2.replace(
+            "producer_wait_ns=0", "producer_wait_ns=18446744073709551614"
+        ))
+        upper = parse_metrics(self.METRICS_V2.replace(
+            "producer_wait_ns=0", "producer_wait_ns=18446744073709551615"
+        ))
+        self.assertEqual(
+            Decimal("18446744073709551614.5"),
+            median_report([lower, upper])["producer_wait_ns"],
+        )
+
+    def test_profile_comparison_preserves_oracle_identity_and_uses_compressed_size(self):
+        current = median_report([parse_metrics(self.METRICS_V2)])
+        current["return"] = "0x42"
+        baseline = {
+            "profile": "balanced", "instructions": 100000, "return": "0x42",
+            "compressed_bytes": 1048576,
+        }
+
+        comparison = compare_to_profile_baseline(current, baseline)
+
+        self.assertTrue(comparison["meets_rate_target"])
+        self.assertTrue(comparison["meets_size_target"])
+        with self.assertRaisesRegex(ValueError, "oracle.*return"):
+            compare_to_profile_baseline(current, {**baseline, "return": "0x43"})
+        with self.assertRaisesRegex(ValueError, "oracle.*instructions"):
+            compare_to_profile_baseline(current, {**baseline, "instructions": 99999})
+
+    def test_format_two_device_identity_maps_to_live_device_fields(self):
+        baseline = {
+            "device_model": "Pixel 6", "device_product": "oriole",
+            "android_version": "16", "abi": "arm64-v8a", "build_type": "Debug",
+        }
+        current = {
+            "model": "Pixel 6", "device": "oriole", "android": "16",
+            "abi": "arm64-v8a", "build_type": "Debug",
+        }
+        ensure_same_format_two_device(baseline, current)
+        with self.assertRaisesRegex(ValueError, "device_model"):
+            ensure_same_format_two_device(baseline, {**current, "model": "Pixel 8"})
 
     def test_binary_trace_baseline_has_all_profiles_and_size_fields(self):
         path = Path("docs/benchmarks/binary-trace-baseline.md")
@@ -361,6 +476,91 @@ effective_buffer_bytes=67108864
             "1710000000001_100_100_benchmark_0x20_0.trace.txt.lz4.metrics",
             select_newest_optimized_metrics(names),
         )
+
+    def test_selects_one_new_binary_pair_and_rejects_ambiguous_pairs(self):
+        pair = [
+            "300_benchmark.trace.bin.lz4.metrics",
+            "300_benchmark.trace.bin.lz4",
+        ]
+        self.assertEqual(pair[0], select_newest_optimized_metrics(pair))
+        with self.assertRaisesRegex(ValueError, "exactly one paired"):
+            select_exact_new_optimized_metrics([
+                *pair,
+                "301_benchmark.trace.bin.metrics",
+                "301_benchmark.trace.bin",
+            ])
+
+    def test_run_collection_rejects_orphan_new_artifacts(self):
+        pair = [
+            "300_benchmark.trace.bin.lz4.metrics",
+            "300_benchmark.trace.bin.lz4",
+        ]
+        self.assertEqual(pair[0], select_exact_new_optimized_metrics(pair))
+        for extra in (
+            "301_benchmark.trace.bin",
+            "301_benchmark.trace.bin.metrics",
+            "300_benchmark.trace.bin.lz4.crash",
+        ):
+            with self.subTest(extra=extra), self.assertRaisesRegex(
+                ValueError, "exactly one paired"
+            ):
+                select_exact_new_optimized_metrics([*pair, extra])
+
+    def test_collects_raw_binary_atomically_and_validates_footer_sidecar_container(self):
+        binary = complete_stream(compression=0)
+
+        def fixed_six(numerator, denominator):
+            whole, remainder = divmod(numerator, denominator)
+            return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
+
+        sidecar = (
+            "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
+            f"elapsed_ms=17\ninstructions_per_second=0.000000\nencoded_bytes={len(binary)}\n"
+            f"compressed_bytes={len(binary)}\n"
+            f"encoded_bytes_per_second={fixed_six(len(binary) * 1000, 17)}\n"
+            f"disk_bytes_per_second={fixed_six(len(binary) * 1000, 17)}\n"
+            "compression_ratio=1.000000\ncache_hits=9\ncache_misses=1\n"
+            "cache_collisions=0\ncache_hit_rate=0.900000\nbuffer_swaps=2\n"
+            "producer_waits=0\nproducer_wait_ns=0\neffective_buffer_bytes=4096\n"
+        ).encode("ascii")
+        metrics = parse_metrics(sidecar)
+
+        def fake_adb(_args, *command, **kwargs):
+            kwargs["stdout"].write(binary)
+            return subprocess.CompletedProcess(command, 0, stdout=None, stderr=b"")
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            benchmark_trace, "adb", side_effect=fake_adb
+        ):
+            args = SimpleNamespace(
+                artifact_output=directory, package="com.example.app", lz4="lz4"
+            )
+            result = collect_and_validate_optimized_artifact(
+                args, "run_benchmark.trace.bin", sidecar, metrics
+            )
+
+            converted = Path(directory) / "run_benchmark.trace.txt"
+            self.assertEqual(converted.stat().st_size, result["converted_text_bytes"])
+            self.assertEqual(64, len(result["artifact_sha256"]))
+            self.assertIn(
+                "TRACE_END status=ok",
+                converted.read_text(encoding="utf-8"),
+            )
+            self.assertEqual([], list(Path(directory).glob(".benchmark-*")))
+
+    def test_benchmark_artifact_pull_error_removes_partial_temporary(self):
+        def failing_adb(_args, *command, **kwargs):
+            kwargs["stdout"].write(b"partial")
+            raise subprocess.TimeoutExpired(command, 0.1)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            benchmark_trace, "adb", side_effect=failing_adb
+        ):
+            root = Path(directory)
+            args = SimpleNamespace(artifact_output=directory, package="com.example.app")
+            with self.assertRaises(subprocess.TimeoutExpired):
+                benchmark_trace._publish_remote_file(args, "run.trace.bin", root / "run.trace.bin")
+            self.assertEqual([], list(root.iterdir()))
 
     def test_configures_the_requested_profile_for_the_fresh_process_agent(self):
         source = "const profile = '__QTRACE_PROFILE__'; const test = '__QTRACE_TEST_CONFIG__';"

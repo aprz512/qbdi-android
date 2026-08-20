@@ -4,16 +4,28 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from importlib.resources import files
 import json
+import os
 import re
 import statistics
 import subprocess
 import sys
 import time
+import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
+
+try:
+    from scripts.lz4_frames import PullTraceError, decode_lz4_file
+    from scripts.trace_binary import BinaryTraceError
+    from scripts.trace_convert import convert_binary_file
+except ModuleNotFoundError:  # Support direct execution as scripts/benchmark_trace.py.
+    from lz4_frames import PullTraceError, decode_lz4_file  # type: ignore[no-redef]
+    from trace_binary import BinaryTraceError  # type: ignore[no-redef]
+    from trace_convert import convert_binary_file  # type: ignore[no-redef]
 
 
 TRACE_FOOTER = re.compile(
@@ -24,10 +36,14 @@ TRACE_FOOTER = re.compile(
 )
 TRACE_SEQUENCE = re.compile(rb"^(\d+)\s", re.MULTILINE)
 TRACE_DIRECTORY = "files/qbdi-traces"
-OPTIMIZED_INTEGER_FIELDS = (
+ARTIFACT_NAME = re.compile(r"[A-Za-z0-9_.-]+\Z")
+TEXT_TRACE_SUFFIX = ".trace.txt.lz4"
+BINARY_TRACE_SUFFIX = ".trace.bin.lz4"
+BINARY_RAW_SUFFIX = ".trace.bin"
+TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)
+COMMON_INTEGER_FIELDS = (
     "instructions",
     "elapsed_ms",
-    "raw_bytes",
     "compressed_bytes",
     "cache_hits",
     "cache_misses",
@@ -37,15 +53,26 @@ OPTIMIZED_INTEGER_FIELDS = (
     "producer_wait_ns",
     "effective_buffer_bytes",
 )
-OPTIMIZED_RATE_FIELDS = (
+COMMON_RATE_FIELDS = (
     "instructions_per_second",
-    "raw_bytes_per_second",
     "disk_bytes_per_second",
     "compression_ratio",
     "cache_hit_rate",
 )
-OPTIMIZED_FIELDS = ("profile", "return", *OPTIMIZED_INTEGER_FIELDS, *OPTIMIZED_RATE_FIELDS)
+V1_INTEGER_FIELDS = (*COMMON_INTEGER_FIELDS[:2], "raw_bytes", *COMMON_INTEGER_FIELDS[2:])
+V2_INTEGER_FIELDS = (*COMMON_INTEGER_FIELDS[:2], "encoded_bytes", *COMMON_INTEGER_FIELDS[2:])
+V1_RATE_FIELDS = (*COMMON_RATE_FIELDS[:1], "raw_bytes_per_second", *COMMON_RATE_FIELDS[1:])
+V2_RATE_FIELDS = (*COMMON_RATE_FIELDS[:1], "encoded_bytes_per_second", *COMMON_RATE_FIELDS[1:])
+# Compatibility aliases for existing v1 callers.
+OPTIMIZED_INTEGER_FIELDS = V1_INTEGER_FIELDS
+OPTIMIZED_RATE_FIELDS = V1_RATE_FIELDS
 UINT64_MAX = (1 << 64) - 1
+MAX_METRICS_BYTES = 64 * 1024
+PROFILE_RATE_TARGETS = {
+    "fast": Decimal(1_000_000),
+    "balanced": Decimal(800_000),
+    "full": Decimal(500_000),
+}
 
 
 def parse_legacy_trace(trace: bytes, file_bytes: int) -> dict[str, int | str]:
@@ -86,15 +113,40 @@ def select_newest_optimized_metrics(names: Iterable[str]) -> str:
     ordered = list(names)
     available = set(ordered)
     for name in ordered:
-        if (name.endswith(".trace.txt.lz4.metrics") and "_benchmark_" in name and
-                name.removesuffix(".metrics") in available):
+        if (name.endswith(tuple(suffix + ".metrics" for suffix in TRACE_SUFFIXES))
+                and "_benchmark" in name and name.removesuffix(".metrics") in available):
             return name
-    raise ValueError("no complete compressed benchmark metrics found")
+    raise ValueError("no complete benchmark trace+metrics pair found")
+
+
+def select_exact_new_optimized_metrics(names: Iterable[str]) -> str:
+    """Require one run to publish only one trace and its matching metrics sidecar."""
+    new_names = list(names)
+    selected = select_newest_optimized_metrics(new_names)
+    artifact = selected.removesuffix(".metrics")
+    trace_outputs = {
+        name for name in new_names
+        if name.endswith(TRACE_SUFFIXES)
+        or name.endswith(tuple(suffix + ending for suffix in TRACE_SUFFIXES
+                               for ending in (".metrics", ".crash")))
+    }
+    expected = {artifact, selected}
+    if trace_outputs != expected:
+        extras = sorted(trace_outputs - expected)
+        missing = sorted(expected - trace_outputs)
+        raise ValueError(
+            "new benchmark run did not publish exactly one paired trace+metrics artifact"
+            + (f"; extras={extras}" if extras else "")
+            + (f"; missing={missing}" if missing else "")
+        )
+    return selected
 
 
 def _expected_optimized_rates(metrics: dict[str, int | Decimal | str]) -> dict[str, Decimal]:
     elapsed_ms = int(metrics["elapsed_ms"])
-    raw_bytes = int(metrics["raw_bytes"])
+    byte_field = "encoded_bytes" if int(metrics.get("metrics_version", 1)) == 2 else "raw_bytes"
+    rate_field = byte_field + "_per_second"
+    encoded_bytes = int(metrics[byte_field])
     compressed_bytes = int(metrics["compressed_bytes"])
     cache_hits = int(metrics["cache_hits"])
     cache_lookups = cache_hits + int(metrics["cache_misses"])
@@ -103,14 +155,14 @@ def _expected_optimized_rates(metrics: dict[str, int | Decimal | str]) -> dict[s
             Decimal(int(metrics["instructions"]) * 1000) / elapsed_ms
             if elapsed_ms else Decimal(0)
         ),
-        "raw_bytes_per_second": (
-            Decimal(raw_bytes * 1000) / elapsed_ms if elapsed_ms else Decimal(0)
+        rate_field: (
+            Decimal(encoded_bytes * 1000) / elapsed_ms if elapsed_ms else Decimal(0)
         ),
         "disk_bytes_per_second": (
             Decimal(compressed_bytes * 1000) / elapsed_ms if elapsed_ms else Decimal(0)
         ),
         "compression_ratio": (
-            Decimal(compressed_bytes) / raw_bytes if raw_bytes else Decimal(0)
+            Decimal(compressed_bytes) / encoded_bytes if encoded_bytes else Decimal(0)
         ),
         "cache_hit_rate": Decimal(cache_hits) / cache_lookups if cache_lookups else Decimal(0),
     }
@@ -119,7 +171,10 @@ def _expected_optimized_rates(metrics: dict[str, int | Decimal | str]) -> dict[s
 def parse_metrics(sidecar: str | bytes) -> dict[str, int | Decimal | str]:
     """Parse one completed optimized sidecar and validate its derived metrics."""
     if isinstance(sidecar, bytes):
-        sidecar = sidecar.decode("utf-8")
+        try:
+            sidecar = sidecar.decode("ascii")
+        except UnicodeDecodeError as error:
+            raise ValueError("metrics sidecar is not ASCII") from error
     values: dict[str, str] = {}
     for line in sidecar.splitlines():
         if not line or "=" not in line:
@@ -129,9 +184,31 @@ def parse_metrics(sidecar: str | bytes) -> dict[str, int | Decimal | str]:
             raise ValueError(f"invalid or duplicate metrics key: {key}")
         values[key] = value
 
-    missing = [key for key in OPTIMIZED_FIELDS if key not in values]
+    version_text = values.get("metrics_version")
+    if version_text is None:
+        version = 1
+        integer_fields = V1_INTEGER_FIELDS
+        rate_fields = V1_RATE_FIELDS
+        forbidden = ("encoded_bytes", "encoded_bytes_per_second")
+    elif version_text == "2":
+        version = 2
+        integer_fields = V2_INTEGER_FIELDS
+        rate_fields = V2_RATE_FIELDS
+        forbidden = ("raw_bytes", "raw_bytes_per_second")
+    else:
+        raise ValueError("unsupported metrics_version")
+    mixed = [key for key in forbidden if key in values]
+    if mixed:
+        raise ValueError(f"metrics contract contains forbidden {mixed[0]}")
+    required = {"profile", "return", *integer_fields, *rate_fields}
+    if version == 2:
+        required.add("metrics_version")
+    missing = sorted(required - values.keys())
     if missing:
         raise ValueError("missing metrics fields: " + ", ".join(missing))
+    unknown = sorted(values.keys() - required)
+    if unknown:
+        raise ValueError("unknown metrics fields: " + ", ".join(unknown))
     if values["profile"] not in ("fast", "balanced", "full"):
         raise ValueError("invalid profile metric")
     if re.fullmatch(r"0x[0-9a-fA-F]+", values["return"]) is None:
@@ -142,15 +219,20 @@ def parse_metrics(sidecar: str | bytes) -> dict[str, int | Decimal | str]:
     parsed: dict[str, int | Decimal | str] = {
         "profile": values["profile"],
         "return": values["return"].lower(),
+        "metrics_version": version,
     }
     try:
-        for key in OPTIMIZED_INTEGER_FIELDS:
+        for key in integer_fields:
+            if re.fullmatch(r"\d+", values[key]) is None:
+                raise ValueError(f"{key} is not an unsigned integer")
             parsed[key] = int(values[key])
             if int(parsed[key]) < 0:
                 raise ValueError(f"{key} must not be negative")
             if int(parsed[key]) > UINT64_MAX:
                 raise ValueError(f"{key} exceeds uint64")
-        for key in OPTIMIZED_RATE_FIELDS:
+        for key in rate_fields:
+            if re.fullmatch(r"\d+\.\d{6}", values[key]) is None:
+                raise ValueError(f"{key} is not fixed-six decimal")
             parsed[key] = Decimal(values[key])
             if not Decimal(parsed[key]).is_finite() or Decimal(parsed[key]) < 0:
                 raise ValueError(f"{key} must be finite and non-negative")
@@ -172,6 +254,27 @@ def compare_to_baseline(
     if current_ms <= 0 or baseline_ms <= 0:
         raise ValueError("elapsed_ms must be positive for comparison")
     return {"speedup": baseline_ms / current_ms}
+
+
+def compare_to_profile_baseline(
+    current: dict[str, int | Decimal | str],
+    baseline: dict[str, int | str],
+) -> dict[str, Decimal | bool | int]:
+    profile = str(current.get("profile", ""))
+    if profile not in PROFILE_RATE_TARGETS or profile != str(baseline.get("profile", "")):
+        raise ValueError("current and baseline profiles differ")
+    for key in ("instructions", "return"):
+        if str(current.get(key, "")).lower() != str(baseline.get(key, "")).lower():
+            raise ValueError(f"format-2 oracle mismatch for {key}")
+    rate = Decimal(current["instructions_per_second"])
+    compressed = int(current["compressed_bytes"])
+    baseline_compressed = int(baseline["compressed_bytes"])
+    return {
+        "target_instructions_per_second": PROFILE_RATE_TARGETS[profile],
+        "meets_rate_target": rate >= PROFILE_RATE_TARGETS[profile],
+        "baseline_compressed_bytes": baseline_compressed,
+        "meets_size_target": compressed <= baseline_compressed,
+    }
 
 
 def require_balanced_comparison(profile: str) -> None:
@@ -337,6 +440,24 @@ def ensure_same_device(
         raise ValueError("baseline device mismatch: " + "; ".join(mismatches))
 
 
+def ensure_same_format_two_device(baseline: dict[str, str], current: dict[str, str]) -> None:
+    mapping = {
+        "device_model": "model",
+        "device_product": "device",
+        "android_version": "android",
+        "abi": "abi",
+        "build_type": "build_type",
+    }
+    mismatches = [
+        f"{baseline_key}: baseline={baseline.get(baseline_key)!r} "
+        f"current={current.get(current_key)!r}"
+        for baseline_key, current_key in mapping.items()
+        if baseline.get(baseline_key, "") != current.get(current_key, "")
+    ]
+    if mismatches:
+        raise ValueError("baseline device mismatch: " + "; ".join(mismatches))
+
+
 def classify_run_as_build_type(returncode: int, stderr: str) -> str:
     if returncode == 0:
         return "Debug"
@@ -353,6 +474,16 @@ def ensure_artifact_return(
         raise RuntimeError(
             f"agent returned {returned}, optimized artifact {artifact} ended with {artifact_return}"
         )
+
+
+def ensure_metrics_container(
+    metrics: dict[str, int | Decimal | str], artifact: str
+) -> None:
+    version = int(metrics.get("metrics_version", 1))
+    if version == 1 and not artifact.endswith(TEXT_TRACE_SUFFIX):
+        raise RuntimeError("metrics v1 must accompany a .trace.txt.lz4 artifact")
+    if version == 2 and not artifact.endswith((BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)):
+        raise RuntimeError("metrics v2 must accompany a binary trace artifact")
 
 
 def verify_setup_failure_smoke(
@@ -429,6 +560,11 @@ def fast_cost_diagnosis(
         Decimal(int(metrics["cache_misses"])) / lookups if lookups else Decimal(0)
     )
     dominant = "producer_wait_time" if wait_fraction > Decimal("0.5") else "undetermined"
+    byte_rate = (
+        "encoded_bytes_per_second"
+        if int(metrics.get("metrics_version", 1)) == 2
+        else "raw_bytes_per_second"
+    )
     return {
         "dominant_cost": dominant,
         "evidence": (
@@ -438,7 +574,7 @@ def fast_cost_diagnosis(
         ),
         "producer_wait_fraction": wait_fraction,
         "cache_miss_fraction": miss_fraction,
-        "raw_bytes_per_second": Decimal(metrics["raw_bytes_per_second"]),
+        byte_rate: Decimal(metrics[byte_rate]),
     }
 
 
@@ -456,6 +592,16 @@ def throughput_metrics(run: dict[str, int | str]) -> dict[str, float]:
     }
 
 
+def _integer_median(values: Iterable[int]) -> int | Decimal:
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError("no integer values for median")
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return Decimal(ordered[middle - 1] + ordered[middle]) / 2
+
+
 def median_report(
     runs: list[dict[str, int | Decimal | str]],
 ) -> dict[str, Decimal | float | int | str]:
@@ -469,19 +615,32 @@ def median_report(
         if len(profiles) != 1:
             raise ValueError("benchmark profiles differ: " + ", ".join(sorted(profiles)))
         report["profile"] = profiles.pop()
-        for key in OPTIMIZED_INTEGER_FIELDS:
+        versions = {int(run.get("metrics_version", 1)) for run in runs}
+        if len(versions) != 1:
+            raise ValueError("metrics versions differ")
+        version = versions.pop()
+        report["metrics_version"] = version
+        integer_fields = V2_INTEGER_FIELDS if version == 2 else V1_INTEGER_FIELDS
+        rate_fields = V2_RATE_FIELDS if version == 2 else V1_RATE_FIELDS
+        for key in integer_fields:
             if any(key not in run for run in runs):
                 raise ValueError(f"optimized run is missing {key}")
-            report[key] = statistics.median(int(run[key]) for run in runs)
-        for key in OPTIMIZED_RATE_FIELDS:
+            if key == "instructions" and len({int(run[key]) for run in runs}) != 1:
+                raise ValueError("benchmark instruction counts differ")
+            report[key] = _integer_median(int(run[key]) for run in runs)
+        for key in rate_fields:
             if any(key not in run for run in runs):
                 raise ValueError(f"optimized run is missing {key}")
             report[key] = statistics.median(Decimal(run[key]) for run in runs)
+        if all("converted_text_bytes" in run for run in runs):
+            report["converted_text_bytes"] = _integer_median(
+                int(run["converted_text_bytes"]) for run in runs
+            )
         return report
     for key in ("instructions", "elapsed_ms", "raw_bytes"):
         values = [int(run[key]) for run in runs if key in run]
         if values:
-            report[key] = statistics.median(values)
+            report[key] = _integer_median(values)
 
     throughput_runs = [
         run for run in runs
@@ -498,13 +657,19 @@ def median_report(
     return report
 
 
-def adb(args: argparse.Namespace, *command: str, text: bool = False) -> subprocess.CompletedProcess[Any]:
+def adb(
+    args: argparse.Namespace,
+    *command: str,
+    text: bool = False,
+    stdout: Any = subprocess.PIPE,
+) -> subprocess.CompletedProcess[Any]:
     return subprocess.run(
         [args.adb, "-s", args.device, *command],
         check=True,
-        stdout=subprocess.PIPE,
+        stdout=stdout,
         stderr=subprocess.PIPE,
         text=text,
+        timeout=getattr(args, "adb_timeout", 30.0),
     )
 
 
@@ -526,7 +691,16 @@ def trace_names(args: argparse.Namespace) -> list[str]:
         if is_missing_trace_directory(error):
             return []
         raise
-    return listing.stdout.splitlines()
+    if len(listing.stdout.encode("utf-8")) > 1024 * 1024:
+        raise RuntimeError("artifact listing exceeds size limit")
+    names = listing.stdout.splitlines()
+    invalid = next(
+        (name for name in names if ARTIFACT_NAME.fullmatch(name) is None or name in (".", "..")),
+        None,
+    )
+    if invalid is not None:
+        raise RuntimeError(f"unsafe artifact name in device listing: {invalid!r}")
+    return names
 
 
 def live_device_identity(args: argparse.Namespace) -> dict[str, str]:
@@ -564,12 +738,181 @@ def newest_legacy_trace(
 def newest_optimized_metrics(
     args: argparse.Namespace, previous_names: set[str]
 ) -> tuple[str, bytes]:
-    name = select_newest_optimized_metrics(
+    name = select_exact_new_optimized_metrics(
         candidate for candidate in trace_names(args) if candidate not in previous_names
     )
-    metrics = adb(args, "exec-out", "run-as", args.package, "cat",
-                  f"{TRACE_DIRECTORY}/{name}").stdout
+    metrics = adb(
+        args, "exec-out", "run-as", args.package, "head", "-c",
+        str(MAX_METRICS_BYTES + 1), f"{TRACE_DIRECTORY}/{name}",
+    ).stdout
+    if len(metrics) > MAX_METRICS_BYTES:
+        raise RuntimeError(f"metrics sidecar exceeds size limit: {name}")
     return name, metrics
+
+
+def _publish_remote_file(args: argparse.Namespace, name: str, destination: Path) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".benchmark-trace-", dir=destination.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            adb(
+                args, "exec-out", "run-as", args.package, "cat",
+                f"{TRACE_DIRECTORY}/{name}", stdout=output,
+            )
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as error:
+            raise RuntimeError(f"benchmark output already exists: {destination}") from error
+        temporary.unlink()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _write_sidecar_atomic(data: bytes, destination: Path) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".benchmark-metrics-", dir=destination.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as error:
+            raise RuntimeError(f"benchmark output already exists: {destination}") from error
+        temporary.unlink()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_format_two_file(
+    path: Path, metrics: dict[str, int | Decimal | str]
+) -> None:
+    last_sequence = 0
+    footer_return: str | None = None
+    footer_elapsed: int | None = None
+    with path.open("rb") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if len(line) > 1024 * 1024:
+                raise RuntimeError(f"format-2 line {line_number} exceeds size limit")
+            sequence = re.match(rb"^(\d+)\s", line)
+            if sequence is not None:
+                last_sequence = int(sequence.group(1))
+            footer = TRACE_FOOTER.fullmatch(line.rstrip(b"\r\n"))
+            if footer is not None:
+                footer_return = footer.group(1).decode("ascii").lower()
+                footer_elapsed = int(footer.group(2))
+    expected = {
+        "return": str(metrics["return"]),
+        "elapsed_ms": int(metrics["elapsed_ms"]),
+        "instructions": int(metrics["instructions"]),
+        "raw_bytes": int(metrics["raw_bytes"]),
+    }
+    actual = {
+        "return": footer_return,
+        "elapsed_ms": footer_elapsed,
+        "instructions": last_sequence,
+        "raw_bytes": path.stat().st_size,
+    }
+    for key, value in expected.items():
+        if actual[key] != value:
+            raise RuntimeError(
+                f"format-2 footer/sidecar mismatch for {key}: expected {value}, got {actual[key]}"
+            )
+
+
+def collect_and_validate_optimized_artifact(
+    args: argparse.Namespace,
+    artifact_name: str,
+    sidecar: bytes,
+    metrics: dict[str, int | Decimal | str],
+) -> dict[str, int | Decimal | str]:
+    """Collect one exact pair and validate its container, footer, and sidecar identity."""
+    configured_output = getattr(args, "artifact_output", None)
+    output_root: Path | None = None
+    if configured_output:
+        output_root = Path(configured_output)
+        output_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".benchmark-stage-", dir=output_root
+    ) as staging_directory:
+        root = Path(staging_directory)
+        artifact = root / artifact_name
+        metrics_path = root / (artifact_name + ".metrics")
+        _publish_remote_file(args, artifact_name, artifact)
+        _write_sidecar_atomic(sidecar, metrics_path)
+        actual_size = artifact.stat().st_size
+        if actual_size != int(metrics["compressed_bytes"]):
+            raise RuntimeError(
+                f"artifact size mismatch: metrics={metrics['compressed_bytes']} actual={actual_size}"
+            )
+
+        result = dict(metrics)
+        result["artifact_sha256"] = _sha256_file(artifact)
+        if int(metrics["metrics_version"]) == 2:
+            suffix = (
+                BINARY_TRACE_SUFFIX
+                if artifact_name.endswith(BINARY_TRACE_SUFFIX) else BINARY_RAW_SUFFIX
+            )
+            text = root / (artifact_name.removesuffix(suffix) + ".trace.txt")
+            try:
+                stats = convert_binary_file(
+                    artifact,
+                    text,
+                    lz4=getattr(args, "lz4", "lz4")
+                    if artifact_name.endswith(BINARY_TRACE_SUFFIX) else None,
+                    crash_marked=False,
+                )
+            except (BinaryTraceError, PullTraceError) as error:
+                raise RuntimeError(f"binary artifact validation failed: {error}") from error
+            result["converted_text_bytes"] = stats.converted_text_bytes
+        else:
+            decoded = root / (artifact_name.removesuffix(TEXT_TRACE_SUFFIX) + ".trace.txt")
+            try:
+                truncated = decode_lz4_file(
+                    artifact, decoded, getattr(args, "lz4", "lz4")
+                )
+            except PullTraceError as error:
+                raise RuntimeError(f"format-2 artifact validation failed: {error}") from error
+            if truncated:
+                raise RuntimeError("complete format-2 metrics accompany a truncated artifact")
+            _validate_format_two_file(decoded, metrics)
+            result["converted_text_bytes"] = decoded.stat().st_size
+        if output_root is not None:
+            staged = sorted(root.iterdir())
+            existing = next(
+                (output_root / path.name for path in staged if (output_root / path.name).exists()),
+                None,
+            )
+            if existing is not None:
+                raise RuntimeError(f"benchmark output already exists: {existing}")
+            published: list[Path] = []
+            try:
+                for path in staged:
+                    destination = output_root / path.name
+                    os.link(path, destination)
+                    published.append(destination)
+            except OSError:
+                for destination in published:
+                    destination.unlink(missing_ok=True)
+                raise
+        return result
 
 
 def invoke_benchmark(args: argparse.Namespace) -> str:
@@ -662,8 +1005,11 @@ def run_once(args: argparse.Namespace) -> dict[str, int | Decimal | str]:
             f"requested profile {args.profile}, metrics {name} reports {parsed['profile']}"
         )
     ensure_artifact_return(returned, parsed, name)
+    artifact_name = name.removesuffix(".metrics")
+    ensure_metrics_container(parsed, artifact_name)
+    parsed = collect_and_validate_optimized_artifact(args, artifact_name, sidecar, parsed)
     parsed["metrics"] = name
-    parsed["trace"] = name.removesuffix(".metrics")
+    parsed["trace"] = artifact_name
     return parsed
 
 
@@ -684,6 +1030,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--agent", default=str(Path(__file__).with_name("benchmark_trace.js")))
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--adb-timeout", type=float, default=30.0)
+    parser.add_argument("--lz4", default="lz4", help="host lz4 executable")
+    parser.add_argument(
+        "--artifact-output",
+        help="retain each validated artifact, sidecar, and converted binary text in this directory",
+    )
     parser.add_argument("--profile", choices=("fast", "balanced", "full"), default="fast")
     parser.add_argument("--compare", help="checked-in baseline Markdown report")
     parser.add_argument("--legacy", action="store_true", help="require uncompressed .trace.txt files")
@@ -724,10 +1076,17 @@ def main() -> int:
         print(render_report({"return": returned, "status": "native_fallback"}))
         return 0
     baseline: dict[str, int | str] | None = None
+    profile_baseline: dict[str, int | str] | None = None
     if args.compare:
-        require_balanced_comparison(args.profile)
-        baseline = parse_baseline_report(Path(args.compare).read_text(encoding="utf-8"))
-        ensure_same_device(baseline, live_device_identity(args))
+        baseline_document = Path(args.compare).read_text(encoding="utf-8")
+        identity = live_device_identity(args)
+        if "## Current format-2 artifact baselines" in baseline_document:
+            profile_baseline = parse_profile_baseline(baseline_document, args.profile)
+            ensure_same_format_two_device(parse_baseline_document(baseline_document), identity)
+        else:
+            require_balanced_comparison(args.profile)
+            baseline = parse_baseline_report(baseline_document)
+            ensure_same_device(baseline, identity)
     warmup = run_once(args)
     runs = [run_once(args) for _ in range(args.runs)]
     stable_return = ensure_stable_return([str(warmup["return"]), *[str(run["return"]) for run in runs]])
@@ -743,6 +1102,11 @@ def main() -> int:
             "baseline": args.compare,
             "meets_balanced_5x": comparison["speedup"] >= Decimal(5),
         }
+    if args.compare and profile_baseline is not None:
+        report["comparison"] = {
+            **compare_to_profile_baseline(report, profile_baseline),
+            "baseline": args.compare,
+        }
     if (not args.legacy and args.profile == "fast" and
             Decimal(report["instructions_per_second"]) < Decimal(1_000_000)):
         report["fast_target_diagnosis"] = fast_cost_diagnosis(report)
@@ -753,6 +1117,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (RuntimeError, subprocess.CalledProcessError, ValueError) as error:
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
         print(f"benchmark failed: {error}", file=sys.stderr)
         raise SystemExit(1)

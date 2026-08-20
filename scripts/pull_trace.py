@@ -29,6 +29,8 @@ try:
         scan_lz4_file,
         split_lz4_frames,
     )
+    from scripts.trace_binary import BinaryTraceError
+    from scripts.trace_convert import convert_binary_file
 except ModuleNotFoundError:  # Support direct execution as scripts/pull_trace.py.
     from lz4_frames import (  # type: ignore[no-redef]
         DecodeResult,
@@ -40,6 +42,8 @@ except ModuleNotFoundError:  # Support direct execution as scripts/pull_trace.py
         scan_lz4_file,
         split_lz4_frames,
     )
+    from trace_binary import BinaryTraceError  # type: ignore[no-redef]
+    from trace_convert import convert_binary_file  # type: ignore[no-redef]
 
 
 CRASH_MARKER_MAGIC = 0x51435248
@@ -47,13 +51,20 @@ CRASH_MARKER = struct.Struct("<Iii")
 # Linux/Android arm64 signal ABI values written by crash_marker.cpp. These must not inherit the
 # host Python ABI (Darwin SIGBUS is 10, while Android SIGBUS is 7).
 CRASH_SIGNALS = frozenset((4, 6, 7, 8, 11))
-TRACE_SUFFIX = ".trace.txt.lz4"
+TEXT_TRACE_SUFFIX = ".trace.txt.lz4"
+BINARY_TRACE_SUFFIX = ".trace.bin.lz4"
+BINARY_RAW_SUFFIX = ".trace.bin"
+TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)
+# Kept for callers that imported the old text-only constant.
+TRACE_SUFFIX = TEXT_TRACE_SUFFIX
 TRACE_DIRECTORY = "files/qbdi-traces"
 PACKAGE_NAME = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\Z")
 ARTIFACT_NAME = re.compile(r"[A-Za-z0-9_.-]+\Z")
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_PARTIAL = 2
+MAX_LISTING_BYTES = 1024 * 1024
+MAX_METRICS_BYTES = 64 * 1024
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +98,7 @@ class AdbArtifactClient:
         package: str,
         device: str | None = None,
         adb: str = "adb",
+        timeout: float = 120.0,
         runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
     ) -> None:
         if PACKAGE_NAME.fullmatch(package) is None:
@@ -94,6 +106,7 @@ class AdbArtifactClient:
         self.package = package
         self.device = device
         self.adb = adb
+        self.timeout = timeout
         self.runner = runner
 
     def _command(self, *command: str) -> list[str]:
@@ -107,7 +120,8 @@ class AdbArtifactClient:
         argv = self._command(*command)
         try:
             completed = self.runner(
-                argv, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False
+                argv, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+                timeout=self.timeout,
             )
         except FileNotFoundError as error:
             raise PullTraceError(f"adb executable not found: {self.adb}") from error
@@ -116,6 +130,8 @@ class AdbArtifactClient:
             raise PullTraceError(
                 f"adb run-as command failed ({error.returncode}): {stderr.strip()}"
             ) from error
+        except subprocess.TimeoutExpired as error:
+            raise PullTraceError(f"adb run-as command timed out after {self.timeout:g}s") from error
         return completed.stdout
 
     @staticmethod
@@ -124,6 +140,8 @@ class AdbArtifactClient:
 
     def list_names(self) -> list[str]:
         raw = self._run("ls", "-1t", TRACE_DIRECTORY)
+        if len(raw) > MAX_LISTING_BYTES:
+            raise PullTraceError("artifact listing exceeds size limit")
         try:
             names = raw.decode("utf-8").splitlines()
         except UnicodeDecodeError as error:
@@ -132,16 +150,24 @@ class AdbArtifactClient:
             self._validate_name(name)
         return names
 
-    def read_file(self, name: str) -> bytes:
+    def read_file(self, name: str, maximum_bytes: int = MAX_METRICS_BYTES) -> bytes:
         self._validate_name(name)
-        return self._run("cat", f"{TRACE_DIRECTORY}/{name}")
+        if maximum_bytes < 0:
+            raise PullTraceError("read size limit must not be negative")
+        data = self._run(
+            "head", "-c", str(maximum_bytes + 1), f"{TRACE_DIRECTORY}/{name}"
+        )
+        if len(data) > maximum_bytes:
+            raise PullTraceError(f"remote artifact exceeds size limit: {name}")
+        return data
 
     def stream_file(self, name: str, output: Any) -> None:
         self._validate_name(name)
         argv = self._command("cat", f"{TRACE_DIRECTORY}/{name}")
         try:
             self.runner(
-                argv, check=True, stdout=output, stderr=subprocess.PIPE, shell=False
+                argv, check=True, stdout=output, stderr=subprocess.PIPE, shell=False,
+                timeout=self.timeout,
             )
         except FileNotFoundError as error:
             raise PullTraceError(f"adb executable not found: {self.adb}") from error
@@ -150,6 +176,8 @@ class AdbArtifactClient:
             raise PullTraceError(
                 f"adb run-as stream failed ({error.returncode}): {stderr.strip()}"
             ) from error
+        except subprocess.TimeoutExpired as error:
+            raise PullTraceError(f"adb run-as stream timed out after {self.timeout:g}s") from error
 
 
 def parse_crash_marker(data: bytes) -> CrashMarker | None:
@@ -172,7 +200,7 @@ def classify_artifacts(artifacts: Mapping[str, bytes]) -> dict[str, TraceArtifac
     """Group trace files with their adjacent metrics and crash sidecars."""
     traces: dict[str, TraceArtifact] = {}
     for name in artifacts:
-        if not name.endswith(TRACE_SUFFIX):
+        if not name.endswith(TRACE_SUFFIXES):
             continue
         metrics_name = name + ".metrics"
         crash_name = name + ".crash"
@@ -236,8 +264,8 @@ def pull_artifact_set(
 ) -> PullResult:
     """Pull one trace and adjacent sidecars, publishing each local file atomically."""
     _validate_artifact_name(name)
-    if not name.endswith(TRACE_SUFFIX):
-        raise PullTraceError(f"not a compressed trace artifact: {name}")
+    if not name.endswith(TRACE_SUFFIXES):
+        raise PullTraceError(f"not a trace artifact: {name}")
     available = set(available_names)
     if name not in available:
         raise PullTraceError(f"remote trace does not exist: {name}")
@@ -250,7 +278,8 @@ def pull_artifact_set(
     output_directory.mkdir(parents=True, exist_ok=True)
     if not output_directory.is_dir():
         raise PullTraceError(f"output path is not a directory: {output_directory}")
-    stem = name.removesuffix(TRACE_SUFFIX)
+    trace_suffix = next(suffix for suffix in TRACE_SUFFIXES if name.endswith(suffix))
+    stem = name.removesuffix(trace_suffix)
     compressed_path = output_directory / name
     normal_path = output_directory / f"{stem}.trace.txt"
     partial_path = output_directory / f"{stem}.partial.trace.txt"
@@ -262,7 +291,12 @@ def pull_artifact_set(
         if existing is not None:
             raise PullTraceError(f"local output already exists: {existing}")
 
-    sidecars = {sidecar: client.read_file(sidecar) for sidecar in sidecar_names}
+    sidecars = {
+        sidecar: client.read_file(
+            sidecar, CRASH_MARKER.size if sidecar.endswith(".crash") else MAX_METRICS_BYTES
+        )
+        for sidecar in sidecar_names
+    }
     classification = classify_artifacts({name: b"", **sidecars})[name]
     pulled: list[Path] = []
     compressed_temporary = _temporary_path(output_directory)
@@ -280,10 +314,36 @@ def pull_artifact_set(
 
     if compressed_only:
         return PullResult(name, classification.status, tuple(pulled))
-    if not lz4:
+    is_text = trace_suffix == TEXT_TRACE_SUFFIX
+    is_compressed_binary = trace_suffix == BINARY_TRACE_SUFFIX
+    if (is_text or is_compressed_binary) and not lz4:
         raise PullTraceError(
             "host lz4 CLI is required for decompression; install the 'lz4' command "
             "or use --compressed-only"
+        )
+    if not is_text:
+        binary_partial = (
+            is_compressed_binary
+            and scan_lz4_file(compressed_path).truncated
+            and classification.crash_marker is not None
+        )
+        destination = partial_path if binary_partial else normal_path
+        try:
+            stats = convert_binary_file(
+                compressed_path,
+                destination,
+                lz4=lz4 if is_compressed_binary else None,
+                crash_marked=classification.crash_marker is not None,
+                force=force,
+            )
+        except BinaryTraceError as error:
+            raise PullTraceError(str(error)) from error
+        pulled.append(destination)
+        return PullResult(
+            name,
+            classification.status,
+            tuple(pulled),
+            exit_code=EXIT_PARTIAL if stats.partial else EXIT_OK,
         )
     if decoder is None:
         decoder = decode_lz4_file
@@ -312,13 +372,13 @@ def select_trace_name(names: Iterable[str], requested: str | None = None) -> str
     ordered = list(names)
     if requested is not None:
         _validate_artifact_name(requested)
-        if not requested.endswith(TRACE_SUFFIX):
-            raise PullTraceError(f"not a compressed trace artifact: {requested}")
+        if not requested.endswith(TRACE_SUFFIXES):
+            raise PullTraceError(f"not a trace artifact: {requested}")
         if requested not in ordered:
             raise PullTraceError(f"remote trace does not exist: {requested}")
         return requested
     for name in ordered:
-        if name.endswith(TRACE_SUFFIX):
+        if name.endswith(TRACE_SUFFIXES):
             return name
     raise PullTraceError("no compressed trace artifacts found")
 
@@ -331,7 +391,9 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", help="adb device serial")
     parser.add_argument("--adb", default="adb", help="adb executable (default: adb)")
     parser.add_argument("--output", default=".", help="local output directory")
-    parser.add_argument("--name", help="specific .trace.txt.lz4 artifact (default: newest)")
+    parser.add_argument(
+        "--name", help="specific .trace.txt.lz4, .trace.bin.lz4, or .trace.bin artifact"
+    )
     parser.add_argument(
         "--compressed-only", action="store_true", help="pull artifacts without decompression"
     )
@@ -350,8 +412,9 @@ def main(
         client = client_factory(package=args.package, device=args.device, adb=args.adb)
         names = client.list_names()
         selected = select_trace_name(names, args.name)
-        lz4 = None if args.compressed_only else lz4_finder("lz4")
-        if not args.compressed_only and lz4 is None:
+        requires_lz4 = selected.endswith((TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX))
+        lz4 = None if args.compressed_only or not requires_lz4 else lz4_finder("lz4")
+        if not args.compressed_only and requires_lz4 and lz4 is None:
             raise PullTraceError(
                 "host lz4 CLI is required for decompression; install the 'lz4' command "
                 "or use --compressed-only"
