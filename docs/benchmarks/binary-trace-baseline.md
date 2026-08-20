@@ -18,7 +18,7 @@ processes; the artifact named in the table is the run at the median elapsed time
 | SELinux | Enforcing |
 | Package | com.aprz.qbdiandroid |
 | Tracer library SHA-256 | cc8c3509f81647e3d6bced804fcfc58dd983c32a2d577ce03f004ad5d14dece1 |
-| Candidate tracer SHA-256 | 33083c68ea20082ea91fede32d5302d3677a0abaaa0e4e769a66d7563d50f53d |
+| Candidate tracer SHA-256 | f95c4e0b3267fa0403ae324db0f58edf6118e270f044651ae9b3e9ba759f7972 |
 
 ## Current format-2 artifact baselines
 
@@ -109,6 +109,44 @@ is retained under `/tmp/qbdi-binary-final2-fast`.
 The final binary's first fast batch (`26, 16, 16, 22, 22` ms) measured a 22 ms median and missed
 the 1M gate at 987181.818181 instructions/s; the complete rerun shown above passed at 21 ms. This
 1 ms boundary jitter is retained as a performance-stability concern rather than discarded.
+
+### Scoped re-review acceptance (2026-08-21)
+
+The v1.1 repaired candidate is the stripped Debug tracer with SHA-256
+`f95c4e0b3267fa0403ae324db0f58edf6118e270f044651ae9b3e9ba759f7972`; the final stripped Release
+hash is `19d25fc20a490b0d9e4d4831e8f6199fe45333abfc3392dd16de50da22892ec1`.
+The local, staged, and app-private Debug hashes matched on the same Pixel 6 identity above under
+SELinux Enforcing. Every decoded stream header was QTRB major 1 minor 1.
+
+The prior `33083c68...` fast miss was handled as a failed gate. A simpleperf capture against that
+exact candidate recorded 6,325 samples with zero lost; the tracer thread retained 395 samples.
+The paired failed diagnostic was 27 ms with 23,220,215 ns (86.0%) producer wait. Design review
+isolated end-of-run compression and a 1,944-byte whole-record clear. Fast now selects LZ4 level 0,
+balanced/full retain level 2, Android Debug LZ4 is compiled with `-O2`, and record reuse resets only
+semantic counts. The pre-optimization exact-v1.1 batch `26,24,19,24,24` ms failed and is retained at
+`/tmp/qbdi-binary-final3-fast`; 256/128 KiB buffer experiments were diagnostic, failed to establish
+margin, and were reverted. No failed batch was relabeled or replaced by an unplanned rerun.
+
+After that review, one new predeclared acceptance batch per profile used one warmup plus exactly
+five measured processes on the final hash:
+
+| Profile | Measured elapsed ms | Median instructions/s | Compressed bytes (five) | Maximum | Format-2 limit | Semantic oracle | Verdict |
+| --- | --- | ---: | --- | ---: | ---: | --- | --- |
+| fast | 16, 22, 15, 23, 15 | 1357375.000000 | 276873, 276765, 276546, 277005, 276629 | 277005 | 307925 | 21718 events; `1 libdemo_target.so+0x6e828 STPXpre`; `21718 libdemo_target.so+0x6ea28 RET` | PASS |
+| balanced | 25, 26, 18, 23, 18 | 944260.869565 | 360862, 360176, 360331, 360630, 360486 | 360862 | 365877 | same exact count/first/last | PASS |
+| full | 41, 28, 32, 32, 33 | 678687.500000 | 378337, 378311, 378420, 378284, 378068 | 378420 | 429199 | same exact count/first/last | PASS |
+
+All fifteen measured traces returned `0x5745c858653f5a7f` and passed strict fixed-six v2 sidecars,
+exact footer/artifact counters, bounded conversion, and the semantic oracle. Fast's 16 ms median is
+35.7% above the 1M gate and remains a pass despite two individual 22/23 ms scheduling outliers.
+Evidence is retained at `/tmp/qbdi-binary-final3-accept-{fast,balanced,full}`.
+
+The same final binary also ran the 8,192-iteration full workload. The measured artifact grew from
+0 through 2,654,531 and 8,497,851 to 12,277,961 bytes, then completed with 692,922 instructions,
+sequence `1..692922`, return `0x8f62a472c26c47a9`, 52,973,571 encoded bytes, SHA-256
+`624595f7b2e2a2e62c76e5c707dd12b62d357f3eb02724f2e8eb82daad46de9b`, and a complete
+297,567,027-byte conversion. Footer, sidecar, framing, and exact rate arithmetic passed. Evidence
+is retained at `/tmp/qbdi-binary-final3-final-large`.
 
 ### Compression-level diagnosis
 

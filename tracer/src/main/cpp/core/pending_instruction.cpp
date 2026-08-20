@@ -29,11 +29,13 @@ bool PendingInstructionCollector::begin(const InstructionView &instruction,
 
     continuing_memory_ = false;
     continuation_pc_ = 0;
-    pending_record_ = {};
     pending_record_.sequence = next_sequence_++;
     pending_record_.pc = instruction.address;
     pending_record_.module_base = module_base_;
     pending_record_.decoded = instruction.decoded;
+    pending_record_.reads.count = 0;
+    pending_record_.writes.count = 0;
+    pending_record_.memory_count = 0;
     if (instruction.decoded != nullptr) {
         uint64_t mask = instruction.decoded->read_gpr_mask;
         while (mask != 0) {

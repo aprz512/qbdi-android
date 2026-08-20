@@ -144,7 +144,7 @@ class DocumentationContractTests(unittest.TestCase):
             "docs", "trace-format.md"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'StreamHeader {\n  magic: "QTRB"[4]\n  major: u8 = 1\n  minor: u8 = 0\n'
+            'StreamHeader {\n  magic: "QTRB"[4]\n  major: u8 = 1\n  minor: u8 = 1\n'
             '  endian: u8 = 1\n  pointer_width: u8 = 4 | 8\n'
             '  profile: u8                 # fast=0, balanced=1, full=2\n'
             '  reserved: u8 = 0\n  header_bytes: u16 = 16\n'

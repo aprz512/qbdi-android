@@ -200,7 +200,9 @@ An encoding, allocation, compression, synchronization, or write failure latches 
 prevents subsequent event work. It must not change whether the target executes or alter its native
 return value. A failed run does not publish a success metrics sidecar.
 
-The converter accepts QTRB major 1 minor 0..1. Types `0x8000..0xffff` are optional extension
+The producer emits QTRB major 1 minor 1. The converter accepts minor 0..1: minor 0 retains ordinary
+RULE/ERROR and CALL continuation, while minor 1 additionally permits RULE/ERROR continuation.
+Types `0x8000..0xffff` are optional extension
 records and may be skipped only when well framed, zero flagged, inside the begun lifecycle, and
 outside continuation groups. Unknown lower-numbered required records, unknown required feature
 bits, and newer minor versions fail closed. The converter validates magic, version compatibility, feature flags, pointer width, record sizes,

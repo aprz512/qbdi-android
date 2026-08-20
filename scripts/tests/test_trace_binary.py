@@ -330,16 +330,27 @@ class BinaryTraceConversionTests(unittest.TestCase):
 
     def test_reassembles_rule_and_error_chunks_as_one_ordered_utf8_or_raw_event(self):
         euro = "\u20ac".encode()
-        rendered, _ = self.convert(complete_stream(
+        version_one = complete_stream(
             event_chunk(7, 11, 6, 0, 2, b"abc"),
             event_chunk(7, 11, 6, 1, 2, euro),
             event_chunk(8, 12, 3, 0, 2, euro[:1]),
             event_chunk(8, 12, 3, 1, 2, euro[1:]),
-        ))
+        ).replace(stream_header(), stream_header(minor=1), 1)
+        rendered, _ = self.convert(version_one)
         lines = [line for line in rendered.splitlines()
                  if line.startswith(("RULE ", "ERROR "))]
         self.assertEqual('RULE name="rule" detail="abc€"', lines[0])
         self.assertEqual('ERROR name="rule" detail="€"', lines[1])
+
+    def test_minor_zero_rejects_event_continuation_but_keeps_legacy_rule(self):
+        legacy_rule = record(7, text("legacy") + text("detail"))
+        legacy, _ = self.convert(complete_stream(legacy_rule))
+        self.assertIn('RULE name="legacy" detail="detail"', legacy)
+        with self.assertRaisesRegex(BinaryTraceError, "minor 1"):
+            self.convert(complete_stream(
+                event_chunk(7, 11, 6, 0, 2, b"abc"),
+                event_chunk(7, 11, 6, 1, 2, b"def"),
+            ))
 
     def test_compatible_minor_skips_only_optional_namespace_records(self):
         optional = record(0x8000, b"opaque")

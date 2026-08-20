@@ -701,3 +701,14 @@ Resolve every Critical and Important finding with a RED/GREEN regression before 
 - [x] Define minor-1 optional record namespace behavior while rejecting required extensions.
 - [x] Make crash-marker session and retired paths fixed-capacity under `-fno-exceptions`.
 - [x] Reject impossible continuation metadata and remove obsolete text-era instruction fields.
+
+### Scoped re-review repair (2026-08-21)
+
+- [x] Emit QTRB v1.1 and keep v1.0 legacy RULE/ERROR grammar strictly convertible.
+- [x] Require producer-identical integer fixed-six truncation with no epsilon acceptance.
+- [x] Stop after the final-candidate fast miss, capture simpleperf under Enforcing, and return to
+  design review before changing performance code.
+- [x] Retain failed and diagnostic batches; optimize Debug LZ4 effort and hot-record reuse without
+  changing fields, ordering, workload, or acceptance targets.
+- [x] Run and completely convert the 8,192-iteration workload on the exact final candidate.
+- [x] Run one new predeclared warmup-plus-five batch for fast, balanced, and full.

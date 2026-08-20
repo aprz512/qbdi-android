@@ -41,7 +41,7 @@ bytes without a terminator. The 16-byte stream header is:
 StreamHeader {
   magic: "QTRB"[4]
   major: u8 = 1
-  minor: u8 = 0
+  minor: u8 = 1
   endian: u8 = 1
   pointer_width: u8 = 4 | 8
   profile: u8                 # fast=0, balanced=1, full=2
@@ -61,9 +61,10 @@ RecordHeader {
 }
 ```
 
-Unless stated otherwise, `RecordHeader.flags` is zero. `CALL_CONTINUATION`, `RULE_CONTINUATION`,
-and `ERROR_CONTINUATION` reuse their logical type with flag `0x0001`; all other flag bits are
-unsupported. Signed `i64` values use their
+Unless stated otherwise, `RecordHeader.flags` is zero. `CALL_CONTINUATION` reuses its logical type
+with flag `0x0001` in v1.0 and v1.1. `RULE_CONTINUATION` and `ERROR_CONTINUATION` use that flag only
+in v1.1; v1.0 permits only their ordinary zero-flag layouts. All other flag bits are unsupported.
+Signed `i64` values use their
 two's-complement bit pattern. The fixed-size column follows the named encoder constants:
 `TRACE_BEGIN`, `MODULE_DEF`, `CALL`, `RULE`, and `ERROR` include their string-length prefixes;
 `INSTRUCTION_DEF` excludes its three string prefixes; `MEMORY` includes both state/length pairs.
@@ -143,8 +144,11 @@ A continuation group must be contiguous, start at index zero, keep identical typ
 count, and name (plus CALL category), and contain every index exactly once. UTF-8 validation occurs
 after raw detail fragments are reassembled.
 
-Major version 1 accepts minor versions 0 and 1. Record types `0x8000..0xffff` are the optional
-extension namespace: a minor-1 decoder skips a well-framed, zero-flag unknown optional record only
+The current producer emits major 1 minor 1. The converter preserves retained v1.0 artifacts: v1.0
+supports zero-flag RULE/ERROR and CALL continuation, while v1.1 additionally supports RULE/ERROR
+continuation. A v1.0 RULE/ERROR record with flag `0x0001` fails closed. Record types
+`0x8000..0xffff` are the optional extension namespace: a minor-1 decoder skips a well-framed,
+zero-flag unknown optional record only
 between `TRACE_BEGIN` and `TRACE_END` and never through a continuation group. Types below `0x8000`
 are required records. Unknown required feature bits, required record types, flags, references,
 lifecycle violations, minor versions above 1, or incompatible major versions fail closed.
@@ -201,6 +205,8 @@ publication. Pull, conversion, and benchmarking use one suffix-aware strict pars
 format-2 v1 metrics are valid only beside `.trace.txt.lz4` when `metrics_version` is absent and
 `raw_bytes` is present, while v2 is valid only beside QTRB artifacts. Mixed generations are
 rejected. All five fixed-six rates are mandatory and recomputed from validated counters.
+Recomputation exactly reproduces the producer's unsigned integer truncation to six fractional
+digits, including a zero denominator; an adjacent `0.000001` value is inconsistent and rejected.
 
 `elapsed_ms` stops after traced target execution and producer callbacks, before final writer drain,
 footer, and sidecar publication.
@@ -254,8 +260,10 @@ never publish a success metrics sidecar.
 The writer owns two buffers. Auto sizing selects 64 MiB per buffer below 8 GiB physical memory and
 128 MiB per buffer at or above 8 GiB. Explicit `buffer_mb` accepts 8–128 MiB; allocation fallback
 tries 64 MiB, 32 MiB, and 8 MiB. Debug accepts exactly 4096 bytes through the test-only override.
-The default `lz4_level=2` stays on LZ4's fast compressor while improving the fixed-width binary
-stream's compressed size; levels 3–12 select high-compression mode and are opt-in.
+Default compression effort is profile-aware: fast uses `lz4_level=0`, while balanced and full use
+`lz4_level=2`. An explicit `lz4_level=` overrides this selection. This single variable changes only
+compressor effort; record content and ordering are identical. Levels 3–12 select high-compression
+mode and are opt-in.
 
 ## Explicit exclusions
 

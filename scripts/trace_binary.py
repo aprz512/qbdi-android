@@ -374,6 +374,8 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
             raise BinaryTraceError("record after TRACE_END")
         is_chunk = record_type == 6 and flags == 1
         is_event_chunk = record_type in (7, 8) and flags == 1
+        if is_event_chunk and minor == 0:
+            raise BinaryTraceError("RULE/ERROR continuation requires minor 1")
         if pending_call is not None and not is_chunk:
             raise BinaryTraceError("CALL chunks must be contiguous")
         if pending_event is not None and not is_event_chunk:

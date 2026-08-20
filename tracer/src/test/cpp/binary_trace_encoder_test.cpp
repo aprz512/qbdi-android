@@ -41,7 +41,7 @@ void stream_header_is_exact_and_tagged() {
     CHECK(result.size == kBinaryStreamHeaderBytes);
     CHECK(std::memcmp(bytes, "QTRB", 4) == 0);
     CHECK(bytes[4] == 1);
-    CHECK(bytes[5] == 0);
+    CHECK(bytes[5] == 1);
     CHECK(bytes[6] == 1);
     CHECK(bytes[7] == sizeof(uintptr_t));
     CHECK(bytes[8] == 0);

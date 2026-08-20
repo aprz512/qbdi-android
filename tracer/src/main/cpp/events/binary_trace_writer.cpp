@@ -26,7 +26,7 @@ bool is_utf8_continuation(unsigned char byte) {
     return (byte & 0xc0U) == 0x80U;
 }
 
-size_t call_chunk_end(std::string_view detail, size_t offset) {
+size_t detail_chunk_end(std::string_view detail, size_t offset) {
     size_t end = offset + std::min(kBinaryMaxCallChunkDetailBytes,
                                    detail.size() - offset);
     if (end == detail.size()) return end;
@@ -430,7 +430,7 @@ bool BinaryTraceWriter::call(const char *category, std::string_view name,
 
     size_t chunk_count = 0;
     for (size_t offset = 0; offset < detail.size();
-         offset = call_chunk_end(detail, offset)) {
+         offset = detail_chunk_end(detail, offset)) {
         ++chunk_count;
     }
     if (chunk_count > UINT16_MAX) return fail(EINVAL);
@@ -439,7 +439,7 @@ bool BinaryTraceWriter::call(const char *category, std::string_view name,
     if (event_id == 0) event_id = next_call_event_id_++;
     size_t offset = 0;
     for (size_t index = 0; index < chunk_count; ++index) {
-        const size_t end = call_chunk_end(detail, offset);
+        const size_t end = detail_chunk_end(detail, offset);
         const CallChunkInfo chunk{event_id, static_cast<uint32_t>(detail.size()),
                                   static_cast<uint16_t>(index),
                                   static_cast<uint16_t>(chunk_count)};
@@ -460,7 +460,7 @@ bool BinaryTraceWriter::append_event(BinaryRecordType type, std::string_view nam
     if (detail.size() > kBinaryMaxEventChunkDetailBytes) {
         size_t chunk_count = 0;
         for (size_t offset = 0; offset < detail.size();
-             offset = call_chunk_end(detail, offset)) {
+             offset = detail_chunk_end(detail, offset)) {
             ++chunk_count;
         }
         if (chunk_count < 2 || chunk_count > UINT16_MAX) return fail(EINVAL);
@@ -468,7 +468,7 @@ bool BinaryTraceWriter::append_event(BinaryRecordType type, std::string_view nam
         if (event_id == 0) event_id = next_call_event_id_++;
         size_t offset = 0;
         for (size_t index = 0; index < chunk_count; ++index) {
-            const size_t end = call_chunk_end(detail, offset);
+            const size_t end = detail_chunk_end(detail, offset);
             const EventChunkInfo chunk{event_id, static_cast<uint32_t>(detail.size()),
                                        static_cast<uint16_t>(index),
                                        static_cast<uint16_t>(chunk_count)};

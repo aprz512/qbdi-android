@@ -17,7 +17,7 @@ enum class TraceProfile : uint8_t { Fast, Balanced, Full };
 struct TraceOptions {
     TraceProfile profile = TraceProfile::Fast;
     bool compression_enabled = true;
-    int lz4_level = 2;
+    int lz4_level = 0;
     bool auto_buffer_size = true;
     size_t buffer_bytes = 0;
     size_t hexdump_limit = 32;

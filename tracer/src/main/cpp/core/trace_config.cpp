@@ -75,6 +75,7 @@ TraceConfig default_trace_config() {
 TraceConfig parse_trace_config(const char *encoded_config) {
     TraceConfig config = default_trace_config();
     if (encoded_config == nullptr || encoded_config[0] == 0) return config;
+    bool lz4_level_explicit = false;
 
     for (const std::string &part: split(encoded_config, ';')) {
         if (part.empty()) continue;
@@ -129,6 +130,7 @@ TraceConfig parse_trace_config(const char *encoded_config) {
                 return invalid_config(std::move(config), "invalid lz4_level: " + value);
             }
             config.trace.lz4_level = static_cast<int>(level);
+            lz4_level_explicit = true;
         } else if (part.rfind("auto_buffer=", 0) == 0) {
             const std::string value = part.substr(12);
             if (value == "0") {
@@ -169,6 +171,9 @@ TraceConfig parse_trace_config(const char *encoded_config) {
         } else {
             return invalid_config(std::move(config), "unknown trace configuration field: " + part);
         }
+    }
+    if (!lz4_level_explicit && config.trace.profile != TraceProfile::Fast) {
+        config.trace.lz4_level = 2;
     }
     return config;
 }

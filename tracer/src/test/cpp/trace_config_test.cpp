@@ -22,7 +22,7 @@ int main() {
     TraceConfig defaults = default_trace_config();
     CHECK(defaults.trace.profile == TraceProfile::Fast);
     CHECK(defaults.trace.compression_enabled);
-    CHECK(defaults.trace.lz4_level == 2);
+    CHECK(defaults.trace.lz4_level == 0);
     CHECK(defaults.trace.auto_buffer_size);
     CHECK(defaults.trace.buffer_bytes == 0);
     CHECK(defaults.trace.hexdump_limit == 32);
@@ -50,6 +50,17 @@ int main() {
     CHECK(automatic.trace.buffer_bytes == 0);
     CHECK(automatic.trace.memory_enabled());
     CHECK(!automatic.trace.hexdump_enabled());
+    CHECK(automatic.trace.lz4_level == 2);
+
+    TraceConfig full_default_level = parse_trace_config("profile=full");
+    CHECK(full_default_level.valid);
+    CHECK(full_default_level.trace.lz4_level == 2);
+    TraceConfig fast_explicit_level = parse_trace_config("lz4_level=7;profile=fast");
+    CHECK(fast_explicit_level.valid);
+    CHECK(fast_explicit_level.trace.lz4_level == 7);
+    TraceConfig balanced_explicit_level = parse_trace_config("profile=balanced;lz4_level=0");
+    CHECK(balanced_explicit_level.valid);
+    CHECK(balanced_explicit_level.trace.lz4_level == 0);
 
     assert_invalid("profile=turbo;buffer_mb=512");
     assert_invalid("lz4_level=9oops");

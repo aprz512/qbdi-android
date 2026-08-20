@@ -48,9 +48,27 @@ void instruction_event_model_has_no_text_hot_fields() {
     CHECK(sizeof(InstructionRecord) == 1944);
 }
 
+void pending_instruction_reuse_does_not_clear_the_whole_hot_record() {
+    const std::filesystem::path root(QTRACE_CPP_SOURCE_DIR);
+    const std::string source = read_file(root / "core" / "pending_instruction.cpp");
+    CHECK(source.find("pending_record_ = {};") == std::string::npos);
+    CHECK(source.find("pending_record_.reads.count = 0;") != std::string::npos);
+    CHECK(source.find("pending_record_.writes.count = 0;") != std::string::npos);
+    CHECK(source.find("pending_record_.memory_count = 0;") != std::string::npos);
+}
+
+void android_debug_compression_is_not_built_unoptimized() {
+    const std::filesystem::path root(QTRACE_CPP_SOURCE_DIR);
+    const std::string cmake = read_file(root / "CMakeLists.txt");
+    CHECK(cmake.find("target_compile_options(lz4_static PRIVATE\n"
+                     "            $<$<CONFIG:Debug>:-O2>)") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
     production_sources_have_only_the_binary_trace_facade();
     instruction_event_model_has_no_text_hot_fields();
+    pending_instruction_reuse_does_not_clear_the_whole_hot_record();
+    android_debug_compression_is_not_built_unoptimized();
 }

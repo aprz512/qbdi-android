@@ -14,6 +14,10 @@ add_library(lz4_static STATIC
         ${LZ4_ROOT}/lz4hc.c
         ${LZ4_ROOT}/xxhash.c)
 target_compile_features(lz4_static PRIVATE c_std_99)
+if(ANDROID)
+    target_compile_options(lz4_static PRIVATE
+            $<$<CONFIG:Debug>:-O2>)
+endif()
 target_include_directories(lz4_static PUBLIC ${LZ4_ROOT})
 
 if(${ANDROID_ABI} STREQUAL "arm64-v8a")

@@ -25,7 +25,17 @@ TEXT_TRACE_SUFFIX = ".trace.txt.lz4"
 BINARY_TRACE_SUFFIXES = (".trace.bin.lz4", ".trace.bin")
 
 
-def expected_rates(metrics: dict[str, int | Decimal | str]) -> dict[str, Decimal]:
+def canonical_fixed_six(numerator: int, denominator: int) -> str:
+    """Reproduce the producer's unsigned fixed-six truncation exactly."""
+    if numerator < 0 or denominator < 0:
+        raise ValueError("fixed-six operands must be unsigned")
+    if denominator == 0:
+        return "0.000000"
+    whole, remainder = divmod(numerator, denominator)
+    return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
+
+
+def expected_rates(metrics: dict[str, int | Decimal | str]) -> dict[str, str]:
     elapsed_ms = int(metrics["elapsed_ms"])
     byte_field = "encoded_bytes" if int(metrics.get("metrics_version", 1)) == 2 else "raw_bytes"
     encoded_bytes = int(metrics[byte_field])
@@ -33,20 +43,12 @@ def expected_rates(metrics: dict[str, int | Decimal | str]) -> dict[str, Decimal
     cache_hits = int(metrics["cache_hits"])
     cache_lookups = cache_hits + int(metrics["cache_misses"])
     return {
-        "instructions_per_second": (
-            Decimal(int(metrics["instructions"]) * 1000) / elapsed_ms
-            if elapsed_ms else Decimal(0)
-        ),
-        byte_field + "_per_second": (
-            Decimal(encoded_bytes * 1000) / elapsed_ms if elapsed_ms else Decimal(0)
-        ),
-        "disk_bytes_per_second": (
-            Decimal(compressed_bytes * 1000) / elapsed_ms if elapsed_ms else Decimal(0)
-        ),
-        "compression_ratio": (
-            Decimal(compressed_bytes) / encoded_bytes if encoded_bytes else Decimal(0)
-        ),
-        "cache_hit_rate": Decimal(cache_hits) / cache_lookups if cache_lookups else Decimal(0),
+        "instructions_per_second": canonical_fixed_six(
+            int(metrics["instructions"]) * 1000, elapsed_ms),
+        byte_field + "_per_second": canonical_fixed_six(encoded_bytes * 1000, elapsed_ms),
+        "disk_bytes_per_second": canonical_fixed_six(compressed_bytes * 1000, elapsed_ms),
+        "compression_ratio": canonical_fixed_six(compressed_bytes, encoded_bytes),
+        "cache_hit_rate": canonical_fixed_six(cache_hits, cache_lookups),
     }
 
 
@@ -131,6 +133,6 @@ def parse_metrics(sidecar: str | bytes, artifact_name: str | None = None
     except (ValueError, InvalidOperation) as error:
         raise ValueError(f"invalid metrics value: {error}") from error
     for key, expected in expected_rates(parsed).items():
-        if abs(Decimal(values[key]) - expected) >= Decimal("0.000001"):
+        if values[key] != expected:
             raise ValueError(f"{key} is inconsistent with raw counters")
     return parsed
