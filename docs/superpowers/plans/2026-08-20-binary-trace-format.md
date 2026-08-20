@@ -151,6 +151,13 @@ struct BinaryEncodeResult {
     size_t size = 0;
 };
 
+struct CallChunkInfo {
+    uint64_t event_id;
+    uint32_t total_detail_bytes;
+    uint16_t chunk_index;
+    uint16_t chunk_count;
+};
+
 struct TraceBeginInfo {
     TraceProfile profile = TraceProfile::Fast;
     bool compression_enabled = true;
@@ -173,6 +180,9 @@ public:
                                      const MemoryRecord &) const noexcept;
     BinaryEncodeResult encode_call(uint8_t *, size_t, std::string_view,
                                    std::string_view, std::string_view) const noexcept;
+    BinaryEncodeResult encode_call_chunk(uint8_t *, size_t, const CallChunkInfo &,
+                                         std::string_view, std::string_view,
+                                         std::string_view) const noexcept;
     BinaryEncodeResult encode_event(uint8_t *, size_t, BinaryRecordType,
                                     std::string_view, std::string_view) const noexcept;
     BinaryEncodeResult encode_end(uint8_t *, size_t, bool, uint64_t, uint64_t,
@@ -182,7 +192,7 @@ public:
 
 - [ ] **Step 1: Write exact-byte RED tests**
 
-Require magic QTRB, version 1, little-endian marker, pointer width, exact eight-byte record headers, golden bytes for all nine types, exact payload sizes, all PC-relative kinds, memory states, and no partial output when capacity is one byte short. `TRACE_BEGIN` must encode profile, compression state, run ID, and effective buffer size and must not encode package name. Pair an instruction definition and reference with a metadata ID different from the opcode. Encode CALL category, name, and detail as three separately length-prefixed strings; Rule and Error retain two-string payloads. Every independently bounded string family needs an over-limit atomic-failure test, and maximum-size cases must assert both `ok` and exact size.
+Require magic QTRB, version 1, little-endian marker, pointer width, exact eight-byte record headers, golden bytes for all nine types, exact payload sizes, all PC-relative kinds, memory states, and no partial output when capacity is one byte short. `TRACE_BEGIN` must encode profile, compression state, run ID, and effective buffer size and must not encode package name. Pair an instruction definition and reference with a metadata ID different from the opcode. Encode an ordinary CALL category, name, and detail as three separately length-prefixed strings with flags zero. Encode a chunked CALL with the explicit chunk flag followed by nonzero event ID, total detail bytes, chunk index/count, and the three strings. Reject invalid or unbounded chunk metadata atomically. Rule and Error retain two-string payloads. Every independently bounded string family needs an over-limit atomic-failure test, and maximum-size cases must assert both `ok` and exact size.
 
 ~~~cpp
 uint8_t bytes[4096]{};
@@ -419,7 +429,7 @@ Expected: binary assertions fail while production uses text.
 
 - [ ] **Step 3: Replace the concrete facade**
 
-Change caller types to BinaryTraceWriter. Preserve callback gate, TraceRunSessionOutcome, retained-original fallback, heap runner runtime, child abandon, fd registry, nested-fork behavior, atfork fail-closed state, and first-error latching. Remove text sources and tests only after binary tests cover their lifecycle/error contracts.
+Change caller types to BinaryTraceWriter. Preserve callback gate, TraceRunSessionOutcome, retained-original fallback, heap runner runtime, child abandon, fd registry, nested-fork behavior, atfork fail-closed state, and first-error latching. Keep short CALL records compact; split details above 3072 bytes at valid UTF-8 boundaries into explicitly grouped CALL-chunk records, preserving arbitrary fragment bytes and bounding a logical detail to 1 MiB. Add parser-style round-trip coverage for boundary-spanning UTF-8, adjacent identical calls, empty details, arbitrary bytes, maximum chunks/order, and validation failure before any fragment is written. Connect callback-registration failures through the production registrar seam and link a real InstructionCollector failure-gate/rule-action integration test. Remove text sources and tests only after binary tests cover their lifecycle/error contracts.
 
 - [ ] **Step 4: Run all native tests and stress**
 
@@ -520,7 +530,7 @@ git commit -m "refactor(trace): share LZ4 frame decoder"
 
 - [ ] **Step 1: Write protocol and CLI RED tests**
 
-Construct fixture bytes with struct.pack("<HHI", record_type, flags, payload_size). Cover all profiles/types, dictionary resolution, PC-relative classes, special registers, memory continuations, escaping, and exact format-3 lines. Reject wrong magic/version/endian/pointer width/features, oversized payload, conflicting definition, missing definition, invalid UTF-8, sequence gap, record after footer, missing footer, and sidecar mismatch.
+Construct fixture bytes with struct.pack("<HHI", record_type, flags, payload_size). Cover all profiles/types, dictionary resolution, PC-relative classes, special registers, memory continuations, escaping, ordinary and chunked CALLs, and exact format-3 lines. Reassemble only contiguous CALL chunks with one nonzero event ID, identical total/count/category/name, and indexes exactly `0..count-1`; concatenate raw detail bytes before validating UTF-8 and emitting one CALL. Reject unknown flags, interleaved/incomplete/duplicate/out-of-order chunks, total-length mismatch, wrong magic/version/endian/pointer width/features, oversized payload or logical CALL, conflicting definition, missing definition, invalid reassembled UTF-8, sequence gap, record after footer, missing footer, and sidecar mismatch.
 
 - [ ] **Step 2: Verify RED**
 

@@ -24,6 +24,13 @@ struct BinaryEncodeResult {
     size_t size = 0;
 };
 
+struct CallChunkInfo {
+    uint64_t event_id = 0;
+    uint32_t total_detail_bytes = 0;
+    uint16_t chunk_index = 0;
+    uint16_t chunk_count = 0;
+};
+
 class BinaryTraceEncoder {
 public:
     BinaryEncodeResult encode_stream_header(uint8_t *, size_t,
@@ -43,6 +50,9 @@ public:
                                      const MemoryRecord &) const noexcept;
     BinaryEncodeResult encode_call(uint8_t *, size_t, std::string_view,
                                    std::string_view, std::string_view) const noexcept;
+    BinaryEncodeResult encode_call_chunk(uint8_t *, size_t, const CallChunkInfo &,
+                                         std::string_view, std::string_view,
+                                         std::string_view) const noexcept;
     // Only Rule and Error use the common two-string payload.
     BinaryEncodeResult encode_event(uint8_t *, size_t, BinaryRecordType,
                                     std::string_view, std::string_view) const noexcept;

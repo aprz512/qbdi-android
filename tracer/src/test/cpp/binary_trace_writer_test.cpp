@@ -351,6 +351,92 @@ size_t count_type(const std::vector<BinaryRecordType> &types, BinaryRecordType t
     return count;
 }
 
+struct LogicalCall {
+    std::string category;
+    std::string name;
+    std::string detail;
+    uint64_t event_id = 0;
+    uint32_t total_detail_bytes = 0;
+    uint16_t chunk_count = 1;
+    std::vector<size_t> fragment_sizes;
+};
+
+std::string read_wire_string(const std::vector<uint8_t> &bytes, size_t *offset,
+                             size_t limit) {
+    CHECK(*offset + 2 <= limit);
+    const size_t size = u16(bytes, *offset);
+    *offset += 2;
+    CHECK(size <= limit - *offset);
+    std::string value(reinterpret_cast<const char *>(bytes.data() + *offset), size);
+    *offset += size;
+    return value;
+}
+
+std::vector<LogicalCall> logical_calls(const std::vector<uint8_t> &bytes) {
+    std::vector<LogicalCall> calls;
+    size_t offset = kBinaryStreamHeaderBytes;
+    while (offset < bytes.size()) {
+        CHECK(bytes.size() - offset >= kBinaryRecordHeaderBytes);
+        const auto type = static_cast<BinaryRecordType>(u16(bytes, offset));
+        const uint16_t flags = u16(bytes, offset + 2);
+        const size_t end = offset + kBinaryRecordHeaderBytes + u32(bytes, offset + 4);
+        CHECK(end <= bytes.size());
+        if (type != BinaryRecordType::Call) {
+            offset = end;
+            continue;
+        }
+
+        size_t cursor = offset + kBinaryRecordHeaderBytes;
+        if (flags == 0) {
+            LogicalCall call;
+            call.category = read_wire_string(bytes, &cursor, end);
+            call.name = read_wire_string(bytes, &cursor, end);
+            call.detail = read_wire_string(bytes, &cursor, end);
+            call.total_detail_bytes = static_cast<uint32_t>(call.detail.size());
+            call.fragment_sizes.push_back(call.detail.size());
+            CHECK(cursor == end);
+            calls.push_back(std::move(call));
+        } else {
+            CHECK(flags == kBinaryCallChunkFlag);
+            CHECK(cursor + kBinaryCallChunkMetadataBytes <= end);
+            const uint64_t event_id = u64(bytes, cursor);
+            const uint32_t total = u32(bytes, cursor + 8);
+            const uint16_t chunk_index = u16(bytes, cursor + 12);
+            const uint16_t chunk_count = u16(bytes, cursor + 14);
+            cursor += kBinaryCallChunkMetadataBytes;
+            const std::string category = read_wire_string(bytes, &cursor, end);
+            const std::string name = read_wire_string(bytes, &cursor, end);
+            const std::string fragment = read_wire_string(bytes, &cursor, end);
+            CHECK(cursor == end);
+            if (chunk_index == 0) {
+                CHECK(event_id != 0);
+                LogicalCall call;
+                call.category = category;
+                call.name = name;
+                call.event_id = event_id;
+                call.total_detail_bytes = total;
+                call.chunk_count = chunk_count;
+                calls.push_back(std::move(call));
+            }
+            CHECK(!calls.empty());
+            LogicalCall &call = calls.back();
+            CHECK(call.event_id == event_id);
+            CHECK(call.category == category);
+            CHECK(call.name == name);
+            CHECK(call.total_detail_bytes == total);
+            CHECK(call.chunk_count == chunk_count);
+            CHECK(call.fragment_sizes.size() == chunk_index);
+            call.fragment_sizes.push_back(fragment.size());
+            call.detail.append(fragment);
+            if (chunk_index + 1U == chunk_count) {
+                CHECK(call.detail.size() == call.total_detail_bytes);
+            }
+        }
+        offset = end;
+    }
+    return calls;
+}
+
 std::string metric_value(const std::string &metrics, std::string_view key) {
     const std::string prefix = std::string(key) + "=";
     const size_t begin = metrics.find(prefix);
@@ -675,6 +761,81 @@ void instruction_and_memory_hot_path_allocate_nothing() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+void chunked_calls_round_trip_utf8_identity_and_maximum_order() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 8192;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    const std::string euro("\xe2\x82\xac", 3);
+    const std::string crossing = std::string(3071, 'a') + euro + std::string(5000, 'b');
+    const std::string arbitrary = std::string(3071, 'q') +
+                                  std::string("\x80\xff\x00", 3) +
+                                  std::string(4000, 'r');
+    const std::string maximum(kBinaryMaxLogicalCallDetailBytes, 'z');
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.call("jni-enter", "same", crossing));
+    CHECK(writer.call("jni-enter", "same", "second"));
+    CHECK(writer.call("jni-enter", "same", ""));
+    CHECK(writer.call("jni-enter", "same", arbitrary));
+    CHECK(writer.call("jni-enter", "same", maximum));
+    CHECK(writer.end(0, true, 1));
+    CHECK(writer.close());
+
+    const std::vector<LogicalCall> calls = logical_calls(read_bytes(artifact_path(writer)));
+    CHECK(calls.size() == 5);
+    CHECK(calls[0].detail == crossing);
+    CHECK(calls[0].chunk_count == 3);
+    CHECK(calls[0].fragment_sizes.size() == 3);
+    CHECK(calls[0].fragment_sizes[0] == 3071);
+    CHECK(calls[0].event_id != 0);
+    CHECK(calls[1].detail == "second");
+    CHECK(calls[1].event_id == 0);
+    CHECK(calls[2].detail.empty());
+    CHECK(calls[2].event_id == 0);
+    CHECK(calls[3].detail == arbitrary);
+    CHECK(calls[3].event_id != 0);
+    CHECK(calls[3].event_id != calls[0].event_id);
+    CHECK(calls[4].detail == maximum);
+    CHECK(calls[4].event_id != 0);
+    CHECK(calls[4].event_id != calls[3].event_id);
+    CHECK(calls[4].chunk_count ==
+          (kBinaryMaxLogicalCallDetailBytes + 3071U) / 3072U);
+    CHECK(calls[4].fragment_sizes.size() == calls[4].chunk_count);
+
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void oversized_logical_call_fails_before_writing_any_fragment() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 8192;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    const std::string oversized(kBinaryMaxLogicalCallDetailBytes + 1U, 'x');
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    const uint64_t encoded_before = metrics.encoded_bytes;
+    CHECK(!writer.call("jni", "oversized", oversized));
+    CHECK(writer.failed());
+    CHECK(metrics.encoded_bytes == encoded_before);
+    CHECK(!writer.close());
+
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 void encoding_failure_latches_and_does_no_later_event_work() {
     const std::string directory = temporary_directory();
     TraceOptions options{};
@@ -689,7 +850,8 @@ void encoding_failure_latches_and_does_no_later_event_work() {
     CHECK(writer.open(context));
     CHECK(writer.begin(context));
     const uint64_t bytes_before = metrics.encoded_bytes;
-    CHECK(!writer.call("category", "name", std::string(kBinaryMaxEventDetailBytes + 1, 'x')));
+    CHECK(!writer.call("category", "name",
+                       std::string(kBinaryMaxLogicalCallDetailBytes + 1U, 'x')));
     CHECK(writer.failed());
     const int first_error = writer.error_code();
     CHECK(first_error != 0);
@@ -923,6 +1085,8 @@ int main() {
     sidecar_write_error_removes_partial_file();
     invalid_lifecycle_transitions_fail_closed();
     instruction_and_memory_hot_path_allocate_nothing();
+    chunked_calls_round_trip_utf8_identity_and_maximum_order();
+    oversized_logical_call_fails_before_writing_any_fragment();
     encoding_failure_latches_and_does_no_later_event_work();
     failed_definition_is_not_committed();
     async_write_error_preserves_first_error_and_suppresses_metrics();

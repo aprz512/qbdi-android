@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(qbdi_tracer_native_tests LANGUAGES C CXX)
 enable_testing()
+find_package(Threads REQUIRED)
 
 set(LZ4_ROOT ../../main/cpp/third_party/lz4/lib)
 add_library(lz4_static STATIC
@@ -32,6 +33,24 @@ add_trace_test(instruction_cache_test
 add_trace_test(instruction_collector_test
     instruction_collector_test.cpp
     ../../main/cpp/core/pending_instruction.cpp)
+
+add_trace_test(instruction_collector_integration_test
+    instruction_collector_integration_test.cpp
+    ../../main/cpp/core/instruction_collector.cpp
+    ../../main/cpp/core/instruction_cache.cpp
+    ../../main/cpp/core/qbdi_instruction_decoder.cpp
+    ../../main/cpp/core/safe_memory.cpp
+    ../../main/cpp/core/pending_instruction.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
+    ../../main/cpp/events/binary_trace_writer.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp
+    ../../main/cpp/events/trace_dictionary.cpp
+    ../../main/cpp/events/async_trace_writer.cpp
+    ../../main/cpp/rules/code_rule.cpp
+    ../../main/cpp/rules/code_rule_context.cpp)
+target_compile_options(instruction_collector_integration_test PRIVATE -ffunction-sections)
+target_link_options(instruction_collector_integration_test PRIVATE -Wl,--gc-sections)
+target_link_libraries(instruction_collector_integration_test PRIVATE lz4_static Threads::Threads)
 
 add_trace_test(qbdi_instruction_decoder_test
     qbdi_instruction_decoder_test.cpp
@@ -72,7 +91,6 @@ add_trace_test(memory_profile_test
     ../../main/cpp/core/safe_memory.cpp
     ../../main/cpp/events/binary_trace_encoder.cpp)
 
-find_package(Threads REQUIRED)
 add_trace_test(binary_trace_writer_test
     binary_trace_writer_test.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
@@ -104,6 +122,7 @@ target_link_libraries(qbdi_runner_lifecycle_test PRIVATE lz4_static Threads::Thr
 
 add_trace_test(trace_run_session_test
     trace_run_session_test.cpp
+    ../../main/cpp/core/qbdi_runner_lifecycle.cpp
     ../../main/cpp/core/trace_run_session.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/events/binary_trace_writer.cpp

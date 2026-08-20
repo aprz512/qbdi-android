@@ -119,7 +119,16 @@ Read and write values are encoded densely in set-bit order rather than as all 34
 ordered continuation records and are never dropped.
 
 `CALL`, `RULE`, and `ERROR` retain their current categories, names, and details with bounded
-length-prefixed UTF-8 strings.
+length-prefixed strings. A short `CALL` remains the compact three-string record with flags zero.
+A logical `CALL` detail above 3072 bytes is represented by consecutive CALL records carrying the
+CALL-chunk flag and a nonzero run-local event ID, total detail byte length, zero-based chunk index,
+and chunk count before the repeated category/name and detail fragment. The complete logical detail
+is bounded to 1 MiB. A decoder must require a contiguous, complete group with identical metadata,
+category, and name, concatenate fragment bytes in index order, and emit exactly one visible CALL.
+The writer chooses UTF-8 code-point boundaries when the complete detail is valid UTF-8. Individual
+fragments are raw bytes and are not independently UTF-8 validated: arbitrary input bytes are
+preserved exactly, while the converter validates UTF-8 once after reassembly and rejects an invalid
+complete logical string.
 
 `TRACE_END` contains status, target return value, elapsed time, instruction count, and writer/cache
 metrics.

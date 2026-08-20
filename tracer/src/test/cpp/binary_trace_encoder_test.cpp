@@ -313,6 +313,51 @@ void semantic_events_have_exact_golden_bytes() {
     });
 }
 
+void chunked_call_has_reversible_golden_bytes_and_atomic_failures() {
+    const BinaryTraceEncoder encoder;
+    const CallChunkInfo info{0x0102030405060708ULL, 7000, 1, 3};
+    std::array<uint8_t, 64> bytes{};
+    const BinaryEncodeResult encoded = encoder.encode_call_chunk(
+            bytes.data(), bytes.size(), info, "c", "n", "xyz");
+    CHECK(encoded.ok);
+    check_bytes(bytes.data(), encoded.size, {
+        0x06, 0x00, 0x01, 0x00, 0x1b, 0x00, 0x00, 0x00,
+        0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+        0x58, 0x1b, 0x00, 0x00,
+        0x01, 0x00, 0x03, 0x00,
+        0x01, 0x00, 'c', 0x01, 0x00, 'n', 0x03, 0x00, 'x', 'y', 'z',
+    });
+
+    std::array<uint8_t, 64> short_output{};
+    std::fill(short_output.begin(), short_output.end(), 0xa5);
+    const BinaryEncodeResult short_result = encoder.encode_call_chunk(
+            short_output.data(), encoded.size - 1U, info, "c", "n", "xyz");
+    CHECK(!short_result.ok);
+    CHECK(short_result.size == encoded.size);
+    CHECK(std::all_of(short_output.begin(), short_output.end(),
+                      [](uint8_t value) { return value == 0xa5; }));
+
+    for (const CallChunkInfo invalid : {
+                 CallChunkInfo{0, 7000, 0, 3},
+                 CallChunkInfo{1, 7000, 3, 3},
+                 CallChunkInfo{1, 7000, 0, 1},
+                 CallChunkInfo{1, 2, 0, 2},
+                 CallChunkInfo{1, kBinaryMaxLogicalCallDetailBytes + 1U, 0, 2},
+         }) {
+        std::fill(bytes.begin(), bytes.end(), 0x5a);
+        CHECK(!encoder.encode_call_chunk(bytes.data(), bytes.size(), invalid,
+                                         "c", "n", "xyz").ok);
+        CHECK(std::all_of(bytes.begin(), bytes.end(),
+                          [](uint8_t value) { return value == 0x5a; }));
+    }
+    std::fill(bytes.begin(), bytes.end(), 0x5a);
+    CHECK(!encoder.encode_call_chunk(
+                           bytes.data(), bytes.size(), info, "c", "n",
+                           std::string(kBinaryMaxCallChunkDetailBytes + 1U, 'x')).ok);
+    CHECK(std::all_of(bytes.begin(), bytes.end(),
+                      [](uint8_t value) { return value == 0x5a; }));
+}
+
 void trace_end_has_exact_golden_bytes() {
     TraceMetrics metrics{};
     metrics.instructions = 1;
@@ -496,6 +541,7 @@ void declared_record_maxima_are_exact_and_encodable() {
     CHECK(kBinaryMaxInstructionRecordBytes == 578);
     CHECK(kBinaryMaxMemoryRecordBytes == 176);
     CHECK(kBinaryMaxCallRecordBytes == 4620);
+    CHECK(kBinaryMaxCallChunkRecordBytes == 3612);
     CHECK(kBinaryMaxRuleErrorRecordBytes == 4363);
     CHECK(kBinaryTraceEndRecordBytes == 105);
 
@@ -547,6 +593,11 @@ void declared_record_maxima_are_exact_and_encodable() {
     check_exact_size(encoder.encode_call(output.data(), output.size(), call_category,
                                          call_name, event_detail),
                      kBinaryMaxCallRecordBytes);
+    const CallChunkInfo chunk_info{1, kBinaryMaxLogicalCallDetailBytes, 0, 2};
+    check_exact_size(encoder.encode_call_chunk(output.data(), output.size(), chunk_info,
+                                               call_category, call_name,
+                                               std::string(kBinaryMaxCallChunkDetailBytes, 'd')),
+                     kBinaryMaxCallChunkRecordBytes);
     check_exact_size(encoder.encode_event(output.data(), output.size(), BinaryRecordType::Error,
                                           event_name, event_detail),
                      kBinaryMaxRuleErrorRecordBytes);
@@ -567,6 +618,7 @@ int main() {
     definition_and_instruction_share_an_explicit_metadata_id();
     memory_has_exact_golden_bytes_and_all_capture_states();
     semantic_events_have_exact_golden_bytes();
+    chunked_call_has_reversible_golden_bytes_and_atomic_failures();
     trace_end_has_exact_golden_bytes();
     every_encoding_is_atomic_when_capacity_is_one_byte_short();
     rejects_invalid_or_oversized_inputs_without_writing();

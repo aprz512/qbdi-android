@@ -139,22 +139,6 @@ namespace {
 
     // QBDI 是单线程执行的, 用 thread_local 存储当前活跃的 JNI 调用
     static thread_local ActiveJniCall t_active_jni;
-    constexpr size_t kJniCallChunkBytes = 3072;
-
-    bool emit_chunked_call(BinaryTraceWriter *writer, const char *category,
-                           std::string_view name, std::string_view detail) {
-        if (writer == nullptr || writer->failed()) return false;
-        if (detail.empty()) return writer->call(category, name, detail);
-        size_t offset = 0;
-        while (offset < detail.size()) {
-            const size_t count = std::min(kJniCallChunkBytes,
-                                          detail.size() - offset);
-            if (!writer->call(category, name, detail.substr(offset, count))) return false;
-            offset += count;
-        }
-        return true;
-    }
-
     // ── JNI 状态更新 ──
     void update_jni_state(const JniFuncInfo &func, const uint64_t *args, uint64_t retval) {
         auto &state = jni_state();
@@ -224,7 +208,7 @@ namespace {
         int num_args = static_cast<int>(t_active_jni.func->args.size());
         std::string line = fmt.format_enter(t_active_jni.tid, t_active_jni.enter_ms,
                                              *t_active_jni.func, t_active_jni.args, num_args);
-        emit_chunked_call(writer, "jni-enter", t_active_jni.func->name, line);
+        writer->call("jni-enter", t_active_jni.func->name, line);
         if (writer->failed()) {
             t_active_jni = ActiveJniCall{};
             return;
@@ -256,8 +240,8 @@ namespace {
             }
             free(symbols);
             if (!frames.empty()) {
-                emit_chunked_call(writer, "jni-backtrace", t_active_jni.func->name,
-                                  JniFormatter::format_backtrace(frames));
+                writer->call("jni-backtrace", t_active_jni.func->name,
+                             JniFormatter::format_backtrace(frames));
                 if (writer->failed()) t_active_jni = ActiveJniCall{};
             }
         }
@@ -276,7 +260,7 @@ namespace {
         JniFormatter fmt;
         std::string line = fmt.format_leave(t_active_jni.tid, t_active_jni.enter_ms,
                                              *t_active_jni.func, retval);
-        emit_chunked_call(writer, "jni-leave", t_active_jni.func->name, line);
+        writer->call("jni-leave", t_active_jni.func->name, line);
 
         t_active_jni = ActiveJniCall{};
     }

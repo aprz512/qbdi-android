@@ -59,9 +59,10 @@ void append_string(AppendBuffer &buffer, std::string_view value) noexcept {
 }
 
 void append_record_header(AppendBuffer &buffer, BinaryRecordType type,
-                          size_t payload_bytes) noexcept {
+                          size_t payload_bytes,
+                          uint16_t flags = kBinaryRecordFlags) noexcept {
     append_u16(buffer, static_cast<uint16_t>(type));
-    append_u16(buffer, kBinaryRecordFlags);
+    append_u16(buffer, flags);
     append_u32(buffer, static_cast<uint32_t>(payload_bytes));
 }
 
@@ -395,6 +396,38 @@ BinaryEncodeResult BinaryTraceEncoder::encode_call(
 
     AppendBuffer buffer{output};
     append_record_header(buffer, BinaryRecordType::Call, payload_bytes);
+    append_string(buffer, category);
+    append_string(buffer, name);
+    append_string(buffer, detail);
+    return {true, buffer.offset};
+}
+
+BinaryEncodeResult BinaryTraceEncoder::encode_call_chunk(
+        uint8_t *output, size_t capacity, const CallChunkInfo &info,
+        std::string_view category, std::string_view name,
+        std::string_view detail) const noexcept {
+    if (info.event_id == 0 || info.chunk_count < 2 ||
+        info.chunk_index >= info.chunk_count || detail.empty() ||
+        info.total_detail_bytes > kBinaryMaxLogicalCallDetailBytes ||
+        info.total_detail_bytes <= detail.size() ||
+        category.size() > kBinaryMaxCallCategoryBytes ||
+        name.size() > kBinaryMaxCallNameBytes ||
+        detail.size() > kBinaryMaxCallChunkDetailBytes) {
+        return {};
+    }
+    const size_t payload_bytes = kBinaryCallChunkFixedPayloadBytes +
+                                 category.size() + name.size() + detail.size();
+    const size_t required = kBinaryRecordHeaderBytes + payload_bytes;
+    const BinaryEncodeResult result = preflight(output, capacity, required);
+    if (!result.ok) return result;
+
+    AppendBuffer buffer{output};
+    append_record_header(buffer, BinaryRecordType::Call, payload_bytes,
+                         kBinaryCallChunkFlag);
+    append_u64(buffer, info.event_id);
+    append_u32(buffer, info.total_detail_bytes);
+    append_u16(buffer, info.chunk_index);
+    append_u16(buffer, info.chunk_count);
     append_string(buffer, category);
     append_string(buffer, name);
     append_string(buffer, detail);

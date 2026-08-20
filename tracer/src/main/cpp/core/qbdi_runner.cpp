@@ -99,6 +99,30 @@ on_exec_transfer(QBDI::VM *, const QBDI::VMState *vm_state, QBDI::GPRState *gpr,
     });
 }
 
+struct CallbackRegistrationContext {
+    QBDI::VM *vm = nullptr;
+    InstructionCollector *collector = nullptr;
+    RunnerState *state = nullptr;
+};
+
+static uint32_t add_pre_callback(void *opaque) noexcept {
+    auto *context = static_cast<CallbackRegistrationContext *>(opaque);
+    return context->vm->addCodeCB(QBDI::PREINST, InstructionCollector::pre_callback,
+                                  context->collector);
+}
+
+static uint32_t add_post_callback(void *opaque) noexcept {
+    auto *context = static_cast<CallbackRegistrationContext *>(opaque);
+    return context->vm->addCodeCB(QBDI::POSTINST, InstructionCollector::post_callback,
+                                  context->collector);
+}
+
+static uint32_t add_exec_transfer_callback(void *opaque) noexcept {
+    auto *context = static_cast<CallbackRegistrationContext *>(opaque);
+    return context->vm->addVMEventCB(QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN,
+                                     on_exec_transfer, context->state);
+}
+
 TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation) {
     if (invocation.scene == nullptr || invocation.module == nullptr) return {};
     std::unique_ptr<RunnerRuntime> runtime(
@@ -179,19 +203,15 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
 
     TraceTargetOutcome target{};
     if (state.session.target_should_run()) {
-        bool callback_setup_ok =
-                vm.addCodeCB(QBDI::PREINST, InstructionCollector::pre_callback,
-                             &collector) != QBDI::INVALID_EVENTID;
-        if (state.code_rules.requires_immediate_post()) {
-            callback_setup_ok =
-                    vm.addCodeCB(QBDI::POSTINST, InstructionCollector::post_callback,
-                                 &collector) != QBDI::INVALID_EVENTID &&
-                    callback_setup_ok;
-        }
-        callback_setup_ok =
-                vm.addVMEventCB(QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN,
-                                on_exec_transfer, &state) != QBDI::INVALID_EVENTID &&
-                callback_setup_ok;
+        CallbackRegistrationContext callback_context{&vm, &collector, &state};
+        const QbdiCallbackRegistration registration{
+                &callback_context,
+                add_pre_callback,
+                add_post_callback,
+                add_exec_transfer_callback,
+                static_cast<uint32_t>(QBDI::INVALID_EVENTID),
+                state.code_rules.requires_immediate_post()};
+        const bool callback_setup_ok = register_qbdi_callbacks(registration);
         if (!callback_setup_ok) {
             state.writer.error("QBDI callback registration failed");
             state.session.observe_execution_setup(false);

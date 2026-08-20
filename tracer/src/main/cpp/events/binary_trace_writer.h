@@ -44,6 +44,8 @@ private:
     bool writable_event_state() const;
     bool append_call(const char *category, std::string_view name,
                      std::string_view detail);
+    bool append_call_chunk(std::string_view category, std::string_view name,
+                           std::string_view detail, const CallChunkInfo &chunk);
     bool append_event(BinaryRecordType type, std::string_view name,
                       std::string_view detail);
     bool write_metrics_sidecar();
@@ -71,4 +73,5 @@ private:
     bool facade_failed_ = false;
     bool prepared_ = false;
     int facade_error_code_ = 0;
+    uint64_t next_call_event_id_ = 1;
 };

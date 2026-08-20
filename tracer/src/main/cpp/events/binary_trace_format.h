@@ -4,7 +4,8 @@
 #include <cstdint>
 
 // QTRB v1 is byte-packed and little-endian. There is no implicit padding and no native struct is
-// copied to the stream. Strings are a u16 byte length followed by uninterpreted UTF-8 bytes.
+// copied to the stream. Wire strings are a u16 byte length followed by raw bytes; logical text is
+// UTF-8, with chunked CALL detail validated only after its raw fragments are reassembled.
 // uintptr_t values are widened to u64 on the wire; the stream header records the source pointer
 // width so a decoder can validate the producer ABI.
 inline constexpr uint8_t kBinaryTraceMagic[] = {'Q', 'T', 'R', 'B'};
@@ -14,6 +15,9 @@ inline constexpr uint8_t kBinaryLittleEndianMarker = 1;
 inline constexpr uint16_t kBinaryStreamHeaderBytes = 16;
 inline constexpr uint16_t kBinaryRecordHeaderBytes = 8;
 inline constexpr uint16_t kBinaryRecordFlags = 0;
+// CALL records with this flag are fragments of one logical CALL. Their payload starts with the
+// grouping fields documented below; ordinary short CALL records keep flags=0 and their v1 layout.
+inline constexpr uint16_t kBinaryCallChunkFlag = 1U << 0U;
 inline constexpr uint32_t kBinaryRequiredFeatures = 0;
 
 // StreamHeader (16 bytes): magic[4], major u8, minor u8, endian u8, pointer_width u8,
@@ -32,7 +36,8 @@ enum class BinaryRecordType : uint16_t {
     TraceEnd = 9,
 };
 
-// RecordHeader (8 bytes): type u16, flags u16 (zero in v1), payload_bytes u32.
+// RecordHeader (8 bytes): type u16, flags u16, payload_bytes u32. Flags are zero except for the
+// explicitly defined CALL chunk flag.
 
 inline constexpr size_t kBinaryMaxContextStringBytes = 255;
 inline constexpr size_t kBinaryMaxModuleNameBytes = 255;
@@ -40,6 +45,8 @@ inline constexpr size_t kBinaryMaxCallCategoryBytes = 255;
 inline constexpr size_t kBinaryMaxCallNameBytes = 255;
 inline constexpr size_t kBinaryMaxEventNameBytes = 255;
 inline constexpr size_t kBinaryMaxEventDetailBytes = 4096;
+inline constexpr size_t kBinaryMaxCallChunkDetailBytes = 3072;
+inline constexpr uint32_t kBinaryMaxLogicalCallDetailBytes = 1U << 20U;
 inline constexpr size_t kBinaryMaxMnemonicBytes = 16;
 inline constexpr size_t kBinaryMaxOperandsBytes = 96;
 inline constexpr size_t kBinaryMaxDisassemblyBytes = 112;
@@ -100,6 +107,19 @@ inline constexpr size_t kBinaryMaxCallRecordBytes =
         kBinaryMaxCallCategoryBytes + kBinaryMaxCallNameBytes +
         kBinaryMaxEventDetailBytes;
 
+// Chunked CALL payload (RecordHeader.flags has kBinaryCallChunkFlag): event_id u64,
+// total_detail_bytes u32, chunk_index u16, chunk_count u16, then category, name, and detail
+// fragment strings. event_id is nonzero and run-local; chunk indexes are contiguous from zero.
+// The decoder groups by event_id, verifies identical category/name/total/count, concatenates raw
+// detail fragments in index order, then validates UTF-8 once on the complete logical detail.
+inline constexpr size_t kBinaryCallChunkMetadataBytes = 16;
+inline constexpr size_t kBinaryCallChunkFixedPayloadBytes =
+        kBinaryCallChunkMetadataBytes + kBinaryCallFixedPayloadBytes;
+inline constexpr size_t kBinaryMaxCallChunkRecordBytes =
+        kBinaryRecordHeaderBytes + kBinaryCallChunkFixedPayloadBytes +
+        kBinaryMaxCallCategoryBytes + kBinaryMaxCallNameBytes +
+        kBinaryMaxCallChunkDetailBytes;
+
 // RULE/ERROR payload: name string, detail string.
 inline constexpr size_t kBinaryRuleErrorFixedPayloadBytes = 4;
 inline constexpr size_t kBinaryMaxRuleErrorRecordBytes =
@@ -121,5 +141,6 @@ static_assert(kBinaryMaxInstructionDefinitionRecordBytes == 1646);
 static_assert(kBinaryMaxInstructionRecordBytes == 578);
 static_assert(kBinaryMaxMemoryRecordBytes == 176);
 static_assert(kBinaryMaxCallRecordBytes == 4620);
+static_assert(kBinaryMaxCallChunkRecordBytes == 3612);
 static_assert(kBinaryMaxRuleErrorRecordBytes == 4363);
 static_assert(kBinaryTraceEndRecordBytes == 105);

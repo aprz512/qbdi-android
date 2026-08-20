@@ -1,4 +1,5 @@
 #include "core/trace_run_session.h"
+#include "core/qbdi_runner_lifecycle.h"
 #include "events/binary_trace_format.h"
 #include "events/binary_trace_writer.h"
 
@@ -106,6 +107,46 @@ void early_execution_setup_failure_finalizes_one_failed_binary_run() {
 }
 
 void callback_registration_failure_blocks_execution_and_success_metrics() {
+    struct RegistrationState {
+        unsigned int calls = 0;
+        unsigned int failing_call = 0;
+    };
+    const auto registrar = [](void *opaque) noexcept -> uint32_t {
+        auto *state = static_cast<RegistrationState *>(opaque);
+        ++state->calls;
+        return state->calls == state->failing_call ? 0xffffffffU : state->calls;
+    };
+    for (unsigned int failing_call = 1; failing_call <= 3; ++failing_call) {
+        const std::string directory = temporary_directory();
+        TraceMetrics metrics{};
+        BinaryTraceWriter writer(options(), &metrics);
+        const TraceContext context = context_for(directory);
+        TraceRunSessionOutcome session;
+        CHECK(writer.open(context));
+        CHECK(writer.begin(context));
+        session.observe_trace_setup(true);
+        session.observe_execution_setup(true);
+        RegistrationState registration{0, failing_call};
+        const QbdiCallbackRegistration callbacks{
+                &registration, registrar, registrar, registrar, 0xffffffffU, true};
+        session.observe_execution_setup(register_qbdi_callbacks(callbacks));
+        CHECK(registration.calls == 3);
+        CHECK(!session.target_should_run());
+        unsigned int target_calls = 0;
+        if (session.target_should_run()) ++target_calls;
+        CHECK(target_calls == 0);
+        session.observe_target_call({false, false, 73}, writer.failed());
+        const TraceRunFinalization finalization = session.finalize(writer, 5);
+        CHECK(!finalization.target_ran);
+        CHECK(finalization.outward_return_value == 0);
+        CHECK(!finalization.footer_success);
+        CHECK(!finalization.completion_success);
+        CHECK(metrics.instructions == 0);
+        remove_artifact(writer, directory, false);
+    }
+}
+
+void memory_instrumentation_failure_blocks_execution_and_success_metrics() {
     const std::string directory = temporary_directory();
     TraceMetrics metrics{};
     BinaryTraceWriter writer(options(), &metrics);
@@ -120,7 +161,9 @@ void callback_registration_failure_blocks_execution_and_success_metrics() {
     session.observe_target_call({false, false, 73}, writer.failed());
     const TraceRunFinalization finalization = session.finalize(writer, 5);
     CHECK(!finalization.target_ran);
+    CHECK(!finalization.footer_success);
     CHECK(!finalization.completion_success);
+    CHECK(metrics.instructions == 0);
     remove_artifact(writer, directory, false);
 }
 
@@ -175,6 +218,7 @@ void writer_failure_after_execution_preserves_target_result() {
 int main() {
     early_execution_setup_failure_finalizes_one_failed_binary_run();
     callback_registration_failure_blocks_execution_and_success_metrics();
+    memory_instrumentation_failure_blocks_execution_and_success_metrics();
     successful_target_has_one_authoritative_return_and_metrics();
     writer_failure_after_execution_preserves_target_result();
 }

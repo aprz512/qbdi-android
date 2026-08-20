@@ -6,6 +6,7 @@
 #include "events/binary_trace_format.h"
 #include "events/trace_number_formatter.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -20,6 +21,23 @@ namespace {
 
 constexpr uint32_t kTargetModuleId = 1;
 std::atomic<uint64_t> g_binary_artifact_sequence{0};
+
+bool is_utf8_continuation(unsigned char byte) {
+    return (byte & 0xc0U) == 0x80U;
+}
+
+size_t call_chunk_end(std::string_view detail, size_t offset) {
+    size_t end = offset + std::min(kBinaryMaxCallChunkDetailBytes,
+                                   detail.size() - offset);
+    if (end == detail.size()) return end;
+    while (end > offset && is_utf8_continuation(
+                                   static_cast<unsigned char>(detail[end]))) {
+        --end;
+    }
+    // A valid UTF-8 code point is at most four bytes, so this fallback is reachable only for
+    // arbitrary/non-UTF-8 bytes. Preserve those bytes exactly and keep progress bounded.
+    return end == offset ? offset + kBinaryMaxCallChunkDetailBytes : end;
+}
 
 bool mkdirs(char *path) {
     if (path == nullptr || path[0] == '\0') {
@@ -375,9 +393,59 @@ bool BinaryTraceWriter::append_call(const char *category, std::string_view name,
     return writer_.failed() ? fail() : true;
 }
 
+bool BinaryTraceWriter::append_call_chunk(std::string_view category, std::string_view name,
+                                          std::string_view detail,
+                                          const CallChunkInfo &chunk) {
+    const size_t maximum = kBinaryRecordHeaderBytes + kBinaryCallChunkFixedPayloadBytes +
+                           category.size() + name.size() + detail.size();
+    WritableSpan span = writer_.reserve(maximum);
+    if (span.data == nullptr) return fail();
+    const BinaryEncodeResult result = encoder_.encode_call_chunk(
+            reinterpret_cast<uint8_t *>(span.data), span.capacity, chunk, category, name,
+            detail);
+    if (!result.ok) {
+        writer_.commit(0);
+        return fail(EINVAL);
+    }
+    writer_.commit(result.size);
+    return writer_.failed() ? fail() : true;
+}
+
 bool BinaryTraceWriter::call(const char *category, std::string_view name,
                              std::string_view detail) {
-    return append_call(category, name, detail);
+    if (!writable_event_state()) return false;
+    const std::string_view category_view = category == nullptr ? std::string_view{} : category;
+    if (category_view.size() > kBinaryMaxCallCategoryBytes ||
+        name.size() > kBinaryMaxCallNameBytes ||
+        detail.size() > kBinaryMaxLogicalCallDetailBytes) {
+        return fail(EINVAL);
+    }
+    if (detail.size() <= kBinaryMaxCallChunkDetailBytes) {
+        return append_call(category, name, detail);
+    }
+
+    size_t chunk_count = 0;
+    for (size_t offset = 0; offset < detail.size();
+         offset = call_chunk_end(detail, offset)) {
+        ++chunk_count;
+    }
+    if (chunk_count > UINT16_MAX) return fail(EINVAL);
+
+    uint64_t event_id = next_call_event_id_++;
+    if (event_id == 0) event_id = next_call_event_id_++;
+    size_t offset = 0;
+    for (size_t index = 0; index < chunk_count; ++index) {
+        const size_t end = call_chunk_end(detail, offset);
+        const CallChunkInfo chunk{event_id, static_cast<uint32_t>(detail.size()),
+                                  static_cast<uint16_t>(index),
+                                  static_cast<uint16_t>(chunk_count)};
+        if (!append_call_chunk(category_view, name, detail.substr(offset, end - offset),
+                               chunk)) {
+            return false;
+        }
+        offset = end;
+    }
+    return true;
 }
 
 bool BinaryTraceWriter::append_event(BinaryRecordType type, std::string_view name,
