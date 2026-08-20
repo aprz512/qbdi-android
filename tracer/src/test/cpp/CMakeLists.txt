@@ -72,6 +72,15 @@ add_trace_test(memory_profile_test
     ../../main/cpp/events/trace_encoder.cpp)
 
 find_package(Threads REQUIRED)
+add_trace_test(binary_trace_writer_test
+    binary_trace_writer_test.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
+    ../../main/cpp/events/binary_trace_writer.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp
+    ../../main/cpp/events/trace_dictionary.cpp
+    ../../main/cpp/events/async_trace_writer.cpp)
+target_link_libraries(binary_trace_writer_test PRIVATE lz4_static Threads::Threads)
+
 add_trace_test(async_trace_writer_test
     async_trace_writer_test.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp

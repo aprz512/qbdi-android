@@ -48,9 +48,10 @@ public:
             errno = write_error;
             return -1;
         }
+        const size_t accepted = std::min(size, max_write_bytes);
         const auto *bytes = static_cast<const char *>(data);
-        output.insert(output.end(), bytes, bytes + size);
-        return static_cast<ssize_t>(size);
+        output.insert(output.end(), bytes, bytes + accepted);
+        return static_cast<ssize_t>(accepted);
     }
 
     int close_file(int) noexcept override {
@@ -68,6 +69,7 @@ public:
     int open_error = 0;
     int write_error = 0;
     bool interrupt_once = false;
+    size_t max_write_bytes = static_cast<size_t>(-1);
     std::atomic<unsigned int> open_calls{0};
     std::atomic<unsigned int> write_calls{0};
     std::atomic<unsigned int> close_calls{0};
@@ -361,7 +363,7 @@ void appends_large_payloads_as_exact_concatenated_frames() {
     CHECK(std::string(decoded.begin(), decoded.end()) == expected);
     CHECK(frames >= 3);
     CHECK(metrics.buffer_swaps >= 2);
-    CHECK(metrics.raw_bytes == expected.size());
+    CHECK(metrics.encoded_bytes == expected.size());
     CHECK(metrics.compressed_bytes > 0);
 }
 
@@ -379,6 +381,23 @@ void retries_interrupted_writes() {
     const auto decoded = decompress_concatenated_frames(backend.copy_output(), &frames);
     CHECK(std::string(decoded.begin(), decoded.end()) == "retry me");
     CHECK(frames == 1);
+}
+
+void completes_short_writes_without_losing_bytes() {
+    MemoryBackend backend;
+    backend.max_write_bytes = 3;
+    TraceMetrics metrics{};
+    AsyncTraceWriter writer(&backend);
+    CHECK(writer.open("memory", options_with_buffer(4096), &metrics));
+    CHECK(writer.append("short writes remain ordered"));
+    CHECK(writer.finish());
+    CHECK(backend.write_calls > 1);
+
+    size_t frames = 0;
+    const auto decoded = decompress_concatenated_frames(backend.copy_output(), &frames);
+    CHECK(std::string(decoded.begin(), decoded.end()) == "short writes remain ordered");
+    CHECK(frames == 1);
+    CHECK(metrics.encoded_bytes == 27);
 }
 
 void preserves_publication_order_when_buffer_zero_is_republished() {
@@ -437,7 +456,7 @@ void enospc_releases_a_waiting_producer() {
     CHECK(writer.error_code() == ENOSPC);
     CHECK(metrics.producer_waits >= 1);
     CHECK(metrics.producer_wait_ns > 0);
-    CHECK(metrics.raw_bytes == 2 * 4096);
+    CHECK(metrics.encoded_bytes == 2 * 4096);
 }
 
 void allocation_falls_back_to_eight_mib_per_buffer() {
@@ -578,6 +597,7 @@ int main() {
     sizes_each_buffer_exactly();
     appends_large_payloads_as_exact_concatenated_frames();
     retries_interrupted_writes();
+    completes_short_writes_without_losing_bytes();
     preserves_publication_order_when_buffer_zero_is_republished();
     enospc_releases_a_waiting_producer();
     allocation_falls_back_to_eight_mib_per_buffer();

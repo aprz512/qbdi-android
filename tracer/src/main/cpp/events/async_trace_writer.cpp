@@ -634,7 +634,7 @@ void AsyncTraceWriter::commit(size_t bytes) {
     }
 
     impl_->buffers[impl_->active_buffer].used += bytes;
-    if (impl_->metrics != nullptr) impl_->metrics->raw_bytes += bytes;
+    if (impl_->metrics != nullptr) impl_->metrics->encoded_bytes += bytes;
     impl_->reservation_active = false;
     impl_->reservation_capacity = 0;
 }
