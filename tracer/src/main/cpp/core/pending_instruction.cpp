@@ -21,6 +21,12 @@ bool PendingInstructionCollector::begin(const InstructionView &instruction,
                                         const RegisterSnapshot &registers) noexcept {
     if (pending_ && !complete(registers)) return false;
 
+    if (instruction.decoded != nullptr &&
+        (!valid_trace_gpr_mask(instruction.decoded->read_gpr_mask) ||
+         !valid_trace_gpr_mask(instruction.decoded->write_gpr_mask))) {
+        return false;
+    }
+
     continuing_memory_ = false;
     continuation_pc_ = 0;
     pending_record_ = {};
@@ -85,6 +91,10 @@ uint64_t PendingInstructionCollector::pending_write_mask() const noexcept {
 
 bool PendingInstructionCollector::complete(const RegisterSnapshot &registers) noexcept {
     if (pending_record_.decoded != nullptr) {
+        if (!valid_trace_gpr_mask(pending_record_.decoded->write_gpr_mask)) {
+            pending_ = false;
+            return false;
+        }
         uint64_t mask = pending_record_.decoded->write_gpr_mask;
         while (mask != 0) {
             const size_t index = std::countr_zero(mask);

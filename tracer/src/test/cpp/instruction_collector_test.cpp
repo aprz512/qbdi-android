@@ -164,6 +164,21 @@ void stores_sparse_registers_densely_in_set_bit_order() {
     assert(sink.records[0].writes.values[1] == 50);
 }
 
+void rejects_register_masks_outside_the_trace_register_file() {
+    CachedInstruction invalid_read{};
+    invalid_read.read_gpr_mask = 1ULL << kTraceGprCount;
+    CachedInstruction invalid_write{};
+    invalid_write.write_gpr_mask = 1ULL << 63U;
+
+    RecordingSink sink;
+    PendingInstructionCollector collector(&sink, 0);
+    assert(!collector.begin(view(0x1000, &invalid_read), snapshot({})));
+    assert(!collector.has_pending());
+    assert(!collector.begin(view(0x1004, &invalid_write), snapshot({})));
+    assert(!collector.has_pending());
+    assert(sink.records.empty());
+}
+
 void attaches_only_the_fixed_memory_prefix_without_reordering() {
     CachedInstruction instruction{};
     RecordingSink sink;
@@ -223,6 +238,7 @@ int main() {
     separates_previous_completion_from_current_rule_mutation();
     truncates_w_register_aliases_to_their_architectural_width();
     stores_sparse_registers_densely_in_set_bit_order();
+    rejects_register_masks_outside_the_trace_register_file();
     attaches_only_the_fixed_memory_prefix_without_reordering();
     emits_more_than_eight_accesses_as_lossless_ordered_continuations();
 }

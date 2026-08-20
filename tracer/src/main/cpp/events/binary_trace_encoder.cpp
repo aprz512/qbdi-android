@@ -18,7 +18,6 @@ static_assert(kTraceGprCount == kBinaryMaxGprCount);
 static_assert(CachedInstruction::kMaxMemoryOperands == kBinaryMaxMemoryOperandCount);
 static_assert(kMaxCapturedMemoryBytes == kBinaryMaxCapturedMemoryBytes);
 
-constexpr uint64_t kValidGprMask = (1ULL << kTraceGprCount) - 1U;
 constexpr uint32_t kValidInstructionFlags =
         static_cast<uint32_t>(InstructionFlags::Branch) |
         static_cast<uint32_t>(InstructionFlags::PcRelative) |
@@ -255,8 +254,8 @@ BinaryEncodeResult BinaryTraceEncoder::encode_instruction_definition(
         uint8_t *output, size_t capacity, uint32_t metadata_id,
         const CachedInstruction &instruction) const noexcept {
     const uint32_t flags = static_cast<uint32_t>(instruction.flags);
-    if ((instruction.read_gpr_mask & ~kValidGprMask) != 0 ||
-        (instruction.write_gpr_mask & ~kValidGprMask) != 0 ||
+    if (!valid_trace_gpr_mask(instruction.read_gpr_mask) ||
+        !valid_trace_gpr_mask(instruction.write_gpr_mask) ||
         (flags & ~kValidInstructionFlags) != 0 ||
         !valid_pc_relative_kind(instruction.pc_relative_kind) ||
         instruction.memory_operand_count > CachedInstruction::kMaxMemoryOperands) {
@@ -313,8 +312,8 @@ BinaryEncodeResult BinaryTraceEncoder::encode_instruction(
         uint8_t *output, size_t capacity, uint32_t module_id, uint32_t metadata_id,
         const InstructionRecord &record) const noexcept {
     if (record.decoded == nullptr || record.pc < record.module_base ||
-        (record.decoded->read_gpr_mask & ~kValidGprMask) != 0 ||
-        (record.decoded->write_gpr_mask & ~kValidGprMask) != 0) {
+        !valid_trace_gpr_mask(record.decoded->read_gpr_mask) ||
+        !valid_trace_gpr_mask(record.decoded->write_gpr_mask)) {
         return {};
     }
     const uint8_t read_count = mask_count(record.decoded->read_gpr_mask);

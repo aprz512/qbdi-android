@@ -279,6 +279,29 @@ void rejects_inconsistent_dense_register_counts_without_writing() {
     for (char value : output) assert(value == '#');
 }
 
+void rejects_out_of_range_register_masks_without_writing() {
+    for (const bool write : {false, true}) {
+        CachedInstruction decoded{};
+        if (write) {
+            decoded.write_gpr_mask = 1ULL << kTraceGprCount;
+        } else {
+            decoded.read_gpr_mask = 1ULL << 63U;
+        }
+
+        InstructionRecord record{};
+        record.decoded = &decoded;
+        if (write) record.writes.count = 1;
+        else record.reads.count = 1;
+        char output[64];
+        std::memset(output, '#', sizeof(output));
+
+        const EncodeResult result =
+                TraceEncoder{}.encode_instruction(output, sizeof(output), "libx.so", record);
+        assert(!result.ok);
+        for (char value : output) assert(value == '#');
+    }
+}
+
 void encodes_cache_hit_rate_with_an_overflowing_counter_total() {
     TraceMetrics metrics{};
     metrics.cache_hits = 1ULL << 63U;
@@ -316,6 +339,7 @@ int main() {
     rejects_overflowing_records();
     rejects_instruction_lines_above_the_fixed_bound();
     rejects_inconsistent_dense_register_counts_without_writing();
+    rejects_out_of_range_register_masks_without_writing();
     encodes_cache_hit_rate_with_an_overflowing_counter_total();
     encodes_zero_cache_total_as_zero_rate();
 }

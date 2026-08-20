@@ -193,7 +193,7 @@ InstructionView InstructionCollector::resolve(QBDI::VM *vm,
 RegisterSnapshot InstructionCollector::snapshot(const QBDI::GPRState &gpr,
                                                 uint64_t mask) noexcept {
     RegisterSnapshot result{};
-    mask &= (1ULL << kTraceGprCount) - 1ULL;
+    mask &= kTraceValidGprMask;
     while (mask != 0) {
         const size_t index = std::countr_zero(mask);
         result.values[index] = QBDI_GPR_GET(&gpr, index);

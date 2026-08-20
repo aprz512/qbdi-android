@@ -190,7 +190,9 @@ EncodeResult encode_atomic(char *output, size_t capacity, size_t maximum_size, E
 bool append_instruction(AppendBuffer &buffer, const char *module_name,
                         const InstructionRecord &record) noexcept {
     if (record.decoded != nullptr &&
-        (record.reads.count != std::popcount(record.decoded->read_gpr_mask) ||
+        (!valid_trace_gpr_mask(record.decoded->read_gpr_mask) ||
+         !valid_trace_gpr_mask(record.decoded->write_gpr_mask) ||
+         record.reads.count != std::popcount(record.decoded->read_gpr_mask) ||
          record.writes.count != std::popcount(record.decoded->write_gpr_mask))) {
         buffer.ok = false;
         return false;

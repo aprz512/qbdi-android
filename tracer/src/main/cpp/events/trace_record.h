@@ -7,12 +7,17 @@
 #include <cstdint>
 
 constexpr size_t kTraceGprCount = kArm64RegisterCount;
+constexpr uint64_t kTraceValidGprMask = (1ULL << kTraceGprCount) - 1ULL;
 constexpr size_t kMaxRegisterNameBytes = 16;
 constexpr size_t kMaxMemoryRecords = 8;
 constexpr size_t kMaxHexdumpBytes = kMaxCapturedMemoryBytes;
 constexpr size_t kMaxInstructionLineBytes = 4096;
 
 struct CachedInstruction;
+
+constexpr bool valid_trace_gpr_mask(uint64_t mask) noexcept {
+    return (mask & ~kTraceValidGprMask) == 0;
+}
 
 struct DenseRegisterValues {
     std::array<uint64_t, kTraceGprCount> values{};
