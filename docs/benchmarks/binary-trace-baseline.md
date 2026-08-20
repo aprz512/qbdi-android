@@ -12,7 +12,8 @@ processes; the artifact named in the table is the run at the median elapsed time
 | Device product | oriole |
 | Android version | 16 |
 | ABI | arm64-v8a |
-| Build type | user |
+| Android build type | user |
+| App build type | Debug |
 | Build fingerprint | google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys |
 | SELinux | Enforcing |
 | Package | com.aprz.qbdiandroid |

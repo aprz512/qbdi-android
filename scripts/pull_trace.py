@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from scripts.bounded_process import BoundedProcessError, capture_bounded
     from scripts.lz4_frames import (
         DecodeResult,
         Lz4FileScan,
@@ -32,6 +33,7 @@ try:
     from scripts.trace_binary import BinaryTraceError
     from scripts.trace_convert import convert_binary_file
 except ModuleNotFoundError:  # Support direct execution as scripts/pull_trace.py.
+    from bounded_process import BoundedProcessError, capture_bounded  # type: ignore[no-redef]
     from lz4_frames import (  # type: ignore[no-redef]
         DecodeResult,
         Lz4FileScan,
@@ -100,6 +102,7 @@ class AdbArtifactClient:
         adb: str = "adb",
         timeout: float = 120.0,
         runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+        listing_capture: Callable[..., bytes] = capture_bounded,
     ) -> None:
         if PACKAGE_NAME.fullmatch(package) is None:
             raise PullTraceError(f"unsafe Android package name: {package!r}")
@@ -108,6 +111,7 @@ class AdbArtifactClient:
         self.adb = adb
         self.timeout = timeout
         self.runner = runner
+        self.listing_capture = listing_capture
 
     def _command(self, *command: str) -> list[str]:
         result = [self.adb]
@@ -139,9 +143,18 @@ class AdbArtifactClient:
         _validate_artifact_name(name)
 
     def list_names(self) -> list[str]:
-        raw = self._run("ls", "-1t", TRACE_DIRECTORY)
-        if len(raw) > MAX_LISTING_BYTES:
-            raise PullTraceError("artifact listing exceeds size limit")
+        try:
+            raw = self.listing_capture(
+                self._command("ls", "-1t", TRACE_DIRECTORY),
+                maximum_bytes=MAX_LISTING_BYTES,
+                timeout=self.timeout,
+            )
+        except FileNotFoundError as error:
+            raise PullTraceError(f"adb executable not found: {self.adb}") from error
+        except subprocess.TimeoutExpired as error:
+            raise PullTraceError(f"adb artifact listing timed out after {self.timeout:g}s") from error
+        except BoundedProcessError as error:
+            raise PullTraceError(f"adb artifact listing failed: {error}") from error
         try:
             names = raw.decode("utf-8").splitlines()
         except UnicodeDecodeError as error:

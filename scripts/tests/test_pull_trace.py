@@ -16,6 +16,8 @@ from scripts.pull_trace import (
     select_trace_name,
 )
 from scripts.tests.test_trace_binary import complete_stream
+from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
+from scripts.tests.test_trace_convert import fake_lz4_executable
 
 
 CRASH_MAGIC = 0x51435248
@@ -104,18 +106,17 @@ class AdbArtifactClientTests(unittest.TestCase):
     def test_enumerates_and_streams_only_via_exec_out_run_as(self):
         calls = []
 
+        def listing_capture(command, **kwargs):
+            calls.append((command, kwargs))
+            return b"123_algorithm.trace.txt.lz4\n123_algorithm.trace.txt.lz4.metrics\n"
+
         def runner(command, **kwargs):
             calls.append((command, kwargs))
-            if command[-2:] == ["-1t", "files/qbdi-traces"]:
-                return subprocess.CompletedProcess(
-                    command, 0,
-                    stdout=b"123_algorithm.trace.txt.lz4\n123_algorithm.trace.txt.lz4.metrics\n",
-                    stderr=b"",
-                )
             return subprocess.CompletedProcess(command, 0, stdout=b"trace-bytes", stderr=b"")
 
         client = AdbArtifactClient(
-            package="com.aprz.qbdiandroid", device="serial", adb="custom-adb", runner=runner
+            package="com.aprz.qbdiandroid", device="serial", adb="custom-adb", runner=runner,
+            listing_capture=listing_capture,
         )
 
         self.assertEqual(
@@ -128,6 +129,7 @@ class AdbArtifactClientTests(unittest.TestCase):
             calls[0][0][:6],
         )
         self.assertEqual("ls", calls[0][0][6])
+        self.assertEqual(1024 * 1024, calls[0][1]["maximum_bytes"])
         self.assertEqual("head", calls[1][0][6])
         self.assertNotIn("shell", calls[0][0])
         self.assertFalse(calls[0][1].get("shell", False))
@@ -144,11 +146,11 @@ class AdbArtifactClientTests(unittest.TestCase):
             self.assertEqual(b"streamed", output.read())
 
     def test_translates_adb_timeout_and_rejects_oversized_sidecars(self):
-        def timeout_runner(command, **kwargs):
+        def timeout_capture(command, **kwargs):
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
 
         client = AdbArtifactClient(
-            package="com.example.app", timeout=0.25, runner=timeout_runner
+            package="com.example.app", timeout=0.25, listing_capture=timeout_capture
         )
         with self.assertRaisesRegex(PullTraceError, "timed out after 0.25s"):
             client.list_names()
@@ -301,6 +303,60 @@ class PullArtifactTests(unittest.TestCase):
             self.assertEqual(binary, (Path(directory) / name).read_bytes())
             text = Path(directory) / "123_algorithm.trace.txt"
             self.assertIn("TRACE_END status=ok", text.read_text(encoding="utf-8"))
+
+    def test_pulls_compressed_binary_and_routes_sidecar_through_converter(self):
+        name = "123_algorithm.trace.bin.lz4"
+        probe = complete_stream(compression=1)
+        artifact_size = len(uncompressed_lz4_frame(probe))
+        binary = complete_stream(compression=1, compressed_bytes=artifact_size)
+        artifact = uncompressed_lz4_frame(binary)
+
+        def fixed_six(numerator, denominator):
+            whole, remainder = divmod(numerator, denominator)
+            return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
+
+        sidecar = (
+            "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
+            f"elapsed_ms=17\ninstructions_per_second=0.000000\nencoded_bytes={len(binary)}\n"
+            f"compressed_bytes={len(artifact)}\n"
+            f"encoded_bytes_per_second={fixed_six(len(binary) * 1000, 17)}\n"
+            f"disk_bytes_per_second={fixed_six(len(artifact) * 1000, 17)}\n"
+            f"compression_ratio={fixed_six(len(artifact), len(binary))}\n"
+            "cache_hits=9\ncache_misses=1\ncache_collisions=0\ncache_hit_rate=0.900000\n"
+            "buffer_swaps=2\nproducer_waits=0\nproducer_wait_ns=0\n"
+            "effective_buffer_bytes=4096\n"
+        ).encode("ascii")
+        client = self.FakeClient({name: artifact, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            decoder = fake_lz4_executable(root)
+            result = pull_artifact_set(
+                client, name, client.files, root, lz4=str(decoder)
+            )
+
+            self.assertEqual(0, result.exit_code)
+            self.assertEqual("complete", result.status)
+            self.assertIn("TRACE_END status=ok", (root / "123_algorithm.trace.txt").read_text())
+
+    def test_compressed_binary_crash_truncation_routes_to_partial_output(self):
+        name = "123_algorithm.trace.bin.lz4"
+        partial_binary = complete_stream(compression=1)[:-105]
+        artifact = (
+            uncompressed_lz4_frame(partial_binary)
+            + uncompressed_lz4_frame(b"incomplete-tail")[:-3]
+        )
+        files = {name: artifact, name + ".crash": crash_marker()}
+        client = self.FakeClient(files)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            decoder = fake_lz4_executable(root)
+            result = pull_artifact_set(client, name, files, root, lz4=str(decoder))
+
+            self.assertEqual(EXIT_PARTIAL, result.exit_code)
+            self.assertTrue((root / "123_algorithm.partial.trace.txt").is_file())
+            self.assertFalse((root / "123_algorithm.trace.txt").exists())
 
     def test_binary_conversion_failure_never_publishes_readable_output(self):
         name = "123_algorithm.trace.bin"

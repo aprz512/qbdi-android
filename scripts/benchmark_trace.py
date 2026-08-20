@@ -19,10 +19,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 try:
+    from scripts.bounded_process import BoundedProcessError, capture_bounded
     from scripts.lz4_frames import PullTraceError, decode_lz4_file
     from scripts.trace_binary import BinaryTraceError
     from scripts.trace_convert import convert_binary_file
 except ModuleNotFoundError:  # Support direct execution as scripts/benchmark_trace.py.
+    from bounded_process import BoundedProcessError, capture_bounded  # type: ignore[no-redef]
     from lz4_frames import PullTraceError, decode_lz4_file  # type: ignore[no-redef]
     from trace_binary import BinaryTraceError  # type: ignore[no-redef]
     from trace_convert import convert_binary_file  # type: ignore[no-redef]
@@ -73,6 +75,13 @@ PROFILE_RATE_TARGETS = {
     "balanced": Decimal(800_000),
     "full": Decimal(500_000),
 }
+
+
+def require_binary_acceptance_candidate(run: dict[str, int | Decimal | str]) -> None:
+    if int(run.get("metrics_version", 0)) != 2:
+        raise ValueError("binary acceptance requires metrics_version=2")
+    if not str(run.get("trace", "")).endswith(BINARY_TRACE_SUFFIX):
+        raise ValueError("binary acceptance requires .trace.bin.lz4 artifacts")
 
 
 def parse_legacy_trace(trace: bytes, file_bytes: int) -> dict[str, int | str]:
@@ -259,7 +268,13 @@ def compare_to_baseline(
 def compare_to_profile_baseline(
     current: dict[str, int | Decimal | str],
     baseline: dict[str, int | str],
-) -> dict[str, Decimal | bool | int]:
+    runs: Iterable[dict[str, int | Decimal | str]],
+) -> dict[str, Any]:
+    measured = list(runs)
+    if not measured:
+        raise ValueError("binary acceptance requires measured runs")
+    for run in measured:
+        require_binary_acceptance_candidate(run)
     profile = str(current.get("profile", ""))
     if profile not in PROFILE_RATE_TARGETS or profile != str(baseline.get("profile", "")):
         raise ValueError("current and baseline profiles differ")
@@ -267,13 +282,17 @@ def compare_to_profile_baseline(
         if str(current.get(key, "")).lower() != str(baseline.get(key, "")).lower():
             raise ValueError(f"format-2 oracle mismatch for {key}")
     rate = Decimal(current["instructions_per_second"])
-    compressed = int(current["compressed_bytes"])
     baseline_compressed = int(baseline["compressed_bytes"])
+    compressed_values = [int(run["compressed_bytes"]) for run in measured]
+    size_targets = [value <= baseline_compressed for value in compressed_values]
     return {
         "target_instructions_per_second": PROFILE_RATE_TARGETS[profile],
         "meets_rate_target": rate >= PROFILE_RATE_TARGETS[profile],
         "baseline_compressed_bytes": baseline_compressed,
-        "meets_size_target": compressed <= baseline_compressed,
+        "per_run_compressed_bytes": compressed_values,
+        "per_run_size_targets": size_targets,
+        "maximum_compressed_bytes": max(compressed_values),
+        "meets_size_target": all(size_targets),
     }
 
 
@@ -407,7 +426,8 @@ def parse_baseline_document(document: str) -> dict[str, str]:
         ("Device product", "device_product"),
         ("Android version", "android_version"),
         ("ABI", "abi"),
-        ("Build type", "build_type"),
+        ("Android build type", "android_build_type"),
+        ("App build type", "app_build_type"),
     ):
         match = re.search(rf"^\| {re.escape(label)} \|\s*(.*?)\s*\|$", document, re.MULTILINE)
         if match is None or not match.group(1).strip():
@@ -446,7 +466,8 @@ def ensure_same_format_two_device(baseline: dict[str, str], current: dict[str, s
         "device_product": "device",
         "android_version": "android",
         "abi": "abi",
-        "build_type": "build_type",
+        "android_build_type": "android_build_type",
+        "app_build_type": "app_build_type",
     }
     mismatches = [
         f"{baseline_key}: baseline={baseline.get(baseline_key)!r} "
@@ -673,7 +694,7 @@ def adb(
     )
 
 
-def is_missing_trace_directory(error: subprocess.CalledProcessError) -> bool:
+def is_missing_trace_directory(error: Any) -> bool:
     stderr = (
         error.stderr.decode("utf-8", errors="replace")
         if isinstance(error.stderr, bytes)
@@ -683,17 +704,23 @@ def is_missing_trace_directory(error: subprocess.CalledProcessError) -> bool:
 
 
 def trace_names(args: argparse.Namespace) -> list[str]:
+    command = [
+        args.adb, "-s", args.device, "shell", "run-as", args.package,
+        "ls", "-1t", TRACE_DIRECTORY,
+    ]
     try:
-        listing = adb(
-            args, "shell", "run-as", args.package, "ls", "-1t", TRACE_DIRECTORY, text=True
+        raw = capture_bounded(
+            command, maximum_bytes=1024 * 1024,
+            timeout=getattr(args, "adb_timeout", 30.0),
         )
-    except subprocess.CalledProcessError as error:
+    except BoundedProcessError as error:
         if is_missing_trace_directory(error):
             return []
         raise
-    if len(listing.stdout.encode("utf-8")) > 1024 * 1024:
-        raise RuntimeError("artifact listing exceeds size limit")
-    names = listing.stdout.splitlines()
+    try:
+        names = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise RuntimeError("artifact listing is not valid UTF-8") from error
     invalid = next(
         (name for name in names if ARTIFACT_NAME.fullmatch(name) is None or name in (".", "..")),
         None,
@@ -709,19 +736,22 @@ def live_device_identity(args: argparse.Namespace) -> dict[str, str]:
 
     try:
         adb(args, "shell", "run-as", args.package, "id", text=True)
-        build_type = classify_run_as_build_type(0, "")
+        app_build_type = classify_run_as_build_type(0, "")
     except subprocess.CalledProcessError as error:
         stderr = error.stderr if isinstance(error.stderr, str) else error.stderr.decode(
             "utf-8", errors="replace"
         )
-        build_type = classify_run_as_build_type(error.returncode, stderr)
+        app_build_type = classify_run_as_build_type(error.returncode, stderr)
 
     return {
         "model": prop("ro.product.model"),
         "device": prop("ro.product.device"),
         "android": prop("ro.build.version.release"),
         "abi": prop("ro.product.cpu.abi"),
-        "build_type": build_type,
+        "android_build_type": prop("ro.build.type"),
+        "app_build_type": app_build_type,
+        # The older throughput baseline uses this key for application build configuration.
+        "build_type": app_build_type,
     }
 
 
@@ -1088,6 +1118,8 @@ def main() -> int:
             baseline = parse_baseline_report(baseline_document)
             ensure_same_device(baseline, identity)
     warmup = run_once(args)
+    if profile_baseline is not None:
+        require_binary_acceptance_candidate(warmup)
     runs = [run_once(args) for _ in range(args.runs)]
     stable_return = ensure_stable_return([str(warmup["return"]), *[str(run["return"]) for run in runs]])
     report = median_report(runs)
@@ -1104,13 +1136,17 @@ def main() -> int:
         }
     if args.compare and profile_baseline is not None:
         report["comparison"] = {
-            **compare_to_profile_baseline(report, profile_baseline),
+            **compare_to_profile_baseline(report, profile_baseline, runs),
             "baseline": args.compare,
         }
     if (not args.legacy and args.profile == "fast" and
             Decimal(report["instructions_per_second"]) < Decimal(1_000_000)):
         report["fast_target_diagnosis"] = fast_cost_diagnosis(report)
     print(render_report(report))
+    comparison = report.get("comparison")
+    if (profile_baseline is not None and isinstance(comparison, dict)
+            and (not comparison["meets_rate_target"] or not comparison["meets_size_target"])):
+        return 2
     return 0
 
 

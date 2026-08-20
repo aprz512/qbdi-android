@@ -1,4 +1,6 @@
 import unittest
+import contextlib
+import io
 import subprocess
 import sys
 import tempfile
@@ -25,6 +27,7 @@ from scripts.benchmark_trace import (
     is_missing_trace_directory,
     median_report,
     parse_legacy_trace,
+    parse_baseline_document,
     parse_baseline_report,
     parse_metrics,
     require_balanced_comparison,
@@ -110,15 +113,15 @@ TRACE_END status=ok ret=0x42 elapsed_ms=7 instructions=1 raw_bytes=200 cache_hit
         self.assertFalse(is_missing_trace_directory(denied))
 
     def test_device_listing_rejects_unsafe_names_and_unbounded_output(self):
-        args = SimpleNamespace(package="com.example.app")
+        args = SimpleNamespace(package="com.example.app", adb="adb", device="serial")
         with patch.object(
-            benchmark_trace, "adb",
-            return_value=subprocess.CompletedProcess([], 0, stdout="../trace.bin\n", stderr=""),
+            benchmark_trace, "capture_bounded", return_value=b"../trace.bin\n",
         ), self.assertRaisesRegex(RuntimeError, "unsafe artifact"):
             benchmark_trace.trace_names(args)
         with patch.object(
-            benchmark_trace, "adb",
-            return_value=subprocess.CompletedProcess([], 0, stdout="x" * (1024 * 1024 + 1), stderr=""),
+            benchmark_trace, "capture_bounded", side_effect=benchmark_trace.BoundedProcessError(
+                "subprocess output exceeds size limit"
+            ),
         ), self.assertRaisesRegex(RuntimeError, "size limit"):
             benchmark_trace.trace_names(args)
 
@@ -229,30 +232,64 @@ effective_buffer_bytes=67108864
         )
 
     def test_profile_comparison_preserves_oracle_identity_and_uses_compressed_size(self):
-        current = median_report([parse_metrics(self.METRICS_V2)])
+        run = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4"}
+        current = median_report([run])
         current["return"] = "0x42"
         baseline = {
             "profile": "balanced", "instructions": 100000, "return": "0x42",
             "compressed_bytes": 1048576,
         }
 
-        comparison = compare_to_profile_baseline(current, baseline)
+        comparison = compare_to_profile_baseline(current, baseline, [run])
 
         self.assertTrue(comparison["meets_rate_target"])
         self.assertTrue(comparison["meets_size_target"])
         with self.assertRaisesRegex(ValueError, "oracle.*return"):
-            compare_to_profile_baseline(current, {**baseline, "return": "0x43"})
+            compare_to_profile_baseline(current, {**baseline, "return": "0x43"}, [run])
         with self.assertRaisesRegex(ValueError, "oracle.*instructions"):
-            compare_to_profile_baseline(current, {**baseline, "instructions": 99999})
+            compare_to_profile_baseline(current, {**baseline, "instructions": 99999}, [run])
+
+    def test_acceptance_checks_every_compressed_binary_artifact_not_the_median(self):
+        first = {**parse_metrics(self.METRICS_V2), "compressed_bytes": 90,
+                 "trace": "first.trace.bin.lz4"}
+        second = {**parse_metrics(self.METRICS_V2), "compressed_bytes": 110,
+                  "trace": "second.trace.bin.lz4"}
+        current = median_report([first, second])
+        current["return"] = "0x42"
+        baseline = {"profile": "balanced", "instructions": 100000, "return": "0x42",
+                    "compressed_bytes": 100}
+
+        comparison = compare_to_profile_baseline(current, baseline, [first, second])
+
+        self.assertEqual(Decimal("100"), current["compressed_bytes"])
+        self.assertEqual([True, False], comparison["per_run_size_targets"])
+        self.assertEqual(110, comparison["maximum_compressed_bytes"])
+        self.assertFalse(comparison["meets_size_target"])
+
+    def test_acceptance_requires_metrics_v2_compressed_qtrb_runs(self):
+        baseline = {"profile": "balanced", "instructions": 100000, "return": "0x42",
+                    "compressed_bytes": 20_000_000}
+        v2 = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4"}
+        report = median_report([v2])
+        report["return"] = "0x42"
+        compare_to_profile_baseline(report, baseline, [v2])
+        v1 = {**parse_metrics(self.METRICS), "trace": "run.trace.txt.lz4"}
+        raw = {**v2, "trace": "run.trace.bin"}
+        for candidate, message in ((v1, "metrics_version=2"), (raw, "trace.bin.lz4")):
+            with self.subTest(trace=candidate["trace"]), self.assertRaisesRegex(ValueError, message):
+                candidate_report = median_report([candidate])
+                candidate_report["return"] = "0x42"
+                compare_to_profile_baseline(candidate_report, baseline, [candidate])
 
     def test_format_two_device_identity_maps_to_live_device_fields(self):
         baseline = {
             "device_model": "Pixel 6", "device_product": "oriole",
-            "android_version": "16", "abi": "arm64-v8a", "build_type": "Debug",
+            "android_version": "16", "abi": "arm64-v8a", "android_build_type": "user",
+            "app_build_type": "Debug",
         }
         current = {
             "model": "Pixel 6", "device": "oriole", "android": "16",
-            "abi": "arm64-v8a", "build_type": "Debug",
+            "abi": "arm64-v8a", "android_build_type": "user", "app_build_type": "Debug",
         }
         ensure_same_format_two_device(baseline, current)
         with self.assertRaisesRegex(ValueError, "device_model"):
@@ -265,11 +302,64 @@ effective_buffer_bytes=67108864
         self.assertEqual("Pixel 6", identity["device_model"])
         self.assertEqual("oriole", identity["device_product"])
         self.assertEqual("16", identity["android_version"])
+        self.assertEqual("user", identity["android_build_type"])
+        self.assertEqual("Debug", identity["app_build_type"])
+        ensure_same_format_two_device(identity, {
+            "model": "Pixel 6", "device": "oriole", "android": "16",
+            "abi": "arm64-v8a", "android_build_type": "user", "app_build_type": "Debug",
+        })
         for profile in ("fast", "balanced", "full"):
             row = benchmark_trace.parse_profile_baseline(text, profile)
             self.assertGreater(row["compressed_bytes"], 0)
             self.assertEqual(21718, row["instructions"])
             self.assertEqual("0x5745c858653f5a7f", row["return"])
+
+    def test_checked_in_baseline_matches_live_identity_shape_for_debug_app(self):
+        properties = {
+            "ro.product.model": "Pixel 6", "ro.product.device": "oriole",
+            "ro.build.version.release": "16", "ro.product.cpu.abi": "arm64-v8a",
+            "ro.build.type": "user",
+        }
+
+        def fake_adb(_args, *command, **kwargs):
+            output = "uid=123\n" if "run-as" in command else properties[command[-1]] + "\n"
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+        document = Path("docs/benchmarks/binary-trace-baseline.md").read_text(encoding="utf-8")
+        with patch.object(benchmark_trace, "adb", side_effect=fake_adb):
+            live = benchmark_trace.live_device_identity(
+                SimpleNamespace(package="com.aprz.qbdiandroid")
+            )
+
+        ensure_same_format_two_device(parse_baseline_document(document), live)
+        self.assertEqual("user", live["android_build_type"])
+        self.assertEqual("Debug", live["app_build_type"])
+
+    def test_cli_returns_acceptance_miss_and_preserves_json_verdict(self):
+        run = {**parse_metrics(self.METRICS_V2), "profile": "balanced",
+               "instructions": 21718, "return": "0x5745c858653f5a7f",
+               "compressed_bytes": 999_999_999, "trace": "run.trace.bin.lz4"}
+        run["instructions_per_second"] = Decimal("21.718000")
+        args = SimpleNamespace(
+            runs=1, test_fail_setup=False,
+            compare="docs/benchmarks/binary-trace-baseline.md", profile="balanced",
+            legacy=False,
+        )
+        identity = {
+            "model": "Pixel 6", "device": "oriole", "android": "16",
+            "abi": "arm64-v8a", "android_build_type": "user", "app_build_type": "Debug",
+        }
+        output = io.StringIO()
+        with patch.object(benchmark_trace, "parse_args", return_value=args), \
+             patch.object(benchmark_trace, "live_device_identity", return_value=identity), \
+             patch.object(benchmark_trace, "run_once", side_effect=[run, run]), \
+             contextlib.redirect_stdout(output):
+            status = benchmark_trace.main()
+
+        self.assertEqual(2, status)
+        report = benchmark_trace.json.loads(output.getvalue())
+        self.assertFalse(report["comparison"]["meets_rate_target"])
+        self.assertFalse(report["comparison"]["meets_size_target"])
 
     def test_binary_trace_baseline_parser_rejects_invalid_tables(self):
         table = """## Current format-2 artifact baselines
