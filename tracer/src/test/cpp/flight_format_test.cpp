@@ -113,7 +113,8 @@ int main() {
     superblock.flags = 0x81828384U;
     CHECK(flight_set_superblock_identity(&superblock, identity));
 
-    uint8_t encoded[kFlightSuperblockBytes]{};
+    uint8_t encoded[kFlightSuperblockBytes];
+    std::memset(encoded, 0xa5, sizeof(encoded));
     CHECK(encode_flight_superblock_le(superblock, encoded, sizeof(encoded)));
     CHECK(encoded[0] == 0x54 && encoded[1] == 0x4c && encoded[2] == 0x46 && encoded[3] == 0x51);
     CHECK(encoded[4] == 0x01 && encoded[5] == 0x00);
@@ -122,6 +123,8 @@ int main() {
     CHECK(encoded[8] == 0x00 && encoded[9] == 0x10);
     CHECK(encoded[16] == 0x08 && encoded[17] == 0x07 && encoded[22] == 0x02 && encoded[23] == 0x01);
     CHECK(encoded[72] == 0x84 && encoded[73] == 0x83 && encoded[74] == 0x82 && encoded[75] == 0x81);
+    CHECK(encoded[10] == 0 && encoded[15] == 0 && encoded[76] == 0 &&
+          encoded[kFlightSuperblockBytes - 1U] == 0);
 
     FlightSuperblock decoded{};
     CHECK(decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
@@ -158,14 +161,14 @@ int main() {
     CHECK(encoded[92] == 0x07 && encoded[93] == 0x00);
     CHECK(encoded[96] == identity.target_name_bytes && encoded[97] == 0x00);
     CHECK(encoded[kFlightTargetNameOffset] == 'l');
+    CHECK(encoded[kFlightTargetNameOffset + identity.target_name_bytes] == 0);
+    CHECK(encoded[kFlightSuperblockBytes - 1U] == 0);
     CHECK(decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
-    FlightArtifactIdentityView decoded_identity{};
-    CHECK(flight_get_superblock_identity(decoded, &decoded_identity));
-    CHECK(decoded_identity.run_id == identity.run_id);
-    CHECK(decoded_identity.pid == identity.pid);
-    CHECK(decoded_identity.module_generation == identity.module_generation);
-    CHECK(decoded_identity.target_name_bytes == identity.target_name_bytes);
-    CHECK(std::memcmp(decoded_identity.target_name, target_name, identity.target_name_bytes) == 0);
+    CHECK(decoded.run_id == identity.run_id);
+    CHECK(decoded.pid == identity.pid);
+    CHECK(decoded.module_generation == identity.module_generation);
+    CHECK(decoded.target_name_bytes == identity.target_name_bytes);
+    CHECK(std::memcmp(decoded.target_name, target_name, identity.target_name_bytes) == 0);
 
     FlightArtifactIdentityView invalid_identity = identity;
     invalid_identity.run_id = 0;
@@ -190,4 +193,43 @@ int main() {
     encoded[98 + identity.target_name_bytes + 1U] = 0;
     encoded[76] = 1;
     CHECK(!decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
+
+    uint8_t invalid_encoded[kFlightSuperblockBytes];
+    std::memcpy(invalid_encoded, encoded, sizeof(invalid_encoded));
+    invalid_encoded[76] = 0;
+    std::memset(invalid_encoded + 80, 0, sizeof(uint64_t));
+    CHECK(!decode_flight_superblock_le(invalid_encoded, sizeof(invalid_encoded), &decoded));
+    std::memcpy(invalid_encoded, encoded, sizeof(invalid_encoded));
+    invalid_encoded[76] = 0;
+    std::memset(invalid_encoded + 88, 0, sizeof(uint32_t));
+    CHECK(!decode_flight_superblock_le(invalid_encoded, sizeof(invalid_encoded), &decoded));
+    std::memcpy(invalid_encoded, encoded, sizeof(invalid_encoded));
+    invalid_encoded[76] = 0;
+    invalid_encoded[96] = 0;
+    invalid_encoded[97] = 0;
+    CHECK(!decode_flight_superblock_le(invalid_encoded, sizeof(invalid_encoded), &decoded));
+    std::memcpy(invalid_encoded, encoded, sizeof(invalid_encoded));
+    invalid_encoded[76] = 0;
+    invalid_encoded[96] = 129;
+    invalid_encoded[97] = 0;
+    CHECK(!decode_flight_superblock_le(invalid_encoded, sizeof(invalid_encoded), &decoded));
+    std::memcpy(invalid_encoded, encoded, sizeof(invalid_encoded));
+    invalid_encoded[76] = 0;
+    invalid_encoded[kFlightTargetNameOffset + 1] = 0;
+    CHECK(!decode_flight_superblock_le(invalid_encoded, sizeof(invalid_encoded), &decoded));
+    CHECK(!decode_flight_superblock_le(nullptr, sizeof(encoded), &decoded));
+    CHECK(!decode_flight_superblock_le(encoded, sizeof(encoded), nullptr));
+
+    char maximum_name[kFlightTargetNameBytes];
+    std::memset(maximum_name, 'x', sizeof(maximum_name));
+    FlightArtifactIdentityView maximum_identity{identity.run_id, identity.pid,
+                                                 identity.module_generation, maximum_name,
+                                                 kFlightTargetNameBytes};
+    FlightSuperblock maximum_superblock = identity_superblock;
+    CHECK(flight_set_superblock_identity(&maximum_superblock, maximum_identity));
+    std::memset(encoded, 0xa5, sizeof(encoded));
+    CHECK(encode_flight_superblock_le(maximum_superblock, encoded, sizeof(encoded)));
+    CHECK(encoded[kFlightTargetNameOffset + kFlightTargetNameBytes - 1U] == 'x');
+    CHECK(decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
+    CHECK(decoded.target_name_bytes == kFlightTargetNameBytes);
 }

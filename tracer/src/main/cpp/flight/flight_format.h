@@ -204,17 +204,6 @@ inline bool flight_set_superblock_identity(FlightSuperblock *superblock,
     return true;
 }
 
-inline bool flight_get_superblock_identity(const FlightSuperblock &superblock,
-                                           FlightArtifactIdentityView *identity) noexcept {
-    if (identity == nullptr || !flight_superblock_identity_valid(superblock)) return false;
-    identity->run_id = superblock.run_id;
-    identity->pid = superblock.pid;
-    identity->module_generation = superblock.module_generation;
-    identity->target_name = reinterpret_cast<const char *>(superblock.target_name);
-    identity->target_name_bytes = superblock.target_name_bytes;
-    return true;
-}
-
 inline bool encode_flight_superblock_le(const FlightSuperblock &superblock, uint8_t *destination,
                                         size_t destination_size) noexcept {
     if (destination == nullptr || destination_size != kFlightSuperblockBytes ||
