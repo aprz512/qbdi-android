@@ -29,6 +29,20 @@ add_trace_test(trace_config_test
 add_trace_test(flight_format_test
     flight_format_test.cpp)
 
+add_trace_test(flight_artifact_test
+    flight_artifact_test.cpp
+    ../../main/cpp/flight/flight_artifact.cpp)
+target_link_libraries(flight_artifact_test PRIVATE Threads::Threads)
+target_link_options(flight_artifact_test PRIVATE
+    -Wl,--wrap=ftruncate
+    -Wl,--wrap=mmap)
+
+add_trace_test(flight_chunk_writer_test
+    flight_chunk_writer_test.cpp
+    ../../main/cpp/flight/flight_artifact.cpp
+    ../../main/cpp/flight/flight_chunk_writer.cpp)
+target_link_libraries(flight_chunk_writer_test PRIVATE Threads::Threads)
+
 add_trace_test(instruction_cache_test
     instruction_cache_test.cpp
     ../../main/cpp/core/instruction_cache.cpp)
