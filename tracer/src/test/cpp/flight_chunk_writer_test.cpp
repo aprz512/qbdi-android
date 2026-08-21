@@ -22,6 +22,12 @@ void check(bool condition, const char *expression, int line) {
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
+FlightArtifactIdentityView test_identity() {
+    static constexpr char kTargetName[] = "libdemo_target.so";
+    return {0x1020304050607080ULL, 4242, 17, kTargetName,
+            static_cast<uint16_t>(sizeof(kTargetName) - 1U)};
+}
+
 struct Fixture {
     Fixture() {
         char directory_template[] = "/tmp/qtrace-flight-writer-XXXXXX";
@@ -35,7 +41,7 @@ struct Fixture {
         options.chunk_bytes = 64U * 1024;
         options.max_threads = 4;
         options.protected_chunks = 2;
-        CHECK(artifact.create(path.c_str(), options));
+        CHECK(artifact.create(path.c_str(), options, test_identity()));
         CHECK(artifact.register_thread(1234, &thread));
         CHECK(writer.initialize(&artifact, thread));
     }
@@ -180,7 +186,7 @@ void exact_oldest_unprotected_reclamation() {
     options.max_threads = 2;
     options.protected_chunks = 4;
     FlightArtifact artifact;
-    CHECK(artifact.create(path.c_str(), options));
+    CHECK(artifact.create(path.c_str(), options, test_identity()));
     FlightThreadRegistration threads[2]{};
     CHECK(artifact.register_thread(311, &threads[0]));
     CHECK(artifact.register_thread(422, &threads[1]));
@@ -265,7 +271,7 @@ void stress_rotations(unsigned int rotations) {
     options.max_threads = 2;
     options.protected_chunks = 4;
     FlightArtifact artifact;
-    CHECK(artifact.create(path.c_str(), options));
+    CHECK(artifact.create(path.c_str(), options, test_identity()));
     FlightThreadRegistration first_thread{};
     FlightThreadRegistration second_thread{};
     CHECK(artifact.register_thread(111, &first_thread));

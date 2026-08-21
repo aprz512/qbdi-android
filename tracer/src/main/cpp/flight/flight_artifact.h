@@ -101,7 +101,8 @@ public:
     FlightArtifact(const FlightArtifact &) = delete;
     FlightArtifact &operator=(const FlightArtifact &) = delete;
 
-    bool create(const char *path, const FlightOptions &options) noexcept;
+    bool create(const char *path, const FlightOptions &options,
+                const FlightArtifactIdentityView &identity) noexcept;
     void close() noexcept;
     void detach_after_fork_child() noexcept;
 

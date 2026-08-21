@@ -84,13 +84,19 @@ FlightOptions test_options() {
     return options;
 }
 
+FlightArtifactIdentityView test_identity() {
+    static constexpr char kTargetName[] = "libdemo_target.so";
+    return {0x1020304050607080ULL, 4242, 17, kTargetName,
+            static_cast<uint16_t>(sizeof(kTargetName) - 1U)};
+}
+
 void creates_checked_private_mapping_and_publishes_superblock_last() {
     TemporaryArtifact file;
     g_file_operation_order = 0;
     g_ftruncate_order = 0;
     g_shared_mmap_order = 0;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), test_options()));
+    CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
     CHECK(artifact.valid());
     CHECK(g_ftruncate_order > 0);
     CHECK(g_shared_mmap_order > g_ftruncate_order);
@@ -110,6 +116,12 @@ void creates_checked_private_mapping_and_publishes_superblock_last() {
     CHECK(superblock.chunk_count == artifact.chunk_count());
     CHECK(superblock.emergency_record_count == test_options().max_threads + 1U);
     CHECK(superblock.emergency_record_bytes == kFlightEmergencyRecordBytes);
+    CHECK(superblock.run_id == test_identity().run_id);
+    CHECK(superblock.pid == test_identity().pid);
+    CHECK(superblock.module_generation == test_identity().module_generation);
+    CHECK(superblock.target_name_bytes == test_identity().target_name_bytes);
+    CHECK(std::memcmp(superblock.target_name, test_identity().target_name,
+                      superblock.target_name_bytes) == 0);
     CHECK(superblock.directory_offset +
                   static_cast<uint64_t>(superblock.directory_entries) *
                           superblock.directory_entry_bytes <=
@@ -124,7 +136,7 @@ void creates_checked_private_mapping_and_publishes_superblock_last() {
           superblock.artifact_bytes);
 
     FlightArtifact duplicate;
-    CHECK(!duplicate.create(file.path.c_str(), test_options()));
+    CHECK(!duplicate.create(file.path.c_str(), test_options(), test_identity()));
     CHECK(artifact.valid());
 }
 
@@ -132,7 +144,7 @@ void mmap_failure_closes_and_removes_the_partial_artifact() {
     TemporaryArtifact file;
     FlightArtifact artifact;
     g_fail_shared_mmap = true;
-    CHECK(!artifact.create(file.path.c_str(), test_options()));
+    CHECK(!artifact.create(file.path.c_str(), test_options(), test_identity()));
     g_fail_shared_mmap = false;
     CHECK(!artifact.valid());
     CHECK(::access(file.path.c_str(), F_OK) == -1);
@@ -146,9 +158,36 @@ void rejects_invalid_layout_without_leaving_a_file() {
     options.max_threads = UINT32_MAX;
 
     FlightArtifact artifact;
-    CHECK(!artifact.create(file.path.c_str(), options));
+    CHECK(!artifact.create(file.path.c_str(), options, test_identity()));
     CHECK(::access(file.path.c_str(), F_OK) == -1);
     CHECK(errno == ENOENT);
+}
+
+void rejects_invalid_artifact_identity_without_leaving_a_file() {
+    TemporaryArtifact file;
+    FlightArtifactIdentityView identity = test_identity();
+    identity.run_id = 0;
+    FlightArtifact artifact;
+    CHECK(!artifact.create(file.path.c_str(), test_options(), identity));
+    CHECK(::access(file.path.c_str(), F_OK) == -1);
+    CHECK(errno == ENOENT);
+
+    identity = test_identity();
+    identity.pid = 0;
+    CHECK(!artifact.create(file.path.c_str(), test_options(), identity));
+    identity = test_identity();
+    identity.target_name_bytes = 0;
+    CHECK(!artifact.create(file.path.c_str(), test_options(), identity));
+    char long_name[kFlightTargetNameBytes + 1]{};
+    for (size_t index = 0; index < sizeof(long_name); ++index) long_name[index] = 'x';
+    identity = {test_identity().run_id, test_identity().pid, test_identity().module_generation,
+                long_name, static_cast<uint16_t>(sizeof(long_name))};
+    CHECK(!artifact.create(file.path.c_str(), test_options(), identity));
+    char embedded_nul[] = {'a', '\0', 'b'};
+    identity = {test_identity().run_id, test_identity().pid, test_identity().module_generation,
+                embedded_nul, static_cast<uint16_t>(sizeof(embedded_nul))};
+    CHECK(!artifact.create(file.path.c_str(), test_options(), identity));
+    CHECK(::access(file.path.c_str(), F_OK) == -1);
 }
 
 void sequence_allocation_saturates_permanently_before_wrap() {
@@ -164,7 +203,7 @@ void registers_unique_tids_and_marks_exhaustion_incomplete() {
     FlightOptions options = test_options();
     options.max_threads = 2;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), options));
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
 
     FlightThreadRegistration first{};
     FlightThreadRegistration duplicate{};
@@ -216,7 +255,7 @@ void protected_pool_exhaustion_publishes_the_affected_tid() {
     options.max_threads = 2;
     options.protected_chunks = 63;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), options));
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
     CHECK(artifact.chunk_count() == 63);
     FlightThreadRegistration thread{};
     FlightThreadRegistration neighbor{};
@@ -259,7 +298,7 @@ void protected_pool_exhaustion_publishes_the_affected_tid() {
 void emergency_slots_publish_complete_little_endian_records() {
     TemporaryArtifact file;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), test_options()));
+    CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
     FlightThreadRegistration thread{};
     CHECK(artifact.register_thread(0x11223344U, &thread));
 
@@ -300,7 +339,7 @@ void emergency_slots_publish_complete_little_endian_records() {
 void colliding_emergency_writers_never_publish_a_hybrid() {
     TemporaryArtifact file;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), test_options()));
+    CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
     FlightThreadRegistration thread{};
     CHECK(artifact.register_thread(900, &thread));
 
@@ -365,7 +404,7 @@ void colliding_emergency_writers_never_publish_a_hybrid() {
 void concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity() {
     TemporaryArtifact file;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), test_options()));
+    CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
     std::atomic<bool> start{false};
     std::array<FlightThreadRegistration, 8> duplicates{};
     std::array<std::thread, 8> duplicate_workers;
@@ -414,7 +453,7 @@ void concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity() {
 void allocator_reclaims_global_oldest_without_stealing_reservations() {
     TemporaryArtifact file;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), test_options()));
+    CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
     FlightThreadRegistration busy{};
     FlightThreadRegistration quiet{};
     CHECK(artifact.register_thread(101, &busy));
@@ -454,7 +493,7 @@ void allocator_reclaims_global_oldest_without_stealing_reservations() {
 void fork_child_detach_releases_only_the_child_copy() {
     TemporaryArtifact file;
     FlightArtifact artifact;
-    CHECK(artifact.create(file.path.c_str(), test_options()));
+    CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
     const pid_t child = ::fork();
     CHECK(child >= 0);
     if (child == 0) {
@@ -478,6 +517,7 @@ int main() {
     creates_checked_private_mapping_and_publishes_superblock_last();
     mmap_failure_closes_and_removes_the_partial_artifact();
     rejects_invalid_layout_without_leaving_a_file();
+    rejects_invalid_artifact_identity_without_leaving_a_file();
     sequence_allocation_saturates_permanently_before_wrap();
     registers_unique_tids_and_marks_exhaustion_incomplete();
     protected_pool_exhaustion_publishes_the_affected_tid();

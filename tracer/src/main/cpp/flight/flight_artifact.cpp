@@ -206,12 +206,14 @@ FlightArtifact::~FlightArtifact() {
     close();
 }
 
-bool FlightArtifact::create(const char *path, const FlightOptions &options) noexcept {
+bool FlightArtifact::create(const char *path, const FlightOptions &options,
+                            const FlightArtifactIdentityView &identity) noexcept {
     if (valid() || path == nullptr || path[0] == '\0' || options.capacity_bytes > SIZE_MAX ||
         options.capacity_bytes > static_cast<uint64_t>(std::numeric_limits<off_t>::max()) ||
         options.max_threads == 0 || options.max_threads == UINT32_MAX ||
         options.protected_chunks == 0 ||
-        !power_of_two(options.chunk_bytes) || options.chunk_bytes <= kFlightChunkHeaderBytes) {
+        !power_of_two(options.chunk_bytes) || options.chunk_bytes <= kFlightChunkHeaderBytes ||
+        !flight_identity_view_valid(identity)) {
         errno = EINVAL;
         return false;
     }
@@ -341,6 +343,13 @@ bool FlightArtifact::create(const char *path, const FlightOptions &options) noex
     superblock.emergency_record_bytes = kFlightEmergencyRecordBytes;
     superblock.emergency_record_count = emergency_record_count_;
     superblock.flags = 0;
+    if (!flight_set_superblock_identity(&superblock, identity)) {
+        const int error = EINVAL;
+        close();
+        (void)::unlink(path);
+        errno = error;
+        return false;
+    }
     if (!encode_flight_superblock_le(superblock, mapping_, kFlightSuperblockBytes)) {
         const int error = EINVAL;
         close();

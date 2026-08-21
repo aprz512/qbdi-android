@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
+#include <cstring>
 #include <type_traits>
 
 static void check(bool condition, const char *expression, int line) {
@@ -14,9 +15,13 @@ static void check(bool condition, const char *expression, int line) {
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
 int main() {
+    const char target_name[] = "libdemo_target.so";
+    FlightArtifactIdentityView identity{0x0102030405060708ULL, 1234, 7, target_name,
+                                        static_cast<uint16_t>(sizeof(target_name) - 1U)};
     CHECK(kFlightMagic == 0x51464c54U);
     CHECK(kFlightVersion == 1);
     CHECK(kFlightRecordCommit == 0x51434d54U);
+    CHECK(kFlightTargetNameBytes == 128);
     CHECK(sizeof(FlightSuperblock) == kFlightSuperblockBytes);
     CHECK(sizeof(FlightDirectoryEntry) == kFlightDirectoryEntryBytes);
     CHECK(sizeof(FlightChunkHeader) == kFlightChunkHeaderBytes);
@@ -58,6 +63,11 @@ int main() {
     CHECK(offsetof(FlightSuperblock, chunk_offset) == 40);
     CHECK(offsetof(FlightSuperblock, emergency_offset) == 56);
     CHECK(offsetof(FlightSuperblock, flags) == 72);
+    CHECK(offsetof(FlightSuperblock, run_id) == 80);
+    CHECK(offsetof(FlightSuperblock, pid) == 88);
+    CHECK(offsetof(FlightSuperblock, module_generation) == 92);
+    CHECK(offsetof(FlightSuperblock, target_name_bytes) == 96);
+    CHECK(offsetof(FlightSuperblock, target_name) == kFlightTargetNameOffset);
     CHECK(offsetof(FlightRecordHeader, type) == 0);
     CHECK(offsetof(FlightRecordHeader, sequence) == 8);
     CHECK(offsetof(FlightRecordHeader, commit) == 20);
@@ -101,6 +111,7 @@ int main() {
     superblock.emergency_record_bytes = kFlightEmergencyRecordBytes;
     superblock.emergency_record_count = 0x71727374U;
     superblock.flags = 0x81828384U;
+    CHECK(flight_set_superblock_identity(&superblock, identity));
 
     uint8_t encoded[kFlightSuperblockBytes]{};
     CHECK(encode_flight_superblock_le(superblock, encoded, sizeof(encoded)));
@@ -124,5 +135,59 @@ int main() {
     CHECK(decoded.emergency_offset == superblock.emergency_offset);
     CHECK(decoded.flags == superblock.flags);
     encoded[6] = 0;
+    CHECK(!decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
+
+    FlightSuperblock identity_superblock{};
+    CHECK(flight_set_superblock_identity(&identity_superblock, identity));
+    CHECK(identity_superblock.run_id == identity.run_id);
+    CHECK(identity_superblock.pid == identity.pid);
+    CHECK(identity_superblock.module_generation == identity.module_generation);
+    CHECK(identity_superblock.target_name_bytes == identity.target_name_bytes);
+    CHECK(identity_superblock.target_name[0] == 'l');
+    CHECK(identity_superblock.target_name[identity.target_name_bytes] == 0);
+
+    identity_superblock.magic = kFlightMagic;
+    identity_superblock.version = kFlightVersion;
+    identity_superblock.byte_order = kFlightByteOrderLittleEndian;
+    identity_superblock.pointer_width = kFlightPointerWidth64;
+    identity_superblock.header_bytes = kFlightSuperblockBytes;
+    CHECK(encode_flight_superblock_le(identity_superblock, encoded, sizeof(encoded)));
+    CHECK(encoded[80] == 0x08 && encoded[81] == 0x07 && encoded[86] == 0x02 &&
+          encoded[87] == 0x01);
+    CHECK(encoded[88] == 0xd2 && encoded[89] == 0x04);
+    CHECK(encoded[92] == 0x07 && encoded[93] == 0x00);
+    CHECK(encoded[96] == identity.target_name_bytes && encoded[97] == 0x00);
+    CHECK(encoded[kFlightTargetNameOffset] == 'l');
+    CHECK(decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
+    FlightArtifactIdentityView decoded_identity{};
+    CHECK(flight_get_superblock_identity(decoded, &decoded_identity));
+    CHECK(decoded_identity.run_id == identity.run_id);
+    CHECK(decoded_identity.pid == identity.pid);
+    CHECK(decoded_identity.module_generation == identity.module_generation);
+    CHECK(decoded_identity.target_name_bytes == identity.target_name_bytes);
+    CHECK(std::memcmp(decoded_identity.target_name, target_name, identity.target_name_bytes) == 0);
+
+    FlightArtifactIdentityView invalid_identity = identity;
+    invalid_identity.run_id = 0;
+    CHECK(!flight_set_superblock_identity(&identity_superblock, invalid_identity));
+    invalid_identity = identity;
+    invalid_identity.pid = 0;
+    CHECK(!flight_set_superblock_identity(&identity_superblock, invalid_identity));
+    invalid_identity = identity;
+    invalid_identity.target_name_bytes = 0;
+    CHECK(!flight_set_superblock_identity(&identity_superblock, invalid_identity));
+    char long_name[kFlightTargetNameBytes + 1]{};
+    for (size_t index = 0; index < sizeof(long_name); ++index) long_name[index] = 'x';
+    invalid_identity = {identity.run_id, identity.pid, identity.module_generation, long_name,
+                        static_cast<uint16_t>(sizeof(long_name))};
+    CHECK(!flight_set_superblock_identity(&identity_superblock, invalid_identity));
+    char embedded_nul[] = {'a', '\0', 'b'};
+    invalid_identity = {identity.run_id, identity.pid, identity.module_generation, embedded_nul,
+                        static_cast<uint16_t>(sizeof(embedded_nul))};
+    CHECK(!flight_set_superblock_identity(&identity_superblock, invalid_identity));
+    encoded[98 + identity.target_name_bytes + 1U] = 1;
+    CHECK(!decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
+    encoded[98 + identity.target_name_bytes + 1U] = 0;
+    encoded[76] = 1;
     CHECK(!decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
 }
