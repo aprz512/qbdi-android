@@ -264,7 +264,8 @@ git commit -m "refactor(trace): add event sink seam"
 - Modify: `tracer/src/test/cpp/CMakeLists.txt`
 
 **Interfaces:**
-- Produces: `FlightOptions`, superblock/directory/chunk/record/emergency POD structs, record types, and exact byte constants.
+- Produces: `FlightOptions`, `FlightArtifactIdentityView`, superblock/directory/chunk/record/emergency
+  POD structs, record types, and exact byte constants.
 
 - [ ] **Step 1: Write failing format/config tests**
 
@@ -275,6 +276,7 @@ CHECK(parsed.valid && parsed.flight.enabled);
 CHECK(parsed.flight.capacity_bytes == 512ULL * 1024 * 1024);
 CHECK(sizeof(FlightRecordHeader) == kFlightRecordHeaderBytes);
 CHECK(kFlightMagic == 0x51464c54U && kFlightVersion == 1);
+CHECK(kFlightTargetNameBytes == 128);
 ```
 
 Reject capacity outside 64–2048 MiB, non-power-of-two chunk sizes outside 64–1024 KiB, thread count
@@ -299,6 +301,14 @@ struct FlightOptions {
     uint32_t protected_chunks = 4;
 };
 
+struct FlightArtifactIdentityView {
+    uint64_t run_id;
+    uint32_t pid;
+    uint32_t module_generation;
+    const char *target_name;
+    uint16_t target_name_bytes;
+};
+
 enum class FlightRecordType : uint16_t {
     ChunkBegin = 1, ThreadBegin = 2, ThreadEnd = 3, Instruction = 4,
     Memory = 5, Call = 6, Rule = 7, Error = 8, RegisterDelta = 9,
@@ -308,7 +318,10 @@ enum class FlightRecordType : uint16_t {
 ```
 
 Use fixed-width integers, explicit reserved bytes, and `static_assert`; never map native `bool`,
-pointers, atomics, `sigaction`, or C++ containers.
+pointers, atomics, `sigaction`, or C++ containers. The input view is not persisted: encode its
+`run_id`, `pid`, `module_generation`, `target_name_bytes`, and at most 128 UTF-8 target-name bytes
+into explicit superblock fields. Reject zero run IDs, zero PIDs, empty names, names longer than 128
+bytes, and embedded NUL bytes. Decode validates the same invariants and zero-filled name padding.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
@@ -334,13 +347,14 @@ git commit -m "feat(trace): define flight recorder format"
 
 **Interfaces:**
 - Consumes: Task 3 options and wire structs.
-- Produces: `FlightArtifact::create/register_thread/acquire_chunk/mark_incomplete/write_emergency/detach_after_fork_child`.
+- Produces: `FlightArtifact::create(path, options, identity)/register_thread/acquire_chunk/mark_incomplete/write_emergency/detach_after_fork_child`.
 - Produces: `FlightChunkWriter::append/seal/rotate`.
 
 - [ ] **Step 1: Write failing storage tests**
 
-Test checked layout, `0600`, `ftruncate` before mmap, unique/duplicate TIDs, directory exhaustion,
-generation increments, four protected chunks, oldest-unprotected reclamation, child detach, sealed
+Test checked layout, `0600`, `ftruncate` before mmap, identity round-trip/rejection,
+unique/duplicate TIDs, directory exhaustion, generation increments, four protected chunks,
+oldest-unprotected reclamation, child detach, sealed
 checksums, and a torn final record:
 
 ```cpp
@@ -361,7 +375,8 @@ Expected: build fails because storage classes do not exist.
 - [ ] **Step 3: Implement artifact ownership and allocation**
 
 Compute aligned offsets with checked arithmetic. Open with `O_CREAT|O_EXCL|O_RDWR|O_CLOEXEC` mode
-`0600`, `ftruncate`, then `mmap(MAP_SHARED)`, and publish initialized superblock last. Use one normal
+`0600`, validate and encode the required identity, `ftruncate`, then `mmap(MAP_SHARED)`, and publish
+initialized superblock last. Use one normal
 mutex only for chunk rotation. `mark_incomplete` never reverses. Emergency slots use fixed atomic
 stores and never allocate.
 
@@ -468,7 +483,9 @@ Expected: imports fail because modules do not exist.
 - [ ] **Step 3: Implement strict parsing and atomic publication**
 
 Use explicit little-endian `Struct` objects, checked region arithmetic, enum validation, and exact
-reads. Reject bad superblock bounds, sealed checksum failures, and duplicate global sequences. Ignore
+reads. Reject bad superblock bounds or identity fields, sealed checksum failures, and duplicate
+global sequences. Expose run ID, PID, module generation, and target module name in the JSON summary.
+Ignore
 only a torn suffix of an active chunk. Resolve dictionaries per chunk, apply deltas from the chunk
 checkpoint, and emit merged/per-TID text plus JSON summary. Write every output to same-directory
 temporary files and publish all-or-none with the existing no-overwrite rule.
