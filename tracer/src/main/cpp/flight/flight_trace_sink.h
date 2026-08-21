@@ -16,6 +16,8 @@ public:
 
     bool instruction(const TraceContext &context,
                      const InstructionRecord &record) noexcept override;
+    bool instruction(const TraceContext &context, const InstructionRecord &record,
+                     const RegisterSnapshot &post_registers) noexcept override;
     bool memory(const TraceContext &context, uintptr_t pc,
                 const MemoryRecord &record) noexcept override;
     bool call(const char *category, std::string_view name,

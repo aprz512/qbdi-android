@@ -8,7 +8,8 @@
 namespace {
 
 struct RecordingSink final : PendingInstructionSink {
-    bool emit(const InstructionRecord &record) override {
+    bool emit(const InstructionRecord &record,
+              const RegisterSnapshot &) override {
         event_addresses.push_back(record.pc);
         records.push_back(record);
         return true;

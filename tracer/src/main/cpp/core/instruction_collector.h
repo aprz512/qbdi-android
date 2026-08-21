@@ -34,7 +34,8 @@ public:
     static QBDI::VMAction post_callback(QBDI::VM *vm, QBDI::GPRState *gpr,
                                         QBDI::FPRState *fpr, void *data);
 
-    bool emit(const InstructionRecord &record) override;
+    bool emit(const InstructionRecord &record,
+              const RegisterSnapshot &post_registers) override;
     bool emit_memory_continuation(uintptr_t pc,
                                   const MemoryRecord &record) override;
 

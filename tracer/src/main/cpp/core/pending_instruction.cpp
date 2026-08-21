@@ -107,5 +107,5 @@ bool PendingInstructionCollector::complete(const RegisterSnapshot &registers) no
     }
 
     pending_ = false;
-    return sink_ != nullptr && sink_->emit(pending_record_);
+    return sink_ != nullptr && sink_->emit(pending_record_, registers);
 }

@@ -324,7 +324,8 @@ void matches_table_driven_addressing_classes_through_the_policy() {
 }
 
 struct PipelineSink final : PendingInstructionSink {
-    bool emit(const InstructionRecord &value) override {
+    bool emit(const InstructionRecord &value,
+              const RegisterSnapshot &) override {
         instruction = value;
         emitted_instruction = true;
         return true;

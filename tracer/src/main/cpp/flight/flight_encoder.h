@@ -43,6 +43,8 @@ public:
 
     bool instruction(const TraceContext &context,
                      const InstructionRecord &record) noexcept;
+    bool instruction(const TraceContext &context, const InstructionRecord &record,
+                     const RegisterSnapshot &post_registers) noexcept;
     bool memory(const TraceContext &context, uintptr_t pc,
                 const MemoryRecord &record) noexcept;
     bool call(const char *category, std::string_view name,
@@ -90,6 +92,9 @@ private:
     bool instruction_post_state(
             const InstructionRecord &record,
             std::array<uint64_t, kFlightGprCount> *post) const noexcept;
+    bool write_instruction_with_post_state(
+            const TraceContext &context, const InstructionRecord &record,
+            const std::array<uint64_t, kFlightGprCount> &post) noexcept;
     bool write_string_event(FlightRecordType type,
                             const std::array<std::string_view, 3> &fields,
                             size_t field_count, size_t detail_field,
@@ -110,6 +115,9 @@ private:
 
     static void snapshot_gpr(const QBDI::GPRState &gpr,
                              std::array<uint64_t, kFlightGprCount> *values) noexcept;
+    static void snapshot_registers(
+            const RegisterSnapshot &registers,
+            std::array<uint64_t, kFlightGprCount> *values) noexcept;
 
     FlightChunkWriter *writer_ = nullptr;
     TraceProfile profile_ = TraceProfile::Full;

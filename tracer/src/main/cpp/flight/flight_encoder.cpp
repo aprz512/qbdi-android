@@ -126,6 +126,17 @@ void FlightEncoder::snapshot_gpr(
     (*values)[33] = static_cast<uint64_t>(gpr.nzcv);
 }
 
+void FlightEncoder::snapshot_registers(
+        const RegisterSnapshot &registers,
+        std::array<uint64_t, kFlightGprCount> *values) noexcept {
+    if (values == nullptr) return;
+    for (size_t index = 0; index < 32; ++index) {
+        (*values)[index] = registers.values[index];
+    }
+    (*values)[32] = registers.values[33];
+    (*values)[33] = registers.values[32];
+}
+
 FlightWriteResult FlightEncoder::append_no_rotate(FlightRecordType type,
                                                   const uint8_t *payload,
                                                   size_t payload_bytes,
@@ -312,11 +323,26 @@ bool FlightEncoder::write_instruction(const InstructionRecord &record) noexcept 
 bool FlightEncoder::instruction(const TraceContext &context,
                                 const InstructionRecord &record) noexcept {
     std::array<uint64_t, kFlightGprCount> post{};
+    if (!instruction_post_state(record, &post)) return fail();
+    return write_instruction_with_post_state(context, record, post);
+}
+
+bool FlightEncoder::instruction(const TraceContext &context,
+                                const InstructionRecord &record,
+                                const RegisterSnapshot &post_registers) noexcept {
+    std::array<uint64_t, kFlightGprCount> ignored{};
+    if (!instruction_post_state(record, &ignored)) return fail();
+    std::array<uint64_t, kFlightGprCount> post{};
+    snapshot_registers(post_registers, &post);
+    return write_instruction_with_post_state(context, record, post);
+}
+
+bool FlightEncoder::write_instruction_with_post_state(
+        const TraceContext &context, const InstructionRecord &record,
+        const std::array<uint64_t, kFlightGprCount> &post) noexcept {
     if (failed_ || context.module_base != module_base_ ||
         record.module_base != module_base_ || record.pc < module_base_ ||
-        record.memory_count > record.memory.size() ||
-        !instruction_post_state(record, &post) ||
-        !write_instruction(record)) {
+        record.memory_count > record.memory.size() || !write_instruction(record)) {
         return fail();
     }
     if (!write_register_snapshot(post)) return false;

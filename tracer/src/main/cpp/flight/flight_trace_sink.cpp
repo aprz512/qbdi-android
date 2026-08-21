@@ -20,6 +20,12 @@ bool FlightTraceSink::instruction(const TraceContext &context,
     return observe(encoder_.instruction(context, record));
 }
 
+bool FlightTraceSink::instruction(
+        const TraceContext &context, const InstructionRecord &record,
+        const RegisterSnapshot &post_registers) noexcept {
+    return observe(encoder_.instruction(context, record, post_registers));
+}
+
 bool FlightTraceSink::memory(const TraceContext &context, uintptr_t pc,
                              const MemoryRecord &record) noexcept {
     return observe(encoder_.memory(context, pc, record));

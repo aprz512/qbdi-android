@@ -126,6 +126,112 @@ void maps_all_trace_sink_events_and_fails_closed() {
     CHECK(::rmdir(created) == 0);
 }
 
+void full_post_state_drives_deltas_and_the_next_rotation_checkpoint() {
+    char directory_template[] = "/tmp/qtrace-flight-post-state-XXXXXX";
+    char *created = ::mkdtemp(directory_template);
+    CHECK(created != nullptr);
+    const std::string path = std::string(created) + "/artifact.flight.bin";
+    FlightOptions options;
+    options.enabled = true;
+    options.capacity_bytes = 8ULL * 1024ULL * 1024ULL;
+    options.chunk_bytes = 4096;
+    options.max_threads = 1;
+    options.protected_chunks = 1;
+    FlightArtifact artifact;
+    CHECK(artifact.create(path.c_str(), options, test_identity()));
+    FlightThreadRegistration thread{};
+    CHECK(artifact.register_thread(7788, &thread));
+    FlightChunkWriter writer;
+    CHECK(writer.initialize(&artifact, thread));
+    TraceContext context;
+    context.target_so = "libsink_target.so";
+    context.module_base = 0x72000000;
+    context.pid = 4400;
+    context.tid = 7788;
+
+    QBDI::GPRState initial{};
+    for (size_t index = 0; index < 31; ++index) QBDI_GPR_SET(&initial, index, 100 + index);
+    initial.sp = 131;
+    initial.pc = context.module_base + 0x40;
+    initial.nzcv = 133;
+    FlightTraceSink sink;
+    CHECK(sink.initialize(&writer, TraceProfile::Full, context, &initial));
+
+    CachedInstruction branch{};
+    branch.opcode = 0x14000010;
+    branch.write_gpr_mask = 1ULL;
+    branch.write_gpr_widths[0] = 8;
+    branch.flags = InstructionFlags::Branch;
+    std::memcpy(branch.mnemonic, "b", 2);
+    std::memcpy(branch.disassembly, "b #0x40", 8);
+    InstructionRecord event{};
+    event.sequence = 1;
+    event.pc = initial.pc;
+    event.module_base = context.module_base;
+    event.decoded = &branch;
+    event.writes.count = 1;
+    event.writes.values[0] = 1000;
+
+    RegisterSnapshot post{};
+    for (size_t index = 0; index < 31; ++index) post.values[index] = 1000 + index;
+    post.values[31] = 1031;
+    post.values[32] = 1033;
+    post.values[33] = context.module_base + 0x180;
+    TraceSink &event_sink = sink;
+    CHECK(event_sink.instruction(context, event, post));
+
+    const uint32_t instruction_chunk = writer.chunk_index();
+    const uint32_t instruction_generation = writer.generation();
+    const uint32_t instruction_bytes = writer.committed_bytes();
+    const uint8_t *bytes = artifact.chunk_data(instruction_chunk);
+    size_t offset = 0;
+    FlightDecodedRecord delta{};
+    while (offset < instruction_bytes) {
+        FlightDecodedRecord record{};
+        CHECK(scan_flight_record(bytes + offset, instruction_bytes - offset,
+                                 instruction_generation, &record));
+        if (record.type == FlightRecordType::RegisterDelta && record.flags == 0) delta = record;
+        offset += record.storage_bytes;
+    }
+    CHECK(delta.payload != nullptr);
+    CHECK(flight_read_u64_le(delta.payload) == kTraceValidGprMask);
+    CHECK(delta.payload_bytes == sizeof(uint64_t) + 34U * sizeof(uint64_t));
+    for (size_t index = 0; index < 32; ++index) {
+        CHECK(flight_read_u64_le(delta.payload + 8U + index * 8U) == 1000 + index);
+    }
+    CHECK(flight_read_u64_le(delta.payload + 8U + 32U * 8U) ==
+          context.module_base + 0x180);
+    CHECK(flight_read_u64_le(delta.payload + 8U + 33U * 8U) == 1033);
+
+    const size_t remaining = artifact.chunk_data_capacity() - writer.committed_bytes();
+    CHECK(remaining > 48U + kFlightRecordHeaderBytes);
+    std::vector<uint8_t> padding(remaining - 48U - kFlightRecordHeaderBytes, 0x5a);
+    CHECK(writer.append(FlightRecordType::Rule, padding) == FlightWriteResult::Written);
+    CHECK(sink.call("cat", "rotate", "post-state"));
+    CHECK(writer.chunk_index() != instruction_chunk);
+
+    bytes = artifact.chunk_data(writer.chunk_index());
+    FlightDecodedRecord metadata{};
+    FlightDecodedRecord checkpoint{};
+    CHECK(scan_flight_record(bytes, writer.committed_bytes(), writer.generation(), &metadata));
+    CHECK(scan_flight_record(bytes + metadata.storage_bytes,
+                             writer.committed_bytes() - metadata.storage_bytes,
+                             writer.generation(), &checkpoint));
+    CHECK(checkpoint.type == FlightRecordType::RegisterDelta);
+    CHECK(checkpoint.flags == kFlightRegisterCheckpointFlag);
+    for (size_t index = 0; index < 32; ++index) {
+        CHECK(flight_read_u64_le(checkpoint.payload + index * 8U) == 1000 + index);
+    }
+    CHECK(flight_read_u64_le(checkpoint.payload + 32U * 8U) ==
+          context.module_base + 0x180);
+    CHECK(flight_read_u64_le(checkpoint.payload + 33U * 8U) == 1033);
+
+    writer.detach();
+    artifact.close();
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::rmdir(created) == 0);
+}
+
 void preserves_large_logical_call_behavior_with_independent_fragments() {
     char directory_template[] = "/tmp/qtrace-flight-large-call-XXXXXX";
     char *created = ::mkdtemp(directory_template);
@@ -249,5 +355,6 @@ void preserves_large_logical_call_behavior_with_independent_fragments() {
 
 int main() {
     maps_all_trace_sink_events_and_fails_closed();
+    full_post_state_drives_deltas_and_the_next_rotation_checkpoint();
     preserves_large_logical_call_behavior_with_independent_fragments();
 }

@@ -13,6 +13,10 @@ public:
     virtual ~TraceSink() = default;
 
     virtual bool instruction(const TraceContext &, const InstructionRecord &) = 0;
+    virtual bool instruction(const TraceContext &context, const InstructionRecord &record,
+                             const RegisterSnapshot &) {
+        return instruction(context, record);
+    }
     virtual bool memory(const TraceContext &, uintptr_t, const MemoryRecord &) = 0;
     virtual bool call(const char *, std::string_view, std::string_view) = 0;
     virtual bool rule(const std::string &, const std::string &) = 0;

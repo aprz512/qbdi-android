@@ -67,7 +67,7 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
 
     const bool tracing_before_rule = trace_gate_ == nullptr || trace_gate_->enabled();
     if (tracing_before_rule && gpr != nullptr && pending_.has_pending()) {
-        pending_.complete_pending(snapshot(*gpr, pending_.pending_write_mask()));
+        pending_.complete_pending(snapshot(*gpr, kTraceValidGprMask));
         if (trace_gate_ != nullptr && writer_ != nullptr)
             trace_gate_->observe_failure(writer_->failed());
     }
@@ -113,9 +113,9 @@ QBDI::VMAction InstructionCollector::on_memory(QBDI::VM *vm, QBDI::GPRState *gpr
     return trace_gate_->trace(QBDI::CONTINUE, [&] {
         const auto accesses = vm->getInstMemoryAccess();
         bool matched = false;
-        const RegisterSnapshot post_registers = gpr != nullptr
-                                                        ? snapshot(*gpr, pending_.pending_write_mask())
-                                                        : RegisterSnapshot{};
+        const RegisterSnapshot post_registers =
+                gpr != nullptr ? snapshot(*gpr, kTraceValidGprMask)
+                               : RegisterSnapshot{};
         for (const auto &access: accesses) {
             const NormalizedMemoryAccess normalized = normalize(access);
             MemoryRecord memory{};
@@ -150,7 +150,7 @@ QBDI::VMAction InstructionCollector::on_post(QBDI::VM *vm, QBDI::GPRState *gpr,
 void InstructionCollector::finish_last(const QBDI::GPRState &gpr) noexcept {
     if (trace_gate_ != nullptr && !trace_gate_->enabled()) return;
     if (!pending_.has_pending()) return;
-    pending_.finish_last(snapshot(gpr, pending_.pending_write_mask()));
+    pending_.finish_last(snapshot(gpr, kTraceValidGprMask));
 }
 
 QBDI::VMAction InstructionCollector::pre_callback(QBDI::VM *vm, QBDI::GPRState *gpr,
@@ -171,12 +171,15 @@ QBDI::VMAction InstructionCollector::post_callback(QBDI::VM *vm, QBDI::GPRState 
     return static_cast<InstructionCollector *>(data)->on_post(vm, gpr, fpr);
 }
 
-bool InstructionCollector::emit(const InstructionRecord &record) {
+bool InstructionCollector::emit(const InstructionRecord &record,
+                                const RegisterSnapshot &post_registers) {
     if (writer_ == nullptr) return true;
-    if (trace_gate_ == nullptr) return writer_->instruction(*trace_, record);
+    if (trace_gate_ == nullptr) {
+        return writer_->instruction(*trace_, record, post_registers);
+    }
     trace_gate_->observe_failure(writer_->failed());
     if (!trace_gate_->enabled()) return true;
-    const bool emitted = writer_->instruction(*trace_, record);
+    const bool emitted = writer_->instruction(*trace_, record, post_registers);
     trace_gate_->observe_failure(writer_->failed());
     return emitted;
 }

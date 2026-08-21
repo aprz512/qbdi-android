@@ -9,7 +9,8 @@
 class PendingInstructionSink {
 public:
     virtual ~PendingInstructionSink() = default;
-    virtual bool emit(const InstructionRecord &record) = 0;
+    virtual bool emit(const InstructionRecord &record,
+                      const RegisterSnapshot &post_registers) = 0;
     virtual bool emit_memory_continuation(uintptr_t pc,
                                           const MemoryRecord &record) = 0;
 };
