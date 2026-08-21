@@ -55,6 +55,9 @@ set_target_properties(qbdi_static PROPERTIES
 add_library(qbdi_tracer SHARED
         tracer_entry.cpp
         core/module_maps.cpp
+        core/arm64_syscall.cpp
+        core/signal_context_arm64.cpp
+        core/signal_probe.cpp
         core/instruction_cache.cpp
         core/arm64_memory_operand.cpp
         core/memory_trace_policy.cpp

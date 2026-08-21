@@ -3,10 +3,12 @@
 #include "integrity.h"
 
 #include <android/log.h>
+#include <signal.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
@@ -19,6 +21,90 @@ constexpr std::array<uint8_t, 16> kInitSeed{
     0x51, 0x42, 0x44, 0x49, 0x2d, 0x41, 0x6e, 0x64,
     0x72, 0x6f, 0x69, 0x64, 0x2d, 0x64, 0x65, 0x6d,
 };
+
+constexpr uint64_t kSignalProbeGuestCalled = 1U << 0U;
+constexpr uint64_t kSignalProbeGuestPcOriginal = 1U << 1U;
+constexpr uint64_t kSignalProbeRegisterCookie = 1U << 2U;
+constexpr uint64_t kSignalProbeHandlerQueryHidden = 1U << 4U;
+constexpr uint64_t kArm64RtSigaction = 134U;
+constexpr uint64_t kArm64Tgkill = 131U;
+constexpr size_t kKernelSignalSetBytes = 8U;
+constexpr uint64_t kSignalProbeCookieRestoreMask = 0xa5a55a5af0f00f0fULL;
+
+struct KernelSigaction {
+    void (*handler)(int, siginfo_t *, void *) = nullptr;
+    uint64_t flags = 0;
+    void (*restorer)() = nullptr;
+    uint64_t mask = 0;
+};
+
+volatile sig_atomic_t g_probe_handler_called = 0;
+volatile sig_atomic_t g_probe_pc_original = 0;
+volatile sig_atomic_t g_probe_register_cookie = 0;
+std::atomic<uint64_t> g_probe_expected_pc{0};
+std::atomic<uint64_t> g_probe_expected_cookie{0};
+
+static_assert(std::atomic<uint64_t>::is_always_lock_free);
+static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t));
+
+__attribute__((always_inline)) inline uint64_t
+load_published_signal_value(const std::atomic<uint64_t> &value) noexcept {
+    uint64_t loaded = 0;
+    __asm__ volatile("ldar %0, [%1]"
+                     : "=r"(loaded)
+                     : "r"(&value)
+                     : "memory");
+    return loaded;
+}
+
+long raw_rt_sigaction(int signal_number, const KernelSigaction *action,
+                      KernelSigaction *old_action) noexcept {
+    register uint64_t x0 __asm__("x0") = static_cast<uint64_t>(signal_number);
+    register uint64_t x1 __asm__("x1") = reinterpret_cast<uintptr_t>(action);
+    register uint64_t x2 __asm__("x2") = reinterpret_cast<uintptr_t>(old_action);
+    register uint64_t x3 __asm__("x3") = kKernelSignalSetBytes;
+    register uint64_t x8 __asm__("x8") = kArm64RtSigaction;
+    __asm__ volatile("svc 0"
+                     : "+r"(x0)
+                     : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+                     : "memory", "cc");
+    return static_cast<long>(x0);
+}
+
+long raw_tgkill_with_cookie(int process_id, int thread_id, int signal_number,
+                            uint64_t cookie,
+                            uint64_t *restored_cookie) noexcept {
+    register uint64_t x0 __asm__("x0") = static_cast<uint64_t>(process_id);
+    register uint64_t x1 __asm__("x1") = static_cast<uint64_t>(thread_id);
+    register uint64_t x2 __asm__("x2") = static_cast<uint64_t>(signal_number);
+    register uint64_t x8 __asm__("x8") = kArm64Tgkill;
+    register uint64_t x19 __asm__("x19") = cookie;
+    std::atomic<uint64_t> *expected_pc = &g_probe_expected_pc;
+    __asm__ volatile("adr x9, 1f\n"
+                     "stlr x9, [%[expected_pc]]\n"
+                     "1: svc 0"
+                     : "+r"(x0), "+r"(x19)
+                     : "r"(x1), "r"(x2), "r"(x8),
+                       [expected_pc] "r"(expected_pc)
+                     : "x9", "memory", "cc");
+    if (restored_cookie != nullptr) {
+        *restored_cookie = x19;
+    }
+    return static_cast<long>(x0);
+}
+
+extern "C" __attribute__((noinline)) void
+demo_signal_probe_handler(int signal_number, siginfo_t *,
+                          void *opaque_context) {
+    auto *context = static_cast<ucontext_t *>(opaque_context);
+    g_probe_handler_called = signal_number == SIGUSR2;
+    g_probe_pc_original = context->uc_mcontext.pc ==
+                          load_published_signal_value(g_probe_expected_pc);
+    g_probe_register_cookie =
+        context->uc_mcontext.regs[19] ==
+        load_published_signal_value(g_probe_expected_cookie);
+    context->uc_mcontext.regs[19] ^= kSignalProbeCookieRestoreMask;
+}
 
 std::string read_property(const char *name) {
     char value[PROP_VALUE_MAX]{};
@@ -160,6 +246,47 @@ extern "C" uint64_t demo_benchmark_case(uint64_t iterations, uint64_t seed) {
     }
 
     return state ^ working_set[static_cast<size_t>(state & (working_set.size() - 1))];
+}
+
+extern "C" uint64_t demo_signal_probe(uint64_t cookie) {
+    g_probe_handler_called = 0;
+    g_probe_pc_original = 0;
+    g_probe_register_cookie = 0;
+    g_probe_expected_pc.store(0, std::memory_order_relaxed);
+    g_probe_expected_cookie.store(cookie, std::memory_order_release);
+
+    KernelSigaction guest_action{};
+    guest_action.handler = demo_signal_probe_handler;
+    guest_action.flags = SA_SIGINFO;
+    if (raw_rt_sigaction(SIGUSR2, &guest_action, nullptr) != 0) {
+        return 0;
+    }
+
+    uint64_t restored_cookie = 0;
+    (void)raw_tgkill_with_cookie(getpid(), gettid(), SIGUSR2, cookie,
+                                 &restored_cookie);
+
+    KernelSigaction visible_action{};
+    const bool handler_query_hidden =
+        raw_rt_sigaction(SIGUSR2, nullptr, &visible_action) == 0 &&
+        visible_action.handler == demo_signal_probe_handler &&
+        visible_action.flags == static_cast<uint64_t>(SA_SIGINFO);
+
+    uint64_t result = 0;
+    if (g_probe_handler_called != 0) {
+        result |= kSignalProbeGuestCalled;
+    }
+    if (g_probe_pc_original != 0) {
+        result |= kSignalProbeGuestPcOriginal;
+    }
+    if (g_probe_register_cookie != 0 &&
+        restored_cookie == (cookie ^ kSignalProbeCookieRestoreMask)) {
+        result |= kSignalProbeRegisterCookie;
+    }
+    if (handler_query_hidden) {
+        result |= kSignalProbeHandlerQueryHidden;
+    }
+    return result;
 }
 
 extern "C" std::string demo_integrity_case() {

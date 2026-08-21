@@ -147,6 +147,14 @@ add_trace_test(trace_callback_gate_test
 add_trace_test(trace_number_formatter_test
     trace_number_formatter_test.cpp)
 
+add_trace_test(arm64_syscall_test
+    arm64_syscall_test.cpp
+    ../../main/cpp/core/arm64_syscall.cpp)
+
+add_trace_test(signal_context_arm64_test
+    signal_context_arm64_test.cpp
+    ../../main/cpp/core/signal_context_arm64.cpp)
+
 add_trace_test(tracer_entry_proxy_test
     tracer_entry_proxy_test.cpp
     ../../main/cpp/tracer_entry.cpp

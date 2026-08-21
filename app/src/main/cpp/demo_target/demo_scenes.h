@@ -20,7 +20,8 @@ __attribute__((visibility("hidden"))) uint64_t demo_algorithm_case(const uint8_t
 __attribute__((visibility("hidden"))) std::string demo_integrity_case();
 __attribute__((noinline, visibility("default"))) uint64_t demo_benchmark_case(uint64_t iterations,
                                                                                  uint64_t seed);
-
+__attribute__((noinline, visibility("default"))) uint64_t
+demo_signal_probe(uint64_t cookie);
 }
 
 #if defined(__clang__)
