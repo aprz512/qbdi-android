@@ -25,7 +25,10 @@
 - Do not add multi-process coordination or claim late-attach coverage equivalent to spawn-before-load.
 - Do not promise device power-loss durability or hide the master signal action from untraced modules.
 - Production remains exception-free and RTTI-free.
-- Task 1 is a stop gate: do not build the recorder unless QBDI signal compatibility passes on arm64 hardware.
+- A guest signal handler is dispatched natively and is intentionally untraced; the master handler
+  must never enter a QBDI execution API.
+- Task 1 is a stop gate: do not build the recorder unless native broker dispatch, guest-context
+  mapping, and handler hiding pass on arm64 hardware.
 
 ## File Map
 
@@ -43,7 +46,7 @@
 
 ---
 
-### Task 1: Prove QBDI Signal-context Compatibility
+### Task 1: Prove Native Signal-broker Compatibility
 
 **Files:**
 - Create: `tracer/src/main/cpp/core/arm64_syscall.h`
@@ -63,8 +66,11 @@
 **Interfaces:**
 - Produces: `bool is_arm64_svc(uint32_t) noexcept`.
 - Produces: `Arm64SyscallSnapshot snapshot_arm64_syscall(uintptr_t, const QBDI::GPRState&) noexcept`.
-- Produces: `bool qbdi_gpr_to_ucontext(const QBDI::GPRState&, ucontext_t*) noexcept` and inverse mapping.
-- Produces: `SignalProbeResult run_qbdi_signal_probe(uintptr_t entry, uintptr_t module_address) noexcept`.
+- Produces: pure host-portable `Arm64SignalContext` with `x0`-`x30`, `sp`, `pc`, and `pstate`, plus
+  `qbdi_gpr_to_signal_context` and inverse mapping.
+- Produces on Android arm64: explicit adapters between `Arm64SignalContext` and Bionic
+  `ucontext_t`; host tests never include or inspect host `ucontext_t`.
+- Produces: `SignalProbeResult run_native_signal_probe(uintptr_t entry, uintptr_t module_address) noexcept`.
 
 - [ ] **Step 1: Write failing host tests**
 
@@ -83,10 +89,10 @@ void round_trips_guest_registers() {
     QBDI::GPRState source{};
     source.x0 = 0x1111; source.x29 = 0x2929; source.lr = 0x3030;
     source.sp = 0x4040; source.pc = 0x5050; source.nzcv = 0x60000000;
-    ucontext_t context{};
+    Arm64SignalContext context{};
     QBDI::GPRState restored{};
-    CHECK(qbdi_gpr_to_ucontext(source, &context));
-    CHECK(ucontext_to_qbdi_gpr(context, &restored));
+    CHECK(qbdi_gpr_to_signal_context(source, &context));
+    CHECK(signal_context_to_qbdi_gpr(context, &restored));
     CHECK(restored.x0 == source.x0 && restored.pc == source.pc);
     CHECK(restored.sp == source.sp && restored.nzcv == source.nzcv);
 }
@@ -95,8 +101,8 @@ void round_trips_guest_registers() {
 - [ ] **Step 2: Configure and verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake -S tracer/src/test/cpp -B build/flight-recorder-host -G Ninja
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target arm64_syscall_test signal_context_arm64_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake -S tracer/src/test/cpp -B build/flight-recorder-host-make
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target arm64_syscall_test signal_context_arm64_test
 ```
 
 Expected: configure or build fails because targets and interfaces do not exist.
@@ -113,36 +119,60 @@ struct Arm64SyscallSnapshot {
 
 Use opcode mask `(opcode & 0xffe0001fU) == 0xd4000001U`. Map Android arm64
 `uc_mcontext.regs[0..30]`, `sp`, `pc`, and `pstate` explicitly without casting wire/native layouts.
+Compile those Bionic adapters only for `__ANDROID__ && __aarch64__`; host tests exercise the pure
+`Arm64SignalContext` representation in both directions with hand-derived literal values.
 
-- [ ] **Step 4: Add the direct-syscall device probe**
+- [ ] **Step 4: Write the direct-syscall device test and verify RED**
 
 Add default-visible `demo_signal_probe(uint64_t cookie)`. It uses inline `svc 0` for
-`rt_sigaction` and `tgkill`; its `SA_SIGINFO` handler validates original target PC and cookie state.
-The minimal probe interceptor emulates direct `rt_sigaction` with `QBDI::SKIP_INST`, patches a
-stack-local guest `ucontext`, and uses preallocated signal-session state to trace the target-resident
-handler without recursively entering a running VM. `signal_probe.js` prints exactly:
+`rt_sigaction` and `tgkill`; its `SA_SIGINFO` handler validates original target PC and cookie state,
+changes guest `x19`, and exposes whether that change was observed after return. Make
+`signal_probe.js` require exactly:
 
 ```json
-{"guest_handler_called":true,"guest_pc_original":true,"register_cookie":true,"qbdi_handler_traced":true,"handler_query_hidden":true}
+{"guest_handler_called":true,"guest_pc_original":true,"register_cookie":true,"qbdi_handler_untraced":true,"handler_query_hidden":true}
 ```
 
-- [ ] **Step 5: Run the gate**
+Build, install, and run the fixture against the unchanged tracer:
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target arm64_syscall_test signal_context_arm64_test
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'arm64_syscall|signal_context_arm64'
 ./gradlew :app:assembleDebug :tracer:assembleDebug :tracer:copyTracerDebug
 frida -U -f com.aprz.qbdiandroid -l scripts/signal_probe.js
 ```
 
-Expected: both CTest targets pass and all five JSON fields are `true`. Otherwise stop, retain probe
-evidence, and revise the approved design before any Task 2 work.
+Expected: exit nonzero because the tracer probe export or the new `qbdi_handler_untraced` behavior
+does not exist. A JavaScript syntax error, missing application install, or stale staged tracer is not
+an accepted RED.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Implement minimal native broker dispatch**
+
+The probe interceptor emulates direct `rt_sigaction` with `QBDI::SKIP_INST` and snapshots
+the primary guest state before `tgkill`. Its allocation-free master handler patches a stack-local
+guest `ucontext`, calls the retained target handler directly as native code, and copies returned
+`x0`-`x30`, `sp`, `pc`, and `pstate` changes back to the published primary guest state. It records
+fixed begin/return probe markers and never calls `VM::callA`, `VM::run`, or another QBDI execution
+API. An instruction callback counts target-handler instructions so the probe fails if the handler
+is accidentally traced. Do not retain the exploratory secondary signal VM.
+
+- [ ] **Step 6: Run the gate**
+
+```bash
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target arm64_syscall_test signal_context_arm64_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'arm64_syscall|signal_context_arm64'
+./gradlew :app:assembleDebug :tracer:assembleDebug :tracer:copyTracerDebug
+frida -U -f com.aprz.qbdiandroid -l scripts/signal_probe.js
+```
+
+Expected: both CTest targets pass and all five JSON fields are `true`. Review the master-handler
+call graph and reject the gate if it reaches any QBDI execution API or non-async-signal-safe
+operation. Otherwise stop, retain probe evidence, and revise the approved design before any Task 2
+work.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add app/src/main/cpp/demo_target/demo_scenes.h app/src/main/cpp/demo_target/demo_scenes.cpp scripts/signal_probe.js tracer/src/main/cpp/core/arm64_syscall.h tracer/src/main/cpp/core/arm64_syscall.cpp tracer/src/main/cpp/core/signal_context_arm64.h tracer/src/main/cpp/core/signal_context_arm64.cpp tracer/src/main/cpp/core/signal_probe.h tracer/src/main/cpp/core/signal_probe.cpp tracer/src/main/cpp/CMakeLists.txt tracer/src/test/cpp/arm64_syscall_test.cpp tracer/src/test/cpp/signal_context_arm64_test.cpp tracer/src/test/cpp/CMakeLists.txt
-git commit -m "test(trace): prove QBDI signal compatibility"
+git commit -m "test(trace): prove native signal compatibility"
 ```
 
 ---
@@ -182,7 +212,7 @@ Construct `InstructionCollector` with the fake and assert one completed pending 
 - [ ] **Step 2: Verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target instruction_collector_integration_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target instruction_collector_integration_test
 ```
 
 Expected: compile fails because `TraceSink` does not exist.
@@ -208,7 +238,7 @@ leave normal lifecycle methods concrete.
 - [ ] **Step 4: Verify affected tests**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'instruction_collector|code_rule|binary_trace_writer|trace_run_session'
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'instruction_collector|code_rule|binary_trace_writer|trace_run_session'
 ```
 
 Expected: all selected tests pass with unchanged QTRB bytes.
@@ -253,7 +283,7 @@ outside 1–1024, zero protected chunks, and a protected reservation larger than
 - [ ] **Step 2: Verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target trace_config_test flight_format_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target trace_config_test flight_format_test
 ```
 
 Expected: compile fails because flight types do not exist.
@@ -272,7 +302,8 @@ struct FlightOptions {
 enum class FlightRecordType : uint16_t {
     ChunkBegin = 1, ThreadBegin = 2, ThreadEnd = 3, Instruction = 4,
     Memory = 5, Call = 6, Rule = 7, Error = 8, RegisterDelta = 9,
-    Syscall = 10, Signal = 11, TerminationIntent = 12, CoverageGap = 13,
+    Syscall = 10, Signal = 11, SignalHandlerBegin = 12,
+    SignalHandlerReturn = 13, TerminationIntent = 14, CoverageGap = 15,
 };
 ```
 
@@ -282,7 +313,7 @@ pointers, atomics, `sigaction`, or C++ containers.
 - [ ] **Step 4: Verify GREEN and commit**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'trace_config|flight_format'
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'trace_config|flight_format'
 git add tracer/src/main/cpp/flight/flight_format.h tracer/src/test/cpp/flight_format_test.cpp tracer/src/main/cpp/core/trace_config.h tracer/src/main/cpp/core/trace_config.cpp tracer/src/test/cpp/trace_config_test.cpp tracer/src/main/cpp/CMakeLists.txt tracer/src/test/cpp/CMakeLists.txt
 git commit -m "feat(trace): define flight recorder format"
 ```
@@ -322,7 +353,7 @@ CHECK(scan_record(writer.previous_record_bytes(), writer.previous_record_size(),
 - [ ] **Step 2: Verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target flight_artifact_test flight_chunk_writer_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target flight_artifact_test flight_chunk_writer_test
 ```
 
 Expected: build fails because storage classes do not exist.
@@ -343,8 +374,8 @@ reclaimed chunk's generation before new ownership publication.
 - [ ] **Step 5: Verify stress and commit**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'flight_artifact|flight_chunk_writer'
-build/flight-recorder-host/flight_chunk_writer_test --stress-rotations 100
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'flight_artifact|flight_chunk_writer'
+build/flight-recorder-host-make/flight_chunk_writer_test --stress-rotations 100
 git add tracer/src/main/cpp/flight/flight_artifact.h tracer/src/main/cpp/flight/flight_artifact.cpp tracer/src/main/cpp/flight/flight_chunk_writer.h tracer/src/main/cpp/flight/flight_chunk_writer.cpp tracer/src/test/cpp/flight_artifact_test.cpp tracer/src/test/cpp/flight_chunk_writer_test.cpp tracer/src/main/cpp/CMakeLists.txt tracer/src/test/cpp/CMakeLists.txt
 git commit -m "feat(trace): add persistent flight ring"
 ```
@@ -376,7 +407,7 @@ reconstructs the exact state. Reuse full-profile fixtures to compare memory pre/
 - [ ] **Step 2: Verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target flight_encoder_test flight_trace_sink_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target flight_encoder_test flight_trace_sink_test
 ```
 
 Expected: build fails because encoder and sink do not exist.
@@ -392,7 +423,7 @@ emits a fresh GPR checkpoint before the first event in every chunk.
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'flight_encoder|flight_trace_sink|memory_profile|instruction_collector'
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'flight_encoder|flight_trace_sink|memory_profile|instruction_collector'
 git add tracer/src/main/cpp/flight/flight_encoder.h tracer/src/main/cpp/flight/flight_encoder.cpp tracer/src/main/cpp/flight/flight_trace_sink.h tracer/src/main/cpp/flight/flight_trace_sink.cpp tracer/src/test/cpp/flight_encoder_test.cpp tracer/src/test/cpp/flight_trace_sink_test.cpp tracer/src/main/cpp/CMakeLists.txt tracer/src/test/cpp/CMakeLists.txt
 git commit -m "feat(trace): encode independent flight chunks"
 ```
@@ -479,7 +510,7 @@ leave, and child detach.
 - [ ] **Step 2: Verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target capture_coordinator_test qbdi_thread_session_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target capture_coordinator_test qbdi_thread_session_test
 ```
 
 Expected: build fails because coordinator/session do not exist.
@@ -495,7 +526,7 @@ the init scene is required and other nonzero scenes become callback gateways.
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'capture_coordinator|qbdi_thread_session|qbdi_runner_lifecycle|trace_run_session|tracer_entry_proxy|failure_state'
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'capture_coordinator|qbdi_thread_session|qbdi_runner_lifecycle|trace_run_session|tracer_entry_proxy|failure_state'
 git add tracer/src/main/cpp/core/capture_coordinator.h tracer/src/main/cpp/core/capture_coordinator.cpp tracer/src/main/cpp/core/qbdi_thread_session.h tracer/src/main/cpp/core/qbdi_thread_session.cpp tracer/src/test/cpp/capture_coordinator_test.cpp tracer/src/test/cpp/qbdi_thread_session_test.cpp tracer/src/main/cpp/tracer_entry.cpp tracer/src/main/cpp/CMakeLists.txt tracer/src/test/cpp/CMakeLists.txt
 git commit -m "feat(trace): add per-thread QBDI sessions"
 ```
@@ -528,7 +559,7 @@ allocation failure, and child detach.
 - [ ] **Step 2: Verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target thread_create_gateway_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target thread_create_gateway_test
 ```
 
 Expected: build fails because the gateway does not exist.
@@ -555,7 +586,7 @@ retained original path and permanently marks a coverage gap. Install before rele
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'thread_create_gateway|capture_coordinator|tracer_entry_proxy|failure_state'
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'thread_create_gateway|capture_coordinator|tracer_entry_proxy|failure_state'
 git add tracer/src/main/cpp/hooks/thread_create_gateway.h tracer/src/main/cpp/hooks/thread_create_gateway.cpp tracer/src/test/cpp/thread_create_gateway_test.cpp tracer/src/main/cpp/hooks/inline_hook_adapter.h tracer/src/main/cpp/hooks/inline_hook_adapter.cpp tracer/src/main/cpp/core/capture_coordinator.cpp tracer/src/main/cpp/tracer_entry.cpp tracer/src/main/cpp/CMakeLists.txt tracer/src/test/cpp/CMakeLists.txt
 git commit -m "feat(trace): capture target pthreads"
 ```
@@ -587,13 +618,15 @@ git commit -m "feat(trace): capture target pthreads"
 Signal tests cover install/query/replace, normal and `SA_SIGINFO`, default/ignore, masks,
 `SA_NODEFER`, `SA_RESETHAND`, lazy master installation, raw-syscall recursion bypass, errno/result,
 stale delivery generations, nested delivery, handler address hiding, guest PC mapping, and child
-detach. Syscall tests cover arm64 numbers 93, 94, 129, 130, 131, and 138 and assert the emergency
-record is committed before `QBDI::CONTINUE`.
+detach. They also assert native custom-handler dispatch, begin/return interval publication, returned
+general-register application, and zero QBDI execution calls during master dispatch. Syscall tests
+cover arm64 numbers 93, 94, 129, 130, 131, and 138 and assert the emergency record is committed
+before `QBDI::CONTINUE`.
 
 - [ ] **Step 2: Verify RED**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host --target signal_broker_test termination_syscall_test
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make --target signal_broker_test termination_syscall_test
 ```
 
 Expected: build fails because broker/observer do not exist.
@@ -602,15 +635,17 @@ Expected: build fails because broker/observer do not exist.
 
 Use fixed signal/generation tables and active delivery counters following `crash_marker.cpp` ownership.
 Normal context installs/retires actions. The master handler writes one emergency slot, patches a
-stack-local guest `ucontext`, dispatches exact guest masks/flags through Task 1's preallocated signal
-session, and raw-redelivers defaults. Before `pending_.begin`, recognize `svc`. Virtualized
+stack-local guest `ucontext`, emits `SIGNAL_HANDLER_BEGIN`, invokes custom handlers directly as
+native code with exact guest masks/flags, applies returned general-register changes, emits
+`SIGNAL_HANDLER_RETURN`, and raw-redelivers defaults. It never enters QBDI. Before
+`pending_.begin`, recognize `svc`. Virtualized
 `rt_sigaction` uses guarded target memory, sets guest `x0`, and returns `QBDI::SKIP_INST` while still
 emitting `SYSCALL`; termination calls commit `TERMINATION_INTENT` before continuing.
 
 - [ ] **Step 4: Verify and commit**
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure -R 'signal_broker|termination_syscall|instruction_collector|failure_state|tracer_entry_proxy'
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure -R 'signal_broker|termination_syscall|instruction_collector|failure_state|tracer_entry_proxy'
 git add tracer/src/main/cpp/core/signal_broker.h tracer/src/main/cpp/core/signal_broker.cpp tracer/src/test/cpp/signal_broker_test.cpp tracer/src/test/cpp/termination_syscall_test.cpp tracer/src/main/cpp/core/instruction_collector.h tracer/src/main/cpp/core/instruction_collector.cpp tracer/src/main/cpp/core/qbdi_thread_session.cpp tracer/src/main/cpp/core/capture_coordinator.cpp tracer/src/main/cpp/core/trace_process_lifecycle.cpp tracer/src/main/cpp/CMakeLists.txt tracer/src/test/cpp/CMakeLists.txt
 git commit -m "feat(trace): broker signals and exit syscalls"
 ```
@@ -733,8 +768,8 @@ Record device/product, Android/fingerprint, SELinux, APK/tracer hashes, QBDI ver
 expected/observed TID/PC, thread/rotation/chunk counts, decode status, and artifact hashes. Run:
 
 ```bash
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host
-/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host --output-on-failure
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/cmake --build build/flight-recorder-host-make
+/home/lyldalek/Android/sdk/cmake/3.22.1/bin/ctest --test-dir build/flight-recorder-host-make --output-on-failure
 PYTHONDONTWRITEBYTECODE=1 PYTHONWARNINGS=error python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ./gradlew :app:assembleDebug :app:assembleRelease :tracer:assembleDebug :tracer:assembleRelease :tracer:copyTracerDebug
 ```
