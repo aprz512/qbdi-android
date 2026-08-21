@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <type_traits>
 
 static void check(bool condition, const char *expression, int line) {
@@ -15,12 +16,23 @@ static void check(bool condition, const char *expression, int line) {
 int main() {
     CHECK(kFlightMagic == 0x51464c54U);
     CHECK(kFlightVersion == 1);
+    CHECK(kFlightRecordCommit == 0x51434d54U);
     CHECK(sizeof(FlightSuperblock) == kFlightSuperblockBytes);
     CHECK(sizeof(FlightDirectoryEntry) == kFlightDirectoryEntryBytes);
     CHECK(sizeof(FlightChunkHeader) == kFlightChunkHeaderBytes);
     CHECK(sizeof(FlightRecordHeader) == kFlightRecordHeaderBytes);
     CHECK(sizeof(FlightEmergencyRecord) == kFlightEmergencyRecordBytes);
     CHECK(static_cast<uint16_t>(FlightRecordType::ChunkBegin) == 1);
+    CHECK(static_cast<uint16_t>(FlightRecordType::ThreadBegin) == 2);
+    CHECK(static_cast<uint16_t>(FlightRecordType::ThreadEnd) == 3);
+    CHECK(static_cast<uint16_t>(FlightRecordType::Instruction) == 4);
+    CHECK(static_cast<uint16_t>(FlightRecordType::Memory) == 5);
+    CHECK(static_cast<uint16_t>(FlightRecordType::Call) == 6);
+    CHECK(static_cast<uint16_t>(FlightRecordType::Rule) == 7);
+    CHECK(static_cast<uint16_t>(FlightRecordType::Error) == 8);
+    CHECK(static_cast<uint16_t>(FlightRecordType::RegisterDelta) == 9);
+    CHECK(static_cast<uint16_t>(FlightRecordType::Syscall) == 10);
+    CHECK(static_cast<uint16_t>(FlightRecordType::Signal) == 11);
     CHECK(static_cast<uint16_t>(FlightRecordType::SignalHandlerBegin) == 12);
     CHECK(static_cast<uint16_t>(FlightRecordType::SignalHandlerReturn) == 13);
     CHECK(static_cast<uint16_t>(FlightRecordType::TerminationIntent) == 14);
@@ -35,4 +47,82 @@ int main() {
     CHECK(std::is_trivial_v<FlightChunkHeader>);
     CHECK(std::is_trivial_v<FlightRecordHeader>);
     CHECK(std::is_trivial_v<FlightEmergencyRecord>);
+
+    CHECK(offsetof(FlightSuperblock, magic) == 0);
+    CHECK(offsetof(FlightSuperblock, version) == 4);
+    CHECK(offsetof(FlightSuperblock, byte_order) == 6);
+    CHECK(offsetof(FlightSuperblock, pointer_width) == 7);
+    CHECK(offsetof(FlightSuperblock, header_bytes) == 8);
+    CHECK(offsetof(FlightSuperblock, artifact_bytes) == 16);
+    CHECK(offsetof(FlightSuperblock, directory_offset) == 24);
+    CHECK(offsetof(FlightSuperblock, chunk_offset) == 40);
+    CHECK(offsetof(FlightSuperblock, emergency_offset) == 56);
+    CHECK(offsetof(FlightSuperblock, flags) == 72);
+    CHECK(offsetof(FlightRecordHeader, type) == 0);
+    CHECK(offsetof(FlightRecordHeader, sequence) == 8);
+    CHECK(offsetof(FlightRecordHeader, commit) == 20);
+    CHECK(offsetof(FlightDirectoryEntry, tid) == 0);
+    CHECK(offsetof(FlightDirectoryEntry, state) == 4);
+    CHECK(offsetof(FlightDirectoryEntry, first_sequence) == 8);
+    CHECK(offsetof(FlightDirectoryEntry, last_sequence) == 16);
+    CHECK(offsetof(FlightDirectoryEntry, chunk_index) == 24);
+    CHECK(offsetof(FlightDirectoryEntry, chunk_generation) == 28);
+    CHECK(offsetof(FlightChunkHeader, magic) == 0);
+    CHECK(offsetof(FlightChunkHeader, version) == 4);
+    CHECK(offsetof(FlightChunkHeader, header_bytes) == 6);
+    CHECK(offsetof(FlightChunkHeader, chunk_index) == 8);
+    CHECK(offsetof(FlightChunkHeader, tid) == 16);
+    CHECK(offsetof(FlightChunkHeader, first_sequence) == 24);
+    CHECK(offsetof(FlightChunkHeader, committed_bytes) == 40);
+    CHECK(offsetof(FlightChunkHeader, checksum) == 48);
+    CHECK(offsetof(FlightEmergencyRecord, type) == 0);
+    CHECK(offsetof(FlightEmergencyRecord, tid) == 4);
+    CHECK(offsetof(FlightEmergencyRecord, sequence) == 8);
+    CHECK(offsetof(FlightEmergencyRecord, pc) == 16);
+    CHECK(offsetof(FlightEmergencyRecord, sp) == 24);
+    CHECK(offsetof(FlightEmergencyRecord, fault_address) == 32);
+    CHECK(offsetof(FlightEmergencyRecord, signal_number) == 40);
+    CHECK(offsetof(FlightEmergencyRecord, flags) == 48);
+
+    FlightSuperblock superblock{};
+    superblock.magic = kFlightMagic;
+    superblock.version = kFlightVersion;
+    superblock.byte_order = kFlightByteOrderLittleEndian;
+    superblock.pointer_width = kFlightPointerWidth64;
+    superblock.header_bytes = kFlightSuperblockBytes;
+    superblock.artifact_bytes = 0x0102030405060708ULL;
+    superblock.directory_offset = 0x1112131415161718ULL;
+    superblock.directory_entry_bytes = kFlightDirectoryEntryBytes;
+    superblock.directory_entries = 0x21222324U;
+    superblock.chunk_offset = 0x3132333435363738ULL;
+    superblock.chunk_bytes = 0x41424344U;
+    superblock.chunk_count = 0x51525354U;
+    superblock.emergency_offset = 0x6162636465666768ULL;
+    superblock.emergency_record_bytes = kFlightEmergencyRecordBytes;
+    superblock.emergency_record_count = 0x71727374U;
+    superblock.flags = 0x81828384U;
+
+    uint8_t encoded[kFlightSuperblockBytes]{};
+    CHECK(encode_flight_superblock_le(superblock, encoded, sizeof(encoded)));
+    CHECK(encoded[0] == 0x54 && encoded[1] == 0x4c && encoded[2] == 0x46 && encoded[3] == 0x51);
+    CHECK(encoded[4] == 0x01 && encoded[5] == 0x00);
+    CHECK(encoded[6] == kFlightByteOrderLittleEndian);
+    CHECK(encoded[7] == kFlightPointerWidth64);
+    CHECK(encoded[8] == 0x00 && encoded[9] == 0x10);
+    CHECK(encoded[16] == 0x08 && encoded[17] == 0x07 && encoded[22] == 0x02 && encoded[23] == 0x01);
+    CHECK(encoded[72] == 0x84 && encoded[73] == 0x83 && encoded[74] == 0x82 && encoded[75] == 0x81);
+
+    FlightSuperblock decoded{};
+    CHECK(decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
+    CHECK(decoded.magic == superblock.magic);
+    CHECK(decoded.version == superblock.version);
+    CHECK(decoded.byte_order == kFlightByteOrderLittleEndian);
+    CHECK(decoded.pointer_width == kFlightPointerWidth64);
+    CHECK(decoded.artifact_bytes == superblock.artifact_bytes);
+    CHECK(decoded.directory_offset == superblock.directory_offset);
+    CHECK(decoded.chunk_offset == superblock.chunk_offset);
+    CHECK(decoded.emergency_offset == superblock.emergency_offset);
+    CHECK(decoded.flags == superblock.flags);
+    encoded[6] = 0;
+    CHECK(!decode_flight_superblock_le(encoded, sizeof(encoded), &decoded));
 }

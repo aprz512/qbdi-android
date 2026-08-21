@@ -28,6 +28,11 @@ int main() {
     CHECK(defaults.trace.hexdump_limit == 32);
     CHECK(!defaults.trace.memory_enabled());
     CHECK(!defaults.trace.hexdump_enabled());
+    CHECK(!defaults.flight.enabled);
+    CHECK(defaults.flight.capacity_bytes == 512ULL * 1024 * 1024);
+    CHECK(defaults.flight.chunk_bytes == 256U * 1024);
+    CHECK(defaults.flight.max_threads == 256);
+    CHECK(defaults.flight.protected_chunks == 4);
     CHECK(defaults.valid);
 
     TraceConfig flight = parse_trace_config(
