@@ -41,6 +41,10 @@ static bool parse_hex(const std::string &value, uintptr_t *result) {
     return true;
 }
 
+static bool is_power_of_two(unsigned long long value) {
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
 static TraceConfig invalid_config(TraceConfig config, std::string error) {
     config.valid = false;
     config.error = std::move(error);
@@ -156,6 +160,44 @@ TraceConfig parse_trace_config(const char *encoded_config) {
                 return invalid_config(std::move(config), "invalid hexdump_limit: " + value);
             }
             config.trace.hexdump_limit = static_cast<size_t>(limit);
+        } else if (part.rfind("flight=", 0) == 0) {
+            const std::string value = part.substr(7);
+            if (value == "0") {
+                config.flight.enabled = false;
+            } else if (value == "1") {
+                config.flight.enabled = true;
+            } else {
+                return invalid_config(std::move(config), "invalid flight setting: " + value);
+            }
+        } else if (part.rfind("flight_mb=", 0) == 0) {
+            const std::string value = part.substr(10);
+            unsigned long long megabytes = 0;
+            if (!parse_decimal(value, &megabytes) || megabytes < 64 || megabytes > 2048) {
+                return invalid_config(std::move(config), "invalid flight_mb: " + value);
+            }
+            config.flight.capacity_bytes = megabytes * 1024ULL * 1024ULL;
+        } else if (part.rfind("flight_chunk_kb=", 0) == 0) {
+            const std::string value = part.substr(16);
+            unsigned long long kilobytes = 0;
+            if (!parse_decimal(value, &kilobytes) || kilobytes < 64 || kilobytes > 1024 ||
+                !is_power_of_two(kilobytes)) {
+                return invalid_config(std::move(config), "invalid flight_chunk_kb: " + value);
+            }
+            config.flight.chunk_bytes = static_cast<uint32_t>(kilobytes * 1024ULL);
+        } else if (part.rfind("flight_max_threads=", 0) == 0) {
+            const std::string value = part.substr(19);
+            unsigned long long threads = 0;
+            if (!parse_decimal(value, &threads) || threads < 1 || threads > 1024) {
+                return invalid_config(std::move(config), "invalid flight_max_threads: " + value);
+            }
+            config.flight.max_threads = static_cast<uint32_t>(threads);
+        } else if (part.rfind("flight_protected_chunks=", 0) == 0) {
+            const std::string value = part.substr(24);
+            unsigned long long chunks = 0;
+            if (!parse_decimal(value, &chunks) || chunks == 0 || chunks > UINT32_MAX) {
+                return invalid_config(std::move(config), "invalid flight_protected_chunks: " + value);
+            }
+            config.flight.protected_chunks = static_cast<uint32_t>(chunks);
 #ifndef NDEBUG
         } else if (part.rfind("test_buffer_bytes=", 0) == 0) {
             const std::string value = part.substr(18);
@@ -174,6 +216,10 @@ TraceConfig parse_trace_config(const char *encoded_config) {
     }
     if (!lz4_level_explicit && config.trace.profile != TraceProfile::Fast) {
         config.trace.lz4_level = 2;
+    }
+    if (static_cast<uint64_t>(config.flight.protected_chunks) * config.flight.chunk_bytes >
+        config.flight.capacity_bytes) {
+        return invalid_config(std::move(config), "flight protected reservation exceeds capacity");
     }
     return config;
 }

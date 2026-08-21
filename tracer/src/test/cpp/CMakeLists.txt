@@ -26,6 +26,9 @@ add_trace_test(trace_config_test
     trace_config_test.cpp
     ../../main/cpp/core/trace_config.cpp)
 
+add_trace_test(flight_format_test
+    flight_format_test.cpp)
+
 add_trace_test(instruction_cache_test
     instruction_cache_test.cpp
     ../../main/cpp/core/instruction_cache.cpp)

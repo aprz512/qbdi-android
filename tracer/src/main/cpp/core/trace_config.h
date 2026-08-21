@@ -26,6 +26,14 @@ struct TraceOptions {
     bool hexdump_enabled() const { return profile == TraceProfile::Full; }
 };
 
+struct FlightOptions {
+    bool enabled = false;
+    uint64_t capacity_bytes = 512ULL * 1024 * 1024;
+    uint32_t chunk_bytes = 256U * 1024;
+    uint32_t max_threads = 256;
+    uint32_t protected_chunks = 4;
+};
+
 struct TraceConfig {
     std::string package_name = "com.aprz.qbdiandroid";
     std::string target_so = "libdemo_target.so";
@@ -33,6 +41,7 @@ struct TraceConfig {
     // JNI 函数名列表，命中时打印调用栈（回溯）
     std::vector<std::string> jni_backtrace_funcs;
     TraceOptions trace;
+    FlightOptions flight;
 #ifndef NDEBUG
     bool test_fail_setup = false;
 #endif

@@ -73,6 +73,7 @@ add_library(qbdi_tracer SHARED
         events/binary_trace_encoder.cpp
         events/trace_dictionary.cpp
         events/async_trace_writer.cpp
+        flight/flight_format.h
         core/trace_config.cpp
         hooks/inline_hook_adapter.cpp
         core/qbdi_runner.cpp

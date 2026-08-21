@@ -30,6 +30,27 @@ int main() {
     CHECK(!defaults.trace.hexdump_enabled());
     CHECK(defaults.valid);
 
+    TraceConfig flight = parse_trace_config(
+            "flight=1;flight_mb=512;flight_chunk_kb=256;flight_max_threads=256;"
+            "flight_protected_chunks=4");
+    CHECK(flight.valid);
+    CHECK(flight.flight.enabled);
+    CHECK(flight.flight.capacity_bytes == 512ULL * 1024 * 1024);
+    CHECK(flight.flight.chunk_bytes == 256U * 1024);
+    CHECK(flight.flight.max_threads == 256);
+    CHECK(flight.flight.protected_chunks == 4);
+
+    assert_invalid("flight=2");
+    assert_invalid("flight_mb=63");
+    assert_invalid("flight_mb=2049");
+    assert_invalid("flight_chunk_kb=63");
+    assert_invalid("flight_chunk_kb=96");
+    assert_invalid("flight_chunk_kb=2048");
+    assert_invalid("flight_max_threads=0");
+    assert_invalid("flight_max_threads=1025");
+    assert_invalid("flight_protected_chunks=0");
+    assert_invalid("flight_mb=64;flight_chunk_kb=1024;flight_protected_chunks=65");
+
     TraceConfig parsed = parse_trace_config(
             "profile=full;compression=0;lz4_level=9;auto_buffer=0;"
             "buffer_mb=64;hexdump_limit=16");
