@@ -43,6 +43,23 @@ add_trace_test(flight_chunk_writer_test
     ../../main/cpp/flight/flight_chunk_writer.cpp)
 target_link_libraries(flight_chunk_writer_test PRIVATE Threads::Threads)
 
+add_trace_test(flight_encoder_test
+    flight_encoder_test.cpp
+    ../../main/cpp/flight/flight_artifact.cpp
+    ../../main/cpp/flight/flight_chunk_writer.cpp
+    ../../main/cpp/flight/flight_encoder.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp)
+target_link_libraries(flight_encoder_test PRIVATE Threads::Threads)
+
+add_trace_test(flight_trace_sink_test
+    flight_trace_sink_test.cpp
+    ../../main/cpp/flight/flight_artifact.cpp
+    ../../main/cpp/flight/flight_chunk_writer.cpp
+    ../../main/cpp/flight/flight_encoder.cpp
+    ../../main/cpp/flight/flight_trace_sink.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp)
+target_link_libraries(flight_trace_sink_test PRIVATE Threads::Threads)
+
 add_trace_test(instruction_cache_test
     instruction_cache_test.cpp
     ../../main/cpp/core/instruction_cache.cpp)

@@ -76,6 +76,8 @@ add_library(qbdi_tracer SHARED
         flight/flight_format.h
         flight/flight_artifact.cpp
         flight/flight_chunk_writer.cpp
+        flight/flight_encoder.cpp
+        flight/flight_trace_sink.cpp
         core/trace_config.cpp
         hooks/inline_hook_adapter.cpp
         core/qbdi_runner.cpp
