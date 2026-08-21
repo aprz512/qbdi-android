@@ -108,7 +108,7 @@ void creates_checked_private_mapping_and_publishes_superblock_last() {
     CHECK(superblock.directory_entry_bytes == kFlightDirectoryEntryBytes);
     CHECK(superblock.chunk_bytes == test_options().chunk_bytes);
     CHECK(superblock.chunk_count == artifact.chunk_count());
-    CHECK(superblock.emergency_record_count == test_options().max_threads);
+    CHECK(superblock.emergency_record_count == test_options().max_threads + 1U);
     CHECK(superblock.emergency_record_bytes == kFlightEmergencyRecordBytes);
     CHECK(superblock.directory_offset +
                   static_cast<uint64_t>(superblock.directory_entries) *
@@ -151,6 +151,14 @@ void rejects_invalid_layout_without_leaving_a_file() {
     CHECK(errno == ENOENT);
 }
 
+void sequence_allocation_saturates_permanently_before_wrap() {
+    FlightSequenceAllocator allocator(UINT64_MAX - 1U);
+    CHECK(allocator.next() == UINT64_MAX - 1U);
+    CHECK(allocator.next() == 0);
+    CHECK(allocator.next() == 0);
+    CHECK(allocator.next() == 0);
+}
+
 void registers_unique_tids_and_marks_exhaustion_incomplete() {
     TemporaryArtifact file;
     FlightOptions options = test_options();
@@ -168,6 +176,17 @@ void registers_unique_tids_and_marks_exhaustion_incomplete() {
     CHECK(first.tid == 101);
     CHECK(artifact.register_thread(202, &second));
     CHECK(first.directory_index != second.directory_index);
+
+    FlightEmergencyRecord first_evidence{};
+    first_evidence.type = static_cast<uint32_t>(FlightRecordType::Error);
+    first_evidence.tid = first.tid;
+    first_evidence.sequence = 41;
+    first_evidence.flags = static_cast<uint32_t>(FlightIncompleteReason::WriterFailure);
+    CHECK(artifact.write_emergency(first, first_evidence));
+    FlightEmergencyRecord second_evidence = first_evidence;
+    second_evidence.tid = second.tid;
+    second_evidence.sequence = 42;
+    CHECK(artifact.write_emergency(second, second_evidence));
     CHECK(!artifact.register_thread(303, &exhausted));
     CHECK(artifact.incomplete());
 
@@ -177,7 +196,11 @@ void registers_unique_tids_and_marks_exhaustion_incomplete() {
     CHECK((artifact.flags() & static_cast<uint32_t>(FlightIncompleteReason::DirectoryExhausted)) !=
           0);
     CHECK((artifact.flags() & static_cast<uint32_t>(FlightIncompleteReason::WriterFailure)) != 0);
-    const uint8_t *emergency = artifact.emergency_bytes(303U % options.max_threads);
+    CHECK(flight_read_u32_le(artifact.emergency_bytes(first.directory_index) + 4) == first.tid);
+    CHECK(flight_read_u64_le(artifact.emergency_bytes(first.directory_index) + 8) == 41);
+    CHECK(flight_read_u32_le(artifact.emergency_bytes(second.directory_index) + 4) == second.tid);
+    CHECK(flight_read_u64_le(artifact.emergency_bytes(second.directory_index) + 8) == 42);
+    const uint8_t *emergency = artifact.emergency_bytes(options.max_threads);
     CHECK(flight_read_u32_le(emergency + 0) ==
           static_cast<uint32_t>(FlightRecordType::CoverageGap));
     CHECK(flight_read_u32_le(emergency + 4) == 303U);
@@ -190,13 +213,22 @@ void registers_unique_tids_and_marks_exhaustion_incomplete() {
 void protected_pool_exhaustion_publishes_the_affected_tid() {
     TemporaryArtifact file;
     FlightOptions options = test_options();
-    options.max_threads = 1;
+    options.max_threads = 2;
     options.protected_chunks = 63;
     FlightArtifact artifact;
     CHECK(artifact.create(file.path.c_str(), options));
     CHECK(artifact.chunk_count() == 63);
     FlightThreadRegistration thread{};
-    CHECK(artifact.register_thread(404, &thread));
+    FlightThreadRegistration neighbor{};
+    CHECK(artifact.register_thread(3, &thread));
+    CHECK(artifact.register_thread(4, &neighbor));
+    CHECK(thread.directory_index == 0);
+    CHECK(thread.tid % options.max_threads == neighbor.directory_index);
+    FlightEmergencyRecord neighbor_evidence{};
+    neighbor_evidence.type = static_cast<uint32_t>(FlightRecordType::Signal);
+    neighbor_evidence.tid = neighbor.tid;
+    neighbor_evidence.sequence = 77;
+    CHECK(artifact.write_emergency(neighbor, neighbor_evidence));
     FlightChunkLease lease{};
     for (uint32_t index = 0; index < artifact.chunk_count(); ++index) {
         CHECK(artifact.acquire_chunk(thread, index + 1U, &lease));
@@ -208,6 +240,20 @@ void protected_pool_exhaustion_publishes_the_affected_tid() {
     CHECK(flight_read_u32_le(emergency + 4) == thread.tid);
     CHECK((flight_read_u32_le(emergency + 48) &
            static_cast<uint32_t>(FlightIncompleteReason::ChunkExhausted)) != 0);
+    const uint64_t first_gap_sequence = flight_read_u64_le(emergency + 8);
+    CHECK(!artifact.acquire_chunk(thread, artifact.chunk_count() + 2U, &lease));
+    CHECK(flight_read_u64_le(emergency + 8) == first_gap_sequence);
+    FlightEmergencyRecord later_signal{};
+    later_signal.type = static_cast<uint32_t>(FlightRecordType::Signal);
+    later_signal.tid = thread.tid;
+    later_signal.sequence = 999;
+    CHECK(!artifact.write_emergency(thread, later_signal));
+    CHECK(flight_read_u32_le(emergency + 0) ==
+          static_cast<uint32_t>(FlightRecordType::CoverageGap));
+    CHECK(flight_read_u64_le(emergency + 8) == first_gap_sequence);
+    CHECK(flight_read_u32_le(artifact.emergency_bytes(neighbor.directory_index) + 4) ==
+          neighbor.tid);
+    CHECK(flight_read_u64_le(artifact.emergency_bytes(neighbor.directory_index) + 8) == 77);
 }
 
 void emergency_slots_publish_complete_little_endian_records() {
@@ -237,6 +283,83 @@ void emergency_slots_publish_complete_little_endian_records() {
     CHECK(flight_read_u64_le(bytes + 16) == 0x1112131415161718ULL);
     CHECK(flight_read_u32_le(bytes + 40) == 11);
     CHECK(flight_read_u32_le(bytes + 48) == (0x44U | kFlightEmergencyCommitted));
+    FlightEmergencyRecord decoded{};
+    CHECK(scan_flight_emergency(bytes, &decoded));
+    CHECK(decoded.tid == record.tid);
+    CHECK(decoded.sequence == record.sequence);
+    CHECK(decoded.pc == record.pc);
+    CHECK(decoded.flags == record.flags);
+
+    uint8_t *mutable_bytes = artifact.bytes() + (bytes - artifact.bytes());
+    flight_atomic_store_u32_le(mutable_bytes + 16,
+                               flight_read_u32_le(mutable_bytes + 16) ^ 1U,
+                               std::memory_order_relaxed);
+    CHECK(!scan_flight_emergency(bytes, &decoded));
+}
+
+void colliding_emergency_writers_never_publish_a_hybrid() {
+    TemporaryArtifact file;
+    FlightArtifact artifact;
+    CHECK(artifact.create(file.path.c_str(), test_options()));
+    FlightThreadRegistration thread{};
+    CHECK(artifact.register_thread(900, &thread));
+
+    auto patterned_record = [](uint32_t identity) {
+        FlightEmergencyRecord record{};
+        record.type = static_cast<uint32_t>(FlightRecordType::Signal);
+        record.tid = 1000U + identity;
+        record.sequence = 0x1100000000000000ULL | identity;
+        record.pc = record.sequence ^ 0x1111111111111111ULL;
+        record.sp = record.sequence ^ 0x2222222222222222ULL;
+        record.fault_address = record.sequence ^ 0x3333333333333333ULL;
+        record.signal_number = 4U + identity;
+        record.signal_code = 40U + identity;
+        record.flags = identity;
+        return record;
+    };
+    CHECK(artifact.write_emergency(thread.directory_index, patterned_record(1)));
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> stop_reader{false};
+    std::atomic<bool> coherent{true};
+    std::thread reader([&] {
+        while (!stop_reader.load(std::memory_order_acquire)) {
+            FlightEmergencyRecord decoded{};
+            if (!scan_flight_emergency(
+                        artifact.emergency_bytes(thread.directory_index), &decoded)) {
+                continue;
+            }
+            const uint32_t identity = decoded.tid - 1000U;
+            const uint64_t sequence = 0x1100000000000000ULL | identity;
+            if (identity == 0 || identity > 8 || decoded.sequence != sequence ||
+                decoded.pc != (sequence ^ 0x1111111111111111ULL) ||
+                decoded.sp != (sequence ^ 0x2222222222222222ULL) ||
+                decoded.fault_address != (sequence ^ 0x3333333333333333ULL) ||
+                decoded.signal_number != 4U + identity ||
+                decoded.signal_code != 40U + identity || decoded.flags != identity) {
+                coherent.store(false, std::memory_order_relaxed);
+                return;
+            }
+        }
+    });
+    std::array<std::thread, 8> writers;
+    for (uint32_t index = 0; index < writers.size(); ++index) {
+        writers[index] = std::thread([&, identity = index + 1U] {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            const FlightEmergencyRecord record = patterned_record(identity);
+            for (uint32_t iteration = 0; iteration < 2000; ++iteration) {
+                (void)artifact.write_emergency(thread.directory_index, record);
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (std::thread &writer : writers) writer.join();
+    stop_reader.store(true, std::memory_order_release);
+    reader.join();
+    CHECK(coherent.load(std::memory_order_relaxed));
+    FlightEmergencyRecord decoded{};
+    CHECK(scan_flight_emergency(artifact.emergency_bytes(thread.directory_index), &decoded));
 }
 
 void concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity() {
@@ -355,9 +478,11 @@ int main() {
     creates_checked_private_mapping_and_publishes_superblock_last();
     mmap_failure_closes_and_removes_the_partial_artifact();
     rejects_invalid_layout_without_leaving_a_file();
+    sequence_allocation_saturates_permanently_before_wrap();
     registers_unique_tids_and_marks_exhaustion_incomplete();
     protected_pool_exhaustion_publishes_the_affected_tid();
     emergency_slots_publish_complete_little_endian_records();
+    colliding_emergency_writers_never_publish_a_hybrid();
     concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity();
     allocator_reclaims_global_oldest_without_stealing_reservations();
     fork_child_detach_releases_only_the_child_copy();

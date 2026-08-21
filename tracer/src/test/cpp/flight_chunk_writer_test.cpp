@@ -82,6 +82,16 @@ void rejects_bad_bounds_commit_checksum_and_generation() {
     FlightDecodedRecord decoded{};
     CHECK(!scan_flight_record(record, size - 1U, fixture.writer.generation(), &decoded));
     CHECK(!scan_flight_record(record, size, fixture.writer.generation() + 1U, &decoded));
+    const uint32_t total_bytes = flight_read_u32_le(record + 4);
+    CHECK(!scan_flight_record(record, total_bytes, fixture.writer.generation(), &decoded));
+    CHECK(scan_flight_record(record, fixture.writer.committed_bytes(),
+                             fixture.writer.generation(), &decoded));
+
+    alignas(8) uint8_t unaligned_storage[64]{};
+    CHECK(fixture.writer.committed_bytes() + 1U <= sizeof(unaligned_storage));
+    std::memcpy(unaligned_storage + 1, record, fixture.writer.committed_bytes());
+    CHECK(!scan_flight_record(unaligned_storage + 1, fixture.writer.committed_bytes(),
+                              fixture.writer.generation(), &decoded));
 
     uint8_t saved = fixture.writer.mutable_previous_record_bytes()[kFlightRecordHeaderBytes];
     fixture.writer.mutable_previous_record_bytes()[kFlightRecordHeaderBytes] ^= 0xffU;
@@ -143,7 +153,107 @@ void rotation_seals_old_chunk_and_increments_reclaimed_generations() {
     CHECK(old_snapshot.state == FlightChunkState::Sealed);
 }
 
+struct LeaseIdentity {
+    uint32_t chunk_index;
+    uint32_t generation;
+    uint32_t tid;
+};
+
+LeaseIdentity identity(const FlightChunkLease &lease) {
+    return {lease.chunk_index, lease.generation, lease.tid};
+}
+
+bool same_lease(const LeaseIdentity &left, const LeaseIdentity &right) {
+    return left.chunk_index == right.chunk_index && left.generation == right.generation &&
+           left.tid == right.tid;
+}
+
+void exact_oldest_unprotected_reclamation() {
+    char directory_template[] = "/tmp/qtrace-flight-fairness-XXXXXX";
+    char *created = ::mkdtemp(directory_template);
+    CHECK(created != nullptr);
+    const std::string path = std::string(created) + "/artifact.flight.bin";
+    FlightOptions options;
+    options.enabled = true;
+    options.capacity_bytes = 64ULL * 1024 * 1024;
+    options.chunk_bytes = 1024U * 1024;
+    options.max_threads = 2;
+    options.protected_chunks = 4;
+    FlightArtifact artifact;
+    CHECK(artifact.create(path.c_str(), options));
+    FlightThreadRegistration threads[2]{};
+    CHECK(artifact.register_thread(311, &threads[0]));
+    CHECK(artifact.register_thread(422, &threads[1]));
+
+    std::vector<LeaseIdentity> allocation_order;
+    uint64_t sequence = 1;
+    for (uint32_t index = 0; index < artifact.chunk_count(); ++index) {
+        FlightChunkLease lease{};
+        CHECK(artifact.acquire_chunk(threads[index % 2U], sequence++, &lease));
+        allocation_order.push_back(identity(lease));
+    }
+    for (uint32_t iteration = 0; iteration < 100; ++iteration) {
+        std::vector<LeaseIdentity> protected_leases;
+        for (const FlightThreadRegistration &thread : threads) {
+            uint32_t retained = 0;
+            for (auto candidate = allocation_order.rbegin();
+                 candidate != allocation_order.rend() && retained < options.protected_chunks;
+                 ++candidate) {
+                if (candidate->tid != thread.tid) continue;
+                protected_leases.push_back(*candidate);
+                ++retained;
+            }
+            CHECK(retained == options.protected_chunks);
+        }
+        auto expected = allocation_order.begin();
+        while (expected != allocation_order.end() &&
+               std::find_if(protected_leases.begin(), protected_leases.end(),
+                            [&](const LeaseIdentity &protected_lease) {
+                                return same_lease(*expected, protected_lease);
+                            }) != protected_leases.end()) {
+            ++expected;
+        }
+        CHECK(expected != allocation_order.end());
+        const LeaseIdentity expected_victim = *expected;
+
+        FlightChunkLease acquired{};
+        CHECK(artifact.acquire_chunk(threads[iteration % 2U], sequence++, &acquired));
+        CHECK(acquired.chunk_index == expected_victim.chunk_index);
+        CHECK(acquired.generation == expected_victim.generation + 1U);
+        allocation_order.erase(expected);
+        allocation_order.push_back(identity(acquired));
+
+        for (const LeaseIdentity &protected_lease : protected_leases) {
+            CHECK(artifact.chunk_generation(protected_lease.chunk_index) ==
+                  protected_lease.generation);
+            CHECK(artifact.chunk_tid(protected_lease.chunk_index) == protected_lease.tid);
+        }
+        for (const FlightThreadRegistration &thread : threads) {
+            uint32_t retained = 0;
+            for (auto candidate = allocation_order.rbegin();
+                 candidate != allocation_order.rend() && retained < options.protected_chunks;
+                 ++candidate) {
+                if (candidate->tid != thread.tid) continue;
+                CHECK(artifact.chunk_is_protected(candidate->chunk_index));
+                ++retained;
+            }
+            uint32_t observed_protected = 0;
+            for (uint32_t index = 0; index < artifact.chunk_count(); ++index) {
+                if (artifact.chunk_tid(index) == thread.tid &&
+                    artifact.chunk_is_protected(index)) {
+                    ++observed_protected;
+                }
+            }
+            CHECK(observed_protected == options.protected_chunks);
+        }
+    }
+    artifact.close();
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::rmdir(created) == 0);
+}
+
 void stress_rotations(unsigned int rotations) {
+    exact_oldest_unprotected_reclamation();
     char directory_template[] = "/tmp/qtrace-flight-stress-XXXXXX";
     char *created = ::mkdtemp(directory_template);
     CHECK(created != nullptr);
@@ -167,7 +277,13 @@ void stress_rotations(unsigned int rotations) {
     const uint8_t payload[] = {1, 3, 3, 7};
     std::atomic<bool> start{false};
     std::atomic<bool> succeeded{true};
-    auto rotate = [&](FlightChunkWriter *writer) {
+    std::vector<LeaseIdentity> first_leases{{first_writer.chunk_index(),
+                                             first_writer.generation(),
+                                             first_thread.tid}};
+    std::vector<LeaseIdentity> second_leases{{second_writer.chunk_index(),
+                                              second_writer.generation(),
+                                              second_thread.tid}};
+    auto rotate = [&](FlightChunkWriter *writer, std::vector<LeaseIdentity> *leases) {
         while (!start.load(std::memory_order_acquire)) {
         }
         for (unsigned int iteration = 0; iteration < rotations; ++iteration) {
@@ -176,10 +292,13 @@ void stress_rotations(unsigned int rotations) {
                 succeeded.store(false, std::memory_order_relaxed);
                 return;
             }
+            leases->push_back({writer->chunk_index(), writer->generation(),
+                               writer == &first_writer ? first_thread.tid
+                                                       : second_thread.tid});
         }
     };
-    std::thread first(rotate, &first_writer);
-    std::thread second(rotate, &second_writer);
+    std::thread first(rotate, &first_writer, &first_leases);
+    std::thread second(rotate, &second_writer, &second_leases);
     start.store(true, std::memory_order_release);
     first.join();
     second.join();
@@ -207,6 +326,17 @@ void stress_rotations(unsigned int rotations) {
     }
     CHECK(first_chunks >= options.protected_chunks);
     CHECK(second_chunks >= options.protected_chunks);
+    auto check_latest = [&](const std::vector<LeaseIdentity> &leases) {
+        CHECK(leases.size() >= options.protected_chunks);
+        for (size_t offset = 0; offset < options.protected_chunks; ++offset) {
+            const LeaseIdentity &lease = leases[leases.size() - 1U - offset];
+            CHECK(artifact.chunk_generation(lease.chunk_index) == lease.generation);
+            CHECK(artifact.chunk_tid(lease.chunk_index) == lease.tid);
+            CHECK(artifact.chunk_is_protected(lease.chunk_index));
+        }
+    };
+    check_latest(first_leases);
+    check_latest(second_leases);
     if (rotations * 2U >= artifact.chunk_count()) CHECK(reclaimed_chunks != 0);
     std::sort(retained_sequences.begin(), retained_sequences.end());
     CHECK(std::adjacent_find(retained_sequences.begin(), retained_sequences.end()) ==

@@ -51,7 +51,7 @@ uint32_t flight_checksum32(const uint8_t *bytes, size_t size) noexcept {
 bool scan_flight_record(const uint8_t *bytes, size_t available, uint32_t generation,
                         FlightDecodedRecord *record) noexcept {
     if (bytes == nullptr || record == nullptr || available < kFlightRecordHeaderBytes ||
-        generation == 0) {
+        generation == 0 || !flight_atomic_u32_aligned(bytes + 20)) {
         return false;
     }
     const uint16_t type = flight_read_u16_le(bytes + 0);
@@ -62,7 +62,7 @@ bool scan_flight_record(const uint8_t *bytes, size_t available, uint32_t generat
     if (!valid_record_type(type) || total_bytes < kFlightRecordHeaderBytes ||
         !checked_record_sizes(total_bytes - kFlightRecordHeaderBytes, &checked_total,
                               &storage_bytes) ||
-        checked_total != total_bytes || total_bytes > available) {
+        checked_total != total_bytes || total_bytes > available || storage_bytes > available) {
         return false;
     }
     const uint32_t expected_commit = kFlightRecordCommit ^ total_bytes ^ generation;
@@ -125,14 +125,14 @@ bool FlightChunkWriter::write_record(FlightRecordType type, std::span<const uint
     write_offset_ += storage_bytes;
     if (!publish) {
         interrupted_record_ = destination;
-        interrupted_record_size_ = total_bytes;
+        interrupted_record_size_ = storage_bytes;
         return true;
     }
     const uint32_t commit = kFlightRecordCommit ^ total_bytes ^ lease_.generation;
     flight_atomic_store_u32_le(destination + 20, commit, std::memory_order_release);
     committed_extent_ = write_offset_;
     previous_record_ = destination;
-    previous_record_size_ = total_bytes;
+    previous_record_size_ = storage_bytes;
     ++record_count_;
     if (first_sequence_ == 0) first_sequence_ = sequence;
     last_sequence_ = sequence;
