@@ -92,25 +92,96 @@ bool FlightChunkWriter::initialize(FlightArtifact *artifact,
     return true;
 }
 
-bool FlightChunkWriter::append(FlightRecordType type, std::span<const uint8_t> payload,
-                               uint16_t flags) noexcept {
+FlightWriteResult FlightChunkWriter::append(FlightRecordType type,
+                                            std::span<const uint8_t> payload,
+                                            uint16_t flags) noexcept {
     return write_record(type, payload, flags, true);
 }
 
-bool FlightChunkWriter::write_record(FlightRecordType type, std::span<const uint8_t> payload,
-                                     uint16_t flags, bool publish) noexcept {
+FlightWriteResult FlightChunkWriter::append_pair(const FlightRecordView &first,
+                                                 const FlightRecordView &second) noexcept {
+    const uint16_t first_type = static_cast<uint16_t>(first.type);
+    const uint16_t second_type = static_cast<uint16_t>(second.type);
+    uint32_t first_total = 0;
+    uint32_t first_storage = 0;
+    uint32_t second_total = 0;
+    uint32_t second_storage = 0;
+    if (!active() || sealed_ || interrupted_record_ != nullptr ||
+        !valid_record_type(first_type) || !valid_record_type(second_type) ||
+        (first.payload.data() == nullptr && !first.payload.empty()) ||
+        (second.payload.data() == nullptr && !second.payload.empty()) ||
+        !checked_record_sizes(first.payload.size(), &first_total, &first_storage) ||
+        !checked_record_sizes(second.payload.size(), &second_total, &second_storage)) {
+        return FlightWriteResult::Error;
+    }
+    const size_t remaining = lease_.capacity - write_offset_;
+    if (first_storage > remaining || second_storage > remaining - first_storage) {
+        return FlightWriteResult::NoSpace;
+    }
+    const uint64_t first_sequence = artifact_->next_sequence();
+    const uint64_t second_sequence = artifact_->next_sequence();
+    if (first_sequence == 0 || second_sequence == 0) return FlightWriteResult::Error;
+
+    const auto encode = [&](uint8_t *destination, uint16_t type, uint16_t flags,
+                            uint32_t total, uint32_t storage, uint64_t sequence,
+                            std::span<const uint8_t> payload) {
+        std::memset(destination, 0, storage);
+        flight_write_u16_le(destination + 0, type);
+        flight_write_u16_le(destination + 2, flags);
+        flight_write_u32_le(destination + 4, total);
+        flight_write_u64_le(destination + 8, sequence);
+        flight_atomic_store_u32_le(destination + 20, 0, std::memory_order_relaxed);
+        if (!payload.empty()) {
+            std::memcpy(destination + kFlightRecordHeaderBytes, payload.data(), payload.size());
+        }
+        flight_write_u32_le(destination + 16, record_checksum(destination, total));
+    };
+
+    uint8_t *first_destination = lease_.data + write_offset_;
+    uint8_t *second_destination = first_destination + first_storage;
+    encode(first_destination, first_type, first.flags, first_total, first_storage,
+           first_sequence, first.payload);
+    encode(second_destination, second_type, second.flags, second_total, second_storage,
+           second_sequence, second.payload);
+    const uint32_t second_commit =
+            kFlightRecordCommit ^ second_total ^ lease_.generation;
+    const uint32_t first_commit = kFlightRecordCommit ^ first_total ^ lease_.generation;
+    flight_atomic_store_u32_le(second_destination + 20, second_commit,
+                               std::memory_order_release);
+    flight_atomic_store_u32_le(first_destination + 20, first_commit,
+                               std::memory_order_release);
+
+    write_offset_ += first_storage + second_storage;
+    committed_extent_ = write_offset_;
+    previous_record_ = second_destination;
+    previous_record_size_ = second_storage;
+    record_count_ += 2;
+    if (first_sequence_ == 0) first_sequence_ = first_sequence;
+    last_sequence_ = second_sequence;
+    if (!artifact_->publish_thread_sequence(registration_, lease_, first_sequence_,
+                                            last_sequence_)) {
+        artifact_->mark_incomplete(FlightIncompleteReason::WriterFailure);
+        return FlightWriteResult::Error;
+    }
+    return FlightWriteResult::Written;
+}
+
+FlightWriteResult FlightChunkWriter::write_record(FlightRecordType type,
+                                                  std::span<const uint8_t> payload,
+                                                  uint16_t flags,
+                                                  bool publish) noexcept {
     const uint16_t encoded_type = static_cast<uint16_t>(type);
     uint32_t total_bytes = 0;
     uint32_t storage_bytes = 0;
     if (!active() || sealed_ || interrupted_record_ != nullptr ||
         !valid_record_type(encoded_type) ||
         (payload.data() == nullptr && !payload.empty()) ||
-        !checked_record_sizes(payload.size(), &total_bytes, &storage_bytes) ||
-        storage_bytes > lease_.capacity - write_offset_) {
-        return false;
+        !checked_record_sizes(payload.size(), &total_bytes, &storage_bytes)) {
+        return FlightWriteResult::Error;
     }
+    if (storage_bytes > lease_.capacity - write_offset_) return FlightWriteResult::NoSpace;
     const uint64_t sequence = artifact_->next_sequence();
-    if (sequence == 0) return false;
+    if (sequence == 0) return FlightWriteResult::Error;
     uint8_t *destination = lease_.data + write_offset_;
     std::memset(destination, 0, storage_bytes);
     flight_write_u16_le(destination + 0, encoded_type);
@@ -126,7 +197,7 @@ bool FlightChunkWriter::write_record(FlightRecordType type, std::span<const uint
     if (!publish) {
         interrupted_record_ = destination;
         interrupted_record_size_ = storage_bytes;
-        return true;
+        return FlightWriteResult::Written;
     }
     const uint32_t commit = kFlightRecordCommit ^ total_bytes ^ lease_.generation;
     flight_atomic_store_u32_le(destination + 20, commit, std::memory_order_release);
@@ -139,9 +210,9 @@ bool FlightChunkWriter::write_record(FlightRecordType type, std::span<const uint
     if (!artifact_->publish_thread_sequence(registration_, lease_, first_sequence_,
                                             last_sequence_)) {
         artifact_->mark_incomplete(FlightIncompleteReason::WriterFailure);
-        return false;
+        return FlightWriteResult::Error;
     }
-    return true;
+    return FlightWriteResult::Written;
 }
 
 bool FlightChunkWriter::seal() noexcept {

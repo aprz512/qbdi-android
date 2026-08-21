@@ -9,6 +9,7 @@ class FlightTraceSink final : public TraceSink {
 public:
     FlightTraceSink() noexcept = default;
 
+    // gpr is copied by the encoder before initialize returns; it is not borrowed.
     bool initialize(FlightChunkWriter *writer, TraceProfile profile,
                     const TraceContext &context,
                     const QBDI::GPRState *gpr) noexcept;

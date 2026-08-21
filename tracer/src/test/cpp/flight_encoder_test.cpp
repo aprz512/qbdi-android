@@ -270,6 +270,178 @@ void no_fit_rotates_once_and_never_publishes_a_partial_record() {
           (kFlightDefinitionFlag | kFlightStringDefinitionFlag));
 }
 
+void instruction_rotation_checkpoints_pre_state_then_emits_post_state_delta() {
+    Fixture fixture(1024);
+    QBDI::GPRState live{};
+    live.x0 = 0x11;
+    live.pc = fixture.context.module_base + 0x88;
+    FlightEncoder encoder;
+    CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context, &live));
+    const uint32_t old_chunk = fixture.writer.chunk_index();
+    const size_t remaining = fixture.artifact.chunk_data_capacity() -
+                             fixture.writer.committed_bytes();
+    CHECK(remaining > 184);
+    std::vector<uint8_t> padding(remaining - 160U - kFlightRecordHeaderBytes, 0x5a);
+    CHECK(fixture.writer.append(FlightRecordType::Rule, padding) ==
+          FlightWriteResult::Written);
+
+    CachedInstruction decoded = instruction_metadata();
+    InstructionRecord event = instruction_record(fixture.context, &decoded);
+    event.writes.values[0] = 0x99;
+    live.x0 = 0x99;
+    CHECK(encoder.instruction(fixture.context, event));
+    CHECK(fixture.writer.chunk_index() != old_chunk);
+
+    const Records records = records_in(fixture, fixture.writer.chunk_index(),
+                                       fixture.writer.generation(),
+                                       fixture.writer.committed_bytes());
+    CHECK(records.values.size() == 5);
+    CHECK(records.values[0].type == FlightRecordType::ChunkBegin);
+    CHECK(records.values[1].type == FlightRecordType::RegisterDelta);
+    CHECK(records.values[1].flags == kFlightRegisterCheckpointFlag);
+    CHECK(flight_read_u64_le(records.values[1].payload) == 0x11);
+    CHECK(records.values[3].type == FlightRecordType::Instruction);
+    CHECK(records.values[3].flags == 0);
+    CHECK(records.values[4].type == FlightRecordType::RegisterDelta);
+    CHECK(flight_read_u64_le(records.values[4].payload) == 1);
+    CHECK(flight_read_u64_le(records.values[4].payload + 8) == 0x99);
+}
+
+void explicit_rotation_uses_the_latest_owned_register_snapshot() {
+    Fixture fixture;
+    QBDI::GPRState initialization_object{};
+    for (size_t index = 0; index < 31; ++index) {
+        QBDI_GPR_SET(&initialization_object, index, 100 + index);
+    }
+    initialization_object.sp = 131;
+    initialization_object.pc = 132;
+    initialization_object.nzcv = 133;
+    FlightEncoder encoder;
+    CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context,
+                             &initialization_object));
+
+    QBDI::GPRState latest = initialization_object;
+    for (size_t index = 0; index < 31; ++index) QBDI_GPR_SET(&latest, index, 1000 + index);
+    latest.sp = 1031;
+    latest.pc = 1032;
+    latest.nzcv = 1033;
+    CHECK(encoder.registers(latest));
+    std::memset(&initialization_object, 0xee, sizeof(initialization_object));
+    CHECK(encoder.rotate());
+
+    const Records records = records_in(fixture, fixture.writer.chunk_index(),
+                                       fixture.writer.generation(),
+                                       fixture.writer.committed_bytes());
+    CHECK(records.values.size() == 2);
+    CHECK(records.values[1].flags == kFlightRegisterCheckpointFlag);
+    for (size_t index = 0; index < kFlightGprCount; ++index) {
+        CHECK(flight_read_u64_le(records.values[1].payload + index * 8U) == 1000 + index);
+    }
+}
+
+void rejects_module_metadata_mismatches_in_instruction_and_memory_events() {
+    {
+        Fixture fixture;
+        QBDI::GPRState initial{};
+        FlightEncoder encoder;
+        CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context, &initial));
+        CachedInstruction decoded = instruction_metadata();
+        InstructionRecord event = instruction_record(fixture.context, &decoded);
+        event.module_base -= 0x1000;
+        CHECK(!encoder.instruction(fixture.context, event));
+        CHECK(encoder.failed());
+    }
+    {
+        Fixture fixture;
+        QBDI::GPRState initial{};
+        FlightEncoder encoder;
+        CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context, &initial));
+        TraceContext mismatch = fixture.context;
+        mismatch.module_base -= 0x1000;
+        MemoryRecord memory{};
+        CHECK(!encoder.memory(mismatch, fixture.context.module_base + 0x44, memory));
+        CHECK(encoder.failed());
+    }
+}
+
+void preamble_capacity_failure_commits_neither_metadata_nor_checkpoint() {
+    Fixture fixture(512);
+    fixture.context.target_so.assign(100, 't');
+    fixture.context.scene_name.assign(100, 's');
+    QBDI::GPRState initial{};
+    FlightEncoder encoder;
+    CHECK(!encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context, &initial));
+    CHECK(fixture.writer.committed_bytes() == 0);
+    CHECK(fixture.writer.record_count() == 0);
+}
+
+void colliding_instruction_dictionary_rotates_after_all_256_slots_are_used() {
+    Fixture fixture(1024U * 1024U);
+    QBDI::GPRState initial{};
+    FlightEncoder encoder;
+    CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context, &initial));
+    const uint32_t first_chunk = fixture.writer.chunk_index();
+    CachedInstruction decoded{};
+    std::memcpy(decoded.mnemonic, "nop", 4);
+    std::memcpy(decoded.disassembly, "nop", 4);
+    InstructionRecord event{};
+    event.pc = fixture.context.module_base + 4;
+    event.module_base = fixture.context.module_base;
+    event.decoded = &decoded;
+    for (uint32_t index = 0; index < 257; ++index) {
+        // These opcodes share the same low byte and therefore the same initial table slot.
+        decoded.opcode = 1U + index * 256U;
+        event.sequence = index + 1U;
+        CHECK(encoder.instruction(fixture.context, event));
+    }
+    CHECK(fixture.writer.chunk_index() != first_chunk);
+    const Records records = records_in(fixture, fixture.writer.chunk_index(),
+                                       fixture.writer.generation(),
+                                       fixture.writer.committed_bytes());
+    CHECK(records.values.size() == 4);
+    CHECK(records.values[2].flags == kFlightDefinitionFlag);
+    CHECK(flight_read_u32_le(records.values[2].payload + 8) == 1);
+    CHECK(records.values[3].flags == 0);
+}
+
+void string_pool_exhaustion_rotates_and_restarts_local_ids() {
+    Fixture fixture(1024U * 1024U);
+    QBDI::GPRState initial{};
+    FlightEncoder encoder;
+    CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context, &initial));
+    const uint32_t first_chunk = fixture.writer.chunk_index();
+    for (size_t index = 0; index < 6; ++index) {
+        std::string name = "rule-" + std::to_string(index);
+        std::string detail(3000, static_cast<char>('a' + index));
+        CHECK(encoder.rule(name, detail));
+    }
+    CHECK(fixture.writer.chunk_index() != first_chunk);
+    const Records records = records_in(fixture, fixture.writer.chunk_index(),
+                                       fixture.writer.generation(),
+                                       fixture.writer.committed_bytes());
+    CHECK(records.values.size() == 5);
+    CHECK(records.values[2].flags ==
+          (kFlightDefinitionFlag | kFlightStringDefinitionFlag));
+    CHECK(flight_read_u32_le(records.values[2].payload) == 1);
+    CHECK(records.values[3].flags ==
+          (kFlightDefinitionFlag | kFlightStringDefinitionFlag));
+    CHECK(flight_read_u32_le(records.values[3].payload) == 2);
+    CHECK(records.values[4].type == FlightRecordType::Rule);
+    CHECK(records.values[4].flags == 0);
+}
+
+void writer_state_errors_fail_without_rotating() {
+    Fixture fixture;
+    QBDI::GPRState initial{};
+    FlightEncoder encoder;
+    CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full, fixture.context, &initial));
+    const uint32_t chunk = fixture.writer.chunk_index();
+    CHECK(fixture.writer.seal());
+    CHECK(!encoder.call("category", "name", "detail"));
+    CHECK(encoder.failed());
+    CHECK(fixture.writer.chunk_index() == chunk);
+}
+
 } // namespace
 
 int main() {
@@ -277,4 +449,11 @@ int main() {
     checkpoint_and_delta_reconstruct_exact_gpr_state_in_artifact_order();
     memory_payload_preserves_full_profile_pre_and_post_bytes();
     no_fit_rotates_once_and_never_publishes_a_partial_record();
+    instruction_rotation_checkpoints_pre_state_then_emits_post_state_delta();
+    explicit_rotation_uses_the_latest_owned_register_snapshot();
+    rejects_module_metadata_mismatches_in_instruction_and_memory_events();
+    preamble_capacity_failure_commits_neither_metadata_nor_checkpoint();
+    colliding_instruction_dictionary_rotates_after_all_256_slots_are_used();
+    string_pool_exhaustion_rotates_and_restarts_local_ids();
+    writer_state_errors_fail_without_rotating();
 }

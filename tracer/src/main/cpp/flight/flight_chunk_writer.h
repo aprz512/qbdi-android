@@ -20,6 +20,18 @@ uint32_t flight_checksum32(const uint8_t *bytes, size_t size) noexcept;
 bool scan_flight_record(const uint8_t *bytes, size_t available, uint32_t generation,
                         FlightDecodedRecord *record) noexcept;
 
+enum class FlightWriteResult : uint8_t {
+    Written,
+    NoSpace,
+    Error,
+};
+
+struct FlightRecordView {
+    FlightRecordType type;
+    std::span<const uint8_t> payload;
+    uint16_t flags = 0;
+};
+
 class FlightChunkWriter {
 public:
     FlightChunkWriter() noexcept = default;
@@ -30,8 +42,12 @@ public:
 
     bool initialize(FlightArtifact *artifact,
                     const FlightThreadRegistration &registration) noexcept;
-    bool append(FlightRecordType type, std::span<const uint8_t> payload,
-                uint16_t flags = 0) noexcept;
+    FlightWriteResult append(FlightRecordType type, std::span<const uint8_t> payload,
+                             uint16_t flags = 0) noexcept;
+    // Publishes the second record before the first record's readiness word. Recovery therefore
+    // observes either neither record or both records as one consecutive valid prefix.
+    FlightWriteResult append_pair(const FlightRecordView &first,
+                                  const FlightRecordView &second) noexcept;
     bool seal() noexcept;
     bool rotate() noexcept;
     void detach() noexcept;
@@ -52,8 +68,8 @@ public:
     void test_interrupt_before_commit() noexcept;
 
 private:
-    bool write_record(FlightRecordType type, std::span<const uint8_t> payload,
-                      uint16_t flags, bool publish) noexcept;
+    FlightWriteResult write_record(FlightRecordType type, std::span<const uint8_t> payload,
+                                   uint16_t flags, bool publish) noexcept;
     void reset_chunk_state() noexcept;
 
     FlightArtifact *artifact_ = nullptr;

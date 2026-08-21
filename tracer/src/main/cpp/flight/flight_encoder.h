@@ -34,6 +34,7 @@ class FlightEncoder {
 public:
     FlightEncoder() noexcept = default;
 
+    // gpr is copied during this call; no pointer or reference is retained.
     bool initialize(FlightChunkWriter *writer, TraceProfile profile,
                     const TraceContext &context,
                     const QBDI::GPRState *gpr) noexcept;
@@ -75,22 +76,29 @@ private:
 
     bool fail() noexcept;
     void reset_chunk_state() noexcept;
-    bool write_chunk_preamble(const QBDI::GPRState &gpr) noexcept;
-    bool rotate_to(const QBDI::GPRState &gpr) noexcept;
-    bool append_no_rotate(FlightRecordType type, const uint8_t *payload,
-                          size_t payload_bytes, uint16_t flags = 0) noexcept;
+    bool write_chunk_preamble(
+            const std::array<uint64_t, kFlightGprCount> &gpr) noexcept;
+    bool rotate_to(const std::array<uint64_t, kFlightGprCount> &gpr) noexcept;
+    FlightWriteResult append_no_rotate(FlightRecordType type, const uint8_t *payload,
+                                       size_t payload_bytes,
+                                       uint16_t flags = 0) noexcept;
     bool append_single_with_rotation(FlightRecordType type, const uint8_t *payload,
-                                     size_t payload_bytes, uint16_t flags,
-                                     const QBDI::GPRState &rotation_gpr) noexcept;
+                                     size_t payload_bytes, uint16_t flags) noexcept;
     bool write_instruction(const InstructionRecord &record) noexcept;
-    bool write_string_event(FlightRecordType type, std::string_view first,
-                            std::string_view second,
-                            std::string_view third, uint64_t event_id = 0,
+    bool write_register_snapshot(
+            const std::array<uint64_t, kFlightGprCount> &current) noexcept;
+    bool instruction_post_state(
+            const InstructionRecord &record,
+            std::array<uint64_t, kFlightGprCount> *post) const noexcept;
+    bool write_string_event(FlightRecordType type,
+                            const std::array<std::string_view, 3> &fields,
+                            size_t field_count, size_t detail_field,
+                            uint64_t event_id = 0,
                             uint32_t total_detail_bytes = 0,
                             uint16_t chunk_index = 0,
                             uint16_t chunk_count = 0) noexcept;
-    bool write_chunked_event(FlightRecordType type, std::string_view first,
-                             std::string_view detail) noexcept;
+    bool write_chunked_event(FlightRecordType type, std::string_view category,
+                             std::string_view name, std::string_view detail) noexcept;
 
     LookupResult find_instruction(uint32_t opcode, uint32_t *id,
                                   size_t *slot) const noexcept;
@@ -104,7 +112,6 @@ private:
                              std::array<uint64_t, kFlightGprCount> *values) noexcept;
 
     FlightChunkWriter *writer_ = nullptr;
-    const QBDI::GPRState *gpr_ = nullptr;
     TraceProfile profile_ = TraceProfile::Full;
     uint64_t module_base_ = 0;
     uint64_t target_offset_ = 0;

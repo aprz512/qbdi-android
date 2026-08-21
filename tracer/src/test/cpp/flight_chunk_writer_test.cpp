@@ -64,7 +64,8 @@ void appends_explicit_little_endian_records_with_valid_commit_and_checksum() {
     Fixture fixture;
     const uint8_t payload[] = {0xde, 0xad, 0xbe, 0xef, 0x55};
     CHECK(fixture.writer.append(FlightRecordType::Instruction,
-                                {payload, sizeof(payload)}, 0x1234));
+                                {payload, sizeof(payload)}, 0x1234) ==
+          FlightWriteResult::Written);
 
     FlightDecodedRecord decoded{};
     CHECK(scan_flight_record(fixture.writer.previous_record_bytes(),
@@ -79,10 +80,43 @@ void appends_explicit_little_endian_records_with_valid_commit_and_checksum() {
           static_cast<uint16_t>(FlightRecordType::Instruction));
 }
 
+void distinguishes_written_no_space_and_writer_errors() {
+    FlightChunkWriter inactive;
+    const uint8_t byte = 1;
+    CHECK(inactive.append(FlightRecordType::Instruction, {&byte, 1}) ==
+          FlightWriteResult::Error);
+
+    Fixture fixture;
+    CHECK(fixture.writer.append(FlightRecordType::Instruction, {&byte, 1}) ==
+          FlightWriteResult::Written);
+    const uint32_t committed = fixture.writer.committed_bytes();
+    std::vector<uint8_t> oversized(fixture.artifact.chunk_data_capacity(), 0xaa);
+    CHECK(fixture.writer.append(FlightRecordType::Instruction, oversized) ==
+          FlightWriteResult::NoSpace);
+    CHECK(fixture.writer.committed_bytes() == committed);
+}
+
+void pair_append_preflights_both_records_before_publishing_either() {
+    Fixture fixture;
+    const size_t capacity = fixture.artifact.chunk_data_capacity();
+    std::vector<uint8_t> padding(capacity - 72U, 0x55);
+    CHECK(fixture.writer.append(FlightRecordType::Rule, padding) ==
+          FlightWriteResult::Written);
+    const uint32_t committed = fixture.writer.committed_bytes();
+    const uint8_t metadata = 1;
+    const uint8_t checkpoint = 2;
+    const FlightRecordView first{FlightRecordType::ChunkBegin, {&metadata, 1}, 0};
+    const FlightRecordView second{FlightRecordType::RegisterDelta, {&checkpoint, 1}, 1};
+    CHECK(fixture.writer.append_pair(first, second) == FlightWriteResult::NoSpace);
+    CHECK(fixture.writer.committed_bytes() == committed);
+    CHECK(fixture.writer.record_count() == 1);
+}
+
 void rejects_bad_bounds_commit_checksum_and_generation() {
     Fixture fixture;
     const uint8_t payload[] = {1, 2, 3, 4};
-    CHECK(fixture.writer.append(FlightRecordType::Memory, {payload, sizeof(payload)}));
+    CHECK(fixture.writer.append(FlightRecordType::Memory, {payload, sizeof(payload)}) ==
+          FlightWriteResult::Written);
     const uint8_t *record = fixture.writer.previous_record_bytes();
     const size_t size = fixture.writer.previous_record_size();
     FlightDecodedRecord decoded{};
@@ -113,7 +147,8 @@ void rejects_bad_bounds_commit_checksum_and_generation() {
 void torn_final_record_does_not_hide_preceding_committed_record() {
     Fixture fixture;
     const uint8_t payload[] = {7, 8, 9};
-    CHECK(fixture.writer.append(FlightRecordType::Instruction, {payload, sizeof(payload)}));
+    CHECK(fixture.writer.append(FlightRecordType::Instruction, {payload, sizeof(payload)}) ==
+          FlightWriteResult::Written);
     fixture.writer.test_interrupt_before_commit();
 
     FlightDecodedRecord decoded{};
@@ -129,8 +164,10 @@ void seal_publishes_lengths_endpoints_counts_and_chunk_checksum() {
     Fixture fixture;
     const uint8_t first[] = {0x10};
     const uint8_t second[] = {0x20, 0x21};
-    CHECK(fixture.writer.append(FlightRecordType::ThreadBegin, {first, sizeof(first)}));
-    CHECK(fixture.writer.append(FlightRecordType::Call, {second, sizeof(second)}));
+    CHECK(fixture.writer.append(FlightRecordType::ThreadBegin, {first, sizeof(first)}) ==
+          FlightWriteResult::Written);
+    CHECK(fixture.writer.append(FlightRecordType::Call, {second, sizeof(second)}) ==
+          FlightWriteResult::Written);
     const uint32_t chunk_index = fixture.writer.chunk_index();
     const size_t committed = fixture.writer.committed_bytes();
     CHECK(fixture.writer.seal());
@@ -150,7 +187,8 @@ void seal_publishes_lengths_endpoints_counts_and_chunk_checksum() {
 void rotation_seals_old_chunk_and_increments_reclaimed_generations() {
     Fixture fixture;
     const uint8_t payload[] = {0x42};
-    CHECK(fixture.writer.append(FlightRecordType::Instruction, {payload, sizeof(payload)}));
+    CHECK(fixture.writer.append(FlightRecordType::Instruction, {payload, sizeof(payload)}) ==
+          FlightWriteResult::Written);
     const uint32_t old_chunk = fixture.writer.chunk_index();
     CHECK(fixture.writer.rotate());
     CHECK(fixture.writer.chunk_index() != old_chunk);
@@ -293,7 +331,8 @@ void stress_rotations(unsigned int rotations) {
         while (!start.load(std::memory_order_acquire)) {
         }
         for (unsigned int iteration = 0; iteration < rotations; ++iteration) {
-            if (!writer->append(FlightRecordType::Instruction, {payload, sizeof(payload)}) ||
+            if (writer->append(FlightRecordType::Instruction, {payload, sizeof(payload)}) !=
+                        FlightWriteResult::Written ||
                 !writer->rotate()) {
                 succeeded.store(false, std::memory_order_relaxed);
                 return;
@@ -365,6 +404,8 @@ int main(int argc, char **argv) {
         return 0;
     }
     appends_explicit_little_endian_records_with_valid_commit_and_checksum();
+    distinguishes_written_no_space_and_writer_errors();
+    pair_append_preflights_both_records_before_publishing_either();
     rejects_bad_bounds_commit_checksum_and_generation();
     torn_final_record_does_not_hide_preceding_committed_record();
     seal_publishes_lengths_endpoints_counts_and_chunk_checksum();

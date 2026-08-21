@@ -31,6 +31,15 @@ size_t detail_chunk_end(std::string_view detail, size_t offset) noexcept {
     return end == offset ? offset + kBinaryMaxCallChunkDetailBytes : end;
 }
 
+size_t detail_chunk_count(std::string_view detail) noexcept {
+    size_t count = 0;
+    for (size_t offset = 0; offset < detail.size();
+         offset = detail_chunk_end(detail, offset)) {
+        ++count;
+    }
+    return count;
+}
+
 uint64_t string_hash(std::string_view value) noexcept {
     uint64_t hash = kFnvOffsetBasis;
     for (char byte : value) {
@@ -69,7 +78,6 @@ bool FlightEncoder::initialize(FlightChunkWriter *writer, TraceProfile profile,
         return fail();
     }
     writer_ = writer;
-    gpr_ = gpr;
     profile_ = profile;
     module_base_ = context.module_base;
     target_offset_ = context.target_offset;
@@ -85,7 +93,9 @@ bool FlightEncoder::initialize(FlightChunkWriter *writer, TraceProfile profile,
         std::memcpy(scene_name_.data(), context.scene_name.data(), scene_name_bytes_);
     }
     reset_chunk_state();
-    if (!write_chunk_preamble(*gpr)) return fail();
+    std::array<uint64_t, kFlightGprCount> initial{};
+    snapshot_gpr(*gpr, &initial);
+    if (!write_chunk_preamble(initial)) return fail();
     return true;
 }
 
@@ -116,13 +126,18 @@ void FlightEncoder::snapshot_gpr(
     (*values)[33] = static_cast<uint64_t>(gpr.nzcv);
 }
 
-bool FlightEncoder::append_no_rotate(FlightRecordType type, const uint8_t *payload,
-                                     size_t payload_bytes, uint16_t flags) noexcept {
-    if (failed_ || writer_ == nullptr || (payload == nullptr && payload_bytes != 0)) return false;
+FlightWriteResult FlightEncoder::append_no_rotate(FlightRecordType type,
+                                                  const uint8_t *payload,
+                                                  size_t payload_bytes,
+                                                  uint16_t flags) noexcept {
+    if (failed_ || writer_ == nullptr || (payload == nullptr && payload_bytes != 0)) {
+        return FlightWriteResult::Error;
+    }
     return writer_->append(type, {payload, payload_bytes}, flags);
 }
 
-bool FlightEncoder::write_chunk_preamble(const QBDI::GPRState &gpr) noexcept {
+bool FlightEncoder::write_chunk_preamble(
+        const std::array<uint64_t, kFlightGprCount> &snapshot) noexcept {
     std::array<uint8_t, kChunkMetadataFixedBytes + 2U * kContextStringBytes> metadata{};
     uint8_t profile = 0;
     if (!encode_profile(profile_, &profile)) return false;
@@ -145,43 +160,43 @@ bool FlightEncoder::write_chunk_preamble(const QBDI::GPRState &gpr) noexcept {
         std::memcpy(metadata.data() + metadata_bytes, scene_name_.data(), scene_name_bytes_);
         metadata_bytes += scene_name_bytes_;
     }
-    if (!append_no_rotate(FlightRecordType::ChunkBegin, metadata.data(), metadata_bytes)) {
-        return false;
-    }
-
-    std::array<uint64_t, kFlightGprCount> snapshot{};
-    snapshot_gpr(gpr, &snapshot);
     std::array<uint8_t, kFlightGprCount * sizeof(uint64_t)> checkpoint{};
     for (size_t index = 0; index < snapshot.size(); ++index) {
         flight_write_u64_le(checkpoint.data() + index * sizeof(uint64_t), snapshot[index]);
     }
-    if (!append_no_rotate(FlightRecordType::RegisterDelta, checkpoint.data(),
-                          checkpoint.size(), kFlightRegisterCheckpointFlag)) {
-        return false;
-    }
+    const FlightRecordView metadata_record{
+            FlightRecordType::ChunkBegin, {metadata.data(), metadata_bytes}, 0};
+    const FlightRecordView checkpoint_record{
+            FlightRecordType::RegisterDelta, checkpoint, kFlightRegisterCheckpointFlag};
+    if (writer_->append_pair(metadata_record, checkpoint_record) !=
+        FlightWriteResult::Written) return false;
     previous_gpr_ = snapshot;
     have_previous_gpr_ = true;
     return true;
 }
 
-bool FlightEncoder::rotate_to(const QBDI::GPRState &gpr) noexcept {
+bool FlightEncoder::rotate_to(
+        const std::array<uint64_t, kFlightGprCount> &gpr) noexcept {
+    const std::array<uint64_t, kFlightGprCount> owned_gpr = gpr;
     if (failed_ || writer_ == nullptr || !writer_->rotate()) return fail();
     reset_chunk_state();
-    if (!write_chunk_preamble(gpr)) return fail();
+    if (!write_chunk_preamble(owned_gpr)) return fail();
     return true;
 }
 
 bool FlightEncoder::rotate() noexcept {
-    if (failed_ || gpr_ == nullptr) return fail();
-    return rotate_to(*gpr_);
+    if (failed_ || !have_previous_gpr_) return fail();
+    return rotate_to(previous_gpr_);
 }
 
 bool FlightEncoder::append_single_with_rotation(
         FlightRecordType type, const uint8_t *payload, size_t payload_bytes,
-        uint16_t flags, const QBDI::GPRState &rotation_gpr) noexcept {
-    if (append_no_rotate(type, payload, payload_bytes, flags)) return true;
-    if (!rotate_to(rotation_gpr)) return false;
-    if (!append_no_rotate(type, payload, payload_bytes, flags)) return fail();
+        uint16_t flags) noexcept {
+    FlightWriteResult result = append_no_rotate(type, payload, payload_bytes, flags);
+    if (result == FlightWriteResult::Written) return true;
+    if (result != FlightWriteResult::NoSpace || !rotate_to(previous_gpr_)) return fail();
+    result = append_no_rotate(type, payload, payload_bytes, flags);
+    if (result != FlightWriteResult::Written) return fail();
     return true;
 }
 
@@ -189,12 +204,15 @@ bool FlightEncoder::registers(const QBDI::GPRState &gpr) noexcept {
     if (failed_ || writer_ == nullptr || !have_previous_gpr_) return fail();
     std::array<uint64_t, kFlightGprCount> current{};
     snapshot_gpr(gpr, &current);
+    return write_register_snapshot(current);
+}
+
+bool FlightEncoder::write_register_snapshot(
+        const std::array<uint64_t, kFlightGprCount> &current) noexcept {
     uint64_t mask = 0;
-    size_t changed = 0;
     for (size_t index = 0; index < current.size(); ++index) {
         if (current[index] == previous_gpr_[index]) continue;
         mask |= 1ULL << index;
-        ++changed;
     }
     if (mask == 0) return true;
     std::array<uint8_t, sizeof(uint64_t) + kFlightGprCount * sizeof(uint64_t)> payload{};
@@ -205,12 +223,15 @@ bool FlightEncoder::registers(const QBDI::GPRState &gpr) noexcept {
         flight_write_u64_le(payload.data() + offset, current[index]);
         offset += sizeof(uint64_t);
     }
-    if (append_no_rotate(FlightRecordType::RegisterDelta, payload.data(), offset)) {
+    const FlightWriteResult result = append_no_rotate(
+            FlightRecordType::RegisterDelta, payload.data(), offset);
+    if (result == FlightWriteResult::Written) {
         previous_gpr_ = current;
         return true;
     }
+    if (result != FlightWriteResult::NoSpace) return fail();
     // A fresh checkpoint already represents this exact state, so no redundant delta follows it.
-    return rotate_to(gpr);
+    return rotate_to(current);
 }
 
 FlightEncoder::LookupResult FlightEncoder::find_instruction(
@@ -248,7 +269,7 @@ bool FlightEncoder::write_instruction(const InstructionRecord &record) noexcept 
         size_t slot = 0;
         const LookupResult lookup = find_instruction(record.decoded->opcode, &id, &slot);
         if (lookup == LookupResult::Full) {
-            if (attempt == 0 && gpr_ != nullptr && rotate_to(*gpr_)) continue;
+            if (attempt == 0 && rotate_to(previous_gpr_)) continue;
             return fail();
         }
         const bool definition_needed = lookup == LookupResult::Missing;
@@ -265,18 +286,24 @@ bool FlightEncoder::write_instruction(const InstructionRecord &record) noexcept 
             encoded_definition = binary.encode_instruction_definition(
                     definition.data(), definition.size(), id, *record.decoded);
             if (!encoded_definition.ok) return fail();
-            if (!append_no_rotate(FlightRecordType::Instruction, definition.data(),
-                                  encoded_definition.size, kFlightDefinitionFlag)) {
-                if (attempt == 0 && gpr_ != nullptr && rotate_to(*gpr_)) continue;
+            const FlightWriteResult definition_result = append_no_rotate(
+                    FlightRecordType::Instruction, definition.data(),
+                    encoded_definition.size, kFlightDefinitionFlag);
+            if (definition_result != FlightWriteResult::Written) {
+                if (definition_result == FlightWriteResult::NoSpace && attempt == 0 &&
+                    rotate_to(previous_gpr_)) continue;
                 return fail();
             }
             if (!insert_instruction(slot, record.decoded->opcode, id)) return fail();
             ++next_instruction_id_;
         }
-        if (append_no_rotate(FlightRecordType::Instruction, encoded_event.data(), event.size)) {
+        const FlightWriteResult event_result = append_no_rotate(
+                FlightRecordType::Instruction, encoded_event.data(), event.size);
+        if (event_result == FlightWriteResult::Written) {
             return true;
         }
-        if (attempt == 0 && gpr_ != nullptr && rotate_to(*gpr_)) continue;
+        if (event_result == FlightWriteResult::NoSpace && attempt == 0 &&
+            rotate_to(previous_gpr_)) continue;
         return fail();
     }
     return fail();
@@ -284,27 +311,55 @@ bool FlightEncoder::write_instruction(const InstructionRecord &record) noexcept 
 
 bool FlightEncoder::instruction(const TraceContext &context,
                                 const InstructionRecord &record) noexcept {
-    if (failed_ || record.memory_count > record.memory.size() ||
+    std::array<uint64_t, kFlightGprCount> post{};
+    if (failed_ || context.module_base != module_base_ ||
+        record.module_base != module_base_ || record.pc < module_base_ ||
+        record.memory_count > record.memory.size() ||
+        !instruction_post_state(record, &post) ||
         !write_instruction(record)) {
         return fail();
     }
+    if (!write_register_snapshot(post)) return false;
     for (size_t index = 0; index < record.memory_count; ++index) {
         if (!memory(context, record.pc, record.memory[index])) return false;
     }
-    if (gpr_ != nullptr && !registers(*gpr_)) return false;
     return true;
+}
+
+bool FlightEncoder::instruction_post_state(
+        const InstructionRecord &record,
+        std::array<uint64_t, kFlightGprCount> *post) const noexcept {
+    if (record.decoded == nullptr || post == nullptr ||
+        !valid_trace_gpr_mask(record.decoded->write_gpr_mask)) return false;
+    uint64_t mask = record.decoded->write_gpr_mask;
+    size_t dense_index = 0;
+    *post = previous_gpr_;
+    while (mask != 0) {
+        size_t trace_index = 0;
+        uint64_t probe = mask;
+        while ((probe & 1U) == 0) {
+            ++trace_index;
+            probe >>= 1U;
+        }
+        if (dense_index >= record.writes.count) return false;
+        const size_t flight_index = trace_index == 32 ? 33 :
+                                    trace_index == 33 ? 32 : trace_index;
+        (*post)[flight_index] = record.writes.values[dense_index++];
+        mask &= mask - 1U;
+    }
+    return dense_index == record.writes.count;
 }
 
 bool FlightEncoder::memory(const TraceContext &context, uintptr_t pc,
                            const MemoryRecord &record) noexcept {
-    if (failed_ || gpr_ == nullptr || pc < context.module_base) return fail();
+    if (failed_ || context.module_base != module_base_ || pc < module_base_) return fail();
     BinaryTraceEncoder binary;
     std::array<uint8_t, kBinaryMaxMemoryRecordBytes> payload{};
     const BinaryEncodeResult encoded = binary.encode_memory(
-            payload.data(), payload.size(), 1, pc - context.module_base, record);
+            payload.data(), payload.size(), 1, pc - module_base_, record);
     if (!encoded.ok) return fail();
     return append_single_with_rotation(FlightRecordType::Memory, payload.data(),
-                                       encoded.size, 0, *gpr_);
+                                       encoded.size, 0);
 }
 
 FlightEncoder::LookupResult FlightEncoder::find_string(
@@ -342,37 +397,35 @@ bool FlightEncoder::insert_string(size_t slot_index, std::string_view value,
     return true;
 }
 
-bool FlightEncoder::write_string_event(FlightRecordType type, std::string_view first,
-                                       std::string_view second,
-                                       std::string_view third, uint64_t event_id,
-                                       uint32_t total_detail_bytes,
-                                       uint16_t chunk_index,
-                                       uint16_t chunk_count) noexcept {
-    if (failed_ || gpr_ == nullptr ||
+bool FlightEncoder::write_string_event(
+        FlightRecordType type, const std::array<std::string_view, 3> &fields,
+        size_t field_count, size_t detail_field, uint64_t event_id,
+        uint32_t total_detail_bytes, uint16_t chunk_index,
+        uint16_t chunk_count) noexcept {
+    if (failed_ || !have_previous_gpr_ ||
         (type != FlightRecordType::Call && type != FlightRecordType::Rule &&
          type != FlightRecordType::Error) ||
-        first.size() > kBinaryMaxEventDetailBytes ||
-        second.size() > kBinaryMaxEventDetailBytes ||
-        third.size() > kBinaryMaxEventDetailBytes) {
+        field_count < 2 || field_count > fields.size() || detail_field >= field_count) {
         return fail();
     }
+    for (size_t index = 0; index < field_count; ++index) {
+        if (fields[index].size() > kBinaryMaxEventDetailBytes) return fail();
+    }
     const bool chunked = event_id != 0;
-    const size_t detail_bytes = type == FlightRecordType::Call ? third.size() : second.size();
+    const size_t detail_bytes = fields[detail_field].size();
     if (chunked && (chunk_count < 2 || chunk_index >= chunk_count ||
                     total_detail_bytes < detail_bytes)) {
         return fail();
     }
-    const std::array<std::string_view, 3> values{first, second, third};
-    const size_t value_count = type == FlightRecordType::Call ? 3U : 2U;
     for (unsigned int attempt = 0; attempt < 2; ++attempt) {
         std::array<uint32_t, 3> ids{};
         bool retry = false;
-        for (size_t index = 0; index < value_count; ++index) {
+        for (size_t index = 0; index < field_count; ++index) {
             size_t slot = 0;
-            const LookupResult lookup = find_string(values[index], &ids[index], &slot);
+            const LookupResult lookup = find_string(fields[index], &ids[index], &slot);
             if (lookup == LookupResult::Full ||
                 (lookup == LookupResult::Missing &&
-                 values[index].size() > string_pool_.size() - string_pool_used_)) {
+                 fields[index].size() > string_pool_.size() - string_pool_used_)) {
                 retry = true;
                 break;
             }
@@ -381,17 +434,20 @@ bool FlightEncoder::write_string_event(FlightRecordType type, std::string_view f
             std::array<uint8_t, 8U + kBinaryMaxEventDetailBytes> definition{};
             flight_write_u32_le(definition.data(), ids[index]);
             flight_write_u32_le(definition.data() + 4,
-                                static_cast<uint32_t>(values[index].size()));
-            if (!values[index].empty()) {
-                std::memcpy(definition.data() + 8, values[index].data(), values[index].size());
+                                static_cast<uint32_t>(fields[index].size()));
+            if (!fields[index].empty()) {
+                std::memcpy(definition.data() + 8, fields[index].data(), fields[index].size());
             }
-            if (!append_no_rotate(FlightRecordType::Call, definition.data(),
-                                  8U + values[index].size(),
-                                  kFlightDefinitionFlag | kFlightStringDefinitionFlag)) {
+            const FlightWriteResult definition_result = append_no_rotate(
+                    FlightRecordType::Call, definition.data(),
+                    8U + fields[index].size(),
+                    kFlightDefinitionFlag | kFlightStringDefinitionFlag);
+            if (definition_result != FlightWriteResult::Written) {
+                if (definition_result != FlightWriteResult::NoSpace) return fail();
                 retry = true;
                 break;
             }
-            if (!insert_string(slot, values[index], string_hash(values[index]), ids[index])) {
+            if (!insert_string(slot, fields[index], string_hash(fields[index]), ids[index])) {
                 return fail();
             }
             ++next_string_id_;
@@ -406,32 +462,32 @@ bool FlightEncoder::write_string_event(FlightRecordType type, std::string_view f
                 flight_write_u16_le(payload.data() + 14, chunk_count);
                 payload_offset = 16;
             }
-            for (size_t index = 0; index < value_count; ++index) {
+            for (size_t index = 0; index < field_count; ++index) {
                 flight_write_u32_le(payload.data() + payload_offset +
                                             index * sizeof(uint32_t),
                                     ids[index]);
             }
-            if (append_no_rotate(type, payload.data(),
-                                 payload_offset + value_count * sizeof(uint32_t),
-                                 chunked ? kFlightEventChunkFlag : 0)) {
+            const FlightWriteResult event_result = append_no_rotate(
+                    type, payload.data(),
+                    payload_offset + field_count * sizeof(uint32_t),
+                    chunked ? kFlightEventChunkFlag : 0);
+            if (event_result == FlightWriteResult::Written) {
                 return true;
             }
+            if (event_result != FlightWriteResult::NoSpace) return fail();
             retry = true;
         }
-        if (retry && attempt == 0 && rotate_to(*gpr_)) continue;
+        if (retry && attempt == 0 && rotate_to(previous_gpr_)) continue;
         return fail();
     }
     return fail();
 }
 
 bool FlightEncoder::write_chunked_event(FlightRecordType type,
-                                        std::string_view first,
+                                        std::string_view category,
+                                        std::string_view name,
                                         std::string_view detail) noexcept {
-    size_t chunk_count = 0;
-    for (size_t offset = 0; offset < detail.size();
-         offset = detail_chunk_end(detail, offset)) {
-        ++chunk_count;
-    }
+    const size_t chunk_count = detail_chunk_count(detail);
     if (chunk_count < 2 || chunk_count > UINT16_MAX || detail.size() > UINT32_MAX) {
         return fail();
     }
@@ -440,13 +496,15 @@ bool FlightEncoder::write_chunked_event(FlightRecordType type,
     size_t offset = 0;
     for (size_t index = 0; index < chunk_count; ++index) {
         const size_t end = detail_chunk_end(detail, offset);
-        if (type == FlightRecordType::Call) {
-            // The caller passes category and name packed as two adjacent string views via
-            // write_string_event directly; this helper is for two-string semantic events.
-            return fail();
-        }
-        if (!write_string_event(type, first, detail.substr(offset, end - offset), {},
-                                event_id, static_cast<uint32_t>(detail.size()),
+        const std::string_view fragment = detail.substr(offset, end - offset);
+        const std::array<std::string_view, 3> fields =
+                type == FlightRecordType::Call
+                        ? std::array<std::string_view, 3>{category, name, fragment}
+                        : std::array<std::string_view, 3>{name, fragment, {}};
+        const size_t field_count = type == FlightRecordType::Call ? 3U : 2U;
+        const size_t detail_field = field_count - 1U;
+        if (!write_string_event(type, fields, field_count, detail_field, event_id,
+                                static_cast<uint32_t>(detail.size()),
                                 static_cast<uint16_t>(index),
                                 static_cast<uint16_t>(chunk_count))) {
             return false;
@@ -465,29 +523,10 @@ bool FlightEncoder::call(const char *category, std::string_view name,
         return fail();
     }
     if (detail.size() <= kBinaryMaxCallChunkDetailBytes) {
-        return write_string_event(FlightRecordType::Call, category_view, name, detail);
+        return write_string_event(FlightRecordType::Call,
+                                  {category_view, name, detail}, 3, 2);
     }
-    size_t chunk_count = 0;
-    for (size_t offset = 0; offset < detail.size();
-         offset = detail_chunk_end(detail, offset)) {
-        ++chunk_count;
-    }
-    if (chunk_count < 2 || chunk_count > UINT16_MAX) return fail();
-    uint64_t event_id = next_event_id_++;
-    if (event_id == 0) event_id = next_event_id_++;
-    size_t offset = 0;
-    for (size_t index = 0; index < chunk_count; ++index) {
-        const size_t end = detail_chunk_end(detail, offset);
-        if (!write_string_event(FlightRecordType::Call, category_view, name,
-                                detail.substr(offset, end - offset), event_id,
-                                static_cast<uint32_t>(detail.size()),
-                                static_cast<uint16_t>(index),
-                                static_cast<uint16_t>(chunk_count))) {
-            return false;
-        }
-        offset = end;
-    }
-    return true;
+    return write_chunked_event(FlightRecordType::Call, category_view, name, detail);
 }
 
 bool FlightEncoder::rule(const std::string &name, const std::string &detail) noexcept {
@@ -495,15 +534,17 @@ bool FlightEncoder::rule(const std::string &name, const std::string &detail) noe
         return fail();
     }
     if (detail.size() <= kBinaryMaxEventChunkDetailBytes) {
-        return write_string_event(FlightRecordType::Rule, name, detail, {});
+        return write_string_event(FlightRecordType::Rule, {name, detail, {}}, 2, 1);
     }
-    return write_chunked_event(FlightRecordType::Rule, name, detail);
+    return write_chunked_event(FlightRecordType::Rule, {}, name, detail);
 }
 
 bool FlightEncoder::error(const std::string &message) noexcept {
     if (message.size() > kBinaryMaxEventDetailBytes) return fail();
     if (message.size() <= kBinaryMaxEventChunkDetailBytes) {
-        return write_string_event(FlightRecordType::Error, {}, message, {});
+        return write_string_event(
+                FlightRecordType::Error,
+                std::array<std::string_view, 3>{std::string_view{}, message, {}}, 2, 1);
     }
-    return write_chunked_event(FlightRecordType::Error, {}, message);
+    return write_chunked_event(FlightRecordType::Error, {}, {}, message);
 }

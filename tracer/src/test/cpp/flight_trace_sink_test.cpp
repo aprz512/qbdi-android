@@ -8,8 +8,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <array>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -131,7 +134,7 @@ void preserves_large_logical_call_behavior_with_independent_fragments() {
     FlightOptions options;
     options.enabled = true;
     options.capacity_bytes = 8ULL * 1024ULL * 1024ULL;
-    options.chunk_bytes = 64U * 1024U;
+    options.chunk_bytes = 4096;
     options.max_threads = 1;
     options.protected_chunks = 1;
     FlightArtifact artifact;
@@ -149,30 +152,92 @@ void preserves_large_logical_call_behavior_with_independent_fragments() {
     FlightTraceSink sink;
     CHECK(sink.initialize(&writer, TraceProfile::Full, context, &gpr));
 
-    const std::string detail(5000, 'z');
+    const std::string detail = std::string(3071, 'a') + "\xe2\x82\xac" +
+                               std::string(6926, 'z');
     CHECK(sink.call("jni", "large", detail));
 
-    size_t chunks = 0;
-    uint64_t event_id = 0;
-    const uint8_t *bytes = artifact.chunk_data(writer.chunk_index());
-    size_t offset = 0;
-    while (offset < writer.committed_bytes()) {
-        FlightDecodedRecord record{};
-        CHECK(scan_flight_record(bytes + offset, writer.committed_bytes() - offset,
-                                 writer.generation(), &record));
-        if (record.type == FlightRecordType::Call &&
-            record.flags == kFlightCallChunkFlag) {
-            ++chunks;
-            const uint64_t observed_id = flight_read_u64_le(record.payload);
-            CHECK(observed_id != 0);
-            if (event_id == 0) event_id = observed_id;
-            CHECK(observed_id == event_id);
-            CHECK(flight_read_u32_le(record.payload + 8) == detail.size());
-            CHECK(flight_read_u16_le(record.payload + 14) == 2);
+    struct Chunk {
+        uint32_t index;
+        uint32_t generation;
+        uint32_t committed;
+        uint64_t first_sequence;
+    };
+    std::vector<Chunk> retained;
+    for (uint32_t index = 0; index < artifact.chunk_count(); ++index) {
+        FlightChunkSnapshot snapshot{};
+        if (!artifact.read_chunk(index, &snapshot) || snapshot.tid != thread.tid) continue;
+        const uint32_t committed = index == writer.chunk_index()
+                                           ? writer.committed_bytes()
+                                           : snapshot.committed_bytes;
+        if (committed != 0) {
+            retained.push_back({index, snapshot.generation, committed,
+                                snapshot.first_sequence});
         }
-        offset += record.storage_bytes;
     }
-    CHECK(chunks == 2);
+    std::sort(retained.begin(), retained.end(), [](const Chunk &left, const Chunk &right) {
+        return left.first_sequence < right.first_sequence;
+    });
+    CHECK(retained.size() > 1);
+
+    std::array<std::string, 4> fragments{};
+    std::array<bool, 4> seen{};
+    size_t fragments_observed = 0;
+    size_t fragment_chunks = 0;
+    uint64_t event_id = 0;
+    for (const Chunk &chunk : retained) {
+        std::array<std::string, 257> definitions{};
+        std::array<bool, 257> defined{};
+        bool chunk_has_fragment = false;
+        const uint8_t *bytes = artifact.chunk_data(chunk.index);
+        size_t offset = 0;
+        while (offset < chunk.committed) {
+            FlightDecodedRecord record{};
+            CHECK(scan_flight_record(bytes + offset, chunk.committed - offset,
+                                     chunk.generation, &record));
+            if (record.type == FlightRecordType::Call &&
+                record.flags == (kFlightDefinitionFlag | kFlightStringDefinitionFlag)) {
+                const uint32_t id = flight_read_u32_le(record.payload);
+                const uint32_t size = flight_read_u32_le(record.payload + 4);
+                CHECK(id < definitions.size());
+                CHECK(8U + size == record.payload_bytes);
+                definitions[id].assign(reinterpret_cast<const char *>(record.payload + 8), size);
+                defined[id] = true;
+            }
+            if (record.type == FlightRecordType::Call &&
+                record.flags == kFlightCallChunkFlag) {
+                chunk_has_fragment = true;
+                ++fragments_observed;
+                const uint64_t observed_id = flight_read_u64_le(record.payload);
+                CHECK(observed_id != 0);
+                if (event_id == 0) event_id = observed_id;
+                CHECK(observed_id == event_id);
+                CHECK(flight_read_u32_le(record.payload + 8) == detail.size());
+                const uint16_t index = flight_read_u16_le(record.payload + 12);
+                CHECK(index < fragments.size());
+                CHECK(flight_read_u16_le(record.payload + 14) == fragments.size());
+                const uint32_t category_id = flight_read_u32_le(record.payload + 16);
+                const uint32_t name_id = flight_read_u32_le(record.payload + 20);
+                const uint32_t detail_id = flight_read_u32_le(record.payload + 24);
+                CHECK(category_id < defined.size() && defined[category_id]);
+                CHECK(name_id < defined.size() && defined[name_id]);
+                CHECK(detail_id < defined.size() && defined[detail_id]);
+                CHECK(definitions[category_id] == "jni");
+                CHECK(definitions[name_id] == "large");
+                fragments[index] = definitions[detail_id];
+                seen[index] = true;
+            }
+            offset += record.storage_bytes;
+        }
+        if (chunk_has_fragment) ++fragment_chunks;
+    }
+    CHECK(fragment_chunks > 1);
+    CHECK(fragments_observed == fragments.size());
+    std::string reconstructed;
+    for (size_t index = 0; index < fragments.size(); ++index) {
+        CHECK(seen[index]);
+        reconstructed += fragments[index];
+    }
+    CHECK(reconstructed == detail);
 
     writer.detach();
     artifact.close();
