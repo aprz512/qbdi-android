@@ -10,13 +10,13 @@
 #include <array>
 
 class CodeRuleEngine;
-class BinaryTraceWriter;
 class TraceCallbackGate;
+class TraceSink;
 struct TraceContext;
 
 class InstructionCollector final : public PendingInstructionSink {
 public:
-    InstructionCollector(InstructionCache *cache, BinaryTraceWriter *writer,
+    InstructionCollector(InstructionCache *cache, TraceSink *writer,
                          CodeRuleEngine *code_rules, const TraceContext *trace,
                          TraceCallbackGate *trace_gate,
                          const TraceOptions &options,
@@ -44,7 +44,7 @@ private:
     void capture_pre_memory(QBDI::VM *vm) noexcept;
 
     InstructionCache *cache_ = nullptr;
-    BinaryTraceWriter *writer_ = nullptr;
+    TraceSink *writer_ = nullptr;
     CodeRuleEngine *code_rules_ = nullptr;
     const TraceContext *trace_ = nullptr;
     TraceCallbackGate *trace_gate_ = nullptr;

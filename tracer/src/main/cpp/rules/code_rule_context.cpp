@@ -1,6 +1,7 @@
 #include "rules/code_rule_context.h"
 
 #include "core/safe_memory.h"
+#include "events/trace_sink.h"
 
 #include <cstring>
 
@@ -12,7 +13,7 @@ namespace {
 
 CodeRuleContext::CodeRuleContext(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr,
                                  const InstructionView *instruction, const TraceContext *trace,
-                                 BinaryTraceWriter *writer)
+                                 TraceSink *writer)
         : vm_(vm), gpr_(gpr), fpr_(fpr), instruction_(instruction), trace_(trace),
           writer_(writer) {}
 

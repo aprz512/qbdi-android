@@ -7,12 +7,13 @@
 #include "events/trace_event.h"
 #include "events/trace_metrics.h"
 #include "events/trace_record.h"
+#include "events/trace_sink.h"
 
 #include <cstdint>
 #include <string>
 #include <string_view>
 
-class BinaryTraceWriter {
+class BinaryTraceWriter final : public TraceSink {
 public:
     explicit BinaryTraceWriter(const TraceOptions &options, TraceMetrics *metrics,
                                TraceWriterBackend *backend = nullptr,
@@ -26,16 +27,16 @@ public:
     bool prepare(const TraceContext &context);
     bool open_prepared();
     bool begin(const TraceContext &context);
-    bool instruction(const TraceContext &context, const InstructionRecord &record);
-    bool memory(const TraceContext &context, uintptr_t pc, const MemoryRecord &record);
-    bool call(const char *category, std::string_view name, std::string_view detail);
-    bool rule(const std::string &name, const std::string &detail);
-    bool error(const std::string &message);
+    bool instruction(const TraceContext &context, const InstructionRecord &record) override;
+    bool memory(const TraceContext &context, uintptr_t pc, const MemoryRecord &record) override;
+    bool call(const char *category, std::string_view name, std::string_view detail) override;
+    bool rule(const std::string &name, const std::string &detail) override;
+    bool error(const std::string &message) override;
     bool end(uint64_t retval, bool ok, long elapsed_ms);
     bool close();
     void detach_after_fork_child() noexcept;
 
-    bool failed() const { return !healthy_writer_state(); }
+    bool failed() const noexcept override { return !healthy_writer_state(); }
     int error_code() const noexcept;
     std::string_view path() const noexcept;
 

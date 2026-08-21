@@ -3,6 +3,7 @@
 #include "core/trace_callback_gate.h"
 #include "events/binary_trace_format.h"
 #include "events/binary_trace_writer.h"
+#include "events/trace_sink.h"
 #include "rules/code_rule.h"
 
 #include <cstdio>
@@ -32,6 +33,40 @@ public:
 
     unsigned int calls = 0;
 };
+
+class RecordingSink final : public TraceSink {
+public:
+    bool instruction(const TraceContext &, const InstructionRecord &) override {
+        ++count;
+        return true;
+    }
+
+    bool memory(const TraceContext &, uintptr_t, const MemoryRecord &) override { return true; }
+    bool call(const char *, std::string_view, std::string_view) override { return true; }
+    bool rule(const std::string &, const std::string &) override { return true; }
+    bool error(const std::string &) override { return true; }
+    bool failed() const noexcept override { return false; }
+
+    size_t count = 0;
+};
+
+void completed_pending_instruction_is_emitted_to_injected_sink() {
+    TraceOptions options{};
+    TraceContext trace{};
+    trace.module_base = 0x1000;
+    ModuleRange module{};
+    module.start = 0x1000;
+    module.end = 0x2000;
+    InstructionCache cache;
+    RecordingSink sink;
+    InstructionCollector collector(&cache, &sink, nullptr, &trace, nullptr, options, module);
+    PendingInstructionCollector pending(&collector, trace.module_base);
+
+    CHECK(pending.begin({0x1010, nullptr}, {}));
+    CHECK(pending.finish_last({}));
+
+    CHECK(sink.count == 1);
+}
 
 void latched_writer_blocks_collector_trace_work_but_preserves_rule_action() {
     char directory_template[] = "/tmp/qtrace-collector-XXXXXX";
@@ -86,5 +121,6 @@ void latched_writer_blocks_collector_trace_work_but_preserves_rule_action() {
 } // namespace
 
 int main() {
+    completed_pending_instruction_is_emitted_to_injected_sink();
     latched_writer_blocks_collector_trace_work_but_preserves_rule_action();
 }

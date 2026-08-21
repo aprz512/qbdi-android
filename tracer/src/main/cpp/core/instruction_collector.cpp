@@ -4,7 +4,7 @@
 #include "core/safe_memory.h"
 #include "core/trace_callback_gate.h"
 #include "core/trace_process_lifecycle.h"
-#include "events/binary_trace_writer.h"
+#include "events/trace_sink.h"
 #include "rules/code_rule.h"
 
 #include <QBDI/InstAnalysis.h>
@@ -48,7 +48,7 @@ NormalizedMemoryAccess normalize(const QBDI::MemoryAccess &access) noexcept {
 
 } // namespace
 
-InstructionCollector::InstructionCollector(InstructionCache *cache, BinaryTraceWriter *writer,
+InstructionCollector::InstructionCollector(InstructionCache *cache, TraceSink *writer,
                                            CodeRuleEngine *code_rules,
                                            const TraceContext *trace,
                                            TraceCallbackGate *trace_gate,
