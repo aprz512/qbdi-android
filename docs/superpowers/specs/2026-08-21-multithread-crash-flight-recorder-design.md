@@ -46,6 +46,8 @@ are not part of the first version.
   kernel and filesystem remain running.
 - Hiding the tracer signal handler from code outside the captured target module that independently
   reads the real kernel signal action.
+- Recording instructions executed inside an asynchronously invoked protection-library signal
+  handler. The broker preserves its ABI-visible delivery semantics but dispatches it natively.
 - Replacing QBDI with another execution engine.
 
 ## Coverage Contract
@@ -270,13 +272,16 @@ guest-visible `ucontext` must contain the corresponding original target PC and g
 not code-cache or tracer addresses. A default fatal action is reproduced by installing the real
 default action with a raw syscall and redelivering the same signal to the same thread.
 
-A protection handler located in the target module is part of the requested trace coverage. Running
-that handler through QBDI from a signal context is a mandatory feasibility and acceptance gate. The
-implementation may use preallocated per-thread signal-session state, but it must not call QBDI in a
-signal context unless QBDI v0.12.1 behavior is proven safe under the signal contract tests below.
-If safe handler instrumentation cannot be demonstrated, the feature is not complete: it must report
-the handler body as a coverage gap rather than silently dispatching it natively and claiming full
-coverage.
+A guest custom handler is invoked directly as native code and is intentionally not instrumented.
+The master handler must never enter QBDI through `VM::callA`, `VM::run`, or another execution API.
+It records fixed-size `SIGNAL_HANDLER_BEGIN` state before dispatch and
+`SIGNAL_HANDLER_RETURN` state if the handler returns, so recovery never implies that the
+unrecorded handler body was part of a contiguous instruction trace. This explicit interval is part
+of the recorder contract and does not make the run incomplete. If a returning handler changes its
+guest `ucontext`, the broker copies the supported register changes back to the interrupted thread's
+published guest state before returning to QBDI execution. The first version supports all general
+register fields in the artifact contract: `x0`-`x30`, `sp`, `pc`, and `pstate`/`nzcv`; a mapping
+failure is a compatibility failure and marks the run incomplete.
 
 `SIGKILL` cannot be brokered. Target-issued `SIGKILL` is covered only by the pre-syscall terminal
 record and the persistent ring.
@@ -353,9 +358,11 @@ A target fixture uses direct arm64 syscalls rather than libc wrappers to:
 - verify that handler-visible PC and general registers match the original guest instruction state;
 - verify that target-side queries never expose the tracer master handler or code-cache addresses;
 - deliver nested signals during ordinary recording and chunk rotation; and
-- prove that a target-resident protection handler is traced without unsafe QBDI re-entry.
+- prove that a target-resident protection handler is dispatched natively, its untraced interval is
+  explicit, and the master handler never enters a QBDI execution API.
 
-Failure of the last three properties blocks release of the feature as transparent full coverage.
+Failure of the last three properties blocks release of the feature as transparent recorder
+coverage.
 
 ### End-to-end acceptance
 
@@ -377,6 +384,7 @@ handling provide reusable behavior and tests, but the flight recorder is a separ
 protocol. It must not overload normal `TRACE_END` semantics or pretend a ring artifact is an
 append-only QTRB stream.
 
-The implementation should first prove QBDI signal-context compatibility and guest-ucontext mapping
-with a focused fixture. That gate resolves the highest technical risk before building the full ring
-and host tooling. Passing ordinary QBDI tracing tests alone is insufficient.
+The implementation should first prove native broker dispatch and guest-ucontext mapping with a
+focused fixture. The fixture must exercise a signal delivered while QBDI is active and demonstrate
+that the master handler performs no QBDI execution call. That gate resolves the highest technical
+risk before building the full ring and host tooling.
