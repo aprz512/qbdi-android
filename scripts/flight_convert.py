@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -73,11 +74,29 @@ def _write_temporary(directory: Path, suffix: str, data: str) -> Path:
         raise
 
 
-def _same_file(left: Path, right: Path) -> bool:
-    try:
-        return os.path.samefile(left, right)
-    except (FileNotFoundError, OSError):
-        return False
+def _path_exists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def _cleanup_context(failures: list[str], artifacts: list[Path]) -> str:
+    parts = []
+    if failures:
+        parts.append("rollback cleanup failures: " + "; ".join(failures))
+    if artifacts:
+        unique = dict.fromkeys(str(path) for path in artifacts)
+        parts.append("recovery artifacts preserved: " + ", ".join(unique))
+    return "; " + "; ".join(parts) if parts else ""
+
+
+def _record_cleanup_failure(path: Path, error: BaseException, failures: list[str],
+                            artifacts: list[Path]) -> None:
+    failures.append(f"{path}: {type(error).__name__}: {error}")
+    artifacts.append(path)
+
+
+def _annotate(error: BaseException, context: str) -> None:
+    if context:
+        error.add_note(context.removeprefix("; "))
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -88,49 +107,65 @@ def _fsync_directory(directory: Path) -> None:
         os.close(descriptor)
 
 
-def _best_effort_fsync(directory: Path) -> None:
-    try:
-        _fsync_directory(directory)
-    except OSError:
-        pass
-
-
 def _publish_no_replace(pairs: list[tuple[Path, Path]]) -> None:
     for _, destination in pairs:
-        if destination.exists():
+        if _path_exists(destination):
             raise FileExistsError(f"flight output already exists: {destination.name}")
-    published: list[tuple[Path, Path]] = []
+    attempted: list[tuple[Path, tuple[int, int]]] = []
     try:
         for temporary, destination in pairs:
+            identity = temporary.stat()
+            attempted.append((destination, (identity.st_dev, identity.st_ino)))
             os.link(temporary, destination)
-            published.append((temporary, destination))
         if pairs:
             _fsync_directory(pairs[0][1].parent)
-    except FileExistsError:
-        for temporary, destination in reversed(published):
-            if _same_file(temporary, destination):
-                destination.unlink()
+    except BaseException as error:
+        failures: list[str] = []
+        artifacts: list[Path] = []
+        for destination, identity in reversed(attempted):
+            try:
+                current = destination.lstat()
+                if (current.st_dev, current.st_ino) == identity:
+                    destination.unlink()
+            except FileNotFoundError:
+                pass
+            except BaseException as cleanup_error:
+                _record_cleanup_failure(destination, cleanup_error,
+                                        failures, artifacts)
         if pairs:
-            _best_effort_fsync(pairs[0][1].parent)
+            try:
+                _fsync_directory(pairs[0][1].parent)
+            except BaseException as cleanup_error:
+                failures.append(
+                    f"{pairs[0][1].parent}: {type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        context = _cleanup_context(failures, artifacts)
+        if isinstance(error, FileExistsError):
+            _annotate(error, context)
+            raise
+        if isinstance(error, OSError):
+            raise FlightTraceError(
+                f"flight output publication failure: {error}{context}"
+            ) from error
+        _annotate(error, context)
         raise
-    except OSError as error:
-        for temporary, destination in reversed(published):
-            if _same_file(temporary, destination):
-                destination.unlink()
-        if pairs:
-            _best_effort_fsync(pairs[0][1].parent)
-        raise FlightTraceError(f"flight output publication failure: {error}") from error
 
 
 def _backup(destination: Path) -> Path | None:
-    if not destination.exists():
+    if not _path_exists(destination):
         return None
     backup = _temporary(destination.parent, ".backup")
-    backup.unlink()
     try:
-        os.link(destination, backup)
-    except BaseException:
-        backup.unlink(missing_ok=True)
+        backup.unlink()
+        os.link(destination, backup, follow_symlinks=False)
+    except BaseException as error:
+        try:
+            backup.unlink(missing_ok=True)
+        except BaseException as cleanup_error:
+            _annotate(error, _cleanup_context(
+                [f"{backup}: {type(cleanup_error).__name__}: {cleanup_error}"],
+                [backup],
+            ))
         raise
     return backup
 
@@ -140,44 +175,115 @@ def _publish_force(pairs: list[tuple[Path, Path]]) -> None:
     try:
         for _, destination in pairs:
             backups[destination] = _backup(destination)
-    except OSError as error:
+    except BaseException as error:
+        failures: list[str] = []
+        artifacts: list[Path] = []
         for backup in backups.values():
-            if backup is not None:
-                backup.unlink(missing_ok=True)
-        raise FlightTraceError(f"flight output backup failure: {error}") from error
+            if backup is not None and _path_exists(backup):
+                try:
+                    backup.unlink()
+                except BaseException as cleanup_error:
+                    _record_cleanup_failure(backup, cleanup_error, failures, artifacts)
+        if pairs:
+            try:
+                _fsync_directory(pairs[0][1].parent)
+            except BaseException as cleanup_error:
+                failures.append(
+                    f"{pairs[0][1].parent}: {type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        context = _cleanup_context(failures, artifacts)
+        if isinstance(error, OSError):
+            raise FlightTraceError(f"flight output backup failure: {error}{context}") from error
+        _annotate(error, context)
+        raise
 
-    published: list[tuple[Path, tuple[int, int]]] = []
+    attempted: list[tuple[Path, tuple[int, int]]] = []
     try:
         for temporary, destination in pairs:
             identity = temporary.stat()
+            attempted.append((destination, (identity.st_dev, identity.st_ino)))
             os.replace(temporary, destination)
-            published.append((destination, (identity.st_dev, identity.st_ino)))
         if pairs:
             _fsync_directory(pairs[0][1].parent)
-    except OSError as error:
-        for destination, identity in reversed(published):
+    except BaseException as error:
+        failures = []
+        artifacts = []
+        failed_restores: set[Path] = set()
+        for destination, identity in reversed(attempted):
             backup = backups[destination]
             if backup is not None:
-                os.replace(backup, destination)
-                backups[destination] = None
+                try:
+                    backup_state = backup.lstat()
+                    backup_identity = (backup_state.st_dev, backup_state.st_ino)
+                    try:
+                        current = destination.lstat()
+                        current_identity = (current.st_dev, current.st_ino)
+                    except FileNotFoundError:
+                        current_identity = None
+                    if current_identity == identity or current_identity is None:
+                        os.replace(backup, destination)
+                        backups[destination] = None
+                    elif current_identity != backup_identity:
+                        failures.append(
+                            f"{destination}: destination changed during rollback"
+                        )
+                        artifacts.append(backup)
+                        failed_restores.add(backup)
+                except BaseException as cleanup_error:
+                    _record_cleanup_failure(backup, cleanup_error, failures, artifacts)
+                    failed_restores.add(backup)
             else:
                 try:
-                    current = destination.stat()
+                    current = destination.lstat()
                     if (current.st_dev, current.st_ino) == identity:
                         destination.unlink()
                 except FileNotFoundError:
                     pass
+                except BaseException as cleanup_error:
+                    _record_cleanup_failure(destination, cleanup_error,
+                                            failures, artifacts)
         for destination, backup in backups.items():
-            if backup is not None:
-                backup.unlink(missing_ok=True)
+            if (backup is not None and backup not in failed_restores and
+                    _path_exists(backup)):
+                try:
+                    backup.unlink()
+                    backups[destination] = None
+                except BaseException as cleanup_error:
+                    _record_cleanup_failure(backup, cleanup_error, failures, artifacts)
         if pairs:
-            _best_effort_fsync(pairs[0][1].parent)
-        raise FlightTraceError(f"flight output publication failure: {error}") from error
+            try:
+                _fsync_directory(pairs[0][1].parent)
+            except BaseException as cleanup_error:
+                failures.append(
+                    f"{pairs[0][1].parent}: {type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        context = _cleanup_context(failures, artifacts)
+        if isinstance(error, OSError):
+            raise FlightTraceError(
+                f"flight output publication failure: {error}{context}"
+            ) from error
+        _annotate(error, context)
+        raise
+    failures = []
+    artifacts = []
+    removed_backup = False
     for backup in backups.values():
-        if backup is not None:
-            backup.unlink(missing_ok=True)
-    if pairs:
-        _best_effort_fsync(pairs[0][1].parent)
+        if backup is not None and _path_exists(backup):
+            try:
+                backup.unlink()
+                removed_backup = True
+            except BaseException as cleanup_error:
+                _record_cleanup_failure(backup, cleanup_error, failures, artifacts)
+    if pairs and removed_backup:
+        try:
+            _fsync_directory(pairs[0][1].parent)
+        except BaseException as cleanup_error:
+            failures.append(
+                f"{pairs[0][1].parent}: {type(cleanup_error).__name__}: {cleanup_error}"
+            )
+    context = _cleanup_context(failures, artifacts)
+    if context:
+        raise FlightTraceError(f"flight output backup cleanup failure{context}")
 
 
 def publish_flight_outputs(source: Path, output_dir: Path,
@@ -200,7 +306,7 @@ def publish_flight_outputs(source: Path, output_dir: Path,
     )
     destinations.append(output_dir / f"{basename}.flight.json")
     if not force:
-        existing = next((path for path in destinations if path.exists()), None)
+        existing = next((path for path in destinations if _path_exists(path)), None)
         if existing is not None:
             raise FileExistsError(f"flight output already exists: {existing.name}")
 
@@ -235,5 +341,28 @@ def publish_flight_outputs(source: Path, output_dir: Path,
     except OSError as error:
         raise FlightTraceError(f"flight output preparation failure: {error}") from error
     finally:
+        failures: list[str] = []
+        artifacts: list[Path] = []
+        removed_temporary = False
         for temporary in temporaries:
-            temporary.unlink(missing_ok=True)
+            if not _path_exists(temporary):
+                continue
+            try:
+                temporary.unlink()
+                removed_temporary = True
+            except BaseException as cleanup_error:
+                _record_cleanup_failure(temporary, cleanup_error, failures, artifacts)
+        if removed_temporary:
+            try:
+                _fsync_directory(output_dir)
+            except BaseException as cleanup_error:
+                failures.append(
+                    f"{output_dir}: {type(cleanup_error).__name__}: {cleanup_error}"
+                )
+        context = _cleanup_context(failures, artifacts)
+        if context:
+            active = sys.exception()
+            if active is not None:
+                _annotate(active, context)
+            else:
+                raise FlightTraceError(f"flight output temporary cleanup failure{context}")

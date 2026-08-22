@@ -138,6 +138,7 @@ class _WireRecord:
 class _FragmentValue:
     sequence: int
     tid: int
+    chunk_index: int
     kind: int
     event_id: int
     total: int
@@ -145,6 +146,25 @@ class _FragmentValue:
     count: int
     fixed: tuple[str, ...]
     detail: bytes
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _DecodedChunk:
+    index: int
+    tid: int
+    state: int
+    records: tuple[_WireRecord, ...]
+    events: tuple[FlightEvent, ...]
+    fragments: tuple[_FragmentValue, ...]
+    registers: FlightRegisters
+    last_state_sequence: int
+    checkpoint_pc: int
+
+
+class _FragmentGroupError(FlightTraceError):
+    def __init__(self, message: str, chunk_indexes: set[int]) -> None:
+        super().__init__(message)
+        self.chunk_indexes = frozenset(chunk_indexes)
 
 
 class _Cursor:
@@ -418,18 +438,30 @@ def _instruction_definition(payload: bytes) -> tuple[int, dict[str, object]]:
     mnemonic = cursor.u16_text(16, "mnemonic")
     operands = cursor.u16_text(96, "operands")
     disassembly = cursor.u16_text(112, "disassembly")
+    register_definitions: list[tuple[dict[str, object], ...]] = []
     for mask, label in ((read_mask, "read register"), (write_mask, "write register")):
-        for _ in range(mask.bit_count()):
-            cursor.take(1)
-            cursor.u16_text(16, label)
+        definitions = []
+        for index in range(34):
+            if mask & (1 << index):
+                width = cursor.take(1)[0]
+                name = cursor.u16_text(16, label)
+                definitions.append({"index": index, "width": width, "name": name})
+        register_definitions.append(tuple(definitions))
+    memory_operands = []
     for _ in range(memory_count):
-        base, index, extend, mode, shift, access, writeback, size, _ = cursor.unpack(
+        (base, index, extend, mode, shift, access, writeback, size,
+         memory_displacement) = cursor.unpack(
             QTRB_MEMORY_OPERAND
         )
         if ((base >= 34 and base != 0xFF) or (index >= 34 and index != 0xFF)
                 or extend > 4 or mode > 2 or access not in (1, 2, 3)
                 or writeback not in (0, 1)):
             raise FlightTraceError("invalid memory operand")
+        memory_operands.append({
+            "base": base, "index": index, "extend": extend, "mode": mode,
+            "shift": shift, "access_kind": access, "writeback": writeback,
+            "size": size, "displacement": memory_displacement,
+        })
     cursor.finish()
     return metadata_id, {
         "opcode": opcode, "read_mask": read_mask, "write_mask": write_mask,
@@ -437,6 +469,9 @@ def _instruction_definition(payload: bytes) -> tuple[int, dict[str, object]]:
         "pc_kind": pc_kind, "condition": condition, "mnemonic": mnemonic,
         "operands": operands, "disassembly": disassembly,
         "slow_memory_path": slow_path,
+        "read_registers": register_definitions[0],
+        "write_registers": register_definitions[1],
+        "memory_operands": tuple(memory_operands),
     }
 
 
@@ -460,6 +495,14 @@ def _instruction_event(payload: bytes, definitions: dict[int, dict[str, object]]
     for value in read_values + write_values:
         _require_pointer(value, pointer_maximum, "instruction register")
     result = dict(definition)
+    result["read_registers"] = tuple(
+        {**item, "value": value}
+        for item, value in zip(definition["read_registers"], read_values, strict=True)
+    )
+    result["write_registers"] = tuple(
+        {**item, "value": value}
+        for item, value in zip(definition["write_registers"], write_values, strict=True)
+    )
     result.update({
         "local_sequence": local_sequence, "metadata_id": metadata_id,
         "module_base": module_base, "relative_pc": relative_pc,
@@ -508,16 +551,16 @@ def _validate_event_fields(kind: int, fields: tuple[bytes, ...], *,
         if len(fields) != 2 or len(fields[0]) > 255:
             raise FlightTraceError("event field limit exceeded")
         total_limit = 4096
-    detail_limit = 3072 if logical_total is not None else 4096
+    detail_limit = 3072
     if len(fields[-1]) > detail_limit or (logical_total is not None and
                                          logical_total > total_limit):
         raise FlightTraceError("event field limit exceeded")
 
 
-def _decode_chunk(records: list[_WireRecord], tid: int, superblock: _Superblock,
-                  events: list[FlightEvent], fragments: list[_FragmentValue]) -> tuple[FlightRegisters, int]:
-    if not records:
-        return FlightRegisters.from_values([0] * 34), 0
+def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
+                  superblock: _Superblock,
+                  events: list[FlightEvent], fragments: list[_FragmentValue]
+                  ) -> tuple[FlightRegisters, int, int]:
     if len(records) < 2 or records[0].kind != 1 or records[0].flags != 0 or \
             records[1].kind != 9 or records[1].flags != 1:
         raise FlightTraceError("chunk does not begin with metadata and checkpoint")
@@ -544,6 +587,7 @@ def _decode_chunk(records: list[_WireRecord], tid: int, superblock: _Superblock,
     values = list(CHECKPOINT.unpack(records[1].payload))
     for value in values:
         _require_pointer(value, pointer_maximum, "register checkpoint")
+    checkpoint_pc = values[32]
     definitions: dict[int, dict[str, object]] = {}
     strings: dict[int, bytes] = {}
     for record in records[2:]:
@@ -604,11 +648,17 @@ def _decode_chunk(records: list[_WireRecord], tid: int, superblock: _Superblock,
                     raw_fields = tuple(strings[item] for item in ids)
                 except KeyError as error:
                     raise FlightTraceError("undefined string dictionary reference") from error
+                detail = raw_fields[-1]
+                if (not detail or total <= len(detail) or total < count or
+                        total < len(detail) + count - 1):
+                    raise FlightTraceError("invalid logical fragment metadata")
                 _validate_event_fields(record.kind, raw_fields, logical_total=total)
                 fixed_raw = raw_fields[:-1]
                 fixed = tuple(_utf8(item, "event field") for item in fixed_raw)
-                fragments.append(_FragmentValue(record.sequence, tid, record.kind, event_id,
-                                                total, index, count, fixed, raw_fields[-1]))
+                fragments.append(_FragmentValue(
+                    record.sequence, tid, chunk_index, record.kind, event_id,
+                    total, index, count, fixed, raw_fields[-1]
+                ))
                 continue
             if record.flags != 0 or len(record.payload) != field_count * 4:
                 raise FlightTraceError("invalid string event")
@@ -628,25 +678,29 @@ def _decode_chunk(records: list[_WireRecord], tid: int, superblock: _Superblock,
         events.append(FlightEvent(record.sequence, tid, RECORD_NAMES[record.kind], {
             "payload_hex": record.payload.hex(),
         }))
-    return FlightRegisters.from_values(values), records[-1].sequence
+    return FlightRegisters.from_values(values), records[-1].sequence, checkpoint_pc
 
 
 def _decode_fragments(
         fragments: list[_FragmentValue],
 ) -> tuple[list[FlightEvent], list[dict[str, object]]]:
-    grouped: dict[tuple[int, int, int], list[_FragmentValue]] = {}
+    grouped: dict[tuple[int, int], list[_FragmentValue]] = {}
     for fragment in fragments:
-        grouped.setdefault((fragment.tid, fragment.kind, fragment.event_id), []).append(fragment)
+        grouped.setdefault((fragment.tid, fragment.event_id), []).append(fragment)
     events = []
     incomplete = []
-    for (_, kind, _), values in grouped.items():
+    for values in grouped.values():
         first = values[0]
+        chunk_indexes = {item.chunk_index for item in values}
+        if any(item.kind != first.kind for item in values):
+            raise _FragmentGroupError("logical fragment kind mismatch", chunk_indexes)
+        kind = first.kind
         if any((item.total, item.count, item.fixed) !=
                (first.total, first.count, first.fixed) for item in values):
-            raise FlightTraceError("logical fragment metadata mismatch")
+            raise _FragmentGroupError("logical fragment metadata mismatch", chunk_indexes)
         by_index = {item.index: item for item in values}
         if len(by_index) != len(values):
-            raise FlightTraceError("duplicate logical fragment index")
+            raise _FragmentGroupError("duplicate logical fragment index", chunk_indexes)
         if set(by_index) != set(range(first.count)):
             incomplete.append({
                 "tid": first.tid,
@@ -658,8 +712,11 @@ def _decode_fragments(
             continue
         detail_raw = b"".join(by_index[index].detail for index in range(first.count))
         if len(detail_raw) != first.total:
-            raise FlightTraceError("logical fragment byte count mismatch")
-        detail = _utf8(detail_raw, "logical event detail")
+            raise _FragmentGroupError("logical fragment byte count mismatch", chunk_indexes)
+        try:
+            detail = _utf8(detail_raw, "logical event detail")
+        except FlightTraceError as error:
+            raise _FragmentGroupError(str(error), chunk_indexes) from error
         if kind == 6:
             data = {"category": first.fixed[0], "name": first.fixed[1], "detail": detail}
         else:
@@ -747,11 +804,13 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     damage: list[str] = []
     stale_entries: list[int] = []
     events: list[FlightEvent] = []
-    fragments: list[_FragmentValue] = []
     observed: set[int] = set()
+    observed_by_tid: dict[int, set[int]] = {}
     thread_state: dict[int, tuple[int, FlightRegisters]] = {}
+    checkpoint_pcs: set[int] = set()
     chunk_headers: dict[int, tuple[int, int, int]] = {}
     sealed_ranges: list[tuple[int, int]] = []
+    decoded_chunks: list[_DecodedChunk] = []
 
     for index in range(superblock.chunk_count):
         offset = superblock.chunk_offset + index * superblock.chunk_bytes
@@ -797,13 +856,25 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             data = _read_at(source, offset + CHUNK_HEADER_BYTES, capacity,
                             f"active chunk {index} data")
             records = _scan_chunk_data(data, generation, active=True)
-        for record in records:
-            if record.sequence in observed:
-                raise FlightTraceError(f"duplicate global sequence {record.sequence}")
-            observed.add(record.sequence)
-        registers, last_state_sequence = _decode_chunk(records, tid, superblock, events, fragments)
-        if last_state_sequence > thread_state.get(tid, (0, registers))[0]:
-            thread_state[tid] = (last_state_sequence, registers)
+        if not records:
+            label = "sealed" if state == 2 else "active"
+            damage.append(f"empty {label} chunk {index}")
+            continue
+        chunk_events: list[FlightEvent] = []
+        chunk_fragments: list[_FragmentValue] = []
+        try:
+            registers, last_state_sequence, checkpoint_pc = _decode_chunk(
+                records, tid, index, superblock, chunk_events, chunk_fragments
+            )
+        except FlightTraceError as error:
+            if state != 2:
+                raise
+            damage.append(f"sealed chunk {index}: {error}")
+            continue
+        decoded_chunks.append(_DecodedChunk(
+            index, tid, state, tuple(records), tuple(chunk_events),
+            tuple(chunk_fragments), registers, last_state_sequence, checkpoint_pc,
+        ))
 
     for entry in directories:
         if entry.state == 2 or entry.chunk_index == INVALID_INDEX:
@@ -812,23 +883,61 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         if identity != (entry.tid, entry.generation, 1) and identity != (entry.tid, entry.generation, 2):
             stale_entries.append(entry.index)
 
-    fragment_events, incomplete_logical_events = _decode_fragments(fragments)
+    while True:
+        fragments = [
+            fragment
+            for decoded in decoded_chunks
+            for fragment in decoded.fragments
+        ]
+        try:
+            fragment_events, incomplete_logical_events = _decode_fragments(fragments)
+            break
+        except _FragmentGroupError as error:
+            contributors = [
+                decoded for decoded in decoded_chunks
+                if decoded.index in error.chunk_indexes
+            ]
+            if not contributors or any(decoded.state != 2 for decoded in contributors):
+                raise
+            sealed = {decoded.index for decoded in contributors}
+            for index in sorted(sealed):
+                damage.append(f"sealed chunk {index}: {error}")
+            decoded_chunks = [
+                decoded for decoded in decoded_chunks if decoded.index not in sealed
+            ]
+
+    for decoded in decoded_chunks:
+        for record in decoded.records:
+            if record.sequence in observed:
+                raise FlightTraceError(f"duplicate global sequence {record.sequence}")
+        events.extend(decoded.events)
+        for record in decoded.records:
+            observed.add(record.sequence)
+            observed_by_tid.setdefault(decoded.tid, set()).add(record.sequence)
+        checkpoint_pcs.add(decoded.checkpoint_pc)
+        if decoded.last_state_sequence > thread_state.get(
+                decoded.tid, (0, decoded.registers))[0]:
+            thread_state[decoded.tid] = (
+                decoded.last_state_sequence, decoded.registers
+            )
     events.extend(fragment_events)
     emergency_events = _parse_emergencies(source, superblock)
     for event in emergency_events:
         if event.global_seq in observed:
             raise FlightTraceError(f"duplicate global sequence {event.global_seq}")
         observed.add(event.global_seq)
+        observed_by_tid.setdefault(event.tid, set()).add(event.global_seq)
     events.extend(emergency_events)
     events.sort(key=lambda item: item.global_seq)
 
-    thread_events: dict[int, list[FlightEvent]] = {entry.tid: [] for entry in directories}
+    thread_events: dict[int, list[FlightEvent]] = {}
     for event in events:
         thread_events.setdefault(event.tid, []).append(event)
     zero = FlightRegisters.from_values([0] * 34)
     threads = {
-        tid: FlightThread(tid, tuple(values), thread_state.get(tid, (0, zero))[1])
-        for tid, values in sorted(thread_events.items())
+        tid: FlightThread(tid, tuple(thread_events.get(tid, ())),
+                          thread_state.get(tid, (0, zero))[1])
+        for tid in sorted(set(thread_events) | set(thread_state))
     }
 
     range_starts = [entry.first for entry in directories if entry.first]
@@ -850,8 +959,15 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         }
     else:
         termination = {"cause": "unknown", "initiator_tid": None}
-    target_pcs = sorted({int(event.data["pc"]) for event in events
-                         if int(event.data.get("pc", 0)) != 0})
+    target_pcs = sorted(checkpoint_pcs | {
+        int(event.data["pc"]) for event in events
+        if int(event.data.get("pc", 0)) != 0
+    })
+    last_recorded_thread = max(
+        ((sequence, tid) for tid, sequences in observed_by_tid.items()
+         for sequence in sequences),
+        default=(0, None),
+    )[1]
     summary: dict[str, object] = {
         "format_version": VERSION,
         "run_id": superblock.run_id,
@@ -865,7 +981,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         "termination": termination,
         "final_signal": next((event.data for event in reversed(events)
                               if event.kind == "signal"), None),
-        "last_recorded_thread": events[-1].tid if events else None,
+        "last_recorded_thread": last_recorded_thread,
         "target_pcs": target_pcs,
         "retained_sequences": _ranges(observed),
         "lost_sequences": lost,
@@ -884,7 +1000,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         "threads": {
             str(tid): {
                 "events": len(thread.events), "last_pc": thread.registers.pc,
-                "retained_sequences": _ranges({event.global_seq for event in thread.events}),
+                "retained_sequences": _ranges(observed_by_tid.get(tid, set())),
             }
             for tid, thread in threads.items()
         },

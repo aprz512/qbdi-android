@@ -91,6 +91,34 @@ def qtrb_one_read_instruction(relative_pc: int = 0x1234) -> bytes:
     return qtrb_record(4, payload)
 
 
+def qtrb_rich_instruction_definition() -> bytes:
+    read_mask = (1 << 0) | (1 << 31)
+    write_mask = (1 << 32) | (1 << 33)
+    fixed = struct.pack(
+        "<IIQQqIBBBB", 7, 0x14000000, read_mask, write_mask,
+        -0x20, 3, 2, 14, 1, 1,
+    )
+    strings = (
+        struct.pack("<H4s", 4, b"B.EQ")
+        + struct.pack("<H8s", 8, b"x0, #0x4")
+        + struct.pack("<H8s", 8, b"fallback")
+    )
+    registers = (
+        struct.pack("<BH2s", 4, 2, b"W0")
+        + struct.pack("<BH2s", 8, 2, b"SP")
+        + struct.pack("<BH4s", 8, 4, b"NZCV")
+        + struct.pack("<BH2s", 8, 2, b"PC")
+    )
+    operand = struct.pack("<BBBBBBBIq", 0, 31, 3, 1, 2, 3, 1, 16, -16)
+    return qtrb_record(3, fixed + strings + registers + operand)
+
+
+def qtrb_rich_instruction() -> bytes:
+    payload = struct.pack("<QIQIBB", 19, 1, 0x2345, 7, 2, 2)
+    payload += struct.pack("<QQQQ", 0x11, 0x22, 0x33, 0x44)
+    return qtrb_record(4, payload)
+
+
 def string_definition(string_id: int, value: bytes) -> bytes:
     return struct.pack("<II", string_id, len(value)) + value
 
@@ -176,6 +204,30 @@ def core_records(tid: int, generation: int = 1, *, start: int = 1,
 
 
 class FlightRecoveryTests(unittest.TestCase):
+    def test_excludes_an_empty_sealed_chunk_as_damaged_evidence(self):
+        raw = artifact(
+            directories=[directory_entry(7, 0, 0, 0, 1)],
+            chunks=[chunk(0, 7, 1, [])],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual({}, recovery.threads)
+        self.assertFalse(recovery.summary["complete"])
+        self.assertIn("empty sealed chunk", recovery.summary["recovery_damage"][0])
+
+    def test_tolerates_an_empty_active_chunk_only_as_incomplete_evidence(self):
+        raw = artifact(
+            directories=[directory_entry(7, 0, 0, 0, 1)],
+            chunks=[chunk(0, 7, 1, [], state=1)],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual({}, recovery.threads)
+        self.assertFalse(recovery.summary["complete"])
+        self.assertIn("empty active chunk", recovery.summary["recovery_damage"][0])
+
     def test_recovers_active_prefix_deltas_terminal_and_sequence_gap(self):
         records = core_records(321, generation=2, start=5)
         records += [
@@ -413,6 +465,30 @@ class FlightRecoveryTests(unittest.TestCase):
         self.assertIn("sequence order", recovery.summary["recovery_damage"][0])
         self.assertFalse(recovery.summary["complete"])
 
+    def test_excludes_a_semantically_malformed_sealed_chunk_transactionally(self):
+        healthy = core_records(10) + [flight_record(2, 3, b"healthy")]
+        malformed = core_records(20, start=4) + [
+            flight_record(2, 6, b"must-not-leak"),
+            flight_record(4, 7, qtrb_instruction(metadata_id=99)),
+        ]
+        raw = artifact(
+            directories=[
+                directory_entry(10, 1, 3, 0, 1),
+                directory_entry(20, 4, 7, 1, 1),
+            ],
+            chunks=[chunk(0, 10, 1, healthy), chunk(1, 20, 1, malformed)],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual([(3, 10)],
+                         [(event.global_seq, event.tid) for event in recovery.merged])
+        self.assertEqual([10], list(recovery.threads))
+        self.assertEqual([[1, 3]], recovery.summary["retained_sequences"])
+        self.assertEqual([[4, 7]], recovery.summary["lost_sequences"])
+        self.assertIn("undefined instruction metadata",
+                      recovery.summary["recovery_damage"][0])
+
     def test_reports_a_uint64_lost_interval_without_iterating_over_each_sequence(self):
         maximum = (1 << 64) - 1
         raw = artifact(
@@ -517,7 +593,7 @@ class FlightRecoveryTests(unittest.TestCase):
         records = core_records(12) + [flight_record(4, 3, qtrb_instruction(metadata_id=99))]
         raw = artifact(
             directories=[directory_entry(12, 1, 3, 0, 1)],
-            chunks=[chunk(0, 12, 1, records)],
+            chunks=[chunk(0, 12, 1, records, state=1)],
         )
 
         with self.assertRaisesRegex(FlightTraceError, "undefined instruction metadata"):
@@ -537,6 +613,46 @@ class FlightRecoveryTests(unittest.TestCase):
 
         self.assertEqual([4], [event.global_seq for event in recovery.merged])
 
+    def test_preserves_rich_instruction_definitions_in_expanded_events(self):
+        records = core_records(12) + [
+            flight_record(4, 3, qtrb_rich_instruction_definition(), flags=1),
+            flight_record(4, 4, qtrb_rich_instruction()),
+        ]
+        raw = artifact(
+            directories=[directory_entry(12, 1, 4, 0, 1)],
+            chunks=[chunk(0, 12, 1, records)],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        instruction = recovery.merged[0].data
+        self.assertEqual(
+            (
+                {"index": 0, "width": 4, "name": "W0", "value": 0x11},
+                {"index": 31, "width": 8, "name": "SP", "value": 0x22},
+            ),
+            instruction["read_registers"],
+        )
+        self.assertEqual(
+            (
+                {"index": 32, "width": 8, "name": "NZCV", "value": 0x33},
+                {"index": 33, "width": 8, "name": "PC", "value": 0x44},
+            ),
+            instruction["write_registers"],
+        )
+        self.assertEqual(
+            ({
+                "base": 0, "index": 31, "extend": 3, "mode": 1,
+                "shift": 2, "access_kind": 3, "writeback": 1,
+                "size": 16, "displacement": -16,
+            },),
+            instruction["memory_operands"],
+        )
+        self.assertEqual(-0x20, instruction["displacement"])
+        self.assertEqual("B.EQ", instruction["mnemonic"])
+        self.assertEqual("x0, #0x4", instruction["operands"])
+        self.assertEqual("fallback", instruction["disassembly"])
+
     def test_rejects_mismatched_logical_fragment_metadata(self):
         records = core_records(88)
         records += [
@@ -549,11 +665,161 @@ class FlightRecoveryTests(unittest.TestCase):
         ]
         raw = artifact(
             directories=[directory_entry(88, 1, 8, 0, 1)],
-            chunks=[chunk(0, 88, 1, records)],
+            chunks=[chunk(0, 88, 1, records, state=1)],
         )
 
         with self.assertRaisesRegex(FlightTraceError, "fragment metadata"):
             recover_flight(io.BytesIO(raw))
+
+    def test_rejects_logical_event_id_collisions_across_event_kinds(self):
+        records = core_records(88)
+        records += [
+            flight_record(6, 3, string_definition(1, b"jni"), flags=3),
+            flight_record(6, 4, string_definition(2, b"Lookup"), flags=3),
+            flight_record(6, 5, string_definition(3, b"A"), flags=3),
+            flight_record(6, 6, event_fragment(9, 2, 0, 2, 1, 2, 3), flags=4),
+            flight_record(6, 7, string_definition(4, b"rule"), flags=3),
+            flight_record(6, 8, string_definition(5, b"B"), flags=3),
+            flight_record(7, 9, event_fragment(9, 2, 1, 2, 4, 5), flags=4),
+        ]
+        raw = artifact(
+            directories=[directory_entry(88, 1, 9, 0, 1)],
+            chunks=[chunk(0, 88, 1, records, state=1)],
+        )
+
+        with self.assertRaisesRegex(FlightTraceError, "logical fragment kind mismatch"):
+            recover_flight(io.BytesIO(raw))
+
+    def test_excludes_sealed_fragment_metadata_collision_transactionally(self):
+        healthy = core_records(10) + [flight_record(2, 3, b"healthy")]
+        malformed = core_records(20, start=4) + [
+            flight_record(6, 6, string_definition(1, b"jni"), flags=3),
+            flight_record(6, 7, string_definition(2, b"Lookup"), flags=3),
+            flight_record(6, 8, string_definition(3, b"A"), flags=3),
+            flight_record(6, 9, event_fragment(9, 2, 0, 2, 1, 2, 3), flags=4),
+            flight_record(6, 10, string_definition(4, b"B"), flags=3),
+            flight_record(6, 11, event_fragment(9, 3, 1, 2, 1, 2, 4), flags=4),
+        ]
+        raw = artifact(
+            directories=[
+                directory_entry(10, 1, 3, 0, 1),
+                directory_entry(20, 4, 11, 1, 1),
+            ],
+            chunks=[chunk(0, 10, 1, healthy), chunk(1, 20, 1, malformed)],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual([(3, 10)],
+                         [(event.global_seq, event.tid) for event in recovery.merged])
+        self.assertEqual([10], list(recovery.threads))
+        self.assertEqual([[1, 3]], recovery.summary["retained_sequences"])
+        self.assertEqual([[4, 11]], recovery.summary["lost_sequences"])
+        self.assertIn("logical fragment metadata mismatch",
+                      recovery.summary["recovery_damage"][0])
+
+    def test_excludes_sealed_invalid_reassembled_fragment_utf8_transactionally(self):
+        healthy = core_records(10) + [flight_record(2, 3, b"healthy")]
+        malformed = core_records(20, start=4) + [
+            flight_record(6, 6, string_definition(1, b"jni"), flags=3),
+            flight_record(6, 7, string_definition(2, b"Lookup"), flags=3),
+            flight_record(6, 8, string_definition(3, b"\xf0"), flags=3),
+            flight_record(6, 9, event_fragment(9, 2, 0, 2, 1, 2, 3), flags=4),
+            flight_record(6, 10, string_definition(4, b"("), flags=3),
+            flight_record(6, 11, event_fragment(9, 2, 1, 2, 1, 2, 4), flags=4),
+        ]
+        raw = artifact(
+            directories=[
+                directory_entry(10, 1, 3, 0, 1),
+                directory_entry(20, 4, 11, 1, 1),
+            ],
+            chunks=[chunk(0, 10, 1, healthy), chunk(1, 20, 1, malformed)],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual([(3, 10)],
+                         [(event.global_seq, event.tid) for event in recovery.merged])
+        self.assertEqual([[4, 11]], recovery.summary["lost_sequences"])
+        self.assertIn("UTF-8", recovery.summary["recovery_damage"][0])
+
+    def test_rejects_fragment_collisions_with_an_active_contributor(self):
+        sealed = core_records(88) + [
+            flight_record(6, 3, string_definition(1, b"jni"), flags=3),
+            flight_record(6, 4, string_definition(2, b"Lookup"), flags=3),
+            flight_record(6, 5, string_definition(3, b"A"), flags=3),
+            flight_record(6, 6, event_fragment(9, 2, 0, 2, 1, 2, 3), flags=4),
+        ]
+        active = core_records(88, start=7) + [
+            flight_record(6, 9, string_definition(1, b"rule"), flags=3),
+            flight_record(6, 10, string_definition(2, b"B"), flags=3),
+            flight_record(7, 11, event_fragment(9, 2, 1, 2, 1, 2), flags=4),
+        ]
+        raw = artifact(
+            directories=[directory_entry(88, 1, 11, 1, 1)],
+            chunks=[chunk(0, 88, 1, sealed), chunk(1, 88, 1, active, state=1)],
+        )
+
+        with self.assertRaisesRegex(FlightTraceError, "logical fragment kind mismatch"):
+            recover_flight(io.BytesIO(raw))
+
+    def test_rejects_plain_calls_larger_than_the_native_3072_byte_limit(self):
+        records = core_records(88)
+        records += [
+            flight_record(6, 3, string_definition(1, b"jni"), flags=3),
+            flight_record(6, 4, string_definition(2, b"Lookup"), flags=3),
+            flight_record(6, 5, string_definition(3, b"x" * 3073), flags=3),
+            flight_record(6, 6, struct.pack("<III", 1, 2, 3)),
+        ]
+        raw = artifact(
+            directories=[directory_entry(88, 1, 6, 0, 1)],
+            chunks=[chunk(0, 88, 1, records, state=1, chunk_bytes=8192)],
+            chunk_bytes=8192,
+        )
+
+        with self.assertRaisesRegex(FlightTraceError, "event field limit"):
+            recover_flight(io.BytesIO(raw))
+
+    def test_rejects_empty_logical_event_fragments(self):
+        records = core_records(88)
+        records += [
+            flight_record(6, 3, string_definition(1, b"jni"), flags=3),
+            flight_record(6, 4, string_definition(2, b"Lookup"), flags=3),
+            flight_record(6, 5, string_definition(3, b""), flags=3),
+            flight_record(6, 6, event_fragment(9, 2, 0, 2, 1, 2, 3), flags=4),
+        ]
+        raw = artifact(
+            directories=[directory_entry(88, 1, 6, 0, 1)],
+            chunks=[chunk(0, 88, 1, records, state=1)],
+        )
+
+        with self.assertRaisesRegex(FlightTraceError, "logical fragment metadata"):
+            recover_flight(io.BytesIO(raw))
+
+    def test_summary_accounts_for_hidden_records_and_checkpoint_pcs(self):
+        first = core_records(10, start=1, pc=0x71001000) + [
+            flight_record(9, 3, register_delta({32: 0x71001111})),
+            flight_record(2, 4, b"visible"),
+        ]
+        second = core_records(20, start=5, pc=0x71002000) + [
+            flight_record(6, 7, string_definition(1, b"hidden"), flags=3),
+        ]
+        raw = artifact(
+            directories=[
+                directory_entry(10, 1, 4, 0, 1),
+                directory_entry(20, 5, 7, 1, 1),
+            ],
+            chunks=[chunk(0, 10, 1, first), chunk(1, 20, 1, second)],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual([[1, 7]], recovery.summary["retained_sequences"])
+        self.assertEqual([[1, 4]], recovery.summary["threads"]["10"]["retained_sequences"])
+        self.assertEqual([[5, 7]], recovery.summary["threads"]["20"]["retained_sequences"])
+        self.assertEqual(20, recovery.summary["last_recorded_thread"])
+        self.assertEqual([0x71001000, 0x71001111, 0x71002000],
+                         recovery.summary["target_pcs"])
 
     def test_rejects_string_events_that_exceed_task5_field_limits(self):
         records = core_records(88)
@@ -565,7 +831,7 @@ class FlightRecoveryTests(unittest.TestCase):
         ]
         raw = artifact(
             directories=[directory_entry(88, 1, 6, 0, 1)],
-            chunks=[chunk(0, 88, 1, records)],
+            chunks=[chunk(0, 88, 1, records, state=1)],
         )
 
         with self.assertRaisesRegex(FlightTraceError, "event field limit"):
@@ -605,7 +871,7 @@ class FlightRecoveryTests(unittest.TestCase):
         ]
         raw = artifact(
             directories=[directory_entry(1, 1, 2, 0, 1)],
-            chunks=[chunk(0, 1, 1, records)],
+            chunks=[chunk(0, 1, 1, records, state=1)],
         )
 
         with self.assertRaisesRegex(FlightTraceError, "target"):
