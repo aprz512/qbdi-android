@@ -84,7 +84,7 @@ bool normalize_module_ranges(const std::vector<ModuleRange> &maps,
 
     ModuleRange normalized;
     normalized.start = load_bias;
-    normalized.end = observed_size != 0 ? observed_end : load_bias;
+    normalized.end = load_bias;
     normalized.path = mapped_path;
     for (const ModuleRange &range: maps) {
         if (range.path != mapped_path || range.start >= range.end ||

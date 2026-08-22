@@ -706,8 +706,17 @@ void observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map() {
     ModuleRange detached;
     CHECK(normalize_module_ranges(g_fake_maps, "libtarget.so", 0, 0, &detached));
     CHECK(detached.start == normalized.start);
+    CHECK(detached.end == normalized.end);
     CHECK(detached.readable_executable_range_count ==
           normalized.readable_executable_range_count);
+
+    // Android's loader may include a trailing anonymous BSS page in
+    // Module.size. Observer hints validate the mapping, but must not change
+    // the retained generation identity compared with /proc/self/maps polling.
+    ModuleRange observer_with_anonymous_tail;
+    CHECK(normalize_module_ranges(g_fake_maps, executable.path, 0x70000000, 0x5000,
+                                  &observer_with_anonymous_tail));
+    CHECK(observer_with_anonymous_tail.end == detached.end);
 
     CHECK(!normalize_module_ranges(g_fake_maps, executable.path, UINTPTR_MAX - 1U, 4,
                                    &normalized));
