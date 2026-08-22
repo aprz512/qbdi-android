@@ -1,7 +1,9 @@
+#include "core/capture_coordinator.h"
 #include "core/logging.h"
 #include "core/module_maps.h"
 #include "core/native_fallback_arm64.h"
 #include "core/qbdi_runner.h"
+#include "core/qbdi_thread_session.h"
 #include "core/trace_config.h"
 #include "core/trace_process_lifecycle.h"
 #include "handlers/call_handlers.h"
@@ -19,6 +21,7 @@
 #include <mutex>
 #include <new>
 #include <pthread.h>
+#include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -30,9 +33,11 @@ struct InstalledSceneHook {
     SceneConfig scene;
     HookHandle hook;
     ModuleRange module;
+    std::shared_ptr<CaptureCoordinator> coordinator;
     TraceConfig pending_config;
     SceneConfig pending_scene;
     ModuleRange pending_module;
+    std::shared_ptr<CaptureCoordinator> pending_coordinator;
     void *module_guard = nullptr;
     size_t active_proxy_calls = 0;
     size_t proxy_generation = 0;
@@ -53,6 +58,7 @@ static std::mutex g_lock;
 static TraceConfig g_config = default_trace_config();
 static bool g_configured = false;
 static uint64_t g_config_generation = 0;
+static std::shared_ptr<CaptureCoordinator> g_capture_coordinator;
 
 static constexpr size_t kMaxScenes = 256;
 static constexpr size_t kMaxProxyGenerations = 4096;
@@ -75,10 +81,12 @@ static void *proxy_for_generation(size_t generation);
 static bool create_hook_generation_locked(const TraceConfig &config,
                                           const SceneConfig &scene,
                                           const ModuleRange &module,
-                                          uint64_t config_generation);
+                                          uint64_t config_generation,
+                                          const std::shared_ptr<CaptureCoordinator> &coordinator);
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
                                       const ModuleRange &module,
-                                      uint64_t config_generation);
+                                      uint64_t config_generation,
+                                      const std::shared_ptr<CaptureCoordinator> &coordinator);
 extern "C" char trace_proxy_stubs[];
 
 static bool tracer_fork_lifecycle_ready() noexcept {
@@ -192,7 +200,23 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
 
     TraceRunResult traced{};
     if (execution_target != 0 && !use_original_bypass) {
-        traced = run_with_qbdi(runtime->hook->config, runtime->invocation);
+        if (runtime->hook->config.flight.enabled &&
+            runtime->hook->coordinator != nullptr) {
+            CaptureCoordinator *const coordinator =
+                    runtime->hook->coordinator.get();
+            const uint32_t tid = static_cast<uint32_t>(::syscall(SYS_gettid));
+            QbdiThreadSession *const session =
+                    coordinator->enter(tid, *runtime->invocation.scene);
+            if (session != nullptr) {
+                traced = session->call(
+                        execution_target, runtime->invocation.args.data(),
+                        runtime->invocation.indirect_result);
+                if (!trace_process_child_detached()) coordinator->leave(session);
+            }
+        } else {
+            traced = run_with_qbdi(runtime->hook->config,
+                                   runtime->invocation);
+        }
     }
     const uint64_t result = traced.target_executed
                                     ? traced.value
@@ -225,12 +249,14 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                             std::move(runtime->hook->pending_scene);
                     const ModuleRange pending_module =
                             std::move(runtime->hook->pending_module);
+                    const std::shared_ptr<CaptureCoordinator> pending_coordinator =
+                            std::move(runtime->hook->pending_coordinator);
                     const uint64_t pending_config_generation =
                             runtime->hook->pending_config_generation;
                     runtime->hook->pending_install = false;
                     (void)create_hook_generation_locked(
                             pending_config, pending_scene, pending_module,
-                            pending_config_generation);
+                            pending_config_generation, pending_coordinator);
                 }
             } else if (!runtime->hook->retired && !runtime->hook->installed) {
                 // Every physical hook installation gets a distinct proxy identity.
@@ -238,7 +264,8 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                 runtime->hook->retired = true;
                 (void)create_hook_generation_locked(
                         runtime->hook->config, runtime->hook->scene,
-                        runtime->hook->module, runtime->hook->config_generation);
+                        runtime->hook->module, runtime->hook->config_generation,
+                        runtime->hook->coordinator);
             } else if (!runtime->hook->retired) {
                 runtime->hook->unhook_failed_window = false;
             }
@@ -256,7 +283,8 @@ static void *proxy_for_generation(size_t generation) {
 static bool create_hook_generation_locked(const TraceConfig &config,
                                           const SceneConfig &scene,
                                           const ModuleRange &module,
-                                          uint64_t config_generation) {
+                                          uint64_t config_generation,
+                                          const std::shared_ptr<CaptureCoordinator> &coordinator) {
     if (g_next_proxy_generation >= kMaxProxyGenerations) {
         QTRACE_E("proxy generation capacity exhausted=%zu", kMaxProxyGenerations);
         return false;
@@ -274,6 +302,7 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     slot->config = config;
     slot->scene = scene;
     slot->module = module;
+    slot->coordinator = coordinator;
     slot->config_generation = config_generation;
 #if defined(__ANDROID__)
     slot->module_guard = ::dlopen(module.path.c_str(), RTLD_NOW | RTLD_NOLOAD);
@@ -298,7 +327,8 @@ static bool create_hook_generation_locked(const TraceConfig &config,
 
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
                                       const ModuleRange &module,
-                                      uint64_t config_generation) {
+                                      uint64_t config_generation,
+                                      const std::shared_ptr<CaptureCoordinator> &coordinator) {
     if (scene.offset == 0) {
         QTRACE_W("scene %s offset is 0, skip", scene.name.c_str());
         return false;
@@ -332,6 +362,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
             previous->pending_config = config;
             previous->pending_scene = scene;
             previous->pending_module = module;
+            previous->pending_coordinator = coordinator;
             previous->pending_config_generation = config_generation;
             previous->pending_install = true;
             return true;
@@ -341,7 +372,8 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         previous->unhook_failed_window = false;
         previous->retired = true;
     }
-    return create_hook_generation_locked(config, scene, module, config_generation);
+    return create_hook_generation_locked(config, scene, module, config_generation,
+                                         coordinator);
 }
 
 #if defined(QTRACE_HOST_TEST)
@@ -352,6 +384,7 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     g_hook_generation_raw.fill(nullptr);
     g_next_proxy_generation = 0;
     g_config = config;
+    g_capture_coordinator.reset();
     ++g_config_generation;
     g_configured = true;
     g_registration_gate = nullptr;
@@ -364,14 +397,16 @@ bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene
     std::lock_guard<std::mutex> guard(g_lock);
     g_config = config;
     ++g_config_generation;
-    return install_scene_hook_locked(config, scene, module, g_config_generation);
+    return install_scene_hook_locked(config, scene, module, g_config_generation,
+                                     g_capture_coordinator);
 }
 
 bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
                                              const ModuleRange &module) {
     if (!tracer_fork_lifecycle_ready()) return false;
     std::lock_guard<std::mutex> guard(g_lock);
-    return install_scene_hook_locked(g_config, scene, module, g_config_generation);
+    return install_scene_hook_locked(g_config, scene, module, g_config_generation,
+                                     g_capture_coordinator);
 }
 
 void trace_proxy_test_set_registration_gate(RegistrationGate gate) {
@@ -389,6 +424,21 @@ size_t trace_proxy_test_generation(size_t scene_index) {
         return kMaxProxyGenerations;
     }
     return g_scene_hooks[scene_index]->proxy_generation;
+}
+
+void trace_proxy_test_set_coordinator(
+        const std::shared_ptr<CaptureCoordinator> &coordinator) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    g_capture_coordinator = coordinator;
+}
+
+CaptureCoordinator *trace_proxy_test_hook_coordinator(size_t generation) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (generation >= g_next_proxy_generation ||
+        g_hook_generations[generation] == nullptr) {
+        return nullptr;
+    }
+    return g_hook_generations[generation]->coordinator.get();
 }
 #endif
 
@@ -417,6 +467,16 @@ static void tracer_atfork_parent() {
 
 static void tracer_atfork_child() {
     trace_process_mark_child_detached();
+    if (g_capture_coordinator != nullptr) {
+        g_capture_coordinator->detach_after_fork_child();
+    }
+    for (size_t generation = 0; generation < g_next_proxy_generation;
+         ++generation) {
+        InstalledSceneHook *const hook = g_hook_generation_raw[generation];
+        if (hook != nullptr && hook->coordinator != nullptr) {
+            hook->coordinator->detach_after_fork_child();
+        }
+    }
 }
 
 static void install_hooks_for_module(const ModuleRange &module,
@@ -426,10 +486,25 @@ static void install_hooks_for_module(const ModuleRange &module,
     if (!g_configured || trace_process_child_detached()) return;
     if (expected_generation != 0 && expected_generation != g_config_generation) return;
     if (basename_of(module.path) != g_config.target_so) return;
+    if (g_config.flight.enabled) {
+        if (g_capture_coordinator == nullptr || g_config_generation == 0 ||
+            g_config_generation > UINT32_MAX) {
+            QTRACE_E("flight coordinator unavailable");
+            return;
+        }
+        if (!g_capture_coordinator->started() &&
+            !g_capture_coordinator->start(
+                    g_config, module,
+                    static_cast<uint32_t>(g_config_generation))) {
+            QTRACE_E("cannot start flight capture artifact");
+            return;
+        }
+    }
     QTRACE_I("target module %s base=0x%lx", g_config.target_so.c_str(),
              static_cast<unsigned long>(module.start));
     for (const auto &scene: g_config.scenes) {
-        install_scene_hook_locked(g_config, scene, module, g_config_generation);
+        install_scene_hook_locked(g_config, scene, module, g_config_generation,
+                                  g_capture_coordinator);
     }
 }
 
@@ -453,11 +528,31 @@ qbdi_tracer_configure(const char *encoded_config) {
         QTRACE_E("invalid tracer configuration: %s", config.error.c_str());
         return;
     }
+    std::shared_ptr<CaptureCoordinator> coordinator;
+    if (config.flight.enabled) {
+        const SceneConfig *init_scene = nullptr;
+        for (const SceneConfig &scene : config.scenes) {
+            if (scene.index == 0 && scene.name == "init") {
+                init_scene = &scene;
+                break;
+            }
+        }
+        if (init_scene == nullptr || init_scene->offset == 0) {
+            QTRACE_E("flight capture requires a configured init scene");
+            return;
+        }
+        coordinator.reset(new (std::nothrow) CaptureCoordinator());
+        if (coordinator == nullptr) {
+            QTRACE_E("cannot allocate flight capture coordinator");
+            return;
+        }
+    }
     if (!init_inline_hook()) return;
     uint64_t generation = 0;
     {
         std::lock_guard<std::mutex> guard(g_lock);
         g_config = config;
+        g_capture_coordinator = std::move(coordinator);
         g_configured = true;
         generation = ++g_config_generation;
     }

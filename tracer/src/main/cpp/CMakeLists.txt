@@ -64,6 +64,8 @@ add_library(qbdi_tracer SHARED
         core/trace_run_session.cpp
         core/trace_process_lifecycle.cpp
         core/qbdi_runner_lifecycle.cpp
+        core/qbdi_thread_session.cpp
+        core/capture_coordinator.cpp
         core/qbdi_instruction_decoder.cpp
         core/pending_instruction.cpp
         core/instruction_collector.cpp

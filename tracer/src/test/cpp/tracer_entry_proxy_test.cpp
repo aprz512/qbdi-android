@@ -1,3 +1,4 @@
+#include "core/capture_coordinator.h"
 #include "core/module_maps.h"
 #include "core/native_fallback_arm64.h"
 #include "core/qbdi_runner.h"
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <mutex>
 #include <new>
+#include <memory>
 #include <string>
 #include <thread>
 #include <sys/wait.h>
@@ -35,6 +37,9 @@ bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
 void trace_proxy_test_set_registration_gate(RegistrationGate gate);
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate);
 size_t trace_proxy_test_generation(size_t scene_index);
+void trace_proxy_test_set_coordinator(
+        const std::shared_ptr<CaptureCoordinator> &coordinator);
+CaptureCoordinator *trace_proxy_test_hook_coordinator(size_t generation);
 
 void check(bool condition, const char *expression, int line) {
     if (condition) return;
@@ -384,6 +389,30 @@ void every_physical_rehook_gets_a_new_proxy_identity() {
     // resolve the second generation.
     CHECK(trace_proxy_dispatch(first_generation, args, 0) == 0x113);
     CHECK(g_seen_config.package_name == "physical-rehook-generation");
+}
+
+void physical_rehook_keeps_its_original_capture_coordinator() {
+    reset_fakes();
+    const TraceConfig config = config_named("coordinator-generation");
+    const SceneConfig scene = scene_named(
+            "coordinator-generation", reinterpret_cast<uintptr_t>(old_target));
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> original =
+            std::make_shared<CaptureCoordinator>();
+    const std::shared_ptr<CaptureCoordinator> replacement =
+            std::make_shared<CaptureCoordinator>();
+    trace_proxy_test_set_coordinator(original);
+    CHECK(trace_proxy_test_update(config, scene, module_named("module")));
+    const size_t first_generation = trace_proxy_test_generation(scene.index);
+    CHECK(trace_proxy_test_hook_coordinator(first_generation) == original.get());
+
+    trace_proxy_test_set_coordinator(replacement);
+    uint64_t args[8]{41};
+    CHECK(trace_proxy_dispatch(first_generation, args, 0) == 0x129);
+    const size_t second_generation = trace_proxy_test_generation(scene.index);
+
+    CHECK(second_generation != first_generation);
+    CHECK(trace_proxy_test_hook_coordinator(second_generation) == original.get());
 }
 
 void concurrent_unhook_failures_keep_the_original_bypass_alive() {
@@ -873,6 +902,7 @@ int main() {
     unhook_failure_uses_the_saved_original_exactly_once();
     rehook_failure_leaves_a_coherent_direct_execution_state();
     every_physical_rehook_gets_a_new_proxy_identity();
+    physical_rehook_keeps_its_original_capture_coordinator();
     concurrent_unhook_failures_keep_the_original_bypass_alive();
     same_address_updates_replace_all_metadata_and_hook_generation();
     duplicate_install_for_one_configuration_generation_is_idempotent();
