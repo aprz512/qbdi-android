@@ -45,7 +45,7 @@ struct Fixture {
                 static_cast<uint16_t>(sizeof(target) - 1U)};
         CHECK(artifact.create(path.c_str(), options, identity));
         CHECK(artifact.register_thread(731, &registration));
-        CHECK(writer.initialize(731, &artifact, registration, nullptr));
+        CHECK(writer.initialize(731, &artifact, registration, &gpr));
     }
 
     ~Fixture() {
@@ -59,6 +59,7 @@ struct Fixture {
     FlightArtifact artifact;
     FlightThreadRegistration registration{};
     SignalBrokerThreadState writer{};
+    QBDI::GPRState gpr{};
 };
 
 void arm64_termination_intent_is_committed_before_continue() {
@@ -140,10 +141,33 @@ void instruction_preinst_commits_termination_before_returning_continue() {
     CHECK(record.sp == 0x77U);
 }
 
+void termination_publication_failure_is_durable_before_continue() {
+    Fixture fixture;
+    CHECK(fixture.artifact.test_claim_emergency_slot(
+            fixture.registration.directory_index));
+    Arm64SyscallSnapshot snapshot{};
+    snapshot.pc = 0x71003000U;
+    snapshot.number = 94;
+
+    CHECK(TerminationObserver::before_svc(snapshot, &fixture.writer) ==
+          QBDI::CONTINUE);
+
+    CHECK((fixture.artifact.flags() & static_cast<uint32_t>(
+                                              FlightIncompleteReason::EmergencyFailure)) !=
+          0);
+    FlightEmergencyRecord absent{};
+    CHECK(!scan_flight_emergency(
+            fixture.artifact.emergency_bytes(fixture.registration.directory_index),
+            &absent));
+    fixture.artifact.test_release_emergency_slot(
+            fixture.registration.directory_index);
+}
+
 } // namespace
 
 int main() {
     arm64_termination_intent_is_committed_before_continue();
     nontermination_syscalls_continue_without_overwriting_evidence();
     instruction_preinst_commits_termination_before_returning_continue();
+    termination_publication_failure_is_durable_before_continue();
 }

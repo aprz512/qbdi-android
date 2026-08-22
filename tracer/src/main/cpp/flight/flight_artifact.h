@@ -135,6 +135,9 @@ public:
 #if defined(QTRACE_HOST_TEST)
     bool test_claim_emergency_slot(uint32_t slot_index) noexcept;
     void test_release_emergency_slot(uint32_t slot_index) noexcept;
+    void test_interrupt_emergency_publication(
+            FlightRecordType type, uint32_t matching_publications_to_skip,
+            uint32_t phase) noexcept;
 #endif
     const uint8_t *emergency_bytes(uint32_t directory_index) const noexcept;
 
@@ -164,7 +167,7 @@ private:
     const uint8_t *chunk(uint32_t index) const noexcept;
     void publish_exhaustion(uint32_t tid, uint32_t slot_index,
                             FlightIncompleteReason reason) noexcept;
-    bool publish_emergency_claimed(
+    __attribute__((no_stack_protector)) bool publish_emergency_claimed(
             uint8_t *slot, RuntimeEmergencyMetadata &metadata,
             const FlightEmergencyRecord &record) noexcept;
     void reset_state() noexcept;
@@ -186,4 +189,9 @@ private:
     uint64_t allocation_epoch_ = 0;
     FlightSequenceAllocator sequence_allocator_{};
     pthread_mutex_t rotation_mutex_ = PTHREAD_MUTEX_INITIALIZER;
+#if defined(QTRACE_HOST_TEST)
+    uint32_t test_interrupt_emergency_type_ = 0;
+    uint32_t test_interrupt_emergency_skip_ = 0;
+    uint32_t test_interrupt_emergency_phase_ = 0;
+#endif
 };

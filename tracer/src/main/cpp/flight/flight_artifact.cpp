@@ -182,8 +182,11 @@ bool flight_atomic_compare_exchange_weak_u32_le(
 
 } // namespace
 
-bool scan_flight_emergency(const uint8_t *bytes,
-                           FlightEmergencyRecord *record) noexcept {
+namespace {
+
+__attribute__((no_stack_protector)) bool scan_flight_emergency_cell(
+        const uint8_t *bytes, FlightEmergencyRecord *record,
+        uint32_t *version) noexcept {
     if (bytes == nullptr || record == nullptr ||
         !flight_atomic_u32_aligned(bytes + kEmergencyFlagsOffset) ||
         !flight_atomic_u32_aligned(bytes + kEmergencyVersionOffset)) {
@@ -230,7 +233,35 @@ bool scan_flight_emergency(const uint8_t *bytes,
         return false;
     }
     *record = decoded;
+    if (version != nullptr) *version = final_version;
     return true;
+}
+
+__attribute__((no_stack_protector)) const uint8_t *latest_emergency_cell(
+        const uint8_t *bytes, FlightEmergencyRecord *record,
+        uint32_t *version) noexcept {
+    FlightEmergencyRecord first{};
+    FlightEmergencyRecord second{};
+    uint32_t first_version = 0;
+    uint32_t second_version = 0;
+    const bool first_valid = scan_flight_emergency_cell(
+            bytes, &first, &first_version);
+    const bool second_valid = scan_flight_emergency_cell(
+            bytes + kFlightEmergencyRecordBytes, &second, &second_version);
+    if (!first_valid && !second_valid) return nullptr;
+    const bool use_second = second_valid &&
+                            (!first_valid || second_version > first_version);
+    if (record != nullptr) *record = use_second ? second : first;
+    if (version != nullptr) *version = use_second ? second_version : first_version;
+    return bytes + (use_second ? kFlightEmergencyRecordBytes : 0U);
+}
+
+} // namespace
+
+bool scan_flight_emergency(const uint8_t *bytes,
+                           FlightEmergencyRecord *record) noexcept {
+    return bytes != nullptr && record != nullptr &&
+           latest_emergency_cell(bytes, record, nullptr) != nullptr;
 }
 
 FlightArtifact::~FlightArtifact() {
@@ -259,10 +290,10 @@ bool FlightArtifact::create(const char *path, const FlightOptions &options,
             static_cast<uint64_t>(options.max_threads) + 1U;
     if (!checked_multiply_u64(options.max_threads, kFlightDirectoryEntryBytes,
                               &directory_bytes) ||
-        !checked_multiply_u64(emergency_record_count, kFlightEmergencyRecordBytes,
+        !checked_multiply_u64(emergency_record_count, kFlightEmergencySlotBytes,
                               &emergency_bytes) ||
         !checked_add_u64(kFlightSuperblockBytes, directory_bytes, &directory_end) ||
-        !checked_align_u64(directory_end, kFlightEmergencyRecordBytes, &emergency_offset) ||
+        !checked_align_u64(directory_end, kFlightEmergencySlotBytes, &emergency_offset) ||
         !checked_add_u64(emergency_offset, emergency_bytes, &emergency_end) ||
         !checked_align_u64(emergency_end, options.chunk_bytes, &chunk_offset) ||
         chunk_offset >= options.capacity_bytes) {
@@ -371,7 +402,7 @@ bool FlightArtifact::create(const char *path, const FlightOptions &options,
     superblock.chunk_bytes = options.chunk_bytes;
     superblock.chunk_count = chunk_count_;
     superblock.emergency_offset = emergency_offset_;
-    superblock.emergency_record_bytes = kFlightEmergencyRecordBytes;
+    superblock.emergency_record_bytes = kFlightEmergencySlotBytes;
     superblock.emergency_record_count = emergency_record_count_;
     superblock.flags = 0;
     if (!flight_set_superblock_identity(&superblock, identity)) {
@@ -605,7 +636,7 @@ bool FlightArtifact::write_emergency(uint32_t slot_index,
         return false;
     }
     uint8_t *slot = mapping_ + emergency_offset_ +
-                    static_cast<uint64_t>(slot_index) * kFlightEmergencyRecordBytes;
+                    static_cast<uint64_t>(slot_index) * kFlightEmergencySlotBytes;
     RuntimeEmergencyMetadata &metadata = emergency_metadata_[slot_index];
     uint32_t expected_claim = 0;
     if (!flight_atomic_u32_compare_exchange_strong(
@@ -630,7 +661,7 @@ bool FlightArtifact::increment_dropped_coverage_gap(
         return false;
     }
     uint8_t *slot = mapping_ + emergency_offset_ +
-                    static_cast<uint64_t>(slot_index) * kFlightEmergencyRecordBytes;
+                    static_cast<uint64_t>(slot_index) * kFlightEmergencySlotBytes;
     if (!flight_atomic_u32_aligned(slot + 44)) {
         mark_incomplete(FlightIncompleteReason::EmergencyFailure);
         return false;
@@ -641,12 +672,18 @@ bool FlightArtifact::increment_dropped_coverage_gap(
         mark_incomplete(FlightIncompleteReason::EmergencyFailure);
         return false;
     }
-    uint32_t observed = flight_atomic_load_u32_le(slot + 44,
+    uint8_t *published_cell = const_cast<uint8_t *>(latest_emergency_cell(
+            slot, nullptr, nullptr));
+    if (published_cell == nullptr) {
+        mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+        return false;
+    }
+    uint32_t observed = flight_atomic_load_u32_le(published_cell + 44,
                                                   std::memory_order_acquire);
     for (;;) {
         if (observed == UINT32_MAX) return true;
         if (flight_atomic_compare_exchange_weak_u32_le(
-                    slot + 44, &observed, observed + 1U,
+                    published_cell + 44, &observed, observed + 1U,
                     std::memory_order_acq_rel, std::memory_order_acquire)) {
             return true;
         }
@@ -664,7 +701,7 @@ bool FlightArtifact::write_coverage_gap_sticky(
         return false;
     }
     uint8_t *slot = mapping_ + emergency_offset_ +
-                    static_cast<uint64_t>(slot_index) * kFlightEmergencyRecordBytes;
+                    static_cast<uint64_t>(slot_index) * kFlightEmergencySlotBytes;
     RuntimeEmergencyMetadata &metadata = emergency_metadata_[slot_index];
     constexpr uint32_t kMaximumClaimAttempts = 4096;
     bool claimed = false;
@@ -710,11 +747,38 @@ void FlightArtifact::test_release_emergency_slot(uint32_t slot_index) noexcept {
     flight_atomic_u32_store(&emergency_metadata_[slot_index].claim, 0,
                             std::memory_order_release);
 }
+
+void FlightArtifact::test_interrupt_emergency_publication(
+        FlightRecordType type, uint32_t matching_publications_to_skip,
+        uint32_t phase) noexcept {
+    test_interrupt_emergency_type_ = static_cast<uint32_t>(type);
+    test_interrupt_emergency_skip_ = matching_publications_to_skip;
+    test_interrupt_emergency_phase_ = phase;
+}
 #endif
 
 bool FlightArtifact::publish_emergency_claimed(
         uint8_t *slot, RuntimeEmergencyMetadata &metadata,
         const FlightEmergencyRecord &record) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    bool test_interrupt_this_publication = false;
+    if (test_interrupt_emergency_phase_ != 0 &&
+        test_interrupt_emergency_type_ == record.type) {
+        if (test_interrupt_emergency_skip_ == 0) {
+            test_interrupt_this_publication = true;
+        } else {
+            --test_interrupt_emergency_skip_;
+        }
+    }
+    const auto test_interrupt_after_phase = [&](uint32_t phase) noexcept {
+        if (!test_interrupt_this_publication ||
+            test_interrupt_emergency_phase_ != phase) return false;
+        test_interrupt_emergency_phase_ = 0;
+        flight_atomic_u32_store(&metadata.claim, 0,
+                                std::memory_order_release);
+        return true;
+    };
+#endif
     uint32_t version = flight_atomic_u32_load(&metadata.next_version,
                                               std::memory_order_relaxed);
     while (version != 0 && version <= UINT32_MAX - 2U) {
@@ -729,40 +793,73 @@ bool FlightArtifact::publish_emergency_claimed(
         mark_incomplete(FlightIncompleteReason::EmergencyFailure);
         return false;
     }
-    flight_atomic_store_u32_le(slot + kEmergencyVersionOffset, version | 1U,
+    FlightEmergencyRecord first{};
+    FlightEmergencyRecord second{};
+    uint32_t first_version = 0;
+    uint32_t second_version = 0;
+    const bool first_valid = scan_flight_emergency_cell(
+            slot, &first, &first_version);
+    const bool second_valid = scan_flight_emergency_cell(
+            slot + kFlightEmergencyRecordBytes, &second, &second_version);
+    uint8_t *target = slot;
+    if (first_valid && (!second_valid || first_version > second_version)) {
+        target = slot + kFlightEmergencyRecordBytes;
+    }
+    flight_atomic_store_u32_le(target + kEmergencyVersionOffset, version | 1U,
                                std::memory_order_release);
-    flight_atomic_store_u32_le(slot + kEmergencyFlagsOffset, 0,
+#if defined(QTRACE_HOST_TEST)
+    if (test_interrupt_after_phase(1)) return false;
+#endif
+    flight_atomic_store_u32_le(target + kEmergencyFlagsOffset, 0,
                                std::memory_order_release);
-    flight_atomic_store_u32_le(slot + 0, record.type, std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 4, record.tid, std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 8, static_cast<uint32_t>(record.sequence),
+#if defined(QTRACE_HOST_TEST)
+    if (test_interrupt_after_phase(2)) return false;
+#endif
+    flight_atomic_store_u32_le(target + 0, record.type, std::memory_order_relaxed);
+    flight_atomic_store_u32_le(target + 4, record.tid, std::memory_order_relaxed);
+    flight_atomic_store_u32_le(target + 8, static_cast<uint32_t>(record.sequence),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 12, static_cast<uint32_t>(record.sequence >> 32U),
+    flight_atomic_store_u32_le(target + 12, static_cast<uint32_t>(record.sequence >> 32U),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 16, static_cast<uint32_t>(record.pc),
+    flight_atomic_store_u32_le(target + 16, static_cast<uint32_t>(record.pc),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 20, static_cast<uint32_t>(record.pc >> 32U),
+    flight_atomic_store_u32_le(target + 20, static_cast<uint32_t>(record.pc >> 32U),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 24, static_cast<uint32_t>(record.sp),
+    flight_atomic_store_u32_le(target + 24, static_cast<uint32_t>(record.sp),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 28, static_cast<uint32_t>(record.sp >> 32U),
+    flight_atomic_store_u32_le(target + 28, static_cast<uint32_t>(record.sp >> 32U),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 32, static_cast<uint32_t>(record.fault_address),
+    flight_atomic_store_u32_le(target + 32, static_cast<uint32_t>(record.fault_address),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 36, static_cast<uint32_t>(record.fault_address >> 32U),
+    flight_atomic_store_u32_le(target + 36, static_cast<uint32_t>(record.fault_address >> 32U),
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 40, record.signal_number, std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + 44, record.signal_code, std::memory_order_relaxed);
+    flight_atomic_store_u32_le(target + 40, record.signal_number, std::memory_order_relaxed);
+    flight_atomic_store_u32_le(target + 44, record.signal_code, std::memory_order_relaxed);
+#if defined(QTRACE_HOST_TEST)
+    if (test_interrupt_after_phase(3)) return false;
+#endif
     const uint32_t checksum = emergency_checksum(record);
-    flight_atomic_store_u32_le(slot + kEmergencyChecksumOffset, checksum,
+    flight_atomic_store_u32_le(target + kEmergencyChecksumOffset, checksum,
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + kEmergencyChecksumInverseOffset, ~checksum,
+#if defined(QTRACE_HOST_TEST)
+    if (test_interrupt_after_phase(4)) return false;
+#endif
+    flight_atomic_store_u32_le(target + kEmergencyChecksumInverseOffset, ~checksum,
                                std::memory_order_relaxed);
-    flight_atomic_store_u32_le(slot + kEmergencyVersionOffset, version,
+#if defined(QTRACE_HOST_TEST)
+    if (test_interrupt_after_phase(5)) return false;
+#endif
+    flight_atomic_store_u32_le(target + kEmergencyVersionOffset, version,
                                std::memory_order_release);
-    flight_atomic_store_u32_le(slot + kEmergencyFlagsOffset,
+#if defined(QTRACE_HOST_TEST)
+    if (test_interrupt_after_phase(6)) return false;
+#endif
+    flight_atomic_store_u32_le(target + kEmergencyFlagsOffset,
                                record.flags | kFlightEmergencyCommitted,
                                std::memory_order_release);
+#if defined(QTRACE_HOST_TEST)
+    if (test_interrupt_after_phase(7)) return false;
+#endif
     flight_atomic_u32_store(&metadata.claim, 0, std::memory_order_release);
     return true;
 }
@@ -770,7 +867,7 @@ bool FlightArtifact::publish_emergency_claimed(
 const uint8_t *FlightArtifact::emergency_bytes(uint32_t directory_index) const noexcept {
     if (!valid() || directory_index >= emergency_record_count_) return nullptr;
     return mapping_ + emergency_offset_ +
-           static_cast<uint64_t>(directory_index) * kFlightEmergencyRecordBytes;
+           static_cast<uint64_t>(directory_index) * kFlightEmergencySlotBytes;
 }
 
 const uint8_t *FlightArtifact::chunk_data(uint32_t chunk_index) const noexcept {

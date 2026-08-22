@@ -12,9 +12,11 @@ DIRECTORY_ENTRY_BYTES = 64
 CHUNK_HEADER_BYTES = 64
 RECORD_HEADER_BYTES = 24
 EMERGENCY_RECORD_BYTES = 64
+EMERGENCY_SLOT_BYTES = 128
 TARGET_NAME_BYTES = 128
 MAGIC = 0x51464C54
-VERSION = 1
+LEGACY_VERSION = 1
+VERSION = 2
 RECORD_COMMIT = 0x51434D54
 EMERGENCY_COMMITTED = 0x80000000
 KNOWN_INCOMPLETE_FLAGS = 0x0F
@@ -98,6 +100,7 @@ class FlightRecovery:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _Superblock:
+    version: int
     pointer_width: int
     artifact_bytes: int
     directory_offset: int
@@ -106,6 +109,7 @@ class _Superblock:
     chunk_bytes: int
     chunk_count: int
     emergency_offset: int
+    emergency_record_bytes: int
     emergency_count: int
     flags: int
     run_id: int
@@ -276,7 +280,7 @@ def _parse_superblock(source: BinaryIO, source_size: int) -> _Superblock:
      target_bytes) = SUPERBLOCK_FIXED.unpack_from(raw)
     if magic != MAGIC:
         raise FlightTraceError("invalid flight magic")
-    if version != VERSION:
+    if version not in (LEGACY_VERSION, VERSION):
         raise FlightTraceError("unsupported flight version")
     if byte_order != 1:
         raise FlightTraceError("invalid byte order")
@@ -288,7 +292,11 @@ def _parse_superblock(source: BinaryIO, source_size: int) -> _Superblock:
         raise FlightTraceError("artifact size does not match source")
     if directory_entry_bytes != DIRECTORY_ENTRY_BYTES or directory_entries == 0:
         raise FlightTraceError("invalid directory configuration")
-    if emergency_record_bytes != EMERGENCY_RECORD_BYTES or emergency_count != directory_entries + 1:
+    expected_emergency_bytes = (EMERGENCY_RECORD_BYTES
+                                if version == LEGACY_VERSION
+                                else EMERGENCY_SLOT_BYTES)
+    if (emergency_record_bytes != expected_emergency_bytes or
+            emergency_count != directory_entries + 1):
         raise FlightTraceError("invalid emergency configuration")
     if chunk_bytes <= CHUNK_HEADER_BYTES or chunk_bytes & (chunk_bytes - 1) or chunk_count == 0:
         raise FlightTraceError("invalid chunk configuration")
@@ -315,9 +323,10 @@ def _parse_superblock(source: BinaryIO, source_size: int) -> _Superblock:
         raise FlightTraceError("overlapping flight regions")
     if directory_offset % 8 or emergency_offset % EMERGENCY_RECORD_BYTES or chunk_offset % chunk_bytes:
         raise FlightTraceError("misaligned flight region")
-    return _Superblock(pointer_width, artifact_bytes, directory_offset, directory_entries,
+    return _Superblock(version, pointer_width, artifact_bytes, directory_offset, directory_entries,
                        chunk_offset, chunk_bytes, chunk_count, emergency_offset,
-                       emergency_count, flags, run_id, pid, module_generation, target)
+                       emergency_record_bytes, emergency_count, flags, run_id, pid,
+                       module_generation, target)
 
 
 def _parse_directories(source: BinaryIO, superblock: _Superblock) -> list[_Directory]:
@@ -729,30 +738,55 @@ def _decode_fragments(
 
 def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[FlightEvent]:
     raw = _read_at(source, superblock.emergency_offset,
-                   superblock.emergency_count * EMERGENCY_RECORD_BYTES, "emergency slots")
+                   superblock.emergency_count * superblock.emergency_record_bytes,
+                   "emergency slots")
     events = []
     for index in range(superblock.emergency_count):
-        slot = raw[index * EMERGENCY_RECORD_BYTES:(index + 1) * EMERGENCY_RECORD_BYTES]
+        slot = raw[index * superblock.emergency_record_bytes:
+                   (index + 1) * superblock.emergency_record_bytes]
         if not any(slot):
             continue
-        (kind, tid, sequence, pc, sp, fault, signal, code, published_flags,
-         checksum, inverse, version) = EMERGENCY_RECORD.unpack(slot)
-        if not published_flags & EMERGENCY_COMMITTED:
+        cells = [slot[:EMERGENCY_RECORD_BYTES]]
+        if superblock.emergency_record_bytes == EMERGENCY_SLOT_BYTES:
+            cells.append(slot[EMERGENCY_RECORD_BYTES:])
+        candidates = []
+        invalid_committed = []
+        for cell in cells:
+            if not any(cell):
+                continue
+            values = EMERGENCY_RECORD.unpack(cell)
+            (cell_kind, cell_tid, cell_sequence, cell_pc, cell_sp, cell_fault,
+             cell_signal, cell_code, cell_published_flags, cell_checksum,
+             cell_inverse, cell_version) = values
+            if not cell_published_flags & EMERGENCY_COMMITTED:
+                continue
+            if cell_version == 0 or cell_version & 1:
+                continue
+            cell_flags = cell_published_flags & ~EMERGENCY_COMMITTED
+            checksum_code = 0 if cell_kind == 15 else cell_code
+            logical = struct.pack(
+                "<IIQQQQIII", cell_kind, cell_tid, cell_sequence, cell_pc,
+                cell_sp, cell_fault, cell_signal, checksum_code, cell_flags,
+            )
+            legacy_logical = struct.pack(
+                "<IIQQQQIII", cell_kind, cell_tid, cell_sequence, cell_pc,
+                cell_sp, cell_fault, cell_signal, cell_code, cell_flags,
+            )
+            if (cell_inverse != (~cell_checksum & 0xFFFFFFFF) or
+                    cell_checksum not in {_fnv32(logical), _fnv32(legacy_logical)}):
+                invalid_committed.append(cell_version)
+                continue
+            candidates.append((cell_version, values))
+        if not candidates:
+            if invalid_committed:
+                raise FlightTraceError(
+                    f"invalid committed emergency publication at slot {index}")
             continue
+        (_, (kind, tid, sequence, pc, sp, fault, signal, code, published_flags,
+             checksum, inverse, version)) = max(candidates, key=lambda item: item[0])
         flags = published_flags & ~EMERGENCY_COMMITTED
         if kind not in RECORD_NAMES or tid == 0 or sequence == 0:
             raise FlightTraceError(f"invalid committed emergency slot {index}")
-        if version == 0 or version & 1:
-            continue
-        if inverse != (~checksum & 0xFFFFFFFF):
-            raise FlightTraceError(f"invalid committed emergency publication at slot {index}")
-        checksum_code = 0 if kind == 15 else code
-        logical = struct.pack("<IIQQQQIII", kind, tid, sequence, pc, sp, fault,
-                              signal, checksum_code, flags)
-        legacy_logical = struct.pack("<IIQQQQIII", kind, tid, sequence, pc, sp,
-                                     fault, signal, code, flags)
-        if checksum not in {_fnv32(logical), _fnv32(legacy_logical)}:
-            raise FlightTraceError(f"committed emergency checksum mismatch at slot {index}")
         if kind == 15 and flags & ~KNOWN_INCOMPLETE_FLAGS:
             raise FlightTraceError("unknown coverage gap reason")
         pointer_maximum = (1 << (8 * superblock.pointer_width)) - 1
@@ -827,7 +861,8 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             raise FlightTraceError(f"invalid chunk state at index {index}")
         (magic, version, header_bytes, encoded_index, _, tid, generation, first, last,
          committed, count, checksum) = CHUNK_HEADER.unpack(header)
-        if magic != MAGIC or version != VERSION or header_bytes != CHUNK_HEADER_BYTES or encoded_index != index:
+        if (magic != MAGIC or version != superblock.version or
+                header_bytes != CHUNK_HEADER_BYTES or encoded_index != index):
             raise FlightTraceError(f"invalid chunk header identity at index {index}")
         if tid == 0 or generation == 0 or tid not in directory_by_tid or any(header[52:]):
             raise FlightTraceError(f"invalid chunk ownership at index {index}")
@@ -1004,7 +1039,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         default=(0, None),
     )[1]
     summary: dict[str, object] = {
-        "format_version": VERSION,
+        "format_version": superblock.version,
         "run_id": superblock.run_id,
         "pid": superblock.pid,
         "module_generation": superblock.module_generation,

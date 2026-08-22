@@ -5,7 +5,7 @@
 #include <type_traits>
 
 constexpr uint32_t kFlightMagic = 0x51464c54U;
-constexpr uint16_t kFlightVersion = 1;
+constexpr uint16_t kFlightVersion = 2;
 constexpr uint32_t kFlightRecordCommit = 0x51434d54U;
 constexpr uint8_t kFlightByteOrderLittleEndian = 1;
 constexpr uint8_t kFlightPointerWidth32 = 4;
@@ -16,6 +16,7 @@ constexpr size_t kFlightDirectoryEntryBytes = 64;
 constexpr size_t kFlightChunkHeaderBytes = 64;
 constexpr size_t kFlightRecordHeaderBytes = 24;
 constexpr size_t kFlightEmergencyRecordBytes = 64;
+constexpr size_t kFlightEmergencySlotBytes = 2 * kFlightEmergencyRecordBytes;
 constexpr size_t kFlightTargetNameBytes = 128;
 constexpr size_t kFlightTargetNameOffset = 98;
 

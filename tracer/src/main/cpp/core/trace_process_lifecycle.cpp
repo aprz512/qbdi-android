@@ -1,9 +1,5 @@
 #include "core/trace_process_lifecycle.h"
 
-#if !defined(QTRACE_HOST_TEST)
-#include "core/signal_broker.h"
-#endif
-
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -36,9 +32,6 @@ void trace_process_atfork_parent() noexcept {
 
 void trace_process_atfork_child() noexcept {
     trace_process_mark_child_detached();
-#if !defined(QTRACE_HOST_TEST)
-    detach_process_signal_broker_after_fork_child();
-#endif
     g_trace_writer_prepare_locked = 0;
     for (std::atomic<int> &slot : g_trace_writer_fds) {
         const int fd_plus_one = slot.exchange(0, std::memory_order_relaxed);

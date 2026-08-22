@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <pthread.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -13,6 +14,9 @@
 namespace {
 
 std::atomic<SignalBroker *> g_active_signal_broker{nullptr};
+pthread_once_t g_signal_broker_atfork_once = PTHREAD_ONCE_INIT;
+std::atomic<int> g_signal_broker_atfork_error{EAGAIN};
+thread_local SignalBroker *g_prepared_signal_broker = nullptr;
 static_assert(std::atomic<SignalBroker *>::is_always_lock_free);
 static_assert(std::atomic<SignalBrokerThreadState *>::is_always_lock_free);
 static_assert(std::atomic<uint64_t>::is_always_lock_free);
@@ -122,10 +126,10 @@ long default_rt_sigprocmask(void *, int how, const uint64_t *set,
     sigset_t replacement{};
     sigset_t previous{};
     if (set != nullptr) std::memcpy(&replacement, set, sizeof(*set));
-    if (::pthread_sigmask(how, set != nullptr ? &replacement : nullptr,
-                          old_set != nullptr ? &previous : nullptr) != 0) {
-        return -errno;
-    }
+    const int result = ::pthread_sigmask(
+            how, set != nullptr ? &replacement : nullptr,
+            old_set != nullptr ? &previous : nullptr);
+    if (result != 0) return -result;
     if (old_set != nullptr) std::memcpy(old_set, &previous, sizeof(*old_set));
     return 0;
 #endif
@@ -188,6 +192,10 @@ uint64_t signal_bit(int signal_number) noexcept {
 
 constexpr uint32_t kSignalHandlerCounterMaximum = 0xffffU;
 
+#if defined(QTRACE_HOST_TEST)
+SignalBrokerTestGate g_action_publication_gate = nullptr;
+#endif
+
 uint32_t increment_saturated(std::atomic<uint32_t> *counter) noexcept {
     uint32_t value = counter->load(std::memory_order_relaxed);
     while (value < kSignalHandlerCounterMaximum &&
@@ -210,25 +218,61 @@ uint32_t signal_handler_flags(uint32_t depth,
     return bounded_depth | (bounded_nested << 16U);
 }
 
+void register_signal_broker_atfork() noexcept {
+    g_signal_broker_atfork_error.store(
+            ::pthread_atfork(signal_broker_atfork_prepare,
+                             signal_broker_atfork_parent,
+                             signal_broker_atfork_child),
+            std::memory_order_release);
+}
+
+bool signal_broker_atfork_ready() noexcept {
+    const int once_error = ::pthread_once(&g_signal_broker_atfork_once,
+                                          register_signal_broker_atfork);
+    if (once_error != 0) {
+        g_signal_broker_atfork_error.store(once_error,
+                                           std::memory_order_release);
+    }
+    return g_signal_broker_atfork_error.load(std::memory_order_acquire) == 0;
+}
+
 } // namespace
+
+void signal_broker_atfork_prepare() noexcept {
+    SignalBroker *broker = g_active_signal_broker.load(std::memory_order_acquire);
+    if (broker == nullptr || broker->detached()) return;
+    broker->update_mutex_.lock();
+    g_prepared_signal_broker = broker;
+}
+
+void signal_broker_atfork_parent() noexcept {
+    SignalBroker *broker = g_prepared_signal_broker;
+    if (broker == nullptr) return;
+    g_prepared_signal_broker = nullptr;
+    broker->update_mutex_.unlock();
+}
+
+void signal_broker_atfork_child() noexcept {
+    SignalBroker *broker = g_prepared_signal_broker;
+    g_prepared_signal_broker = nullptr;
+    if (broker != nullptr) broker->detach_after_fork_child();
+}
 
 bool SignalBrokerThreadState::initialize(
         uint32_t tid, FlightArtifact *artifact,
         const FlightThreadRegistration &registration,
         QBDI::GPRState *guest_gpr) noexcept {
     if (attached_.load(std::memory_order_acquire) || tid == 0 || artifact == nullptr ||
-        !artifact->valid() || registration.tid != tid ||
+        guest_gpr == nullptr || !artifact->valid() || registration.tid != tid ||
         registration.directory_index == kFlightInvalidIndex) {
         return false;
     }
     tid_ = tid;
     artifact_ = artifact;
     registration_ = registration;
-    if (guest_gpr != nullptr) {
-        Arm64SignalContext context{};
-        if (!qbdi_gpr_to_signal_context(*guest_gpr, &context) ||
-            !store_guest(context, guest_gpr)) return false;
-    }
+    Arm64SignalContext context{};
+    if (!qbdi_gpr_to_signal_context(*guest_gpr, &context) ||
+        !store_guest(context, guest_gpr)) return false;
     attached_.store(true, std::memory_order_release);
     return true;
 }
@@ -298,8 +342,9 @@ void SignalBrokerThreadState::publish_guest(
 
 bool SignalBrokerThreadState::store_guest(
         const Arm64SignalContext &context, QBDI::GPRState *gpr) noexcept {
+    if (gpr == nullptr) return false;
     publish_guest(context, gpr);
-    return gpr == nullptr || signal_context_to_qbdi_gpr(context, gpr);
+    return signal_context_to_qbdi_gpr(context, gpr);
 }
 
 SignalBroker::SignalBroker() noexcept : SignalBroker(default_platform()) {}
@@ -334,7 +379,8 @@ bool SignalBroker::install() noexcept {
 }
 
 bool SignalBroker::install(std::span<const int> signal_numbers) noexcept {
-    if (!platform_valid() || signal_numbers.empty() || detached()) return false;
+    if (!platform_valid() || signal_numbers.empty() || detached() ||
+        !signal_broker_atfork_ready()) return false;
     std::lock_guard<std::mutex> guard(update_mutex_);
     for (int signal_number : signal_numbers) {
         if (install_signal(signal_number) < 0) return false;
@@ -355,15 +401,17 @@ long SignalBroker::install_signal(
                 platform_.opaque, signal_number, nullptr, &incumbent);
         if (result < 0) return result;
     }
-    KernelSignalAction visible = incumbent;
-    if (guest_semantics != nullptr) {
-        visible = *guest_semantics;
-    } else if (installed &&
-               !read_action(signal_number, &visible, nullptr)) {
+    KernelSignalAction previous = incumbent;
+    if (installed && !read_action(signal_number, &previous, nullptr)) {
         return -EAGAIN;
     }
-    if (!installed) {
-        publish_action(signal_number, incumbent);
+    KernelSignalAction visible = previous;
+    if (guest_semantics != nullptr) {
+        visible = *guest_semantics;
+    }
+    const bool replace_publication = !installed || guest_semantics != nullptr;
+    if (replace_publication) {
+        if (!publish_action(signal_number, visible)) return -EAGAIN;
         g_active_signal_broker.store(this, std::memory_order_release);
     }
     KernelSignalAction master{};
@@ -373,69 +421,89 @@ long SignalBroker::install_signal(
     master.restorer = visible.restorer;
     const long result = platform_.rt_sigaction(
             platform_.opaque, signal_number, &master, nullptr);
-    if (result < 0) return result;
+    if (result < 0) {
+        if (replace_publication && !publish_action(signal_number, previous)) {
+            return -EAGAIN;
+        }
+        return result;
+    }
     if (installed) return 0;
     slot.installed.store(true, std::memory_order_release);
     return 0;
 }
 
-void SignalBroker::publish_action(
+bool SignalBroker::publish_action(
         int signal_number, const KernelSignalAction &action) noexcept {
     ActionSlot &slot = actions_[static_cast<size_t>(signal_number)];
-    uint64_t version = slot.version.load(std::memory_order_acquire);
     for (;;) {
-        if ((version & 1U) != 0) {
-            version = slot.version.load(std::memory_order_acquire);
+        if (slot.next_generation == 0 || slot.next_generation == UINT64_MAX) {
+            return false;
+        }
+        while (slot.acquiring_deliveries.load(std::memory_order_acquire) != 0) {
+            (void)::sched_yield();
+        }
+#if defined(QTRACE_HOST_TEST)
+        if (g_action_publication_gate != nullptr) g_action_publication_gate();
+#endif
+        const uint32_t current = slot.active_generation.load(
+                std::memory_order_acquire);
+        uint32_t target = 1;
+        if (current == target) target = 2;
+        ActionGeneration &generation = slot.generations[target];
+        while (generation.active_deliveries.load(std::memory_order_acquire) != 0) {
+            (void)::sched_yield();
+        }
+        if (slot.acquiring_deliveries.load(std::memory_order_acquire) != 0 ||
+            slot.active_generation.load(std::memory_order_acquire) != current) {
             continue;
         }
-        if (slot.version.compare_exchange_weak(
-                    version, version + 1U, std::memory_order_acq_rel,
+        generation.action = action;
+        generation.generation = slot.next_generation++;
+        uint32_t expected = current;
+        if (slot.active_generation.compare_exchange_strong(
+                    expected, target, std::memory_order_release,
                     std::memory_order_acquire)) {
-            break;
+            return true;
         }
     }
-    slot.handler.store(action.handler, std::memory_order_relaxed);
-    slot.flags.store(action.flags, std::memory_order_relaxed);
-    slot.restorer.store(action.restorer, std::memory_order_relaxed);
-    slot.mask.store(action.mask, std::memory_order_relaxed);
-    slot.version.store(version + 2U, std::memory_order_release);
 }
+
+#if defined(QTRACE_HOST_TEST)
+void signal_broker_test_set_action_publication_gate(
+        SignalBrokerTestGate gate) noexcept {
+    g_action_publication_gate = gate;
+}
+#endif
 
 bool SignalBroker::read_action(int signal_number, KernelSignalAction *action,
                                uint64_t *generation) const noexcept {
     if (!valid_signal(signal_number) || action == nullptr) return false;
     const ActionSlot &slot = actions_[static_cast<size_t>(signal_number)];
-    for (size_t attempt = 0; attempt < 8; ++attempt) {
-        const uint64_t before = slot.version.load(std::memory_order_acquire);
-        if (before == 0 || (before & 1U) != 0) continue;
-        KernelSignalAction snapshot{};
-        snapshot.handler = slot.handler.load(std::memory_order_relaxed);
-        snapshot.flags = slot.flags.load(std::memory_order_relaxed);
-        snapshot.restorer = slot.restorer.load(std::memory_order_relaxed);
-        snapshot.mask = slot.mask.load(std::memory_order_relaxed);
-        const uint64_t after = slot.version.load(std::memory_order_acquire);
-        if (before != after || (after & 1U) != 0) continue;
-        *action = snapshot;
-        if (generation != nullptr) *generation = after;
-        return true;
+    slot.acquiring_deliveries.fetch_add(1, std::memory_order_acq_rel);
+    const uint32_t index = slot.active_generation.load(std::memory_order_acquire);
+    if (index >= slot.generations.size()) {
+        slot.acquiring_deliveries.fetch_sub(1, std::memory_order_release);
+        return false;
     }
-    return false;
+    const ActionGeneration &selected = slot.generations[index];
+    selected.active_deliveries.fetch_add(1, std::memory_order_acq_rel);
+    slot.acquiring_deliveries.fetch_sub(1, std::memory_order_release);
+    *action = selected.action;
+    if (generation != nullptr) *generation = selected.generation;
+    selected.active_deliveries.fetch_sub(1, std::memory_order_release);
+    return true;
 }
 
 bool SignalBroker::reset_if_current(int signal_number,
                                     uint64_t generation) noexcept {
     if (!valid_signal(signal_number)) return false;
     ActionSlot &slot = actions_[static_cast<size_t>(signal_number)];
-    uint64_t expected = generation;
-    if (!slot.version.compare_exchange_strong(
-                expected, generation + 1U, std::memory_order_acq_rel,
-                std::memory_order_acquire)) return false;
-    slot.handler.store(kDefaultHandler, std::memory_order_relaxed);
-    slot.flags.store(0, std::memory_order_relaxed);
-    slot.restorer.store(0, std::memory_order_relaxed);
-    slot.mask.store(0, std::memory_order_relaxed);
-    slot.version.store(generation + 2U, std::memory_order_release);
-    return true;
+    const uint32_t current = slot.active_generation.load(std::memory_order_acquire);
+    if (current >= slot.generations.size() ||
+        slot.generations[current].generation != generation) return false;
+    uint32_t expected = current;
+    return slot.active_generation.compare_exchange_strong(
+            expected, 0, std::memory_order_release, std::memory_order_acquire);
 }
 
 bool SignalBroker::publish_syscall(const Arm64SyscallSnapshot &call) noexcept {
@@ -489,7 +557,6 @@ QBDI::VMAction SignalBroker::observe_rt_sigaction(
         const bool mask_saved = result >= 0;
         if (mask_saved) {
             result = install_signal(signal_number, &replacement);
-            if (result >= 0) publish_action(signal_number, replacement);
             const long restore = platform_.rt_sigprocmask(
                     platform_.opaque, SIG_SETMASK, &saved_mask, nullptr);
             if (result >= 0 && restore < 0) result = restore;
@@ -791,15 +858,7 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
 #endif
 #if defined(__ANDROID__) && defined(__aarch64__)
     (void)returned_mask;
-    const uint64_t restore_mask = saved_mask;
-#else
-    const uint64_t restore_mask =
-            (delivery.action.flags & SA_SIGINFO) != 0
-                    ? returned_mask
-                    : saved_mask;
 #endif
-    (void)platform_.rt_sigprocmask(platform_.opaque, SIG_SETMASK, &restore_mask,
-                                   nullptr);
     if (!mapped || (depth == 1 && !thread->store_guest(guest, guest_gpr))) {
         thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
     }
@@ -811,6 +870,14 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
                                   thread->nested_deliveries_.load(
                                           std::memory_order_acquire)));
     thread->active_deliveries_.fetch_sub(1, std::memory_order_release);
+#if !defined(__ANDROID__) || !defined(__aarch64__)
+    const uint64_t restore_mask =
+            (delivery.action.flags & SA_SIGINFO) != 0
+                    ? returned_mask
+                    : saved_mask;
+    (void)platform_.rt_sigprocmask(platform_.opaque, SIG_SETMASK, &restore_mask,
+                                   nullptr);
+#endif
     return mapped;
 }
 
@@ -832,14 +899,7 @@ void SignalBroker::detach_after_fork_child() noexcept {
         }
         if (result < 0) {
             restored_all = false;
-            slot.handler.store(replacement->handler, std::memory_order_relaxed);
-            slot.flags.store(replacement->flags, std::memory_order_relaxed);
-            slot.restorer.store(replacement->restorer, std::memory_order_relaxed);
-            slot.mask.store(replacement->mask, std::memory_order_relaxed);
-            uint64_t version = slot.version.load(std::memory_order_relaxed);
-            if (version == 0) version = 2;
-            if ((version & 1U) != 0) ++version;
-            slot.version.store(version, std::memory_order_release);
+            if (!readable) (void)publish_action(static_cast<int>(index), defaults);
         }
     }
     for (std::atomic<SignalBrokerThreadState *> &slot : threads_) {

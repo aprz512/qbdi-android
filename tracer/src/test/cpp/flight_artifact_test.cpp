@@ -115,7 +115,7 @@ void creates_checked_private_mapping_and_publishes_superblock_last() {
     CHECK(superblock.chunk_bytes == test_options().chunk_bytes);
     CHECK(superblock.chunk_count == artifact.chunk_count());
     CHECK(superblock.emergency_record_count == test_options().max_threads + 1U);
-    CHECK(superblock.emergency_record_bytes == kFlightEmergencyRecordBytes);
+    CHECK(superblock.emergency_record_bytes == kFlightEmergencySlotBytes);
     CHECK(superblock.run_id == test_identity().run_id);
     CHECK(superblock.pid == test_identity().pid);
     CHECK(superblock.module_generation == test_identity().module_generation);
@@ -337,6 +337,37 @@ void emergency_slots_publish_complete_little_endian_records() {
                                flight_read_u32_le(mutable_bytes + 16) ^ 1U,
                                std::memory_order_relaxed);
     CHECK(!scan_flight_emergency(bytes, &decoded));
+}
+
+void emergency_overwrite_is_old_or_new_at_every_publication_phase() {
+    for (uint32_t phase = 1; phase <= 7; ++phase) {
+        TemporaryArtifact file;
+        FlightArtifact artifact;
+        CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
+        FlightThreadRegistration thread{};
+        CHECK(artifact.register_thread(909, &thread));
+        FlightEmergencyRecord old_record{};
+        old_record.type = static_cast<uint32_t>(FlightRecordType::Signal);
+        old_record.tid = thread.tid;
+        old_record.sequence = 41;
+        old_record.pc = 0x71000100U;
+        CHECK(artifact.write_emergency(thread, old_record));
+        FlightEmergencyRecord replacement = old_record;
+        replacement.sequence = 42;
+        replacement.pc = 0x71000200U;
+        artifact.test_interrupt_emergency_publication(
+                FlightRecordType::Signal, 0, phase);
+
+        CHECK(!artifact.write_emergency(thread, replacement));
+
+        FlightEmergencyRecord recovered{};
+        CHECK(scan_flight_emergency(
+                artifact.emergency_bytes(thread.directory_index), &recovered));
+        CHECK(recovered.sequence == 41 || recovered.sequence == 42);
+        CHECK(recovered.pc == (recovered.sequence == 41
+                                       ? 0x71000100U
+                                       : 0x71000200U));
+    }
 }
 
 void coverage_gap_root_cause_is_sticky_and_counts_later_failures() {
@@ -654,6 +685,7 @@ int main() {
     registers_unique_tids_and_marks_exhaustion_incomplete();
     protected_pool_exhaustion_publishes_the_affected_tid();
     emergency_slots_publish_complete_little_endian_records();
+    emergency_overwrite_is_old_or_new_at_every_publication_phase();
     coverage_gap_root_cause_is_sticky_and_counts_later_failures();
     dropped_gap_update_keeps_the_root_publication_immutable();
     colliding_emergency_writers_never_publish_a_hybrid();

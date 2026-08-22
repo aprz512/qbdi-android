@@ -53,6 +53,9 @@ struct SignalBrokerGuestContext {
 
 class SignalBroker;
 class TerminationObserver;
+void signal_broker_atfork_prepare() noexcept;
+void signal_broker_atfork_parent() noexcept;
+void signal_broker_atfork_child() noexcept;
 
 struct SignalBrokerThreadState {
 public:
@@ -140,12 +143,21 @@ public:
     static SignalBroker &process() noexcept;
 
 private:
+    friend void signal_broker_atfork_prepare() noexcept;
+    friend void signal_broker_atfork_parent() noexcept;
+    friend void signal_broker_atfork_child() noexcept;
+
+    struct ActionGeneration {
+        KernelSignalAction action{};
+        uint64_t generation = 0;
+        mutable std::atomic<uint32_t> active_deliveries{0};
+    };
+
     struct ActionSlot {
-        std::atomic<uint64_t> version{0};
-        std::atomic<uintptr_t> handler{0};
-        std::atomic<uint64_t> flags{0};
-        std::atomic<uintptr_t> restorer{0};
-        std::atomic<uint64_t> mask{0};
+        std::array<ActionGeneration, 3> generations{};
+        mutable std::atomic<uint32_t> acquiring_deliveries{0};
+        std::atomic<uint32_t> active_generation{UINT32_MAX};
+        uint64_t next_generation = 1;
         std::atomic<bool> installed{false};
     };
 
@@ -154,7 +166,7 @@ private:
     long install_signal(
             int signal_number,
             const KernelSignalAction *guest_semantics = nullptr) noexcept;
-    void publish_action(int signal_number,
+    bool publish_action(int signal_number,
                         const KernelSignalAction &action) noexcept;
     bool read_action(int signal_number, KernelSignalAction *action,
                      uint64_t *generation) const noexcept;
@@ -185,3 +197,9 @@ public:
 };
 
 void detach_process_signal_broker_after_fork_child() noexcept;
+
+#if defined(QTRACE_HOST_TEST)
+using SignalBrokerTestGate = void (*)();
+void signal_broker_test_set_action_publication_gate(
+        SignalBrokerTestGate gate) noexcept;
+#endif

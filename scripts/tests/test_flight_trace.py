@@ -174,24 +174,29 @@ def emergency(kind: int, tid: int, sequence: int, *, pc: int = 0, sp: int = 0,
 def artifact(*, directories: list[bytes], chunks: list[bytes], emergencies: list[bytes] | None = None,
              flags: int = 0, pointer_width: int = 8, run_id: int = 0x1020304050607080,
              pid: int = 4242, module_generation: int = 17,
-             target: bytes = b"libtarget.so", chunk_bytes: int = 2048) -> bytes:
+             target: bytes = b"libtarget.so", chunk_bytes: int = 2048,
+             wire_version: int = VERSION,
+             emergency_slot_bytes: int = EMERGENCY_BYTES) -> bytes:
     directory_offset = SUPERBLOCK_BYTES
     directory_count = len(directories)
     emergency_count = directory_count + 1
-    emergency_offset = align(directory_offset + directory_count * DIRECTORY_BYTES, EMERGENCY_BYTES)
-    chunk_offset = align(emergency_offset + emergency_count * EMERGENCY_BYTES, chunk_bytes)
+    emergency_offset = align(directory_offset + directory_count * DIRECTORY_BYTES,
+                             emergency_slot_bytes)
+    chunk_offset = align(emergency_offset + emergency_count * emergency_slot_bytes,
+                         chunk_bytes)
     artifact_bytes = chunk_offset + len(chunks) * chunk_bytes
     raw = bytearray(artifact_bytes)
     struct.pack_into("<IHBBH6xQQIIQIIQIII4xQI I H", raw, 0,
-                     MAGIC, VERSION, 1, pointer_width, SUPERBLOCK_BYTES, artifact_bytes,
+                     MAGIC, wire_version, 1, pointer_width, SUPERBLOCK_BYTES, artifact_bytes,
                      directory_offset, DIRECTORY_BYTES, directory_count, chunk_offset,
-                     chunk_bytes, len(chunks), emergency_offset, EMERGENCY_BYTES,
+                     chunk_bytes, len(chunks), emergency_offset, emergency_slot_bytes,
                      emergency_count, flags, run_id, pid, module_generation, len(target))
     raw[98:98 + len(target)] = target
     for index, entry in enumerate(directories):
         raw[directory_offset + index * DIRECTORY_BYTES:directory_offset + (index + 1) * DIRECTORY_BYTES] = entry
     for index, slot in enumerate(emergencies or []):
-        raw[emergency_offset + index * EMERGENCY_BYTES:emergency_offset + (index + 1) * EMERGENCY_BYTES] = slot
+        raw[emergency_offset + index * emergency_slot_bytes:
+            emergency_offset + (index + 1) * emergency_slot_bytes] = slot
     for index, encoded in enumerate(chunks):
         start = chunk_offset + index * chunk_bytes
         raw[start:start + chunk_bytes] = encoded
@@ -207,6 +212,38 @@ def core_records(tid: int, generation: int = 1, *, start: int = 1,
 
 
 class FlightRecoveryTests(unittest.TestCase):
+    def test_emergency_failure_flag_can_never_recover_as_complete(self):
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], flags=8,
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertFalse(recovery.summary["complete"])
+        self.assertEqual(8, recovery.summary["artifact_flags"])
+
+    def test_v2_emergency_double_cell_recovers_old_or_new_publication(self):
+        old = emergency(14, 77, 41, pc=0x71000100, version=2)
+        torn_new = emergency(14, 77, 42, pc=0x71000200, version=5)
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[old + torn_new],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+
+        recovered_old = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual(41, recovered_old.summary["termination"]["sequence"])
+        committed_new = emergency(14, 77, 42, pc=0x71000200, version=4)
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[old + committed_new],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+        recovered_new = recover_flight(io.BytesIO(raw))
+        self.assertEqual(42, recovered_new.summary["termination"]["sequence"])
+
     def test_excludes_an_empty_sealed_chunk_as_damaged_evidence(self):
         raw = artifact(
             directories=[directory_entry(7, 0, 0, 0, 1)],

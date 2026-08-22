@@ -19,7 +19,7 @@ int main() {
     FlightArtifactIdentityView identity{0x0102030405060708ULL, 1234, 7, target_name,
                                         static_cast<uint16_t>(sizeof(target_name) - 1U)};
     CHECK(kFlightMagic == 0x51464c54U);
-    CHECK(kFlightVersion == 1);
+    CHECK(kFlightVersion == 2);
     CHECK(kFlightRecordCommit == 0x51434d54U);
     CHECK(kFlightTargetNameBytes == 128);
     CHECK(sizeof(FlightSuperblock) == kFlightSuperblockBytes);
@@ -108,7 +108,7 @@ int main() {
     superblock.chunk_bytes = 0x41424344U;
     superblock.chunk_count = 0x51525354U;
     superblock.emergency_offset = 0x6162636465666768ULL;
-    superblock.emergency_record_bytes = kFlightEmergencyRecordBytes;
+    superblock.emergency_record_bytes = kFlightEmergencySlotBytes;
     superblock.emergency_record_count = 0x71727374U;
     superblock.flags = 0x81828384U;
     CHECK(flight_set_superblock_identity(&superblock, identity));
@@ -117,7 +117,7 @@ int main() {
     std::memset(encoded, 0xa5, sizeof(encoded));
     CHECK(encode_flight_superblock_le(superblock, encoded, sizeof(encoded)));
     CHECK(encoded[0] == 0x54 && encoded[1] == 0x4c && encoded[2] == 0x46 && encoded[3] == 0x51);
-    CHECK(encoded[4] == 0x01 && encoded[5] == 0x00);
+    CHECK(encoded[4] == 0x02 && encoded[5] == 0x00);
     CHECK(encoded[6] == kFlightByteOrderLittleEndian);
     CHECK(encoded[7] == kFlightPointerWidth64);
     CHECK(encoded[8] == 0x00 && encoded[9] == 0x10);
