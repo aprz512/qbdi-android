@@ -9,7 +9,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-from scripts.flight_trace import FlightEvent, FlightRecovery, FlightTraceError, recover_flight
+try:
+    from scripts.flight_trace import FlightEvent, FlightRecovery, FlightTraceError, recover_flight
+except ModuleNotFoundError:  # Support import from directly executed scripts/pull_trace.py.
+    from flight_trace import (  # type: ignore[no-redef]
+        FlightEvent,
+        FlightRecovery,
+        FlightTraceError,
+        recover_flight,
+    )
+
+
+def recovery_status(summary: dict[str, object]) -> str:
+    """Map the recovery completeness verdict to the pull-tool status vocabulary."""
+    return "complete" if summary.get("complete") is True else "incomplete"
 
 
 def _stem(source: Path) -> str:
@@ -284,6 +297,19 @@ def _publish_force(pairs: list[tuple[Path, Path]]) -> None:
     context = _cleanup_context(failures, artifacts)
     if context:
         raise FlightTraceError(f"flight output backup cleanup failure{context}")
+
+
+def publish_flight_file_set(pairs: list[tuple[Path, Path]], force: bool) -> None:
+    """Publish a prepared flight artifact set with one rollback boundary."""
+    if not pairs:
+        return
+    parent = pairs[0][1].parent
+    if any(destination.parent != parent for _, destination in pairs):
+        raise FlightTraceError("flight output set must share one destination directory")
+    if force:
+        _publish_force(pairs)
+    else:
+        _publish_no_replace(pairs)
 
 
 def publish_flight_outputs(source: Path, output_dir: Path,

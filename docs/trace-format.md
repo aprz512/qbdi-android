@@ -28,6 +28,11 @@ The files are:
   signal. It contains magic `0x51435248`, the signal, and a positive TID.
 - `<basename>.trace.txt`: host-converted text format 3.
 - `<basename>.partial.trace.txt`: recoverable complete frames from a crash-truncated artifact.
+- `<run_id>_<pid>_<target>.flight.bin`: preallocated persistent cross-thread flight ring.
+- `<flight-basename>.merged.trace.txt`: recovered events merged by process-wide sequence.
+- `<flight-basename>.tid-<tid>.trace.txt`: one recovered event stream per captured TID.
+- `<flight-basename>.flight.json`: recovery, termination, retained-window, damage, and completeness
+  summary.
 
 The pull tool also supports legacy format-2 `.trace.txt.lz4` artifacts and their v1 sidecars. It
 never treats a format-2 `raw_bytes` field as the format-3 `encoded_bytes` field.
@@ -225,9 +230,12 @@ python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
   --device 192.168.51.42:5555 --output pulled-traces
 ```
 
-Use `--name <artifact>` to select a specific `.trace.bin.lz4`, `.trace.bin`, or legacy
-`.trace.txt.lz4`. Use `--compressed-only` to retain the original artifact and sidecars without
-conversion. Existing outputs require `--force`.
+Use `--name <artifact>` to select a specific `.flight.bin`, `.trace.bin.lz4`, `.trace.bin`, or
+legacy `.trace.txt.lz4`. Without `--name`, listing order selects the newest supported artifact. Use
+`--compressed-only` to retain the original artifact and sidecars without conversion; for an
+uncompressed `.flight.bin` it means only the validated artifact is published and derived recovery
+outputs are skipped. Existing source and every possible derived output require `--force` before
+replacement.
 
 Manual binary conversion:
 
@@ -239,6 +247,44 @@ python3 scripts/trace_convert.py input.trace.bin --output output.trace.txt
 Both tools use status 0 for complete success, status 1 for an error with no text publication, and
 status 2 for valid crash-partial recovery. `benchmark_trace.py --compare` also uses status 2 when
 a speed or size acceptance gate is missed while still printing the complete JSON verdict.
+
+## Persistent flight recorder
+
+Flight capture must be injected with Frida spawn before the target library loads. Its defaults are
+512 MiB total capacity, 256 KiB chunks, 256 thread entries, and four protected chunks per active
+thread (a 1 MiB minimum retained window). The persistent `pthread_create` gateway observes all
+pthread lifecycles. Recorder sessions cover target-owned threads: target start routines and
+threads created by an active target scene. Within those sessions QBDI emits instruction, memory,
+and GPR records only for the target module; retained hook trampolines are control-only.
+
+Flight collection is the full profile regardless of the ordinary trace profile: all target
+instructions, QBDI memory accesses with bounded pre/post bytes, and checkpoints/deltas for
+`x0`–`x30`, `sp`, `pc`, and `nzcv`. The artifact is a process-wide persistent ring, so overwriting
+old unprotected chunks is expected and represented as sequence ranges rather than silently hidden.
+
+The signal broker virtualizes guest dispositions, including direct `rt_sigaction` syscalls, while
+guest handlers execute natively and are excluded from QBDI. Explicit signal-handler begin/return
+records delimit that untraced interval and returned GPR changes are applied before guest execution
+resumes. Direct `tkill`, `tgkill`, `exit`, and `exit_group` paths publish evidence without relying
+on libc hooks. `SIGKILL` cannot be brokered; only a target-issued pre-syscall termination intent is
+available for that case.
+
+Pull and recover the newest or an explicit flight artifact without installing LZ4:
+
+```bash
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --device <adb-serial> --output pulled-traces
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --device <adb-serial> --name <run>.flight.bin --output pulled-traces
+```
+
+Recovery validates the superblock, directory/chunk generations, committed prefixes, checksums,
+dictionaries, register deltas, and global sequence ordering. It publishes the original
+`.flight.bin`, a merged text stream, per-TID text streams, and `.flight.json`. The JSON `complete`
+field—not normal QTRB metrics or crash sidecars—defines flight status. Missing terminal evidence is
+reported as `termination.cause="unknown"` and does not by itself make an otherwise valid recovery
+incomplete. Coverage gaps, recovery damage, incomplete logical events, stale/active state, or
+unterminated lifecycle evidence are surfaced explicitly and fail completeness closed.
 
 ## Crash partial semantics
 

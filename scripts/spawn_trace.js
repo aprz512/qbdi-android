@@ -15,6 +15,7 @@ const config = {
     bufferMb: 0,
     hexdumpLimit: 32
   },
+  flight: { enabled: true, capacityMb: 512, chunkKb: 256, maxThreads: 256, protectedChunks: 4 },
   scenes: {
     init: { offset: '0x6AC90' },
     jni: { offset: '0x6DCA8' },
@@ -45,7 +46,12 @@ function encodeConfig(cfg) {
     'lz4_level=' + cfg.trace.lz4Level,
     'auto_buffer=' + (cfg.trace.autoBuffer ? '1' : '0'),
     'buffer_mb=' + cfg.trace.bufferMb,
-    'hexdump_limit=' + cfg.trace.hexdumpLimit);
+    'hexdump_limit=' + cfg.trace.hexdumpLimit,
+    'flight=' + (cfg.flight.enabled ? '1' : '0'),
+    'flight_mb=' + cfg.flight.capacityMb,
+    'flight_chunk_kb=' + cfg.flight.chunkKb,
+    'flight_max_threads=' + cfg.flight.maxThreads,
+    'flight_protected_chunks=' + cfg.flight.protectedChunks);
   for (const [name, scene] of Object.entries(cfg.scenes)) {
     parts.push(['scene=' + name, scene.offset].join(','));
   }

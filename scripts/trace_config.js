@@ -13,6 +13,7 @@ module.exports = {
     bufferMb: 0,
     hexdumpLimit: 32
   },
+  flight: { enabled: true, capacityMb: 512, chunkKb: 256, maxThreads: 256, protectedChunks: 4 },
   scenes: {
     init: { offset: '0x6AC90' },
     jni: { offset: '0x6DCA8' },

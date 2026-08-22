@@ -1,3 +1,4 @@
+import json
 import signal
 import subprocess
 import sys
@@ -6,6 +7,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
+
+import scripts.flight_convert as flight_convert
 from scripts.pull_trace import (
     AdbArtifactClient,
     EXIT_PARTIAL,
@@ -15,8 +19,14 @@ from scripts.pull_trace import (
     pull_artifact_set,
     select_trace_name,
 )
-from scripts.tests.test_trace_binary import complete_stream
+from scripts.tests.test_flight_trace import (
+    artifact as flight_artifact,
+    chunk as flight_chunk,
+    core_records as flight_core_records,
+    directory_entry as flight_directory_entry,
+)
 from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
+from scripts.tests.test_trace_binary import complete_stream
 from scripts.tests.test_trace_convert import fake_lz4_executable
 
 
@@ -31,7 +41,20 @@ def crash_marker(signal_number=signal.SIGSEGV, tid=1234):
     )
 
 
+def recoverable_flight_artifact(tid=321):
+    return flight_artifact(
+        directories=[flight_directory_entry(tid, 1, 2, 0, 1)],
+        chunks=[flight_chunk(0, tid, 1, flight_core_records(tid))],
+    )
+
+
 class ArtifactClassificationTests(unittest.TestCase):
+    def test_classifies_flight_artifact_without_normal_sidecars(self):
+        traces = classify_artifacts({"100_target.flight.bin": b"persistent-ring"})
+
+        self.assertEqual({"100_target.flight.bin"}, set(traces))
+        self.assertEqual("incomplete", traces["100_target.flight.bin"].status)
+
     def test_classifies_text_compressed_binary_and_raw_binary_artifacts(self):
         artifacts = {
             "100.trace.txt.lz4": b"",
@@ -407,8 +430,175 @@ class PullArtifactTests(unittest.TestCase):
                 pull_artifact_set(FailingClient({name: b"ignored"}), name, [name], root)
             self.assertEqual([], list(root.iterdir()))
 
+    def test_streams_flight_without_lz4_and_publishes_recovery_outputs(self):
+        name = "123_target.flight.bin"
+        binary = recoverable_flight_artifact()
+        client = self.FakeClient({name: binary})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = pull_artifact_set(client, name, client.files, root)
+
+            self.assertEqual("complete", result.status)
+            self.assertEqual(binary, (root / name).read_bytes())
+            self.assertEqual(
+                {
+                    name,
+                    "123_target.merged.trace.txt",
+                    "123_target.tid-321.trace.txt",
+                    "123_target.flight.json",
+                },
+                {path.name for path in result.outputs},
+            )
+            self.assertEqual([name], client.streamed)
+            summary = json.loads((root / "123_target.flight.json").read_text())
+            self.assertEqual("unknown", summary["termination"]["cause"])
+
+    def test_compressed_only_flight_skips_recovery_outputs(self):
+        name = "123_target.flight.bin"
+        binary = recoverable_flight_artifact()
+        client = self.FakeClient({name: binary})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = pull_artifact_set(
+                client, name, client.files, root, compressed_only=True
+            )
+
+            self.assertEqual("complete", result.status)
+            self.assertEqual((root / name,), result.outputs)
+            self.assertEqual([name], [path.name for path in root.iterdir()])
+
+    def test_flight_no_overwrite_checks_every_derived_output(self):
+        name = "123_target.flight.bin"
+        binary = recoverable_flight_artifact()
+        derived = (
+            name,
+            "123_target.merged.trace.txt",
+            "123_target.tid-321.trace.txt",
+            "123_target.flight.json",
+        )
+
+        for occupied in derived:
+            with self.subTest(occupied=occupied), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                existing = root / occupied
+                existing.write_bytes(b"keep")
+                client = self.FakeClient({name: binary})
+
+                with self.assertRaisesRegex((PullTraceError, FileExistsError), "already exists"):
+                    pull_artifact_set(client, name, client.files, root)
+
+                self.assertEqual(b"keep", existing.read_bytes())
+                self.assertEqual([occupied], [path.name for path in root.iterdir()])
+
+    def test_flight_no_overwrite_rejects_dangling_source_symlink_before_stream(self):
+        name = "123_target.flight.bin"
+        client = self.FakeClient({name: recoverable_flight_artifact()})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / name
+            destination.symlink_to("missing-artifact")
+
+            with self.assertRaisesRegex(PullTraceError, "already exists"):
+                pull_artifact_set(client, name, client.files, root)
+
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual([], client.streamed)
+
+    def test_flight_conversion_failure_cleans_staging_and_publishes_nothing(self):
+        name = "123_target.flight.bin"
+        client = self.FakeClient({name: b"not-a-flight-artifact"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(PullTraceError):
+                pull_artifact_set(client, name, client.files, root)
+
+            self.assertEqual([], list(root.iterdir()))
+
+    def test_flight_publication_failure_rolls_back_source_and_all_derived_outputs(self):
+        name = "123_target.flight.bin"
+        client = self.FakeClient({name: recoverable_flight_artifact()})
+        real_link = flight_convert.os.link
+        calls = 0
+
+        def fail_source_link(src, dst, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 5:
+                raise OSError("injected artifact publication failure")
+            return real_link(src, dst, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(flight_convert.os, "link", side_effect=fail_source_link), \
+                    self.assertRaises((PullTraceError, OSError)):
+                pull_artifact_set(client, name, client.files, root)
+
+            self.assertEqual([], list(root.iterdir()))
+
 
 class CommandLineTests(unittest.TestCase):
+    def test_script_remains_directly_executable(self):
+        root = Path(__file__).resolve().parents[2]
+        probe = subprocess.run(
+            [sys.executable, "scripts/pull_trace.py", "--help"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(0, probe.returncode, probe.stderr)
+
+    def test_selects_latest_or_explicit_flight_artifact(self):
+        names = [
+            "new.flight.bin",
+            "older.trace.bin.lz4",
+            "old.flight.bin",
+        ]
+
+        self.assertEqual("new.flight.bin", select_trace_name(names))
+        self.assertEqual("old.flight.bin", select_trace_name(names, "old.flight.bin"))
+
+    def test_frida_configs_share_exact_flight_defaults_and_encoded_fields(self):
+        expected = (
+            "flight: { enabled: true, capacityMb: 512, chunkKb: 256, "
+            "maxThreads: 256, protectedChunks: 4 }"
+        )
+        root = Path(__file__).resolve().parents[2]
+        module_config = (root / "scripts/trace_config.js").read_text(encoding="utf-8")
+        spawn_config = (root / "scripts/spawn_trace.js").read_text(encoding="utf-8")
+
+        self.assertIn(expected, module_config)
+        self.assertIn(expected, spawn_config)
+        for encoded in (
+            "flight=", "flight_mb=", "flight_chunk_kb=",
+            "flight_max_threads=", "flight_protected_chunks=",
+        ):
+            with self.subTest(encoded=encoded):
+                self.assertIn(encoded, spawn_config)
+
+    def test_flight_cli_recovers_missing_terminal_without_lz4(self):
+        name = "new.flight.bin"
+        client = PullArtifactTests.FakeClient({name: recoverable_flight_artifact()})
+        client.list_names = lambda: [name]
+        stdout = StringIO()
+
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stdout):
+            exit_code = main(
+                ["--package", "com.example.app", "--output", directory],
+                client_factory=lambda **kwargs: client,
+                lz4_finder=lambda command: None,
+            )
+
+            self.assertEqual(0, exit_code)
+            self.assertTrue((Path(directory) / "new.flight.json").is_file())
+        self.assertIn("status=complete", stdout.getvalue())
+
     def test_selects_binary_by_listing_order_without_suffix_priority(self):
         names = [
             "300_benchmark.trace.bin.lz4.metrics",

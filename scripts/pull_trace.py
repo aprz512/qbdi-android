@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import os
 import re
 import shutil
@@ -30,6 +31,12 @@ try:
         scan_lz4_file,
         split_lz4_frames,
     )
+    from scripts.flight_convert import (
+        publish_flight_file_set,
+        publish_flight_outputs,
+        recovery_status,
+    )
+    from scripts.flight_trace import FlightTraceError, recover_flight
     from scripts.trace_binary import BinaryTraceError
     from scripts.trace_convert import convert_binary_file
     from scripts.trace_metrics import parse_metrics
@@ -45,6 +52,12 @@ except ModuleNotFoundError:  # Support direct execution as scripts/pull_trace.py
         scan_lz4_file,
         split_lz4_frames,
     )
+    from flight_convert import (  # type: ignore[no-redef]
+        publish_flight_file_set,
+        publish_flight_outputs,
+        recovery_status,
+    )
+    from flight_trace import FlightTraceError, recover_flight  # type: ignore[no-redef]
     from trace_binary import BinaryTraceError  # type: ignore[no-redef]
     from trace_convert import convert_binary_file  # type: ignore[no-redef]
     from trace_metrics import parse_metrics  # type: ignore[no-redef]
@@ -58,7 +71,8 @@ CRASH_SIGNALS = frozenset((4, 6, 7, 8, 11))
 TEXT_TRACE_SUFFIX = ".trace.txt.lz4"
 BINARY_TRACE_SUFFIX = ".trace.bin.lz4"
 BINARY_RAW_SUFFIX = ".trace.bin"
-TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)
+FLIGHT_SUFFIX = ".flight.bin"
+TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX, FLIGHT_SUFFIX)
 # Kept for callers that imported the old text-only constant.
 TRACE_SUFFIX = TEXT_TRACE_SUFFIX
 TRACE_DIRECTORY = "files/qbdi-traces"
@@ -284,15 +298,50 @@ def pull_artifact_set(
     available = set(available_names)
     if name not in available:
         raise PullTraceError(f"remote trace does not exist: {name}")
+    output_directory.mkdir(parents=True, exist_ok=True)
+    if not output_directory.is_dir():
+        raise PullTraceError(f"output path is not a directory: {output_directory}")
+    if name.endswith(FLIGHT_SUFFIX):
+        destination = output_directory / name
+        if not force and os.path.lexists(destination):
+            raise PullTraceError(f"local output already exists: {destination}")
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix=".pull-flight-", dir=output_directory
+            ) as staging_name:
+                staging = Path(staging_name)
+                source = staging / name
+                with source.open("wb") as output:
+                    client.stream_file(name, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                if compressed_only:
+                    with source.open("rb") as binary:
+                        status = recovery_status(recover_flight(binary).summary)
+                    _publish_temp(source, destination, force)
+                    return PullResult(name, status, (destination,))
+                staged_outputs = publish_flight_outputs(
+                    source, staging / "converted", force=False
+                )
+                summary = json.loads(staged_outputs[-1].read_text(encoding="utf-8"))
+                outputs = tuple(output_directory / path.name for path in staged_outputs)
+                publish_flight_file_set(
+                    [(source, destination), *zip(staged_outputs, outputs, strict=True)],
+                    force,
+                )
+                return PullResult(
+                    name,
+                    recovery_status(summary),
+                    (destination, *outputs),
+                )
+        except (FlightTraceError, FileExistsError, json.JSONDecodeError) as error:
+            raise PullTraceError(str(error)) from error
     metrics_name = name + ".metrics"
     crash_name = name + ".crash"
     sidecar_names = tuple(
         sidecar for sidecar in (metrics_name, crash_name) if sidecar in available
     )
 
-    output_directory.mkdir(parents=True, exist_ok=True)
-    if not output_directory.is_dir():
-        raise PullTraceError(f"output path is not a directory: {output_directory}")
     trace_suffix = next(suffix for suffix in TRACE_SUFFIXES if name.endswith(suffix))
     stem = name.removesuffix(trace_suffix)
     compressed_path = output_directory / name
@@ -412,7 +461,7 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--adb", default="adb", help="adb executable (default: adb)")
     parser.add_argument("--output", default=".", help="local output directory")
     parser.add_argument(
-        "--name", help="specific .trace.txt.lz4, .trace.bin.lz4, or .trace.bin artifact"
+        "--name", help="specific .flight.bin, .trace.txt.lz4, .trace.bin.lz4, or .trace.bin artifact"
     )
     parser.add_argument(
         "--compressed-only", action="store_true", help="pull artifacts without decompression"
