@@ -955,6 +955,24 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     lost = _missing_ranges(min(range_starts) if range_starts else 0,
                            max(range_ends) if range_ends else 0, observed)
     coverage = [event for event in events if event.kind == "coverage_gap"]
+    signal_handler_intervals = []
+    for event in events:
+        if event.kind not in {"signal_handler_begin", "signal_handler_return"}:
+            continue
+        encoded_flags = int(event.data["flags"])
+        depth = encoded_flags & 0xFFFF
+        nested_delivery_count = encoded_flags >> 16
+        returned = event.kind == "signal_handler_return"
+        signal_handler_intervals.append({
+            "tid": event.tid,
+            "depth": depth,
+            "nested_delivery_count": nested_delivery_count,
+            "begin_sequence": (int(event.data["fault_address"])
+                               if returned else event.global_seq),
+            "return_sequence": event.global_seq if returned else None,
+            "returned": returned,
+            "unreturned_ancestor_count": max(depth - 1, 0),
+        })
     active_chunks = sorted(
         decoded.index for decoded in decoded_chunks if decoded.state == 1
     )
@@ -1008,6 +1026,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             {"sequence": event.global_seq, "tid": event.tid, **event.data}
             for event in coverage
         ],
+        "signal_handler_intervals": signal_handler_intervals,
         "active_chunks": active_chunks,
         "unterminated_threads": unterminated_threads,
         "incomplete_logical_events": incomplete_logical_events,

@@ -2,6 +2,7 @@
 
 #include "core/qbdi_instruction_decoder.h"
 #include "core/safe_memory.h"
+#include "core/signal_broker.h"
 #include "core/trace_callback_gate.h"
 #include "core/trace_process_lifecycle.h"
 #include "events/trace_sink.h"
@@ -53,13 +54,16 @@ InstructionCollector::InstructionCollector(InstructionCache *cache, TraceSink *w
                                            const TraceContext *trace,
                                            TraceCallbackGate *trace_gate,
                                            const TraceOptions &options,
-                                           const ModuleRange &retained_module) noexcept
+                                           const ModuleRange &retained_module,
+                                           SignalBroker *signal_broker,
+                                           SignalBrokerThreadState *signal_thread) noexcept
         : cache_(cache), writer_(writer), code_rules_(code_rules), trace_(trace),
           trace_gate_(trace_gate), profile_(options.profile),
           hexdump_limit_(options.hexdump_limit),
           decode_memory_(options.memory_enabled()),
           resolver_(retained_module),
-          pending_(this, trace != nullptr ? trace->module_base : 0) {}
+          pending_(this, trace != nullptr ? trace->module_base : 0),
+          signal_broker_(signal_broker), signal_thread_(signal_thread) {}
 
 QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                             QBDI::FPRState *fpr) {
@@ -70,6 +74,24 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
         pending_.complete_pending(snapshot(*gpr, kTraceValidGprMask));
         if (trace_gate_ != nullptr && writer_ != nullptr)
             trace_gate_->observe_failure(writer_->failed());
+    }
+
+    if (gpr != nullptr && signal_thread_ != nullptr) {
+        if (signal_broker_ != nullptr) {
+            (void)signal_broker_->publish_guest_state(signal_thread_, *gpr);
+        }
+        uint32_t opcode = 0;
+        if (safe_read_memory(gpr->pc, &opcode, sizeof(opcode)) &&
+            is_arm64_svc(opcode)) {
+            const Arm64SyscallSnapshot syscall =
+                    snapshot_arm64_syscall(gpr->pc, *gpr);
+            const QBDI::VMAction termination =
+                    TerminationObserver::before_svc(syscall, signal_thread_);
+            if (syscall.number == kArm64RtSigaction && signal_broker_ != nullptr) {
+                return signal_broker_->observe_rt_sigaction(syscall, gpr);
+            }
+            if (termination != QBDI::CONTINUE) return termination;
+        }
     }
 
     current_view_ = resolve(vm, gpr);

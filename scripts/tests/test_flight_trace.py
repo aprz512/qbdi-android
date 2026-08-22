@@ -628,6 +628,50 @@ class FlightRecoveryTests(unittest.TestCase):
         self.assertFalse(recovery.summary["complete"])
         self.assertEqual(77, recovery.summary["coverage_gaps"][0]["tid"])
 
+    def test_recovers_an_unreturned_signal_handler_begin_as_an_open_interval(self):
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[chunk(0, 77, 1, [], state=1)],
+            emergencies=[emergency(
+                12, 77, 41, pc=0x71009900, sp=0x81001000,
+                fault=0xdeadbeef, signal=11, code=1, flags=0x00010002,
+            )],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual([{
+            "tid": 77,
+            "depth": 2,
+            "nested_delivery_count": 1,
+            "begin_sequence": 41,
+            "return_sequence": None,
+            "returned": False,
+            "unreturned_ancestor_count": 1,
+        }], recovery.summary["signal_handler_intervals"])
+
+    def test_recovers_a_signal_handler_return_as_a_closed_interval(self):
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[chunk(0, 77, 1, [], state=1)],
+            emergencies=[emergency(
+                13, 77, 44, pc=0x71009904, sp=0x81001008,
+                fault=41, signal=11, code=1, flags=0x00010001,
+            )],
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual([{
+            "tid": 77,
+            "depth": 1,
+            "nested_delivery_count": 1,
+            "begin_sequence": 41,
+            "return_sequence": 44,
+            "returned": True,
+            "unreturned_ancestor_count": 0,
+        }], recovery.summary["signal_handler_intervals"])
+
     def test_recovers_canonical_and_legacy_dropped_gap_checksums(self):
         for canonical in (True, False):
             with self.subTest(canonical=canonical):

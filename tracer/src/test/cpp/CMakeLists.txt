@@ -83,6 +83,8 @@ add_trace_test(instruction_collector_integration_test
     instruction_collector_integration_test.cpp
     ../../main/cpp/core/instruction_collector.cpp
     ../../main/cpp/core/instruction_cache.cpp
+    ../../main/cpp/core/arm64_memory_operand.cpp
+    ../../main/cpp/core/memory_trace_policy.cpp
     ../../main/cpp/core/qbdi_instruction_decoder.cpp
     ../../main/cpp/core/safe_memory.cpp
     ../../main/cpp/core/pending_instruction.cpp
@@ -233,6 +235,54 @@ add_trace_test(arm64_syscall_test
 add_trace_test(signal_context_arm64_test
     signal_context_arm64_test.cpp
     ../../main/cpp/core/signal_context_arm64.cpp)
+
+add_trace_test(signal_broker_test
+    signal_broker_test.cpp
+    ../../main/cpp/core/signal_broker.cpp
+    ../../main/cpp/core/arm64_syscall.cpp
+    ../../main/cpp/core/signal_context_arm64.cpp
+    ../../main/cpp/core/instruction_collector.cpp
+    ../../main/cpp/core/instruction_cache.cpp
+    ../../main/cpp/core/arm64_memory_operand.cpp
+    ../../main/cpp/core/memory_trace_policy.cpp
+    ../../main/cpp/core/qbdi_instruction_decoder.cpp
+    ../../main/cpp/core/safe_memory.cpp
+    ../../main/cpp/core/pending_instruction.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
+    ../../main/cpp/events/binary_trace_writer.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp
+    ../../main/cpp/events/trace_dictionary.cpp
+    ../../main/cpp/events/async_trace_writer.cpp
+    ../../main/cpp/rules/code_rule.cpp
+    ../../main/cpp/rules/code_rule_context.cpp
+    ../../main/cpp/flight/flight_artifact.cpp)
+target_link_libraries(signal_broker_test PRIVATE lz4_static Threads::Threads)
+target_compile_options(signal_broker_test PRIVATE -ffunction-sections)
+target_link_options(signal_broker_test PRIVATE -Wl,--gc-sections)
+
+add_trace_test(termination_syscall_test
+    termination_syscall_test.cpp
+    ../../main/cpp/core/signal_broker.cpp
+    ../../main/cpp/core/arm64_syscall.cpp
+    ../../main/cpp/core/signal_context_arm64.cpp
+    ../../main/cpp/core/instruction_collector.cpp
+    ../../main/cpp/core/instruction_cache.cpp
+    ../../main/cpp/core/arm64_memory_operand.cpp
+    ../../main/cpp/core/memory_trace_policy.cpp
+    ../../main/cpp/core/qbdi_instruction_decoder.cpp
+    ../../main/cpp/core/safe_memory.cpp
+    ../../main/cpp/core/pending_instruction.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp
+    ../../main/cpp/events/binary_trace_writer.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp
+    ../../main/cpp/events/trace_dictionary.cpp
+    ../../main/cpp/events/async_trace_writer.cpp
+    ../../main/cpp/rules/code_rule.cpp
+    ../../main/cpp/rules/code_rule_context.cpp
+    ../../main/cpp/flight/flight_artifact.cpp)
+target_link_libraries(termination_syscall_test PRIVATE lz4_static Threads::Threads)
+target_compile_options(termination_syscall_test PRIVATE -ffunction-sections)
+target_link_options(termination_syscall_test PRIVATE -Wl,--gc-sections)
 
 add_trace_test(tracer_entry_proxy_test
     tracer_entry_proxy_test.cpp

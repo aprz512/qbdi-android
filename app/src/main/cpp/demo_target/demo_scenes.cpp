@@ -82,7 +82,8 @@ long raw_tgkill_with_cookie(int process_id, int thread_id, int signal_number,
     std::atomic<uint64_t> *expected_pc = &g_probe_expected_pc;
     __asm__ volatile("adr x9, 1f\n"
                      "stlr x9, [%[expected_pc]]\n"
-                     "1: svc 0"
+                     "svc 0\n"
+                     "1:"
                      : "+r"(x0), "+r"(x19)
                      : "r"(x1), "r"(x2), "r"(x8),
                        [expected_pc] "r"(expected_pc)

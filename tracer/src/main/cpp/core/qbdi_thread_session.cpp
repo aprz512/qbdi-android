@@ -1,6 +1,7 @@
 #include "core/qbdi_thread_session.h"
 
 #include "core/capture_coordinator.h"
+#include "core/signal_broker.h"
 #include "core/trace_process_lifecycle.h"
 
 #include <new>
@@ -134,10 +135,21 @@ struct QbdiThreadSession::Impl {
             !chunk_writer.initialize(artifact, registration)) {
             return;
         }
+        signal_broker = &SignalBroker::process();
+        if (!signal_thread.initialize(thread_id, artifact, registration,
+                                      vm.getGPRState()) ||
+            !signal_broker->register_thread(&signal_thread)) {
+            return;
+        }
+        signal_registered = true;
         initialize_collector();
     }
 
     ~Impl() {
+        if (signal_registered && signal_broker != nullptr) {
+            signal_broker->unregister_thread(&signal_thread);
+            signal_registered = false;
+        }
         delete collector;
         collector = nullptr;
         if (flight) {
@@ -156,7 +168,8 @@ struct QbdiThreadSession::Impl {
         register_user_code_rules(code_rules);
         collector = new (std::nothrow) InstructionCollector(
                 &instruction_cache, sink, &code_rules, context, gate,
-                trace_options, *module);
+                trace_options, *module, signal_broker,
+                signal_registered ? &signal_thread : nullptr);
         ready = collector != nullptr;
     }
 
@@ -590,6 +603,8 @@ struct QbdiThreadSession::Impl {
     TraceCallbackGate *gate = nullptr;
     BinaryTraceWriter *normal_writer = nullptr;
     FlightArtifact *artifact = nullptr;
+    SignalBroker *signal_broker = nullptr;
+    SignalBrokerThreadState signal_thread{};
     TraceOptions trace_options{};
     FlightThreadRegistration registration{};
     FlightChunkWriter chunk_writer;
@@ -608,6 +623,7 @@ struct QbdiThreadSession::Impl {
     uint32_t thread_creator_tid = 0;
     uint32_t thread_module_generation = 0;
     bool flight = false;
+    bool signal_registered = false;
     bool ready = false;
     bool setup_attempted = false;
     bool setup_succeeded = false;

@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #if !defined(QTRACE_HOST_TEST)
+#include "core/signal_broker.h"
 #include "core/trace_process_lifecycle.h"
 #include "flight/flight_artifact.h"
 #include "xdl.h"
@@ -331,6 +332,17 @@ bool CaptureCoordinator::start(TraceConfig config, ModuleRange module,
         incomplete_.store(true, std::memory_order_release);
         return false;
     }
+#if !defined(QTRACE_HOST_TEST)
+    if (!SignalBroker::process().install()) {
+        factories_.mark_coverage_gap(
+                factories_.opaque, artifact, static_cast<uint32_t>(::gettid()),
+                module.start, CoverageGapReason::HookSetup);
+        factories_.destroy_artifact(factories_.opaque, artifact);
+        delete[] slots;
+        incomplete_.store(true, std::memory_order_release);
+        return false;
+    }
+#endif
 
     config_ = std::move(config);
     module_ = std::move(module);

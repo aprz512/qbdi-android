@@ -57,6 +57,7 @@ add_library(qbdi_tracer SHARED
         core/module_maps.cpp
         core/arm64_syscall.cpp
         core/signal_context_arm64.cpp
+        core/signal_broker.cpp
         core/signal_probe.cpp
         core/instruction_cache.cpp
         core/arm64_memory_operand.cpp
@@ -100,7 +101,9 @@ target_compile_options(qbdi_tracer PRIVATE
         -Wextra
         $<$<CONFIG:Debug>:-O2>
         $<$<CONFIG:Debug>:-g>)
-target_link_options(qbdi_tracer PRIVATE ${ANDROID_16KB_PAGE_LINK_OPTIONS})
+target_link_options(qbdi_tracer PRIVATE
+        ${ANDROID_16KB_PAGE_LINK_OPTIONS}
+        -Wl,-Bsymbolic-functions)
 target_include_directories(qbdi_tracer PRIVATE
         ${QBDI_ROOT}/include
         ${SHADOWHOOK_ROOT}/third_party/xdl

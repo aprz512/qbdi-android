@@ -90,8 +90,8 @@ uint32_t flight_atomic_load_u32_le(const uint8_t *source,
                                    std::memory_order order) noexcept;
 uint32_t flight_atomic_fetch_or_u32_le(uint8_t *destination, uint32_t value,
                                        std::memory_order order) noexcept;
-bool scan_flight_emergency(const uint8_t *bytes,
-                           FlightEmergencyRecord *record) noexcept;
+__attribute__((no_stack_protector)) bool scan_flight_emergency(
+        const uint8_t *bytes, FlightEmergencyRecord *record) noexcept;
 
 class FlightArtifact {
 public:
@@ -122,14 +122,16 @@ public:
     bool incomplete() const noexcept { return flags() != 0; }
     uint32_t flags() const noexcept;
 
-    bool write_emergency(const FlightThreadRegistration &registration,
-                         const FlightEmergencyRecord &record) noexcept;
-    bool write_emergency(uint32_t slot_index,
-                         const FlightEmergencyRecord &record) noexcept;
+    __attribute__((no_stack_protector)) bool write_emergency(
+            const FlightThreadRegistration &registration,
+            const FlightEmergencyRecord &record) noexcept;
+    __attribute__((no_stack_protector)) bool write_emergency(
+            uint32_t slot_index, const FlightEmergencyRecord &record) noexcept;
     bool write_coverage_gap_sticky(
             uint32_t slot_index,
             const FlightEmergencyRecord &record) noexcept;
-    bool increment_dropped_coverage_gap(uint32_t slot_index) noexcept;
+    __attribute__((no_stack_protector)) bool increment_dropped_coverage_gap(
+            uint32_t slot_index) noexcept;
 #if defined(QTRACE_HOST_TEST)
     bool test_claim_emergency_slot(uint32_t slot_index) noexcept;
     void test_release_emergency_slot(uint32_t slot_index) noexcept;

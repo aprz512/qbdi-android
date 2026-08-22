@@ -79,7 +79,8 @@ bool valid_registration(const FlightThreadRegistration &registration,
     return registration.tid != 0 && registration.directory_index < maximum;
 }
 
-uint32_t emergency_checksum(const FlightEmergencyRecord &record) noexcept {
+__attribute__((no_stack_protector)) uint32_t emergency_checksum(
+        const FlightEmergencyRecord &record) noexcept {
     uint8_t encoded[52]{};
     flight_write_u32_le(encoded + 0, record.type);
     flight_write_u32_le(encoded + 4, record.tid);

@@ -10,6 +10,8 @@
 #include <array>
 
 class CodeRuleEngine;
+class SignalBroker;
+struct SignalBrokerThreadState;
 class TraceCallbackGate;
 class TraceSink;
 struct TraceContext;
@@ -20,7 +22,9 @@ public:
                          CodeRuleEngine *code_rules, const TraceContext *trace,
                          TraceCallbackGate *trace_gate,
                          const TraceOptions &options,
-                         const ModuleRange &retained_module) noexcept;
+                         const ModuleRange &retained_module,
+                         SignalBroker *signal_broker = nullptr,
+                         SignalBrokerThreadState *signal_thread = nullptr) noexcept;
 
     QBDI::VMAction on_pre(QBDI::VM *vm, QBDI::GPRState *gpr, QBDI::FPRState *fpr);
     QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr);
@@ -57,4 +61,6 @@ private:
     InstructionView current_view_{};
     MemoryTracePolicy memory_policy_{};
     PendingInstructionCollector pending_;
+    SignalBroker *signal_broker_ = nullptr;
+    SignalBrokerThreadState *signal_thread_ = nullptr;
 };
