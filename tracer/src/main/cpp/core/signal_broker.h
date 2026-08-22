@@ -139,6 +139,9 @@ public:
     bool detached() const noexcept {
         return detached_.load(std::memory_order_acquire);
     }
+#if defined(QTRACE_HOST_TEST)
+    uint32_t test_active_action_readers(int signal_number) const noexcept;
+#endif
 
     static SignalBroker &process() noexcept;
 
@@ -201,5 +204,7 @@ void detach_process_signal_broker_after_fork_child() noexcept;
 #if defined(QTRACE_HOST_TEST)
 using SignalBrokerTestGate = void (*)();
 void signal_broker_test_set_action_publication_gate(
+        SignalBrokerTestGate gate) noexcept;
+void signal_broker_test_set_action_reset_gate(
         SignalBrokerTestGate gate) noexcept;
 #endif

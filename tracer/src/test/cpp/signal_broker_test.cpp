@@ -363,10 +363,17 @@ void incumbent_is_visible_before_the_kernel_can_deliver_to_master() {
 
 std::atomic<bool> g_action_publication_entered{false};
 std::atomic<bool> g_action_publication_release{false};
+std::atomic<bool> g_action_reset_entered{false};
+std::atomic<bool> g_action_reset_release{false};
 
 void action_publication_gate() {
     g_action_publication_entered.store(true, std::memory_order_release);
     while (!g_action_publication_release.load(std::memory_order_acquire)) {}
+}
+
+void action_reset_gate() {
+    g_action_reset_entered.store(true, std::memory_order_release);
+    while (!g_action_reset_release.load(std::memory_order_acquire)) {}
 }
 
 void concurrent_action_replacement_never_swallows_a_delivery() {
@@ -399,6 +406,33 @@ void concurrent_action_replacement_never_swallows_a_delivery() {
     signal_broker_test_set_action_publication_gate(nullptr);
 
     CHECK(g_replacement_old_calls + g_replacement_new_calls == 1);
+}
+
+void reset_generation_stays_pinned_while_reset_reads_it() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    KernelSignalAction reset_action{
+            reinterpret_cast<uintptr_t>(replacement_old_handler),
+            SA_RESETHAND, 0, 0};
+    QBDI::GPRState gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &reset_action, nullptr), &gpr) ==
+          QBDI::SKIP_INST);
+    g_replacement_old_calls = 0;
+    g_action_reset_entered.store(false, std::memory_order_relaxed);
+    g_action_reset_release.store(false, std::memory_order_relaxed);
+    signal_broker_test_set_action_reset_gate(action_reset_gate);
+
+    std::thread delivery([&] {
+        CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, nullptr));
+    });
+    while (!g_action_reset_entered.load(std::memory_order_acquire)) {}
+    CHECK(broker.test_active_action_readers(SIGUSR1) == 1);
+    g_action_reset_release.store(true, std::memory_order_release);
+    delivery.join();
+    signal_broker_test_set_action_reset_gate(nullptr);
+
+    CHECK(g_replacement_old_calls == 1);
 }
 
 void kernel_master_never_precedes_replacement_guest_semantics() {
@@ -1092,6 +1126,7 @@ void instruction_preinst_virtualizes_rt_sigaction_before_collecting_svc() {
 int main() {
     incumbent_is_visible_before_the_kernel_can_deliver_to_master();
     concurrent_action_replacement_never_swallows_a_delivery();
+    reset_generation_stays_pinned_while_reset_reads_it();
     kernel_master_never_precedes_replacement_guest_semantics();
     master_preserves_the_incumbent_handlers_errno_semantics();
     fork_child_detach_restores_native_delivery_before_clearing_broker();

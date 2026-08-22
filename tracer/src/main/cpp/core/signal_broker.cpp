@@ -194,6 +194,7 @@ constexpr uint32_t kSignalHandlerCounterMaximum = 0xffffU;
 
 #if defined(QTRACE_HOST_TEST)
 SignalBrokerTestGate g_action_publication_gate = nullptr;
+SignalBrokerTestGate g_action_reset_gate = nullptr;
 #endif
 
 uint32_t increment_saturated(std::atomic<uint32_t> *counter) noexcept {
@@ -473,6 +474,23 @@ void signal_broker_test_set_action_publication_gate(
         SignalBrokerTestGate gate) noexcept {
     g_action_publication_gate = gate;
 }
+
+void signal_broker_test_set_action_reset_gate(
+        SignalBrokerTestGate gate) noexcept {
+    g_action_reset_gate = gate;
+}
+
+uint32_t SignalBroker::test_active_action_readers(
+        int signal_number) const noexcept {
+    if (!valid_signal(signal_number)) return 0;
+    const ActionSlot &slot = actions_[static_cast<size_t>(signal_number)];
+    const uint32_t current = slot.active_generation.load(
+            std::memory_order_acquire);
+    return current < slot.generations.size()
+                   ? slot.generations[current].active_deliveries.load(
+                             std::memory_order_acquire)
+                   : 0;
+}
 #endif
 
 bool SignalBroker::read_action(int signal_number, KernelSignalAction *action,
@@ -498,12 +516,27 @@ bool SignalBroker::reset_if_current(int signal_number,
                                     uint64_t generation) noexcept {
     if (!valid_signal(signal_number)) return false;
     ActionSlot &slot = actions_[static_cast<size_t>(signal_number)];
+    slot.acquiring_deliveries.fetch_add(1, std::memory_order_acq_rel);
     const uint32_t current = slot.active_generation.load(std::memory_order_acquire);
-    if (current >= slot.generations.size() ||
-        slot.generations[current].generation != generation) return false;
-    uint32_t expected = current;
-    return slot.active_generation.compare_exchange_strong(
-            expected, 0, std::memory_order_release, std::memory_order_acquire);
+    if (current >= slot.generations.size()) {
+        slot.acquiring_deliveries.fetch_sub(1, std::memory_order_release);
+        return false;
+    }
+    ActionGeneration &selected = slot.generations[current];
+    selected.active_deliveries.fetch_add(1, std::memory_order_acq_rel);
+    slot.acquiring_deliveries.fetch_sub(1, std::memory_order_release);
+#if defined(QTRACE_HOST_TEST)
+    if (g_action_reset_gate != nullptr) g_action_reset_gate();
+#endif
+    bool reset = false;
+    if (selected.generation == generation) {
+        uint32_t expected = current;
+        reset = slot.active_generation.compare_exchange_strong(
+                expected, 0, std::memory_order_release,
+                std::memory_order_acquire);
+    }
+    selected.active_deliveries.fetch_sub(1, std::memory_order_release);
+    return reset;
 }
 
 bool SignalBroker::publish_syscall(const Arm64SyscallSnapshot &call) noexcept {
