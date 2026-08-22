@@ -1,3 +1,5 @@
+#include "hooks/inline_hook_adapter.h"
+
 #include <cassert>
 #include <fstream>
 #include <sstream>
@@ -32,6 +34,7 @@ std::string function_body(const std::string &source, const char *name,
 } // namespace
 
 int main() {
+    static_assert(kShadowHookArm64OriginalSlotBytes == 64);
     const std::string enter = read_source("sh_enter.c");
     assert(enter.find("sh_trampo_free(&sh_enter_trampo_mgr, enter)") != std::string::npos);
 

@@ -746,8 +746,12 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
             continue
         if inverse != (~checksum & 0xFFFFFFFF):
             raise FlightTraceError(f"invalid committed emergency publication at slot {index}")
-        logical = struct.pack("<IIQQQQIII", kind, tid, sequence, pc, sp, fault, signal, code, flags)
-        if checksum != _fnv32(logical):
+        checksum_code = 0 if kind == 15 else code
+        logical = struct.pack("<IIQQQQIII", kind, tid, sequence, pc, sp, fault,
+                              signal, checksum_code, flags)
+        legacy_logical = struct.pack("<IIQQQQIII", kind, tid, sequence, pc, sp,
+                                     fault, signal, code, flags)
+        if checksum not in {_fnv32(logical), _fnv32(legacy_logical)}:
             raise FlightTraceError(f"committed emergency checksum mismatch at slot {index}")
         if kind == 15 and flags & ~KNOWN_INCOMPLETE_FLAGS:
             raise FlightTraceError("unknown coverage gap reason")
@@ -761,6 +765,7 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
         }
         if kind == 15:
             data["reason_flags"] = flags
+            data["dropped_gap_count"] = code
         events.append(FlightEvent(sequence, tid, RECORD_NAMES[kind], data))
     return events
 

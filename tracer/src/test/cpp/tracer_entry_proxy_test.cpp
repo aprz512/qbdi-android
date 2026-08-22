@@ -137,6 +137,7 @@ struct FlightProxyFactory {
     std::atomic<CoverageGapReason> last_gap_reason{
             CoverageGapReason::SessionFailure};
     std::atomic<uintptr_t> last_execution_entry{0};
+    std::atomic<size_t> last_execution_bytes{0};
     std::mutex gate_mutex;
     std::condition_variable gate_condition;
     size_t blocked_entries = 0;
@@ -209,6 +210,7 @@ void reset_fakes() {
     g_flight_factory.last_gap_reason.store(CoverageGapReason::SessionFailure,
                                            std::memory_order_relaxed);
     g_flight_factory.last_execution_entry.store(0, std::memory_order_relaxed);
+    g_flight_factory.last_execution_bytes.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> flight_lock(g_flight_factory.gate_mutex);
         g_flight_factory.blocked_entries = 0;
@@ -267,10 +269,13 @@ void destroy_flight_proxy_artifact(void *, void *) noexcept {}
 
 TraceRunResult execute_flight_proxy_session(
         void *opaque, QbdiThreadSession *, uintptr_t entry,
+        size_t execution_bytes,
         const uint64_t args[8], uint64_t indirect_result) noexcept {
     auto *factory = static_cast<FlightProxyFactory *>(opaque);
     factory->session_calls.fetch_add(1, std::memory_order_relaxed);
     factory->last_execution_entry.store(entry, std::memory_order_relaxed);
+    factory->last_execution_bytes.store(execution_bytes,
+                                        std::memory_order_relaxed);
     {
         std::unique_lock<std::mutex> lock(factory->gate_mutex);
         if (factory->block_sessions) {
@@ -994,6 +999,7 @@ void concurrent_flight_gateway_keeps_the_hook_persistent() {
     CHECK(g_flight_factory.session_calls.load(std::memory_order_relaxed) == 2);
     CHECK(g_flight_factory.last_execution_entry.load(std::memory_order_relaxed) ==
           reinterpret_cast<uintptr_t>(old_target));
+    CHECK(g_flight_factory.last_execution_bytes.load(std::memory_order_relaxed) == 64);
     CHECK(!coordinator->incomplete());
 }
 

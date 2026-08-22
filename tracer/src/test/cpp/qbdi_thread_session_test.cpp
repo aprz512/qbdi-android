@@ -17,6 +17,7 @@ void check(bool condition, const char *expression, int line) {
 struct FakeExecution {
     QbdiThreadSession *session = nullptr;
     uintptr_t entry = 0;
+    size_t execution_bytes = 0;
     std::array<uint64_t, 8> args{};
     uint64_t indirect_result = 0;
     uint64_t return_value = 0;
@@ -29,11 +30,13 @@ struct FakeExecution {
 };
 
 TraceRunResult execute(void *opaque, QbdiThreadSession *session, uintptr_t entry,
+                       size_t execution_bytes,
                        const uint64_t args[8], uint64_t indirect_result) noexcept {
     auto *execution = static_cast<FakeExecution *>(opaque);
     ++execution->calls;
     execution->session = session;
     execution->entry = entry;
+    execution->execution_bytes = execution_bytes;
     for (size_t index = 0; index < execution->args.size(); ++index) {
         execution->args[index] = args[index];
     }
@@ -137,15 +140,16 @@ void gateway_separates_logical_and_trampoline_entries() {
     const uint64_t args[8]{3};
 
     const TraceRunResult first = session->call_gateway(
-            0x74000100, 0x75000200, 256, args, 0x44);
+            0x74000100, 0x75000200, 64, args, 0x44);
     CHECK(first.target_executed);
     CHECK(first.value == 0x66);
     CHECK(execution.entry == 0x75000200);
+    CHECK(execution.execution_bytes == 64);
     CHECK(execution.gaps == 0);
 
     execution.target_executed = false;
     const TraceRunResult failed = session->call_gateway(
-            0x74000104, 0x75000204, 256, args, 0x45);
+            0x74000104, 0x75000204, 64, args, 0x45);
     CHECK(!failed.target_executed);
     CHECK(execution.entry == 0x75000204);
     CHECK(execution.gaps == 1);

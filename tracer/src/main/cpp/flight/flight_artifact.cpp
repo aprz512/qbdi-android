@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -22,6 +23,7 @@ static_assert(kFlightRecordHeaderBytes % kFlightAtomicU32Alignment == 0);
 static_assert(kFlightEmergencyRecordBytes % kFlightAtomicU32Alignment == 0);
 static_assert(72U % kFlightAtomicU32Alignment == 0);
 static_assert(20U % kFlightAtomicU32Alignment == 0);
+static_assert(44U % kFlightAtomicU32Alignment == 0);
 static_assert(48U % kFlightAtomicU32Alignment == 0);
 
 constexpr size_t kSuperblockFlagsOffset = 72;
@@ -89,7 +91,11 @@ uint32_t emergency_checksum(const FlightEmergencyRecord &record) noexcept {
     flight_write_u64_le(encoded + 24, record.sp);
     flight_write_u64_le(encoded + 32, record.fault_address);
     flight_write_u32_le(encoded + 40, record.signal_number);
-    flight_write_u32_le(encoded + 44, record.signal_code);
+    flight_write_u32_le(
+            encoded + 44,
+            record.type == static_cast<uint32_t>(FlightRecordType::CoverageGap)
+                    ? 0U
+                    : record.signal_code);
     flight_write_u32_le(encoded + 48, record.flags);
     uint32_t checksum = kEmergencyChecksumOffsetBasis;
     for (uint8_t byte : encoded) {
@@ -602,25 +608,90 @@ bool FlightArtifact::increment_dropped_coverage_gap(
     }
     uint8_t *slot = mapping_ + emergency_offset_ +
                     static_cast<uint64_t>(slot_index) * kFlightEmergencyRecordBytes;
-    RuntimeEmergencyMetadata &metadata = emergency_metadata_[slot_index];
-    std::atomic_ref<uint32_t> claim(metadata.claim);
-    uint32_t expected_claim = 0;
-    if (!claim.compare_exchange_strong(expected_claim, 1U,
-                                       std::memory_order_acq_rel,
-                                       std::memory_order_acquire)) {
+    if (!flight_atomic_u32_aligned(slot + 44)) {
         mark_incomplete(FlightIncompleteReason::EmergencyFailure);
         return false;
     }
     FlightEmergencyRecord existing{};
     if (!scan_flight_emergency(slot, &existing) ||
         existing.type != static_cast<uint32_t>(FlightRecordType::CoverageGap)) {
-        claim.store(0, std::memory_order_release);
         mark_incomplete(FlightIncompleteReason::EmergencyFailure);
         return false;
     }
-    if (existing.signal_code != UINT32_MAX) ++existing.signal_code;
-    return publish_emergency_claimed(slot, metadata, existing);
+    auto &native = *reinterpret_cast<uint32_t *>(slot + 44);
+    std::atomic_ref<uint32_t> counter(native);
+    uint32_t observed = counter.load(std::memory_order_acquire);
+    for (;;) {
+        const uint32_t value = flight_u32_from_le(observed);
+        if (value == UINT32_MAX) return true;
+        if (counter.compare_exchange_weak(
+                    observed, flight_u32_to_le(value + 1U),
+                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return true;
+        }
+    }
 }
+
+bool FlightArtifact::write_coverage_gap_sticky(
+        uint32_t slot_index,
+        const FlightEmergencyRecord &record) noexcept {
+    if (!valid() || slot_index >= emergency_record_count_ || record.tid == 0 ||
+        record.type != static_cast<uint32_t>(FlightRecordType::CoverageGap) ||
+        record.signal_code != 0 ||
+        (record.flags & kFlightEmergencyCommitted) != 0) {
+        mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+        return false;
+    }
+    uint8_t *slot = mapping_ + emergency_offset_ +
+                    static_cast<uint64_t>(slot_index) * kFlightEmergencyRecordBytes;
+    RuntimeEmergencyMetadata &metadata = emergency_metadata_[slot_index];
+    std::atomic_ref<uint32_t> claim(metadata.claim);
+    constexpr uint32_t kMaximumClaimAttempts = 4096;
+    bool claimed = false;
+    for (uint32_t attempt = 0; attempt < kMaximumClaimAttempts; ++attempt) {
+        uint32_t expected_claim = 0;
+        if (claim.compare_exchange_weak(expected_claim, 1U,
+                                        std::memory_order_acq_rel,
+                                        std::memory_order_acquire)) {
+            claimed = true;
+            break;
+        }
+        FlightEmergencyRecord published{};
+        if (scan_flight_emergency(slot, &published) &&
+            published.type == static_cast<uint32_t>(FlightRecordType::CoverageGap)) {
+            return increment_dropped_coverage_gap(slot_index);
+        }
+        if ((attempt & 63U) == 63U) (void)::sched_yield();
+    }
+    if (!claimed) {
+        mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+        return false;
+    }
+    FlightEmergencyRecord existing{};
+    if (scan_flight_emergency(slot, &existing) &&
+        existing.type == static_cast<uint32_t>(FlightRecordType::CoverageGap)) {
+        claim.store(0, std::memory_order_release);
+        return increment_dropped_coverage_gap(slot_index);
+    }
+    return publish_emergency_claimed(slot, metadata, record);
+}
+
+#if defined(QTRACE_HOST_TEST)
+bool FlightArtifact::test_claim_emergency_slot(uint32_t slot_index) noexcept {
+    if (!valid() || slot_index >= emergency_record_count_) return false;
+    std::atomic_ref<uint32_t> claim(emergency_metadata_[slot_index].claim);
+    uint32_t expected = 0;
+    return claim.compare_exchange_strong(expected, 1U,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_acquire);
+}
+
+void FlightArtifact::test_release_emergency_slot(uint32_t slot_index) noexcept {
+    if (!valid() || slot_index >= emergency_record_count_) return;
+    std::atomic_ref<uint32_t>(emergency_metadata_[slot_index].claim)
+            .store(0, std::memory_order_release);
+}
+#endif
 
 bool FlightArtifact::publish_emergency_claimed(
         uint8_t *slot, RuntimeEmergencyMetadata &metadata,
@@ -816,17 +887,12 @@ void FlightArtifact::publish_exhaustion(uint32_t tid, uint32_t slot_index,
                                         FlightIncompleteReason reason) noexcept {
     mark_incomplete(reason);
     if (!valid() || tid == 0 || slot_index >= emergency_record_count_) return;
-    FlightEmergencyRecord existing{};
-    if (scan_flight_emergency(emergency_bytes(slot_index), &existing) &&
-        existing.type == static_cast<uint32_t>(FlightRecordType::CoverageGap)) {
-        return;
-    }
     FlightEmergencyRecord record{};
     record.type = static_cast<uint32_t>(FlightRecordType::CoverageGap);
     record.tid = tid;
     record.sequence = next_sequence();
     record.flags = static_cast<uint32_t>(reason);
-    (void)write_emergency(slot_index, record);
+    (void)write_coverage_gap_sticky(slot_index, record);
 }
 
 void FlightArtifact::reset_state() noexcept {

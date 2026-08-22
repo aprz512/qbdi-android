@@ -282,6 +282,9 @@ void protected_pool_exhaustion_publishes_the_affected_tid() {
     const uint64_t first_gap_sequence = flight_read_u64_le(emergency + 8);
     CHECK(!artifact.acquire_chunk(thread, artifact.chunk_count() + 2U, &lease));
     CHECK(flight_read_u64_le(emergency + 8) == first_gap_sequence);
+    FlightEmergencyRecord repeated_gap{};
+    CHECK(scan_flight_emergency(emergency, &repeated_gap));
+    CHECK(flight_coverage_gap_dropped_count(repeated_gap) == 1);
     FlightEmergencyRecord later_signal{};
     later_signal.type = static_cast<uint32_t>(FlightRecordType::Signal);
     later_signal.tid = thread.tid;
@@ -363,6 +366,38 @@ void coverage_gap_root_cause_is_sticky_and_counts_later_failures() {
     CHECK(flight_coverage_gap_dropped_count(decoded) == 2);
 }
 
+void dropped_gap_update_keeps_the_root_publication_immutable() {
+    TemporaryArtifact file;
+    FlightOptions options = test_options();
+    FlightArtifact artifact;
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
+    const uint32_t slot = options.max_threads;
+    FlightEmergencyRecord root{};
+    root.type = static_cast<uint32_t>(FlightRecordType::CoverageGap);
+    root.tid = 202;
+    root.sequence = 81;
+    root.pc = 0x71000200;
+    root.flags = 9;
+    CHECK(artifact.write_emergency(slot, root));
+    const uint8_t *bytes = artifact.emergency_bytes(slot);
+    const uint32_t flags = flight_read_u32_le(bytes + 48);
+    const uint32_t checksum = flight_read_u32_le(bytes + 52);
+    const uint32_t checksum_inverse = flight_read_u32_le(bytes + 56);
+    const uint32_t version = flight_read_u32_le(bytes + 60);
+
+    CHECK(artifact.increment_dropped_coverage_gap(slot));
+
+    CHECK(flight_read_u32_le(bytes + 48) == flags);
+    CHECK(flight_read_u32_le(bytes + 52) == checksum);
+    CHECK(flight_read_u32_le(bytes + 56) == checksum_inverse);
+    CHECK(flight_read_u32_le(bytes + 60) == version);
+    FlightEmergencyRecord decoded{};
+    CHECK(scan_flight_emergency(bytes, &decoded));
+    CHECK(decoded.tid == root.tid);
+    CHECK(decoded.pc == root.pc);
+    CHECK(flight_coverage_gap_dropped_count(decoded) == 1);
+}
+
 void colliding_emergency_writers_never_publish_a_hybrid() {
     TemporaryArtifact file;
     FlightArtifact artifact;
@@ -428,6 +463,70 @@ void colliding_emergency_writers_never_publish_a_hybrid() {
     CHECK(scan_flight_emergency(artifact.emergency_bytes(thread.directory_index), &decoded));
 }
 
+void mixed_emergency_writers_preserve_one_gap_and_count_every_later_gap() {
+    TemporaryArtifact file;
+    FlightOptions options = test_options();
+    FlightArtifact artifact;
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
+    const uint32_t slot = options.max_threads;
+    constexpr uint32_t kGapWriters = 4;
+    constexpr uint32_t kAttempts = 500;
+    std::atomic<bool> start{false};
+    std::array<std::thread, kGapWriters * 2U> writers;
+    for (uint32_t index = 0; index < kGapWriters; ++index) {
+        writers[index] = std::thread([&, index] {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            FlightEmergencyRecord record{};
+            record.type = static_cast<uint32_t>(FlightRecordType::Signal);
+            record.tid = 300U + index;
+            for (uint32_t attempt = 0; attempt < kAttempts; ++attempt) {
+                record.sequence = attempt + 1U;
+                (void)artifact.write_emergency(slot, record);
+            }
+        });
+        writers[kGapWriters + index] = std::thread([&, index] {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            FlightEmergencyRecord record{};
+            record.type = static_cast<uint32_t>(FlightRecordType::CoverageGap);
+            record.tid = 400U + index;
+            record.sequence = 100U + index;
+            record.pc = 0x71001000U + index * 4U;
+            record.flags = index + 1U;
+            for (uint32_t attempt = 0; attempt < kAttempts; ++attempt) {
+                CHECK(artifact.write_coverage_gap_sticky(slot, record));
+            }
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (std::thread &writer : writers) writer.join();
+
+    FlightEmergencyRecord decoded{};
+    CHECK(scan_flight_emergency(artifact.emergency_bytes(slot), &decoded));
+    CHECK(decoded.type == static_cast<uint32_t>(FlightRecordType::CoverageGap));
+    CHECK(flight_coverage_gap_dropped_count(decoded) ==
+          kGapWriters * kAttempts - 1U);
+}
+
+void abandoned_emergency_claim_fails_open_without_spinning_forever() {
+    TemporaryArtifact file;
+    FlightOptions options = test_options();
+    FlightArtifact artifact;
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
+    const uint32_t slot = options.max_threads;
+    CHECK(artifact.test_claim_emergency_slot(slot));
+    FlightEmergencyRecord record{};
+    record.type = static_cast<uint32_t>(FlightRecordType::CoverageGap);
+    record.tid = 501;
+    record.sequence = 1;
+    record.flags = 2;
+    CHECK(!artifact.write_coverage_gap_sticky(slot, record));
+    CHECK((artifact.flags() &
+           static_cast<uint32_t>(FlightIncompleteReason::EmergencyFailure)) != 0);
+    artifact.test_release_emergency_slot(slot);
+}
+
 void concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity() {
     TemporaryArtifact file;
     FlightArtifact artifact;
@@ -475,6 +574,12 @@ void concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity() {
         }
     }
     CHECK(artifact.incomplete());
+    FlightEmergencyRecord exhaustion{};
+    CHECK(scan_flight_emergency(
+            artifact.emergency_bytes(test_options().max_threads), &exhaustion));
+    const uint32_t failures = static_cast<uint32_t>(registered.size()) - successes;
+    CHECK(failures > 0);
+    CHECK(flight_coverage_gap_dropped_count(exhaustion) == failures - 1U);
 }
 
 void allocator_reclaims_global_oldest_without_stealing_reservations() {
@@ -550,7 +655,10 @@ int main() {
     protected_pool_exhaustion_publishes_the_affected_tid();
     emergency_slots_publish_complete_little_endian_records();
     coverage_gap_root_cause_is_sticky_and_counts_later_failures();
+    dropped_gap_update_keeps_the_root_publication_immutable();
     colliding_emergency_writers_never_publish_a_hybrid();
+    mixed_emergency_writers_preserve_one_gap_and_count_every_later_gap();
+    abandoned_emergency_claim_fails_open_without_spinning_forever();
     concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity();
     allocator_reclaims_global_oldest_without_stealing_reservations();
     fork_child_detach_releases_only_the_child_copy();

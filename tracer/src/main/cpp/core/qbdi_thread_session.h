@@ -23,6 +23,7 @@ using QbdiThreadSessionGapReporter = void (*)(void *opaque, uint32_t tid,
 #if defined(QTRACE_HOST_TEST)
 using QbdiThreadSessionTestExecutor = TraceRunResult (*)(
         void *opaque, QbdiThreadSession *session, uintptr_t entry,
+        size_t execution_bytes,
         const uint64_t args[8], uint64_t indirect_result) noexcept;
 #endif
 

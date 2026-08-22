@@ -58,6 +58,7 @@ void destroy_artifact(void *opaque, void *) noexcept {
 }
 
 TraceRunResult no_op_execution(void *opaque, QbdiThreadSession *session, uintptr_t entry,
+                               size_t,
                                const uint64_t[8], uint64_t) noexcept {
     auto *factory = static_cast<FakeFactory *>(opaque);
     if (factory->session_reports_gap) session->mark_coverage_gap(entry);

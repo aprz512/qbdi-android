@@ -462,12 +462,12 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
 }
 
 TraceRunResult QbdiThreadSession::execute(uintptr_t, uintptr_t execution_entry,
-                                          size_t,
+                                          size_t execution_bytes,
                                           const uint64_t args[8],
                                           uint64_t indirect_result) noexcept {
     if (test_executor_ == nullptr) return {};
-    return test_executor_(test_executor_opaque_, this, execution_entry, args,
-                          indirect_result);
+    return test_executor_(test_executor_opaque_, this, execution_entry,
+                          execution_bytes, args, indirect_result);
 }
 
 QbdiThreadSession *QbdiThreadSession::create_normal(

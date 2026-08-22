@@ -158,8 +158,11 @@ def chunk(index: int, tid: int, generation: int, records: list[bytes], *,
 
 def emergency(kind: int, tid: int, sequence: int, *, pc: int = 0, sp: int = 0,
               fault: int = 0, signal: int = 0, code: int = 0, flags: int = 0,
-              committed: bool = True, version: int = 2) -> bytes:
-    logical = struct.pack("<IIQQQQIII", kind, tid, sequence, pc, sp, fault, signal, code, flags)
+              committed: bool = True, version: int = 2,
+              canonical_gap_checksum: bool = True) -> bytes:
+    checksum_code = 0 if kind == 15 and canonical_gap_checksum else code
+    logical = struct.pack("<IIQQQQIII", kind, tid, sequence, pc, sp, fault,
+                          signal, checksum_code, flags)
     checksum = fnv32(logical)
     published = flags | (EMERGENCY_COMMITTED if committed else 0)
     return struct.pack(
@@ -576,6 +579,21 @@ class FlightRecoveryTests(unittest.TestCase):
         self.assertEqual(2, recovery.merged[0].data["reason_flags"])
         self.assertFalse(recovery.summary["complete"])
         self.assertEqual(77, recovery.summary["coverage_gaps"][0]["tid"])
+
+    def test_recovers_canonical_and_legacy_dropped_gap_checksums(self):
+        for canonical in (True, False):
+            with self.subTest(canonical=canonical):
+                raw = artifact(
+                    directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+                    chunks=[chunk(0, 77, 1, [], state=1)],
+                    emergencies=[emergency(
+                        15, 77, 4, pc=0x71009900, code=7, flags=2,
+                        canonical_gap_checksum=canonical,
+                    )],
+                )
+                recovery = recover_flight(io.BytesIO(raw))
+                gap = recovery.summary["coverage_gaps"][0]
+                self.assertEqual(7, gap["dropped_gap_count"])
 
     def test_ignores_torn_emergency_slot_during_overwrite_publication(self):
         raw = artifact(

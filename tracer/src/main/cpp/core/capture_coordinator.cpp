@@ -164,11 +164,8 @@ void mark_production_gap(void *, void *opaque, uint32_t tid,
     record.sequence = artifact->artifact.next_sequence();
     record.pc = pc;
     record.flags = static_cast<uint32_t>(reason);
-    if (!artifact->artifact.write_emergency(
-                artifact->global_emergency_slot, record)) {
-        (void)artifact->artifact.increment_dropped_coverage_gap(
-                artifact->global_emergency_slot);
-    }
+    (void)artifact->artifact.write_coverage_gap_sticky(
+            artifact->global_emergency_slot, record);
 }
 
 CaptureCoordinatorFactories production_factories() noexcept {

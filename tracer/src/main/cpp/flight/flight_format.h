@@ -122,6 +122,7 @@ struct FlightEmergencyRecord {
 
 // CoverageGap records do not carry a signal code. That field instead persists
 // the number of later failures dropped to preserve the slot's first root cause.
+// It is atomically updated outside the immutable root-cause checksum.
 inline uint32_t flight_coverage_gap_dropped_count(
         const FlightEmergencyRecord &record) noexcept {
     return record.type == static_cast<uint32_t>(FlightRecordType::CoverageGap)

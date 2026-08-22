@@ -3,7 +3,15 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "third_party/android-inline-hook/shadowhook/src/main/cpp/common/sh_config.h"
+
+// Keep this in lockstep with sh_enter.c: the bundled production configuration
+// uses branch islands and therefore allocates 64-byte sh_enter slots.
+#if defined(SH_CONFIG_TRY_HOOK_WITHOUT_ISLAND)
 constexpr size_t kShadowHookArm64OriginalSlotBytes = 256;
+#else
+constexpr size_t kShadowHookArm64OriginalSlotBytes = 64;
+#endif
 
 struct HookHandle {
     void *stub = nullptr;

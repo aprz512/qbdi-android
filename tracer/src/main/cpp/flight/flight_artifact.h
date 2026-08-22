@@ -126,7 +126,14 @@ public:
                          const FlightEmergencyRecord &record) noexcept;
     bool write_emergency(uint32_t slot_index,
                          const FlightEmergencyRecord &record) noexcept;
+    bool write_coverage_gap_sticky(
+            uint32_t slot_index,
+            const FlightEmergencyRecord &record) noexcept;
     bool increment_dropped_coverage_gap(uint32_t slot_index) noexcept;
+#if defined(QTRACE_HOST_TEST)
+    bool test_claim_emergency_slot(uint32_t slot_index) noexcept;
+    void test_release_emergency_slot(uint32_t slot_index) noexcept;
+#endif
     const uint8_t *emergency_bytes(uint32_t directory_index) const noexcept;
 
     const uint8_t *chunk_data(uint32_t chunk_index) const noexcept;
