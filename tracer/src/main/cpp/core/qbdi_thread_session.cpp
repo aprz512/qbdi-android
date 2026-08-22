@@ -7,6 +7,7 @@
 #if !defined(QTRACE_HOST_TEST)
 #include "core/instruction_cache.h"
 #include "core/instruction_collector.h"
+#include "core/flight_transfer_event.h"
 #include "core/logging.h"
 #include "core/module_maps.h"
 #include "core/qbdi_runner_lifecycle.h"
@@ -44,25 +45,23 @@ struct QbdiThreadSession::Impl {
     Impl(const TraceConfig &source_config, const TraceInvocation &invocation,
          TraceContext *external_context, TraceSink *external_sink,
          TraceCallbackGate *external_gate, BinaryTraceWriter *writer) noexcept
-            : config(source_config), module(*invocation.module), scene(*invocation.scene),
+            : config(&source_config), module(invocation.module), scene(invocation.scene),
               context(external_context), sink(external_sink), gate(external_gate),
-              normal_writer(writer) {
+              normal_writer(writer), trace_options(source_config.trace) {
         initialize_collector();
     }
 
     Impl(const TraceConfig &source_config, const ModuleRange &retained_module,
          const SceneConfig &entry_scene, uint32_t thread_id,
          FlightArtifact *flight_artifact) noexcept
-            : config(source_config), module(retained_module), scene(entry_scene),
+            : config(&source_config), module(&retained_module), scene(&entry_scene),
               context(&owned_context), sink(&flight_sink), gate(&owned_gate),
-              artifact(flight_artifact), flight(true) {
-        config.trace.profile = TraceProfile::Full;
-        owned_context.package_name = config.package_name;
-        owned_context.scene_name = scene.name;
-        owned_context.target_so = config.target_so;
-        owned_context.module_base = module.start;
-        owned_context.target_offset = scene.offset;
-        (void)module_offset_address(module, scene.offset, false,
+              artifact(flight_artifact), trace_options(source_config.trace),
+              flight(true) {
+        trace_options.profile = TraceProfile::Full;
+        owned_context.module_base = module->start;
+        owned_context.target_offset = scene->offset;
+        (void)module_offset_address(*module, scene->offset, false,
                                     &owned_context.target_address);
         owned_context.pid = ::getpid();
         owned_context.tid = static_cast<int>(thread_id);
@@ -86,13 +85,14 @@ struct QbdiThreadSession::Impl {
 
     void initialize_collector() noexcept {
         if (context == nullptr || sink == nullptr || gate == nullptr ||
-            module.start >= module.end) {
+            config == nullptr || module == nullptr || scene == nullptr ||
+            module->start >= module->end) {
             return;
         }
         register_user_code_rules(code_rules);
         collector = new (std::nothrow) InstructionCollector(
                 &instruction_cache, sink, &code_rules, context, gate,
-                config.trace, module);
+                trace_options, *module);
         ready = collector != nullptr;
     }
 
@@ -102,15 +102,22 @@ struct QbdiThreadSession::Impl {
         return false;
     }
 
-    bool instrument(uintptr_t entry) noexcept {
+    bool instrument(uintptr_t entry, uintptr_t execution_entry,
+                    size_t execution_bytes) noexcept {
         if (flight) {
-            if (module.readable_executable_range_count != 0) {
+            if (execution_bytes == 0 ||
+                execution_entry > UINTPTR_MAX - execution_bytes) {
+                return fail_setup("retained gateway extent is invalid");
+            }
+            vm.addInstrumentedRange(execution_entry,
+                                    execution_entry + execution_bytes);
+            if (module->readable_executable_range_count != 0) {
                 for (size_t index = 0;
-                     index < module.readable_executable_range_count; ++index) {
+                     index < module->readable_executable_range_count; ++index) {
                     const AddressRange range =
-                            module.readable_executable_ranges[index];
-                    if (range.start >= range.end || range.start < module.start ||
-                        range.end > module.end) {
+                            module->readable_executable_ranges[index];
+                    if (range.start >= range.end || range.start < module->start ||
+                        range.end > module->end) {
                         return fail_setup("retained module executable range is invalid");
                     }
                     vm.addInstrumentedRange(range.start, range.end);
@@ -123,11 +130,11 @@ struct QbdiThreadSession::Impl {
             return true;
         }
 
-        if (scene.end_offset > 0) {
+        if (scene->end_offset > 0) {
             uintptr_t range_start = 0;
             uintptr_t range_end = 0;
-            if (!module_offset_address(module, scene.offset, false, &range_start) ||
-                !module_offset_address(module, scene.end_offset, true, &range_end) ||
+            if (!module_offset_address(*module, scene->offset, false, &range_start) ||
+                !module_offset_address(*module, scene->end_offset, true, &range_end) ||
                 range_end <= range_start) {
                 return fail_setup(
                         "scene instrumentation range is outside retained module");
@@ -153,6 +160,7 @@ struct QbdiThreadSession::Impl {
 
     static uint32_t add_pre(void *opaque) noexcept {
         auto *self = static_cast<Impl *>(opaque);
+        if (self->flight) return self->add_target_code_callbacks(QBDI::PREINST);
         return self->vm.addCodeCB(QBDI::PREINST,
                                   InstructionCollector::pre_callback,
                                   self->collector);
@@ -160,9 +168,40 @@ struct QbdiThreadSession::Impl {
 
     static uint32_t add_post(void *opaque) noexcept {
         auto *self = static_cast<Impl *>(opaque);
+        if (self->flight) return self->add_target_code_callbacks(QBDI::POSTINST);
         return self->vm.addCodeCB(QBDI::POSTINST,
                                   InstructionCollector::post_callback,
                                   self->collector);
+    }
+
+    static QBDI::VMAction on_target_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
+                                        QBDI::FPRState *fpr, void *opaque) {
+        auto *self = static_cast<Impl *>(opaque);
+        if (gpr != nullptr) self->last_target_pc = gpr->pc;
+        return InstructionCollector::pre_callback(vm, gpr, fpr, self->collector);
+    }
+
+    static QBDI::VMAction on_target_post(QBDI::VM *vm, QBDI::GPRState *gpr,
+                                         QBDI::FPRState *fpr, void *opaque) {
+        auto *self = static_cast<Impl *>(opaque);
+        return InstructionCollector::post_callback(vm, gpr, fpr, self->collector);
+    }
+
+    uint32_t add_target_code_callbacks(QBDI::InstPosition position) noexcept {
+        const size_t count = module->readable_executable_range_count;
+        uint32_t first = QBDI::INVALID_EVENTID;
+        for (size_t index = 0; index < (count == 0 ? 1U : count); ++index) {
+            const AddressRange range = count == 0
+                                               ? AddressRange{module->start, module->end}
+                                               : module->readable_executable_ranges[index];
+            const uint32_t id = vm.addCodeRangeCB(
+                    range.start, range.end, position,
+                    position == QBDI::PREINST ? on_target_pre : on_target_post,
+                    this);
+            if (id == QBDI::INVALID_EVENTID) return id;
+            if (first == QBDI::INVALID_EVENTID) first = id;
+        }
+        return first;
     }
 
     static QBDI::VMAction on_exec_transfer(QBDI::VM *,
@@ -173,25 +212,14 @@ struct QbdiThreadSession::Impl {
         auto *self = static_cast<Impl *>(opaque);
         self->gate->observe_failure(self->sink->failed());
         return self->gate->trace(QBDI::CONTINUE, [&] {
-            if (self->normal_writer != nullptr) {
-                emit_exec_transfer_event(&self->exec_transfer, vm_state, gpr,
-                                         self->normal_writer);
-            } else if (vm_state != nullptr && gpr != nullptr) {
-                char detail[96];
-                const char *name =
-                        (vm_state->event & QBDI::EXEC_TRANSFER_CALL) != 0
-                                ? "call"
-                                : "return";
-                const int count = std::snprintf(
-                        detail, sizeof(detail), "target=0x%llx",
-                        static_cast<unsigned long long>(gpr->pc));
-                if (count <= 0 || static_cast<size_t>(count) >= sizeof(detail) ||
-                    !self->sink->call("transfer", name,
-                                      std::string_view(detail,
-                                                       static_cast<size_t>(count)))) {
-                    return false;
-                }
+            if (self->flight &&
+                !emit_flight_transfer_event(&self->flight_transfer,
+                                            self->last_target_pc, vm_state,
+                                            gpr, self->sink)) {
+                return false;
             }
+            emit_exec_transfer_event(&self->exec_transfer, vm_state, gpr,
+                                     self->sink);
             return !self->sink->failed();
         });
     }
@@ -203,7 +231,8 @@ struct QbdiThreadSession::Impl {
                 on_exec_transfer, self);
     }
 
-    bool initialize_execution(uintptr_t entry, const uint64_t args[8],
+    bool initialize_execution(uintptr_t logical_entry, uintptr_t execution_entry,
+                              size_t execution_bytes, const uint64_t args[8],
                               uint64_t indirect_result) noexcept {
         QBDI::GPRState *gpr = vm.getGPRState();
         if (gpr == nullptr) return fail_setup("QBDI GPR state unavailable");
@@ -221,17 +250,25 @@ struct QbdiThreadSession::Impl {
         }
         gpr->x8 = indirect_result;
         gpr->sp = initial_sp;
-        gpr->pc = entry;
+        gpr->pc = execution_entry;
+        last_target_pc = logical_entry;
         if (flight && context != nullptr) {
-            context->target_address = entry;
-            context->target_offset = entry >= module.start ? entry - module.start : 0;
+            context->target_address = logical_entry;
+            context->target_offset = logical_entry >= module->start
+                                             ? logical_entry - module->start
+                                             : 0;
         }
 
         if (setup_attempted) return setup_succeeded;
         setup_attempted = true;
-        if (!instrument(entry)) return false;
+        if (!instrument(logical_entry, execution_entry, execution_bytes)) return false;
+        const FlightTraceContextView flight_context{
+                scene->name, config->target_so, context->module_base,
+                context->target_offset, context->target_address,
+                static_cast<uint32_t>(context->pid),
+                static_cast<uint32_t>(context->tid)};
         if (flight && !flight_sink.initialize(&chunk_writer, TraceProfile::Full,
-                                              *context, gpr)) {
+                                              flight_context, gpr)) {
             return fail_setup("flight trace sink initialization failed");
         }
 
@@ -242,7 +279,7 @@ struct QbdiThreadSession::Impl {
         if (!register_qbdi_callbacks(registration_callbacks)) {
             return fail_setup("QBDI callback registration failed");
         }
-        if (config.trace.memory_enabled()) {
+        if (trace_options.memory_enabled()) {
             const bool recording =
                     vm.recordMemoryAccess(QBDI::MEMORY_READ_WRITE);
             const uint32_t callback =
@@ -260,11 +297,17 @@ struct QbdiThreadSession::Impl {
         return true;
     }
 
-    TraceRunResult call(uintptr_t entry, const uint64_t args[8],
+    TraceRunResult call(uintptr_t logical_entry, uintptr_t execution_entry,
+                        size_t execution_bytes,
+                        const uint64_t args[8],
                         uint64_t indirect_result) noexcept {
-        if (!ready || !initialize_execution(entry, args, indirect_result)) return {};
+        if (!ready || !initialize_execution(logical_entry, execution_entry,
+                                            execution_bytes, args,
+                                            indirect_result)) {
+            return {};
+        }
         QBDI::rword value = 0;
-        const bool succeeded = vm.callA(&value, entry,
+        const bool succeeded = vm.callA(&value, execution_entry,
                                         static_cast<uint32_t>(call_arguments.size()),
                                         call_arguments.data());
         if (trace_process_child_detached()) {
@@ -277,9 +320,9 @@ struct QbdiThreadSession::Impl {
         return {succeeded, static_cast<uint64_t>(value)};
     }
 
-    TraceConfig config;
-    ModuleRange module;
-    SceneConfig scene;
+    const TraceConfig *config = nullptr;
+    const ModuleRange *module = nullptr;
+    const SceneConfig *scene = nullptr;
     TraceContext owned_context;
     TraceContext *context = nullptr;
     TraceSink *sink = nullptr;
@@ -287,17 +330,20 @@ struct QbdiThreadSession::Impl {
     TraceCallbackGate *gate = nullptr;
     BinaryTraceWriter *normal_writer = nullptr;
     FlightArtifact *artifact = nullptr;
+    TraceOptions trace_options{};
     FlightThreadRegistration registration{};
     FlightChunkWriter chunk_writer;
     FlightTraceSink flight_sink;
     InstructionCache instruction_cache;
     CodeRuleEngine code_rules;
     ExecTransferMonitor exec_transfer;
+    FlightTransferMonitor flight_transfer;
     QBDI::VM vm;
     InstructionCollector *collector = nullptr;
     std::array<QBDI::rword, 8> call_arguments{};
     uint8_t *fakestack = nullptr;
     QBDI::rword initial_sp = 0;
+    uintptr_t last_target_pc = 0;
     bool flight = false;
     bool ready = false;
     bool setup_attempted = false;
@@ -362,28 +408,38 @@ void QbdiThreadSession::copy_cache_metrics(TraceMetrics *metrics) const noexcept
 
 TraceRunResult QbdiThreadSession::call(uintptr_t entry, const uint64_t args[8],
                                        uint64_t indirect_result) noexcept {
-    if (!ready_ || entry == 0 || args == nullptr || vm_running_) {
-        mark_coverage_gap(entry);
+    return call_gateway(entry, entry, 0, args, indirect_result);
+}
+
+TraceRunResult QbdiThreadSession::call_gateway(
+        uintptr_t logical_entry, uintptr_t execution_entry,
+        size_t execution_bytes,
+        const uint64_t args[8], uint64_t indirect_result) noexcept {
+    if (!ready_ || logical_entry == 0 || execution_entry == 0 ||
+        args == nullptr || vm_running_) {
+        mark_coverage_gap(logical_entry);
         return {};
     }
 
     bool entered_here = false;
     if (!entered_) {
         if (!try_enter()) {
-            mark_coverage_gap(entry);
+            mark_coverage_gap(logical_entry);
             return {};
         }
         entered_here = true;
     } else if (g_current_qbdi_thread_session != this) {
-        mark_coverage_gap(entry);
+        mark_coverage_gap(logical_entry);
         return {};
     }
 
     vm_running_ = true;
-    const TraceRunResult result = execute(entry, args, indirect_result);
+    const TraceRunResult result = execute(logical_entry, execution_entry,
+                                          execution_bytes, args,
+                                          indirect_result);
     if (trace_process_child_detached()) return result;
     vm_running_ = false;
-    if (!result.target_executed) mark_coverage_gap(entry);
+    if (!result.target_executed) mark_coverage_gap(logical_entry);
     if (entered_here) leave();
     return result;
 }
@@ -405,10 +461,13 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
     return session;
 }
 
-TraceRunResult QbdiThreadSession::execute(uintptr_t entry, const uint64_t args[8],
+TraceRunResult QbdiThreadSession::execute(uintptr_t, uintptr_t execution_entry,
+                                          size_t,
+                                          const uint64_t args[8],
                                           uint64_t indirect_result) noexcept {
     if (test_executor_ == nullptr) return {};
-    return test_executor_(test_executor_opaque_, this, entry, args, indirect_result);
+    return test_executor_(test_executor_opaque_, this, execution_entry, args,
+                          indirect_result);
 }
 
 QbdiThreadSession *QbdiThreadSession::create_normal(
@@ -464,14 +523,18 @@ QbdiThreadSession *QbdiThreadSession::create_flight(
     return session;
 }
 
-TraceRunResult QbdiThreadSession::execute(uintptr_t entry,
+TraceRunResult QbdiThreadSession::execute(uintptr_t logical_entry,
+                                          uintptr_t execution_entry,
+                                          size_t execution_bytes,
                                           const uint64_t args[8],
                                           uint64_t indirect_result) noexcept {
     if (impl_ == nullptr) return {};
-    const TraceRunResult result = impl_->call(entry, args, indirect_result);
+    const TraceRunResult result = impl_->call(logical_entry, execution_entry,
+                                              execution_bytes, args,
+                                              indirect_result);
     if (result.target_executed && !trace_process_child_detached() &&
         (impl_->sink->failed() || !impl_->gate->enabled())) {
-        mark_coverage_gap(entry);
+        mark_coverage_gap(logical_entry);
     }
     return result;
 }

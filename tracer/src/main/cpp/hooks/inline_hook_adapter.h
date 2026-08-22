@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+
+constexpr size_t kShadowHookArm64OriginalSlotBytes = 256;
 
 struct HookHandle {
     void *stub = nullptr;
@@ -10,6 +13,7 @@ struct HookHandle {
     // bypass that exact hook generation.
     void *retained_original = nullptr;
     void *retained_resource = nullptr;
+    size_t retained_original_bytes = 0;
     uintptr_t target = 0;
     bool residual_hook = false;
 };

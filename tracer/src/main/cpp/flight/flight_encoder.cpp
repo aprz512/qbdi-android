@@ -70,9 +70,21 @@ bool encode_profile(TraceProfile profile, uint8_t *wire) noexcept {
 bool FlightEncoder::initialize(FlightChunkWriter *writer, TraceProfile profile,
                                const TraceContext &context,
                                const QBDI::GPRState *gpr) noexcept {
+    if (context.pid < 0 || context.tid < 0) return fail();
+    return initialize(writer, profile,
+                      {context.scene_name, context.target_so,
+                       context.module_base, context.target_offset,
+                       context.target_address, static_cast<uint32_t>(context.pid),
+                       static_cast<uint32_t>(context.tid)},
+                      gpr);
+}
+
+bool FlightEncoder::initialize(FlightChunkWriter *writer, TraceProfile profile,
+                               const FlightTraceContextView &context,
+                               const QBDI::GPRState *gpr) noexcept {
     uint8_t ignored_profile = 0;
     if (writer_ != nullptr || writer == nullptr || !writer->active() || gpr == nullptr ||
-        !encode_profile(profile, &ignored_profile) || context.pid < 0 || context.tid < 0 ||
+        !encode_profile(profile, &ignored_profile) ||
         context.target_so.size() > target_name_.size() ||
         context.scene_name.size() > scene_name_.size()) {
         return fail();
@@ -82,8 +94,8 @@ bool FlightEncoder::initialize(FlightChunkWriter *writer, TraceProfile profile,
     module_base_ = context.module_base;
     target_offset_ = context.target_offset;
     target_address_ = context.target_address;
-    pid_ = static_cast<uint32_t>(context.pid);
-    tid_ = static_cast<uint32_t>(context.tid);
+    pid_ = context.pid;
+    tid_ = context.tid;
     target_name_bytes_ = static_cast<uint16_t>(context.target_so.size());
     scene_name_bytes_ = static_cast<uint16_t>(context.scene_name.size());
     if (target_name_bytes_ != 0) {

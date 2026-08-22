@@ -58,7 +58,11 @@ void maps_all_trace_sink_events_and_fails_closed() {
     QBDI::GPRState gpr{};
     gpr.pc = context.target_address;
     FlightTraceSink sink;
-    CHECK(sink.initialize(&writer, TraceProfile::Full, context, &gpr));
+    const FlightTraceContextView context_view{
+            context.scene_name, context.target_so, context.module_base,
+            context.target_offset, context.target_address,
+            static_cast<uint32_t>(context.pid), static_cast<uint32_t>(context.tid)};
+    CHECK(sink.initialize(&writer, TraceProfile::Full, context_view, &gpr));
     CHECK(!sink.failed());
 
     CachedInstruction decoded{};
@@ -99,6 +103,12 @@ void maps_all_trace_sink_events_and_fails_closed() {
         FlightDecodedRecord record{};
         CHECK(scan_flight_record(bytes + offset, writer.committed_bytes() - offset,
                                  writer.generation(), &record));
+        if (record.type == FlightRecordType::ChunkBegin) {
+            CHECK(flight_read_u16_le(record.payload + 2) == 17);
+            CHECK(flight_read_u16_le(record.payload + 4) == 10);
+            CHECK(std::memcmp(record.payload + 40, "libsink_target.so", 17) == 0);
+            CHECK(std::memcmp(record.payload + 57, "sink-scene", 10) == 0);
+        }
         if (record.type == FlightRecordType::RegisterDelta &&
             record.flags == kFlightRegisterCheckpointFlag) saw_checkpoint = true;
         if (record.type == FlightRecordType::Instruction && record.flags == 0)

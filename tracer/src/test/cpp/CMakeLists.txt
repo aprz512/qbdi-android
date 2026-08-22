@@ -159,6 +159,10 @@ add_trace_test(qbdi_thread_session_test
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp)
 
+add_trace_test(flight_transfer_event_test
+    flight_transfer_event_test.cpp
+    ../../main/cpp/core/flight_transfer_event.cpp)
+
 add_trace_test(capture_coordinator_test
     capture_coordinator_test.cpp
     ../../main/cpp/core/capture_coordinator.cpp

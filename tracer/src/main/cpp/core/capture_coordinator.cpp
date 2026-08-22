@@ -9,6 +9,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <unistd.h>
 
 #if !defined(QTRACE_HOST_TEST)
@@ -38,6 +39,38 @@ bool factories_valid(const CaptureCoordinatorFactories &factories) noexcept {
            factories.create_session != nullptr &&
            factories.destroy_session != nullptr &&
            factories.mark_coverage_gap != nullptr;
+}
+
+bool same_module_generation(const ModuleRange &left,
+                            const ModuleRange &right) noexcept {
+    if (left.readable_executable_range_count >
+                left.readable_executable_ranges.size() ||
+        right.readable_executable_range_count >
+                right.readable_executable_ranges.size()) {
+        return false;
+    }
+    if (left.start != right.start || left.end != right.end ||
+        left.file_offset != right.file_offset || left.path != right.path ||
+        left.permissions != right.permissions ||
+        left.readable_executable_range_count !=
+                right.readable_executable_range_count) {
+        return false;
+    }
+    for (size_t index = 0; index < left.readable_executable_range_count;
+         ++index) {
+        if (left.readable_executable_ranges[index].start !=
+                    right.readable_executable_ranges[index].start ||
+            left.readable_executable_ranges[index].end !=
+                    right.readable_executable_ranges[index].end) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string_view basename_view(std::string_view path) noexcept {
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string_view::npos ? path : path.substr(slash + 1U);
 }
 
 #if !defined(QTRACE_HOST_TEST)
@@ -121,7 +154,7 @@ void destroy_production_session(void *, QbdiThreadSession *session) noexcept {
 }
 
 void mark_production_gap(void *, void *opaque, uint32_t tid,
-                         uintptr_t pc) noexcept {
+                         uintptr_t pc, CoverageGapReason reason) noexcept {
     auto *artifact = static_cast<ProductionArtifact *>(opaque);
     if (artifact == nullptr) return;
     artifact->artifact.mark_incomplete(FlightIncompleteReason::WriterFailure);
@@ -130,6 +163,7 @@ void mark_production_gap(void *, void *opaque, uint32_t tid,
     record.tid = tid;
     record.sequence = artifact->artifact.next_sequence();
     record.pc = pc;
+    record.flags = static_cast<uint32_t>(reason);
     (void)artifact->artifact.write_emergency(
             artifact->global_emergency_slot, record);
 }
@@ -166,11 +200,10 @@ CaptureCoordinator::~CaptureCoordinator() {
     }
 }
 
-bool CaptureCoordinator::start(const TraceConfig &config,
-                               const ModuleRange &module,
-                               uint32_t module_generation) noexcept {
+bool CaptureCoordinator::start(TraceConfig config, ModuleRange module,
+                               uint32_t module_generation) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (started_ || start_attempted_ || detached() ||
+    if (started_.load(std::memory_order_relaxed) || start_attempted_ || detached() ||
         !factories_valid(factories_) ||
         !config.flight.enabled || config.flight.max_threads == 0 ||
         module_generation == 0 || module.start >= module.end) {
@@ -178,7 +211,7 @@ bool CaptureCoordinator::start(const TraceConfig &config,
     }
     start_attempted_ = true;
 
-    const std::string target = basename_of(config.target_so);
+    const std::string_view target = basename_view(config.target_so);
     if (target.empty() || target.size() > kFlightTargetNameBytes) {
         incomplete_.store(true, std::memory_order_release);
         return false;
@@ -193,9 +226,9 @@ bool CaptureCoordinator::start(const TraceConfig &config,
     const uint32_t pid = static_cast<uint32_t>(::getpid());
     char path[4096];
     const int count = std::snprintf(
-            path, sizeof(path), "/data/data/%s/files/qbdi-traces/%llu_%u_%s.flight.bin",
+            path, sizeof(path), "/data/data/%s/files/qbdi-traces/%llu_%u_%.*s.flight.bin",
             config.package_name.c_str(), static_cast<unsigned long long>(run_id), pid,
-            target.c_str());
+            static_cast<int>(target.size()), target.data());
     if (count < 0 || static_cast<size_t>(count) >= sizeof(path)) {
         delete[] slots;
         incomplete_.store(true, std::memory_order_release);
@@ -212,15 +245,29 @@ bool CaptureCoordinator::start(const TraceConfig &config,
         return false;
     }
 
-    config_ = config;
-    module_ = module;
+    config_ = std::move(config);
+    module_ = std::move(module);
     slots_ = slots;
     artifact_ = artifact;
-    slot_count_ = config.flight.max_threads;
-    run_id_ = run_id;
-    module_generation_ = module_generation;
-    started_ = true;
+    slot_count_ = config_.flight.max_threads;
+    run_id_.store(run_id, std::memory_order_relaxed);
+    module_generation_.store(module_generation, std::memory_order_relaxed);
+    started_.store(true, std::memory_order_release);
     return true;
+}
+
+bool CaptureCoordinator::copy_module(ModuleRange *module) const {
+    if (module == nullptr) return false;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!started_.load(std::memory_order_relaxed)) return false;
+    *module = module_;
+    return true;
+}
+
+bool CaptureCoordinator::matches_module(const ModuleRange &module) const noexcept {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return started_.load(std::memory_order_relaxed) &&
+           same_module_generation(module_, module);
 }
 
 CaptureCoordinator::ThreadSlot *CaptureCoordinator::find_slot_locked(
@@ -233,29 +280,43 @@ CaptureCoordinator::ThreadSlot *CaptureCoordinator::find_slot_locked(
 }
 
 void CaptureCoordinator::mark_coverage_gap_locked(uint32_t tid,
-                                                  uintptr_t pc) noexcept {
+                                                  uintptr_t pc,
+                                                  CoverageGapReason reason) noexcept {
     incomplete_.store(true, std::memory_order_release);
-    factories_.mark_coverage_gap(factories_.opaque, artifact_, tid, pc);
+    factories_.mark_coverage_gap(factories_.opaque, artifact_, tid, pc, reason);
 }
 
 void CaptureCoordinator::report_session_gap(void *opaque, uint32_t tid,
                                             uintptr_t pc) noexcept {
     if (opaque == nullptr) return;
-    static_cast<CaptureCoordinator *>(opaque)->mark_coverage_gap(tid, pc);
+    static_cast<CaptureCoordinator *>(opaque)->mark_coverage_gap(
+            tid, pc, CoverageGapReason::SessionFailure);
 }
 
 QbdiThreadSession *CaptureCoordinator::enter(uint32_t tid,
                                              const SceneConfig &scene) noexcept {
     if (detached()) return nullptr;
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!started_ || detached() || tid == 0) return nullptr;
+    if (!started_.load(std::memory_order_relaxed) || detached() || tid == 0) {
+        return nullptr;
+    }
     uintptr_t pc = 0;
     (void)module_offset_address(module_, scene.offset, false, &pc);
+    if (scene.index >= config_.scenes.size()) {
+        mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
+        return nullptr;
+    }
+    const SceneConfig &retained_scene = config_.scenes[scene.index];
+    if (retained_scene.offset != scene.offset ||
+        retained_scene.end_offset != scene.end_offset) {
+        mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
+        return nullptr;
+    }
 
     ThreadSlot *slot = find_slot_locked(tid);
     if (slot != nullptr) {
         if (!slot->session->try_enter()) {
-            mark_coverage_gap_locked(tid, pc);
+            mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
             return nullptr;
         }
         return slot->session;
@@ -264,25 +325,25 @@ QbdiThreadSession *CaptureCoordinator::enter(uint32_t tid,
     for (size_t index = 0; index < slot_count_; ++index) {
         if (slots_[index].tid != 0) continue;
         QbdiThreadSession *session = factories_.create_session(
-                factories_.opaque, artifact_, config_, module_, scene, tid,
-                module_generation_);
+                factories_.opaque, artifact_, config_, module_, retained_scene, tid,
+                module_generation_.load(std::memory_order_relaxed));
         if (session == nullptr || !session->ready()) {
             if (session != nullptr) {
                 factories_.destroy_session(factories_.opaque, session);
             }
-            mark_coverage_gap_locked(tid, pc);
+            mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
             return nullptr;
         }
         session->set_gap_reporter(report_session_gap, this);
         slots_[index].tid = tid;
         slots_[index].session = session;
         if (!session->try_enter()) {
-            mark_coverage_gap_locked(tid, pc);
+            mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
             return nullptr;
         }
         return session;
     }
-    mark_coverage_gap_locked(tid, pc);
+    mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
     return nullptr;
 }
 
@@ -297,11 +358,12 @@ void CaptureCoordinator::leave(QbdiThreadSession *session) noexcept {
     }
 }
 
-void CaptureCoordinator::mark_coverage_gap(uint32_t tid, uintptr_t pc) noexcept {
+void CaptureCoordinator::mark_coverage_gap(uint32_t tid, uintptr_t pc,
+                                           CoverageGapReason reason) noexcept {
     if (detached()) return;
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!started_ || detached()) return;
-    mark_coverage_gap_locked(tid, pc);
+    if (!started_.load(std::memory_order_relaxed) || detached()) return;
+    mark_coverage_gap_locked(tid, pc, reason);
 }
 
 void CaptureCoordinator::detach_after_fork_child() noexcept {

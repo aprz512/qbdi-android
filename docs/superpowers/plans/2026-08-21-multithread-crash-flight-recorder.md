@@ -13,6 +13,8 @@
 - Reliable mode requires spawn injection before the configured target init entry.
 - Cover the init path, target-owned pthreads, and configured callback gateways; do not claim coverage for unrelated process threads.
 - Instrument instructions only in the target module. External calls retain boundaries and selected semantics.
+- Retained-original hook trampolines may be admitted to QBDI for execution control but emit no
+  instruction/register/memory records; collection resumes when execution returns to the target module.
 - Defaults: 512 MiB artifact, 256 KiB chunks, 256 thread entries, four protected newest chunks per active thread.
 - Artifacts are app-private mode `0600`, little-endian, pointer-width tagged, `MAP_SHARED`, and uncompressed on device.
 - Records use ownership generation, checked bounds, checksum, and a release-published commit word.
@@ -539,6 +541,12 @@ target call into `QbdiThreadSession`. Normal scene mode constructs a short-lived
 `BinaryTraceWriter`; flight mode retains one session per TID with `FlightTraceSink`. Preserve native
 fallback and outward return values. In `tracer_entry.cpp`, create the coordinator before flight hooks;
 the init scene is required and other nonzero scenes become callback gateways.
+
+Keep every flight gateway hook installed. Execute through its retained-original trampoline, admit
+the exact trampoline range to QBDI only to retain control, and filter all collection callbacks to
+the target module ranges. Do not build or persist a trampoline relocation map, and do not mark the
+intentionally omitted overwritten prologue as a coverage gap. Hook/setup failures preserve the
+first specific gap per emergency slot; later same-slot failures increment a dropped-gap count.
 
 - [ ] **Step 4: Verify and commit**
 

@@ -22,6 +22,7 @@ struct FakeExecution {
     uint64_t return_value = 0;
     size_t calls = 0;
     size_t gaps = 0;
+    uintptr_t last_gap_pc = 0;
     bool saw_current_session = false;
     bool recurse = false;
     bool target_executed = true;
@@ -51,6 +52,7 @@ TraceRunResult execute(void *opaque, QbdiThreadSession *session, uintptr_t entry
 void mark_gap(void *opaque, uint32_t tid, uintptr_t pc) noexcept {
     auto *execution = static_cast<FakeExecution *>(opaque);
     ++execution->gaps;
+    execution->last_gap_pc = pc;
     CHECK(tid == 771);
     CHECK(pc != 0);
 }
@@ -126,10 +128,36 @@ void failed_execution_reports_a_permanent_gap() {
     delete session;
 }
 
+void gateway_separates_logical_and_trampoline_entries() {
+    FakeExecution execution;
+    execution.return_value = 0x66;
+    QbdiThreadSession *session = QbdiThreadSession::create_for_test(
+            771, 23, execute, &execution, mark_gap, &execution);
+    CHECK(session != nullptr);
+    const uint64_t args[8]{3};
+
+    const TraceRunResult first = session->call_gateway(
+            0x74000100, 0x75000200, 256, args, 0x44);
+    CHECK(first.target_executed);
+    CHECK(first.value == 0x66);
+    CHECK(execution.entry == 0x75000200);
+    CHECK(execution.gaps == 0);
+
+    execution.target_executed = false;
+    const TraceRunResult failed = session->call_gateway(
+            0x74000104, 0x75000204, 256, args, 0x45);
+    CHECK(!failed.target_executed);
+    CHECK(execution.entry == 0x75000204);
+    CHECK(execution.gaps == 1);
+    CHECK(execution.last_gap_pc == 0x74000104);
+    delete session;
+}
+
 } // namespace
 
 int main() {
     forwards_entry_arguments_and_return_with_scoped_tls();
     rejects_recursive_running_vm_and_reports_a_permanent_gap();
     failed_execution_reports_a_permanent_gap();
+    gateway_separates_logical_and_trampoline_entries();
 }

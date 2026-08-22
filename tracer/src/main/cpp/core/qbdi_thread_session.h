@@ -2,6 +2,7 @@
 
 #include "core/qbdi_runner.h"
 
+#include <cstddef>
 #include <cstdint>
 
 class BinaryTraceWriter;
@@ -51,6 +52,11 @@ public:
 
     TraceRunResult call(uintptr_t entry, const uint64_t args[8],
                         uint64_t indirect_result) noexcept;
+    TraceRunResult call_gateway(uintptr_t logical_entry,
+                                uintptr_t execution_entry,
+                                size_t execution_bytes,
+                                const uint64_t args[8],
+                                uint64_t indirect_result) noexcept;
 
     bool try_enter() noexcept;
     void leave() noexcept;
@@ -71,7 +77,9 @@ private:
     QbdiThreadSession(uint32_t tid, uint32_t module_generation) noexcept;
     void set_gap_reporter(QbdiThreadSessionGapReporter gap_reporter,
                           void *gap_opaque) noexcept;
-    TraceRunResult execute(uintptr_t entry, const uint64_t args[8],
+    TraceRunResult execute(uintptr_t logical_entry, uintptr_t execution_entry,
+                           size_t execution_bytes,
+                           const uint64_t args[8],
                            uint64_t indirect_result) noexcept;
 
     Impl *impl_ = nullptr;

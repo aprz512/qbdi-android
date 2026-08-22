@@ -2,6 +2,7 @@
 #include "core/module_maps.h"
 #include "core/native_fallback_arm64.h"
 #include "core/qbdi_runner.h"
+#include "core/qbdi_thread_session.h"
 #include "core/trace_process_lifecycle.h"
 #include "core/trace_config.h"
 #include "handlers/call_handlers.h"
@@ -106,6 +107,7 @@ size_t g_unhook_calls = 0;
 bool g_fail_unhook = false;
 bool g_fail_next_hook = false;
 bool g_install_residual_hook = false;
+uintptr_t g_original_override = 0;
 std::atomic<size_t> g_old_calls{0};
 std::atomic<size_t> g_new_calls{0};
 int g_nested_fork_status = -1;
@@ -125,6 +127,24 @@ bool g_release_runner = false;
 bool g_use_bridge_gate = false;
 size_t g_bridge_gate_entries = 0;
 bool g_release_bridge = false;
+
+struct FlightProxyFactory {
+    std::atomic<size_t> artifact_creates{0};
+    std::atomic<size_t> session_creates{0};
+    std::atomic<size_t> session_calls{0};
+    std::atomic<size_t> coverage_gaps{0};
+    std::atomic<uintptr_t> last_gap_pc{0};
+    std::atomic<CoverageGapReason> last_gap_reason{
+            CoverageGapReason::SessionFailure};
+    std::atomic<uintptr_t> last_execution_entry{0};
+    std::mutex gate_mutex;
+    std::condition_variable gate_condition;
+    size_t blocked_entries = 0;
+    bool block_sessions = false;
+    bool release_sessions = false;
+};
+
+FlightProxyFactory g_flight_factory;
 
 uint64_t old_target(uint64_t value, uint64_t, uint64_t, uint64_t,
                     uint64_t, uint64_t, uint64_t, uint64_t) {
@@ -172,6 +192,7 @@ void reset_fakes() {
     g_fail_unhook = false;
     g_fail_next_hook = false;
     g_install_residual_hook = false;
+    g_original_override = 0;
     g_runner_forks = false;
     g_runner_fork_child = -1;
     g_fail_on_child_delete = 0;
@@ -180,6 +201,20 @@ void reset_fakes() {
     g_old_calls = 0;
     g_new_calls = 0;
     g_fake_maps.clear();
+    g_flight_factory.artifact_creates.store(0, std::memory_order_relaxed);
+    g_flight_factory.session_creates.store(0, std::memory_order_relaxed);
+    g_flight_factory.session_calls.store(0, std::memory_order_relaxed);
+    g_flight_factory.coverage_gaps.store(0, std::memory_order_relaxed);
+    g_flight_factory.last_gap_pc.store(0, std::memory_order_relaxed);
+    g_flight_factory.last_gap_reason.store(CoverageGapReason::SessionFailure,
+                                           std::memory_order_relaxed);
+    g_flight_factory.last_execution_entry.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> flight_lock(g_flight_factory.gate_mutex);
+        g_flight_factory.blocked_entries = 0;
+        g_flight_factory.block_sessions = false;
+        g_flight_factory.release_sessions = false;
+    }
     {
         std::lock_guard<std::mutex> gate_lock(g_gate_mutex);
         g_registration_entered = false;
@@ -218,6 +253,85 @@ ModuleRange module_named(const char *path, uintptr_t end = UINTPTR_MAX - 1U) {
     module.permissions = "r-xp";
     module.path = path;
     return module;
+}
+
+void *create_flight_proxy_artifact(
+        void *opaque, const char *, const FlightOptions &,
+        const FlightArtifactIdentityView &) noexcept {
+    auto *factory = static_cast<FlightProxyFactory *>(opaque);
+    factory->artifact_creates.fetch_add(1, std::memory_order_relaxed);
+    return factory;
+}
+
+void destroy_flight_proxy_artifact(void *, void *) noexcept {}
+
+TraceRunResult execute_flight_proxy_session(
+        void *opaque, QbdiThreadSession *, uintptr_t entry,
+        const uint64_t args[8], uint64_t indirect_result) noexcept {
+    auto *factory = static_cast<FlightProxyFactory *>(opaque);
+    factory->session_calls.fetch_add(1, std::memory_order_relaxed);
+    factory->last_execution_entry.store(entry, std::memory_order_relaxed);
+    {
+        std::unique_lock<std::mutex> lock(factory->gate_mutex);
+        if (factory->block_sessions) {
+            ++factory->blocked_entries;
+            factory->gate_condition.notify_all();
+            factory->gate_condition.wait(lock, [&] {
+                return factory->release_sessions;
+            });
+        }
+    }
+    return {true, call_target_arm64(entry, args, indirect_result)};
+}
+
+QbdiThreadSession *create_flight_proxy_session(
+        void *opaque, void *, const TraceConfig &, const ModuleRange &,
+        const SceneConfig &, uint32_t tid,
+        uint32_t module_generation) noexcept {
+    auto *factory = static_cast<FlightProxyFactory *>(opaque);
+    factory->session_creates.fetch_add(1, std::memory_order_relaxed);
+    return QbdiThreadSession::create_for_test(
+            tid, module_generation, execute_flight_proxy_session, factory);
+}
+
+void destroy_flight_proxy_session(void *, QbdiThreadSession *session) noexcept {
+    delete session;
+}
+
+void mark_flight_proxy_gap(void *opaque, void *, uint32_t,
+                           uintptr_t pc, CoverageGapReason reason) noexcept {
+    auto *factory = static_cast<FlightProxyFactory *>(opaque);
+    factory->coverage_gaps.fetch_add(1, std::memory_order_relaxed);
+    factory->last_gap_pc.store(pc, std::memory_order_relaxed);
+    factory->last_gap_reason.store(reason, std::memory_order_relaxed);
+}
+
+CaptureCoordinatorFactories flight_proxy_factories() {
+    return {&g_flight_factory, create_flight_proxy_artifact,
+            destroy_flight_proxy_artifact, create_flight_proxy_session,
+            destroy_flight_proxy_session, mark_flight_proxy_gap};
+}
+
+TraceConfig flight_proxy_config(const SceneConfig &scene) {
+    TraceConfig config = config_named("flight-proxy");
+    config.target_so = "libflight-proxy.so";
+    config.flight.enabled = true;
+    config.flight.max_threads = 4;
+    config.flight.capacity_bytes = 64ULL * 1024ULL * 1024ULL;
+    config.flight.chunk_bytes = 64U * 1024U;
+    config.flight.protected_chunks = 1;
+    config.scenes.push_back(scene);
+    return config;
+}
+
+std::shared_ptr<CaptureCoordinator> start_flight_proxy_coordinator(
+        const TraceConfig &config, const ModuleRange &module) {
+    const std::shared_ptr<CaptureCoordinator> coordinator(
+            new CaptureCoordinator(flight_proxy_factories()));
+    CHECK(coordinator != nullptr);
+    CHECK(coordinator->start(config, module, 77));
+    trace_proxy_test_set_coordinator(coordinator);
+    return coordinator;
 }
 
 void branch_before_dispatch_keeps_its_generation_snapshot_and_bypass() {
@@ -813,6 +927,172 @@ void atfork_install_failure_bypasses_tracing_and_executes_target_once() {
     CHECK(!trace_proxy_test_update(config, scene, module_named("must-not-install")));
 }
 
+void flight_hook_install_failure_latches_a_specific_gap() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "flight-install-failure", reinterpret_cast<uintptr_t>(new_target));
+    const TraceConfig config = flight_proxy_config(scene);
+    const ModuleRange module = module_named("/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(config, module);
+    g_fail_next_hook = true;
+
+    CHECK(!trace_proxy_test_update(config, scene, module));
+    CHECK(coordinator->incomplete());
+    CHECK(g_flight_factory.coverage_gaps.load(std::memory_order_relaxed) == 1);
+    CHECK(g_flight_factory.last_gap_pc.load(std::memory_order_relaxed) ==
+          reinterpret_cast<uintptr_t>(new_target));
+    CHECK(g_flight_factory.last_gap_reason.load(std::memory_order_relaxed) ==
+          CoverageGapReason::HookSetup);
+}
+
+void concurrent_flight_gateway_keeps_the_hook_persistent() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "persistent-flight", reinterpret_cast<uintptr_t>(new_target));
+    const TraceConfig config = flight_proxy_config(scene);
+    const ModuleRange module = module_named("/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(config, module);
+    (void)coordinator;
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    CHECK(trace_proxy_test_update(config, scene, module));
+    const size_t generation = trace_proxy_test_generation(scene.index);
+    {
+        std::lock_guard<std::mutex> lock(g_flight_factory.gate_mutex);
+        g_flight_factory.block_sessions = true;
+    }
+
+    uint64_t first_args[8]{51};
+    uint64_t second_args[8]{52};
+    uint64_t first_result = 0;
+    uint64_t second_result = 0;
+    std::thread first([&] {
+        first_result = trace_proxy_dispatch(generation, first_args, 0);
+    });
+    std::thread second([&] {
+        second_result = trace_proxy_dispatch(generation, second_args, 0);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_flight_factory.gate_mutex);
+        g_flight_factory.gate_condition.wait(lock, [] {
+            return g_flight_factory.blocked_entries == 2;
+        });
+        g_flight_factory.release_sessions = true;
+    }
+    g_flight_factory.gate_condition.notify_all();
+    first.join();
+    second.join();
+
+    CHECK(first_result == 0x133);
+    CHECK(second_result == 0x134);
+    CHECK(g_unhook_calls == 0);
+    CHECK(g_hook_calls == 1);
+    CHECK(g_flight_factory.session_creates.load(std::memory_order_relaxed) == 2);
+    CHECK(g_flight_factory.session_calls.load(std::memory_order_relaxed) == 2);
+    CHECK(g_flight_factory.last_execution_entry.load(std::memory_order_relaxed) ==
+          reinterpret_cast<uintptr_t>(old_target));
+    CHECK(!coordinator->incomplete());
+}
+
+void flight_rejects_a_different_same_basename_mapping() {
+    reset_fakes();
+    SceneConfig scene = scene_named("module-generation", 0x100);
+    const TraceConfig config = flight_proxy_config(scene);
+    ModuleRange retained = module_named("/data/app/a/libflight-proxy.so", 0x71010000);
+    retained.start = 0x71000000;
+    retained.readable_executable_ranges[0] = {retained.start, retained.end};
+    retained.readable_executable_range_count = 1;
+    ModuleRange replacement = retained;
+    replacement.start = 0x72000000;
+    replacement.end = 0x72010000;
+    replacement.path = "/data/app/b/libflight-proxy.so";
+    replacement.readable_executable_ranges[0] = {replacement.start, replacement.end};
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(config, retained);
+
+    CHECK(!trace_proxy_test_update(config, scene, replacement));
+    CHECK(g_hook_calls == 0);
+    CHECK(coordinator->incomplete());
+    CHECK(g_flight_factory.coverage_gaps.load(std::memory_order_relaxed) == 1);
+    CHECK(g_flight_factory.last_gap_pc.load(std::memory_order_relaxed) ==
+          replacement.start + scene.offset);
+}
+
+void flight_native_bypass_latches_a_coverage_gap() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "flight-native-bypass", reinterpret_cast<uintptr_t>(new_target));
+    const TraceConfig config = flight_proxy_config(scene);
+    const ModuleRange module = module_named("/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(config, module);
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    CHECK(trace_proxy_test_update(config, scene, module));
+    const size_t generation = trace_proxy_test_generation(scene.index);
+
+    uint64_t args[8]{61};
+    g_fail_next_nothrow_allocation = 1;
+    CHECK(trace_proxy_dispatch(generation, args, 0) == 0x13D);
+    CHECK(g_old_calls == 1);
+    CHECK(g_flight_factory.session_calls.load(std::memory_order_relaxed) == 0);
+    CHECK(coordinator->incomplete());
+    CHECK(g_flight_factory.coverage_gaps.load(std::memory_order_relaxed) == 1);
+    CHECK(g_flight_factory.last_gap_pc.load(std::memory_order_relaxed) ==
+          reinterpret_cast<uintptr_t>(new_target));
+    CHECK(g_flight_factory.last_gap_reason.load(std::memory_order_relaxed) ==
+          CoverageGapReason::NativeBypass);
+}
+
+void active_flight_reconfiguration_is_rejected_as_incomplete() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "active-flight-reconfigure", reinterpret_cast<uintptr_t>(new_target));
+    const TraceConfig first_config = flight_proxy_config(scene);
+    const ModuleRange module = module_named("/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(first_config);
+    const std::shared_ptr<CaptureCoordinator> first_coordinator =
+            start_flight_proxy_coordinator(first_config, module);
+    (void)first_coordinator;
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    CHECK(trace_proxy_test_update(first_config, scene, module));
+    const size_t generation = trace_proxy_test_generation(scene.index);
+    {
+        std::lock_guard<std::mutex> lock(g_flight_factory.gate_mutex);
+        g_flight_factory.block_sessions = true;
+    }
+    uint64_t args[8]{71};
+    uint64_t result = 0;
+    std::thread active([&] { result = trace_proxy_dispatch(generation, args, 0); });
+    {
+        std::unique_lock<std::mutex> lock(g_flight_factory.gate_mutex);
+        g_flight_factory.gate_condition.wait(lock, [] {
+            return g_flight_factory.blocked_entries == 1;
+        });
+    }
+
+    TraceConfig replacement_config = first_config;
+    replacement_config.package_name = "replacement-flight";
+    const std::shared_ptr<CaptureCoordinator> replacement_coordinator =
+            start_flight_proxy_coordinator(replacement_config, module);
+    CHECK(!trace_proxy_test_update(replacement_config, scene, module));
+    CHECK(replacement_coordinator->incomplete());
+    CHECK(g_unhook_calls == 0);
+    CHECK(g_hook_calls == 1);
+
+    {
+        std::lock_guard<std::mutex> lock(g_flight_factory.gate_mutex);
+        g_flight_factory.release_sessions = true;
+    }
+    g_flight_factory.gate_condition.notify_all();
+    active.join();
+    CHECK(result == 0x147);
+}
+
 } // namespace
 
 bool init_inline_hook() { return true; }
@@ -834,8 +1114,10 @@ bool hook_function_address(uintptr_t target, void *, HookHandle *handle) {
         return false;
     }
     handle->target = target;
-    handle->original = reinterpret_cast<void *>(target);
+    handle->original = reinterpret_cast<void *>(
+            g_original_override != 0 ? g_original_override : target);
     handle->retained_original = handle->original;
+    handle->retained_original_bytes = kShadowHookArm64OriginalSlotBytes;
     handle->stub = reinterpret_cast<void *>(g_hook_calls + 1);
     return true;
 }
@@ -896,7 +1178,31 @@ extern "C" uint64_t call_target_arm64(uintptr_t target, const uint64_t args[8], 
 
 void set_jni_backtrace_funcs(const std::vector<std::string> &) {}
 
-int main() {
+int main(int argc, char **argv) {
+    if (argc == 2) {
+        const std::string_view selected(argv[1]);
+        if (selected == "flight-hook-failure") {
+            flight_hook_install_failure_latches_a_specific_gap();
+            return 0;
+        }
+        if (selected == "persistent-flight") {
+            concurrent_flight_gateway_keeps_the_hook_persistent();
+            return 0;
+        }
+        if (selected == "module-generation") {
+            flight_rejects_a_different_same_basename_mapping();
+            return 0;
+        }
+        if (selected == "flight-native-bypass") {
+            flight_native_bypass_latches_a_coverage_gap();
+            return 0;
+        }
+        if (selected == "flight-active-reconfigure") {
+            active_flight_reconfiguration_is_rejected_as_incomplete();
+            return 0;
+        }
+        return 2;
+    }
     branch_before_dispatch_keeps_its_generation_snapshot_and_bypass();
     entrant_registration_and_snapshot_are_atomic_with_install();
     unhook_failure_uses_the_saved_original_exactly_once();
@@ -918,6 +1224,11 @@ int main() {
     traced_runner_fork_child_performs_no_proxy_deallocation();
     proxy_runtime_allocation_failure_executes_the_target_once();
     proxy_runtime_snapshot_performs_no_throwing_allocation();
+    flight_hook_install_failure_latches_a_specific_gap();
+    concurrent_flight_gateway_keeps_the_hook_persistent();
+    flight_rejects_a_different_same_basename_mapping();
+    flight_native_bypass_latches_a_coverage_gap();
+    active_flight_reconfiguration_is_rejected_as_incomplete();
     atfork_install_failure_bypasses_tracing_and_executes_target_once();
     return 0;
 }

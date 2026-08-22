@@ -20,6 +20,16 @@ constexpr uint16_t kFlightRegisterCheckpointFlag = 1U << 0U;
 constexpr uint16_t kFlightCallChunkFlag = 1U << 2U;
 constexpr uint16_t kFlightEventChunkFlag = kFlightCallChunkFlag;
 
+struct FlightTraceContextView {
+    std::string_view scene_name;
+    std::string_view target_so;
+    uintptr_t module_base = 0;
+    uintptr_t target_offset = 0;
+    uintptr_t target_address = 0;
+    uint32_t pid = 0;
+    uint32_t tid = 0;
+};
+
 // Flight payloads are explicitly little-endian:
 // - ChunkBegin: profile u8, pointer-width u8, target/scene lengths u16, reserved u16,
 //   pid/tid u32, module-base/target-offset/target-address u64, then target and scene bytes.
@@ -37,6 +47,9 @@ public:
     // gpr is copied during this call; no pointer or reference is retained.
     bool initialize(FlightChunkWriter *writer, TraceProfile profile,
                     const TraceContext &context,
+                    const QBDI::GPRState *gpr) noexcept;
+    bool initialize(FlightChunkWriter *writer, TraceProfile profile,
+                    const FlightTraceContextView &context,
                     const QBDI::GPRState *gpr) noexcept;
     bool rotate() noexcept;
     bool registers(const QBDI::GPRState &gpr) noexcept;

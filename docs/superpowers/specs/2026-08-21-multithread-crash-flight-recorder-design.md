@@ -48,6 +48,9 @@ are not part of the first version.
   reads the real kernel signal action.
 - Recording instructions executed inside an asynchronously invoked protection-library signal
   handler. The broker preserves its ABI-visible delivery semantics but dispatches it natively.
+- Recording relocated instructions in an inline-hook retained-original trampoline. QBDI may keep
+  that trampoline under execution control, but collection resumes only after execution returns to
+  the target module; the overwritten entry prologue is intentionally omitted.
 - Replacing QBDI with another execution engine.
 
 ## Coverage Contract
@@ -120,8 +123,14 @@ the artifact protocol.
 ## Entry and Thread Lifecycle
 
 The tracer installs `SignalBroker` and `ThreadCreateGateway` before invoking or releasing the
-target init entry. `InitHookGateway` then runs init from its original entry PC to its original return
-address under QBDI. Target-internal calls remain in the same session.
+target init entry. `InitHookGateway` then runs the retained-original path to the original return
+address under QBDI control. Target-internal calls remain in the same session.
+
+Flight gateways remain hooked for their process lifetime. Their retained-original trampolines are
+admitted to QBDI only to preserve execution control and are excluded from instruction, register,
+and memory collection. No trampoline-to-logical-PC relocation map is required. The trace resumes at
+the first instruction that re-enters the target module, and omission of the overwritten prologue is
+an explicit coverage boundary rather than a `COVERAGE_GAP`.
 
 `ThreadCreateGateway` wraps `pthread_create` when either condition holds:
 
@@ -148,8 +157,9 @@ retained original targets without touching inherited QBDI or allocator state.
 
 ## QBDI Collection Semantics
 
-Each captured thread has one primary VM. The VM instruments only retained executable ranges of the
-target module. Calls into external modules execute without per-instruction collection, while
+Each captured thread has one primary VM. Collection callbacks accept only retained executable
+ranges of the target module. A retained hook trampoline may additionally be admitted as a control-
+only execution range but emits no trace records. Calls into other external modules execute without per-instruction collection, while
 execution-transfer events retain the call target, source PC, selected arguments, and return value
 when available.
 
@@ -317,7 +327,9 @@ Runtime behavior is fail-open, but evidence status is fail-closed.
 
 - If hook, mmap, thread registration, QBDI setup, writer, signal virtualization, or handler-context
   mapping fails, the target continues through the retained original path where safely possible.
-- The failure publishes an emergency `COVERAGE_GAP` and permanently marks the run incomplete.
+- The first failure assigned to an emergency slot publishes a specific `COVERAGE_GAP` and
+  permanently marks the run incomplete. Later failures assigned to the same occupied slot increment
+  a dropped-gap counter without overwriting the first root-cause record.
 - Host tooling refuses to label an incomplete run as full coverage.
 - Failure to write even the emergency state is surfaced in logcat and host-side artifact validation;
   it is never converted into a successful empty trace.

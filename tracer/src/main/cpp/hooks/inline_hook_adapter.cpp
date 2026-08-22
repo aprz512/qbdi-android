@@ -19,6 +19,7 @@ bool hook_function_address(uintptr_t target, void *replacement, HookHandle *hand
     handle->original = nullptr;
     handle->retained_original = nullptr;
     handle->retained_resource = nullptr;
+    handle->retained_original_bytes = 0;
     handle->residual_hook = false;
     handle->stub = shadowhook_hook_func_addr(reinterpret_cast<void *>(target), replacement,
                                              &handle->original);
@@ -42,6 +43,7 @@ bool hook_function_address(uintptr_t target, void *replacement, HookHandle *hand
         return false;
     }
     handle->retained_original = handle->original;
+    handle->retained_original_bytes = kShadowHookArm64OriginalSlotBytes;
     QTRACE_I("hooked 0x%lx original=%p", static_cast<unsigned long>(target), handle->original);
     return true;
 }

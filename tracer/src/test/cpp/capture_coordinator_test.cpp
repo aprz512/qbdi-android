@@ -31,6 +31,7 @@ struct FakeFactory {
     uint32_t session_module_generation = 0;
     uint32_t last_gap_tid = 0;
     uintptr_t last_gap_pc = 0;
+    CoverageGapReason last_gap_reason = CoverageGapReason::SessionFailure;
     std::string target;
     std::string path;
     bool session_reports_gap = false;
@@ -79,12 +80,14 @@ void destroy_session(void *opaque, QbdiThreadSession *session) noexcept {
     delete session;
 }
 
-void mark_gap(void *opaque, void *, uint32_t tid, uintptr_t pc) noexcept {
+void mark_gap(void *opaque, void *, uint32_t tid, uintptr_t pc,
+              CoverageGapReason reason) noexcept {
     if (g_fail_on_child_artifact_mutation) _exit(93);
     auto *factory = static_cast<FakeFactory *>(opaque);
     ++factory->coverage_gaps;
     factory->last_gap_tid = tid;
     factory->last_gap_pc = pc;
+    factory->last_gap_reason = reason;
 }
 
 CaptureCoordinatorFactories factories(FakeFactory *factory) {
@@ -134,6 +137,18 @@ void creates_one_identified_artifact_and_keeps_module_generation_stable() {
             "_libcapture_target.so.flight.bin";
     CHECK(std::string_view(factory.path).ends_with(expected_suffix));
     CHECK(coordinator.module_generation() == 47);
+    ModuleRange module_snapshot;
+    CHECK(coordinator.copy_module(&module_snapshot));
+    CHECK(module_snapshot.start == module.start);
+    CHECK(module_snapshot.end == module.end);
+    CHECK(module_snapshot.path == module.path);
+    CHECK(coordinator.matches_module(module));
+    ModuleRange other_module = module;
+    other_module.start += 0x20000;
+    other_module.end += 0x20000;
+    other_module.readable_executable_ranges[0] = {
+            other_module.start, other_module.end};
+    CHECK(!coordinator.matches_module(other_module));
 
     QbdiThreadSession *session = coordinator.enter(101, config.scenes[0]);
     CHECK(session != nullptr);

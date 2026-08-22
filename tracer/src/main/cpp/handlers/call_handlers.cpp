@@ -190,7 +190,7 @@ namespace {
     }
 
     // ── emit_jni_enter: 检测到 JNI 调用 → 格式化输出 enter ──
-    void emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr, BinaryTraceWriter *writer) {
+    void emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr, TraceSink *writer) {
         uintptr_t env = QBDI_GPR_GET(gpr, 0);
         ensure_jni_map_built(env);
 
@@ -251,7 +251,7 @@ namespace {
     }
 
     // ── emit_jni_leave: JNI 返回 → 格式化输出 leave + 更新状态 ──
-    void emit_jni_leave(QBDI::GPRState *gpr, BinaryTraceWriter *writer) {
+    void emit_jni_leave(QBDI::GPRState *gpr, TraceSink *writer) {
         if (t_active_jni.func == nullptr) return;
 
         uint64_t retval = QBDI_GPR_GET(gpr, 0);
@@ -281,7 +281,7 @@ namespace {
     }
 
     PendingExecTransfer
-    emit_non_jni_call(uintptr_t target, QBDI::GPRState *state, BinaryTraceWriter *writer) {
+    emit_non_jni_call(uintptr_t target, QBDI::GPRState *state, TraceSink *writer) {
         PendingExecTransfer pending;
         pending.target = target;
 
@@ -312,7 +312,7 @@ namespace {
     }
 
     void emit_non_jni_return(const PendingExecTransfer &pending, QBDI::GPRState *state,
-                              BinaryTraceWriter *writer) {
+                              TraceSink *writer) {
         if (state == nullptr || writer == nullptr || pending.name.empty()) return;
         std::ostringstream detail;
         detail << pending.category << "." << pending.name << " target=0x" << std::hex
@@ -329,7 +329,7 @@ void set_jni_backtrace_funcs(const std::vector<std::string> &funcs) {
 
 // ── 公开接口 ──
 void emit_exec_transfer_event(ExecTransferMonitor *monitor, const QBDI::VMState *vm_state,
-                              QBDI::GPRState *state, BinaryTraceWriter *writer) {
+                              QBDI::GPRState *state, TraceSink *writer) {
     if (monitor == nullptr || vm_state == nullptr || state == nullptr || writer == nullptr) return;
     if (writer->failed()) return;
 

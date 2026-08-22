@@ -9,6 +9,15 @@ bool FlightTraceSink::initialize(FlightChunkWriter *writer, TraceProfile profile
     return initialized_;
 }
 
+bool FlightTraceSink::initialize(FlightChunkWriter *writer, TraceProfile profile,
+                                 const FlightTraceContextView &context,
+                                 const QBDI::GPRState *gpr) noexcept {
+    if (initialized_ || failed_) return false;
+    initialized_ = encoder_.initialize(writer, profile, context, gpr);
+    if (!initialized_) failed_ = true;
+    return initialized_;
+}
+
 bool FlightTraceSink::observe(bool result) noexcept {
     if (!initialized_ || failed_) return false;
     if (!result) failed_ = true;

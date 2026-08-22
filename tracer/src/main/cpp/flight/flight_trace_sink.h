@@ -13,6 +13,9 @@ public:
     bool initialize(FlightChunkWriter *writer, TraceProfile profile,
                     const TraceContext &context,
                     const QBDI::GPRState *gpr) noexcept;
+    bool initialize(FlightChunkWriter *writer, TraceProfile profile,
+                    const FlightTraceContextView &context,
+                    const QBDI::GPRState *gpr) noexcept;
 
     bool instruction(const TraceContext &context,
                      const InstructionRecord &record) noexcept override;

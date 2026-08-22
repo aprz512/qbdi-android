@@ -94,20 +94,51 @@ static bool tracer_fork_lifecycle_ready() noexcept {
            g_tracer_atfork_error.load(std::memory_order_acquire) == 0;
 }
 
+static uintptr_t scene_logical_pc(const ModuleRange &module,
+                                  const SceneConfig &scene) noexcept {
+    uintptr_t pc = 0;
+    return module_offset_address(module, scene.offset, false, &pc) ? pc : 0;
+}
+
+static void mark_flight_gateway_gap(
+        const TraceConfig &config,
+        const std::shared_ptr<CaptureCoordinator> &coordinator,
+        const ModuleRange &module, const SceneConfig &scene,
+        CoverageGapReason gap_reason,
+        const char *reason) noexcept {
+    (void)reason;
+    if (!config.flight.enabled || coordinator == nullptr ||
+        !coordinator->started()) {
+        return;
+    }
+    const uintptr_t pc = scene_logical_pc(module, scene);
+    QTRACE_E("flight gateway coverage gap scene=%s pc=0x%lx reason=%s",
+             scene.name.c_str(), static_cast<unsigned long>(pc), reason);
+    coordinator->mark_coverage_gap(
+            static_cast<uint32_t>(::syscall(SYS_gettid)), pc, gap_reason);
+}
+
 static uint64_t call_retained_original_parent(size_t generation,
                                               const uint64_t args[8],
                                               uint64_t indirect_result) {
     uintptr_t fallback_target = 0;
+    std::shared_ptr<InstalledSceneHook> hook;
     {
         std::lock_guard<std::mutex> registry_guard(g_lock);
         if (generation < g_next_proxy_generation &&
             g_hook_generations[generation] != nullptr) {
-            InstalledSceneHook *const raw_hook =
-                    g_hook_generations[generation].get();
+            hook = g_hook_generations[generation];
+            InstalledSceneHook *const raw_hook = hook.get();
             std::lock_guard<std::mutex> transition_guard(raw_hook->transition_mutex);
             fallback_target = reinterpret_cast<uintptr_t>(
                     raw_hook->hook.retained_original);
         }
+    }
+    if (hook != nullptr) {
+        mark_flight_gateway_gap(hook->config, hook->coordinator, hook->module,
+                                hook->scene,
+                                CoverageGapReason::NativeBypass,
+                                "proxy runtime unavailable; native bypass");
     }
     return fallback_target == 0
                    ? 0
@@ -162,10 +193,25 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                     sizeof(runtime->invocation.args));
         runtime->invocation.indirect_result = indirect_result;
         execution_target = runtime->invocation.target_address;
+        const bool persistent_flight = runtime->hook->config.flight.enabled &&
+                                       runtime->hook->coordinator != nullptr;
         if (runtime->hook->retired) {
             execution_target = reinterpret_cast<uintptr_t>(
                     runtime->hook->hook.retained_original);
             runtime->invocation.execution_address = execution_target;
+        } else if (persistent_flight) {
+            execution_target = reinterpret_cast<uintptr_t>(
+                    runtime->hook->hook.retained_original);
+            runtime->invocation.execution_address = execution_target;
+            if (!runtime->hook->installed || execution_target == 0 ||
+                runtime->hook->hook.retained_original_bytes == 0) {
+                mark_flight_gateway_gap(
+                        runtime->hook->config, runtime->hook->coordinator,
+                        runtime->hook->module, runtime->hook->scene,
+                        CoverageGapReason::GatewayUnavailable,
+                        "persistent hook has no retained original");
+                safe_to_dispatch = false;
+            }
         } else if (runtime->hook->installed) {
             if (runtime->hook->unhook_failed_window) {
                 execution_target = reinterpret_cast<uintptr_t>(
@@ -208,8 +254,10 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
             QbdiThreadSession *const session =
                     coordinator->enter(tid, *runtime->invocation.scene);
             if (session != nullptr) {
-                traced = session->call(
-                        execution_target, runtime->invocation.args.data(),
+                traced = session->call_gateway(
+                        runtime->invocation.target_address, execution_target,
+                        runtime->hook->hook.retained_original_bytes,
+                        runtime->invocation.args.data(),
                         runtime->invocation.indirect_result);
                 if (!trace_process_child_detached()) coordinator->leave(session);
             }
@@ -287,6 +335,9 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                           const std::shared_ptr<CaptureCoordinator> &coordinator) {
     if (g_next_proxy_generation >= kMaxProxyGenerations) {
         QTRACE_E("proxy generation capacity exhausted=%zu", kMaxProxyGenerations);
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::HookSetup,
+                                "proxy generation capacity exhausted");
         return false;
     }
     uintptr_t target = 0;
@@ -294,6 +345,9 @@ static bool create_hook_generation_locked(const TraceConfig &config,
         QTRACE_E("scene %s offset=0x%lx outside module size=0x%lx", scene.name.c_str(),
                  static_cast<unsigned long>(scene.offset),
                  static_cast<unsigned long>(module.size()));
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::HookSetup,
+                                "scene target outside retained module generation");
         return false;
     }
     const size_t generation = g_next_proxy_generation++;
@@ -312,6 +366,9 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     }
     if (slot->module_guard == nullptr) {
         QTRACE_E("cannot retain module generation path=%s", module.path.c_str());
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::HookSetup,
+                                "cannot retain module generation");
         return false;
     }
 #endif
@@ -322,6 +379,13 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     const bool hooked = hook_function_address(target, proxy_for_generation(generation),
                                               &slot->hook);
     slot->installed = hooked || slot->hook.residual_hook;
+    if (!hooked) {
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::HookSetup,
+                                slot->hook.residual_hook
+                                        ? "hook install left residual gateway"
+                                        : "hook install failed");
+    }
     return hooked;
 }
 
@@ -329,20 +393,41 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
                                       const ModuleRange &module,
                                       uint64_t config_generation,
                                       const std::shared_ptr<CaptureCoordinator> &coordinator) {
+    if (config.flight.enabled && coordinator != nullptr &&
+        coordinator->started() && !coordinator->matches_module(module)) {
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::ModuleGeneration,
+                                "module generation differs from flight artifact");
+        return false;
+    }
     if (scene.offset == 0) {
         QTRACE_W("scene %s offset is 0, skip", scene.name.c_str());
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::HookSetup,
+                                "gateway offset is zero");
         return false;
     }
     if (scene.index >= kMaxScenes) {
         QTRACE_E("scene index=%zu exceeds proxy stub capacity=%zu", scene.index, kMaxScenes);
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::HookSetup,
+                                "gateway scene index exceeds capacity");
         return false;
     }
     uintptr_t target = 0;
-    if (!module_offset_address(module, scene.offset, false, &target)) return false;
+    if (!module_offset_address(module, scene.offset, false, &target)) {
+        mark_flight_gateway_gap(config, coordinator, module, scene,
+                                CoverageGapReason::HookSetup,
+                                "gateway target outside module generation");
+        return false;
+    }
     if (scene.end_offset != 0) {
         uintptr_t range_end = 0;
         if (!module_offset_address(module, scene.end_offset, true, &range_end) ||
             range_end <= target) {
+            mark_flight_gateway_gap(config, coordinator, module, scene,
+                                    CoverageGapReason::HookSetup,
+                                    "gateway end outside module generation");
             return false;
         }
     }
@@ -358,6 +443,28 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
             basename_of(previous->module.path) == basename_of(module.path)) {
             return true;
         }
+        if (config.flight.enabled && !previous->retired && previous->installed) {
+            if (previous_target_valid && previous_target == target) {
+                if (previous->active_proxy_calls != 0) {
+                    mark_flight_gateway_gap(
+                            config, coordinator, module, scene,
+                            CoverageGapReason::Reconfiguration,
+                            "gateway reconfiguration raced an active call");
+                    return false;
+                } else {
+                    previous->config = config;
+                    previous->scene = scene;
+                    previous->module = module;
+                    previous->coordinator = coordinator;
+                    previous->config_generation = config_generation;
+                }
+                return true;
+            }
+            mark_flight_gateway_gap(config, coordinator, module, scene,
+                                    CoverageGapReason::Reconfiguration,
+                                    "persistent gateway target changed");
+            return false;
+        }
         if (previous->active_proxy_calls != 0) {
             previous->pending_config = config;
             previous->pending_scene = scene;
@@ -367,7 +474,12 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
             previous->pending_install = true;
             return true;
         }
-        if (previous->installed && !unhook_function(&previous->hook)) return false;
+        if (previous->installed && !unhook_function(&previous->hook)) {
+            mark_flight_gateway_gap(config, coordinator, module, scene,
+                                    CoverageGapReason::HookSetup,
+                                    "previous gateway unhook failed");
+            return false;
+        }
         previous->installed = false;
         previous->unhook_failed_window = false;
         previous->retired = true;
