@@ -80,6 +80,12 @@ __attribute__((always_inline)) inline int raw_gettid() noexcept {
     return static_cast<int>(x0);
 }
 
+__attribute__((always_inline)) inline void raw_exit_group(int status) noexcept {
+    register uint64_t x0 __asm__("x0") = static_cast<uint64_t>(status);
+    register uint64_t x8 __asm__("x8") = 94U;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+}
+
 __attribute__((always_inline)) inline void copy_signal_bytes(
         void *destination, const void *source, size_t size) noexcept {
     auto *output = static_cast<volatile unsigned char *>(destination);
@@ -190,11 +196,31 @@ uint64_t signal_bit(int signal_number) noexcept {
                    : 0;
 }
 
+[[noreturn]] __attribute__((no_stack_protector)) void
+fatal_default_fallback(int signal_number) noexcept {
+    const int status = 128 + signal_number;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    const long kill_result = raw_tgkill(raw_getpid(), raw_gettid(), SIGKILL);
+    if (kill_result < 0) {
+        for (;;) raw_exit_group(status);
+    }
+#else
+    const long kill_result = ::syscall(
+            SYS_tgkill, ::getpid(), static_cast<int>(::syscall(SYS_gettid)),
+            SIGKILL);
+    if (kill_result < 0) {
+        for (;;) (void)::syscall(SYS_exit_group, status);
+    }
+#endif
+    for (;;) {}
+}
+
 constexpr uint32_t kSignalHandlerCounterMaximum = 0xffffU;
 
 #if defined(QTRACE_HOST_TEST)
 SignalBrokerTestGate g_action_publication_gate = nullptr;
 SignalBrokerTestGate g_action_reset_gate = nullptr;
+SignalBrokerTestGate g_return_publication_gate = nullptr;
 #endif
 
 uint32_t increment_saturated(std::atomic<uint32_t> *counter) noexcept {
@@ -256,7 +282,10 @@ void signal_broker_atfork_parent() noexcept {
 void signal_broker_atfork_child() noexcept {
     SignalBroker *broker = g_prepared_signal_broker;
     g_prepared_signal_broker = nullptr;
-    if (broker != nullptr) broker->detach_after_fork_child();
+    if (broker != nullptr) {
+        broker->detach_after_fork_child();
+        broker->update_mutex_.unlock();
+    }
 }
 
 bool SignalBrokerThreadState::initialize(
@@ -271,6 +300,11 @@ bool SignalBrokerThreadState::initialize(
     tid_ = tid;
     artifact_ = artifact;
     registration_ = registration;
+    next_return_sequence_.store(1, std::memory_order_relaxed);
+    for (ReturnedSnapshot &snapshot : returned_snapshots_) {
+        snapshot.sequence.store(0, std::memory_order_relaxed);
+        snapshot.state.store(kReturnedFree, std::memory_order_relaxed);
+    }
     Arm64SignalContext context{};
     if (!qbdi_gpr_to_signal_context(*guest_gpr, &context) ||
         !store_guest(context, guest_gpr)) return false;
@@ -309,7 +343,8 @@ bool SignalBrokerThreadState::publish(
 }
 
 bool SignalBrokerThreadState::load_guest(
-        Arm64SignalContext *context, QBDI::GPRState **gpr) const noexcept {
+        Arm64SignalContext *context, QBDI::GPRState **gpr,
+        uint32_t *direct_signal_number) const noexcept {
     if (context == nullptr || !attached_.load(std::memory_order_acquire)) return false;
     const uint32_t snapshot_index =
             guest_snapshot_index_.load(std::memory_order_acquire) & 1U;
@@ -323,11 +358,16 @@ bool SignalBrokerThreadState::load_guest(
     if (gpr != nullptr) {
         *gpr = snapshot.gpr.load(std::memory_order_relaxed);
     }
+    if (direct_signal_number != nullptr) {
+        *direct_signal_number =
+                snapshot.direct_signal_number.load(std::memory_order_relaxed);
+    }
     return true;
 }
 
 void SignalBrokerThreadState::publish_guest(
-        const Arm64SignalContext &context, QBDI::GPRState *gpr) noexcept {
+        const Arm64SignalContext &context, QBDI::GPRState *gpr,
+        uint32_t direct_signal_number) noexcept {
     const uint32_t snapshot_index =
             (guest_snapshot_index_.load(std::memory_order_relaxed) ^ 1U) & 1U;
     GuestSnapshot &snapshot = guest_snapshots_[snapshot_index];
@@ -338,6 +378,8 @@ void SignalBrokerThreadState::publish_guest(
     snapshot.words[32].store(context.pc, std::memory_order_relaxed);
     snapshot.words[33].store(context.pstate, std::memory_order_relaxed);
     snapshot.gpr.store(gpr, std::memory_order_relaxed);
+    snapshot.direct_signal_number.store(direct_signal_number,
+                                        std::memory_order_relaxed);
     guest_snapshot_index_.store(snapshot_index, std::memory_order_release);
 }
 
@@ -345,7 +387,138 @@ bool SignalBrokerThreadState::store_guest(
         const Arm64SignalContext &context, QBDI::GPRState *gpr) noexcept {
     if (gpr == nullptr) return false;
     publish_guest(context, gpr);
-    return signal_context_to_qbdi_gpr(context, gpr);
+    return true;
+}
+
+__attribute__((no_stack_protector)) void
+SignalBrokerThreadState::publish_return_coverage_gap() noexcept {
+    if (artifact_ == nullptr) return;
+    artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+    FlightEmergencyRecord gap{};
+    gap.type = static_cast<uint32_t>(FlightRecordType::CoverageGap);
+    gap.tid = tid_;
+    gap.sequence = artifact_->next_sequence();
+    gap.flags = static_cast<uint32_t>(FlightIncompleteReason::EmergencyFailure);
+    if (gap.sequence == 0 || !artifact_->write_coverage_gap_sticky(
+                                     registration_.directory_index, gap)) {
+        artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+    }
+}
+
+__attribute__((no_stack_protector)) bool
+SignalBrokerThreadState::queue_returned_guest(
+        const Arm64SignalContext &initial,
+        const Arm64SignalContext &returned,
+        uint64_t action_generation) noexcept {
+    uint64_t changed_mask = 0;
+    for (size_t index = 0; index < initial.regs.size(); ++index) {
+        if (initial.regs[index] != returned.regs[index]) {
+            changed_mask |= 1ULL << index;
+        }
+    }
+    if (initial.sp != returned.sp) changed_mask |= 1ULL << 31U;
+    if (initial.pc != returned.pc) changed_mask |= 1ULL << 32U;
+    if (initial.pstate != returned.pstate) changed_mask |= 1ULL << 33U;
+    if (changed_mask == 0) return true;
+
+    ReturnedSnapshot *claimed = nullptr;
+    for (ReturnedSnapshot &snapshot : returned_snapshots_) {
+        uint32_t expected = kReturnedFree;
+        if (snapshot.state.compare_exchange_strong(
+                    expected, kReturnedWriting, std::memory_order_acq_rel,
+                    std::memory_order_relaxed)) {
+            claimed = &snapshot;
+            break;
+        }
+    }
+    if (claimed == nullptr) {
+        publish_return_coverage_gap();
+        return false;
+    }
+
+    const uint64_t sequence =
+            next_return_sequence_.fetch_add(1, std::memory_order_relaxed);
+    if (sequence == 0 || sequence == UINT64_MAX) {
+        claimed->state.store(kReturnedFree, std::memory_order_release);
+        publish_return_coverage_gap();
+        return false;
+    }
+#if defined(QTRACE_HOST_TEST)
+    if (g_return_publication_gate != nullptr) g_return_publication_gate();
+#endif
+    for (size_t index = 0; index < returned.regs.size(); ++index) {
+        claimed->words[index].store(returned.regs[index],
+                                    std::memory_order_relaxed);
+    }
+    claimed->words[31].store(returned.sp, std::memory_order_relaxed);
+    claimed->words[32].store(returned.pc, std::memory_order_relaxed);
+    claimed->words[33].store(returned.pstate, std::memory_order_relaxed);
+    claimed->changed_mask.store(changed_mask, std::memory_order_relaxed);
+    claimed->action_generation.store(action_generation,
+                                     std::memory_order_relaxed);
+    claimed->sequence.store(sequence, std::memory_order_relaxed);
+    claimed->state.store(kReturnedReady, std::memory_order_release);
+    return true;
+}
+
+bool SignalBrokerThreadState::apply_returned_guest(
+        QBDI::GPRState *gpr, bool *pc_changed) noexcept {
+    if (pc_changed != nullptr) *pc_changed = false;
+    if (gpr == nullptr) return false;
+    const uintptr_t original_pc = gpr->pc;
+    Arm64SignalContext merged{};
+    if (!qbdi_gpr_to_signal_context(*gpr, &merged)) return false;
+    for (size_t applied = 0; applied < kReturnedSnapshotCount; ++applied) {
+        ReturnedSnapshot *selected = nullptr;
+        uint64_t selected_sequence = UINT64_MAX;
+        for (ReturnedSnapshot &candidate : returned_snapshots_) {
+            if (candidate.state.load(std::memory_order_acquire) !=
+                kReturnedReady) {
+                continue;
+            }
+            const uint64_t sequence =
+                    candidate.sequence.load(std::memory_order_relaxed);
+            if (sequence != 0 && sequence < selected_sequence) {
+                selected = &candidate;
+                selected_sequence = sequence;
+            }
+        }
+        if (selected == nullptr) break;
+        uint32_t expected = kReturnedReady;
+        if (!selected->state.compare_exchange_strong(
+                    expected, kReturnedReading, std::memory_order_acquire,
+                    std::memory_order_relaxed)) {
+            continue;
+        }
+        if (selected->sequence.load(std::memory_order_relaxed) !=
+                    selected_sequence ||
+            selected->action_generation.load(std::memory_order_relaxed) == 0) {
+            selected->state.store(kReturnedFree, std::memory_order_release);
+            publish_return_coverage_gap();
+            return false;
+        }
+        const uint64_t changed_mask =
+                selected->changed_mask.load(std::memory_order_relaxed);
+        for (size_t index = 0; index < merged.regs.size(); ++index) {
+            if ((changed_mask & (1ULL << index)) != 0) {
+                merged.regs[index] =
+                        selected->words[index].load(std::memory_order_relaxed);
+            }
+        }
+        if ((changed_mask & (1ULL << 31U)) != 0) {
+            merged.sp = selected->words[31].load(std::memory_order_relaxed);
+        }
+        if ((changed_mask & (1ULL << 32U)) != 0) {
+            merged.pc = selected->words[32].load(std::memory_order_relaxed);
+        }
+        if ((changed_mask & (1ULL << 33U)) != 0) {
+            merged.pstate = selected->words[33].load(std::memory_order_relaxed);
+        }
+        selected->state.store(kReturnedFree, std::memory_order_release);
+    }
+    if (!signal_context_to_qbdi_gpr(merged, gpr)) return false;
+    if (pc_changed != nullptr) *pc_changed = gpr->pc != original_pc;
+    return true;
 }
 
 SignalBroker::SignalBroker() noexcept : SignalBroker(default_platform()) {}
@@ -397,39 +570,34 @@ long SignalBroker::install_signal(
     ActionSlot &slot = actions_[static_cast<size_t>(signal_number)];
     KernelSignalAction incumbent{};
     const bool installed = slot.installed.load(std::memory_order_acquire);
+    if (installed) {
+        if (guest_semantics == nullptr) return 0;
+        return publish_action(signal_number, *guest_semantics) ? 0 : -EAGAIN;
+    }
     if (!installed) {
         const long result = platform_.rt_sigaction(
                 platform_.opaque, signal_number, nullptr, &incumbent);
         if (result < 0) return result;
     }
-    KernelSignalAction previous = incumbent;
-    if (installed && !read_action(signal_number, &previous, nullptr)) {
-        return -EAGAIN;
-    }
-    KernelSignalAction visible = previous;
-    if (guest_semantics != nullptr) {
-        visible = *guest_semantics;
-    }
-    const bool replace_publication = !installed || guest_semantics != nullptr;
-    if (replace_publication) {
-        if (!publish_action(signal_number, visible)) return -EAGAIN;
-        g_active_signal_broker.store(this, std::memory_order_release);
-    }
+    if (!publish_action(signal_number, incumbent)) return -EAGAIN;
+    g_active_signal_broker.store(this, std::memory_order_release);
     KernelSignalAction master{};
     master.handler = master_handler_address();
-    master.flags = (visible.flags & ~static_cast<uint64_t>(SA_RESETHAND)) |
+    master.flags = (incumbent.flags & ~static_cast<uint64_t>(SA_RESETHAND)) |
                    SA_SIGINFO | SA_NODEFER;
-    master.restorer = visible.restorer;
+    master.restorer = incumbent.restorer;
+    // Close the master-entry window before dispatch can establish the exact
+    // guest mask. SA_NODEFER then lets dispatch explicitly unblock only the
+    // signals guest semantics permit while invoking the native handler.
+    master.mask = UINT64_MAX;
     const long result = platform_.rt_sigaction(
             platform_.opaque, signal_number, &master, nullptr);
-    if (result < 0) {
-        if (replace_publication && !publish_action(signal_number, previous)) {
-            return -EAGAIN;
-        }
-        return result;
-    }
-    if (installed) return 0;
+    if (result < 0) return result;
     slot.installed.store(true, std::memory_order_release);
+    if (guest_semantics != nullptr &&
+        !publish_action(signal_number, *guest_semantics)) {
+        return -EAGAIN;
+    }
     return 0;
 }
 
@@ -478,6 +646,11 @@ void signal_broker_test_set_action_publication_gate(
 void signal_broker_test_set_action_reset_gate(
         SignalBrokerTestGate gate) noexcept {
     g_action_reset_gate = gate;
+}
+
+void signal_broker_test_set_return_publication_gate(
+        SignalBrokerTestGate gate) noexcept {
+    g_return_publication_gate = gate;
 }
 
 uint32_t SignalBroker::test_active_action_readers(
@@ -652,12 +825,37 @@ SignalBrokerThreadState *SignalBroker::find_thread(uint32_t tid) const noexcept 
 }
 
 bool SignalBroker::publish_guest_state(SignalBrokerThreadState *thread,
-                                       const QBDI::GPRState &gpr) noexcept {
+                                       const QBDI::GPRState &gpr,
+                                       const Arm64SyscallSnapshot *delivery) noexcept {
     if (thread == nullptr || detached()) return false;
     Arm64SignalContext context{};
     if (!qbdi_gpr_to_signal_context(gpr, &context)) return false;
-    thread->publish_guest(context, const_cast<QBDI::GPRState *>(&gpr));
+    uint32_t direct_signal_number = 0;
+    if (delivery != nullptr) {
+        if (delivery->number == 130 &&
+            delivery->args[0] == static_cast<uint64_t>(thread->tid_) &&
+            delivery->args[1] < kSignalCount &&
+            valid_signal(static_cast<int>(delivery->args[1]))) {
+            direct_signal_number = static_cast<uint32_t>(delivery->args[1]);
+        } else if (delivery->number == 131 &&
+                   delivery->args[0] == static_cast<uint64_t>(
+                           platform_.getpid(platform_.opaque)) &&
+                   delivery->args[1] == static_cast<uint64_t>(thread->tid_) &&
+                   delivery->args[2] < kSignalCount &&
+                   valid_signal(static_cast<int>(delivery->args[2]))) {
+            direct_signal_number = static_cast<uint32_t>(delivery->args[2]);
+        }
+    }
+    thread->publish_guest(context, const_cast<QBDI::GPRState *>(&gpr),
+                          direct_signal_number);
     return true;
+}
+
+bool SignalBroker::apply_pending_guest_state(
+        SignalBrokerThreadState *thread, QBDI::GPRState *gpr,
+        bool *pc_changed) noexcept {
+    return thread != nullptr && !detached() &&
+           thread->apply_returned_guest(gpr, pc_changed);
 }
 
 bool SignalBroker::prepare_delivery(
@@ -684,11 +882,16 @@ bool SignalBroker::raw_redeliver_default(
     const KernelSignalAction defaults{};
     const int tid = thread != nullptr ? static_cast<int>(thread->tid_)
                                       : platform_.gettid(platform_.opaque);
-    return platform_.rt_sigaction(platform_.opaque, signal_number, &defaults,
-                                  nullptr) >= 0 &&
-           platform_.tgkill(platform_.opaque,
-                            platform_.getpid(platform_.opaque), tid,
-                            signal_number) >= 0;
+    if (platform_.rt_sigaction(platform_.opaque, signal_number, &defaults,
+                               nullptr) < 0) {
+        fatal_default_fallback(signal_number);
+    }
+    if (platform_.tgkill(platform_.opaque,
+                         platform_.getpid(platform_.opaque), tid,
+                         signal_number) < 0) {
+        fatal_default_fallback(signal_number);
+    }
+    return true;
 }
 
 bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
@@ -708,7 +911,22 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
         uint64_t saved_mask = 0;
         (void)platform_.rt_sigprocmask(platform_.opaque, SIG_SETMASK, nullptr,
                                        &saved_mask);
-        uint64_t handler_mask = saved_mask | delivery.action.mask;
+        uint64_t interrupted_mask = saved_mask;
+#if defined(__ANDROID__) && defined(__aarch64__)
+        if (native_context != nullptr) {
+            const auto *interrupted =
+                    static_cast<const ucontext_t *>(native_context);
+            copy_signal_bytes(&interrupted_mask, &interrupted->uc_sigmask,
+                              sizeof(interrupted_mask));
+        }
+#else
+        if (native_context != nullptr) {
+            interrupted_mask =
+                    static_cast<const SignalBrokerGuestContext *>(native_context)
+                            ->signal_mask;
+        }
+#endif
+        uint64_t handler_mask = interrupted_mask | delivery.action.mask;
         if ((delivery.action.flags & SA_NODEFER) == 0) {
             handler_mask |= signal_bit(signal_number);
         } else {
@@ -729,8 +947,17 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
                     reinterpret_cast<void (*)(int)>(delivery.action.handler);
             handler(signal_number);
         }
+        uint64_t restore_mask = interrupted_mask;
+#if !defined(__ANDROID__) || !defined(__aarch64__)
+        if (native_context != nullptr &&
+            (delivery.action.flags & SA_SIGINFO) != 0) {
+            restore_mask =
+                    static_cast<const SignalBrokerGuestContext *>(native_context)
+                            ->signal_mask;
+        }
+#endif
         (void)platform_.rt_sigprocmask(platform_.opaque, SIG_SETMASK,
-                                       &saved_mask, nullptr);
+                                       &restore_mask, nullptr);
         return true;
     }
     const uint32_t depth = thread->active_deliveries_.fetch_add(
@@ -746,23 +973,36 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
             signal_handler_flags(depth, nested_deliveries);
     Arm64SignalContext guest{};
     QBDI::GPRState *guest_gpr = nullptr;
-    bool have_guest = thread->load_guest(&guest, &guest_gpr);
+    uint32_t direct_signal_number = 0;
+    bool have_guest = thread->load_guest(
+            &guest, &guest_gpr, &direct_signal_number);
     const bool nested_context = depth > 1 && native_context != nullptr;
+    const bool direct_svc_resume =
+            depth == 1 &&
+            direct_signal_number == static_cast<uint32_t>(signal_number) &&
+            guest.pc <= UINTPTR_MAX - sizeof(uint32_t);
+    if (direct_svc_resume) guest.pc += sizeof(uint32_t);
 #if defined(__ANDROID__) && defined(__aarch64__)
-    if (nested_context) {
+    if ((nested_context || direct_svc_resume) && native_context != nullptr) {
         const auto *interrupted = static_cast<const ucontext_t *>(native_context);
         for (size_t index = 0; index < guest.regs.size(); ++index) {
             guest.regs[index] = interrupted->uc_mcontext.regs[index];
         }
         guest.sp = interrupted->uc_mcontext.sp;
-        guest.pc = interrupted->uc_mcontext.pc;
         guest.pstate = interrupted->uc_mcontext.pstate;
+        if (nested_context) guest.pc = interrupted->uc_mcontext.pc;
         have_guest = true;
     }
 #else
     if (nested_context) {
         guest = static_cast<const SignalBrokerGuestContext *>(native_context)
                         ->registers;
+        have_guest = true;
+    } else if (direct_svc_resume && native_context != nullptr) {
+        const uintptr_t resume_pc = guest.pc;
+        guest = static_cast<const SignalBrokerGuestContext *>(native_context)
+                        ->registers;
+        guest.pc = resume_pc;
         have_guest = true;
     }
 #endif
@@ -797,6 +1037,7 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
                           static_cast<uint32_t>(signal_number), code,
                           handler_flags,
                           &begin_sequence);
+    Arm64SignalContext handler_entry{};
 
     uint64_t saved_mask = 0;
     (void)platform_.rt_sigprocmask(platform_.opaque, SIG_SETMASK, nullptr,
@@ -844,10 +1085,12 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
                           sizeof(interrupted_mask));
     }
     if (mapped && (delivery.action.flags & SA_SIGINFO) != 0) {
+        copy_signal_bytes(&handler_entry, &guest, sizeof(handler_entry));
         const auto handler = reinterpret_cast<void (*)(int, siginfo_t *, void *)>(
                 delivery.action.handler);
         handler(signal_number, info, &guest_context);
     } else if (mapped) {
+        copy_signal_bytes(&handler_entry, &guest, sizeof(handler_entry));
         const auto handler = reinterpret_cast<void (*)(int)>(delivery.action.handler);
         handler(signal_number);
     }
@@ -875,6 +1118,7 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
 #else
     SignalBrokerGuestContext guest_context{guest, interrupted_mask};
     bool mapped = true;
+    handler_entry = guest;
     if ((delivery.action.flags & SA_SIGINFO) != 0) {
         const auto handler = reinterpret_cast<void (*)(int, siginfo_t *, void *)>(
                 delivery.action.handler);
@@ -892,7 +1136,12 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
 #if defined(__ANDROID__) && defined(__aarch64__)
     (void)returned_mask;
 #endif
-    if (!mapped || (depth == 1 && !thread->store_guest(guest, guest_gpr))) {
+    const bool stored = mapped &&
+                        (depth != 1 || thread->store_guest(guest, guest_gpr));
+    const bool queued = mapped && thread->queue_returned_guest(
+                                           handler_entry, guest,
+                                           delivery.generation);
+    if (!stored || !queued) {
         thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
     }
     (void)thread->publish(FlightRecordType::SignalHandlerReturn, guest.pc,
@@ -915,6 +1164,16 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
 }
 
 void SignalBroker::detach_after_fork_child() noexcept {
+    // Only the forking thread survives. Reader counts owned by every other
+    // thread are unreachable in the child and must not pin an immutable
+    // generation forever if the broker has to remain as a fail-open master.
+    for (ActionSlot &slot : actions_) {
+        slot.acquiring_deliveries.store(0, std::memory_order_relaxed);
+        for (ActionGeneration &generation : slot.generations) {
+            generation.active_deliveries.store(0,
+                                               std::memory_order_relaxed);
+        }
+    }
     bool restored_all = true;
     for (size_t index = 1; index < actions_.size(); ++index) {
         ActionSlot &slot = actions_[index];

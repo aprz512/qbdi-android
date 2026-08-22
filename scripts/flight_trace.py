@@ -782,25 +782,39 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
                 raise FlightTraceError(
                     f"invalid committed emergency publication at slot {index}")
             continue
-        (_, (kind, tid, sequence, pc, sp, fault, signal, code, published_flags,
-             checksum, inverse, version)) = max(candidates, key=lambda item: item[0])
-        flags = published_flags & ~EMERGENCY_COMMITTED
-        if kind not in RECORD_NAMES or tid == 0 or sequence == 0:
-            raise FlightTraceError(f"invalid committed emergency slot {index}")
-        if kind == 15 and flags & ~KNOWN_INCOMPLETE_FLAGS:
-            raise FlightTraceError("unknown coverage gap reason")
+        newest = max(candidates, key=lambda item: item[0])
+        selected = [newest]
+        if len(candidates) == 2:
+            older, newer = sorted(candidates, key=lambda item: item[0])
+            older_sequence = int(older[1][2])
+            newer_sequence = int(newer[1][2])
+            # A v2 slot is a two-generation bounded history. A completed
+            # publication advances the even generation exactly once and the
+            # global sequence allocator is monotonic. Anything else is a stale
+            # cell left outside the current old-or-new publication pair.
+            if (newer[0] == older[0] + 2 and
+                    newer_sequence > older_sequence):
+                selected = [older, newer]
         pointer_maximum = (1 << (8 * superblock.pointer_width)) - 1
-        for value, field in ((pc, "emergency PC"), (sp, "emergency SP"),
-                             (fault, "emergency fault address")):
-            _require_pointer(value, pointer_maximum, field)
-        data: dict[str, object] = {
-            "pc": pc, "sp": sp, "fault_address": fault,
-            "signal_number": signal, "signal_code": code, "flags": flags,
-        }
-        if kind == 15:
-            data["reason_flags"] = flags
-            data["dropped_gap_count"] = code
-        events.append(FlightEvent(sequence, tid, RECORD_NAMES[kind], data))
+        for _, values in selected:
+            (kind, tid, sequence, pc, sp, fault, signal, code, published_flags,
+             checksum, inverse, version) = values
+            flags = published_flags & ~EMERGENCY_COMMITTED
+            if kind not in RECORD_NAMES or tid == 0 or sequence == 0:
+                raise FlightTraceError(f"invalid committed emergency slot {index}")
+            if kind == 15 and flags & ~KNOWN_INCOMPLETE_FLAGS:
+                raise FlightTraceError("unknown coverage gap reason")
+            for value, field in ((pc, "emergency PC"), (sp, "emergency SP"),
+                                 (fault, "emergency fault address")):
+                _require_pointer(value, pointer_maximum, field)
+            data: dict[str, object] = {
+                "pc": pc, "sp": sp, "fault_address": fault,
+                "signal_number": signal, "signal_code": code, "flags": flags,
+            }
+            if kind == 15:
+                data["reason_flags"] = flags
+                data["dropped_gap_count"] = code
+            events.append(FlightEvent(sequence, tid, RECORD_NAMES[kind], data))
     return events
 
 
@@ -991,8 +1005,15 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                            max(range_ends) if range_ends else 0, observed)
     coverage = [event for event in events if event.kind == "coverage_gap"]
     signal_handler_intervals = []
+    returned_begins = {
+        (event.tid, int(event.data["fault_address"]))
+        for event in events if event.kind == "signal_handler_return"
+    }
     for event in events:
         if event.kind not in {"signal_handler_begin", "signal_handler_return"}:
+            continue
+        if (event.kind == "signal_handler_begin" and
+                (event.tid, event.global_seq) in returned_begins):
             continue
         encoded_flags = int(event.data["flags"])
         depth = encoded_flags & 0xFFFF

@@ -69,22 +69,31 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                             QBDI::FPRState *fpr) {
     if (trace_gate_ != nullptr && writer_ != nullptr) trace_gate_->observe_failure(writer_->failed());
 
+    bool signal_pc_changed = false;
+    if (gpr != nullptr && signal_thread_ != nullptr && signal_broker_ != nullptr) {
+        (void)signal_broker_->apply_pending_guest_state(
+                signal_thread_, gpr, &signal_pc_changed);
+    }
+
     const bool tracing_before_rule = trace_gate_ == nullptr || trace_gate_->enabled();
     if (tracing_before_rule && gpr != nullptr && pending_.has_pending()) {
         pending_.complete_pending(snapshot(*gpr, kTraceValidGprMask));
         if (trace_gate_ != nullptr && writer_ != nullptr)
             trace_gate_->observe_failure(writer_->failed());
     }
+    if (signal_pc_changed) return QBDI::BREAK_TO_VM;
 
     if (gpr != nullptr && signal_thread_ != nullptr) {
-        if (signal_broker_ != nullptr) {
-            (void)signal_broker_->publish_guest_state(signal_thread_, *gpr);
-        }
         uint32_t opcode = 0;
-        if (safe_read_memory(gpr->pc, &opcode, sizeof(opcode)) &&
-            is_arm64_svc(opcode)) {
-            const Arm64SyscallSnapshot syscall =
-                    snapshot_arm64_syscall(gpr->pc, *gpr);
+        const bool svc = safe_read_memory(gpr->pc, &opcode, sizeof(opcode)) &&
+                         is_arm64_svc(opcode);
+        Arm64SyscallSnapshot syscall{};
+        if (svc) syscall = snapshot_arm64_syscall(gpr->pc, *gpr);
+        if (signal_broker_ != nullptr) {
+            (void)signal_broker_->publish_guest_state(
+                    signal_thread_, *gpr, svc ? &syscall : nullptr);
+        }
+        if (svc) {
             const QBDI::VMAction termination =
                     TerminationObserver::before_svc(syscall, signal_thread_);
             if (syscall.number == kArm64RtSigaction && signal_broker_ != nullptr) {

@@ -104,6 +104,9 @@ struct FakeKernel {
     int last_signal = 0;
     long replacement_error = 0;
     uint32_t replacement_failures = 0;
+    bool gate_replacement_failure = false;
+    std::atomic<bool> replacement_failure_entered{false};
+    std::atomic<bool> release_replacement_failure{false};
     bool deliver_during_replacement = false;
     void (*after_mask_set)(FakeKernel *) = nullptr;
 
@@ -119,6 +122,12 @@ struct FakeKernel {
         if (old_action != nullptr) *old_action = self->actions[signal_number];
         if (action != nullptr) {
             if (self->replacement_error != 0) {
+                if (self->gate_replacement_failure) {
+                    self->replacement_failure_entered.store(
+                            true, std::memory_order_release);
+                    while (!self->release_replacement_failure.load(
+                            std::memory_order_acquire)) {}
+                }
                 const long error = self->replacement_error;
                 if (self->replacement_failures > 0) {
                     --self->replacement_failures;
@@ -206,11 +215,13 @@ struct RealInstallWindowPlatform {
     std::atomic<bool> master_exposed{false};
     std::atomic<bool> release_master_install{false};
     std::atomic<bool> gate_next_replacement{true};
+    bool fail_replacements = false;
 
     static long rt_sigaction(void *opaque, int signal_number,
                              const KernelSignalAction *action,
                              KernelSignalAction *old_action) noexcept {
         auto *self = static_cast<RealInstallWindowPlatform *>(opaque);
+        if (action != nullptr && self->fail_replacements) return -EPERM;
         struct sigaction replacement{};
         struct sigaction previous{};
         if (action != nullptr) {
@@ -359,6 +370,7 @@ void incumbent_is_visible_before_the_kernel_can_deliver_to_master() {
     CHECK(broker.install(signals));
 
     CHECK(g_install_race_calls == 1);
+    CHECK(kernel.actions[SIGUSR1].mask == UINT64_MAX);
 }
 
 std::atomic<bool> g_action_publication_entered{false};
@@ -435,7 +447,7 @@ void reset_generation_stays_pinned_while_reset_reads_it() {
     CHECK(g_replacement_old_calls == 1);
 }
 
-void kernel_master_never_precedes_replacement_guest_semantics() {
+void replacement_linearizes_without_exposing_a_rejected_guest_action() {
     FakeKernel kernel;
     kernel.actions[SIGUSR1] = {
             reinterpret_cast<uintptr_t>(replacement_old_handler), 0, 0, 0};
@@ -447,14 +459,40 @@ void kernel_master_never_precedes_replacement_guest_semantics() {
     QBDI::GPRState gpr{};
     g_replacement_old_calls = 0;
     g_replacement_new_calls = 0;
-    kernel.deliver_during_replacement = true;
+    kernel.replacement_error = -EPERM;
+    kernel.gate_replacement_failure = true;
+    const int action_calls_before = kernel.action_calls;
+    std::atomic<bool> update_finished{false};
 
-    CHECK(broker.observe_rt_sigaction(
-                  sigaction_call(SIGUSR1, &replacement, nullptr), &gpr) ==
-          QBDI::SKIP_INST);
+    std::thread updater([&] {
+        CHECK(broker.observe_rt_sigaction(
+                      sigaction_call(SIGUSR1, &replacement, nullptr), &gpr) ==
+              QBDI::SKIP_INST);
+        update_finished.store(true, std::memory_order_release);
+    });
+    while (!kernel.replacement_failure_entered.load(std::memory_order_acquire) &&
+           !update_finished.load(std::memory_order_acquire)) {}
+    const bool kernel_failure_observed =
+            kernel.replacement_failure_entered.load(std::memory_order_acquire);
+    const auto master = reinterpret_cast<void (*)(int, siginfo_t *, void *)>(
+            kernel.actions[SIGUSR1].handler);
+    master(SIGUSR1, nullptr, nullptr);
+    if (kernel_failure_observed) {
+        kernel.release_replacement_failure.store(true,
+                                                 std::memory_order_release);
+    }
+    updater.join();
 
-    CHECK(g_replacement_old_calls == 0);
-    CHECK(g_replacement_new_calls == 1);
+    if (kernel_failure_observed) {
+        CHECK(static_cast<int64_t>(gpr.x0) == -EPERM);
+        CHECK(g_replacement_old_calls == 1);
+        CHECK(g_replacement_new_calls == 0);
+    } else {
+        CHECK(gpr.x0 == 0);
+        CHECK(g_replacement_old_calls == 0);
+        CHECK(g_replacement_new_calls == 1);
+        CHECK(kernel.action_calls == action_calls_before);
+    }
 }
 
 void master_preserves_the_incumbent_handlers_errno_semantics() {
@@ -560,6 +598,128 @@ void failed_child_restore_keeps_master_fail_open_to_incumbent() {
     CHECK(g_fallback_calls == 1);
 }
 
+void persistent_child_default_restore_failure_terminates_instead_of_swallowing() {
+    struct sigaction previous{};
+    CHECK(::sigaction(SIGUSR1, nullptr, &previous) == 0);
+    struct sigaction defaults{};
+    defaults.sa_handler = SIG_DFL;
+    CHECK(::sigemptyset(&defaults.sa_mask) == 0);
+    CHECK(::sigaction(SIGUSR1, &defaults, nullptr) == 0);
+
+    RealInstallWindowPlatform real;
+    real.gate_next_replacement.store(false, std::memory_order_relaxed);
+    SignalBroker broker(real.platform());
+    const int signals[]{SIGUSR1};
+    CHECK(broker.install(signals));
+    real.fail_replacements = true;
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        if (::raise(SIGUSR1) != 0) _exit(90);
+        _exit(91);
+    }
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(::sigaction(SIGUSR1, &previous, nullptr) == 0);
+    CHECK(WIFSIGNALED(status));
+    CHECK(WTERMSIG(status) == SIGKILL);
+}
+
+void persistent_child_restore_failure_keeps_action_updates_usable() {
+    struct sigaction previous{};
+    CHECK(::sigaction(SIGUSR1, nullptr, &previous) == 0);
+    struct sigaction incumbent{};
+    incumbent.sa_handler = child_signal_handler;
+    CHECK(::sigemptyset(&incumbent.sa_mask) == 0);
+    CHECK(::sigaction(SIGUSR1, &incumbent, nullptr) == 0);
+
+    RealInstallWindowPlatform real;
+    real.gate_next_replacement.store(false, std::memory_order_relaxed);
+    SignalBroker broker(real.platform());
+    const int signals[]{SIGUSR1};
+    CHECK(broker.install(signals));
+    real.fail_replacements = true;
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        (void)::alarm(2);
+        KernelSignalAction replacement{
+                reinterpret_cast<uintptr_t>(fallback_handler), 0, 0, 0};
+        QBDI::GPRState gpr{};
+        if (broker.observe_rt_sigaction(
+                    sigaction_call(SIGUSR1, &replacement, nullptr), &gpr) !=
+            QBDI::SKIP_INST || gpr.x0 != 0) {
+            _exit(92);
+        }
+        _exit(0);
+    }
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(::sigaction(SIGUSR1, &previous, nullptr) == 0);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+}
+
+void persistent_child_clears_vanished_action_readers_before_replacement() {
+    struct sigaction previous{};
+    CHECK(::sigaction(SIGUSR1, nullptr, &previous) == 0);
+    struct sigaction incumbent{};
+    incumbent.sa_handler = child_signal_handler;
+    CHECK(::sigemptyset(&incumbent.sa_mask) == 0);
+    CHECK(::sigaction(SIGUSR1, &incumbent, nullptr) == 0);
+
+    RealInstallWindowPlatform real;
+    real.gate_next_replacement.store(false, std::memory_order_relaxed);
+    SignalBroker broker(real.platform());
+    const int signals[]{SIGUSR1};
+    CHECK(broker.install(signals));
+    KernelSignalAction reset_action{
+            reinterpret_cast<uintptr_t>(fallback_handler), SA_RESETHAND, 0, 0};
+    QBDI::GPRState parent_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &reset_action, nullptr), &parent_gpr) ==
+          QBDI::SKIP_INST);
+    g_action_reset_entered.store(false, std::memory_order_relaxed);
+    g_action_reset_release.store(false, std::memory_order_relaxed);
+    signal_broker_test_set_action_reset_gate(action_reset_gate);
+    std::thread delivery([&] {
+        CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, nullptr));
+    });
+    while (!g_action_reset_entered.load(std::memory_order_acquire)) {}
+    CHECK(broker.test_active_action_readers(SIGUSR1) == 1);
+    real.fail_replacements = true;
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        (void)::alarm(2);
+        KernelSignalAction first{
+                reinterpret_cast<uintptr_t>(replacement_old_handler), 0, 0, 0};
+        KernelSignalAction second{
+                reinterpret_cast<uintptr_t>(replacement_new_handler), 0, 0, 0};
+        QBDI::GPRState gpr{};
+        if (broker.observe_rt_sigaction(
+                    sigaction_call(SIGUSR1, &first, nullptr), &gpr) !=
+                    QBDI::SKIP_INST ||
+            broker.observe_rt_sigaction(
+                    sigaction_call(SIGUSR1, &second, nullptr), &gpr) !=
+                    QBDI::SKIP_INST) {
+            _exit(93);
+        }
+        _exit(gpr.x0 == 0 ? 0 : 94);
+    }
+    g_action_reset_release.store(true, std::memory_order_release);
+    delivery.join();
+    signal_broker_test_set_action_reset_gate(nullptr);
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(::sigaction(SIGUSR1, &previous, nullptr) == 0);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+}
+
 void install_query_replace_lazy_install_and_guarded_memory_match_kernel_abi() {
     FakeKernel kernel;
     kernel.actions[SIGUSR1] = {0x12340000U, SA_RESTART, 0x12340100U, 0x44U};
@@ -594,8 +754,8 @@ void install_query_replace_lazy_install_and_guarded_memory_match_kernel_abi() {
                                       &gpr) == QBDI::SKIP_INST);
     CHECK(std::memcmp(&visible, &replacement, sizeof(visible)) == 0);
     CHECK(kernel.actions[SIGUSR1].handler == master);
-    CHECK((kernel.actions[SIGUSR1].flags & SA_RESTART) == 0);
-    CHECK(kernel.actions[SIGUSR1].restorer == replacement.restorer);
+    CHECK((kernel.actions[SIGUSR1].flags & SA_RESTART) != 0);
+    CHECK(kernel.actions[SIGUSR1].restorer == 0x12340100U);
 
     KernelSignalAction combined{kSiginfoHandler, SA_SIGINFO, 0x71000400U, 0x10U};
     kernel.denied_address = 0xdead0000U;
@@ -611,26 +771,29 @@ void install_query_replace_lazy_install_and_guarded_memory_match_kernel_abi() {
                                       &gpr) == QBDI::SKIP_INST);
     CHECK(std::memcmp(&visible, &combined, sizeof(visible)) == 0);
 
-    KernelSignalAction rejected{kSiginfoHandler, SA_SIGINFO, 0x71000400U, 0x10U};
-    KernelSignalAction untouched{0x11110000U, SA_RESTART, 0x22220000U, 0x33U};
-    const KernelSignalAction sentinel = untouched;
+    KernelSignalAction subsequent{kSiginfoHandler, SA_SIGINFO, 0x71000500U, 0x40U};
+    KernelSignalAction old_combined{};
+    const int action_calls_before_replacement = kernel.action_calls;
     kernel.replacement_error = -EPERM;
-    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &rejected, &untouched),
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &subsequent,
+                                                     &old_combined),
                                       &gpr) == QBDI::SKIP_INST);
-    CHECK(static_cast<int64_t>(gpr.x0) == -EPERM);
-    CHECK(std::memcmp(&untouched, &sentinel, sizeof(untouched)) == 0);
+    CHECK(gpr.x0 == 0);
+    CHECK(std::memcmp(&old_combined, &combined, sizeof(old_combined)) == 0);
+    CHECK(kernel.action_calls == action_calls_before_replacement);
     visible = {};
     CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, nullptr, &visible),
                                       &gpr) == QBDI::SKIP_INST);
-    CHECK(std::memcmp(&visible, &combined, sizeof(visible)) == 0);
+    CHECK(std::memcmp(&visible, &subsequent, sizeof(visible)) == 0);
 
     const int action_calls_before_lazy = kernel.action_calls;
+    kernel.replacement_error = 0;
     KernelSignalAction lazy{kSiginfoHandler, SA_SIGINFO | SA_ONSTACK, 0, 0x20U};
     CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR2, &lazy, nullptr),
                                       &gpr) == QBDI::SKIP_INST);
     CHECK(kernel.action_calls == action_calls_before_lazy + 2);
     CHECK(kernel.actions[SIGUSR2].handler == master);
-    CHECK((kernel.actions[SIGUSR2].flags & SA_ONSTACK) != 0);
+    CHECK((kernel.actions[SIGUSR2].flags & SA_ONSTACK) == 0);
 
     Arm64SyscallSnapshot denied = sigaction_call(
             SIGUSR1, reinterpret_cast<const KernelSignalAction *>(kernel.denied_address),
@@ -669,8 +832,14 @@ struct HandlerFixture {
 };
 
 HandlerFixture *g_handler_fixture = nullptr;
+FakeKernel *g_unregistered_mask_kernel = nullptr;
+uint64_t g_unregistered_observed_mask = 0;
 
 void fallback_handler(int) { ++g_fallback_calls; }
+
+void unregistered_mask_handler(int) {
+    g_unregistered_observed_mask = g_unregistered_mask_kernel->mask;
+}
 
 void normal_handler(int) {
     HandlerFixture &fixture = *g_handler_fixture;
@@ -742,6 +911,55 @@ constexpr uintptr_t kTailReturnedPc = 0x7100dd00U;
 constexpr uint64_t kTailReturnedX0 = 0x1234feedU;
 constexpr uintptr_t kTracerTailPc = 0x7f00bad0U;
 constexpr uint64_t kTracerTailX0 = 0xbadc0ffeeULL;
+constexpr uint64_t kDeferredCookie = 0x514244495349474eULL;
+constexpr uint64_t kDeferredMask = 0xa5a55a5af0f00f0fULL;
+uintptr_t g_deferred_entry_pc = 0;
+uint64_t g_deferred_entry_x0 = 0;
+uint32_t g_bounded_return_calls = 0;
+uintptr_t g_deferred_return_pc = 0;
+SignalBroker *g_return_publication_broker = nullptr;
+SignalBrokerThreadState *g_return_publication_thread = nullptr;
+
+void deferred_return_handler(int, siginfo_t *, void *context) {
+    auto *guest = static_cast<SignalBrokerGuestContext *>(context);
+    g_deferred_entry_pc = guest->registers.pc;
+    g_deferred_entry_x0 = guest->registers.regs[0];
+    guest->registers.regs[19] ^= kDeferredMask;
+}
+
+void deferred_pc_handler(int, siginfo_t *, void *context) {
+    auto *guest = static_cast<SignalBrokerGuestContext *>(context);
+    guest->registers.pc = g_deferred_return_pc;
+}
+
+void nested_deferred_return_handler(int signal_number, siginfo_t *info,
+                                    void *context) {
+    HandlerFixture &fixture = *g_handler_fixture;
+    auto *guest = static_cast<SignalBrokerGuestContext *>(context);
+    ++fixture.nested_context_calls;
+    if (fixture.nested_context_calls == 1) {
+        guest->registers.regs[18] ^= 0x11110000U;
+        CHECK(fixture.broker->dispatch(signal_number, info, context,
+                                       fixture.thread));
+        guest->registers.regs[20] ^= 0x33330000U;
+        return;
+    }
+    guest->registers.regs[19] ^= 0x22220000U;
+}
+
+void bounded_deferred_return_handler(int, siginfo_t *, void *context) {
+    auto *guest = static_cast<SignalBrokerGuestContext *>(context);
+    ++g_bounded_return_calls;
+    guest->registers.regs[19] += 1U;
+}
+
+void nested_return_publication_gate() {
+    signal_broker_test_set_return_publication_gate(nullptr);
+    for (size_t delivery = 0; delivery < 8; ++delivery) {
+        CHECK(g_return_publication_broker->dispatch(
+                SIGUSR1, nullptr, nullptr, g_return_publication_thread));
+    }
+}
 
 void tail_reentry_callback(FakeKernel *) {
     HandlerFixture &fixture = *g_handler_fixture;
@@ -818,6 +1036,7 @@ void native_dispatch_persists_interval_preserves_masks_and_applies_guest_context
     CHECK(broker.dispatch(SIGUSR2, nullptr, nullptr, &artifact.thread));
     CHECK(handler.siginfo_calls == 1);
     CHECK(handler.observed_pc == original_pc);
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &artifact.gpr));
     for (size_t index = 0; index < 31; ++index) {
         CHECK(QBDI_GPR_GET(&artifact.gpr, index) == 0x9000U + index);
     }
@@ -849,6 +1068,7 @@ void nested_delivery_maps_the_interrupted_guest_handler_context() {
 
     CHECK(handler.nested_context_calls == 2);
     CHECK(handler.nested_observed_pc == 0x7100aaa0U);
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &artifact.gpr));
     CHECK(artifact.gpr.x0 == 0xfeedfaceU);
     const FlightEmergencyRecord outer_return = artifact.emergency();
     CHECK((outer_return.flags & 0xffffU) == 1U);
@@ -919,6 +1139,25 @@ void delivery_without_a_registered_flight_thread_preserves_incumbent_behavior() 
     g_fallback_calls = 0;
     CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, nullptr));
     CHECK(g_fallback_calls == 1);
+
+    FakeKernel masked_kernel;
+    masked_kernel.actions[SIGUSR2] = {
+            reinterpret_cast<uintptr_t>(unregistered_mask_handler), 0, 0,
+            1ULL << (SIGTERM - 1)};
+    SignalBroker masked_broker(masked_kernel.platform());
+    const int masked_signals[]{SIGUSR2};
+    CHECK(masked_broker.install(masked_signals));
+    masked_kernel.mask = UINT64_MAX;
+    SignalBrokerGuestContext native_context{};
+    native_context.signal_mask = 1ULL << (SIGINT - 1);
+    g_unregistered_mask_kernel = &masked_kernel;
+    g_unregistered_observed_mask = 0;
+    CHECK(masked_broker.dispatch(SIGUSR2, nullptr, &native_context, nullptr));
+    CHECK(g_unregistered_observed_mask ==
+          ((1ULL << (SIGINT - 1)) | (1ULL << (SIGTERM - 1)) |
+           (1ULL << (SIGUSR2 - 1))));
+    CHECK(masked_kernel.mask == (1ULL << (SIGINT - 1)));
+    g_unregistered_mask_kernel = nullptr;
 }
 
 void thread_attachment_rejects_a_missing_returned_register_mapping() {
@@ -1121,17 +1360,277 @@ void instruction_preinst_virtualizes_rt_sigaction_before_collecting_svc() {
     CHECK(std::memcmp(&visible, &action, sizeof(action)) == 0);
 }
 
+void direct_signal_delivery_svc_defers_resume_pc_until_the_signal_matches() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    alignas(uint32_t) uint32_t svc = 0xd4000001U;
+    QBDI::GPRState gpr{};
+    gpr.pc = reinterpret_cast<uintptr_t>(&svc);
+    gpr.x8 = 131;
+    gpr.x0 = 4242;
+    gpr.x1 = 731;
+    gpr.x2 = SIGUSR1;
+    gpr.x19 = 0x514244495349474eULL;
+    TraceOptions options{};
+    ModuleRange module{};
+    module.start = gpr.pc;
+    module.end = gpr.pc + sizeof(svc);
+    InstructionCollector collector(nullptr, nullptr, nullptr, nullptr, nullptr,
+                                   options, module, &broker, &artifact.thread);
+
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+    Arm64SignalContext published{};
+    CHECK(artifact.thread.test_load_guest(&published));
+    CHECK(published.pc == gpr.pc);
+    CHECK(published.regs[19] == gpr.x19);
+}
+
+void unrelated_signal_during_delivery_svc_keeps_the_interrupted_pc() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(deferred_return_handler), SA_SIGINFO, 0, 0};
+    QBDI::GPRState install_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR2, &action, nullptr),
+                                      &install_gpr) == QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    QBDI::GPRState gpr{};
+    gpr.pc = reinterpret_cast<uintptr_t>(&code[0]);
+    gpr.x8 = 131;
+    gpr.x0 = 4242;
+    gpr.x1 = 731;
+    gpr.x2 = SIGUSR1;
+    gpr.x19 = kDeferredCookie;
+    TraceOptions options{};
+    ModuleRange module{};
+    module.start = reinterpret_cast<uintptr_t>(&code[0]);
+    module.end = reinterpret_cast<uintptr_t>(&code[2]);
+    InstructionCollector collector(nullptr, nullptr, nullptr, nullptr, nullptr,
+                                   options, module, &broker, &artifact.thread);
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+
+    SignalBrokerGuestContext interrupted{};
+    interrupted.registers = {};
+    interrupted.registers.pc = kTracerTailPc;
+    interrupted.registers.regs[19] = kDeferredCookie;
+    g_deferred_entry_pc = 0;
+    CHECK(broker.dispatch(SIGUSR2, nullptr, &interrupted, &artifact.thread));
+    CHECK(g_deferred_entry_pc == reinterpret_cast<uintptr_t>(&code[0]));
+}
+
+void handler_changes_are_merged_after_qbdi_syscall_writeback() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(deferred_return_handler), SA_SIGINFO, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    QBDI::GPRState gpr{};
+    gpr.pc = reinterpret_cast<uintptr_t>(&code[0]);
+    gpr.x8 = 131;
+    gpr.x0 = 4242;
+    gpr.x1 = 731;
+    gpr.x2 = SIGUSR1;
+    gpr.x19 = kDeferredCookie;
+    TraceOptions options{};
+    ModuleRange module{};
+    module.start = reinterpret_cast<uintptr_t>(&code[0]);
+    module.end = reinterpret_cast<uintptr_t>(&code[2]);
+    InstructionCollector collector(nullptr, nullptr, nullptr, nullptr, nullptr,
+                                   options, module, &broker, &artifact.thread);
+    g_deferred_entry_pc = 0;
+    g_deferred_entry_x0 = 0;
+
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+    SignalBrokerGuestContext native_post{};
+    native_post.registers.regs[0] = 0;
+    native_post.registers.regs[19] = kDeferredCookie;
+    native_post.registers.sp = gpr.sp;
+    native_post.registers.pc = kTracerTailPc;
+    native_post.registers.pstate = 0x40000000U;
+    CHECK(broker.dispatch(SIGUSR1, nullptr, &native_post, &artifact.thread));
+    CHECK(g_deferred_entry_pc == reinterpret_cast<uintptr_t>(&code[1]));
+    CHECK(g_deferred_entry_x0 == 0);
+    CHECK(gpr.x19 == kDeferredCookie);
+
+    gpr.pc = reinterpret_cast<uintptr_t>(&code[1]);
+    gpr.x0 = 0;
+    gpr.x19 = kDeferredCookie;
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+
+    CHECK(gpr.x0 == 0);
+    CHECK(gpr.x19 == (kDeferredCookie ^ kDeferredMask));
+    CHECK(gpr.pc == reinterpret_cast<uintptr_t>(&code[1]));
+}
+
+void returned_pc_breaks_to_vm_before_the_selected_instruction_executes() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(deferred_pc_handler), SA_SIGINFO, 0, 0};
+    QBDI::GPRState install_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &install_gpr) == QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{
+            0xd4000001U, 0xd503201fU, 0xd503201fU};
+    QBDI::GPRState gpr{};
+    gpr.pc = reinterpret_cast<uintptr_t>(&code[0]);
+    gpr.x8 = 131;
+    gpr.x0 = 4242;
+    gpr.x1 = 731;
+    gpr.x2 = SIGUSR1;
+    TraceOptions options{};
+    ModuleRange module{};
+    module.start = reinterpret_cast<uintptr_t>(&code[0]);
+    module.end = reinterpret_cast<uintptr_t>(&code[3]);
+    InstructionCollector collector(nullptr, nullptr, nullptr, nullptr, nullptr,
+                                   options, module, &broker, &artifact.thread);
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+    SignalBrokerGuestContext native_post{};
+    native_post.registers.pc = kTracerTailPc;
+    g_deferred_return_pc = reinterpret_cast<uintptr_t>(&code[2]);
+    CHECK(broker.dispatch(SIGUSR1, nullptr, &native_post, &artifact.thread));
+
+    gpr.pc = reinterpret_cast<uintptr_t>(&code[1]);
+    gpr.x0 = 0;
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::BREAK_TO_VM);
+    CHECK(gpr.pc == reinterpret_cast<uintptr_t>(&code[2]));
+}
+
+void nested_returned_contexts_merge_only_their_changed_registers() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    QBDI::GPRState &gpr = artifact.gpr;
+    gpr.x18 = 0x1800U;
+    gpr.x19 = 0x1900U;
+    gpr.x20 = 0x2000U;
+    gpr.x0 = 0x7777U;
+    CHECK(broker.publish_guest_state(&artifact.thread, gpr));
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(nested_deferred_return_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &gpr) == QBDI::SKIP_INST);
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = &handler;
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, &artifact.thread));
+    CHECK(handler.nested_context_calls == 2);
+
+    // Model QBDI's completed-syscall writeback before the next PRE callback.
+    gpr.x18 = 0x1800U;
+    gpr.x19 = 0x1900U;
+    gpr.x20 = 0x2000U;
+    gpr.x0 = 0;
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &gpr));
+    CHECK(gpr.x18 == (0x1800U ^ 0x11110000U));
+    CHECK(gpr.x19 == (0x1900U ^ 0x22220000U));
+    CHECK(gpr.x20 == (0x2000U ^ 0x33330000U));
+    CHECK(gpr.x0 == 0);
+    g_handler_fixture = nullptr;
+}
+
+void returned_context_queue_is_bounded_and_marks_overflow_incomplete() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    QBDI::GPRState &gpr = artifact.gpr;
+    gpr.x19 = 0x1900U;
+    CHECK(broker.publish_guest_state(&artifact.thread, gpr));
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(bounded_deferred_return_handler),
+            SA_SIGINFO, 0, 0};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &gpr) == QBDI::SKIP_INST);
+    g_bounded_return_calls = 0;
+
+    for (uint32_t delivery = 0; delivery < 9; ++delivery) {
+        CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, &artifact.thread));
+    }
+    CHECK(g_bounded_return_calls == 9);
+
+    gpr.x19 = 0x1900U;
+    gpr.x0 = 0;
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &gpr));
+    CHECK(gpr.x19 == 0x1908U);
+    CHECK(gpr.x0 == 0);
+    CHECK(artifact.artifact.incomplete());
+    FlightEmergencyRecord gap{};
+    CHECK(scan_flight_emergency(
+            artifact.artifact.emergency_bytes(
+                    artifact.registration.directory_index),
+            &gap));
+    CHECK(gap.type == static_cast<uint32_t>(FlightRecordType::CoverageGap));
+    CHECK((gap.flags & static_cast<uint32_t>(
+                               FlightIncompleteReason::EmergencyFailure)) != 0);
+    CHECK(gap.signal_code >= 1U);
+}
+
+void returned_context_queue_survives_nested_publication_wrap() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    QBDI::GPRState &gpr = artifact.gpr;
+    gpr.x19 = 0x1900U;
+    CHECK(broker.publish_guest_state(&artifact.thread, gpr));
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(bounded_deferred_return_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &gpr) == QBDI::SKIP_INST);
+    g_bounded_return_calls = 0;
+    g_return_publication_broker = &broker;
+    g_return_publication_thread = &artifact.thread;
+    signal_broker_test_set_return_publication_gate(
+            nested_return_publication_gate);
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, &artifact.thread));
+
+    signal_broker_test_set_return_publication_gate(nullptr);
+    g_return_publication_broker = nullptr;
+    g_return_publication_thread = nullptr;
+    CHECK(g_bounded_return_calls == 9);
+    gpr.x19 = 0x1900U;
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &gpr));
+    CHECK(gpr.x19 == 0x1902U);
+    CHECK(artifact.artifact.incomplete());
+    FlightEmergencyRecord gap{};
+    CHECK(scan_flight_emergency(
+            artifact.artifact.emergency_bytes(
+                    artifact.registration.directory_index),
+            &gap));
+    CHECK(gap.type == static_cast<uint32_t>(FlightRecordType::CoverageGap));
+    CHECK(gap.signal_code >= 1U);
+}
+
 } // namespace
 
 int main() {
     incumbent_is_visible_before_the_kernel_can_deliver_to_master();
     concurrent_action_replacement_never_swallows_a_delivery();
     reset_generation_stays_pinned_while_reset_reads_it();
-    kernel_master_never_precedes_replacement_guest_semantics();
+    replacement_linearizes_without_exposing_a_rejected_guest_action();
     master_preserves_the_incumbent_handlers_errno_semantics();
     fork_child_detach_restores_native_delivery_before_clearing_broker();
     fork_waits_for_initial_master_publication_and_restores_child_disposition();
     failed_child_restore_keeps_master_fail_open_to_incumbent();
+    persistent_child_default_restore_failure_terminates_instead_of_swallowing();
+    persistent_child_restore_failure_keeps_action_updates_usable();
+    persistent_child_clears_vanished_action_readers_before_replacement();
     install_query_replace_lazy_install_and_guarded_memory_match_kernel_abi();
     delivery_without_a_registered_flight_thread_preserves_incumbent_behavior();
     thread_attachment_rejects_a_missing_returned_register_mapping();
@@ -1144,4 +1643,11 @@ int main() {
     pending_signal_cannot_reenter_before_return_publication_and_depth_transition();
     stale_generations_nested_delivery_reset_default_ignore_and_detach_are_safe();
     instruction_preinst_virtualizes_rt_sigaction_before_collecting_svc();
+    direct_signal_delivery_svc_defers_resume_pc_until_the_signal_matches();
+    unrelated_signal_during_delivery_svc_keeps_the_interrupted_pc();
+    handler_changes_are_merged_after_qbdi_syscall_writeback();
+    returned_pc_breaks_to_vm_before_the_selected_instruction_executes();
+    nested_returned_contexts_merge_only_their_changed_registers();
+    returned_context_queue_is_bounded_and_marks_overflow_incomplete();
+    returned_context_queue_survives_nested_publication_wrap();
 }

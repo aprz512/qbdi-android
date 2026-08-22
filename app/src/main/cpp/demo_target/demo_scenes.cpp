@@ -28,6 +28,8 @@ constexpr uint64_t kSignalProbeRegisterCookie = 1U << 2U;
 constexpr uint64_t kSignalProbeHandlerQueryHidden = 1U << 4U;
 constexpr uint64_t kArm64RtSigaction = 134U;
 constexpr uint64_t kArm64Tgkill = 131U;
+constexpr uint64_t kArm64Getpid = 172U;
+constexpr uint64_t kArm64Gettid = 178U;
 constexpr size_t kKernelSignalSetBytes = 8U;
 constexpr uint64_t kSignalProbeCookieRestoreMask = 0xa5a55a5af0f00f0fULL;
 
@@ -43,6 +45,8 @@ volatile sig_atomic_t g_probe_pc_original = 0;
 volatile sig_atomic_t g_probe_register_cookie = 0;
 std::atomic<uint64_t> g_probe_expected_pc{0};
 std::atomic<uint64_t> g_probe_expected_cookie{0};
+alignas(uint32_t) uint32_t g_probe_pause_handler_once = 0;
+alignas(uint32_t) uint32_t g_probe_pause_after_handler_once = 0;
 
 static_assert(std::atomic<uint64_t>::is_always_lock_free);
 static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t));
@@ -55,6 +59,24 @@ load_published_signal_value(const std::atomic<uint64_t> &value) noexcept {
                      : "r"(&value)
                      : "memory");
     return loaded;
+}
+
+__attribute__((always_inline)) inline uint32_t
+load_pause_flag(const uint32_t *flag) noexcept {
+    uint32_t loaded = 0;
+    __asm__ volatile("ldar %w0, [%1]"
+                     : "=r"(loaded)
+                     : "r"(flag)
+                     : "memory");
+    return loaded;
+}
+
+__attribute__((always_inline)) inline void
+store_pause_flag(uint32_t *flag, uint32_t value) noexcept {
+    __asm__ volatile("stlr %w0, [%1]"
+                     :
+                     : "r"(value), "r"(flag)
+                     : "memory");
 }
 
 long raw_rt_sigaction(int signal_number, const KernelSigaction *action,
@@ -94,6 +116,39 @@ long raw_tgkill_with_cookie(int process_id, int thread_id, int signal_number,
     return static_cast<long>(x0);
 }
 
+__attribute__((always_inline)) inline void raw_stop_self() noexcept {
+    register uint64_t process_id __asm__("x0");
+    register uint64_t syscall_number __asm__("x8") = kArm64Getpid;
+    __asm__ volatile("svc 0"
+                     : "=r"(process_id)
+                     : "r"(syscall_number)
+                     : "memory", "cc");
+    const uint64_t saved_process_id = process_id;
+
+    register uint64_t thread_id __asm__("x0");
+    syscall_number = kArm64Gettid;
+    __asm__ volatile("svc 0"
+                     : "=r"(thread_id)
+                     : "r"(syscall_number)
+                     : "memory", "cc");
+
+    register uint64_t signal_process_id __asm__("x0") = saved_process_id;
+    register uint64_t signal_thread_id __asm__("x1") = thread_id;
+    register uint64_t signal_number __asm__("x2") = SIGSTOP;
+    syscall_number = kArm64Tgkill;
+    __asm__ volatile("svc 0"
+                     : "+r"(signal_process_id)
+                     : "r"(signal_thread_id), "r"(signal_number),
+                       "r"(syscall_number)
+                     : "memory", "cc");
+}
+
+extern "C" __attribute__((visibility("default"))) void
+demo_signal_probe_pause_handler_once() noexcept {
+    store_pause_flag(&g_probe_pause_handler_once, 1);
+    store_pause_flag(&g_probe_pause_after_handler_once, 1);
+}
+
 extern "C" __attribute__((noinline)) void
 demo_signal_probe_handler(int signal_number, siginfo_t *,
                           void *opaque_context) {
@@ -104,6 +159,10 @@ demo_signal_probe_handler(int signal_number, siginfo_t *,
     g_probe_register_cookie =
         context->uc_mcontext.regs[19] ==
         load_published_signal_value(g_probe_expected_cookie);
+    if (load_pause_flag(&g_probe_pause_handler_once) != 0) {
+        store_pause_flag(&g_probe_pause_handler_once, 0);
+        raw_stop_self();
+    }
     context->uc_mcontext.regs[19] ^= kSignalProbeCookieRestoreMask;
 }
 
@@ -266,6 +325,12 @@ extern "C" uint64_t demo_signal_probe(uint64_t cookie) {
     uint64_t restored_cookie = 0;
     (void)raw_tgkill_with_cookie(getpid(), gettid(), SIGUSR2, cookie,
                                  &restored_cookie);
+    if (load_pause_flag(&g_probe_pause_after_handler_once) != 0) {
+        store_pause_flag(&g_probe_pause_after_handler_once, 0);
+        // Normal post-handler code is outside signal context. Enter libc so
+        // the stop syscall is native rather than another traced target SVC.
+        (void)::raise(SIGSTOP);
+    }
 
     KernelSigaction visible_action{};
     const bool handler_query_hidden =

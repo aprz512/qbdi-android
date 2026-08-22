@@ -690,7 +690,8 @@ bool FlightArtifact::increment_dropped_coverage_gap(
     }
 }
 
-bool FlightArtifact::write_coverage_gap_sticky(
+__attribute__((no_stack_protector)) bool
+FlightArtifact::write_coverage_gap_sticky(
         uint32_t slot_index,
         const FlightEmergencyRecord &record) noexcept {
     if (!valid() || slot_index >= emergency_record_count_ || record.tid == 0 ||
@@ -718,7 +719,6 @@ bool FlightArtifact::write_coverage_gap_sticky(
             published.type == static_cast<uint32_t>(FlightRecordType::CoverageGap)) {
             return increment_dropped_coverage_gap(slot_index);
         }
-        if ((attempt & 63U) == 63U) (void)::sched_yield();
     }
     if (!claimed) {
         mark_incomplete(FlightIncompleteReason::EmergencyFailure);

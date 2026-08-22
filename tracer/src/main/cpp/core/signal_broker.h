@@ -81,18 +81,43 @@ private:
     struct GuestSnapshot {
         std::array<std::atomic<uint64_t>, 34> words{};
         std::atomic<QBDI::GPRState *> gpr{nullptr};
+        std::atomic<uint32_t> direct_signal_number{0};
     };
+    struct ReturnedSnapshot {
+        std::array<std::atomic<uint64_t>, 34> words{};
+        std::atomic<uint64_t> changed_mask{0};
+        std::atomic<uint64_t> action_generation{0};
+        std::atomic<uint64_t> sequence{0};
+        std::atomic<uint32_t> state{0};
+    };
+    static constexpr size_t kReturnedSnapshotCount = 8;
+    static constexpr uint32_t kReturnedFree = 0;
+    static constexpr uint32_t kReturnedWriting = 1;
+    static constexpr uint32_t kReturnedReady = 2;
+    static constexpr uint32_t kReturnedReading = 3;
 
     bool load_guest(Arm64SignalContext *context,
-                    QBDI::GPRState **gpr = nullptr) const noexcept;
+                    QBDI::GPRState **gpr = nullptr,
+                    uint32_t *direct_signal_number = nullptr) const noexcept;
     void publish_guest(const Arm64SignalContext &context,
-                       QBDI::GPRState *gpr) noexcept;
+                       QBDI::GPRState *gpr,
+                       uint32_t direct_signal_number = 0) noexcept;
     bool store_guest(const Arm64SignalContext &context,
                      QBDI::GPRState *gpr) noexcept;
+    __attribute__((no_stack_protector)) bool queue_returned_guest(
+            const Arm64SignalContext &initial,
+            const Arm64SignalContext &returned,
+            uint64_t action_generation) noexcept;
+    bool apply_returned_guest(QBDI::GPRState *gpr,
+                              bool *pc_changed = nullptr) noexcept;
+    __attribute__((no_stack_protector)) void
+    publish_return_coverage_gap() noexcept;
 
     FlightArtifact *artifact_ = nullptr;
     FlightThreadRegistration registration_{};
     std::array<GuestSnapshot, 2> guest_snapshots_{};
+    std::array<ReturnedSnapshot, kReturnedSnapshotCount> returned_snapshots_{};
+    std::atomic<uint64_t> next_return_sequence_{1};
     std::atomic<uint32_t> guest_snapshot_index_{0};
     std::atomic<uint32_t> active_deliveries_{0};
     std::atomic<uint32_t> nested_deliveries_{0};
@@ -122,7 +147,11 @@ public:
     bool register_thread(SignalBrokerThreadState *thread) noexcept;
     void unregister_thread(SignalBrokerThreadState *thread) noexcept;
     bool publish_guest_state(SignalBrokerThreadState *thread,
-                             const QBDI::GPRState &gpr) noexcept;
+                             const QBDI::GPRState &gpr,
+                             const Arm64SyscallSnapshot *delivery = nullptr) noexcept;
+    bool apply_pending_guest_state(SignalBrokerThreadState *thread,
+                                   QBDI::GPRState *gpr,
+                                   bool *pc_changed = nullptr) noexcept;
     bool prepare_delivery(int signal_number,
                           SignalBrokerDelivery *delivery) const noexcept;
     __attribute__((no_stack_protector)) bool dispatch(
@@ -206,5 +235,7 @@ using SignalBrokerTestGate = void (*)();
 void signal_broker_test_set_action_publication_gate(
         SignalBrokerTestGate gate) noexcept;
 void signal_broker_test_set_action_reset_gate(
+        SignalBrokerTestGate gate) noexcept;
+void signal_broker_test_set_return_publication_gate(
         SignalBrokerTestGate gate) noexcept;
 #endif

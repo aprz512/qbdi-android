@@ -127,7 +127,7 @@ public:
             const FlightEmergencyRecord &record) noexcept;
     __attribute__((no_stack_protector)) bool write_emergency(
             uint32_t slot_index, const FlightEmergencyRecord &record) noexcept;
-    bool write_coverage_gap_sticky(
+    __attribute__((no_stack_protector)) bool write_coverage_gap_sticky(
             uint32_t slot_index,
             const FlightEmergencyRecord &record) noexcept;
     __attribute__((no_stack_protector)) bool increment_dropped_coverage_gap(

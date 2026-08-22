@@ -244,6 +244,86 @@ class FlightRecoveryTests(unittest.TestCase):
         recovered_new = recover_flight(io.BytesIO(raw))
         self.assertEqual(42, recovered_new.summary["termination"]["sequence"])
 
+    def test_v2_double_cell_recovers_a_closed_signal_handler_interval(self):
+        begin = emergency(
+            12, 77, 1019, pc=0x71009900, sp=0x81001000,
+            signal=12, code=1, flags=1, version=16,
+        )
+        returned = emergency(
+            13, 77, 1020, pc=0x71009904, sp=0x81001008,
+            fault=1019, signal=12, code=1, flags=1, version=18,
+        )
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[returned + begin],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual(
+            [(1019, "signal_handler_begin"),
+             (1020, "signal_handler_return")],
+            [(event.global_seq, event.kind) for event in recovery.merged],
+        )
+        self.assertEqual([{
+            "tid": 77,
+            "depth": 1,
+            "nested_delivery_count": 0,
+            "begin_sequence": 1019,
+            "return_sequence": 1020,
+            "returned": True,
+            "unreturned_ancestor_count": 0,
+        }], recovery.summary["signal_handler_intervals"])
+
+    def test_v2_double_cell_keeps_one_valid_cell_and_rejects_stale_history(self):
+        valid_begin = emergency(
+            12, 77, 41, signal=12, flags=1, version=16,
+        )
+        torn_return = emergency(
+            13, 77, 42, fault=41, signal=12, flags=1, version=19,
+        )
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[torn_return + valid_begin],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+        recovered_begin = recover_flight(io.BytesIO(raw))
+        self.assertEqual(
+            [(41, "signal_handler_begin")],
+            [(event.global_seq, event.kind) for event in recovered_begin.merged],
+        )
+
+        torn_begin = emergency(
+            12, 77, 41, signal=12, flags=1, version=15,
+        )
+        valid_return = emergency(
+            13, 77, 42, fault=41, signal=12, flags=1, version=18,
+        )
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[valid_return + torn_begin],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+        recovered_return = recover_flight(io.BytesIO(raw))
+        self.assertEqual(
+            [(42, "signal_handler_return")],
+            [(event.global_seq, event.kind) for event in recovered_return.merged],
+        )
+
+        stale = emergency(14, 77, 40, signal=9, version=2)
+        newest = emergency(14, 77, 43, signal=9, version=18)
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[newest + stale],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+        recovered_newest = recover_flight(io.BytesIO(raw))
+        self.assertEqual(
+            [(43, "termination_intent")],
+            [(event.global_seq, event.kind) for event in recovered_newest.merged],
+        )
+
     def test_excludes_an_empty_sealed_chunk_as_damaged_evidence(self):
         raw = artifact(
             directories=[directory_entry(7, 0, 0, 0, 1)],
