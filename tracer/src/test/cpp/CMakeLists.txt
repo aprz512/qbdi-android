@@ -29,6 +29,10 @@ add_trace_test(trace_config_test
 add_trace_test(flight_format_test
     flight_format_test.cpp)
 
+add_trace_test(flight_atomic_u32_test
+    flight_atomic_u32_test.cpp)
+target_link_libraries(flight_atomic_u32_test PRIVATE Threads::Threads)
+
 add_trace_test(flight_artifact_test
     flight_artifact_test.cpp
     ../../main/cpp/flight/flight_artifact.cpp)
