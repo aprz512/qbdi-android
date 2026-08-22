@@ -37,7 +37,6 @@ file(GLOB SHADOWHOOK_SRC
 
 add_library(shadowhook_static STATIC ${SHADOWHOOK_SRC})
 target_compile_features(shadowhook_static PRIVATE c_std_11)
-target_compile_definitions(shadowhook_static PRIVATE SHADOWHOOK_DISABLE_LINKER_INIT)
 target_compile_options(shadowhook_static PRIVATE -Os -ffunction-sections -fdata-sections)
 target_include_directories(shadowhook_static PUBLIC ${SHADOWHOOK_ROOT}/include)
 target_include_directories(shadowhook_static PRIVATE
@@ -55,6 +54,7 @@ set_target_properties(qbdi_static PROPERTIES
 add_library(qbdi_tracer SHARED
         tracer_entry.cpp
         core/module_maps.cpp
+        core/module_generation_retainer.cpp
         core/arm64_syscall.cpp
         core/signal_context_arm64.cpp
         core/signal_broker.cpp
@@ -103,6 +103,7 @@ target_compile_options(qbdi_tracer PRIVATE
         $<$<CONFIG:Debug>:-g>)
 target_link_options(qbdi_tracer PRIVATE
         ${ANDROID_16KB_PAGE_LINK_OPTIONS}
+        -Wl,-z,nodelete
         -Wl,-Bsymbolic-functions)
 target_include_directories(qbdi_tracer PRIVATE
         ${QBDI_ROOT}/include

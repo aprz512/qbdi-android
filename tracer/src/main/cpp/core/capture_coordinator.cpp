@@ -256,10 +256,16 @@ void mark_production_gap(void *, void *opaque, uint32_t tid,
             artifact->global_emergency_slot, record);
 }
 
+uint32_t *production_retention_flags(void *, void *opaque) noexcept {
+    auto *artifact = static_cast<ProductionArtifact *>(opaque);
+    return artifact == nullptr ? nullptr
+                               : artifact->artifact.incomplete_flags_address();
+}
+
 CaptureCoordinatorFactories production_factories() noexcept {
     return {nullptr, create_production_artifact, destroy_production_artifact,
             create_production_session, destroy_production_session,
-            mark_production_gap};
+            mark_production_gap, production_retention_flags};
 }
 #endif
 
@@ -286,6 +292,14 @@ CaptureCoordinator::~CaptureCoordinator() {
     if (artifact_ != nullptr) {
         factories_.destroy_artifact(factories_.opaque, artifact_);
     }
+}
+
+uint32_t *CaptureCoordinator::retention_flags_address() const noexcept {
+    if (!started() || detached() || artifact_ == nullptr ||
+        factories_.retention_flags == nullptr) {
+        return nullptr;
+    }
+    return factories_.retention_flags(factories_.opaque, artifact_);
 }
 
 bool CaptureCoordinator::start(TraceConfig config, ModuleRange module,

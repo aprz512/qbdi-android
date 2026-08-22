@@ -1237,6 +1237,12 @@ void active_flight_reconfiguration_is_rejected_as_incomplete() {
 
 bool init_inline_hook() { return true; }
 
+bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback,
+                                           InlineHookDlInitCallback,
+                                           void *) {
+    return true;
+}
+
 bool hook_function_address(uintptr_t target, void *, HookHandle *handle) {
     std::lock_guard<std::mutex> lock(g_fake_mutex);
     ++g_hook_calls;

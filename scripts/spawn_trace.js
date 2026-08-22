@@ -100,6 +100,8 @@ function configureTracer(encoded, tracerModule) {
 }
 
 function installModuleObserver(tracerModule) {
+  // Native ShadowHook pre-init owns constructor-time installation. This
+  // observer is only a synchronous fallback/dedupe for an already loaded SO.
   const installPtr = findTracerExport(tracerModule, 'qbdi_tracer_install_module');
   const installModule = new NativeFunction(installPtr, 'void', ['pointer', 'pointer', 'pointer']);
 
@@ -121,7 +123,7 @@ function main() {
   const dir = config.remoteDir.replace(/\/$/, '');
   const tracerModule = loadLibrary(dir + '/' + config.tracer);
   configureTracer(encodeConfig(config), tracerModule);
-  installModuleObserver(tracerModule);
+  if (!config.flight.enabled) installModuleObserver(tracerModule);
   console.log('[+] tracer injected; tap a demo button for non-init scenes');
 }
 

@@ -63,6 +63,17 @@ bool init_inline_hook() {
     return true;
 }
 
+bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback pre,
+                                           InlineHookDlInitCallback post,
+                                           void *opaque) {
+    const int result = shadowhook_register_dl_init_callback(pre, post, opaque);
+    if (result != 0) {
+        QTRACE_E("shadowhook dl-init callback registration failed: %d", result);
+        return false;
+    }
+    return true;
+}
+
 bool hook_function_address(uintptr_t target, void *replacement, HookHandle *handle) {
     return hook_address(target, replacement, handle, shadowhook_hook_func_addr);
 }

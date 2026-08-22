@@ -46,6 +46,12 @@ inline uint32_t flight_atomic_u32_fetch_or(uint32_t *destination, uint32_t value
     return __atomic_fetch_or(destination, value, flight_atomic_builtin_order(order));
 }
 
+inline uint32_t flight_atomic_u32_fetch_and(uint32_t *destination, uint32_t value,
+                                            std::memory_order order) noexcept {
+    return __atomic_fetch_and(destination, value,
+                              flight_atomic_builtin_order(order));
+}
+
 inline bool flight_atomic_u32_compare_exchange_strong(
         uint32_t *destination, uint32_t *expected, uint32_t desired,
         std::memory_order success, std::memory_order failure) noexcept {

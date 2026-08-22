@@ -154,6 +154,14 @@ uint32_t flight_atomic_fetch_or_u32_le(uint8_t *destination, uint32_t value,
     return flight_u32_from_le(previous);
 }
 
+uint32_t flight_atomic_fetch_and_u32_le(uint8_t *destination, uint32_t value,
+                                        std::memory_order order) noexcept {
+    if (!flight_atomic_u32_aligned(destination)) return 0;
+    const uint32_t previous = flight_atomic_u32_fetch_and(
+            reinterpret_cast<uint32_t *>(destination), flight_u32_to_le(value), order);
+    return flight_u32_from_le(previous);
+}
+
 namespace {
 
 bool flight_atomic_compare_exchange_strong_u32_le(
@@ -609,10 +617,26 @@ void FlightArtifact::mark_incomplete(FlightIncompleteReason reason) noexcept {
                                         std::memory_order_release);
 }
 
+void FlightArtifact::clear_retention_pending() noexcept {
+    if (!valid()) return;
+    (void)flight_atomic_fetch_and_u32_le(
+            mapping_ + kSuperblockFlagsOffset,
+            ~static_cast<uint32_t>(FlightIncompleteReason::RetentionPending),
+            std::memory_order_release);
+}
+
 uint32_t FlightArtifact::flags() const noexcept {
     if (!valid()) return 0;
     return flight_atomic_load_u32_le(mapping_ + kSuperblockFlagsOffset,
                                      std::memory_order_acquire);
+}
+
+uint32_t *FlightArtifact::incomplete_flags_address() noexcept {
+    uint8_t *const address = valid() ? mapping_ + kSuperblockFlagsOffset
+                                     : nullptr;
+    return flight_atomic_u32_aligned(address)
+                   ? reinterpret_cast<uint32_t *>(address)
+                   : nullptr;
 }
 
 bool FlightArtifact::write_emergency(const FlightThreadRegistration &registration,

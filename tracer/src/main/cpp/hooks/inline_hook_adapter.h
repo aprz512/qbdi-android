@@ -5,6 +5,10 @@
 
 #include "third_party/android-inline-hook/shadowhook/src/main/cpp/common/sh_config.h"
 
+struct dl_phdr_info;
+using InlineHookDlInitCallback = void (*)(struct dl_phdr_info *, size_t,
+                                          void *);
+
 // Keep this in lockstep with sh_enter.c: the bundled production configuration
 // uses branch islands and therefore allocates 64-byte sh_enter slots.
 #if defined(SH_CONFIG_TRY_HOOK_WITHOUT_ISLAND)
@@ -30,6 +34,9 @@ struct HookHandle {
 };
 
 bool init_inline_hook();
+bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback pre,
+                                           InlineHookDlInitCallback post,
+                                           void *opaque);
 
 bool hook_function_address(uintptr_t target, void *replacement, HookHandle *handle);
 

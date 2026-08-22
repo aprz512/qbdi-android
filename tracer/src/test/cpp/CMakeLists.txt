@@ -48,6 +48,11 @@ target_link_options(flight_artifact_test PRIVATE
     -Wl,--wrap=ftruncate
     -Wl,--wrap=mmap)
 
+add_trace_test(module_generation_retainer_test
+    module_generation_retainer_test.cpp
+    ../../main/cpp/core/module_generation_retainer.cpp)
+target_link_libraries(module_generation_retainer_test PRIVATE Threads::Threads)
+
 add_trace_test(flight_chunk_writer_test
     flight_chunk_writer_test.cpp
     ../../main/cpp/flight/flight_artifact.cpp
@@ -114,7 +119,8 @@ add_trace_test(shadowhook_retention_contract_test
     shadowhook_retention_contract_test.cpp)
 target_compile_definitions(shadowhook_retention_contract_test PRIVATE
     QTRACE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp/third_party/android-inline-hook/shadowhook/src/main/cpp"
-    QTRACE_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp")
+    QTRACE_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp"
+    QTRACE_REPO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../..")
 
 add_trace_test(production_trace_contract_test
     production_trace_contract_test.cpp)
@@ -292,6 +298,7 @@ add_trace_test(tracer_entry_proxy_test
     ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
+    ../../main/cpp/core/module_generation_retainer.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/core/trace_config.cpp)
 target_link_libraries(tracer_entry_proxy_test PRIVATE Threads::Threads)
