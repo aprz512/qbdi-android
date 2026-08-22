@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <thread>
@@ -1422,6 +1423,139 @@ void unrelated_signal_during_delivery_svc_keeps_the_interrupted_pc() {
     CHECK(g_deferred_entry_pc == reinterpret_cast<uintptr_t>(&code[0]));
 }
 
+void same_signal_before_self_signal_svc_cannot_claim_the_resume_pc() {
+    struct Scenario {
+        uint64_t syscall_number;
+        uint64_t x0;
+        uint64_t x1;
+        uint64_t x2;
+    };
+    constexpr Scenario scenarios[]{
+            {131, 4242, 731, SIGUSR1},
+            {130, 731, SIGUSR1, 0},
+    };
+    for (const Scenario &scenario : scenarios) {
+        FakeKernel kernel;
+        SignalBroker broker(kernel.platform());
+        ArtifactFixture artifact;
+        CHECK(broker.register_thread(&artifact.thread));
+        KernelSignalAction action{
+                reinterpret_cast<uintptr_t>(deferred_return_handler),
+                SA_SIGINFO, 0, 0};
+        QBDI::GPRState install_gpr{};
+        CHECK(broker.observe_rt_sigaction(
+                      sigaction_call(SIGUSR1, &action, nullptr),
+                      &install_gpr) == QBDI::SKIP_INST);
+        alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+        QBDI::GPRState gpr{};
+        gpr.pc = reinterpret_cast<uintptr_t>(&code[0]);
+        gpr.x8 = scenario.syscall_number;
+        gpr.x0 = scenario.x0;
+        gpr.x1 = scenario.x1;
+        gpr.x2 = scenario.x2;
+        gpr.x19 = kDeferredCookie;
+        TraceOptions options{};
+        ModuleRange module{};
+        module.start = reinterpret_cast<uintptr_t>(&code[0]);
+        module.end = reinterpret_cast<uintptr_t>(&code[2]);
+        InstructionCollector collector(
+                nullptr, nullptr, nullptr, nullptr, nullptr, options, module,
+                &broker, &artifact.thread);
+        CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+
+        siginfo_t same_number_info{};
+        same_number_info.si_code = SI_TKILL;
+        same_number_info.si_pid = 4242;
+        alignas(uint32_t) uint32_t native_code[]{
+                0xd503201fU, 0xd4000001U, 0xd503201fU};
+        SignalBrokerGuestContext before_svc{};
+        // Model QBDI's register-restore tail: every syscall register can look
+        // complete before the native code-cache SVC actually executes.
+        before_svc.registers.regs[0] = 0;
+        before_svc.registers.regs[1] = scenario.x1;
+        before_svc.registers.regs[2] = scenario.x2;
+        before_svc.registers.regs[8] = scenario.syscall_number;
+        before_svc.registers.regs[19] = kDeferredCookie;
+        before_svc.registers.pc =
+                reinterpret_cast<uintptr_t>(&native_code[1]);
+        g_deferred_entry_pc = 0;
+        CHECK(broker.dispatch(SIGUSR1, &same_number_info, &before_svc,
+                              &artifact.thread));
+        CHECK(g_deferred_entry_pc == reinterpret_cast<uintptr_t>(&code[0]));
+
+        SignalBrokerGuestContext after_svc = before_svc;
+        after_svc.registers.pc = reinterpret_cast<uintptr_t>(&native_code[2]);
+        g_deferred_entry_pc = 0;
+        CHECK(broker.dispatch(SIGUSR1, &same_number_info, &after_svc,
+                              &artifact.thread));
+        CHECK(g_deferred_entry_pc == reinterpret_cast<uintptr_t>(&code[1]));
+    }
+}
+
+void direct_delivery_proof_never_reads_before_a_page_boundary() {
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        FakeKernel kernel;
+        SignalBroker broker(kernel.platform());
+        ArtifactFixture artifact;
+        if (!broker.register_thread(&artifact.thread)) _exit(80);
+        KernelSignalAction action{
+                reinterpret_cast<uintptr_t>(deferred_return_handler),
+                SA_SIGINFO, 0, 0};
+        QBDI::GPRState install_gpr{};
+        if (broker.observe_rt_sigaction(
+                    sigaction_call(SIGUSR1, &action, nullptr),
+                    &install_gpr) != QBDI::SKIP_INST) {
+            _exit(81);
+        }
+        alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+        QBDI::GPRState gpr{};
+        gpr.pc = reinterpret_cast<uintptr_t>(&code[0]);
+        gpr.x8 = 131;
+        gpr.x0 = 4242;
+        gpr.x1 = 731;
+        gpr.x2 = SIGUSR1;
+        TraceOptions options{};
+        ModuleRange module{};
+        module.start = reinterpret_cast<uintptr_t>(&code[0]);
+        module.end = reinterpret_cast<uintptr_t>(&code[2]);
+        InstructionCollector collector(
+                nullptr, nullptr, nullptr, nullptr, nullptr, options, module,
+                &broker, &artifact.thread);
+        if (collector.on_pre(nullptr, &gpr, nullptr) != QBDI::CONTINUE) {
+            _exit(82);
+        }
+
+        const long page_bytes = ::sysconf(_SC_PAGESIZE);
+        if (page_bytes <= 0) _exit(83);
+        void *pages = ::mmap(nullptr, static_cast<size_t>(page_bytes) * 2U,
+                             PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (pages == MAP_FAILED) _exit(84);
+        SignalBrokerGuestContext at_boundary{};
+        at_boundary.registers.regs[0] = 0;
+        at_boundary.registers.regs[1] = 731;
+        at_boundary.registers.regs[2] = SIGUSR1;
+        at_boundary.registers.regs[8] = 131;
+        at_boundary.registers.pc = reinterpret_cast<uintptr_t>(pages) +
+                                   static_cast<uintptr_t>(page_bytes);
+        siginfo_t same_number_info{};
+        same_number_info.si_code = SI_TKILL;
+        same_number_info.si_pid = 4242;
+        g_deferred_entry_pc = 0;
+        if (!broker.dispatch(SIGUSR1, &same_number_info, &at_boundary,
+                             &artifact.thread) ||
+            g_deferred_entry_pc != reinterpret_cast<uintptr_t>(&code[0])) {
+            _exit(85);
+        }
+        _exit(0);
+    }
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+}
+
 void handler_changes_are_merged_after_qbdi_syscall_writeback() {
     FakeKernel kernel;
     SignalBroker broker(kernel.platform());
@@ -1452,11 +1586,18 @@ void handler_changes_are_merged_after_qbdi_syscall_writeback() {
     CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
     SignalBrokerGuestContext native_post{};
     native_post.registers.regs[0] = 0;
+    native_post.registers.regs[1] = 731;
+    native_post.registers.regs[2] = SIGUSR1;
+    native_post.registers.regs[8] = 131;
     native_post.registers.regs[19] = kDeferredCookie;
     native_post.registers.sp = gpr.sp;
-    native_post.registers.pc = kTracerTailPc;
+    native_post.registers.pc = reinterpret_cast<uintptr_t>(&code[1]);
     native_post.registers.pstate = 0x40000000U;
-    CHECK(broker.dispatch(SIGUSR1, nullptr, &native_post, &artifact.thread));
+    siginfo_t direct_info{};
+    direct_info.si_code = SI_TKILL;
+    direct_info.si_pid = 4242;
+    CHECK(broker.dispatch(SIGUSR1, &direct_info, &native_post,
+                          &artifact.thread));
     CHECK(g_deferred_entry_pc == reinterpret_cast<uintptr_t>(&code[1]));
     CHECK(g_deferred_entry_x0 == 0);
     CHECK(gpr.x19 == kDeferredCookie);
@@ -1497,9 +1638,17 @@ void returned_pc_breaks_to_vm_before_the_selected_instruction_executes() {
                                    options, module, &broker, &artifact.thread);
     CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
     SignalBrokerGuestContext native_post{};
-    native_post.registers.pc = kTracerTailPc;
+    native_post.registers.regs[0] = 0;
+    native_post.registers.regs[1] = 731;
+    native_post.registers.regs[2] = SIGUSR1;
+    native_post.registers.regs[8] = 131;
+    native_post.registers.pc = reinterpret_cast<uintptr_t>(&code[1]);
+    siginfo_t direct_info{};
+    direct_info.si_code = SI_TKILL;
+    direct_info.si_pid = 4242;
     g_deferred_return_pc = reinterpret_cast<uintptr_t>(&code[2]);
-    CHECK(broker.dispatch(SIGUSR1, nullptr, &native_post, &artifact.thread));
+    CHECK(broker.dispatch(SIGUSR1, &direct_info, &native_post,
+                          &artifact.thread));
 
     gpr.pc = reinterpret_cast<uintptr_t>(&code[1]);
     gpr.x0 = 0;
@@ -1645,6 +1794,8 @@ int main() {
     instruction_preinst_virtualizes_rt_sigaction_before_collecting_svc();
     direct_signal_delivery_svc_defers_resume_pc_until_the_signal_matches();
     unrelated_signal_during_delivery_svc_keeps_the_interrupted_pc();
+    same_signal_before_self_signal_svc_cannot_claim_the_resume_pc();
+    direct_delivery_proof_never_reads_before_a_page_boundary();
     handler_changes_are_merged_after_qbdi_syscall_writeback();
     returned_pc_breaks_to_vm_before_the_selected_instruction_executes();
     nested_returned_contexts_merge_only_their_changed_registers();

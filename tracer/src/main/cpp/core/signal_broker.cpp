@@ -86,6 +86,24 @@ __attribute__((always_inline)) inline void raw_exit_group(int status) noexcept {
     __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8) : "memory", "cc");
 }
 
+__attribute__((always_inline)) inline bool raw_read_self(
+        int pid, uintptr_t address, void *destination, size_t size) noexcept {
+    const iovec local{destination, size};
+    const iovec remote{reinterpret_cast<void *>(address), size};
+    register uint64_t x0 __asm__("x0") = static_cast<uint64_t>(pid);
+    register uint64_t x1 __asm__("x1") = reinterpret_cast<uintptr_t>(&local);
+    register uint64_t x2 __asm__("x2") = 1;
+    register uint64_t x3 __asm__("x3") = reinterpret_cast<uintptr_t>(&remote);
+    register uint64_t x4 __asm__("x4") = 1;
+    register uint64_t x5 __asm__("x5") = 0;
+    register uint64_t x8 __asm__("x8") = 270U;
+    __asm__ volatile("svc 0" : "+r"(x0)
+                     : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5),
+                       "r"(x8)
+                     : "memory", "cc");
+    return x0 == size;
+}
+
 __attribute__((always_inline)) inline void copy_signal_bytes(
         void *destination, const void *source, size_t size) noexcept {
     auto *output = static_cast<volatile unsigned char *>(destination);
@@ -94,6 +112,20 @@ __attribute__((always_inline)) inline void copy_signal_bytes(
 }
 
 #endif
+
+__attribute__((always_inline)) inline bool read_native_word(
+        int pid, uintptr_t address, uint32_t *word) noexcept {
+    if (word == nullptr) return false;
+#if defined(__ANDROID__) && defined(__aarch64__)
+    return raw_read_self(pid, address, word, sizeof(*word));
+#else
+    (void)pid;
+    const iovec local{word, sizeof(*word)};
+    const iovec remote{reinterpret_cast<void *>(address), sizeof(*word)};
+    return ::process_vm_readv(::getpid(), &local, 1, &remote, 1, 0) ==
+           static_cast<ssize_t>(sizeof(*word));
+#endif
+}
 
 long default_rt_sigaction(void *, int signal_number,
                           const KernelSignalAction *action,
@@ -194,6 +226,60 @@ uint64_t signal_bit(int signal_number) noexcept {
     return signal_number > 0 && signal_number <= 64
                    ? 1ULL << static_cast<unsigned>(signal_number - 1)
                    : 0;
+}
+
+constexpr uint32_t kArm64Tkill = 130;
+constexpr uint32_t kArm64Tgkill = 131;
+
+constexpr uint64_t direct_delivery_candidate(
+        uint32_t syscall_number, uint32_t signal_number) noexcept {
+    return (static_cast<uint64_t>(syscall_number) << 32U) | signal_number;
+}
+
+__attribute__((always_inline)) inline bool completed_direct_delivery(
+        uint64_t candidate, int signal_number, uint32_t tid, int pid,
+        const siginfo_t *info, const void *native_context) noexcept {
+    const uint32_t syscall_number = static_cast<uint32_t>(candidate >> 32U);
+    const uint32_t candidate_signal = static_cast<uint32_t>(candidate);
+    if ((syscall_number != kArm64Tkill && syscall_number != kArm64Tgkill) ||
+        candidate_signal != static_cast<uint32_t>(signal_number) ||
+        info == nullptr || info->si_code != SI_TKILL || info->si_pid != pid ||
+        native_context == nullptr) {
+        return false;
+    }
+#if defined(__ANDROID__) && defined(__aarch64__)
+    const auto *interrupted = static_cast<const ucontext_t *>(native_context);
+    const uint64_t x0 = interrupted->uc_mcontext.regs[0];
+    const uint64_t x1 = interrupted->uc_mcontext.regs[1];
+    const uint64_t x2 = interrupted->uc_mcontext.regs[2];
+    const uint64_t x8 = interrupted->uc_mcontext.regs[8];
+    const uintptr_t native_pc = interrupted->uc_mcontext.pc;
+#else
+    const auto *interrupted =
+            static_cast<const SignalBrokerGuestContext *>(native_context);
+    const uint64_t x0 = interrupted->registers.regs[0];
+    const uint64_t x1 = interrupted->registers.regs[1];
+    const uint64_t x2 = interrupted->registers.regs[2];
+    const uint64_t x8 = interrupted->registers.regs[8];
+    const uintptr_t native_pc = interrupted->registers.pc;
+#endif
+    if (native_pc < sizeof(uint32_t) ||
+        (native_pc & (alignof(uint32_t) - 1U)) != 0) {
+        return false;
+    }
+    uint32_t previous_opcode = 0;
+    if (!read_native_word(pid, native_pc - sizeof(uint32_t),
+                          &previous_opcode)) {
+        return false;
+    }
+    if ((previous_opcode & 0xffe0001fU) != 0xd4000001U || x0 != 0 ||
+        x8 != syscall_number) {
+        return false;
+    }
+    if (syscall_number == kArm64Tkill) {
+        return x1 == candidate_signal;
+    }
+    return x1 == tid && x2 == candidate_signal;
 }
 
 [[noreturn]] __attribute__((no_stack_protector)) void
@@ -344,7 +430,7 @@ bool SignalBrokerThreadState::publish(
 
 bool SignalBrokerThreadState::load_guest(
         Arm64SignalContext *context, QBDI::GPRState **gpr,
-        uint32_t *direct_signal_number) const noexcept {
+        uint64_t *direct_delivery) const noexcept {
     if (context == nullptr || !attached_.load(std::memory_order_acquire)) return false;
     const uint32_t snapshot_index =
             guest_snapshot_index_.load(std::memory_order_acquire) & 1U;
@@ -358,16 +444,16 @@ bool SignalBrokerThreadState::load_guest(
     if (gpr != nullptr) {
         *gpr = snapshot.gpr.load(std::memory_order_relaxed);
     }
-    if (direct_signal_number != nullptr) {
-        *direct_signal_number =
-                snapshot.direct_signal_number.load(std::memory_order_relaxed);
+    if (direct_delivery != nullptr) {
+        *direct_delivery =
+                snapshot.direct_delivery.load(std::memory_order_relaxed);
     }
     return true;
 }
 
 void SignalBrokerThreadState::publish_guest(
         const Arm64SignalContext &context, QBDI::GPRState *gpr,
-        uint32_t direct_signal_number) noexcept {
+        uint64_t direct_delivery) noexcept {
     const uint32_t snapshot_index =
             (guest_snapshot_index_.load(std::memory_order_relaxed) ^ 1U) & 1U;
     GuestSnapshot &snapshot = guest_snapshots_[snapshot_index];
@@ -378,15 +464,15 @@ void SignalBrokerThreadState::publish_guest(
     snapshot.words[32].store(context.pc, std::memory_order_relaxed);
     snapshot.words[33].store(context.pstate, std::memory_order_relaxed);
     snapshot.gpr.store(gpr, std::memory_order_relaxed);
-    snapshot.direct_signal_number.store(direct_signal_number,
-                                        std::memory_order_relaxed);
+    snapshot.direct_delivery.store(direct_delivery, std::memory_order_relaxed);
     guest_snapshot_index_.store(snapshot_index, std::memory_order_release);
 }
 
 bool SignalBrokerThreadState::store_guest(
-        const Arm64SignalContext &context, QBDI::GPRState *gpr) noexcept {
+        const Arm64SignalContext &context, QBDI::GPRState *gpr,
+        uint64_t direct_delivery) noexcept {
     if (gpr == nullptr) return false;
-    publish_guest(context, gpr);
+    publish_guest(context, gpr, direct_delivery);
     return true;
 }
 
@@ -830,24 +916,26 @@ bool SignalBroker::publish_guest_state(SignalBrokerThreadState *thread,
     if (thread == nullptr || detached()) return false;
     Arm64SignalContext context{};
     if (!qbdi_gpr_to_signal_context(gpr, &context)) return false;
-    uint32_t direct_signal_number = 0;
+    uint64_t direct_delivery = 0;
     if (delivery != nullptr) {
-        if (delivery->number == 130 &&
+        if (delivery->number == kArm64Tkill &&
             delivery->args[0] == static_cast<uint64_t>(thread->tid_) &&
             delivery->args[1] < kSignalCount &&
             valid_signal(static_cast<int>(delivery->args[1]))) {
-            direct_signal_number = static_cast<uint32_t>(delivery->args[1]);
-        } else if (delivery->number == 131 &&
+            direct_delivery = direct_delivery_candidate(
+                    kArm64Tkill, static_cast<uint32_t>(delivery->args[1]));
+        } else if (delivery->number == kArm64Tgkill &&
                    delivery->args[0] == static_cast<uint64_t>(
                            platform_.getpid(platform_.opaque)) &&
                    delivery->args[1] == static_cast<uint64_t>(thread->tid_) &&
                    delivery->args[2] < kSignalCount &&
                    valid_signal(static_cast<int>(delivery->args[2]))) {
-            direct_signal_number = static_cast<uint32_t>(delivery->args[2]);
+            direct_delivery = direct_delivery_candidate(
+                    kArm64Tgkill, static_cast<uint32_t>(delivery->args[2]));
         }
     }
     thread->publish_guest(context, const_cast<QBDI::GPRState *>(&gpr),
-                          direct_signal_number);
+                          direct_delivery);
     return true;
 }
 
@@ -973,13 +1061,16 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
             signal_handler_flags(depth, nested_deliveries);
     Arm64SignalContext guest{};
     QBDI::GPRState *guest_gpr = nullptr;
-    uint32_t direct_signal_number = 0;
+    uint64_t direct_delivery = 0;
     bool have_guest = thread->load_guest(
-            &guest, &guest_gpr, &direct_signal_number);
+            &guest, &guest_gpr, &direct_delivery);
     const bool nested_context = depth > 1 && native_context != nullptr;
     const bool direct_svc_resume =
             depth == 1 &&
-            direct_signal_number == static_cast<uint32_t>(signal_number) &&
+            direct_delivery != 0 &&
+            completed_direct_delivery(
+                    direct_delivery, signal_number, thread->tid_,
+                    platform_.getpid(platform_.opaque), info, native_context) &&
             guest.pc <= UINTPTR_MAX - sizeof(uint32_t);
     if (direct_svc_resume) guest.pc += sizeof(uint32_t);
 #if defined(__ANDROID__) && defined(__aarch64__)
@@ -1136,8 +1227,12 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
 #if defined(__ANDROID__) && defined(__aarch64__)
     (void)returned_mask;
 #endif
+    const uint64_t retained_direct_delivery =
+            direct_svc_resume ? 0 : direct_delivery;
     const bool stored = mapped &&
-                        (depth != 1 || thread->store_guest(guest, guest_gpr));
+                        (depth != 1 || thread->store_guest(
+                                                guest, guest_gpr,
+                                                retained_direct_delivery));
     const bool queued = mapped && thread->queue_returned_guest(
                                            handler_entry, guest,
                                            delivery.generation);

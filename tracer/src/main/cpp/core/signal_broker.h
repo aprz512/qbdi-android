@@ -81,7 +81,7 @@ private:
     struct GuestSnapshot {
         std::array<std::atomic<uint64_t>, 34> words{};
         std::atomic<QBDI::GPRState *> gpr{nullptr};
-        std::atomic<uint32_t> direct_signal_number{0};
+        std::atomic<uint64_t> direct_delivery{0};
     };
     struct ReturnedSnapshot {
         std::array<std::atomic<uint64_t>, 34> words{};
@@ -98,12 +98,13 @@ private:
 
     bool load_guest(Arm64SignalContext *context,
                     QBDI::GPRState **gpr = nullptr,
-                    uint32_t *direct_signal_number = nullptr) const noexcept;
+                    uint64_t *direct_delivery = nullptr) const noexcept;
     void publish_guest(const Arm64SignalContext &context,
                        QBDI::GPRState *gpr,
-                       uint32_t direct_signal_number = 0) noexcept;
+                       uint64_t direct_delivery = 0) noexcept;
     bool store_guest(const Arm64SignalContext &context,
-                     QBDI::GPRState *gpr) noexcept;
+                     QBDI::GPRState *gpr,
+                     uint64_t direct_delivery = 0) noexcept;
     __attribute__((no_stack_protector)) bool queue_returned_guest(
             const Arm64SignalContext &initial,
             const Arm64SignalContext &returned,
