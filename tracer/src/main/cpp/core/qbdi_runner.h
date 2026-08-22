@@ -25,7 +25,20 @@ struct TraceInvocation {
 
 struct TraceRunResult {
     bool target_executed = false;
+    bool target_returned = false;
+    bool exit_requested = false;
     uint64_t value = 0;
+
+    constexpr TraceRunResult() noexcept = default;
+    constexpr TraceRunResult(bool executed, uint64_t result) noexcept
+            : target_executed(executed), target_returned(executed), value(result) {}
+    constexpr TraceRunResult(bool executed, bool returned,
+                             uint64_t result) noexcept
+            : target_executed(executed), target_returned(returned), value(result) {}
+    constexpr TraceRunResult(bool executed, bool returned, bool requested_exit,
+                             uint64_t result) noexcept
+            : target_executed(executed), target_returned(returned),
+              exit_requested(requested_exit), value(result) {}
 };
 
 TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation);

@@ -955,6 +955,18 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     lost = _missing_ranges(min(range_starts) if range_starts else 0,
                            max(range_ends) if range_ends else 0, observed)
     coverage = [event for event in events if event.kind == "coverage_gap"]
+    active_chunks = sorted(
+        decoded.index for decoded in decoded_chunks if decoded.state == 1
+    )
+    lifecycle_balance: dict[int, int] = {}
+    for event in events:
+        if event.kind == "thread_begin":
+            lifecycle_balance[event.tid] = lifecycle_balance.get(event.tid, 0) + 1
+        elif event.kind == "thread_end":
+            lifecycle_balance[event.tid] = lifecycle_balance.get(event.tid, 0) - 1
+    unterminated_threads = sorted(
+        tid for tid, balance in lifecycle_balance.items() if balance > 0
+    )
     terminations = [event for event in events if event.kind == "termination_intent"]
     if terminations:
         terminal = terminations[-1]
@@ -982,7 +994,8 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         "pointer_width": superblock.pointer_width,
         "artifact_flags": superblock.flags,
         "complete": (superblock.flags == 0 and not damage and not coverage and
-                     not incomplete_logical_events and not stale_entries),
+                     not incomplete_logical_events and not stale_entries and
+                     not active_chunks and not unterminated_threads),
         "termination": termination,
         "final_signal": next((event.data for event in reversed(events)
                               if event.kind == "signal"), None),
@@ -995,6 +1008,8 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             {"sequence": event.global_seq, "tid": event.tid, **event.data}
             for event in coverage
         ],
+        "active_chunks": active_chunks,
+        "unterminated_threads": unterminated_threads,
         "incomplete_logical_events": incomplete_logical_events,
         "recovery_damage": damage,
         "stale_directory_entries": stale_entries,

@@ -64,6 +64,20 @@ void android_debug_compression_is_not_built_unoptimized() {
                      "            $<$<CONFIG:Debug>:-O2>)") != std::string::npos);
 }
 
+void flight_register_sync_follows_simulated_call_setup() {
+    const std::filesystem::path root(QTRACE_CPP_SOURCE_DIR);
+    const std::string source =
+            read_file(root / "core" / "qbdi_thread_session.cpp");
+    const size_t call = source.find("QBDI::simulateCallA(gpr, kReturnAddress");
+    const size_t sync = source.find("flight_sink.sync_registers(*gpr)", call);
+    const size_t run = source.find("vm.run(execution_entry, kReturnAddress)", sync);
+    CHECK(call != std::string::npos);
+    CHECK(sync != std::string::npos);
+    CHECK(run != std::string::npos);
+    CHECK(call < sync);
+    CHECK(sync < run);
+}
+
 } // namespace
 
 int main() {
@@ -71,4 +85,5 @@ int main() {
     instruction_event_model_has_no_text_hot_fields();
     pending_instruction_reuse_does_not_clear_the_whole_hot_record();
     android_debug_compression_is_not_built_unoptimized();
+    flight_register_sync_follows_simulated_call_setup();
 }

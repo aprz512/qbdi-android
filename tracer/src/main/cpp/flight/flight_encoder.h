@@ -35,6 +35,8 @@ struct FlightTraceContextView {
 //   pid/tid u32, module-base/target-offset/target-address u64, then target and scene bytes.
 // - RegisterDelta checkpoint: 34 u64 values in x0..x30, sp, pc, nzcv order.
 // - RegisterDelta delta: changed-mask u64, then changed u64 values in ascending index order.
+// - ThreadBegin: creator-tid u32, tid u32, start-routine u64, module-generation u64.
+// - ThreadEnd: tid u32.
 // - Definition-flag Instruction: one complete QTRB instruction-definition record.
 // - Ordinary Instruction/Memory: one complete QTRB event record.
 // - String definition: string-id u32, byte-count u32, bytes; ordinary string events use IDs.
@@ -53,6 +55,9 @@ public:
                     const QBDI::GPRState *gpr) noexcept;
     bool rotate() noexcept;
     bool registers(const QBDI::GPRState &gpr) noexcept;
+    bool thread_begin(uint32_t creator_tid, uint32_t tid, uintptr_t start_routine,
+                      uint32_t module_generation) noexcept;
+    bool thread_end(uint32_t tid) noexcept;
 
     bool instruction(const TraceContext &context,
                      const InstructionRecord &record) noexcept;

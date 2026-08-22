@@ -9,6 +9,7 @@ add_library(
     SHARED
     demo_target/demo_target.cpp
     demo_target/demo_scenes.cpp
+    demo_target/pthread_fixture.cpp
     demo_target/integrity.cpp
 )
 

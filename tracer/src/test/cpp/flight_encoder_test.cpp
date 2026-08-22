@@ -209,6 +209,73 @@ void checkpoint_and_delta_reconstruct_exact_gpr_state_in_artifact_order() {
     CHECK(flight_read_u64_le(delta.payload + 32) == changed.nzcv);
 }
 
+void thread_lifecycle_records_preserve_exact_identity_fields() {
+    Fixture fixture;
+    QBDI::GPRState initial{};
+    FlightEncoder encoder;
+    CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full,
+                             fixture.context, &initial));
+    constexpr uint32_t creator_tid = 701;
+    constexpr uint32_t worker_tid = 731;
+    constexpr uintptr_t start_routine = 0x71004568;
+    constexpr uint32_t module_generation = 9;
+    CHECK(encoder.thread_begin(creator_tid, worker_tid, start_routine,
+                               module_generation));
+    CHECK(encoder.thread_end(worker_tid));
+    CHECK(fixture.writer.seal());
+
+    FlightChunkSnapshot snapshot{};
+    CHECK(fixture.artifact.read_chunk(fixture.writer.chunk_index(), &snapshot));
+    CHECK(snapshot.state == FlightChunkState::Sealed);
+
+    const Records records = records_in(
+            fixture, fixture.writer.chunk_index(), fixture.writer.generation(),
+            fixture.writer.committed_bytes());
+    CHECK(records.values.size() == 4);
+    const FlightDecodedRecord &begin = records.values[2];
+    CHECK(begin.type == FlightRecordType::ThreadBegin);
+    CHECK(begin.flags == 0);
+    CHECK(begin.payload_bytes == 24);
+    CHECK(flight_read_u32_le(begin.payload) == creator_tid);
+    CHECK(flight_read_u32_le(begin.payload + 4) == worker_tid);
+    CHECK(flight_read_u64_le(begin.payload + 8) == start_routine);
+    CHECK(flight_read_u64_le(begin.payload + 16) == module_generation);
+    const FlightDecodedRecord &end = records.values[3];
+    CHECK(end.type == FlightRecordType::ThreadEnd);
+    CHECK(end.flags == 0);
+    CHECK(end.payload_bytes == 4);
+    CHECK(flight_read_u32_le(end.payload) == worker_tid);
+}
+
+void active_incomplete_thread_stream_is_recoverable_without_cleanup() {
+    Fixture fixture;
+    QBDI::GPRState initial{};
+    FlightEncoder encoder;
+    CHECK(encoder.initialize(&fixture.writer, TraceProfile::Full,
+                             fixture.context, &initial));
+    CHECK(encoder.thread_begin(701, fixture.thread.tid, 0x71004568, 9));
+    CHECK(encoder.call("pthread", "worker", "active-before-crash"));
+    fixture.artifact.mark_incomplete(FlightIncompleteReason::WriterFailure);
+
+    FlightChunkSnapshot snapshot{};
+    CHECK(fixture.artifact.read_chunk(fixture.writer.chunk_index(), &snapshot));
+    CHECK(snapshot.state == FlightChunkState::Active);
+    CHECK(snapshot.committed_bytes == 0);
+    CHECK(fixture.artifact.incomplete());
+
+    const Records records = records_in(fixture, snapshot.chunk_index,
+                                       snapshot.generation,
+                                       fixture.writer.committed_bytes());
+    CHECK(records.values.size() == 7);
+    CHECK(records.values[0].type == FlightRecordType::ChunkBegin);
+    CHECK(records.values[1].type == FlightRecordType::RegisterDelta);
+    CHECK(records.values[2].type == FlightRecordType::ThreadBegin);
+    CHECK(records.values[6].type == FlightRecordType::Call);
+    for (const FlightDecodedRecord &record : records.values) {
+        CHECK(record.type != FlightRecordType::ThreadEnd);
+    }
+}
+
 void memory_payload_preserves_full_profile_pre_and_post_bytes() {
     Fixture fixture;
     QBDI::GPRState gpr{};
@@ -447,6 +514,8 @@ void writer_state_errors_fail_without_rotating() {
 int main() {
     second_chunk_has_its_own_metadata_checkpoint_and_definitions();
     checkpoint_and_delta_reconstruct_exact_gpr_state_in_artifact_order();
+    thread_lifecycle_records_preserve_exact_identity_fields();
+    active_incomplete_thread_stream_is_recoverable_without_cleanup();
     memory_payload_preserves_full_profile_pre_and_post_bytes();
     no_fit_rotates_once_and_never_publishes_a_partial_record();
     instruction_rotation_checkpoints_pre_state_then_emits_post_state_delta();

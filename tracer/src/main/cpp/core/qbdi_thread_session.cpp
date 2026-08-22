@@ -1,8 +1,17 @@
 #include "core/qbdi_thread_session.h"
 
+#include "core/capture_coordinator.h"
 #include "core/trace_process_lifecycle.h"
 
 #include <new>
+#include <pthread.h>
+#include <sched.h>
+
+#if defined(QTRACE_HOST_TEST)
+#define QTRACE_SESSION_CALL_NOEXCEPT
+#else
+#define QTRACE_SESSION_CALL_NOEXCEPT noexcept
+#endif
 
 #if !defined(QTRACE_HOST_TEST)
 #include "core/instruction_cache.h"
@@ -22,6 +31,7 @@
 #include "rules/code_rule.h"
 
 #include <QBDI.h>
+#include <QBDI/Memory.hpp>
 #include <QBDI/State.h>
 
 #include <array>
@@ -34,8 +44,62 @@
 namespace {
 
 thread_local QbdiThreadSession *g_current_qbdi_thread_session = nullptr;
+thread_local std::shared_ptr<CaptureCoordinator> g_current_capture_coordinator;
+
+#if defined(QTRACE_HOST_TEST)
+bool accept_test_control_extent(void *, uintptr_t, uintptr_t) noexcept {
+    return true;
+}
+#endif
 
 } // namespace
+
+bool recognize_deferred_pthread_exit(uintptr_t destination,
+                                     uintptr_t pthread_exit_destination,
+                                     uint64_t exit_value,
+                                     TraceRunResult *result) noexcept {
+    if (destination == 0 || pthread_exit_destination == 0 ||
+        destination != pthread_exit_destination || result == nullptr) {
+        return false;
+    }
+    *result = {true, false, true, exit_value};
+    return true;
+}
+
+bool needs_thread_begin_publication(bool pending, bool published) noexcept {
+    return pending && !published;
+}
+
+QBDI::VMAction classify_deferred_pthread_exit_event(
+        const QBDI::VMState *vm_state, const QBDI::GPRState *gpr,
+        uintptr_t pthread_exit_destination, TraceRunResult *result) noexcept {
+    if (vm_state == nullptr || gpr == nullptr || result == nullptr) {
+        return QBDI::CONTINUE;
+    }
+    uintptr_t destination = 0;
+    if ((vm_state->event & QBDI::EXEC_TRANSFER_CALL) != 0) {
+        destination = vm_state->basicBlockStart;
+    } else if ((vm_state->event &
+                (QBDI::BASIC_BLOCK_EXIT | QBDI::SEQUENCE_EXIT)) != 0) {
+        destination = gpr->pc;
+    }
+    return recognize_deferred_pthread_exit(
+                   destination, pthread_exit_destination,
+                   QBDI_GPR_GET(gpr, 0), result)
+                   ? QBDI::STOP
+                   : QBDI::CONTINUE;
+}
+
+bool make_pthread_exit_control_hole(uintptr_t pthread_exit_destination,
+                                    AddressRange *hole) noexcept {
+    if (pthread_exit_destination == 0 || hole == nullptr ||
+        pthread_exit_destination > UINTPTR_MAX - sizeof(uint32_t)) {
+        return false;
+    }
+    *hole = {pthread_exit_destination,
+             pthread_exit_destination + sizeof(uint32_t)};
+    return true;
+}
 
 #if defined(QTRACE_HOST_TEST)
 struct QbdiThreadSession::Impl {};
@@ -102,15 +166,31 @@ struct QbdiThreadSession::Impl {
         return false;
     }
 
-    bool instrument(uintptr_t entry, uintptr_t execution_entry,
-                    size_t execution_bytes) noexcept {
-        if (flight) {
-            if (execution_bytes == 0 ||
-                execution_entry > UINTPTR_MAX - execution_bytes) {
-                return fail_setup("retained gateway extent is invalid");
+    bool is_target_address(uintptr_t address) const noexcept {
+        if (module == nullptr || address == 0) return false;
+        const size_t count = module->readable_executable_range_count;
+        for (size_t index = 0; index < (count == 0 ? 1U : count); ++index) {
+            const AddressRange range = count == 0
+                                               ? AddressRange{module->start, module->end}
+                                               : module->readable_executable_ranges[index];
+            if (range.start < range.end && address >= range.start &&
+                address < range.end) {
+                return true;
             }
-            vm.addInstrumentedRange(execution_entry,
-                                    execution_entry + execution_bytes);
+        }
+        return false;
+    }
+
+    void exclude_native_pthread_exit() noexcept {
+        const uintptr_t entry = reinterpret_cast<uintptr_t>(pthread_exit);
+        AddressRange hole{};
+        if (make_pthread_exit_control_hole(entry, &hole)) {
+            vm.removeInstrumentedRange(hole.start, hole.end);
+        }
+    }
+
+    bool instrument_target(uintptr_t entry) noexcept {
+        if (flight) {
             if (module->readable_executable_range_count != 0) {
                 for (size_t index = 0;
                      index < module->readable_executable_range_count; ++index) {
@@ -122,11 +202,13 @@ struct QbdiThreadSession::Impl {
                     }
                     vm.addInstrumentedRange(range.start, range.end);
                 }
+                exclude_native_pthread_exit();
                 return true;
             }
             if (!vm.addInstrumentedModuleFromAddr(entry)) {
                 return fail_setup("addInstrumentedModuleFromAddr failed");
             }
+            exclude_native_pthread_exit();
             return true;
         }
 
@@ -158,6 +240,55 @@ struct QbdiThreadSession::Impl {
         return true;
     }
 
+    static bool add_control_range(void *opaque, uintptr_t start,
+                                  uintptr_t end) noexcept {
+        auto *self = static_cast<Impl *>(opaque);
+        self->vm.addInstrumentedRange(start, end);
+        return true;
+    }
+
+    static bool add_control_observer(void *opaque, uintptr_t start,
+                                     uintptr_t end) noexcept {
+        auto *self = static_cast<Impl *>(opaque);
+        return self->vm.addCodeRangeCB(start, end, QBDI::PREINST,
+                                       on_control_pre, self) !=
+               QBDI::INVALID_EVENTID;
+    }
+
+    QbdiControlExtentRegistration control_registration() noexcept {
+        return {this, add_control_range, add_control_observer};
+    }
+
+    bool fail_control_extent(QbdiControlExtentResult result) noexcept {
+        switch (result) {
+            case QbdiControlExtentResult::Invalid:
+                return fail_setup("retained gateway extent is invalid");
+            case QbdiControlExtentResult::CapacityExceeded:
+                return fail_setup("retained gateway extent capacity exhausted");
+            case QbdiControlExtentResult::InstrumentationFailed:
+                return fail_setup("control-only instrumentation unavailable");
+            case QbdiControlExtentResult::ObserverFailed:
+                return fail_setup("control-only execution observer unavailable");
+            case QbdiControlExtentResult::Added:
+            case QbdiControlExtentResult::AlreadyPresent:
+                return true;
+        }
+        return fail_setup("retained gateway extent setup failed");
+    }
+
+    bool copy_execution_state(QbdiExecutionState *state) noexcept {
+        if (state == nullptr) return false;
+        const QBDI::GPRState *gpr = vm.getGPRState();
+        if (gpr == nullptr) return false;
+        static_assert(QBDI::REG_PC + 1 == 34);
+        for (size_t index = 0; index <= QBDI::REG_PC; ++index) {
+            state->words[index] = QBDI_GPR_GET(gpr, index);
+        }
+        state->words[34] = gpr->localMonitor.addr;
+        state->words[35] = gpr->localMonitor.enable;
+        return true;
+    }
+
     static uint32_t add_pre(void *opaque) noexcept {
         auto *self = static_cast<Impl *>(opaque);
         if (self->flight) return self->add_target_code_callbacks(QBDI::PREINST);
@@ -177,13 +308,24 @@ struct QbdiThreadSession::Impl {
     static QBDI::VMAction on_target_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                         QBDI::FPRState *fpr, void *opaque) {
         auto *self = static_cast<Impl *>(opaque);
-        if (gpr != nullptr) self->last_target_pc = gpr->pc;
+        if (gpr != nullptr) {
+            self->target_execution_observed = true;
+            self->last_target_pc = self->control_only ? 0 : gpr->pc;
+        }
+        if (self->control_only) return QBDI::CONTINUE;
         return InstructionCollector::pre_callback(vm, gpr, fpr, self->collector);
+    }
+
+    static QBDI::VMAction on_control_pre(QBDI::VM *, QBDI::GPRState *,
+                                         QBDI::FPRState *, void *opaque) {
+        static_cast<Impl *>(opaque)->target_execution_observed = true;
+        return QBDI::CONTINUE;
     }
 
     static QBDI::VMAction on_target_post(QBDI::VM *vm, QBDI::GPRState *gpr,
                                          QBDI::FPRState *fpr, void *opaque) {
         auto *self = static_cast<Impl *>(opaque);
+        if (self->control_only) return QBDI::CONTINUE;
         return InstructionCollector::post_callback(vm, gpr, fpr, self->collector);
     }
 
@@ -210,29 +352,63 @@ struct QbdiThreadSession::Impl {
                                            QBDI::FPRState *, void *opaque) {
         if (trace_process_child_detached()) return QBDI::CONTINUE;
         auto *self = static_cast<Impl *>(opaque);
+        TraceRunResult deferred_exit{};
+        const QBDI::VMAction deferred_action = self->flight
+                ? classify_deferred_pthread_exit_event(
+                          vm_state, gpr,
+                          reinterpret_cast<uintptr_t>(pthread_exit),
+                          &deferred_exit)
+                : QBDI::CONTINUE;
+        const bool requests_exit = deferred_action == QBDI::STOP;
+        if (requests_exit) {
+            self->thread_exit_requested = true;
+            self->thread_exit_value = deferred_exit.value;
+        }
+        if (vm_state == nullptr ||
+            (vm_state->event & (QBDI::EXEC_TRANSFER_CALL |
+                                QBDI::EXEC_TRANSFER_RETURN)) == 0) {
+            return deferred_action;
+        }
         self->gate->observe_failure(self->sink->failed());
-        return self->gate->trace(QBDI::CONTINUE, [&] {
-            if (self->flight &&
-                !emit_flight_transfer_event(&self->flight_transfer,
-                                            self->last_target_pc, vm_state,
-                                            gpr, self->sink)) {
-                return false;
-            }
-            emit_exec_transfer_event(&self->exec_transfer, vm_state, gpr,
-                                     self->sink);
-            return !self->sink->failed();
-        });
+        const QBDI::VMAction action = self->gate->trace(
+                deferred_action, [&] {
+                    if (self->flight &&
+                        !emit_flight_transfer_event(
+                                &self->flight_transfer,
+                                !self->control_only &&
+                                                self->is_target_address(
+                                                        self->last_target_pc)
+                                        ? self->last_target_pc
+                                        : 0,
+                                vm_state, gpr, self->sink,
+                                !self->control_only)) {
+                        return false;
+                    }
+                    if (!self->control_only &&
+                        (!self->flight ||
+                         self->flight_transfer.last_published)) {
+                        emit_exec_transfer_event(&self->exec_transfer,
+                                                 vm_state, gpr, self->sink);
+                    }
+                    return !self->sink->failed();
+                });
+        if ((vm_state->event & QBDI::EXEC_TRANSFER_CALL) != 0) {
+            self->last_target_pc = 0;
+        }
+        return action;
     }
 
     static uint32_t add_exec(void *opaque) noexcept {
         auto *self = static_cast<Impl *>(opaque);
         return self->vm.addVMEventCB(
-                QBDI::EXEC_TRANSFER_CALL | QBDI::EXEC_TRANSFER_RETURN,
+                QBDI::BASIC_BLOCK_EXIT | QBDI::SEQUENCE_EXIT |
+                        QBDI::EXEC_TRANSFER_CALL |
+                        QBDI::EXEC_TRANSFER_RETURN,
                 on_exec_transfer, self);
     }
 
     bool initialize_execution(uintptr_t logical_entry, uintptr_t execution_entry,
-                              size_t execution_bytes, const uint64_t args[8],
+                              const uint64_t args[8],
                               uint64_t indirect_result) noexcept {
         QBDI::GPRState *gpr = vm.getGPRState();
         if (gpr == nullptr) return fail_setup("QBDI GPR state unavailable");
@@ -251,8 +427,8 @@ struct QbdiThreadSession::Impl {
         gpr->x8 = indirect_result;
         gpr->sp = initial_sp;
         gpr->pc = execution_entry;
-        last_target_pc = logical_entry;
-        if (flight && context != nullptr) {
+        last_target_pc = is_target_address(logical_entry) ? logical_entry : 0;
+        if (flight && context != nullptr && is_target_address(logical_entry)) {
             context->target_address = logical_entry;
             context->target_offset = logical_entry >= module->start
                                              ? logical_entry - module->start
@@ -261,15 +437,24 @@ struct QbdiThreadSession::Impl {
 
         if (setup_attempted) return setup_succeeded;
         setup_attempted = true;
-        if (!instrument(logical_entry, execution_entry, execution_bytes)) return false;
+        if (!instrument_target(logical_entry)) {
+            return false;
+        }
         const FlightTraceContextView flight_context{
                 scene->name, config->target_so, context->module_base,
                 context->target_offset, context->target_address,
                 static_cast<uint32_t>(context->pid),
                 static_cast<uint32_t>(context->tid)};
-        if (flight && !flight_sink.initialize(&chunk_writer, TraceProfile::Full,
-                                              flight_context, gpr)) {
+        if (flight && !flight_sink.ensure_initialized(
+                              &chunk_writer, TraceProfile::Full,
+                              flight_context, gpr)) {
             return fail_setup("flight trace sink initialization failed");
+        }
+        if (flight &&
+            needs_thread_begin_publication(thread_lifecycle_pending,
+                                           thread_lifecycle_published) &&
+            !publish_thread_begin()) {
+            return fail_setup("flight thread-begin publication failed");
         }
 
         const QbdiCallbackRegistration registration_callbacks{
@@ -298,26 +483,101 @@ struct QbdiThreadSession::Impl {
     }
 
     TraceRunResult call(uintptr_t logical_entry, uintptr_t execution_entry,
-                        size_t execution_bytes,
                         const uint64_t args[8],
                         uint64_t indirect_result) noexcept {
         if (!ready || !initialize_execution(logical_entry, execution_entry,
-                                            execution_bytes, args,
-                                            indirect_result)) {
+                                            args, indirect_result)) {
             return {};
         }
-        QBDI::rword value = 0;
-        const bool succeeded = vm.callA(&value, execution_entry,
-                                        static_cast<uint32_t>(call_arguments.size()),
-                                        call_arguments.data());
+        QBDI::GPRState *gpr = vm.getGPRState();
+        if (gpr == nullptr) return {};
+        QBDI::simulateCallA(gpr, kReturnAddress,
+                            static_cast<uint32_t>(call_arguments.size()),
+                            call_arguments.data());
+        if (flight && !flight_sink.sync_registers(*gpr)) return {};
+        thread_exit_requested = false;
+        thread_exit_value = 0;
+        target_execution_observed = false;
+        control_only = false;
+        const bool executed = vm.run(execution_entry, kReturnAddress);
+        const bool returned = executed && gpr->pc == kReturnAddress;
+        const bool target_executed = executed || target_execution_observed;
+        const uint64_t value = QBDI_GPR_GET(gpr, 0);
         if (trace_process_child_detached()) {
-            return {succeeded, static_cast<uint64_t>(value)};
+            return {target_executed, returned, value};
         }
-        if (succeeded) {
-            QBDI::GPRState *gpr = vm.getGPRState();
-            if (gpr != nullptr) collector->finish_last(*gpr);
+        if (target_executed || thread_exit_requested) collector->finish_last(*gpr);
+        if (thread_exit_requested) {
+            return {true, false, true, thread_exit_value};
         }
-        return {succeeded, static_cast<uint64_t>(value)};
+        return {target_executed, returned, value};
+    }
+
+    TraceRunResult continue_control_only() noexcept {
+        QBDI::GPRState *gpr = vm.getGPRState();
+        if (!ready || gpr == nullptr || gpr->pc == 0 ||
+            gpr->pc == kReturnAddress) {
+            return {};
+        }
+        control_only = true;
+        const uintptr_t continuation = gpr->pc;
+        const bool executed = vm.run(continuation, kReturnAddress);
+        const bool returned = executed && gpr->pc == kReturnAddress;
+        if (thread_exit_requested) {
+            return {true, false, true, thread_exit_value};
+        }
+        return {true, returned, QBDI_GPR_GET(gpr, 0)};
+    }
+
+    bool begin_thread(uint32_t creator_tid, uintptr_t start_routine,
+                      uint32_t module_generation) noexcept {
+        if (!flight || thread_lifecycle_pending || thread_lifecycle_published ||
+            creator_tid == 0 || start_routine == 0 || module_generation == 0) {
+            return false;
+        }
+        thread_creator_tid = creator_tid;
+        thread_start_routine = start_routine;
+        thread_module_generation = module_generation;
+        thread_lifecycle_pending = true;
+        return true;
+    }
+
+    bool publish_thread_begin() noexcept {
+        if (!thread_lifecycle_pending || thread_lifecycle_published ||
+            !flight_sink.thread_begin(
+                    thread_creator_tid, static_cast<uint32_t>(context->tid),
+                    thread_start_routine, thread_module_generation)) {
+            return false;
+        }
+        thread_lifecycle_published = true;
+        return true;
+    }
+
+    bool publish_native_thread_begin() noexcept {
+        if (!flight || !thread_lifecycle_pending ||
+            thread_lifecycle_published) {
+            return false;
+        }
+        QBDI::GPRState *gpr = vm.getGPRState();
+        if (gpr == nullptr || context == nullptr) return false;
+        const FlightTraceContextView flight_context{
+                scene->name, config->target_so, context->module_base,
+                context->target_offset, context->target_address,
+                static_cast<uint32_t>(context->pid),
+                static_cast<uint32_t>(context->tid)};
+        return flight_sink.ensure_initialized(
+                       &chunk_writer, TraceProfile::Full, flight_context, gpr) &&
+               publish_thread_begin();
+    }
+
+    bool end_thread() noexcept {
+        if (!thread_lifecycle_pending || thread_lifecycle_ended) return false;
+        thread_lifecycle_ended = true;
+        if (!thread_lifecycle_published) return false;
+        const bool emitted =
+                flight_sink.thread_end(static_cast<uint32_t>(context->tid));
+        const bool sealed = chunk_writer.seal();
+        return emitted && sealed;
     }
 
     const TraceConfig *config = nullptr;
@@ -344,15 +604,30 @@ struct QbdiThreadSession::Impl {
     uint8_t *fakestack = nullptr;
     QBDI::rword initial_sp = 0;
     uintptr_t last_target_pc = 0;
+    uintptr_t thread_start_routine = 0;
+    uint32_t thread_creator_tid = 0;
+    uint32_t thread_module_generation = 0;
     bool flight = false;
     bool ready = false;
     bool setup_attempted = false;
     bool setup_succeeded = false;
+    bool thread_lifecycle_pending = false;
+    bool thread_lifecycle_published = false;
+    bool thread_lifecycle_ended = false;
+    bool thread_exit_requested = false;
+    uint64_t thread_exit_value = 0;
+    static constexpr QBDI::rword kReturnAddress = 42;
+    bool target_execution_observed = false;
+    bool control_only = false;
 };
 #endif
 
 QbdiThreadSession *current_qbdi_thread_session() noexcept {
     return g_current_qbdi_thread_session;
+}
+
+std::shared_ptr<CaptureCoordinator> current_capture_coordinator() noexcept {
+    return g_current_capture_coordinator;
 }
 
 QbdiThreadSession::QbdiThreadSession(uint32_t tid,
@@ -361,7 +636,10 @@ QbdiThreadSession::QbdiThreadSession(uint32_t tid,
 
 QbdiThreadSession::~QbdiThreadSession() {
     if (trace_process_child_detached()) return;
-    if (g_current_qbdi_thread_session == this) g_current_qbdi_thread_session = nullptr;
+    if (g_current_qbdi_thread_session == this) {
+        g_current_capture_coordinator.reset();
+        g_current_qbdi_thread_session = nullptr;
+    }
     delete impl_;
 }
 
@@ -372,6 +650,7 @@ bool QbdiThreadSession::try_enter() noexcept {
         return false;
     }
     entered_ = true;
+    g_current_capture_coordinator = capture_owner_.lock();
     g_current_qbdi_thread_session = this;
     return true;
 }
@@ -379,7 +658,56 @@ bool QbdiThreadSession::try_enter() noexcept {
 void QbdiThreadSession::leave() noexcept {
     if (trace_process_child_detached() || !entered_ || vm_running_) return;
     entered_ = false;
-    if (g_current_qbdi_thread_session == this) g_current_qbdi_thread_session = nullptr;
+    if (g_current_qbdi_thread_session == this) {
+        g_current_capture_coordinator.reset();
+        g_current_qbdi_thread_session = nullptr;
+    }
+}
+
+bool QbdiThreadSession::begin_thread(uint32_t creator_tid,
+                                     uintptr_t start_routine) noexcept {
+    if (!ready_ || thread_begun_ || thread_ended_ || creator_tid == 0 ||
+        start_routine == 0) {
+        return false;
+    }
+#if defined(QTRACE_HOST_TEST)
+    if (lifecycle_reporter_ != nullptr &&
+        !lifecycle_reporter_(lifecycle_opaque_, tid_, true, creator_tid,
+                             start_routine)) {
+        return false;
+    }
+#else
+    if (impl_ == nullptr ||
+        !impl_->begin_thread(creator_tid, start_routine, module_generation_)) {
+        return false;
+    }
+#endif
+    creator_tid_ = creator_tid;
+    thread_entry_ = start_routine;
+    thread_begun_ = true;
+    return true;
+}
+
+bool QbdiThreadSession::publish_native_thread_begin() noexcept {
+    if (!thread_begun_ || thread_ended_) return false;
+#if defined(QTRACE_HOST_TEST)
+    return true;
+#else
+    return impl_ != nullptr && impl_->publish_native_thread_begin();
+#endif
+}
+
+bool QbdiThreadSession::end_thread() noexcept {
+    if (!thread_begun_ || thread_ended_) return false;
+#if defined(QTRACE_HOST_TEST)
+    const bool ended = lifecycle_reporter_ == nullptr ||
+                       lifecycle_reporter_(lifecycle_opaque_, tid_, false,
+                                           creator_tid_, thread_entry_);
+#else
+    const bool ended = impl_ != nullptr && impl_->end_thread();
+#endif
+    thread_ended_ = true;
+    return ended;
 }
 
 void QbdiThreadSession::mark_coverage_gap(uintptr_t pc) noexcept {
@@ -392,6 +720,11 @@ void QbdiThreadSession::set_gap_reporter(
         QbdiThreadSessionGapReporter gap_reporter, void *gap_opaque) noexcept {
     gap_reporter_ = gap_reporter;
     gap_opaque_ = gap_opaque;
+}
+
+void QbdiThreadSession::set_capture_owner(
+        const std::weak_ptr<CaptureCoordinator> &owner) noexcept {
+    capture_owner_ = owner;
 }
 
 void QbdiThreadSession::copy_cache_metrics(TraceMetrics *metrics) const noexcept {
@@ -407,14 +740,16 @@ void QbdiThreadSession::copy_cache_metrics(TraceMetrics *metrics) const noexcept
 }
 
 TraceRunResult QbdiThreadSession::call(uintptr_t entry, const uint64_t args[8],
-                                       uint64_t indirect_result) noexcept {
-    return call_gateway(entry, entry, 0, args, indirect_result);
+                                       uint64_t indirect_result)
+        QTRACE_SESSION_CALL_NOEXCEPT {
+    return call_gateway(entry, entry, entry, 0, args, indirect_result);
 }
 
 TraceRunResult QbdiThreadSession::call_gateway(
         uintptr_t logical_entry, uintptr_t execution_entry,
-        size_t execution_bytes,
-        const uint64_t args[8], uint64_t indirect_result) noexcept {
+        uintptr_t control_start, size_t execution_bytes,
+        const uint64_t args[8], uint64_t indirect_result)
+        QTRACE_SESSION_CALL_NOEXCEPT {
     if (!ready_ || logical_entry == 0 || execution_entry == 0 ||
         args == nullptr || vm_running_) {
         mark_coverage_gap(logical_entry);
@@ -434,12 +769,46 @@ TraceRunResult QbdiThreadSession::call_gateway(
     }
 
     vm_running_ = true;
-    const TraceRunResult result = execute(logical_entry, execution_entry,
-                                          execution_bytes, args,
-                                          indirect_result);
+    TraceRunResult result = execute(logical_entry, execution_entry,
+                                    control_start, execution_bytes, args,
+                                    indirect_result);
     if (trace_process_child_detached()) return result;
+    bool execution_observed = result.target_executed;
+    QbdiNoProgressTracker no_progress;
+    QbdiExecutionState execution_state{};
+    bool state_available = copy_execution_state(&execution_state);
+    if (state_available) (void)no_progress.observe(execution_state);
+    size_t state_unavailable_attempts = 0;
+    // Once QBDI has executed on its virtual stack, restarting the native entry
+    // repeats side effects and returning an invented value breaks the pthread or
+    // scene ABI. Exact no-progress therefore stays in control-only fail-stop and
+    // yields periodically until QBDI can reach the real return/deferred exit.
+    while (execution_observed &&
+           !result.target_returned && !result.exit_requested) {
+        if (!incomplete_) mark_coverage_gap(logical_entry);
+        result = continue_execution();
+        result.target_executed = result.target_executed || execution_observed;
+        execution_observed = result.target_executed;
+        if (trace_process_child_detached()) return result;
+        bool repeated_state = false;
+        if (state_available) {
+            state_available = copy_execution_state(&execution_state);
+            if (state_available) {
+                repeated_state = no_progress.observe(execution_state);
+            }
+        }
+        if (repeated_state ||
+            (!state_available &&
+             ++state_unavailable_attempts ==
+                     QbdiNoProgressTracker::kRepeatedStateYieldInterval)) {
+            (void)::sched_yield();
+            state_unavailable_attempts = 0;
+        }
+    }
     vm_running_ = false;
-    if (!result.target_executed) mark_coverage_gap(logical_entry);
+    if (!result.target_returned && !result.exit_requested && !incomplete_) {
+        mark_coverage_gap(logical_entry);
+    }
     if (entered_here) leave();
     return result;
 }
@@ -449,7 +818,11 @@ TraceRunResult QbdiThreadSession::call_gateway(
 QbdiThreadSession *QbdiThreadSession::create_for_test(
         uint32_t tid, uint32_t module_generation,
         QbdiThreadSessionTestExecutor executor, void *executor_opaque,
-        QbdiThreadSessionGapReporter gap_reporter, void *gap_opaque) noexcept {
+        QbdiThreadSessionGapReporter gap_reporter, void *gap_opaque,
+        QbdiThreadSessionLifecycleReporter lifecycle_reporter,
+        void *lifecycle_opaque,
+        QbdiThreadSessionTestContinuation continuation,
+        QbdiControlExtentRegistration control_registration) noexcept {
     if (tid == 0 || module_generation == 0 || executor == nullptr) return nullptr;
     auto *session = new (std::nothrow) QbdiThreadSession(tid, module_generation);
     if (session == nullptr) return nullptr;
@@ -457,17 +830,32 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
     session->test_executor_opaque_ = executor_opaque;
     session->gap_reporter_ = gap_reporter;
     session->gap_opaque_ = gap_opaque;
+    session->lifecycle_reporter_ = lifecycle_reporter;
+    session->lifecycle_opaque_ = lifecycle_opaque;
+    session->test_continuation_ = continuation;
+    session->test_control_registration_ = control_registration;
     session->ready_ = true;
     return session;
 }
 
+TraceRunResult QbdiThreadSession::continue_execution()
+        QTRACE_SESSION_CALL_NOEXCEPT {
+    if (test_continuation_ == nullptr) return {};
+    return test_continuation_(test_executor_opaque_, this);
+}
+
 TraceRunResult QbdiThreadSession::execute(uintptr_t, uintptr_t execution_entry,
+                                          uintptr_t control_start,
                                           size_t execution_bytes,
                                           const uint64_t args[8],
-                                          uint64_t indirect_result) noexcept {
-    if (test_executor_ == nullptr) return {};
+                                          uint64_t indirect_result)
+        QTRACE_SESSION_CALL_NOEXCEPT {
+    if (test_executor_ == nullptr ||
+        !ensure_control_extent(execution_entry, control_start, execution_bytes)) {
+        return {};
+    }
     return test_executor_(test_executor_opaque_, this, execution_entry,
-                          execution_bytes, args, indirect_result);
+                          control_start, execution_bytes, args, indirect_result);
 }
 
 QbdiThreadSession *QbdiThreadSession::create_normal(
@@ -525,13 +913,17 @@ QbdiThreadSession *QbdiThreadSession::create_flight(
 
 TraceRunResult QbdiThreadSession::execute(uintptr_t logical_entry,
                                           uintptr_t execution_entry,
+                                          uintptr_t control_start,
                                           size_t execution_bytes,
                                           const uint64_t args[8],
-                                          uint64_t indirect_result) noexcept {
-    if (impl_ == nullptr) return {};
+                                          uint64_t indirect_result)
+        QTRACE_SESSION_CALL_NOEXCEPT {
+    if (impl_ == nullptr ||
+        !ensure_control_extent(execution_entry, control_start, execution_bytes)) {
+        return {};
+    }
     const TraceRunResult result = impl_->call(logical_entry, execution_entry,
-                                              execution_bytes, args,
-                                              indirect_result);
+                                              args, indirect_result);
     if (result.target_executed && !trace_process_child_detached() &&
         (impl_->sink->failed() || !impl_->gate->enabled())) {
         mark_coverage_gap(logical_entry);
@@ -539,4 +931,67 @@ TraceRunResult QbdiThreadSession::execute(uintptr_t logical_entry,
     return result;
 }
 
+TraceRunResult QbdiThreadSession::continue_execution()
+        QTRACE_SESSION_CALL_NOEXCEPT {
+    return impl_ != nullptr ? impl_->continue_control_only() : TraceRunResult{};
+}
+
 #endif
+
+bool QbdiThreadSession::ensure_control_extent(
+        uintptr_t execution_entry, uintptr_t control_start,
+        size_t execution_bytes) noexcept {
+    if (execution_bytes == 0) return true;
+    if (control_start > UINTPTR_MAX - execution_bytes) {
+#if !defined(QTRACE_HOST_TEST)
+        if (impl_ != nullptr) {
+            (void)impl_->fail_control_extent(QbdiControlExtentResult::Invalid);
+        }
+#endif
+        return false;
+    }
+    const uintptr_t control_end = control_start + execution_bytes;
+    if (execution_entry < control_start || execution_entry >= control_end) {
+#if !defined(QTRACE_HOST_TEST)
+        if (impl_ != nullptr) {
+            (void)impl_->fail_control_extent(QbdiControlExtentResult::Invalid);
+        }
+#endif
+        return false;
+    }
+
+#if defined(QTRACE_HOST_TEST)
+    QbdiControlExtentRegistration registration = test_control_registration_;
+    if (registration.add_instrumented_range == nullptr &&
+        registration.add_pre_observer == nullptr) {
+        registration = {nullptr, accept_test_control_extent,
+                         accept_test_control_extent};
+    }
+#else
+    if (impl_ == nullptr) return false;
+    const QbdiControlExtentRegistration registration =
+            impl_->control_registration();
+#endif
+    const QbdiControlExtentResult result = control_extents_.ensure(
+            {control_start, control_end}, registration);
+    if (result == QbdiControlExtentResult::Added ||
+        result == QbdiControlExtentResult::AlreadyPresent) {
+        return true;
+    }
+#if !defined(QTRACE_HOST_TEST)
+    (void)impl_->fail_control_extent(result);
+#endif
+    return false;
+}
+
+bool QbdiThreadSession::copy_execution_state(
+        QbdiExecutionState *state) const noexcept {
+#if defined(QTRACE_HOST_TEST)
+    (void)state;
+    return false;
+#else
+    return impl_ != nullptr && impl_->copy_execution_state(state);
+#endif
+}
+
+#undef QTRACE_SESSION_CALL_NOEXCEPT

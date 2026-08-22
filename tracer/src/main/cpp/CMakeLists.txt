@@ -64,6 +64,7 @@ add_library(qbdi_tracer SHARED
         core/trace_run_session.cpp
         core/trace_process_lifecycle.cpp
         core/qbdi_runner_lifecycle.cpp
+        core/qbdi_execution_control.cpp
         core/qbdi_thread_session.cpp
         core/flight_transfer_event.cpp
         core/capture_coordinator.cpp
@@ -83,6 +84,7 @@ add_library(qbdi_tracer SHARED
         flight/flight_trace_sink.cpp
         core/trace_config.cpp
         hooks/inline_hook_adapter.cpp
+        hooks/thread_create_gateway.cpp
         core/qbdi_runner.cpp
         core/native_fallback_arm64.S
         handlers/call_handlers.cpp
@@ -101,6 +103,7 @@ target_compile_options(qbdi_tracer PRIVATE
 target_link_options(qbdi_tracer PRIVATE ${ANDROID_16KB_PAGE_LINK_OPTIONS})
 target_include_directories(qbdi_tracer PRIVATE
         ${QBDI_ROOT}/include
+        ${SHADOWHOOK_ROOT}/third_party/xdl
         ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(qbdi_tracer PRIVATE
         qbdi_static

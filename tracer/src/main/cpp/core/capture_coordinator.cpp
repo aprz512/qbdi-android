@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <dlfcn.h>
+#include <link.h>
+#include <limits>
 #include <new>
 #include <string>
 #include <string_view>
@@ -15,6 +18,7 @@
 #if !defined(QTRACE_HOST_TEST)
 #include "core/trace_process_lifecycle.h"
 #include "flight/flight_artifact.h"
+#include "xdl.h"
 
 #include <cerrno>
 #include <sys/stat.h>
@@ -65,6 +69,89 @@ bool same_module_generation(const ModuleRange &left,
             return false;
         }
     }
+    return true;
+}
+
+bool valid_thread_control(const ThreadExecutionControl &control) noexcept {
+    return control.execution_entry != 0 && control.control_start != 0 &&
+           control.control_bytes != 0 &&
+           control.control_start <=
+                   std::numeric_limits<uintptr_t>::max() - control.control_bytes &&
+           control.execution_entry >= control.control_start &&
+           control.execution_entry < control.control_start + control.control_bytes;
+}
+
+struct ExecutableRangeValidation {
+    uintptr_t start = 0;
+    uintptr_t end = 0;
+    bool executable = false;
+};
+
+int validate_executable_range(struct dl_phdr_info *info, size_t,
+                              void *opaque) noexcept {
+    auto *validation = static_cast<ExecutableRangeValidation *>(opaque);
+    if (validation == nullptr || info == nullptr) return 0;
+    for (ElfW(Half) index = 0; index < info->dlpi_phnum; ++index) {
+        const ElfW(Phdr) &header = info->dlpi_phdr[index];
+        if (header.p_type != PT_LOAD || (header.p_flags & PF_X) == 0 ||
+            header.p_memsz == 0 ||
+            static_cast<uintptr_t>(info->dlpi_addr) >
+                    std::numeric_limits<uintptr_t>::max() - header.p_vaddr) {
+            continue;
+        }
+        const uintptr_t start = static_cast<uintptr_t>(info->dlpi_addr) +
+                                static_cast<uintptr_t>(header.p_vaddr);
+        if (static_cast<uintptr_t>(header.p_memsz) >
+            std::numeric_limits<uintptr_t>::max() - start) {
+            continue;
+        }
+        const uintptr_t end = start + static_cast<uintptr_t>(header.p_memsz);
+        if (validation->start < start || validation->end > end) continue;
+        validation->executable = true;
+        return 1;
+    }
+    return 0;
+}
+
+bool resolve_exact_executable_symbol(uintptr_t address,
+                                     ThreadExecutionControl *control) noexcept {
+    if (address == 0 || control == nullptr) return false;
+    uintptr_t symbol_start = 0;
+    size_t symbol_size = 0;
+#if defined(QTRACE_HOST_TEST)
+    Dl_info info{};
+    void *symbol_opaque = nullptr;
+    if (::dladdr1(reinterpret_cast<void *>(address), &info, &symbol_opaque,
+                  RTLD_DL_SYMENT) == 0 || info.dli_saddr == nullptr ||
+        symbol_opaque == nullptr) {
+        return false;
+    }
+    const auto *symbol = static_cast<const ElfW(Sym) *>(symbol_opaque);
+    symbol_start = reinterpret_cast<uintptr_t>(info.dli_saddr);
+    symbol_size = static_cast<size_t>(symbol->st_size);
+#else
+    xdl_info_t info{};
+    void *cache = nullptr;
+    const int found = ::xdl_addr(reinterpret_cast<void *>(address), &info,
+                                 &cache);
+    if (found != 0 && info.dli_saddr != nullptr) {
+        symbol_start = reinterpret_cast<uintptr_t>(info.dli_saddr);
+        symbol_size = info.dli_ssize;
+    }
+    ::xdl_addr_clean(&cache);
+#endif
+    if (symbol_start != address || symbol_size < sizeof(uint32_t) ||
+        symbol_start > std::numeric_limits<uintptr_t>::max() - symbol_size) {
+        return false;
+    }
+#if !defined(QTRACE_HOST_TEST)
+    if ((symbol_start & 0x3U) != 0 || (symbol_size & 0x3U) != 0) return false;
+#endif
+    ExecutableRangeValidation validation{
+            symbol_start, symbol_start + symbol_size, false};
+    (void)::dl_iterate_phdr(validate_executable_range, &validation);
+    if (!validation.executable) return false;
+    *control = {address, symbol_start, symbol_size, nullptr};
     return true;
 }
 
@@ -270,6 +357,71 @@ bool CaptureCoordinator::matches_module(const ModuleRange &module) const noexcep
            same_module_generation(module_, module);
 }
 
+bool CaptureCoordinator::contains_target_address(uintptr_t address) const noexcept {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!started_.load(std::memory_order_relaxed) || detached() || address == 0 ||
+        module_.readable_executable_range_count >
+                module_.readable_executable_ranges.size()) {
+        return false;
+    }
+    if (module_.readable_executable_range_count == 0) {
+        return address >= module_.start && address < module_.end;
+    }
+    for (size_t index = 0; index < module_.readable_executable_range_count;
+         ++index) {
+        const AddressRange range = module_.readable_executable_ranges[index];
+        if (range.start >= range.end || range.start < module_.start ||
+            range.end > module_.end) {
+            return false;
+        }
+        if (address >= range.start && address < range.end) return true;
+    }
+    return false;
+}
+
+void CaptureCoordinator::set_thread_start_resolver(
+        CaptureThreadStartResolver resolver, void *opaque) noexcept {
+    thread_start_resolver_opaque_.store(opaque, std::memory_order_relaxed);
+    thread_start_resolver_.store(resolver, std::memory_order_release);
+}
+
+bool CaptureCoordinator::resolve_thread_start(
+        uintptr_t logical_entry, ThreadExecutionControl *control) const noexcept {
+    if (logical_entry == 0 || control == nullptr || detached()) {
+        return false;
+    }
+    *control = {};
+    const CaptureThreadStartResolver resolver =
+            thread_start_resolver_.load(std::memory_order_acquire);
+    if (resolver != nullptr &&
+        resolver(thread_start_resolver_opaque_.load(std::memory_order_relaxed),
+                 logical_entry, control) &&
+        valid_thread_control(*control)) {
+        return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!started_.load(std::memory_order_relaxed) || detached()) return false;
+        const size_t count = module_.readable_executable_range_count;
+        for (size_t index = 0; index < (count == 0 ? 1U : count); ++index) {
+            const AddressRange range = count == 0
+                                               ? AddressRange{module_.start, module_.end}
+                                               : module_.readable_executable_ranges[index];
+            if (range.start >= range.end || logical_entry < range.start ||
+                logical_entry >= range.end) {
+                continue;
+            }
+            *control = {logical_entry, range.start,
+                        static_cast<size_t>(range.end - range.start), nullptr};
+            return true;
+        }
+    }
+
+    return resolve_exact_executable_symbol(logical_entry, control) &&
+           valid_thread_control(*control);
+}
+
 CaptureCoordinator::ThreadSlot *CaptureCoordinator::find_slot_locked(
         uint32_t tid) noexcept {
     if (tid == 0 || slots_ == nullptr) return nullptr;
@@ -317,6 +469,34 @@ QbdiThreadSession *CaptureCoordinator::enter(uint32_t tid,
         return nullptr;
     }
 
+    return enter_locked(tid, retained_scene, pc);
+}
+
+QbdiThreadSession *CaptureCoordinator::enter_thread(uint32_t tid,
+                                                    uintptr_t entry) noexcept {
+    if (detached()) return nullptr;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!started_.load(std::memory_order_relaxed) || detached() || tid == 0 ||
+        entry == 0) {
+        return nullptr;
+    }
+    const SceneConfig *init_scene = nullptr;
+    for (const SceneConfig &scene : config_.scenes) {
+        if (scene.index == 0 && scene.name == "init") {
+            init_scene = &scene;
+            break;
+        }
+    }
+    if (init_scene == nullptr) {
+        mark_coverage_gap_locked(tid, entry, CoverageGapReason::SessionFailure);
+        return nullptr;
+    }
+    return enter_locked(tid, *init_scene, entry);
+}
+
+QbdiThreadSession *CaptureCoordinator::enter_locked(
+        uint32_t tid, const SceneConfig &retained_scene, uintptr_t pc) noexcept {
+
     ThreadSlot *slot = find_slot_locked(tid);
     if (slot != nullptr) {
         if (!slot->session->try_enter()) {
@@ -339,6 +519,7 @@ QbdiThreadSession *CaptureCoordinator::enter(uint32_t tid,
             return nullptr;
         }
         session->set_gap_reporter(report_session_gap, this);
+        session->set_capture_owner(weak_from_this());
         slots_[index].tid = tid;
         slots_[index].session = session;
         if (!session->try_enter()) {
@@ -359,6 +540,38 @@ void CaptureCoordinator::leave(QbdiThreadSession *session) noexcept {
         if (slots_[index].session != session) continue;
         session->leave();
         return;
+    }
+}
+
+void CaptureCoordinator::finish_thread(QbdiThreadSession *session,
+                                       bool retain_active_session) noexcept {
+    if (detached() || session == nullptr) return;
+    QbdiThreadSession *owned = nullptr;
+    bool ended = false;
+    uintptr_t entry = 0;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (detached()) return;
+        for (size_t index = 0; index < slot_count_; ++index) {
+            if (slots_[index].session != session) continue;
+            entry = session->thread_entry();
+            ended = session->end_thread();
+            if (retain_active_session) {
+                owned = session;
+                break;
+            }
+            session->leave();
+            owned = session;
+            slots_[index] = {};
+            break;
+        }
+        if (owned != nullptr && !ended) {
+            mark_coverage_gap_locked(owned->tid(), entry,
+                                     CoverageGapReason::SessionFailure);
+        }
+    }
+    if (owned != nullptr && !retain_active_session) {
+        factories_.destroy_session(factories_.opaque, owned);
     }
 }
 

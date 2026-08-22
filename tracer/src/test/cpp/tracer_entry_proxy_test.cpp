@@ -138,6 +138,12 @@ struct FlightProxyFactory {
             CoverageGapReason::SessionFailure};
     std::atomic<uintptr_t> last_execution_entry{0};
     std::atomic<size_t> last_execution_bytes{0};
+    std::atomic<bool> defer_thread_exit{false};
+    std::atomic<bool> partial_execution{false};
+    std::atomic<size_t> continuation_failures_remaining{0};
+    std::atomic<size_t> continuation_stops_remaining{0};
+    std::atomic<size_t> continuation_calls{0};
+    std::atomic<uint64_t> last_argument{0};
     std::mutex gate_mutex;
     std::condition_variable gate_condition;
     size_t blocked_entries = 0;
@@ -211,6 +217,14 @@ void reset_fakes() {
                                            std::memory_order_relaxed);
     g_flight_factory.last_execution_entry.store(0, std::memory_order_relaxed);
     g_flight_factory.last_execution_bytes.store(0, std::memory_order_relaxed);
+    g_flight_factory.defer_thread_exit.store(false, std::memory_order_relaxed);
+    g_flight_factory.partial_execution.store(false, std::memory_order_relaxed);
+    g_flight_factory.continuation_failures_remaining.store(
+            0, std::memory_order_relaxed);
+    g_flight_factory.continuation_stops_remaining.store(
+            0, std::memory_order_relaxed);
+    g_flight_factory.continuation_calls.store(0, std::memory_order_relaxed);
+    g_flight_factory.last_argument.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> flight_lock(g_flight_factory.gate_mutex);
         g_flight_factory.blocked_entries = 0;
@@ -269,13 +283,14 @@ void destroy_flight_proxy_artifact(void *, void *) noexcept {}
 
 TraceRunResult execute_flight_proxy_session(
         void *opaque, QbdiThreadSession *, uintptr_t entry,
-        size_t execution_bytes,
+        uintptr_t, size_t execution_bytes,
         const uint64_t args[8], uint64_t indirect_result) noexcept {
     auto *factory = static_cast<FlightProxyFactory *>(opaque);
     factory->session_calls.fetch_add(1, std::memory_order_relaxed);
     factory->last_execution_entry.store(entry, std::memory_order_relaxed);
     factory->last_execution_bytes.store(execution_bytes,
                                         std::memory_order_relaxed);
+    factory->last_argument.store(args[0], std::memory_order_relaxed);
     {
         std::unique_lock<std::mutex> lock(factory->gate_mutex);
         if (factory->block_sessions) {
@@ -286,7 +301,40 @@ TraceRunResult execute_flight_proxy_session(
             });
         }
     }
+    if (factory->defer_thread_exit.load(std::memory_order_relaxed)) {
+        return {true, false, true, args[0]};
+    }
+    if (factory->partial_execution.load(std::memory_order_relaxed)) {
+        return {true, false, 0xbad};
+    }
     return {true, call_target_arm64(entry, args, indirect_result)};
+}
+
+TraceRunResult continue_flight_proxy_session(
+        void *opaque, QbdiThreadSession *) noexcept {
+    auto *factory = static_cast<FlightProxyFactory *>(opaque);
+    factory->continuation_calls.fetch_add(1, std::memory_order_relaxed);
+    size_t failures = factory->continuation_failures_remaining.load(
+            std::memory_order_relaxed);
+    while (failures != 0 &&
+           !factory->continuation_failures_remaining.compare_exchange_weak(
+                   failures, failures - 1U, std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+    }
+    if (failures != 0) return {};
+    size_t stops = factory->continuation_stops_remaining.load(
+            std::memory_order_relaxed);
+    while (stops != 0 &&
+           !factory->continuation_stops_remaining.compare_exchange_weak(
+                   stops, stops - 1U, std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+    }
+    if (stops != 0) return {true, false, 0xbeef};
+    uint64_t args[8]{factory->last_argument.load(std::memory_order_relaxed)};
+    return {true, true,
+            call_target_arm64(
+                    factory->last_execution_entry.load(std::memory_order_relaxed),
+                    args, 0)};
 }
 
 QbdiThreadSession *create_flight_proxy_session(
@@ -296,7 +344,9 @@ QbdiThreadSession *create_flight_proxy_session(
     auto *factory = static_cast<FlightProxyFactory *>(opaque);
     factory->session_creates.fetch_add(1, std::memory_order_relaxed);
     return QbdiThreadSession::create_for_test(
-            tid, module_generation, execute_flight_proxy_session, factory);
+            tid, module_generation, execute_flight_proxy_session, factory,
+            nullptr, nullptr, nullptr, nullptr,
+            continue_flight_proxy_session);
 }
 
 void destroy_flight_proxy_session(void *, QbdiThreadSession *session) noexcept {
@@ -1012,6 +1062,72 @@ void concurrent_flight_gateway_keeps_the_hook_persistent() {
     CHECK(!coordinator->incomplete());
 }
 
+struct ProxyExitCall {
+    size_t generation = 0;
+    void *value = nullptr;
+    std::atomic<bool> returned{false};
+};
+
+void *dispatch_deferred_exit(void *opaque) {
+    auto *call = static_cast<ProxyExitCall *>(opaque);
+    uint64_t args[8]{reinterpret_cast<uint64_t>(call->value)};
+    (void)trace_proxy_dispatch(call->generation, args, 0);
+    call->returned.store(true, std::memory_order_release);
+    return reinterpret_cast<void *>(0xdead);
+}
+
+void flight_proxy_defers_pthread_exit_until_after_proxy_cleanup() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "flight-deferred-exit", reinterpret_cast<uintptr_t>(new_target));
+    const TraceConfig config = flight_proxy_config(scene);
+    const ModuleRange module = module_named("/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(config, module);
+    (void)coordinator;
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    CHECK(trace_proxy_test_update(config, scene, module));
+    g_flight_factory.defer_thread_exit.store(true, std::memory_order_relaxed);
+
+    int token = 83;
+    ProxyExitCall call{trace_proxy_test_generation(scene.index), &token};
+    pthread_t thread{};
+    CHECK(::pthread_create(&thread, nullptr, dispatch_deferred_exit, &call) == 0);
+    void *result = nullptr;
+    CHECK(::pthread_join(thread, &result) == 0);
+    CHECK(result == &token);
+    CHECK(!call.returned.load(std::memory_order_acquire));
+    CHECK(g_flight_factory.session_calls.load(std::memory_order_relaxed) == 1);
+}
+
+void flight_proxy_continues_partial_execution_without_entry_restart() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "flight-partial", reinterpret_cast<uintptr_t>(new_target));
+    const TraceConfig config = flight_proxy_config(scene);
+    const ModuleRange module = module_named("/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(config, module);
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    CHECK(trace_proxy_test_update(config, scene, module));
+    g_flight_factory.partial_execution.store(true, std::memory_order_relaxed);
+    g_flight_factory.continuation_failures_remaining.store(
+            1, std::memory_order_relaxed);
+    g_flight_factory.continuation_stops_remaining.store(
+            1, std::memory_order_relaxed);
+
+    uint64_t args[8]{89};
+    CHECK(trace_proxy_dispatch(trace_proxy_test_generation(scene.index),
+                               args, 0) == 0x159);
+    CHECK(g_old_calls.load(std::memory_order_relaxed) == 1);
+    CHECK(g_flight_factory.session_calls.load(std::memory_order_relaxed) == 1);
+    CHECK(g_flight_factory.continuation_calls.load(
+                  std::memory_order_relaxed) == 3);
+    CHECK(coordinator->incomplete());
+}
+
 void flight_rejects_a_different_same_basename_mapping() {
     reset_fakes();
     SceneConfig scene = scene_named("module-generation", 0x100);
@@ -1098,6 +1214,15 @@ void active_flight_reconfiguration_is_rejected_as_incomplete() {
     CHECK(replacement_coordinator->incomplete());
     CHECK(g_unhook_calls == 0);
     CHECK(g_hook_calls == 1);
+    ThreadExecutionControl control{};
+    const size_t allocations_before =
+            g_throwing_allocation_calls.load(std::memory_order_relaxed);
+    CHECK(replacement_coordinator->resolve_thread_start(
+            reinterpret_cast<uintptr_t>(new_target), &control));
+    CHECK(g_throwing_allocation_calls.load(std::memory_order_relaxed) ==
+          allocations_before);
+    CHECK(control.execution_entry == reinterpret_cast<uintptr_t>(old_target));
+    CHECK(control.owner != nullptr);
 
     {
         std::lock_guard<std::mutex> lock(g_flight_factory.gate_mutex);
@@ -1135,6 +1260,11 @@ bool hook_function_address(uintptr_t target, void *, HookHandle *handle) {
     handle->retained_original_bytes = kShadowHookArm64OriginalSlotBytes;
     handle->stub = reinterpret_cast<void *>(g_hook_calls + 1);
     return true;
+}
+
+bool hook_symbol_address(uintptr_t target, void *replacement,
+                         HookHandle *handle) {
+    return hook_function_address(target, replacement, handle);
 }
 
 bool unhook_function(HookHandle *handle) {
@@ -1241,6 +1371,8 @@ int main(int argc, char **argv) {
     proxy_runtime_snapshot_performs_no_throwing_allocation();
     flight_hook_install_failure_latches_a_specific_gap();
     concurrent_flight_gateway_keeps_the_hook_persistent();
+    flight_proxy_defers_pthread_exit_until_after_proxy_cleanup();
+    flight_proxy_continues_partial_execution_without_entry_restart();
     flight_rejects_a_different_same_basename_mapping();
     flight_native_bypass_latches_a_coverage_gap();
     active_flight_reconfiguration_is_rejected_as_incomplete();

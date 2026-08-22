@@ -212,6 +212,31 @@ bool FlightEncoder::rotate() noexcept {
     return rotate_to(previous_gpr_);
 }
 
+bool FlightEncoder::thread_begin(uint32_t creator_tid, uint32_t tid,
+                                 uintptr_t start_routine,
+                                 uint32_t module_generation) noexcept {
+    if (creator_tid == 0 || tid == 0 || start_routine == 0 ||
+        module_generation == 0) {
+        return fail();
+    }
+    std::array<uint8_t, 24> payload{};
+    flight_write_u32_le(payload.data(), creator_tid);
+    flight_write_u32_le(payload.data() + 4, tid);
+    flight_write_u64_le(payload.data() + 8,
+                        static_cast<uint64_t>(start_routine));
+    flight_write_u64_le(payload.data() + 16, module_generation);
+    return append_single_with_rotation(FlightRecordType::ThreadBegin,
+                                       payload.data(), payload.size(), 0);
+}
+
+bool FlightEncoder::thread_end(uint32_t tid) noexcept {
+    if (tid == 0) return fail();
+    std::array<uint8_t, 4> payload{};
+    flight_write_u32_le(payload.data(), tid);
+    return append_single_with_rotation(FlightRecordType::ThreadEnd,
+                                       payload.data(), payload.size(), 0);
+}
+
 bool FlightEncoder::append_single_with_rotation(
         FlightRecordType type, const uint8_t *payload, size_t payload_bytes,
         uint16_t flags) noexcept {

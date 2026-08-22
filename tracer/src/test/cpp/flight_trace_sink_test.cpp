@@ -136,6 +136,110 @@ void maps_all_trace_sink_events_and_fails_closed() {
     CHECK(::rmdir(created) == 0);
 }
 
+void lifecycle_initialized_sink_is_reused_by_later_scene_entry() {
+    char directory_template[] = "/tmp/qtrace-flight-sink-reentry-XXXXXX";
+    char *created = ::mkdtemp(directory_template);
+    CHECK(created != nullptr);
+    const std::string path = std::string(created) + "/artifact.flight.bin";
+    FlightOptions options;
+    options.enabled = true;
+    options.capacity_bytes = 8ULL * 1024ULL * 1024ULL;
+    options.chunk_bytes = 64U * 1024U;
+    options.max_threads = 1;
+    options.protected_chunks = 1;
+    FlightArtifact artifact;
+    CHECK(artifact.create(path.c_str(), options, test_identity()));
+    FlightThreadRegistration thread{};
+    CHECK(artifact.register_thread(4412, &thread));
+    FlightChunkWriter writer;
+    CHECK(writer.initialize(&artifact, thread));
+    const FlightTraceContextView context{
+            "init", "libsink_target.so", 0x72000000, 0x80,
+            0x72000080, 4400, 4412};
+    QBDI::GPRState gpr{};
+    for (size_t index = 0; index < 31; ++index) {
+        QBDI_GPR_SET(&gpr, index, 0x100 + index);
+    }
+    gpr.sp = 0x200;
+    gpr.pc = context.target_address;
+    gpr.nzcv = 0x300;
+    FlightTraceSink sink;
+
+    CHECK(sink.ensure_initialized(&writer, TraceProfile::Full, context, &gpr));
+    CHECK(sink.thread_begin(4401, 4412, 0x73000000, 3));
+    const uint32_t lifecycle_bytes = writer.committed_bytes();
+    for (size_t index = 0; index < 31; ++index) {
+        QBDI_GPR_SET(&gpr, index, 0x1000 + index);
+    }
+    gpr.sp = 0x2000;
+    gpr.pc = 0x72000100;
+    gpr.nzcv = 0x3000;
+    CHECK(sink.ensure_initialized(&writer, TraceProfile::Full, context, &gpr));
+    CHECK(writer.committed_bytes() == lifecycle_bytes);
+    constexpr QBDI::rword return_address = 0x1;
+    // Model the exact state handed to sync_registers after simulateCallA.
+    gpr.lr = return_address;
+    CHECK(gpr.lr == return_address);
+    const QBDI::GPRState simulated_entry = gpr;
+    CHECK(sink.sync_registers(gpr));
+    CHECK(writer.committed_bytes() > lifecycle_bytes);
+
+    std::array<uint64_t, kFlightGprCount> reconstructed{};
+    size_t chunk_begins = 0;
+    bool saw_checkpoint = false;
+    bool saw_reentry_sync = false;
+    const uint8_t *bytes = artifact.chunk_data(writer.chunk_index());
+    size_t offset = 0;
+    while (offset < writer.committed_bytes()) {
+        FlightDecodedRecord record{};
+        CHECK(scan_flight_record(bytes + offset,
+                                 writer.committed_bytes() - offset,
+                                 writer.generation(), &record));
+        if (record.type == FlightRecordType::ChunkBegin) {
+            ++chunk_begins;
+        } else if (record.type == FlightRecordType::RegisterDelta &&
+            record.flags == kFlightRegisterCheckpointFlag) {
+            CHECK(record.payload_bytes ==
+                  kFlightGprCount * sizeof(uint64_t));
+            for (size_t index = 0; index < reconstructed.size(); ++index) {
+                reconstructed[index] = flight_read_u64_le(
+                        record.payload + index * sizeof(uint64_t));
+            }
+            saw_checkpoint = true;
+        } else if (record.type == FlightRecordType::RegisterDelta &&
+                   record.flags == 0) {
+            CHECK(saw_checkpoint);
+            const uint64_t mask = flight_read_u64_le(record.payload);
+            size_t payload_offset = sizeof(uint64_t);
+            for (size_t index = 0; index < reconstructed.size(); ++index) {
+                if ((mask & (1ULL << index)) == 0) continue;
+                reconstructed[index] = flight_read_u64_le(
+                        record.payload + payload_offset);
+                payload_offset += sizeof(uint64_t);
+            }
+            CHECK(payload_offset == record.payload_bytes);
+            saw_reentry_sync = true;
+        }
+        offset += record.storage_bytes;
+    }
+    CHECK(chunk_begins == 1);
+    CHECK(saw_checkpoint);
+    CHECK(saw_reentry_sync);
+    for (size_t index = 0; index < 31; ++index) {
+        CHECK(reconstructed[index] == QBDI_GPR_GET(&simulated_entry, index));
+    }
+    CHECK(reconstructed[30] == return_address);
+    CHECK(reconstructed[31] == simulated_entry.sp);
+    CHECK(reconstructed[32] == simulated_entry.pc);
+    CHECK(reconstructed[33] == simulated_entry.nzcv);
+    CHECK(sink.thread_end(4412));
+
+    writer.detach();
+    artifact.close();
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::rmdir(created) == 0);
+}
+
 void full_post_state_drives_deltas_and_the_next_rotation_checkpoint() {
     char directory_template[] = "/tmp/qtrace-flight-post-state-XXXXXX";
     char *created = ::mkdtemp(directory_template);
@@ -365,6 +469,7 @@ void preserves_large_logical_call_behavior_with_independent_fragments() {
 
 int main() {
     maps_all_trace_sink_events_and_fails_closed();
+    lifecycle_initialized_sink_is_reused_by_later_scene_entry();
     full_post_state_drives_deltas_and_the_next_rotation_checkpoint();
     preserves_large_logical_call_behavior_with_independent_fragments();
 }

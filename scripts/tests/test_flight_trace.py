@@ -258,6 +258,54 @@ class FlightRecoveryTests(unittest.TestCase):
         self.assertEqual(17, recovery.summary["module_generation"])
         self.assertEqual("libtarget.so", recovery.summary["target_module"])
 
+    def test_active_thread_begin_without_end_or_seal_is_artifact_incomplete(self):
+        tid = 701
+        generation = 9
+        begin = struct.pack("<IIQQ", 700, tid, 0x71004568, generation)
+        records = core_records(tid, generation=generation) + [
+            flight_record(2, 3, begin, generation=generation),
+        ]
+        raw = artifact(
+            directories=[directory_entry(tid, 1, 3, 0, generation)],
+            chunks=[chunk(0, tid, generation, records, state=1)],
+            flags=0,
+            module_generation=generation,
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        lifecycle = [event for event in recovery.merged
+                     if event.kind in {"thread_begin", "thread_end"}]
+        self.assertEqual([(3, "thread_begin", tid)], [
+            (event.global_seq, event.kind, event.tid) for event in lifecycle
+        ])
+        self.assertFalse(recovery.summary["complete"])
+
+    def test_external_start_below_module_base_uses_retained_chunk_target(self):
+        tid = 703
+        generation = 10
+        begin = struct.pack("<IIQQ", 702, tid, 0x1000, generation)
+        end = struct.pack("<I", tid)
+        records = core_records(tid, generation=generation) + [
+            flight_record(2, 3, begin, generation=generation),
+            flight_record(3, 4, end, generation=generation),
+        ]
+        raw = artifact(
+            directories=[directory_entry(tid, 2, 4, 0, generation)],
+            chunks=[chunk(0, tid, generation, records, state=2)],
+            flags=0,
+            module_generation=generation,
+        )
+
+        recovery = recover_flight(io.BytesIO(raw))
+
+        self.assertTrue(recovery.summary["complete"])
+        begin_event = next(event for event in recovery.merged
+                           if event.kind == "thread_begin")
+        self.assertEqual((702, tid, 0x1000, generation), struct.unpack(
+            "<IIQQ", bytes.fromhex(begin_event.data["payload_hex"])
+        ))
+
     def test_sealed_chunk_resolves_dictionary_and_reassembles_logical_call(self):
         generation = 3
         records = core_records(88, generation=generation)

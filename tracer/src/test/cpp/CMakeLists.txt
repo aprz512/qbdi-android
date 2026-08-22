@@ -33,6 +33,13 @@ add_trace_test(flight_atomic_u32_test
     flight_atomic_u32_test.cpp)
 target_link_libraries(flight_atomic_u32_test PRIVATE Threads::Threads)
 
+add_trace_test(demo_pthread_fixture_test
+    demo_pthread_fixture_test.cpp
+    ../../../../app/src/main/cpp/demo_target/pthread_fixture.cpp)
+target_include_directories(demo_pthread_fixture_test PRIVATE
+    ../../../../app/src/main/cpp)
+target_link_libraries(demo_pthread_fixture_test PRIVATE Threads::Threads)
+
 add_trace_test(flight_artifact_test
     flight_artifact_test.cpp
     ../../main/cpp/flight/flight_artifact.cpp)
@@ -160,6 +167,7 @@ target_link_libraries(qbdi_runner_lifecycle_test PRIVATE lz4_static Threads::Thr
 
 add_trace_test(qbdi_thread_session_test
     qbdi_thread_session_test.cpp
+    ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp)
 
@@ -170,11 +178,26 @@ add_trace_test(flight_transfer_event_test
 add_trace_test(capture_coordinator_test
     capture_coordinator_test.cpp
     ../../main/cpp/core/capture_coordinator.cpp
+    ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
     ../../main/cpp/core/trace_config.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp)
 target_link_libraries(capture_coordinator_test PRIVATE Threads::Threads)
+
+add_trace_test(thread_create_gateway_test
+    thread_create_gateway_test.cpp
+    ../../main/cpp/hooks/thread_create_gateway.cpp
+    ../../main/cpp/core/capture_coordinator.cpp
+    ../../main/cpp/core/qbdi_execution_control.cpp
+    ../../main/cpp/core/qbdi_thread_session.cpp
+    ../../main/cpp/core/module_maps.cpp
+    ../../main/cpp/core/trace_config.cpp
+    ../../main/cpp/core/trace_process_lifecycle.cpp)
+target_link_libraries(thread_create_gateway_test PRIVATE Threads::Threads)
+target_link_options(thread_create_gateway_test PRIVATE
+    -Wl,--wrap=_ZnwmRKSt9nothrow_t
+    -rdynamic)
 
 add_trace_test(trace_run_session_test
     trace_run_session_test.cpp
@@ -214,7 +237,9 @@ add_trace_test(signal_context_arm64_test
 add_trace_test(tracer_entry_proxy_test
     tracer_entry_proxy_test.cpp
     ../../main/cpp/tracer_entry.cpp
+    ../../main/cpp/hooks/thread_create_gateway.cpp
     ../../main/cpp/core/capture_coordinator.cpp
+    ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp

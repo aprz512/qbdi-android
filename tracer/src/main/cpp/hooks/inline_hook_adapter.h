@@ -16,6 +16,9 @@ constexpr size_t kShadowHookArm64OriginalSlotBytes = 64;
 struct HookHandle {
     void *stub = nullptr;
     void *original = nullptr;
+    // Optional caller-owned atomic publication slot. ShadowHook writes the
+    // retained bypass here before the replacement can become reachable.
+    void **published_original = nullptr;
     // ShadowHook's rewritten entry is generation-owned and intentionally retained
     // after unhook so an invocation that already branched to an old proxy can still
     // bypass that exact hook generation.
@@ -29,5 +32,10 @@ struct HookHandle {
 bool init_inline_hook();
 
 bool hook_function_address(uintptr_t target, void *replacement, HookHandle *handle);
+
+// Exported process APIs use ShadowHook's symbol-aware address path. The
+// retained original remains valid for process-lifetime gateways that never
+// unhook.
+bool hook_symbol_address(uintptr_t target, void *replacement, HookHandle *handle);
 
 bool unhook_function(HookHandle *handle);

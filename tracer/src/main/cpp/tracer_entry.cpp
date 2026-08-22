@@ -8,6 +8,7 @@
 #include "core/trace_process_lifecycle.h"
 #include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
+#include "hooks/thread_create_gateway.h"
 
 #include <array>
 #include <atomic>
@@ -116,6 +117,34 @@ static void mark_flight_gateway_gap(
              scene.name.c_str(), static_cast<unsigned long>(pc), reason);
     coordinator->mark_coverage_gap(
             static_cast<uint32_t>(::syscall(SYS_gettid)), pc, gap_reason);
+}
+
+static bool resolve_flight_thread_start(
+        void *opaque, uintptr_t logical_entry,
+        ThreadExecutionControl *control) noexcept {
+    auto *coordinator = static_cast<CaptureCoordinator *>(opaque);
+    if (coordinator == nullptr || control == nullptr) {
+        return false;
+    }
+    if (!coordinator->contains_target_address(logical_entry)) return false;
+    std::lock_guard<std::mutex> guard(g_lock);
+    for (size_t generation = 0; generation < g_next_proxy_generation;
+         ++generation) {
+        const std::shared_ptr<InstalledSceneHook> &hook =
+                g_hook_generations[generation];
+        if (hook == nullptr || hook->retired || !hook->installed ||
+            hook->hook.target != logical_entry ||
+            hook->hook.retained_original == nullptr ||
+            hook->hook.retained_original_bytes == 0) {
+            continue;
+        }
+        const uintptr_t retained =
+                reinterpret_cast<uintptr_t>(hook->hook.retained_original);
+        *control = {retained, retained, hook->hook.retained_original_bytes,
+                    hook};
+        return true;
+    }
+    return false;
 }
 
 static uint64_t call_retained_original_parent(size_t generation,
@@ -256,6 +285,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
             if (session != nullptr) {
                 traced = session->call_gateway(
                         runtime->invocation.target_address, execution_target,
+                        execution_target,
                         runtime->hook->hook.retained_original_bytes,
                         runtime->invocation.args.data(),
                         runtime->invocation.indirect_result);
@@ -266,6 +296,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                                    runtime->invocation);
         }
     }
+    const bool deferred_thread_exit = traced.exit_requested;
     const uint64_t result = traced.target_executed
                                     ? traced.value
                                     : execution_target != 0
@@ -320,6 +351,10 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
         }
     }
     delete runtime;
+    if (deferred_thread_exit) {
+        ::pthread_exit(reinterpret_cast<void *>(
+                static_cast<uintptr_t>(result)));
+    }
     return result;
 }
 
@@ -542,6 +577,10 @@ void trace_proxy_test_set_coordinator(
         const std::shared_ptr<CaptureCoordinator> &coordinator) {
     std::lock_guard<std::mutex> guard(g_lock);
     g_capture_coordinator = coordinator;
+    if (coordinator != nullptr) {
+        coordinator->set_thread_start_resolver(resolve_flight_thread_start,
+                                               coordinator.get());
+    }
 }
 
 CaptureCoordinator *trace_proxy_test_hook_coordinator(size_t generation) {
@@ -579,6 +618,7 @@ static void tracer_atfork_parent() {
 
 static void tracer_atfork_child() {
     trace_process_mark_child_detached();
+    process_thread_create_gateway().detach_after_fork_child();
     if (g_capture_coordinator != nullptr) {
         g_capture_coordinator->detach_after_fork_child();
     }
@@ -610,6 +650,12 @@ static void install_hooks_for_module(const ModuleRange &module,
                     static_cast<uint32_t>(g_config_generation))) {
             QTRACE_E("cannot start flight capture artifact");
             return;
+        }
+        g_capture_coordinator->set_thread_start_resolver(
+                resolve_flight_thread_start, g_capture_coordinator.get());
+        if (!process_thread_create_gateway().install(
+                    g_capture_coordinator)) {
+            QTRACE_E("cannot install persistent pthread_create gateway");
         }
     }
     QTRACE_I("target module %s base=0x%lx", g_config.target_so.c_str(),
