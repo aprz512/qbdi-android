@@ -82,6 +82,7 @@ private:
         std::array<std::atomic<uint64_t>, 34> words{};
         std::atomic<QBDI::GPRState *> gpr{nullptr};
         std::atomic<uint64_t> direct_delivery{0};
+        std::atomic<uintptr_t> direct_svc_pc{0};
     };
     struct ReturnedSnapshot {
         std::array<std::atomic<uint64_t>, 34> words{};
@@ -98,13 +99,16 @@ private:
 
     bool load_guest(Arm64SignalContext *context,
                     QBDI::GPRState **gpr = nullptr,
-                    uint64_t *direct_delivery = nullptr) const noexcept;
+                    uint64_t *direct_delivery = nullptr,
+                    uintptr_t *direct_svc_pc = nullptr) const noexcept;
     void publish_guest(const Arm64SignalContext &context,
                        QBDI::GPRState *gpr,
-                       uint64_t direct_delivery = 0) noexcept;
+                       uint64_t direct_delivery = 0,
+                       uintptr_t direct_svc_pc = 0) noexcept;
     bool store_guest(const Arm64SignalContext &context,
                      QBDI::GPRState *gpr,
-                     uint64_t direct_delivery = 0) noexcept;
+                     uint64_t direct_delivery = 0,
+                     uintptr_t direct_svc_pc = 0) noexcept;
     __attribute__((no_stack_protector)) bool queue_returned_guest(
             const Arm64SignalContext &initial,
             const Arm64SignalContext &returned,
@@ -112,7 +116,7 @@ private:
     bool apply_returned_guest(QBDI::GPRState *gpr,
                               bool *pc_changed = nullptr) noexcept;
     __attribute__((no_stack_protector)) void
-    publish_return_coverage_gap() noexcept;
+    publish_coverage_gap() noexcept;
 
     FlightArtifact *artifact_ = nullptr;
     FlightThreadRegistration registration_{};

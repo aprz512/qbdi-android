@@ -916,6 +916,14 @@ constexpr uint64_t kDeferredCookie = 0x514244495349474eULL;
 constexpr uint64_t kDeferredMask = 0xa5a55a5af0f00f0fULL;
 uintptr_t g_deferred_entry_pc = 0;
 uint64_t g_deferred_entry_x0 = 0;
+std::array<uintptr_t, 2> g_direct_entry_pcs{};
+uint32_t g_direct_entry_count = 0;
+uintptr_t g_unmatched_return_pc = 0;
+FlightArtifact *g_proof_failure_artifact = nullptr;
+uint32_t g_proof_failure_slot = 0;
+bool g_proof_failure_gap_visible_in_handler = false;
+std::array<uintptr_t, 2> g_proof_failure_entry_pcs{};
+uint32_t g_proof_failure_entry_count = 0;
 uint32_t g_bounded_return_calls = 0;
 uintptr_t g_deferred_return_pc = 0;
 SignalBroker *g_return_publication_broker = nullptr;
@@ -931,6 +939,34 @@ void deferred_return_handler(int, siginfo_t *, void *context) {
 void deferred_pc_handler(int, siginfo_t *, void *context) {
     auto *guest = static_cast<SignalBrokerGuestContext *>(context);
     guest->registers.pc = g_deferred_return_pc;
+}
+
+void unmatched_pc_change_handler(int, siginfo_t *, void *context) {
+    auto *guest = static_cast<SignalBrokerGuestContext *>(context);
+    if (g_direct_entry_count < g_direct_entry_pcs.size()) {
+        g_direct_entry_pcs[g_direct_entry_count] = guest->registers.pc;
+    }
+    if (g_direct_entry_count++ == 0) {
+        guest->registers.pc = g_unmatched_return_pc;
+    }
+}
+
+void proof_failure_handler(int, siginfo_t *, void *context) {
+    auto *guest = static_cast<SignalBrokerGuestContext *>(context);
+    if (g_proof_failure_entry_count < g_proof_failure_entry_pcs.size()) {
+        g_proof_failure_entry_pcs[g_proof_failure_entry_count] =
+                guest->registers.pc;
+    }
+    ++g_proof_failure_entry_count;
+    FlightEmergencyRecord record{};
+    g_proof_failure_gap_visible_in_handler =
+            g_proof_failure_artifact != nullptr &&
+            g_proof_failure_artifact->incomplete() &&
+            scan_flight_emergency(
+                    g_proof_failure_artifact->emergency_bytes(
+                            g_proof_failure_slot),
+                    &record) &&
+            record.type == static_cast<uint32_t>(FlightRecordType::CoverageGap);
 }
 
 void nested_deferred_return_handler(int signal_number, siginfo_t *info,
@@ -1492,7 +1528,65 @@ void same_signal_before_self_signal_svc_cannot_claim_the_resume_pc() {
     }
 }
 
-void direct_delivery_proof_never_reads_before_a_page_boundary() {
+void direct_delivery_resume_pc_is_bound_to_the_original_svc() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(unmatched_pc_change_handler),
+            SA_SIGINFO, 0, 0};
+    QBDI::GPRState install_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &action, nullptr),
+                  &install_gpr) == QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t guest_code[]{0xd4000001U, 0xd503201fU};
+    QBDI::GPRState gpr{};
+    gpr.pc = reinterpret_cast<uintptr_t>(&guest_code[0]);
+    gpr.x8 = 131;
+    gpr.x0 = 4242;
+    gpr.x1 = 731;
+    gpr.x2 = SIGUSR1;
+    TraceOptions options{};
+    ModuleRange module{};
+    module.start = reinterpret_cast<uintptr_t>(&guest_code[0]);
+    module.end = reinterpret_cast<uintptr_t>(&guest_code[2]);
+    InstructionCollector collector(
+            nullptr, nullptr, nullptr, nullptr, nullptr, options, module,
+            &broker, &artifact.thread);
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+
+    siginfo_t info{};
+    info.si_code = SI_TKILL;
+    info.si_pid = 4242;
+    alignas(uint32_t) uint32_t native_code[]{
+            0xd503201fU, 0xd4000001U, 0xd503201fU};
+    SignalBrokerGuestContext before_svc{};
+    before_svc.registers.regs[0] = 0;
+    before_svc.registers.regs[1] = 731;
+    before_svc.registers.regs[2] = SIGUSR1;
+    before_svc.registers.regs[8] = 131;
+    before_svc.registers.pc = reinterpret_cast<uintptr_t>(&native_code[1]);
+    g_direct_entry_pcs = {};
+    g_direct_entry_count = 0;
+    g_unmatched_return_pc = 0x7100cafeU;
+    CHECK(broker.dispatch(SIGUSR1, &info, &before_svc, &artifact.thread));
+
+    SignalBrokerGuestContext after_svc = before_svc;
+    after_svc.registers.pc = reinterpret_cast<uintptr_t>(&native_code[2]);
+    CHECK(broker.dispatch(SIGUSR1, &info, &after_svc, &artifact.thread));
+
+    CHECK(g_direct_entry_count == 2);
+    CHECK(g_direct_entry_pcs[0] ==
+          reinterpret_cast<uintptr_t>(&guest_code[0]));
+    CHECK(g_direct_entry_pcs[1] ==
+          reinterpret_cast<uintptr_t>(&guest_code[1]));
+    gpr.pc = reinterpret_cast<uintptr_t>(&guest_code[1]);
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &gpr));
+    CHECK(gpr.pc == g_unmatched_return_pc);
+}
+
+void unreadable_direct_delivery_proof_marks_gap_before_dispatch() {
     const pid_t child = ::fork();
     CHECK(child >= 0);
     if (child == 0) {
@@ -1501,7 +1595,7 @@ void direct_delivery_proof_never_reads_before_a_page_boundary() {
         ArtifactFixture artifact;
         if (!broker.register_thread(&artifact.thread)) _exit(80);
         KernelSignalAction action{
-                reinterpret_cast<uintptr_t>(deferred_return_handler),
+                reinterpret_cast<uintptr_t>(proof_failure_handler),
                 SA_SIGINFO, 0, 0};
         QBDI::GPRState install_gpr{};
         if (broker.observe_rt_sigaction(
@@ -1542,11 +1636,30 @@ void direct_delivery_proof_never_reads_before_a_page_boundary() {
         siginfo_t same_number_info{};
         same_number_info.si_code = SI_TKILL;
         same_number_info.si_pid = 4242;
-        g_deferred_entry_pc = 0;
+        g_proof_failure_artifact = &artifact.artifact;
+        g_proof_failure_slot = artifact.registration.directory_index;
+        g_proof_failure_gap_visible_in_handler = false;
+        g_proof_failure_entry_pcs = {};
+        g_proof_failure_entry_count = 0;
         if (!broker.dispatch(SIGUSR1, &same_number_info, &at_boundary,
-                             &artifact.thread) ||
-            g_deferred_entry_pc != reinterpret_cast<uintptr_t>(&code[0])) {
+                             &artifact.thread)) {
             _exit(85);
+        }
+        if (!g_proof_failure_gap_visible_in_handler ||
+            g_proof_failure_entry_pcs[0] !=
+                    reinterpret_cast<uintptr_t>(&code[0])) {
+            _exit(86);
+        }
+        alignas(uint32_t) uint32_t native_code[]{
+                0xd4000001U, 0xd503201fU};
+        SignalBrokerGuestContext after_svc = at_boundary;
+        after_svc.registers.pc = reinterpret_cast<uintptr_t>(&native_code[1]);
+        if (!broker.dispatch(SIGUSR1, &same_number_info, &after_svc,
+                             &artifact.thread) ||
+            g_proof_failure_entry_count != 2 ||
+            g_proof_failure_entry_pcs[1] !=
+                    reinterpret_cast<uintptr_t>(&code[1])) {
+            _exit(87);
         }
         _exit(0);
     }
@@ -1795,7 +1908,8 @@ int main() {
     direct_signal_delivery_svc_defers_resume_pc_until_the_signal_matches();
     unrelated_signal_during_delivery_svc_keeps_the_interrupted_pc();
     same_signal_before_self_signal_svc_cannot_claim_the_resume_pc();
-    direct_delivery_proof_never_reads_before_a_page_boundary();
+    direct_delivery_resume_pc_is_bound_to_the_original_svc();
+    unreadable_direct_delivery_proof_marks_gap_before_dispatch();
     handler_changes_are_merged_after_qbdi_syscall_writeback();
     returned_pc_breaks_to_vm_before_the_selected_instruction_executes();
     nested_returned_contexts_merge_only_their_changed_registers();
