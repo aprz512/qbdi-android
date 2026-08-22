@@ -120,6 +120,15 @@ struct FlightEmergencyRecord {
     uint8_t reserved[kFlightEmergencyRecordBytes - 52];
 };
 
+// CoverageGap records do not carry a signal code. That field instead persists
+// the number of later failures dropped to preserve the slot's first root cause.
+inline uint32_t flight_coverage_gap_dropped_count(
+        const FlightEmergencyRecord &record) noexcept {
+    return record.type == static_cast<uint32_t>(FlightRecordType::CoverageGap)
+                   ? record.signal_code
+                   : 0;
+}
+
 // Persistent flight artifacts are always serialized with these explicit
 // little-endian helpers; native struct byte order is never persisted.
 inline void flight_write_u16_le(uint8_t *destination, uint16_t value) noexcept {

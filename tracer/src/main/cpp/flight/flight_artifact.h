@@ -126,6 +126,7 @@ public:
                          const FlightEmergencyRecord &record) noexcept;
     bool write_emergency(uint32_t slot_index,
                          const FlightEmergencyRecord &record) noexcept;
+    bool increment_dropped_coverage_gap(uint32_t slot_index) noexcept;
     const uint8_t *emergency_bytes(uint32_t directory_index) const noexcept;
 
     const uint8_t *chunk_data(uint32_t chunk_index) const noexcept;
@@ -154,6 +155,9 @@ private:
     const uint8_t *chunk(uint32_t index) const noexcept;
     void publish_exhaustion(uint32_t tid, uint32_t slot_index,
                             FlightIncompleteReason reason) noexcept;
+    bool publish_emergency_claimed(
+            uint8_t *slot, RuntimeEmergencyMetadata &metadata,
+            const FlightEmergencyRecord &record) noexcept;
     void reset_state() noexcept;
 
     int fd_ = -1;

@@ -186,6 +186,10 @@ void reuses_only_same_tid_and_latches_recursive_gap_and_leave() {
 
     coordinator.mark_coverage_gap(222, 0x71000444);
     CHECK(factory.coverage_gaps == 2);
+    coordinator.mark_coverage_gap(333, 0x71000555,
+                                  CoverageGapReason::HookSetup);
+    CHECK(factory.coverage_gaps == 3);
+    CHECK(coordinator.dropped_gap_count() == 2);
     CHECK(coordinator.incomplete());
 }
 

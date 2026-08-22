@@ -67,6 +67,9 @@ public:
     uint32_t module_generation() const noexcept {
         return module_generation_.load(std::memory_order_acquire);
     }
+    uint64_t dropped_gap_count() const noexcept {
+        return dropped_gap_count_.load(std::memory_order_acquire);
+    }
     bool copy_module(ModuleRange *module) const;
     bool matches_module(const ModuleRange &module) const noexcept;
 
@@ -93,6 +96,8 @@ private:
     std::atomic<uint32_t> module_generation_{0};
     std::atomic<bool> incomplete_{false};
     std::atomic<bool> detached_{false};
+    std::atomic<uint64_t> dropped_gap_count_{0};
+    uint64_t coverage_gap_count_ = 0;
     bool start_attempted_ = false;
     std::atomic<bool> started_{false};
 };

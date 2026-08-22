@@ -336,6 +336,33 @@ void emergency_slots_publish_complete_little_endian_records() {
     CHECK(!scan_flight_emergency(bytes, &decoded));
 }
 
+void coverage_gap_root_cause_is_sticky_and_counts_later_failures() {
+    TemporaryArtifact file;
+    FlightOptions options = test_options();
+    FlightArtifact artifact;
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
+
+    const uint32_t slot = options.max_threads;
+    FlightEmergencyRecord first{};
+    first.type = static_cast<uint32_t>(FlightRecordType::CoverageGap);
+    first.tid = 101;
+    first.sequence = 41;
+    first.pc = 0x71000100;
+    first.flags = 7;
+    CHECK(artifact.write_emergency(slot, first));
+    CHECK(artifact.increment_dropped_coverage_gap(slot));
+    CHECK(artifact.increment_dropped_coverage_gap(slot));
+
+    FlightEmergencyRecord decoded{};
+    CHECK(scan_flight_emergency(artifact.emergency_bytes(slot), &decoded));
+    CHECK(decoded.type == first.type);
+    CHECK(decoded.tid == first.tid);
+    CHECK(decoded.sequence == first.sequence);
+    CHECK(decoded.pc == first.pc);
+    CHECK(decoded.flags == first.flags);
+    CHECK(flight_coverage_gap_dropped_count(decoded) == 2);
+}
+
 void colliding_emergency_writers_never_publish_a_hybrid() {
     TemporaryArtifact file;
     FlightArtifact artifact;
@@ -522,6 +549,7 @@ int main() {
     registers_unique_tids_and_marks_exhaustion_incomplete();
     protected_pool_exhaustion_publishes_the_affected_tid();
     emergency_slots_publish_complete_little_endian_records();
+    coverage_gap_root_cause_is_sticky_and_counts_later_failures();
     colliding_emergency_writers_never_publish_a_hybrid();
     concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity();
     allocator_reclaims_global_oldest_without_stealing_reservations();

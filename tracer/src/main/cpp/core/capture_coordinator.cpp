@@ -164,8 +164,11 @@ void mark_production_gap(void *, void *opaque, uint32_t tid,
     record.sequence = artifact->artifact.next_sequence();
     record.pc = pc;
     record.flags = static_cast<uint32_t>(reason);
-    (void)artifact->artifact.write_emergency(
-            artifact->global_emergency_slot, record);
+    if (!artifact->artifact.write_emergency(
+                artifact->global_emergency_slot, record)) {
+        (void)artifact->artifact.increment_dropped_coverage_gap(
+                artifact->global_emergency_slot);
+    }
 }
 
 CaptureCoordinatorFactories production_factories() noexcept {
@@ -283,6 +286,10 @@ void CaptureCoordinator::mark_coverage_gap_locked(uint32_t tid,
                                                   uintptr_t pc,
                                                   CoverageGapReason reason) noexcept {
     incomplete_.store(true, std::memory_order_release);
+    if (coverage_gap_count_ != 0) {
+        dropped_gap_count_.fetch_add(1, std::memory_order_release);
+    }
+    ++coverage_gap_count_;
     factories_.mark_coverage_gap(factories_.opaque, artifact_, tid, pc, reason);
 }
 
