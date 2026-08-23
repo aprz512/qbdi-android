@@ -1137,6 +1137,11 @@ qbdi_tracer_configure(const char *encoded_config) {
     }
 }
 
+extern "C" __attribute__((visibility("default"))) int
+qbdi_tracer_set_shadowhook_helper_path(const char *helper_path) {
+    return configure_inline_hook_dl_init_helper_path(helper_path) ? 0 : -1;
+}
+
 extern "C" __attribute__((visibility("default"))) void
 qbdi_tracer_install_module(const char *module_path, uintptr_t module_base, uintptr_t module_size) {
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;

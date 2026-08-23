@@ -24,12 +24,14 @@
 #include "sh_linker.h"
 
 #include <dlfcn.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/system_properties.h>
+#include <unistd.h>
 
 #include "queue.h"
 #include "sh_log.h"
@@ -53,8 +55,27 @@
 #define SH_LINKER_HOOK_WITH_DL_MUTEX 0
 #endif
 
-#define SH_LINKER_SHADOWHOOK_BASE_NAME         "libshadowhook.so"
+#define SH_LINKER_SHADOWHOOK_BASE_NAME "libshadowhook.so"
 #define SH_LINKER_SHADOWHOOK_NOTHING_BASE_NAME "libshadowhook_nothing.so"
+
+static char sh_linker_init_helper_path[PATH_MAX] =
+    SH_LINKER_SHADOWHOOK_NOTHING_BASE_NAME;
+
+int sh_linker_set_init_helper_path(const char *helper_path) {
+  if (NULL == helper_path || helper_path[0] != '/') return -1;
+  size_t helper_path_len = strnlen(helper_path, sizeof(sh_linker_init_helper_path));
+  if (0 == helper_path_len || helper_path_len >= sizeof(sh_linker_init_helper_path) ||
+      0 != access(helper_path, R_OK))
+    return -1;
+
+  void *loaded = dlopen(helper_path, RTLD_NOW | RTLD_NOLOAD);
+  if (NULL != loaded) {
+    dlclose(loaded);
+    return -1;
+  }
+  memcpy(sh_linker_init_helper_path, helper_path, helper_path_len + 1);
+  return 0;
+}
 
 // for struct soinfo's memory scan
 static size_t sh_linker_soinfo_offset_load_bias = SIZE_MAX;
@@ -238,7 +259,7 @@ end:
 //  // ......
 //};
 static int sh_linker_soinfo_memory_scan_pre(void *soinfo) {
-  void *handle = xdl_open(SH_LINKER_SHADOWHOOK_NOTHING_BASE_NAME, XDL_DEFAULT);
+  void *handle = xdl_open(sh_linker_init_helper_path, XDL_DEFAULT);
   if (NULL == handle) {
     SH_LOG_ERROR("linker: memory_scan_pre, NULL == handle");
     return -1;
@@ -302,7 +323,7 @@ static int sh_linker_soinfo_memory_scan_pre(void *soinfo) {
         val_2 == l_ld && val_5 == 0 && val_6 == val_0) {
       bool l_name_matched = false;
       SH_SIG_TRY(SIGSEGV, SIGBUS) {
-        l_name_matched = sh_util_ends_with((const char *)val_1, SH_LINKER_SHADOWHOOK_NOTHING_BASE_NAME);
+        l_name_matched = sh_util_ends_with((const char *)val_1, sh_linker_init_helper_path);
 #if __ANDROID_API__ <= __ANDROID_API_M__
         if (!l_name_matched && sh_util_get_api_level() == __ANDROID_API_M__) {
           if (sh_util_ends_with((const char *)val_1, ".apk") &&
@@ -576,7 +597,8 @@ static int sh_linker_hook_call_ctors_dtors(sh_addr_info_t *call_ctors_addr_info,
 
   // do memory scan for struct soinfo
   __atomic_store_n(&sh_linker_soinfo_offset_scan_tid, gettid(), __ATOMIC_RELEASE);
-  void *handle = dlopen(SH_LINKER_SHADOWHOOK_NOTHING_BASE_NAME, RTLD_NOW);
+  SH_LOG_INFO("linker: calibration helper path %s", sh_linker_init_helper_path);
+  void *handle = dlopen(sh_linker_init_helper_path, RTLD_NOW);
   if (__predict_true(NULL != handle)) dlclose(handle);
   __atomic_store_n(&sh_linker_soinfo_offset_scan_tid, 0, __ATOMIC_RELEASE);
   if (__predict_false(NULL == handle)) {

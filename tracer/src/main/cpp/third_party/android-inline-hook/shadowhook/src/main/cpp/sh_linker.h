@@ -31,6 +31,7 @@
 #include "shadowhook.h"
 
 int sh_linker_init(void);
+int sh_linker_set_init_helper_path(const char *helper_path);
 
 // for Android 4.x
 #ifdef SH_CONFIG_COMPATIBLE_WITH_ARM_ANDROID_4_X

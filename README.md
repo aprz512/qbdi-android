@@ -40,6 +40,7 @@ Android arm64 demo project for showing how to use QBDI in an injected tracer.
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell mkdir -p /data/local/tmp/qbdi-android
+adb push out/arm64-v8a/libshadowhook_nothing.so /data/local/tmp/qbdi-android/
 adb push out/arm64-v8a/libqbdi_tracer.so /data/local/tmp/qbdi-android/
 ```
 

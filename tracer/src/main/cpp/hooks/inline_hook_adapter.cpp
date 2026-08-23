@@ -63,6 +63,15 @@ bool init_inline_hook() {
     return true;
 }
 
+bool configure_inline_hook_dl_init_helper_path(const char *helper_path) {
+    const int result = shadowhook_set_dl_init_helper_path(helper_path);
+    if (result != 0) {
+        QTRACE_E("cannot configure ShadowHook dl-init helper path: %d", result);
+        return false;
+    }
+    return true;
+}
+
 bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback pre,
                                            InlineHookDlInitCallback post,
                                            void *opaque) {

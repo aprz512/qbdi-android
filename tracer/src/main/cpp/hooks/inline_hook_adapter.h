@@ -34,6 +34,7 @@ struct HookHandle {
 };
 
 bool init_inline_hook();
+bool configure_inline_hook_dl_init_helper_path(const char *helper_path);
 bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback pre,
                                            InlineHookDlInitCallback post,
                                            void *opaque);

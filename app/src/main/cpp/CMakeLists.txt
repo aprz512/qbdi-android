@@ -1,8 +1,23 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project(qbdi_android_demo_target LANGUAGES CXX)
+project(qbdi_android_demo_target LANGUAGES C CXX)
 
 set(ANDROID_16KB_PAGE_LINK_OPTIONS "-Wl,-z,max-page-size=16384")
+set(SHADOWHOOK_NOTHING_SOURCE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../../tracer/src/main/cpp/third_party/android-inline-hook/shadowhook/src/main/cpp/nothing/sh_nothing.c)
+
+add_library(shadowhook_nothing SHARED ${SHADOWHOOK_NOTHING_SOURCE})
+target_compile_options(shadowhook_nothing PRIVATE
+    -Oz -fno-ident -fno-unwind-tables -fno-asynchronous-unwind-tables)
+target_link_options(shadowhook_nothing PRIVATE
+    ${ANDROID_16KB_PAGE_LINK_OPTIONS}
+    -Wl,--strip-all
+    -Wl,--as-needed
+    -Wl,--hash-style=sysv
+    -Wl,--build-id=none
+    -Wl,-nostdlib
+    -nostartfiles
+    -nodefaultlibs)
 
 add_library(
     demo_target

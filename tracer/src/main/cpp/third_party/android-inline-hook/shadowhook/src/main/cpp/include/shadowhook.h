@@ -102,6 +102,11 @@ typedef enum {
 int shadowhook_init(shadowhook_mode_t default_mode, bool debuggable);
 int shadowhook_get_init_errno(void);
 
+// QTrace integration: configure the absolute, readable, currently-unloaded
+// calibration DSO used by linker init. Must be called before shadowhook_init().
+__attribute__((visibility("hidden")))
+int shadowhook_set_dl_init_helper_path(const char *helper_path);
+
 // get and set attributes
 #define SHADOWHOOK_IS_SHARED_MODE (SHADOWHOOK_MODE_SHARED == shadowhook_get_mode())
 #define SHADOWHOOK_IS_UNIQUE_MODE (SHADOWHOOK_MODE_UNIQUE == shadowhook_get_mode())

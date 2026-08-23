@@ -54,9 +54,23 @@
 static bool shadowhook_disable = false;
 static int shadowhook_init_errno = SHADOWHOOK_ERRNO_UNINIT;
 static shadowhook_mode_t shadowhook_default_mode = SHADOWHOOK_MODE_SHARED;
+static pthread_mutex_t shadowhook_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 const char *shadowhook_get_version(void) {
   return "shadowhook version " SHADOWHOOK_VERSION;
+}
+
+int shadowhook_set_dl_init_helper_path(const char *helper_path) {
+  int result = SHADOWHOOK_ERRNO_INVALID_ARG;
+  pthread_mutex_lock(&shadowhook_init_lock);
+  if (SHADOWHOOK_ERRNO_UNINIT !=
+      __atomic_load_n(&shadowhook_init_errno, __ATOMIC_ACQUIRE)) {
+    result = SHADOWHOOK_ERRNO_UNINIT;
+  } else if (0 == sh_linker_set_init_helper_path(helper_path)) {
+    result = SHADOWHOOK_ERRNO_OK;
+  }
+  pthread_mutex_unlock(&shadowhook_init_lock);
+  return result;
 }
 
 int shadowhook_init(shadowhook_mode_t default_mode, bool debuggable) {
@@ -69,8 +83,7 @@ int shadowhook_init(shadowhook_mode_t default_mode, bool debuggable) {
   } while (0)
 
   if (__predict_true(SHADOWHOOK_ERRNO_UNINIT == __atomic_load_n(&shadowhook_init_errno, __ATOMIC_ACQUIRE))) {
-    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&shadowhook_init_lock);
     if (__predict_true(SHADOWHOOK_ERRNO_UNINIT ==
                        __atomic_load_n(&shadowhook_init_errno, __ATOMIC_RELAXED))) {
       do_init = true;
@@ -97,7 +110,7 @@ int shadowhook_init(shadowhook_mode_t default_mode, bool debuggable) {
       __atomic_store_n(&shadowhook_init_errno, SHADOWHOOK_ERRNO_OK, __ATOMIC_RELEASE);
     }
   end:
-    pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&shadowhook_init_lock);
   }
 
   const char *mode_str;

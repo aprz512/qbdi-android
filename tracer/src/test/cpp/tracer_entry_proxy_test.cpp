@@ -1237,6 +1237,8 @@ void active_flight_reconfiguration_is_rejected_as_incomplete() {
 
 bool init_inline_hook() { return true; }
 
+bool configure_inline_hook_dl_init_helper_path(const char *) { return true; }
+
 bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback,
                                            InlineHookDlInitCallback,
                                            void *) {

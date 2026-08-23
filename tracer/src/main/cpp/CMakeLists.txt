@@ -47,6 +47,20 @@ target_include_directories(shadowhook_static PRIVATE
         ${SHADOWHOOK_ROOT}/third_party/bsd
         ${SHADOWHOOK_ROOT}/third_party/lss)
 
+add_library(shadowhook_nothing SHARED
+        ${SHADOWHOOK_ROOT}/nothing/sh_nothing.c)
+target_compile_options(shadowhook_nothing PRIVATE
+        -Oz -fno-ident -fno-unwind-tables -fno-asynchronous-unwind-tables)
+target_link_options(shadowhook_nothing PRIVATE
+        ${ANDROID_16KB_PAGE_LINK_OPTIONS}
+        -Wl,--strip-all
+        -Wl,--as-needed
+        -Wl,--hash-style=sysv
+        -Wl,--build-id=none
+        -Wl,-nostdlib
+        -nostartfiles
+        -nodefaultlibs)
+
 add_library(qbdi_static STATIC IMPORTED)
 set_target_properties(qbdi_static PROPERTIES
         IMPORTED_LOCATION ${QBDI_ROOT}/lib/arm64-v8a/libQBDI.a)

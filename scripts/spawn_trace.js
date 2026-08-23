@@ -5,6 +5,7 @@
 const config = {
   packageName: 'com.aprz.qbdiandroid',
   remoteDir: '/data/local/tmp/qbdi-android',
+  shadowhookCompanion: 'libshadowhook_nothing.so',
   tracer: 'libqbdi_tracer.so',
   targetSo: 'libdemo_target.so',
   trace: {
@@ -99,6 +100,15 @@ function configureTracer(encoded, tracerModule) {
   console.log('[+] tracer configured: ' + encoded);
 }
 
+function configureShadowHookHelper(path, tracerModule) {
+  const setterPtr = findTracerExport(
+    tracerModule, 'qbdi_tracer_set_shadowhook_helper_path');
+  const setter = new NativeFunction(setterPtr, 'int', ['pointer']);
+  if (setter(Memory.allocUtf8String(path)) !== 0) {
+    throw new Error('failed to configure ShadowHook companion path: ' + path);
+  }
+}
+
 function installModuleObserver(tracerModule) {
   // Native ShadowHook pre-init owns constructor-time installation. This
   // observer is only a synchronous fallback/dedupe for an already loaded SO.
@@ -122,6 +132,7 @@ function installModuleObserver(tracerModule) {
 function main() {
   const dir = config.remoteDir.replace(/\/$/, '');
   const tracerModule = loadLibrary(dir + '/' + config.tracer);
+  configureShadowHookHelper(dir + '/' + config.shadowhookCompanion, tracerModule);
   configureTracer(encodeConfig(config), tracerModule);
   if (!config.flight.enabled) installModuleObserver(tracerModule);
   console.log('[+] tracer injected; tap a demo button for non-init scenes');
