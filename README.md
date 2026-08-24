@@ -22,7 +22,7 @@ Frida spawn 注入 → ShadowHook 接管场景入口 → QBDI 执行与采集 �
 ## 适用范围与限制
 
 - 仅构建 `arm64-v8a`，最低 Android API 24；示例当前使用 compile/target SDK 35。
-- 需要 Android SDK、NDK、CMake 3.22.1+、JDK 17 和 Git LFS。
+- 需要 Android SDK、NDK、CMake 3.22.1、JDK 17 和 Git LFS。
 - 需要可执行 spawn 注入的 Frida 环境。root 设备通常使用与主机版本匹配的 `frida-server`；jailed/non-root 设备通常需要 Frida Gadget。
 - APK 的 release 变体明确设置为 `debuggable false`；实验所需的注入流程使用 debug 变体。
 - 场景以 `module_base + offset` 定位，偏移与具体构建产物绑定；重新编译目标库后应重新确认。
@@ -88,6 +88,19 @@ out/arm64-v8a/libshadowhook_nothing.so
 ```
 
 该任务依次配置、构建并通过 CTest 运行 `tracer/src/test/cpp` 的原生测试；它不依赖 Android JVM 单元测试任务。
+
+普通 Python 单元测试不启动 Gradle，也不要求完整 Android SDK：
+
+```bash
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
+构建契约属于显式集成套件。它会实际运行 Debug/Release manifest 合并、解析合并后的 manifest，并运行 Native Host Gradle/CTest 链；每次 Gradle 子进程有 300 秒 timeout：
+
+```bash
+ANDROID_HOME=/path/to/Android/sdk \
+python3 -m unittest scripts.tests.build_contract_integration -v
+```
 
 ## 安装与部署
 

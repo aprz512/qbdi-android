@@ -590,14 +590,22 @@ class CommandLineTests(unittest.TestCase):
 
         for scene in ("init", "jni", "libc", "algorithm", "integrity"):
             pattern = rf"{scene}: \{{ offset: '([^']+)' \}}"
+            module_match = re.search(pattern, module_config)
+            spawn_match = re.search(pattern, spawn_config)
+            self.assertIsNotNone(module_match, f"missing {scene} in trace_config.js")
+            self.assertIsNotNone(spawn_match, f"missing {scene} in spawn_trace.js")
             self.assertEqual(
-                re.search(pattern, module_config).group(1),
-                re.search(pattern, spawn_config).group(1),
+                module_match.group(1),
+                spawn_match.group(1),
             )
 
         integrity_pattern = r"integrity: \{ offset: '([^']+)' \}"
-        self.assertEqual("0x6E584", re.search(integrity_pattern, module_config).group(1))
-        self.assertEqual("0x6E584", re.search(integrity_pattern, spawn_config).group(1))
+        module_integrity = re.search(integrity_pattern, module_config)
+        spawn_integrity = re.search(integrity_pattern, spawn_config)
+        self.assertIsNotNone(module_integrity, "missing integrity in trace_config.js")
+        self.assertIsNotNone(spawn_integrity, "missing integrity in spawn_trace.js")
+        self.assertEqual("0x6E584", module_integrity.group(1))
+        self.assertEqual("0x6E584", spawn_integrity.group(1))
 
     def test_flight_cli_recovers_missing_terminal_without_lz4(self):
         name = "new.flight.bin"

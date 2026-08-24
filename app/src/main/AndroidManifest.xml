@@ -3,7 +3,6 @@
     <application
         android:name=".App"
         android:allowBackup="false"
-        android:debuggable="true"
         android:label="@string/app_name"
         android:theme="@style/Theme.QbdiAndroid">
         <activity
