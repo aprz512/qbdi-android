@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,11 +21,11 @@
 class JniState {
 public:
     // ── 查询（format 时用） ──
-    const char *class_name(uintptr_t jclass) const;
-    const char *method_sig(uintptr_t jmethodID) const;
-    const char *field_sig(uintptr_t jfieldID) const;
-    const char *string_value(uintptr_t jstring) const;
-    const char *object_type(uintptr_t jobject) const;
+    std::optional<std::string> class_name(uintptr_t jclass) const;
+    std::optional<std::string> method_sig(uintptr_t jmethodID) const;
+    std::optional<std::string> field_sig(uintptr_t jfieldID) const;
+    std::optional<std::string> string_value(uintptr_t jstring) const;
+    std::optional<std::string> object_type(uintptr_t jobject) const;
 
     // ── 更新（onLeave 时调） ──
     void on_find_class(uintptr_t jclass, const char *name);

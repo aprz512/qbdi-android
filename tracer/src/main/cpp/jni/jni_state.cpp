@@ -7,37 +7,41 @@ JniState &jni_state() {
     return instance;
 }
 
-const char *JniState::class_name(uintptr_t jclass) const {
+std::optional<std::string> JniState::class_name(uintptr_t jclass) const {
     std::lock_guard<std::mutex> guard(lock_);
     auto it = classes_.find(jclass);
-    if (it != classes_.end()) return it->second.c_str();
+    if (it != classes_.end()) return it->second;
     auto obj = objects_.find(jclass);
-    if (obj != objects_.end()) return obj->second.c_str();
-    return nullptr;
+    if (obj != objects_.end()) return obj->second;
+    return std::nullopt;
 }
 
-const char *JniState::method_sig(uintptr_t jmethodID) const {
+std::optional<std::string> JniState::method_sig(uintptr_t jmethodID) const {
     std::lock_guard<std::mutex> guard(lock_);
     auto it = methods_.find(jmethodID);
-    return it != methods_.end() ? it->second.c_str() : nullptr;
+    if (it == methods_.end()) return std::nullopt;
+    return it->second;
 }
 
-const char *JniState::field_sig(uintptr_t jfieldID) const {
+std::optional<std::string> JniState::field_sig(uintptr_t jfieldID) const {
     std::lock_guard<std::mutex> guard(lock_);
     auto it = fields_.find(jfieldID);
-    return it != fields_.end() ? it->second.c_str() : nullptr;
+    if (it == fields_.end()) return std::nullopt;
+    return it->second;
 }
 
-const char *JniState::string_value(uintptr_t jstring) const {
+std::optional<std::string> JniState::string_value(uintptr_t jstring) const {
     std::lock_guard<std::mutex> guard(lock_);
     auto it = strings_.find(jstring);
-    return it != strings_.end() ? it->second.c_str() : nullptr;
+    if (it == strings_.end()) return std::nullopt;
+    return it->second;
 }
 
-const char *JniState::object_type(uintptr_t jobject) const {
+std::optional<std::string> JniState::object_type(uintptr_t jobject) const {
     std::lock_guard<std::mutex> guard(lock_);
     auto it = objects_.find(jobject);
-    return it != objects_.end() ? it->second.c_str() : nullptr;
+    if (it == objects_.end()) return std::nullopt;
+    return it->second;
 }
 
 // ── 更新方法 ──

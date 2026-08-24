@@ -169,11 +169,8 @@ namespace {
             std::string fs_str = preview_c_string(args[3], 256);
             if (!fn_str.empty() && !fs_str.empty()) state.on_get_static_field_id(retval, fn_str.c_str(), fs_str.c_str());
         } else if (strcmp(name, "NewStringUTF") == 0) {
-            std::string s_str = preview_c_string(args[1], 1024);
-            if (!s_str.empty()) state.on_new_string_utf(retval, s_str.c_str());
-        } else if (strcmp(name, "NewString") == 0) {
-            std::string s_str = preview_c_string(args[1], 1024);
-            if (!s_str.empty()) state.on_new_string(retval, s_str.c_str());
+            const auto s_str = copy_c_string(args[1], 1024);
+            if (s_str) state.on_new_string_utf(retval, s_str->c_str());
         } else if (strcmp(name, "NewGlobalRef") == 0) {
             state.on_new_global_ref(retval, args[1]);
         } else if (strcmp(name, "NewLocalRef") == 0) {

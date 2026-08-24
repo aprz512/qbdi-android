@@ -36,6 +36,11 @@ add_trace_test(jni_formatter_test
     ../../main/cpp/jni/jni_state.cpp
     ../../main/cpp/core/safe_memory.cpp)
 
+add_trace_test(jni_state_test
+    jni_state_test.cpp
+    ../../main/cpp/jni/jni_state.cpp)
+target_link_libraries(jni_state_test PRIVATE Threads::Threads)
+
 add_trace_test(flight_format_test
     flight_format_test.cpp)
 

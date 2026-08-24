@@ -91,8 +91,8 @@ static std::string resolve_meta(const char *type, uint64_t value) {
 
     // ── jclass → 类名 ──
     if (strcmp(type, JniType::kClass) == 0) {
-        const char *cn = state.class_name(value);
-        if (cn) meta << cn;
+        const auto cn = state.class_name(value);
+        if (cn) meta << *cn;
     }
     else if (strcmp(type, JniType::kCString) == 0) {
         const auto text = copy_c_string(value, 1024, true);
@@ -102,19 +102,23 @@ static std::string resolve_meta(const char *type, uint64_t value) {
     else if (strcmp(type, JniType::kObject)    == 0 ||
              strcmp(type, JniType::kThrowable) == 0 ||
              strcmp(type, JniType::kWeak)      == 0) {
-        const char *ot = state.object_type(value);
-        if (!ot) ot = state.class_name(value);
-        if (ot) meta << ot;
+        const auto ot = state.object_type(value);
+        if (ot) {
+            meta << *ot;
+        } else {
+            const auto cn = state.class_name(value);
+            if (cn) meta << *cn;
+        }
     }
     // ── jmethodID → name(sig) ──
     else if (strcmp(type, JniType::kMethodID) == 0) {
-        const char *ms = state.method_sig(value);
-        if (ms) meta << ms;
+        const auto ms = state.method_sig(value);
+        if (ms) meta << *ms;
     }
     // ── jfieldID → name:sig ──
     else if (strcmp(type, JniType::kFieldID) == 0) {
-        const char *fs = state.field_sig(value);
-        if (fs) meta << fs;
+        const auto fs = state.field_sig(value);
+        if (fs) meta << *fs;
     }
     return meta.str();
 }
@@ -182,9 +186,9 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
     // ── 特殊处理: Call*Method → 展开 Java 参数 ──
     if (strncmp(func.name, "Call", 4) == 0 && strstr(func.name, "Method") != nullptr) {
         uintptr_t method_id = args[1];
-        const char *sig = state.method_sig(method_id);
-        if (sig != nullptr) {
-            auto params = JniState::parse_method_params(sig);
+        const auto sig = state.method_sig(method_id);
+        if (sig) {
+            auto params = JniState::parse_method_params(sig->c_str());
             int param_offset = 2;
             if (strncmp(func.name, "CallNonvirtual", 14) == 0) param_offset = 3;
 
