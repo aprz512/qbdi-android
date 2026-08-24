@@ -43,6 +43,12 @@ add_trace_test(jni_function_registry_test
     jni_function_registry_test.cpp
     ../../main/cpp/jni/jni_function_registry.cpp)
 
+add_trace_test(jni_call_resolver_test
+    jni_call_resolver_test.cpp
+    ../../main/cpp/jni/jni_call_resolver.cpp
+    ../../main/cpp/jni/jni_function_registry.cpp)
+target_link_libraries(jni_call_resolver_test PRIVATE Threads::Threads)
+
 add_trace_test(jni_state_test
     jni_state_test.cpp
     ../../main/cpp/jni/jni_state.cpp)
