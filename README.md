@@ -102,6 +102,15 @@ ANDROID_HOME=/path/to/Android/sdk \
 python3 -m unittest scripts.tests.build_contract_integration -v
 ```
 
+JNI 状态的 ThreadSanitizer 回归是显式 opt-in，避免让环境敏感的 sanitizer 影响默认套件：
+
+```bash
+cmake -S tracer/src/test/cpp -B build/native-tests-tsan \
+  -DQTRACE_ENABLE_TSAN=ON
+cmake --build build/native-tests-tsan --target jni_state_tsan_test --parallel 2
+ctest --test-dir build/native-tests-tsan -R jni_state_tsan_test --output-on-failure
+```
+
 ## 安装与部署
 
 安装 APK，并把 tracer 与 companion 放到 `spawn_trace.js` 默认读取的目录：

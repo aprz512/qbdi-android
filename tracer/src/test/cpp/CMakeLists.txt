@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22.1)
 project(qbdi_tracer_native_tests LANGUAGES C CXX)
 enable_testing()
 find_package(Threads REQUIRED)
+option(QTRACE_ENABLE_TSAN "Build the opt-in JNI state ThreadSanitizer test" OFF)
 
 set(LZ4_ROOT ../../main/cpp/third_party/lz4/lib)
 add_library(lz4_static STATIC
@@ -53,6 +54,19 @@ add_trace_test(jni_state_test
     jni_state_test.cpp
     ../../main/cpp/jni/jni_state.cpp)
 target_link_libraries(jni_state_test PRIVATE Threads::Threads)
+
+if(QTRACE_ENABLE_TSAN)
+    add_trace_test(jni_state_tsan_test
+        jni_state_test.cpp
+        ../../main/cpp/jni/jni_state.cpp)
+    target_compile_options(jni_state_tsan_test PRIVATE
+        -fsanitize=thread
+        -fno-omit-frame-pointer)
+    target_link_options(jni_state_tsan_test PRIVATE
+        -fsanitize=thread
+        -no-pie)
+    target_link_libraries(jni_state_tsan_test PRIVATE Threads::Threads)
+endif()
 
 add_trace_test(jni_state_updater_test
     jni_state_updater_test.cpp
