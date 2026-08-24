@@ -66,6 +66,7 @@ static bool is_ref_type(const char *type) {
            strcmp(type, JniType::kWeak)      == 0 ||
            strcmp(type, JniType::kMethodID)  == 0 ||
            strcmp(type, JniType::kFieldID)   == 0 ||
+           strcmp(type, JniType::kCString)   == 0 ||
            strcmp(type, JniType::kPointer)   == 0;
 }
 

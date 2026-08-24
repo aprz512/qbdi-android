@@ -45,9 +45,14 @@ void function_table_marks_c_string_positions() {
     CHECK(std::string_view(find("GetStringUTFChars").ret_type) == JniType::kCString);
 }
 
+void c_string_values_use_pointer_formatting() {
+    CHECK(JniFormatter::format_ret(JniType::kCString, 0x1234) == "0x1234");
+}
+
 } // namespace
 
 int main() {
     only_c_string_values_are_read_for_metadata();
     function_table_marks_c_string_positions();
+    c_string_values_use_pointer_formatting();
 }
