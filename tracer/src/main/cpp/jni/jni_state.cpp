@@ -87,11 +87,6 @@ void JniState::on_new_string_utf(uintptr_t jstring, const char *value) {
     strings_[jstring] = value;
 }
 
-void JniState::on_new_string(uintptr_t jstring, const char *value) {
-    std::lock_guard<std::mutex> guard(lock_);
-    strings_[jstring] = value;
-}
-
 void JniState::on_new_global_ref(uintptr_t new_ref, uintptr_t old_ref) {
     std::lock_guard<std::mutex> guard(lock_);
     auto it = objects_.find(old_ref);

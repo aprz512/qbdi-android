@@ -15,7 +15,7 @@
 //   jclass    ← FindClass / DefineClass / GetObjectClass
 //   jmethodID ← GetMethodID / GetStaticMethodID
 //   jfieldID  ← GetFieldID / GetStaticFieldID
-//   jstring   ← NewStringUTF / NewString
+//   jstring   ← NewStringUTF
 //   jobject   ← 各种引用创建/传递
 
 class JniState {
@@ -36,7 +36,6 @@ public:
     void on_get_field_id(uintptr_t jfieldID, const char *name, const char *sig);
     void on_get_static_field_id(uintptr_t jfieldID, const char *name, const char *sig);
     void on_new_string_utf(uintptr_t jstring, const char *value);
-    void on_new_string(uintptr_t jstring, const char *value);
     void on_new_global_ref(uintptr_t new_ref, uintptr_t old_ref);
     void on_new_local_ref(uintptr_t new_ref, uintptr_t old_ref);
     void on_delete_global_ref(uintptr_t ref);
@@ -59,7 +58,7 @@ private:
     std::unordered_map<uintptr_t, std::string> methods_;
     // jfieldID → "name:type"
     std::unordered_map<uintptr_t, std::string> fields_;
-    // jstring → UTF-8 内容
+    // jstring → NewStringUTF text
     std::unordered_map<uintptr_t, std::string> strings_;
     // jobject → 类型名
     std::unordered_map<uintptr_t, std::string> objects_;
