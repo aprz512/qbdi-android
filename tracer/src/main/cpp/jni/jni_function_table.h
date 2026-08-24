@@ -21,6 +21,7 @@ namespace JniType {
     constexpr const char *kObject   = "jobject";
     constexpr const char *kClass    = "jclass";
     constexpr const char *kString   = "jstring";
+    constexpr const char *kCString  = "char*";
     constexpr const char *kArray    = "jarray";
     constexpr const char *kThrowable= "jthrowable";
     constexpr const char *kWeak     = "jweak";
@@ -50,8 +51,8 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
 
     // ─── 版本 & 类操作 ───
     table.push_back({"GetVersion",        JniType::kInt,    "JNIEnv", {}});
-    table.push_back({"DefineClass",       JniType::kClass,  "JNIEnv", {JniType::kString, JniType::kObject, JniType::kPointer, JniType::kSize}});
-    table.push_back({"FindClass",         JniType::kClass,  "JNIEnv", {JniType::kString}});
+    table.push_back({"DefineClass",       JniType::kClass,  "JNIEnv", {JniType::kCString, JniType::kObject, JniType::kPointer, JniType::kSize}});
+    table.push_back({"FindClass",         JniType::kClass,  "JNIEnv", {JniType::kCString}});
     table.push_back({"FromReflectedMethod",JniType::kMethodID,"JNIEnv",{JniType::kObject}});
     table.push_back({"FromReflectedField",JniType::kFieldID, "JNIEnv", {JniType::kObject}});
     table.push_back({"ToReflectedMethod", JniType::kObject, "JNIEnv", {JniType::kClass, JniType::kMethodID, JniType::kBoolean}});
@@ -61,11 +62,11 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
 
     // ─── 异常 ───
     table.push_back({"Throw",             JniType::kInt,    "JNIEnv", {JniType::kThrowable}});
-    table.push_back({"ThrowNew",          JniType::kInt,    "JNIEnv", {JniType::kClass, JniType::kString}});
+    table.push_back({"ThrowNew",          JniType::kInt,    "JNIEnv", {JniType::kClass, JniType::kCString}});
     table.push_back({"ExceptionOccurred", JniType::kThrowable,"JNIEnv",{}});
     table.push_back({"ExceptionDescribe", JniType::kVoid,   "JNIEnv", {}});
     table.push_back({"ExceptionClear",    JniType::kVoid,   "JNIEnv", {}});
-    table.push_back({"FatalError",        JniType::kVoid,   "JNIEnv", {JniType::kString}});
+    table.push_back({"FatalError",        JniType::kVoid,   "JNIEnv", {JniType::kCString}});
 
     // ─── 局部/全局引用 ───
     table.push_back({"PushLocalFrame",    JniType::kInt,    "JNIEnv", {JniType::kInt}});
@@ -84,8 +85,8 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     table.push_back({"NewObjectA",        JniType::kObject, "JNIEnv", {JniType::kClass, JniType::kMethodID, JniType::kPointer}});
     table.push_back({"GetObjectClass",    JniType::kClass,  "JNIEnv", {JniType::kObject}});
     table.push_back({"IsInstanceOf",      JniType::kBoolean,"JNIEnv", {JniType::kObject, JniType::kClass}});
-    table.push_back({"GetMethodID",       JniType::kMethodID,"JNIEnv",{JniType::kClass, JniType::kString, JniType::kString}});
-    table.push_back({"GetFieldID",        JniType::kFieldID,"JNIEnv", {JniType::kClass, JniType::kString, JniType::kString}});
+    table.push_back({"GetMethodID",       JniType::kMethodID,"JNIEnv",{JniType::kClass, JniType::kCString, JniType::kCString}});
+    table.push_back({"GetFieldID",        JniType::kFieldID,"JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
 
     // ─── Call<Type>Method (实例方法) ───
     #define CALL_METHODS(RetType, JavaType) \
@@ -137,8 +138,8 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     FIELD_ACCESSORS(JniType::kDouble,  Double)
 
     // ─── 静态方法 ───
-    table.push_back({"GetStaticMethodID", JniType::kMethodID, "JNIEnv", {JniType::kClass, JniType::kString, JniType::kString}});
-    table.push_back({"GetStaticFieldID",  JniType::kFieldID,  "JNIEnv", {JniType::kClass, JniType::kString, JniType::kString}});
+    table.push_back({"GetStaticMethodID", JniType::kMethodID, "JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
+    table.push_back({"GetStaticFieldID",  JniType::kFieldID,  "JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
 
     #define CALL_STATIC_METHODS(RetType, JavaType) \
         table.push_back({"CallStatic" #JavaType "Method",    RetType, "JNIEnv", {JniType::kClass, JniType::kMethodID, JniType::kVarArgs}}); \
@@ -176,10 +177,10 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     table.push_back({"GetStringLength",      JniType::kSize,    "JNIEnv", {JniType::kString}});
     table.push_back({"GetStringChars",       JniType::kPointer, "JNIEnv", {JniType::kString, JniType::kBoolean}});
     table.push_back({"ReleaseStringChars",   JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kPointer}});
-    table.push_back({"NewStringUTF",         JniType::kString,  "JNIEnv", {JniType::kString}});
+    table.push_back({"NewStringUTF",         JniType::kString,  "JNIEnv", {JniType::kCString}});
     table.push_back({"GetStringUTFLength",   JniType::kSize,    "JNIEnv", {JniType::kString}});
-    table.push_back({"GetStringUTFChars",    JniType::kString,  "JNIEnv", {JniType::kString, JniType::kBoolean}});
-    table.push_back({"ReleaseStringUTFChars",JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kString}});
+    table.push_back({"GetStringUTFChars",    JniType::kCString, "JNIEnv", {JniType::kString, JniType::kBoolean}});
+    table.push_back({"ReleaseStringUTFChars",JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kCString}});
     table.push_back({"GetStringRegion",      JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kSize, JniType::kSize, JniType::kPointer}});
     table.push_back({"GetStringUTFRegion",   JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kSize, JniType::kSize, JniType::kPointer}});
     table.push_back({"GetStringCritical",    JniType::kPointer, "JNIEnv", {JniType::kString, JniType::kBoolean}});

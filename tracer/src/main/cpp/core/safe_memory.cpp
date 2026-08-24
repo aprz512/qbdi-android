@@ -21,15 +21,36 @@ bool safe_write_memory(uintptr_t address, const void *buffer, size_t size) {
     return written == static_cast<ssize_t>(size);
 }
 
+std::optional<std::string> copy_c_string(uintptr_t address, size_t max_len,
+                                         bool allow_common_whitespace) {
+    if (address < 0x1000 || max_len == 0) return std::nullopt;
+    std::string result;
+    result.reserve(max_len);
+    for (size_t offset = 0; offset < max_len; ++offset) {
+        char value = 0;
+        if (!safe_read_memory(address + offset, &value, 1)) return std::nullopt;
+        if (value == '\0') return result;
+        const auto byte = static_cast<unsigned char>(value);
+        if ((byte < 0x20 || byte == 0x7f) &&
+            !(allow_common_whitespace && (value == '\n' || value == '\t'))) {
+            return std::nullopt;
+        }
+        result.push_back(value);
+    }
+    return std::nullopt;
+}
+
 std::string preview_c_string(uintptr_t address, size_t max_len) {
+    const auto copied = copy_c_string(address, max_len);
+    if (copied) return *copied;
+
     std::string buffer(max_len, 0);
     if (!safe_read_memory(address, buffer.data(), max_len)) return "<unreadable>";
-    size_t end = 0;
-    while (end < buffer.size() && buffer[end] != 0) {
-        if (!std::isprint(static_cast<unsigned char>(buffer[end]))) return "<non-printable>";
-        ++end;
+    for (const char value : buffer) {
+        if (value == '\0') break;
+        if (!std::isprint(static_cast<unsigned char>(value))) return "<non-printable>";
     }
-    return buffer.substr(0, end);
+    return "<unreadable>";
 }
 
 std::string hex_preview(uintptr_t address, size_t size, size_t max_len) {

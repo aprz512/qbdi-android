@@ -26,6 +26,16 @@ add_trace_test(trace_config_test
     trace_config_test.cpp
     ../../main/cpp/core/trace_config.cpp)
 
+add_trace_test(safe_memory_string_test
+    safe_memory_string_test.cpp
+    ../../main/cpp/core/safe_memory.cpp)
+
+add_trace_test(jni_formatter_test
+    jni_formatter_test.cpp
+    ../../main/cpp/jni/jni_formatter.cpp
+    ../../main/cpp/jni/jni_state.cpp
+    ../../main/cpp/core/safe_memory.cpp)
+
 add_trace_test(flight_format_test
     flight_format_test.cpp)
 

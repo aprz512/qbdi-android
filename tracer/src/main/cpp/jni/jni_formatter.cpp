@@ -7,32 +7,6 @@
 #include <sstream>
 #include <vector>
 
-// ── 安全内存读取工具 ────────────────────────────────────────
-
-// 安全读 C 字符串 (仅 ASCII 可打印)
-static const char *safe_cstring(uintptr_t ptr, size_t max_len = 512) {
-    if (ptr < 0x1000) return nullptr;
-    const auto *p = reinterpret_cast<const char *>(ptr);
-    for (size_t i = 0; i < max_len; ++i) {
-        char c = p[i];
-        if (c == 0) return p;
-        if (c < 0x20 && c != '\n' && c != '\t') return nullptr;
-    }
-    return nullptr;
-}
-
-// 安全读 UTF-8 字符串 (允许非 ASCII 多字节字符)
-static const char *safe_utf8_string(uintptr_t ptr, size_t max_len = 1024) {
-    if (ptr < 0x1000) return nullptr;
-    const auto *p = reinterpret_cast<const char *>(ptr);
-    for (size_t i = 0; i < max_len; ++i) {
-        if (p[i] == 0) return reinterpret_cast<const char *>(ptr);
-        if (p[i] == '\0') break;
-    }
-    // 验证: 至少前几个字节看起来像 UTF-8
-    return reinterpret_cast<const char *>(ptr);
-}
-
 // 标准 hexdump（对标 jnitrace hexdump 库输出格式）
 // offset  | hex bytes (16列) | ASCII
 static std::string hexdump_lines(uintptr_t ptr, size_t total_bytes = 32,
@@ -73,15 +47,7 @@ static std::string hexdump_lines(uintptr_t ptr, size_t total_bytes = 32,
 static bool has_buffer_return(const char *name) {
     return strncmp(name, "Get", 3) == 0 &&
            (strstr(name, "ArrayElements") || strstr(name, "ArrayCritical") ||
-            strstr(name, "StringChars") || strstr(name, "StringCritical") ||
-            strstr(name, "StringUTFChars") ||
             strstr(name, "ArrayRegion"));
-}
-
-static bool has_buffer_arg(const char *name) {
-    return strcmp(name, "DefineClass") == 0 ||
-           strcmp(name, "NewDirectByteBuffer") == 0 ||
-           strncmp(name, "Set", 3) == 0;
 }
 
 static std::string fmt_ptr(uint64_t value) {
@@ -117,8 +83,7 @@ static std::string fmt_value(const char *type, uint64_t value) {
 
 // 为一个值解析最丰富的元数据字符串
 // 返回的字符串包含所有可显示信息: 类名/方法签名/字符串值等
-static std::string resolve_meta(const char *func_name, const char *type,
-                                 uint64_t value, bool is_ret) {
+static std::string resolve_meta(const char *type, uint64_t value) {
     if (value < 0x1000) return "";
     auto &state = jni_state();
     std::ostringstream meta;
@@ -128,11 +93,9 @@ static std::string resolve_meta(const char *func_name, const char *type,
         const char *cn = state.class_name(value);
         if (cn) meta << cn;
     }
-    // ── jstring → 字符串内容 (优先 state, 回退直接读内存) ──
-    else if (strcmp(type, JniType::kString) == 0) {
-        const char *s = state.string_value(value);
-        if (!s) s = safe_utf8_string(value);
-        if (s) meta << "\"" << s << "\"";
+    else if (strcmp(type, JniType::kCString) == 0) {
+        const auto text = copy_c_string(value, 1024, true);
+        if (text) meta << '"' << *text << '"';
     }
     // ── jobject/jthrowable/jweak → 对象类型 ──
     else if (strcmp(type, JniType::kObject)    == 0 ||
@@ -152,17 +115,6 @@ static std::string resolve_meta(const char *func_name, const char *type,
         const char *fs = state.field_sig(value);
         if (fs) meta << fs;
     }
-    // ── kPointer → 特殊处理: 返回值为 char* 的函数 ──
-    else if (strcmp(type, JniType::kPointer) == 0 && is_ret) {
-        // GetStringUTFChars / GetStringChars 等返回 const char*
-        if (strcmp(func_name, "GetStringUTFChars") == 0 ||
-            strcmp(func_name, "GetStringChars")    == 0 ||
-            strcmp(func_name, "GetStringCritical") == 0) {
-            const char *s = safe_utf8_string(value);
-            if (s) meta << "\"" << s << "\"";
-        }
-    }
-
     return meta.str();
 }
 
@@ -218,13 +170,7 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
         if (strcmp(arg_type, JniType::kVaList) == 0) break;
 
         uint64_t val = args[i];
-        std::string meta = resolve_meta(func.name, arg_type, val, false);
-
-        // 特殊: kPointer 类型的参数也尝试读 C 字符串 (FindClass 的 name, GetMethodID 的 name/sig)
-        if (meta.empty() && strcmp(arg_type, JniType::kPointer) == 0 && val > 0x1000) {
-            const char *cs = safe_cstring(val);
-            if (cs) meta = std::string("\"") + cs + "\"";
-        }
+        std::string meta = resolve_meta(arg_type, val);
 
         out << "           "
             << format_data_line(elapsed_ms, "|-", arg_type, val,
@@ -244,7 +190,7 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
             for (size_t pi = 0; pi < params.size() && (param_offset + pi) < 8; ++pi) {
                 uint64_t pval = args[param_offset + pi];
                 const char *ptype = params[pi].c_str();
-                std::string pmeta = resolve_meta(func.name, ptype, pval, false);
+                std::string pmeta = resolve_meta(ptype, pval);
                 out << "           :   "
                     << format_data_line(elapsed_ms, ":", ptype, pval,
                                          pmeta.empty() ? nullptr : pmeta.c_str(), 0)
@@ -265,15 +211,15 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
                 if (!safe_read_memory(methods_ptr + offset + 8, &sig_ptr, sizeof(sig_ptr))) break;
                 if (!safe_read_memory(methods_ptr + offset + 16, &fn_ptr, sizeof(fn_ptr))) break;
 
-                const char *name = safe_cstring(name_ptr);
-                const char *sig  = safe_cstring(sig_ptr);
+                const auto name = copy_c_string(name_ptr, 512, true);
+                const auto sig = copy_c_string(sig_ptr, 512, true);
                 char line[512];
                 if (name && sig) {
                     snprintf(line, sizeof(line), "           :   %-40s %-s  -> fnPtr=0x%lx\n",
-                             name, sig, static_cast<unsigned long>(fn_ptr));
+                             name->c_str(), sig->c_str(), static_cast<unsigned long>(fn_ptr));
                 } else if (name) {
                     snprintf(line, sizeof(line), "           :   %-40s <no sig>  -> fnPtr=0x%lx\n",
-                             name, static_cast<unsigned long>(fn_ptr));
+                             name->c_str(), static_cast<unsigned long>(fn_ptr));
                 } else {
                     snprintf(line, sizeof(line), "           :   <no name>       <no sig>  -> fnPtr=0x%lx\n",
                              static_cast<unsigned long>(fn_ptr));
@@ -310,6 +256,7 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
 std::string JniFormatter::format_leave(int tid, long elapsed_ms,
                                         const JniFuncInfo &func,
                                         uint64_t retval) {
+    (void)tid;
     std::ostringstream out;
 
     if (strcmp(func.ret_type, JniType::kVoid) == 0) {
@@ -319,7 +266,7 @@ std::string JniFormatter::format_leave(int tid, long elapsed_ms,
         return out.str();
     }
 
-    std::string meta = resolve_meta(func.name, func.ret_type, retval, true);
+    std::string meta = resolve_meta(func.ret_type, retval);
 
     out << "           "
         << format_data_line(elapsed_ms, "|=", func.ret_type, retval,
@@ -330,16 +277,6 @@ std::string JniFormatter::format_leave(int tid, long elapsed_ms,
     if (strcmp(func.ret_type, JniType::kPointer) == 0 && retval > 0x1000) {
         if (has_buffer_return(func.name)) {
             out << hexdump_lines(retval, 32);
-        }
-    }
-
-    // ── 特殊: NewStringUTF / NewString 返回 jstring → 读内容 ──
-    if ((strcmp(func.name, "NewStringUTF") == 0 ||
-         strcmp(func.name, "NewString") == 0) && meta.empty() && retval > 0x1000) {
-        const char *s = safe_utf8_string(retval);
-        if (s) {
-            out << "           :   \""
-                << s << "\"\n";
         }
     }
 
