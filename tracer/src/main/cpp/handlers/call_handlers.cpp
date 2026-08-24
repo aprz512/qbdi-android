@@ -4,7 +4,7 @@
 #include "core/module_maps.h"
 #include "core/safe_memory.h"
 #include "jni/jni_formatter.h"
-#include "jni/jni_function_table.h"
+#include "jni/jni_function_registry.h"
 #include "jni/jni_state.h"
 
 #include <QBDI/State.h>
@@ -32,73 +32,71 @@ namespace {
     static std::vector<std::string> g_bt_funcs;
     static std::mutex g_bt_lock;
 
-    static JniAddressMap g_jni_map;
-    static bool g_jni_map_built = false;
-    static std::mutex g_jni_map_lock;
+    JniFunctionRegistry &jni_registry() {
+        static JniFunctionRegistry registry;
+        return registry;
+    }
 
-    void ensure_jni_map_built(uintptr_t env) {
-        if (g_jni_map_built) return;
-        std::lock_guard<std::mutex> guard(g_jni_map_lock);
-        if (g_jni_map_built) return;
+    std::once_flag g_jni_registry_once;
 
-        auto table = build_jni_function_table();
+    void ensure_jni_registry_built(uintptr_t env) {
+        std::call_once(g_jni_registry_once, [env] {
+            auto &registry = jni_registry();
 
-        // ── 方法 1: dlsym 直接解析（优先，覆盖 JNIEnv + JavaVM 所有函数） ──
-        for (auto &func: table) {
-            void *addr = dlsym(RTLD_DEFAULT, func.name);
-            if (addr != nullptr) {
-                func.address = reinterpret_cast<uintptr_t>(addr);
-                g_jni_map[func.address] = &func;
+            // ── 方法 1: dlsym 直接解析（优先，覆盖 JNIEnv + JavaVM 所有函数） ──
+            for (const auto &func: registry.functions()) {
+                void *addr = dlsym(RTLD_DEFAULT, func.name);
+                if (addr != nullptr) {
+                    registry.bind(func.name, reinterpret_cast<uintptr_t>(addr));
+                }
             }
-        }
-        size_t dlsym_count = g_jni_map.size();
+            size_t dlsym_count = registry.size();
 
-        // ── 方法 2: JNIEnv vtable 兜底（dlsym 失败时，如被 strip 的 libart） ──
-        uintptr_t vtable = 0;
-        if (safe_read_memory(env, &vtable, sizeof(vtable)) && vtable > 0x1000) {
-            constexpr int kMaxVtableSlots = 512;
-            for (int i = 0; i < kMaxVtableSlots; ++i) {
-                uintptr_t fn_addr = 0;
-                if (!safe_read_memory(vtable + i * sizeof(uintptr_t), &fn_addr, sizeof(fn_addr)))
-                    break;
-                if (fn_addr == 0 || fn_addr < 0x1000) continue;
-
-                Dl_info info{};
-                if (dladdr(reinterpret_cast<void *>(fn_addr), &info) == 0 ||
-                    info.dli_sname == nullptr)
-                    continue;
-
-                for (auto &func: table) {
-                    if (func.address != 0) continue;
-                    if (strcmp(info.dli_sname, func.name) == 0) {
-                        func.address = fn_addr;
-                        g_jni_map[fn_addr] = &func;
+            // ── 方法 2: JNIEnv vtable 兜底（dlsym 失败时，如被 strip 的 libart） ──
+            uintptr_t vtable = 0;
+            if (safe_read_memory(env, &vtable, sizeof(vtable)) && vtable > 0x1000) {
+                constexpr int kMaxVtableSlots = 512;
+                for (int i = 0; i < kMaxVtableSlots; ++i) {
+                    uintptr_t fn_addr = 0;
+                    if (!safe_read_memory(vtable + i * sizeof(uintptr_t), &fn_addr,
+                                          sizeof(fn_addr)))
                         break;
+                    if (fn_addr == 0 || fn_addr < 0x1000) continue;
+
+                    Dl_info info{};
+                    if (dladdr(reinterpret_cast<void *>(fn_addr), &info) == 0 ||
+                        info.dli_sname == nullptr)
+                        continue;
+
+                    for (const auto &func: registry.functions()) {
+                        if (registry.is_bound(func.name)) continue;
+                        if (strcmp(info.dli_sname, func.name) == 0) {
+                            registry.bind(func.name, fn_addr);
+                            break;
+                        }
                     }
                 }
-            }
 
-            // 后备: 按标准 JNINativeInterface 顺序 (前4个保留槽)
-            int std_index = 4;
-            for (auto &func: table) {
-                if (func.address != 0) { ++std_index; continue; }
-                if (strcmp(func.struct_name, "JavaVM") == 0) { ++std_index; continue; }
-                uintptr_t candidate = 0;
-                if (safe_read_memory(vtable + std_index * sizeof(uintptr_t),
-                                     &candidate, sizeof(candidate)) && candidate > 0x1000) {
-                    func.address = candidate;
-                    g_jni_map[candidate] = &func;
+                // 后备: 按标准 JNINativeInterface 顺序 (前4个保留槽)
+                int std_index = 4;
+                for (const auto &func: registry.functions()) {
+                    if (registry.is_bound(func.name)) { ++std_index; continue; }
+                    if (strcmp(func.struct_name, "JavaVM") == 0) { ++std_index; continue; }
+                    uintptr_t candidate = 0;
+                    if (safe_read_memory(vtable + std_index * sizeof(uintptr_t),
+                                         &candidate, sizeof(candidate)) && candidate > 0x1000) {
+                        registry.bind(func.name, candidate);
+                    }
+                    ++std_index;
                 }
-                ++std_index;
             }
-        }
 
-        // ── 方法 3: JavaVM vtable 兜底（如果 env 正好是 JavaVM*） ──
-        // JavaVM 的 JNIInvokeInterface 最多只有几个函数，已在方法1 dlsym 覆盖
+            // ── 方法 3: JavaVM vtable 兜底（如果 env 正好是 JavaVM*） ──
+            // JavaVM 的 JNIInvokeInterface 最多只有几个函数，已在方法1 dlsym 覆盖
 
-        g_jni_map_built = true;
-        QTRACE_I("jni map built: %zu/%zu resolved (dlsym=%zu)",
-                 g_jni_map.size(), table.size(), dlsym_count);
+            QTRACE_I("jni map built: %zu/%zu resolved (dlsym=%zu)",
+                     registry.size(), registry.functions().size(), dlsym_count);
+        });
     }
 
     // ── 已知 libc 符号 ──
@@ -189,12 +187,12 @@ namespace {
     // ── emit_jni_enter: 检测到 JNI 调用 → 格式化输出 enter ──
     void emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr, TraceSink *writer) {
         uintptr_t env = QBDI_GPR_GET(gpr, 0);
-        ensure_jni_map_built(env);
+        ensure_jni_registry_built(env);
 
-        auto it = g_jni_map.find(target);
-        if (it == g_jni_map.end()) return;
+        const JniFuncInfo *function = jni_registry().find(target);
+        if (function == nullptr) return;
 
-        t_active_jni.func = it->second;
+        t_active_jni.func = function;
         t_active_jni.tid = static_cast<int>(syscall(SYS_gettid));
         t_active_jni.enter_ms = elapsed_ms();
 

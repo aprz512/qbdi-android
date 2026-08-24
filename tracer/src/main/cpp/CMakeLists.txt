@@ -105,6 +105,7 @@ add_library(qbdi_tracer SHARED
         rules/code_rule.cpp
         rules/code_rule_context.cpp
         rules/user_code_rules.cpp
+        jni/jni_function_registry.cpp
         jni/jni_state.cpp
         jni/jni_formatter.cpp)
 

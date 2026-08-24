@@ -36,6 +36,10 @@ add_trace_test(jni_formatter_test
     ../../main/cpp/jni/jni_state.cpp
     ../../main/cpp/core/safe_memory.cpp)
 
+add_trace_test(jni_function_registry_test
+    jni_function_registry_test.cpp
+    ../../main/cpp/jni/jni_function_registry.cpp)
+
 add_trace_test(jni_state_test
     jni_state_test.cpp
     ../../main/cpp/jni/jni_state.cpp)
