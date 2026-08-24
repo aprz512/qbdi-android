@@ -30,8 +30,10 @@ are retained beside it.
 
 The runner used full-profile capture, a 512 MiB fixed artifact, 16 target workers, five measured
 fixture rotations, a minimum four-retained-chunk gate for every worker, and the default 180-second
-oracle timeout. The calibrated fixture used 2,048 mutation iterations per rotation. The measured
-worker windows below show that this remained far above the four-chunk gate.
+oracle timeout. The calibrated fixture used 2,048 mutation iterations per outer workload rotation.
+The fixture measured all five outer rotations, while each worker's independently scanned minimum
+of 101 resident chunks proves at least 100 writer chunk rotations and remains far above the
+four-chunk retention gate.
 
 ## Results
 
