@@ -20,7 +20,7 @@ module.exports = {
     jni: { offset: '0x6DCA8' },
     libc: { offset: '0x6E204' },
     algorithm: { offset: '0x6DB38' },
-    integrity: { offset: '0x0' },
+    integrity: { offset: '0x6E584' },
     benchmark: { offset: '0x0' }
   }
 };

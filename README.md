@@ -24,7 +24,7 @@ Frida spawn 注入 → ShadowHook 接管场景入口 → QBDI 执行与采集 �
 - 仅构建 `arm64-v8a`，最低 Android API 24；示例当前使用 compile/target SDK 35。
 - 需要 Android SDK、NDK、CMake 3.22.1+、JDK 17 和 Git LFS。
 - 需要可执行 spawn 注入的 Frida 环境。root 设备通常使用与主机版本匹配的 `frida-server`；jailed/non-root 设备通常需要 Frida Gadget。
-- APK 的 release 变体也保持 `debuggable`，这是实验项目配置，不应视为生产安全基线。
+- APK 的 release 变体明确设置为 `debuggable false`；实验所需的注入流程使用 debug 变体。
 - 场景以 `module_base + offset` 定位，偏移与具体构建产物绑定；重新编译目标库后应重新确认。
 - 默认 Flight Recorder 预分配 512 MiB 文件；开始实验前确认设备存储空间。
 - `SIGKILL` 无法捕获。tracer 只能解释目标线程在执行终止 syscall 前写下的意图，外部 `SIGKILL` 不会产生虚构的发起者。
@@ -78,6 +78,16 @@ app/build/outputs/apk/debug/app-debug.apk
 out/arm64-v8a/libqbdi_tracer.so
 out/arm64-v8a/libshadowhook_nothing.so
 ```
+
+## 主机端原生验证
+
+在已设置 `ANDROID_HOME` 且 Android SDK 安装了 CMake 3.22.1 的主机上运行：
+
+```bash
+./gradlew nativeHostTest --no-daemon
+```
+
+该任务依次配置、构建并通过 CTest 运行 `tracer/src/test/cpp` 的原生测试；它不依赖 Android JVM 单元测试任务。
 
 ## 安装与部署
 

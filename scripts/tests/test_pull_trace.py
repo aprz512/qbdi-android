@@ -1,4 +1,5 @@
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -581,6 +582,18 @@ class CommandLineTests(unittest.TestCase):
         ):
             with self.subTest(encoded=encoded):
                 self.assertIn(encoded, spawn_config)
+
+    def test_frida_configs_share_demo_scene_offsets(self):
+        root = Path(__file__).resolve().parents[2]
+        module_config = (root / "scripts/trace_config.js").read_text(encoding="utf-8")
+        spawn_config = (root / "scripts/spawn_trace.js").read_text(encoding="utf-8")
+
+        for scene in ("init", "jni", "libc", "algorithm", "integrity"):
+            pattern = rf"{scene}: \{{ offset: '([^']+)' \}}"
+            self.assertEqual(
+                re.search(pattern, module_config).group(1),
+                re.search(pattern, spawn_config).group(1),
+            )
 
     def test_flight_cli_recovers_missing_terminal_without_lz4(self):
         name = "new.flight.bin"
