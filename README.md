@@ -111,6 +111,8 @@ cmake --build build/native-tests-tsan --target jni_state_tsan_test --parallel 2
 ctest --test-dir build/native-tests-tsan -R jni_state_tsan_test --output-on-failure
 ```
 
+该 opt-in 目标仅面向 Linux host，并通过 `setarch -R` 配合非 PIE 可执行文件固定 TSAN shadow-memory 布局。
+
 ## 安装与部署
 
 安装 APK，并把 tracer 与 companion 放到 `spawn_trace.js` 默认读取的目录：

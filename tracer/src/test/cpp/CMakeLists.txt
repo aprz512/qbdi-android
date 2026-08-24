@@ -56,9 +56,15 @@ add_trace_test(jni_state_test
 target_link_libraries(jni_state_test PRIVATE Threads::Threads)
 
 if(QTRACE_ENABLE_TSAN)
-    add_trace_test(jni_state_tsan_test
+    find_program(QTRACE_SETARCH_EXECUTABLE setarch REQUIRED)
+    add_executable(jni_state_tsan_test
         jni_state_test.cpp
         ../../main/cpp/jni/jni_state.cpp)
+    target_compile_features(jni_state_tsan_test PRIVATE cxx_std_20)
+    target_compile_definitions(jni_state_tsan_test PRIVATE QTRACE_HOST_TEST=1)
+    target_include_directories(jni_state_tsan_test PRIVATE
+        ../../main/cpp
+        ../../main/cpp/third_party/qbdi/include)
     target_compile_options(jni_state_tsan_test PRIVATE
         -fsanitize=thread
         -fno-omit-frame-pointer)
@@ -66,6 +72,9 @@ if(QTRACE_ENABLE_TSAN)
         -fsanitize=thread
         -no-pie)
     target_link_libraries(jni_state_tsan_test PRIVATE Threads::Threads)
+    add_test(NAME jni_state_tsan_test
+        COMMAND ${QTRACE_SETARCH_EXECUTABLE} ${CMAKE_SYSTEM_PROCESSOR} -R
+                $<TARGET_FILE:jni_state_tsan_test>)
 endif()
 
 add_trace_test(jni_state_updater_test
