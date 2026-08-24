@@ -86,7 +86,6 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     table.push_back({"GetObjectClass",    JniType::kClass,  "JNIEnv", {JniType::kObject}});
     table.push_back({"IsInstanceOf",      JniType::kBoolean,"JNIEnv", {JniType::kObject, JniType::kClass}});
     table.push_back({"GetMethodID",       JniType::kMethodID,"JNIEnv",{JniType::kClass, JniType::kCString, JniType::kCString}});
-    table.push_back({"GetFieldID",        JniType::kFieldID,"JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
 
     // ─── Call<Type>Method (实例方法) ───
     #define CALL_METHODS(RetType, JavaType) \
@@ -122,24 +121,35 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     CALL_NV_METHODS(JniType::kDouble,  Double)
     CALL_NV_METHODS(JniType::kVoid,    Void)
 
-    // ─── Get/Set<Type>Field ───
-    #define FIELD_ACCESSORS(RetType, JavaType) \
-        table.push_back({"Get" #JavaType "Field", RetType, "JNIEnv", {JniType::kObject, JniType::kFieldID}}); \
-        table.push_back({"Set" #JavaType "Field", JniType::kVoid, "JNIEnv", {JniType::kObject, JniType::kFieldID, RetType}});
+    table.push_back({"GetFieldID",        JniType::kFieldID,"JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
 
-    FIELD_ACCESSORS(JniType::kObject,  Object)
-    FIELD_ACCESSORS(JniType::kBoolean, Boolean)
-    FIELD_ACCESSORS(JniType::kByte,    Byte)
-    FIELD_ACCESSORS(JniType::kChar,    Char)
-    FIELD_ACCESSORS(JniType::kShort,   Short)
-    FIELD_ACCESSORS(JniType::kInt,     Int)
-    FIELD_ACCESSORS(JniType::kLong,    Long)
-    FIELD_ACCESSORS(JniType::kFloat,   Float)
-    FIELD_ACCESSORS(JniType::kDouble,  Double)
+    // ─── Get/Set<Type>Field ───
+    #define GET_FIELD(RetType, JavaType) \
+        table.push_back({"Get" #JavaType "Field", RetType, "JNIEnv", {JniType::kObject, JniType::kFieldID}});
+    #define SET_FIELD(ArgType, JavaType) \
+        table.push_back({"Set" #JavaType "Field", JniType::kVoid, "JNIEnv", {JniType::kObject, JniType::kFieldID, ArgType}});
+
+    GET_FIELD(JniType::kObject,  Object)
+    GET_FIELD(JniType::kBoolean, Boolean)
+    GET_FIELD(JniType::kByte,    Byte)
+    GET_FIELD(JniType::kChar,    Char)
+    GET_FIELD(JniType::kShort,   Short)
+    GET_FIELD(JniType::kInt,     Int)
+    GET_FIELD(JniType::kLong,    Long)
+    GET_FIELD(JniType::kFloat,   Float)
+    GET_FIELD(JniType::kDouble,  Double)
+    SET_FIELD(JniType::kObject,  Object)
+    SET_FIELD(JniType::kBoolean, Boolean)
+    SET_FIELD(JniType::kByte,    Byte)
+    SET_FIELD(JniType::kChar,    Char)
+    SET_FIELD(JniType::kShort,   Short)
+    SET_FIELD(JniType::kInt,     Int)
+    SET_FIELD(JniType::kLong,    Long)
+    SET_FIELD(JniType::kFloat,   Float)
+    SET_FIELD(JniType::kDouble,  Double)
 
     // ─── 静态方法 ───
     table.push_back({"GetStaticMethodID", JniType::kMethodID, "JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
-    table.push_back({"GetStaticFieldID",  JniType::kFieldID,  "JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
 
     #define CALL_STATIC_METHODS(RetType, JavaType) \
         table.push_back({"CallStatic" #JavaType "Method",    RetType, "JNIEnv", {JniType::kClass, JniType::kMethodID, JniType::kVarArgs}}); \
@@ -157,20 +167,32 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     CALL_STATIC_METHODS(JniType::kDouble,  Double)
     CALL_STATIC_METHODS(JniType::kVoid,    Void)
 
-    // ─── Get/SetStatic<Type>Field ───
-    #define STATIC_FIELD_ACCESSORS(RetType, JavaType) \
-        table.push_back({"GetStatic" #JavaType "Field", RetType, "JNIEnv", {JniType::kClass, JniType::kFieldID}}); \
-        table.push_back({"SetStatic" #JavaType "Field", JniType::kVoid, "JNIEnv", {JniType::kClass, JniType::kFieldID, RetType}});
+    table.push_back({"GetStaticFieldID",  JniType::kFieldID,  "JNIEnv", {JniType::kClass, JniType::kCString, JniType::kCString}});
 
-    STATIC_FIELD_ACCESSORS(JniType::kObject,  Object)
-    STATIC_FIELD_ACCESSORS(JniType::kBoolean, Boolean)
-    STATIC_FIELD_ACCESSORS(JniType::kByte,    Byte)
-    STATIC_FIELD_ACCESSORS(JniType::kChar,    Char)
-    STATIC_FIELD_ACCESSORS(JniType::kShort,   Short)
-    STATIC_FIELD_ACCESSORS(JniType::kInt,     Int)
-    STATIC_FIELD_ACCESSORS(JniType::kLong,    Long)
-    STATIC_FIELD_ACCESSORS(JniType::kFloat,   Float)
-    STATIC_FIELD_ACCESSORS(JniType::kDouble,  Double)
+    // ─── Get/SetStatic<Type>Field ───
+    #define GET_STATIC_FIELD(RetType, JavaType) \
+        table.push_back({"GetStatic" #JavaType "Field", RetType, "JNIEnv", {JniType::kClass, JniType::kFieldID}});
+    #define SET_STATIC_FIELD(ArgType, JavaType) \
+        table.push_back({"SetStatic" #JavaType "Field", JniType::kVoid, "JNIEnv", {JniType::kClass, JniType::kFieldID, ArgType}});
+
+    GET_STATIC_FIELD(JniType::kObject,  Object)
+    GET_STATIC_FIELD(JniType::kBoolean, Boolean)
+    GET_STATIC_FIELD(JniType::kByte,    Byte)
+    GET_STATIC_FIELD(JniType::kChar,    Char)
+    GET_STATIC_FIELD(JniType::kShort,   Short)
+    GET_STATIC_FIELD(JniType::kInt,     Int)
+    GET_STATIC_FIELD(JniType::kLong,    Long)
+    GET_STATIC_FIELD(JniType::kFloat,   Float)
+    GET_STATIC_FIELD(JniType::kDouble,  Double)
+    SET_STATIC_FIELD(JniType::kObject,  Object)
+    SET_STATIC_FIELD(JniType::kBoolean, Boolean)
+    SET_STATIC_FIELD(JniType::kByte,    Byte)
+    SET_STATIC_FIELD(JniType::kChar,    Char)
+    SET_STATIC_FIELD(JniType::kShort,   Short)
+    SET_STATIC_FIELD(JniType::kInt,     Int)
+    SET_STATIC_FIELD(JniType::kLong,    Long)
+    SET_STATIC_FIELD(JniType::kFloat,   Float)
+    SET_STATIC_FIELD(JniType::kDouble,  Double)
 
     // ─── 字符串操作 ───
     table.push_back({"NewString",            JniType::kString,  "JNIEnv", {JniType::kPointer, JniType::kSize}});

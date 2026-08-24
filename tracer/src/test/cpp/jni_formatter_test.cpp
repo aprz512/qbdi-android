@@ -1,4 +1,5 @@
 #include "jni/jni_formatter.h"
+#include "jni/jni_state.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -49,10 +50,26 @@ void c_string_values_use_pointer_formatting() {
     CHECK(JniFormatter::format_ret(JniType::kCString, 0x1234) == "0x1234");
 }
 
+void known_jstrings_use_captured_state_without_reading_unknown_handles() {
+    constexpr uintptr_t known_handle = 0x4567;
+    constexpr uintptr_t unknown_handle = 0x5678;
+    jni_state().on_new_string_utf(known_handle, "captured-jstring");
+
+    JniFormatter formatter;
+    JniFuncInfo returns_string{"NewStringUTF", JniType::kString, "JNIEnv",
+                               {JniType::kCString}};
+    const std::string known = formatter.format_leave(7, 0, returns_string, known_handle);
+    const std::string unknown = formatter.format_leave(7, 0, returns_string, unknown_handle);
+
+    CHECK(known.find("captured-jstring") != std::string::npos);
+    CHECK(unknown.find("captured-jstring") == std::string::npos);
+}
+
 } // namespace
 
 int main() {
     only_c_string_values_are_read_for_metadata();
     function_table_marks_c_string_positions();
     c_string_values_use_pointer_formatting();
+    known_jstrings_use_captured_state_without_reading_unknown_handles();
 }

@@ -94,6 +94,11 @@ static std::string resolve_meta(const char *type, uint64_t value) {
         const auto cn = state.class_name(value);
         if (cn) meta << *cn;
     }
+    // jstring is an opaque handle. Only values captured from NewStringUTF are safe.
+    else if (strcmp(type, JniType::kString) == 0) {
+        const auto text = state.string_value(value);
+        if (text) meta << '"' << *text << '"';
+    }
     else if (strcmp(type, JniType::kCString) == 0) {
         const auto text = copy_c_string(value, 1024, true);
         if (text) meta << '"' << *text << '"';
