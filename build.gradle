@@ -4,6 +4,14 @@ plugins {
     id "org.jetbrains.kotlin.android" version "1.9.24" apply false
 }
 
+def nativeHostTestRequested = gradle.startParameter.taskNames.any { taskName ->
+    taskName.tokenize(":").last() == "nativeHostTest"
+}
+if (nativeHostTestRequested && !System.getenv("ANDROID_HOME")) {
+    throw new GradleException(
+            "nativeHostTest requires ANDROID_HOME to locate Android SDK CMake 3.22.1.")
+}
+
 def nativeHostBuildDir = layout.buildDirectory.dir("native-host-tests")
 def nativeHostCmakeBin = {
     def androidHome = System.getenv("ANDROID_HOME")

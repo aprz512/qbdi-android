@@ -595,6 +595,10 @@ class CommandLineTests(unittest.TestCase):
                 re.search(pattern, spawn_config).group(1),
             )
 
+        integrity_pattern = r"integrity: \{ offset: '([^']+)' \}"
+        self.assertEqual("0x6E584", re.search(integrity_pattern, module_config).group(1))
+        self.assertEqual("0x6E584", re.search(integrity_pattern, spawn_config).group(1))
+
     def test_flight_cli_recovers_missing_terminal_without_lz4(self):
         name = "new.flight.bin"
         client = PullArtifactTests.FakeClient({name: recoverable_flight_artifact()})
