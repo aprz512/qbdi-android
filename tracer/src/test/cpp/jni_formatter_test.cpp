@@ -77,6 +77,36 @@ void known_jstrings_do_not_require_pointer_like_handle_values() {
     CHECK(output.find("low-handle") != std::string::npos);
 }
 
+void null_state_handles_do_not_resolve_metadata() {
+    auto &state = jni_state();
+    state.on_find_class(0, "null-class");
+    state.on_new_string_utf(0, "null-string");
+    state.on_new_object(0, "null-object");
+    state.on_get_method_id(0, "nullMethod", "()V");
+    state.on_get_field_id(0, "nullField", "I");
+
+    struct NullCase {
+        const char *type;
+        const char *forbidden_metadata;
+    };
+    const NullCase cases[] = {
+            {JniType::kClass, "null-class"},
+            {JniType::kString, "null-string"},
+            {JniType::kObject, "null-object"},
+            {JniType::kThrowable, "null-object"},
+            {JniType::kWeak, "null-object"},
+            {JniType::kMethodID, "nullMethod()V"},
+            {JniType::kFieldID, "nullField:I"},
+    };
+
+    JniFormatter formatter;
+    for (const auto &test_case : cases) {
+        JniFuncInfo returns_null{"ReturnsNull", test_case.type, "JNIEnv", {}};
+        const std::string output = formatter.format_leave(7, 0, returns_null, 0);
+        CHECK(output.find(test_case.forbidden_metadata) == std::string::npos);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -85,4 +115,5 @@ int main() {
     c_string_values_use_pointer_formatting();
     known_jstrings_use_captured_state_without_reading_unknown_handles();
     known_jstrings_do_not_require_pointer_like_handle_values();
+    null_state_handles_do_not_resolve_metadata();
 }

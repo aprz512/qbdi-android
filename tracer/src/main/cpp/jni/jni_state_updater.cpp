@@ -20,15 +20,19 @@ void update_jni_state(JniState &state, const JniFuncInfo &function,
     const char *name = function.name;
 
     if (std::strcmp(name, "FindClass") == 0) {
+        if (result == 0) return;
         const auto class_name = copy_argument(arguments, 0);
         if (class_name) state.on_find_class(result, class_name->c_str());
     } else if (std::strcmp(name, "DefineClass") == 0) {
+        if (result == 0) return;
         const auto class_name = copy_argument(arguments, 0);
         if (class_name) state.on_define_class(result, class_name->c_str());
     } else if (std::strcmp(name, "GetObjectClass") == 0) {
+        if (result == 0) return;
         state.on_get_object_class(arguments[0], result);
     } else if (std::strcmp(name, "GetMethodID") == 0 ||
                std::strcmp(name, "GetStaticMethodID") == 0) {
+        if (result == 0) return;
         const auto method_name = copy_argument(arguments, 1);
         const auto signature = copy_argument(arguments, 2);
         if (!method_name || !signature) return;
@@ -40,6 +44,7 @@ void update_jni_state(JniState &state, const JniFuncInfo &function,
         }
     } else if (std::strcmp(name, "GetFieldID") == 0 ||
                std::strcmp(name, "GetStaticFieldID") == 0) {
+        if (result == 0) return;
         const auto field_name = copy_argument(arguments, 1);
         const auto signature = copy_argument(arguments, 2);
         if (!field_name || !signature) return;
@@ -50,17 +55,21 @@ void update_jni_state(JniState &state, const JniFuncInfo &function,
                                          signature->c_str());
         }
     } else if (std::strcmp(name, "NewStringUTF") == 0) {
+        if (result == 0) return;
         const auto value = copy_argument(arguments, 0, 1024);
         if (value) state.on_new_string_utf(result, value->c_str());
     } else if (std::strcmp(name, "NewGlobalRef") == 0) {
+        if (result == 0) return;
         state.on_new_global_ref(result, arguments[0]);
     } else if (std::strcmp(name, "NewLocalRef") == 0) {
+        if (result == 0) return;
         state.on_new_local_ref(result, arguments[0]);
     } else if (std::strcmp(name, "DeleteGlobalRef") == 0) {
         state.on_delete_global_ref(arguments[0]);
     } else if (std::strcmp(name, "DeleteLocalRef") == 0) {
         state.on_delete_local_ref(arguments[0]);
     } else if (std::strcmp(name, "NewWeakGlobalRef") == 0) {
+        if (result == 0) return;
         state.on_new_weak_global_ref(result, arguments[0]);
     } else if (std::strcmp(name, "DeleteWeakGlobalRef") == 0) {
         state.on_delete_weak_global_ref(arguments[0]);
