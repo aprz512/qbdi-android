@@ -107,6 +107,7 @@ add_library(qbdi_tracer SHARED
         rules/user_code_rules.cpp
         jni/jni_function_registry.cpp
         jni/jni_state.cpp
+        jni/jni_state_updater.cpp
         jni/jni_formatter.cpp)
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)

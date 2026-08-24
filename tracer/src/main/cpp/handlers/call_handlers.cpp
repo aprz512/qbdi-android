@@ -6,6 +6,7 @@
 #include "jni/jni_formatter.h"
 #include "jni/jni_function_registry.h"
 #include "jni/jni_state.h"
+#include "jni/jni_state_updater.h"
 
 #include <QBDI/State.h>
 #include <dlfcn.h>
@@ -137,53 +138,6 @@ namespace {
 
     // QBDI 是单线程执行的, 用 thread_local 存储当前活跃的 JNI 调用
     static thread_local ActiveJniCall t_active_jni;
-    // ── JNI 状态更新 ──
-    void update_jni_state(const JniFuncInfo &func, const uint64_t *args, uint64_t retval) {
-        auto &state = jni_state();
-        const char *name = func.name;
-
-        if (strcmp(name, "FindClass") == 0) {
-            std::string cn_str = preview_c_string(args[1], 256);
-            if (!cn_str.empty()) state.on_find_class(retval, cn_str.c_str());
-        } else if (strcmp(name, "DefineClass") == 0) {
-            std::string cn_str = preview_c_string(args[1], 256);
-            if (!cn_str.empty()) state.on_define_class(retval, cn_str.c_str());
-        } else if (strcmp(name, "GetObjectClass") == 0) {
-            state.on_get_object_class(args[1], retval);
-        } else if (strcmp(name, "GetMethodID") == 0) {
-            std::string mn_str = preview_c_string(args[2], 256);
-            std::string ms_str = preview_c_string(args[3], 256);
-            if (!mn_str.empty() && !ms_str.empty()) state.on_get_method_id(retval, mn_str.c_str(), ms_str.c_str());
-        } else if (strcmp(name, "GetStaticMethodID") == 0) {
-            std::string mn_str = preview_c_string(args[2], 256);
-            std::string ms_str = preview_c_string(args[3], 256);
-            if (!mn_str.empty() && !ms_str.empty()) state.on_get_static_method_id(retval, mn_str.c_str(), ms_str.c_str());
-        } else if (strcmp(name, "GetFieldID") == 0) {
-            std::string fn_str = preview_c_string(args[2], 256);
-            std::string fs_str = preview_c_string(args[3], 256);
-            if (!fn_str.empty() && !fs_str.empty()) state.on_get_field_id(retval, fn_str.c_str(), fs_str.c_str());
-        } else if (strcmp(name, "GetStaticFieldID") == 0) {
-            std::string fn_str = preview_c_string(args[2], 256);
-            std::string fs_str = preview_c_string(args[3], 256);
-            if (!fn_str.empty() && !fs_str.empty()) state.on_get_static_field_id(retval, fn_str.c_str(), fs_str.c_str());
-        } else if (strcmp(name, "NewStringUTF") == 0) {
-            const auto s_str = copy_c_string(args[1], 1024);
-            if (s_str) state.on_new_string_utf(retval, s_str->c_str());
-        } else if (strcmp(name, "NewGlobalRef") == 0) {
-            state.on_new_global_ref(retval, args[1]);
-        } else if (strcmp(name, "NewLocalRef") == 0) {
-            state.on_new_local_ref(retval, args[1]);
-        } else if (strcmp(name, "DeleteGlobalRef") == 0) {
-            state.on_delete_global_ref(args[1]);
-        } else if (strcmp(name, "DeleteLocalRef") == 0) {
-            state.on_delete_local_ref(args[1]);
-        } else if (strcmp(name, "NewWeakGlobalRef") == 0) {
-            state.on_new_weak_global_ref(retval, args[1]);
-        } else if (strcmp(name, "DeleteWeakGlobalRef") == 0) {
-            state.on_delete_weak_global_ref(args[1]);
-        }
-    }
-
     // ── emit_jni_enter: 检测到 JNI 调用 → 格式化输出 enter ──
     void emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr, TraceSink *writer) {
         uintptr_t env = QBDI_GPR_GET(gpr, 0);
@@ -250,7 +204,7 @@ namespace {
         if (t_active_jni.func == nullptr) return;
 
         uint64_t retval = QBDI_GPR_GET(gpr, 0);
-        update_jni_state(*t_active_jni.func, t_active_jni.args, retval);
+        update_jni_state(jni_state(), *t_active_jni.func, t_active_jni.args, retval);
 
         JniFormatter fmt;
         std::string line = fmt.format_leave(t_active_jni.tid, t_active_jni.enter_ms,
