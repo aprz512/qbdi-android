@@ -47,6 +47,12 @@ class BuildContractTests(unittest.TestCase):
 
         self.assertRegex(app_gradle, r"release\s*\{[^}]*debuggable false")
 
+    def test_debug_build_remains_injectable(self):
+        app_gradle = (ROOT / "app/build.gradle").read_text(encoding="utf-8")
+
+        self.assertRegex(app_gradle, r"debug\s*\{[^}]*debuggable true")
+        self.assertRegex(app_gradle, r"debug\s*\{[^}]*jniDebuggable true")
+
     def test_native_host_test_runs_ctest_without_android_unit_test_dependency(self):
         root_gradle = (ROOT / "build.gradle").read_text(encoding="utf-8")
 
