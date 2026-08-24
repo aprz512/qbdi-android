@@ -65,6 +65,18 @@ void known_jstrings_use_captured_state_without_reading_unknown_handles() {
     CHECK(unknown.find("captured-jstring") == std::string::npos);
 }
 
+void known_jstrings_do_not_require_pointer_like_handle_values() {
+    constexpr uintptr_t low_handle = 1;
+    jni_state().on_new_string_utf(low_handle, "low-handle");
+
+    JniFormatter formatter;
+    JniFuncInfo returns_string{"NewStringUTF", JniType::kString, "JNIEnv",
+                               {JniType::kCString}};
+    const std::string output = formatter.format_leave(7, 0, returns_string, low_handle);
+
+    CHECK(output.find("low-handle") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -72,4 +84,5 @@ int main() {
     function_table_marks_c_string_positions();
     c_string_values_use_pointer_formatting();
     known_jstrings_use_captured_state_without_reading_unknown_handles();
+    known_jstrings_do_not_require_pointer_like_handle_values();
 }

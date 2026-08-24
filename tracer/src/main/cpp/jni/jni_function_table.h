@@ -295,11 +295,11 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     // ─── JavaVM 方法 (JNIInvokeInterface vtable) ───
     // 对标 jnitrace JavaVM callbacks (main.ts:83-87)
     // 注意: JavaVM 函数在独立 vtable 中, 需要单独解析
-    table.push_back({"DestroyJavaVM",             JniType::kInt,   "JavaVM", {JniType::kPointer}});
-    table.push_back({"AttachCurrentThread",       JniType::kInt,   "JavaVM", {JniType::kPointer, JniType::kPointer, JniType::kPointer}});
+    table.push_back({"DestroyJavaVM",             JniType::kInt,   "JavaVM", {}});
+    table.push_back({"AttachCurrentThread",       JniType::kInt,   "JavaVM", {JniType::kPointer, JniType::kPointer}});
     table.push_back({"DetachCurrentThread",       JniType::kInt,   "JavaVM", {}});
-    table.push_back({"GetEnv",                    JniType::kInt,   "JavaVM", {JniType::kPointer, JniType::kPointer, JniType::kPointer}});
-    table.push_back({"AttachCurrentThreadAsDaemon",JniType::kInt,  "JavaVM", {JniType::kPointer, JniType::kPointer, JniType::kPointer}});
+    table.push_back({"GetEnv",                    JniType::kInt,   "JavaVM", {JniType::kPointer, JniType::kInt}});
+    table.push_back({"AttachCurrentThreadAsDaemon",JniType::kInt,  "JavaVM", {JniType::kPointer, JniType::kPointer}});
 
     return table;
 }

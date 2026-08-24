@@ -26,6 +26,13 @@ size_t standard_slot(std::string_view name, std::string_view interface_name,
     return static_cast<size_t>(-1);
 }
 
+JniFuncInfo function_named(std::string_view name) {
+    for (const auto &function: build_jni_function_table()) {
+        if (name == function.name) return function;
+    }
+    std::abort();
+}
+
 void jni_env_entries_follow_the_standard_native_interface_slots() {
     CHECK(standard_slot("GetVersion", "JNIEnv", 4) == 4);
     CHECK(standard_slot("FindClass", "JNIEnv", 4) == 6);
@@ -57,9 +64,24 @@ void java_vm_entries_follow_the_standard_invoke_interface_slots() {
     CHECK(standard_slot("AttachCurrentThreadAsDaemon", "JavaVM", 3) == 7);
 }
 
+void java_vm_metadata_excludes_the_implicit_receiver() {
+    CHECK(function_named("DestroyJavaVM").args.empty());
+    CHECK(function_named("AttachCurrentThread").args.size() == 2);
+    CHECK(std::string_view(function_named("AttachCurrentThread").args[0]) ==
+          JniType::kPointer);
+    CHECK(std::string_view(function_named("AttachCurrentThread").args[1]) ==
+          JniType::kPointer);
+    CHECK(function_named("DetachCurrentThread").args.empty());
+    CHECK(function_named("GetEnv").args.size() == 2);
+    CHECK(std::string_view(function_named("GetEnv").args[0]) == JniType::kPointer);
+    CHECK(std::string_view(function_named("GetEnv").args[1]) == JniType::kInt);
+    CHECK(function_named("AttachCurrentThreadAsDaemon").args.size() == 2);
+}
+
 } // namespace
 
 int main() {
     jni_env_entries_follow_the_standard_native_interface_slots();
     java_vm_entries_follow_the_standard_invoke_interface_slots();
+    java_vm_metadata_excludes_the_implicit_receiver();
 }

@@ -85,7 +85,6 @@ static std::string fmt_value(const char *type, uint64_t value) {
 // 为一个值解析最丰富的元数据字符串
 // 返回的字符串包含所有可显示信息: 类名/方法签名/字符串值等
 static std::string resolve_meta(const char *type, uint64_t value) {
-    if (value < 0x1000) return "";
     auto &state = jni_state();
     std::ostringstream meta;
 
