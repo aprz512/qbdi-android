@@ -10,6 +10,10 @@
 class JniFunctionRegistry {
 public:
     JniFunctionRegistry();
+    JniFunctionRegistry(const JniFunctionRegistry &) = delete;
+    JniFunctionRegistry &operator=(const JniFunctionRegistry &) = delete;
+    JniFunctionRegistry(JniFunctionRegistry &&) = delete;
+    JniFunctionRegistry &operator=(JniFunctionRegistry &&) = delete;
 
     bool bind(std::string_view name, uintptr_t address);
     bool is_bound(std::string_view name) const;
