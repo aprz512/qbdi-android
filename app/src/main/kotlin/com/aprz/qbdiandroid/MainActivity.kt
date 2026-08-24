@@ -2,6 +2,7 @@ package com.aprz.qbdiandroid
 
 import android.graphics.Color
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -37,6 +38,15 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        val acceptanceMode = intent.getIntExtra("flight_acceptance_mode", -1)
+        if (acceptanceMode >= 0) {
+            val seed = intent.getLongExtra("flight_acceptance_seed", 0)
+            val worker = intent.getIntExtra("flight_acceptance_worker", 0)
+            Thread({
+                val returned = NativeDemo.runFlightAcceptance(seed, acceptanceMode, worker)
+                Log.e("QBDI-FlightAcceptance", "fixture unexpectedly returned $returned")
+            }, "flight-acceptance-trigger").start()
+        }
         setContent {
             QbdiDemoApp()
         }

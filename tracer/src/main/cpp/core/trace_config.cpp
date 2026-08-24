@@ -80,6 +80,7 @@ TraceConfig parse_trace_config(const char *encoded_config) {
     TraceConfig config = default_trace_config();
     if (encoded_config == nullptr || encoded_config[0] == 0) return config;
     bool lz4_level_explicit = false;
+    bool replacing_scenes = false;
 
     for (const std::string &part: split(encoded_config, ';')) {
         if (part.empty()) continue;
@@ -87,6 +88,9 @@ TraceConfig parse_trace_config(const char *encoded_config) {
             config.package_name = part.substr(8);
         } else if (part.rfind("target=", 0) == 0) {
             config.target_so = part.substr(7);
+        } else if (part == "scenes=replace") {
+            config.scenes.clear();
+            replacing_scenes = true;
         } else if (part.rfind("scene=", 0) == 0) {
             std::vector<std::string> fields = split(part.substr(6), ',');
             if (fields.size() < 2 || fields.size() > 3 || fields[0].empty()) {
@@ -100,10 +104,17 @@ TraceConfig parse_trace_config(const char *encoded_config) {
             if (fields.size() == 3 && !parse_hex(fields[2], &end_offset)) {
                 return invalid_config(std::move(config), "invalid scene end offset: " + fields[2]);
             }
+            bool found = false;
             for (auto &scene: config.scenes) {
                 if (scene.name != fields[0]) continue;
                 scene.offset = offset;
                 scene.end_offset = end_offset;
+                found = true;
+                break;
+            }
+            if (replacing_scenes && !found) {
+                config.scenes.push_back(
+                        {config.scenes.size(), fields[0], offset, end_offset});
             }
         } else if (part.rfind("jni_bt=", 0) == 0) {
             config.jni_backtrace_funcs = split(part.substr(7), ',');

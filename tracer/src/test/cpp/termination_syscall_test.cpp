@@ -4,6 +4,7 @@
 #include "flight/flight_artifact.h"
 
 #include <array>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -74,10 +75,38 @@ void arm64_termination_intent_is_committed_before_continue() {
         CHECK(TerminationObserver::before_svc(snapshot, &fixture.writer) ==
               QBDI::CONTINUE);
         FlightEmergencyRecord record{};
-        CHECK(scan_flight_emergency(
-                fixture.artifact.emergency_bytes(
-                        fixture.registration.directory_index),
-                &record));
+        const uint8_t *slot = fixture.artifact.emergency_bytes(
+                fixture.registration.directory_index);
+        if (number == 138) {
+            FlightEmergencyRecord cells[2]{};
+            bool valid[2]{};
+            for (size_t index = 0; index < 2; ++index) {
+                std::array<uint8_t, kFlightEmergencySlotBytes> isolated{};
+                std::memcpy(isolated.data(),
+                            slot + index * kFlightEmergencyRecordBytes,
+                            kFlightEmergencyRecordBytes);
+                valid[index] =
+                        scan_flight_emergency(isolated.data(), &cells[index]);
+            }
+            bool found_intent = false;
+            bool found_gap = false;
+            for (size_t index = 0; index < 2; ++index) {
+                if (!valid[index]) continue;
+                if (cells[index].type == static_cast<uint32_t>(
+                                                 FlightRecordType::TerminationIntent) &&
+                    cells[index].signal_number == 138) {
+                    record = cells[index];
+                    found_intent = true;
+                }
+                found_gap |= cells[index].type == static_cast<uint32_t>(
+                                                       FlightRecordType::CoverageGap);
+            }
+            CHECK(found_intent);
+            CHECK(found_gap);
+            CHECK(fixture.artifact.incomplete());
+        } else {
+            CHECK(scan_flight_emergency(slot, &record));
+        }
         CHECK(record.type ==
               static_cast<uint32_t>(FlightRecordType::TerminationIntent));
         CHECK(record.tid == 731);

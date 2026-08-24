@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <link.h>
 #include <limits>
 #include <sstream>
+#include <unistd.h>
 #include <utility>
 
 std::string basename_of(const std::string &path) {
@@ -37,6 +39,57 @@ std::vector<ModuleRange> read_process_maps() {
         ranges.push_back(range);
     }
     return ranges;
+}
+
+bool module_range_from_phdr(const dl_phdr_info &info,
+                            ModuleRange *out) noexcept {
+    if (out == nullptr || info.dlpi_name == nullptr ||
+        info.dlpi_name[0] == '\0' || info.dlpi_phdr == nullptr) {
+        return false;
+    }
+    const long page_size_value = ::sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0) return false;
+    const uintptr_t page_size = static_cast<uintptr_t>(page_size_value);
+    const uintptr_t base = static_cast<uintptr_t>(info.dlpi_addr);
+    const uintptr_t maximum = std::numeric_limits<uintptr_t>::max();
+    ModuleRange module;
+    module.start = base;
+    uintptr_t maximum_load_end = 0;
+    bool have_load = false;
+    bool have_executable = false;
+    for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
+        const ElfW(Phdr) &header = info.dlpi_phdr[index];
+        if (header.p_type != PT_LOAD || header.p_memsz == 0) continue;
+        if (header.p_vaddr > maximum - header.p_memsz) return false;
+        const uintptr_t relative_end = header.p_vaddr + header.p_memsz;
+        maximum_load_end = std::max(maximum_load_end, relative_end);
+        have_load = true;
+        if ((header.p_flags & PF_X) == 0) continue;
+        if (module.readable_executable_range_count ==
+            module.readable_executable_ranges.size()) {
+            return false;
+        }
+        if (header.p_vaddr > maximum - base || relative_end > maximum - base) {
+            return false;
+        }
+        module.readable_executable_ranges[
+                module.readable_executable_range_count++] =
+                {base + header.p_vaddr, base + relative_end};
+        have_executable = true;
+    }
+    if (!have_load) return false;
+    const uintptr_t remainder = maximum_load_end % page_size;
+    if (remainder != 0) {
+        const uintptr_t padding = page_size - remainder;
+        if (maximum_load_end > maximum - padding) return false;
+        maximum_load_end += padding;
+    }
+    if (maximum_load_end == 0 || maximum_load_end > maximum - base) return false;
+    module.end = base + maximum_load_end;
+    module.path = info.dlpi_name;
+    if (have_executable) module.permissions = "r-xp";
+    *out = std::move(module);
+    return true;
 }
 
 namespace {

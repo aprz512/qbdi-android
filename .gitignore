@@ -7,4 +7,7 @@
 **/.cxx/
 out/
 traces/
+artifacts/
+__pycache__/
+*.py[cod]
 local.properties

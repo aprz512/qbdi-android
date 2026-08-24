@@ -29,7 +29,6 @@ enum class FlightIncompleteReason : uint32_t {
     ChunkExhausted = 1U << 1U,
     WriterFailure = 1U << 2U,
     EmergencyFailure = 1U << 3U,
-    RetentionPending = 1U << 4U,
 };
 
 struct FlightThreadRegistration {
@@ -91,8 +90,6 @@ uint32_t flight_atomic_load_u32_le(const uint8_t *source,
                                    std::memory_order order) noexcept;
 uint32_t flight_atomic_fetch_or_u32_le(uint8_t *destination, uint32_t value,
                                        std::memory_order order) noexcept;
-uint32_t flight_atomic_fetch_and_u32_le(uint8_t *destination, uint32_t value,
-                                        std::memory_order order) noexcept;
 __attribute__((no_stack_protector)) bool scan_flight_emergency(
         const uint8_t *bytes, FlightEmergencyRecord *record) noexcept;
 
@@ -122,16 +119,19 @@ public:
                        FlightChunkLease *lease) noexcept;
 
     void mark_incomplete(FlightIncompleteReason reason) noexcept;
-    void clear_retention_pending() noexcept;
     bool incomplete() const noexcept { return flags() != 0; }
     uint32_t flags() const noexcept;
-    uint32_t *incomplete_flags_address() noexcept;
 
     __attribute__((no_stack_protector)) bool write_emergency(
             const FlightThreadRegistration &registration,
             const FlightEmergencyRecord &record) noexcept;
     __attribute__((no_stack_protector)) bool write_emergency(
             uint32_t slot_index, const FlightEmergencyRecord &record) noexcept;
+    __attribute__((no_stack_protector)) bool replace_pinned_termination(
+            const FlightThreadRegistration &registration,
+            uint32_t syscall_number, uint32_t signal_number,
+            const FlightEmergencyRecord &record,
+            bool *matched) noexcept;
     __attribute__((no_stack_protector)) bool write_coverage_gap_sticky(
             uint32_t slot_index,
             const FlightEmergencyRecord &record) noexcept;
@@ -174,7 +174,8 @@ private:
                             FlightIncompleteReason reason) noexcept;
     __attribute__((no_stack_protector)) bool publish_emergency_claimed(
             uint8_t *slot, RuntimeEmergencyMetadata &metadata,
-            const FlightEmergencyRecord &record) noexcept;
+            const FlightEmergencyRecord &record,
+            uint32_t forced_cell = kFlightInvalidIndex) noexcept;
     void reset_state() noexcept;
 
     int fd_ = -1;

@@ -6,6 +6,8 @@
 
 #include <jni.h>
 
+#include "flight_acceptance_protocol.h"
+
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
@@ -22,6 +24,15 @@ __attribute__((noinline, visibility("default"))) uint64_t demo_benchmark_case(ui
                                                                                  uint64_t seed);
 __attribute__((noinline, visibility("default"))) uint64_t
 demo_signal_probe(uint64_t cookie);
+__attribute__((visibility("hidden"))) void demo_flight_acceptance_init();
+__attribute__((visibility("default"))) uint64_t
+demo_flight_acceptance_start(uint64_t seed, uint32_t mode, uint32_t selected_worker);
+__attribute__((visibility("default"))) int
+demo_flight_acceptance_snapshot(DemoFlightAcceptanceSnapshot *snapshot);
+__attribute__((visibility("default"))) int
+demo_flight_acceptance_release(uint64_t generation);
+__attribute__((noinline, visibility("default"))) uint64_t
+demo_flight_acceptance_case(uint64_t seed, uint32_t mode, uint32_t selected_worker);
 }
 
 #if defined(__clang__)

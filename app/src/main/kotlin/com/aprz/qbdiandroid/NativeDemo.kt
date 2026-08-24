@@ -6,4 +6,5 @@ object NativeDemo {
     external fun runAlgorithmCase(): String
     external fun runIntegrityCase(): String
     external fun runBenchmarkCase(): String
+    external fun runFlightAcceptance(seed: Long, mode: Int, selectedWorker: Int): Long
 }

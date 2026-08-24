@@ -3,10 +3,14 @@
 #include "integrity.h"
 
 #include <android/log.h>
+#include <dlfcn.h>
 #include <signal.h>
+#include <pthread.h>
+#include <sys/syscall.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -32,7 +36,6 @@ constexpr uint64_t kArm64Getpid = 172U;
 constexpr uint64_t kArm64Gettid = 178U;
 constexpr size_t kKernelSignalSetBytes = 8U;
 constexpr uint64_t kSignalProbeCookieRestoreMask = 0xa5a55a5af0f00f0fULL;
-
 struct KernelSigaction {
     void (*handler)(int, siginfo_t *, void *) = nullptr;
     uint64_t flags = 0;
@@ -47,6 +50,198 @@ std::atomic<uint64_t> g_probe_expected_pc{0};
 std::atomic<uint64_t> g_probe_expected_cookie{0};
 alignas(uint32_t) uint32_t g_probe_pause_handler_once = 0;
 alignas(uint32_t) uint32_t g_probe_pause_after_handler_once = 0;
+
+#ifndef NDEBUG
+constexpr uint32_t kAcceptanceWorkers = 16;
+constexpr uint32_t kAcceptanceRotations = 5;
+constexpr uint32_t kAcceptanceMutationIterations = 2048;
+constexpr uint32_t kAcceptanceExternalSigkill = 4;
+
+struct AcceptanceWorker {
+    pthread_t thread{};
+    uint32_t index = 0;
+    uint64_t observed_epoch = 0;
+    alignas(64) std::array<uint64_t, 1024> memory{};
+};
+
+std::array<AcceptanceWorker, kAcceptanceWorkers> g_acceptance_workers{};
+std::atomic<uint64_t> g_acceptance_epoch{0};
+std::atomic<uint64_t> g_acceptance_seed{0};
+std::atomic<uint32_t> g_acceptance_mode{0};
+std::atomic<uint32_t> g_acceptance_selected{0};
+std::atomic<uint32_t> g_acceptance_ready{0};
+std::atomic<uint32_t> g_acceptance_probe_bits{0};
+std::array<std::atomic<uint32_t>, kAcceptanceWorkers> g_acceptance_tids{};
+std::array<std::atomic<uint32_t>, kAcceptanceWorkers> g_acceptance_rotations{};
+std::atomic<bool> g_acceptance_started{false};
+FlightAcceptanceProtocol g_acceptance_protocol;
+
+extern "C" const char demo_flight_direct_tgkill_pc[];
+extern "C" const char demo_flight_exit_group_pc[];
+extern "C" const char demo_flight_sync_fault_pc[];
+extern "C" const char demo_flight_target_sigkill_pc[];
+extern "C" [[noreturn]] void demo_flight_direct_tgkill(int pid, int tid);
+extern "C" [[noreturn]] void demo_flight_exit_group();
+extern "C" [[noreturn]] void demo_flight_sync_fault();
+extern "C" [[noreturn]] void demo_flight_target_sigkill(int pid, int tid);
+
+__asm__(
+    ".text\n"
+    ".align 2\n"
+    ".global demo_flight_direct_tgkill\n"
+    ".type demo_flight_direct_tgkill,%function\n"
+    "demo_flight_direct_tgkill:\n"
+    "mov x2, #6\n"
+    "mov x8, #131\n"
+    ".global demo_flight_direct_tgkill_pc\n"
+    "demo_flight_direct_tgkill_pc:\n"
+    "svc #0\n"
+    "mov x8, #94\n"
+    "svc #0\n"
+    ".size demo_flight_direct_tgkill, .-demo_flight_direct_tgkill\n"
+    ".global demo_flight_exit_group\n"
+    ".type demo_flight_exit_group,%function\n"
+    "demo_flight_exit_group:\n"
+    "mov x0, #86\n"
+    "mov x8, #94\n"
+    ".global demo_flight_exit_group_pc\n"
+    "demo_flight_exit_group_pc:\n"
+    "svc #0\n"
+    "brk #0\n"
+    ".size demo_flight_exit_group, .-demo_flight_exit_group\n"
+    ".global demo_flight_sync_fault\n"
+    ".type demo_flight_sync_fault,%function\n"
+    "demo_flight_sync_fault:\n"
+    ".global demo_flight_sync_fault_pc\n"
+    "mov x0, #0\n"
+    "demo_flight_sync_fault_pc:\n"
+    "str xzr, [x0]\n"
+    "brk #0\n"
+    ".size demo_flight_sync_fault, .-demo_flight_sync_fault\n"
+    ".global demo_flight_target_sigkill\n"
+    ".type demo_flight_target_sigkill,%function\n"
+    "demo_flight_target_sigkill:\n"
+    "mov x2, #9\n"
+    "mov x8, #131\n"
+    ".global demo_flight_target_sigkill_pc\n"
+    "demo_flight_target_sigkill_pc:\n"
+    "svc #0\n"
+    "mov x8, #94\n"
+    "svc #0\n"
+    ".size demo_flight_target_sigkill, .-demo_flight_target_sigkill\n");
+
+uint64_t acceptance_mix(uint64_t value) noexcept {
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+}
+
+__attribute__((noinline)) uint32_t acceptance_mutate(AcceptanceWorker &worker,
+                                                     uint64_t seed) noexcept {
+    uint64_t state = acceptance_mix(seed ^ worker.index);
+    uint32_t completed_rotations = 0;
+    const useconds_t delay = static_cast<useconds_t>(500U + (state & 0x3fffU));
+    usleep(delay);
+    for (uint32_t rotation = 0; rotation < kAcceptanceRotations; ++rotation) {
+        for (uint32_t iteration = 0; iteration < kAcceptanceMutationIterations; ++iteration) {
+            const size_t slot = static_cast<size_t>((state + iteration) & 1023U);
+            const uint64_t loaded = worker.memory[slot];
+            state = acceptance_mix(state + loaded + iteration + rotation);
+            worker.memory[slot] = state;
+        }
+        ++completed_rotations;
+    }
+    return completed_rotations;
+}
+
+uintptr_t acceptance_pc(uint32_t mode) noexcept {
+    switch (mode) {
+        case 0: return reinterpret_cast<uintptr_t>(demo_flight_direct_tgkill_pc);
+        case 1: return reinterpret_cast<uintptr_t>(demo_flight_exit_group_pc);
+        case 2: return reinterpret_cast<uintptr_t>(demo_flight_sync_fault_pc);
+        case 3: return reinterpret_cast<uintptr_t>(demo_flight_target_sigkill_pc);
+        default: return 0;
+    }
+}
+
+uintptr_t target_offset(uintptr_t address) noexcept {
+    Dl_info info{};
+    return dladdr(reinterpret_cast<const void *>(address), &info) != 0 &&
+                   info.dli_fbase != nullptr
+           ? address - reinterpret_cast<uintptr_t>(info.dli_fbase)
+           : 0;
+}
+
+[[noreturn]] void acceptance_terminate(uint32_t mode) noexcept {
+    const int pid = getpid();
+    const int tid = static_cast<int>(syscall(SYS_gettid));
+    switch (mode) {
+        case 0: demo_flight_direct_tgkill(pid, tid);
+        case 1: demo_flight_exit_group();
+        case 2: demo_flight_sync_fault();
+        case 3: demo_flight_target_sigkill(pid, tid);
+        default: demo_flight_exit_group();
+    }
+}
+
+void *acceptance_worker(void *opaque) noexcept {
+    auto &worker = *static_cast<AcceptanceWorker *>(opaque);
+    for (;;) {
+        const uint64_t epoch = g_acceptance_epoch.load(std::memory_order_acquire);
+        if (epoch == 0 || epoch == worker.observed_epoch) {
+            usleep(1000);
+            continue;
+        }
+        worker.observed_epoch = epoch;
+        const uint64_t seed = g_acceptance_seed.load(std::memory_order_relaxed);
+        const uint32_t mode = g_acceptance_mode.load(std::memory_order_relaxed);
+        const uint32_t selected = g_acceptance_selected.load(std::memory_order_relaxed);
+        const uint32_t completed_rotations = acceptance_mutate(worker, seed);
+        g_acceptance_rotations[worker.index].store(
+            completed_rotations, std::memory_order_release);
+        if (worker.index == selected) {
+            g_acceptance_probe_bits.store(
+                static_cast<uint32_t>(demo_signal_probe(seed ^ worker.index)),
+                std::memory_order_release);
+        }
+        g_acceptance_tids[worker.index].store(
+            static_cast<uint32_t>(syscall(SYS_gettid)), std::memory_order_release);
+        const uint32_t ready =
+            g_acceptance_ready.fetch_add(1, std::memory_order_acq_rel) + 1U;
+        if (ready == kAcceptanceWorkers) {
+            std::array<uint32_t, kAcceptanceWorkers> tids{};
+            uint32_t minimum_rotations = UINT32_MAX;
+            for (uint32_t index = 0; index < kAcceptanceWorkers; ++index) {
+                tids[index] = g_acceptance_tids[index].load(std::memory_order_acquire);
+                minimum_rotations = std::min(
+                    minimum_rotations,
+                    g_acceptance_rotations[index].load(std::memory_order_acquire));
+            }
+            const uint32_t selected_tid = mode == kAcceptanceExternalSigkill
+                                              ? 0
+                                              : tids[selected];
+            (void)g_acceptance_protocol.publish_ready(
+                epoch, selected_tid, target_offset(acceptance_pc(mode)),
+                g_acceptance_probe_bits.load(std::memory_order_acquire),
+                minimum_rotations,
+                tids.data(), tids.size());
+        }
+        while (g_acceptance_ready.load(std::memory_order_acquire) < kAcceptanceWorkers) {
+            usleep(1000);
+        }
+        if (mode == kAcceptanceExternalSigkill) continue;
+        if (worker.index != selected) {
+            while (g_acceptance_epoch.load(std::memory_order_acquire) == epoch) usleep(1000);
+            continue;
+        }
+        while (!g_acceptance_protocol.released(epoch)) usleep(1000);
+        usleep(250000);
+        acceptance_terminate(mode);
+    }
+}
+#endif
 
 static_assert(std::atomic<uint64_t>::is_always_lock_free);
 static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t));
@@ -183,10 +378,123 @@ __attribute__((noinline)) uint64_t benchmark_helper(uint64_t state) {
 } // namespace
 
 extern "C" uint64_t demo_init_stage() {
+#ifndef NDEBUG
+    demo_flight_acceptance_init();
+#endif
     const uint64_t hash = demo_algorithm_case(kInitSeed.data(), kInitSeed.size());
     __android_log_print(ANDROID_LOG_INFO, kLogTag, "init stage hash=0x%016llx",
                         static_cast<unsigned long long>(hash));
     return hash;
+}
+
+extern "C" void demo_flight_acceptance_init() {
+#ifndef NDEBUG
+    bool expected = false;
+    if (!g_acceptance_started.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+    for (uint32_t index = 0; index < kAcceptanceWorkers; ++index) {
+        g_acceptance_workers[index].index = index;
+        const int result = pthread_create(&g_acceptance_workers[index].thread, nullptr,
+                                          acceptance_worker,
+                                          &g_acceptance_workers[index]);
+        if (result != 0) {
+            __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                                "acceptance pthread_create index=%u error=%d", index,
+                                result);
+        }
+    }
+#endif
+}
+
+extern "C" uint64_t demo_flight_acceptance_start(uint64_t seed, uint32_t mode,
+                                                   uint32_t selected_worker) {
+#ifndef NDEBUG
+    if (!g_acceptance_started.load(std::memory_order_acquire)) return 0;
+    const uint64_t generation =
+        g_acceptance_protocol.start(seed, mode, selected_worker);
+    if (generation == 0) return 0;
+    g_acceptance_seed.store(seed, std::memory_order_relaxed);
+    g_acceptance_mode.store(mode, std::memory_order_relaxed);
+    g_acceptance_selected.store(selected_worker, std::memory_order_relaxed);
+    g_acceptance_probe_bits.store(0, std::memory_order_relaxed);
+    g_acceptance_ready.store(0, std::memory_order_relaxed);
+    for (auto &rotations : g_acceptance_rotations) {
+        rotations.store(0, std::memory_order_relaxed);
+    }
+    g_acceptance_epoch.store(generation, std::memory_order_release);
+    return generation;
+#else
+    (void)seed;
+    (void)mode;
+    (void)selected_worker;
+    return 0;
+#endif
+}
+
+extern "C" int demo_flight_acceptance_snapshot(
+        DemoFlightAcceptanceSnapshot *snapshot) {
+#ifndef NDEBUG
+    return g_acceptance_protocol.snapshot(snapshot) ? 1 : 0;
+#else
+    (void)snapshot;
+    return 0;
+#endif
+}
+
+extern "C" int demo_flight_acceptance_release(uint64_t generation) {
+#ifndef NDEBUG
+    return g_acceptance_protocol.release(generation) ? 1 : 0;
+#else
+    (void)generation;
+    return 0;
+#endif
+}
+
+extern "C" uint64_t demo_flight_acceptance_case(uint64_t seed, uint32_t mode,
+                                                  uint32_t selected_worker) {
+#ifndef NDEBUG
+    const uint64_t generation =
+        demo_flight_acceptance_start(seed, mode, selected_worker);
+    if (generation == 0) return 0;
+    DemoFlightAcceptanceSnapshot snapshot{};
+    while (demo_flight_acceptance_snapshot(&snapshot) == 0) {
+        usleep(1000);
+    }
+    char tids[256]{};
+    size_t used = 0;
+    for (uint32_t index = 0; index < snapshot.worker_count; ++index) {
+        const int written = std::snprintf(
+            tids + used, sizeof(tids) - used, "%s%u", index == 0 ? "" : ",",
+            snapshot.tids[index]);
+        if (written <= 0 || static_cast<size_t>(written) >= sizeof(tids) - used) return 0;
+        used += static_cast<size_t>(written);
+    }
+    constexpr const char *kModeNames[] = {
+        "direct_tgkill", "exit_group", "sync_fault", "target_sigkill", "external_sigkill"
+    };
+    __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                        "QBDI_FLIGHT_WORKERS seed=%llu tids=%s rotations=%u",
+                        static_cast<unsigned long long>(snapshot.seed), tids,
+                        snapshot.rotations);
+    __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+                        "QBDI_FLIGHT_ORACLE seed=%llu mode=%s tid=%s pc=%s phase=ready probe=0x%x",
+                        static_cast<unsigned long long>(snapshot.seed),
+                        kModeNames[snapshot.mode],
+                        snapshot.mode == kAcceptanceExternalSigkill ? "none" :
+                            std::to_string(snapshot.selected_tid).c_str(),
+                        snapshot.mode == kAcceptanceExternalSigkill ? "none" :
+                            ("0x" + [&snapshot] { std::ostringstream value; value << std::hex << snapshot.original_pc; return value.str(); }()).c_str(),
+                        snapshot.probe);
+    if (demo_flight_acceptance_release(generation) == 0) return 0;
+    for (;;) pause();
+#else
+    (void) seed;
+    (void) mode;
+    (void) selected_worker;
+    return 0;
+#endif
 }
 
 extern "C" std::string demo_jni_case(JNIEnv *env, jobject thiz) {

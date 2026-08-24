@@ -674,14 +674,14 @@ void fork_child_detach_releases_only_the_child_copy() {
     CHECK(::fcntl(artifact.fd(), F_GETFD) != -1);
 }
 
-void transient_incomplete_reason_can_be_cleared_without_losing_permanent_reasons() {
+void constructor_time_loading_has_no_transient_incomplete_state() {
     TemporaryArtifact file;
     FlightArtifact artifact;
     CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
-    artifact.mark_incomplete(FlightIncompleteReason::RetentionPending);
-    CHECK(artifact.incomplete());
+    CHECK(!artifact.incomplete());
+    CHECK(artifact.flags() ==
+          static_cast<uint32_t>(FlightIncompleteReason::None));
     artifact.mark_incomplete(FlightIncompleteReason::WriterFailure);
-    artifact.clear_retention_pending();
     CHECK(artifact.flags() ==
           static_cast<uint32_t>(FlightIncompleteReason::WriterFailure));
 }
@@ -706,5 +706,5 @@ int main() {
     concurrent_registration_keeps_duplicate_tids_unique_and_bounds_capacity();
     allocator_reclaims_global_oldest_without_stealing_reservations();
     fork_child_detach_releases_only_the_child_copy();
-    transient_incomplete_reason_can_be_cleared_without_losing_permanent_reasons();
+    constructor_time_loading_has_no_transient_incomplete_state();
 }

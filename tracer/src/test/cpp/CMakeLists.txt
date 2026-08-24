@@ -40,6 +40,13 @@ target_include_directories(demo_pthread_fixture_test PRIVATE
     ../../../../app/src/main/cpp)
 target_link_libraries(demo_pthread_fixture_test PRIVATE Threads::Threads)
 
+add_trace_test(flight_acceptance_protocol_test
+    flight_acceptance_protocol_test.cpp
+    ../../../../app/src/main/cpp/demo_target/flight_acceptance_protocol.cpp)
+target_include_directories(flight_acceptance_protocol_test PRIVATE
+    ../../../../app/src/main/cpp)
+target_link_libraries(flight_acceptance_protocol_test PRIVATE Threads::Threads)
+
 add_trace_test(flight_artifact_test
     flight_artifact_test.cpp
     ../../main/cpp/flight/flight_artifact.cpp)
@@ -47,11 +54,6 @@ target_link_libraries(flight_artifact_test PRIVATE Threads::Threads)
 target_link_options(flight_artifact_test PRIVATE
     -Wl,--wrap=ftruncate
     -Wl,--wrap=mmap)
-
-add_trace_test(module_generation_retainer_test
-    module_generation_retainer_test.cpp
-    ../../main/cpp/core/module_generation_retainer.cpp)
-target_link_libraries(module_generation_retainer_test PRIVATE Threads::Threads)
 
 add_trace_test(flight_chunk_writer_test
     flight_chunk_writer_test.cpp
@@ -125,7 +127,8 @@ target_compile_definitions(shadowhook_retention_contract_test PRIVATE
 add_trace_test(production_trace_contract_test
     production_trace_contract_test.cpp)
 target_compile_definitions(production_trace_contract_test PRIVATE
-    QTRACE_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp")
+    QTRACE_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp"
+    QTRACE_HOST_BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 add_trace_test(binary_trace_encoder_test
     binary_trace_encoder_test.cpp
@@ -178,6 +181,7 @@ add_trace_test(qbdi_thread_session_test
     ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp)
+add_dependencies(production_trace_contract_test qbdi_thread_session_test)
 
 add_trace_test(flight_transfer_event_test
     flight_transfer_event_test.cpp
@@ -298,7 +302,6 @@ add_trace_test(tracer_entry_proxy_test
     ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
-    ../../main/cpp/core/module_generation_retainer.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/core/trace_config.cpp)
 target_link_libraries(tracer_entry_proxy_test PRIVATE Threads::Threads)

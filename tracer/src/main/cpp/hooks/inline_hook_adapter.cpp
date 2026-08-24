@@ -72,12 +72,23 @@ bool configure_inline_hook_dl_init_helper_path(const char *helper_path) {
     return true;
 }
 
-bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback pre,
-                                           InlineHookDlInitCallback post,
+bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback callback,
                                            void *opaque) {
-    const int result = shadowhook_register_dl_init_callback(pre, post, opaque);
+    const int result = shadowhook_register_dl_init_callback(
+            callback, nullptr, opaque);
     if (result != 0) {
         QTRACE_E("shadowhook dl-init callback registration failed: %d", result);
+        return false;
+    }
+    return true;
+}
+
+bool register_inline_hook_dl_fini_callback(InlineHookDlInitCallback callback,
+                                           void *opaque) {
+    const int result = shadowhook_register_dl_fini_callback(
+            nullptr, callback, opaque);
+    if (result != 0) {
+        QTRACE_E("shadowhook dl-fini callback registration failed: %d", result);
         return false;
     }
     return true;

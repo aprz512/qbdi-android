@@ -56,6 +56,19 @@ int main() {
     assert_invalid("flight_protected_chunks=0");
     assert_invalid("flight_mb=64;flight_chunk_kb=1024;flight_protected_chunks=65");
 
+    TraceConfig replacement_scenes = parse_trace_config(
+            "scenes=replace;scene=init,0x100;scene=jni,0x200;scene=libc,0x300;"
+            "scene=algorithm,0x400;scene=integrity,0x500");
+    CHECK(replacement_scenes.valid);
+    CHECK(replacement_scenes.scenes.size() == 5);
+    const char *expected_scene_names[] = {
+            "init", "jni", "libc", "algorithm", "integrity"};
+    for (size_t index = 0; index < replacement_scenes.scenes.size(); ++index) {
+        CHECK(replacement_scenes.scenes[index].index == index);
+        CHECK(replacement_scenes.scenes[index].name == expected_scene_names[index]);
+        CHECK(replacement_scenes.scenes[index].offset == (index + 1) * 0x100);
+    }
+
     TraceConfig parsed = parse_trace_config(
             "profile=full;compression=0;lz4_level=9;auto_buffer=0;"
             "buffer_mb=64;hexdump_limit=16");

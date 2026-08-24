@@ -22,11 +22,12 @@ class ShadowHookCompanionContractTests(unittest.TestCase):
 
         self.assertIn('include("libqbdi_tracer.so", "libshadowhook_nothing.so")', gradle)
 
-    def test_standalone_spawn_configures_unloaded_absolute_companion_before_init(self):
+    def test_standalone_spawn_loads_only_tracer_then_sets_helper_before_configure(self):
         source = (ROOT / "scripts/spawn_trace.js").read_text()
 
         self.assertIn("shadowhookCompanion: 'libshadowhook_nothing.so'", source)
         self.assertNotIn("loadLibrary(dir + '/' + config.shadowhookCompanion)", source)
+        self.assertNotIn("loadLibrary(dir + '/' + config.targetSo)", source)
         self.assertIn("qbdi_tracer_set_shadowhook_helper_path", source)
         self.assertLess(
             source.index("const tracerModule = loadLibrary(dir + '/' + config.tracer)"),
@@ -34,7 +35,12 @@ class ShadowHookCompanionContractTests(unittest.TestCase):
         )
         self.assertLess(source.rindex("configureShadowHookHelper"),
                         source.index("configureTracer(encodeConfig"))
+        self.assertIn("if (!config.flight.enabled) installModuleObserver", source)
         self.assertIn("failed to configure ShadowHook companion path", source)
+
+        tracer = (ROOT / "tracer/src/main/cpp/tracer_entry.cpp").read_text()
+        self.assertIn("static void module_constructor_pre(", tracer)
+        self.assertIn("install_hooks_for_module(module, 0, true)", tracer)
 
     def test_application_injectors_configure_but_never_preload_apk_companion(self):
         for name in ("benchmark_trace.js", "signal_probe.js"):
@@ -43,6 +49,8 @@ class ShadowHookCompanionContractTests(unittest.TestCase):
                 self.assertIn("applicationInfo.nativeLibraryDir", source)
                 self.assertIn(HELPER, source)
                 self.assertNotIn("application.getClass(), companionPath)", source)
+                self.assertNotIn("Module.load(companionPath)", source)
+                self.assertNotIn("Module.load(config.targetSo)", source)
                 self.assertIn("qbdi_tracer_set_shadowhook_helper_path", source)
                 self.assertIn("failed to configure ShadowHook companion path", source)
 

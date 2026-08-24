@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+struct dl_phdr_info;
+
 struct AddressRange {
     uintptr_t start = 0;
     uintptr_t end = 0;
@@ -27,6 +29,9 @@ struct ModuleRange {
 };
 
 std::vector<ModuleRange> read_process_maps();
+
+bool module_range_from_phdr(const dl_phdr_info &info,
+                            ModuleRange *out) noexcept;
 
 bool normalize_module_ranges(const std::vector<ModuleRange> &maps,
                              const std::string &requested_path,

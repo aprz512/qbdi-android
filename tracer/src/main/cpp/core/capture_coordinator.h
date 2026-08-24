@@ -47,8 +47,6 @@ struct CaptureCoordinatorFactories {
                             QbdiThreadSession *session) noexcept = nullptr;
     void (*mark_coverage_gap)(void *opaque, void *artifact, uint32_t tid,
                               uintptr_t pc, CoverageGapReason reason) noexcept = nullptr;
-    uint32_t *(*retention_flags)(void *opaque,
-                                void *artifact) noexcept = nullptr;
 };
 
 class CaptureCoordinator final
@@ -93,7 +91,6 @@ public:
     bool copy_module(ModuleRange *module) const;
     bool matches_module(const ModuleRange &module) const noexcept;
     bool contains_target_address(uintptr_t address) const noexcept;
-    uint32_t *retention_flags_address() const noexcept;
     void set_thread_start_resolver(CaptureThreadStartResolver resolver,
                                    void *opaque) noexcept;
     bool resolve_thread_start(uintptr_t logical_entry,

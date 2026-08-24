@@ -44,6 +44,83 @@ struct FakeControlApi {
     bool fail_observer = false;
 };
 
+struct SignalExecutionProbe {
+    QBDI::GPRState gpr{};
+    uint64_t epoch = 0;
+    uint64_t first_epoch = 0;
+    size_t activations = 0;
+    size_t clears = 0;
+    bool active = false;
+    bool cleared_before_vm_return = false;
+    TraceRunResult direct_result{};
+};
+
+uint64_t activate_signal_execution(void *opaque,
+                                   QBDI::GPRState *) noexcept {
+    auto *probe = static_cast<SignalExecutionProbe *>(opaque);
+    CHECK(!probe->active);
+    probe->active = true;
+    ++probe->activations;
+    probe->epoch += 1U;
+    if (probe->first_epoch == 0) probe->first_epoch = probe->epoch;
+    return probe->epoch;
+}
+
+void clear_signal_execution(void *opaque) noexcept {
+    auto *probe = static_cast<SignalExecutionProbe *>(opaque);
+    probe->active = false;
+    ++probe->clears;
+}
+
+void observe_signal_target_post(void *opaque, const QBDI::GPRState *gpr,
+                                uintptr_t return_address) noexcept {
+    auto *probe = static_cast<SignalExecutionProbe *>(opaque);
+    if (gpr != nullptr && gpr->pc == return_address) probe->active = false;
+}
+
+QbdiVmExecutionLifecycle signal_lifecycle(SignalExecutionProbe *probe) {
+    return {probe, activate_signal_execution, clear_signal_execution,
+            observe_signal_target_post};
+}
+
+TraceRunResult execute_with_target_return_postinst(
+        void *opaque, QbdiThreadSession *, uintptr_t, uintptr_t, size_t,
+        const uint64_t[8], uint64_t) noexcept {
+    auto *probe = static_cast<SignalExecutionProbe *>(opaque);
+    CHECK(probe->active);
+    probe->gpr.pc = 42;
+    observe_qbdi_vm_target_post(signal_lifecycle(probe), &probe->gpr, 42);
+    probe->cleared_before_vm_return = !probe->active;
+    return {true, true, 0x42};
+}
+
+TraceRunResult execute_with_fallback_clear(
+        void *opaque, QbdiThreadSession *, uintptr_t, uintptr_t, size_t,
+        const uint64_t[8], uint64_t) noexcept {
+    auto *probe = static_cast<SignalExecutionProbe *>(opaque);
+    CHECK(probe->active);
+    return probe->direct_result;
+}
+
+TraceRunResult execute_before_continuation(
+        void *opaque, QbdiThreadSession *, uintptr_t, uintptr_t, size_t,
+        const uint64_t[8], uint64_t) noexcept {
+    auto *probe = static_cast<SignalExecutionProbe *>(opaque);
+    CHECK(probe->active);
+    return {true, false, 0};
+}
+
+TraceRunResult continue_with_target_return_postinst(
+        void *opaque, QbdiThreadSession *) noexcept {
+    auto *probe = static_cast<SignalExecutionProbe *>(opaque);
+    CHECK(probe->active);
+    CHECK(probe->epoch > probe->first_epoch);
+    probe->gpr.pc = 42;
+    observe_qbdi_vm_target_post(signal_lifecycle(probe), &probe->gpr, 42);
+    probe->cleared_before_vm_return = !probe->active;
+    return {true, true, 0x43};
+}
+
 bool add_control_range(void *opaque, uintptr_t start, uintptr_t end) noexcept {
     auto *api = static_cast<FakeControlApi *>(opaque);
     if (api->range_calls < api->ranges.size()) {
@@ -428,6 +505,72 @@ void repeated_exact_execution_state_requests_periodic_yield() {
     }
 }
 
+void target_return_postinst_clears_before_injected_vm_run_returns() {
+    SignalExecutionProbe probe;
+    QbdiThreadSession *session = QbdiThreadSession::create_for_test(
+            771, 41, execute_with_target_return_postinst, &probe,
+            nullptr, nullptr, nullptr, nullptr, nullptr, {},
+            signal_lifecycle(&probe));
+    CHECK(session != nullptr);
+    const uint64_t args[8]{};
+
+    const TraceRunResult result = session->call(0x71004000, args, 0);
+
+    CHECK(result.target_returned);
+    CHECK(probe.cleared_before_vm_return);
+    CHECK(!probe.active);
+    CHECK(probe.activations == 1);
+    delete session;
+}
+
+void every_injected_vm_return_falls_back_to_an_inactive_epoch() {
+    const std::array<TraceRunResult, 3> returns{{
+            {false, false, 0},
+            {true, true, 0x11},
+            {true, false, true, 0x22},
+    }};
+    for (const TraceRunResult expected : returns) {
+        SignalExecutionProbe probe;
+        probe.direct_result = expected;
+        QbdiThreadSession *session = QbdiThreadSession::create_for_test(
+                771, 42, execute_with_fallback_clear, &probe,
+                nullptr, nullptr, nullptr, nullptr, nullptr, {},
+                signal_lifecycle(&probe));
+        CHECK(session != nullptr);
+        const uint64_t args[8]{};
+
+        const TraceRunResult result = session->call(0x71004100, args, 0);
+
+        CHECK(result.target_executed == expected.target_executed);
+        CHECK(result.target_returned == expected.target_returned);
+        CHECK(result.exit_requested == expected.exit_requested);
+        CHECK(!probe.active);
+        CHECK(probe.activations == 1);
+        CHECK(probe.clears == 1);
+        delete session;
+    }
+}
+
+void continuation_reactivates_fresh_and_clears_at_target_postinst() {
+    SignalExecutionProbe probe;
+    QbdiThreadSession *session = QbdiThreadSession::create_for_test(
+            771, 43, execute_before_continuation, &probe,
+            nullptr, nullptr, nullptr, nullptr,
+            continue_with_target_return_postinst, {},
+            signal_lifecycle(&probe));
+    CHECK(session != nullptr);
+    const uint64_t args[8]{};
+
+    const TraceRunResult result = session->call(0x71004200, args, 0);
+
+    CHECK(result.target_returned);
+    CHECK(probe.cleared_before_vm_return);
+    CHECK(!probe.active);
+    CHECK(probe.activations == 2);
+    CHECK(probe.epoch == 2);
+    delete session;
+}
+
 } // namespace
 
 int main() {
@@ -444,4 +587,7 @@ int main() {
     lifecycle_only_thread_reentry_registers_distinct_scene_controls();
     control_extent_failures_are_bounded_and_sticky();
     repeated_exact_execution_state_requests_periodic_yield();
+    target_return_postinst_clears_before_injected_vm_run_returns();
+    every_injected_vm_return_falls_back_to_an_inactive_epoch();
+    continuation_reactivates_fresh_and_clears_at_target_postinst();
 }

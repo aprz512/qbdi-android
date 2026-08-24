@@ -316,6 +316,10 @@ constexpr uint32_t kSignalHandlerCounterMaximum = 0xffffU;
 SignalBrokerTestGate g_action_publication_gate = nullptr;
 SignalBrokerTestGate g_action_reset_gate = nullptr;
 SignalBrokerTestGate g_return_publication_gate = nullptr;
+SignalBrokerTestGate g_dispatch_epoch_gate = nullptr;
+SignalBrokerTestGate g_dispatch_return_gate = nullptr;
+SignalBrokerTestGate g_guest_store_gate = nullptr;
+SignalBrokerTestGate g_guest_publication_gate = nullptr;
 #endif
 
 uint32_t increment_saturated(std::atomic<uint32_t> *counter) noexcept {
@@ -387,8 +391,9 @@ bool SignalBrokerThreadState::initialize(
         uint32_t tid, FlightArtifact *artifact,
         const FlightThreadRegistration &registration,
         QBDI::GPRState *guest_gpr) noexcept {
+    if (guest_gpr == nullptr) return false;
     if (attached_.load(std::memory_order_acquire) || tid == 0 || artifact == nullptr ||
-        guest_gpr == nullptr || !artifact->valid() || registration.tid != tid ||
+        !artifact->valid() || registration.tid != tid ||
         registration.directory_index == kFlightInvalidIndex) {
         return false;
     }
@@ -396,21 +401,60 @@ bool SignalBrokerThreadState::initialize(
     artifact_ = artifact;
     registration_ = registration;
     next_return_sequence_.store(1, std::memory_order_relaxed);
+    next_execution_epoch_.store(1, std::memory_order_relaxed);
+    execution_epoch_.store(0, std::memory_order_relaxed);
     for (ReturnedSnapshot &snapshot : returned_snapshots_) {
         snapshot.sequence.store(0, std::memory_order_relaxed);
+        snapshot.execution_epoch.store(0, std::memory_order_relaxed);
         snapshot.state.store(kReturnedFree, std::memory_order_relaxed);
     }
     Arm64SignalContext context{};
-    if (!qbdi_gpr_to_signal_context(*guest_gpr, &context) ||
-        !store_guest(context, guest_gpr)) return false;
+    if (!qbdi_gpr_to_signal_context(*guest_gpr, &context)) return false;
+    if (!publish_guest(context, guest_gpr, 0)) return false;
     attached_.store(true, std::memory_order_release);
     return true;
+}
+
+uint64_t SignalBrokerThreadState::activate_execution(
+        QBDI::GPRState *guest_gpr) noexcept {
+    if (guest_gpr == nullptr ||
+        !attached_.load(std::memory_order_acquire) ||
+        execution_epoch_.load(std::memory_order_acquire) != 0) {
+        return 0;
+    }
+    Arm64SignalContext context{};
+    if (!qbdi_gpr_to_signal_context(*guest_gpr, &context)) return 0;
+    uint64_t epoch = next_execution_epoch_.load(std::memory_order_relaxed);
+    for (;;) {
+        if (epoch == 0 || epoch == UINT64_MAX) return 0;
+        if (next_execution_epoch_.compare_exchange_weak(
+                    epoch, epoch + 1U, std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    if (!publish_guest(context, guest_gpr, epoch)) return 0;
+    execution_epoch_.store(epoch, std::memory_order_release);
+    return epoch;
+}
+
+void SignalBrokerThreadState::deactivate_execution() noexcept {
+    execution_epoch_.store(0, std::memory_order_release);
+}
+
+void SignalBrokerThreadState::observe_target_post(
+        const QBDI::GPRState *guest_gpr, uintptr_t return_address) noexcept {
+    if (guest_gpr != nullptr && return_address != 0 &&
+        guest_gpr->pc == return_address) {
+        deactivate_execution();
+    }
 }
 
 bool SignalBrokerThreadState::publish(
         FlightRecordType type, uintptr_t pc, uintptr_t sp, uintptr_t related,
         uint32_t signal_or_syscall, uint32_t code, uint32_t flags,
-        uint64_t *sequence) noexcept {
+        uint64_t *sequence, uint32_t replace_termination_signal,
+        uint32_t replace_termination_syscall) noexcept {
     if (!attached_.load(std::memory_order_acquire) || artifact_ == nullptr) return false;
     FlightEmergencyRecord record{};
     record.type = static_cast<uint32_t>(type);
@@ -426,7 +470,16 @@ bool SignalBrokerThreadState::publish(
         artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
         return false;
     }
-    if (!artifact_->write_emergency(registration_, record)) {
+    bool matched_termination = false;
+    const bool published = replace_termination_signal != 0
+            ? artifact_->replace_pinned_termination(
+                      registration_, replace_termination_syscall,
+                      replace_termination_signal, record,
+                      &matched_termination) &&
+                      (matched_termination ||
+                       artifact_->write_emergency(registration_, record))
+            : artifact_->write_emergency(registration_, record);
+    if (!published) {
         if (!artifact_->increment_dropped_coverage_gap(
                     registration_.directory_index)) {
             artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
@@ -438,12 +491,23 @@ bool SignalBrokerThreadState::publish(
 }
 
 bool SignalBrokerThreadState::load_guest(
-        Arm64SignalContext *context, QBDI::GPRState **gpr,
+        uint64_t execution_epoch, Arm64SignalContext *context,
+        QBDI::GPRState **gpr,
         uint64_t *direct_delivery, uintptr_t *direct_svc_pc) const noexcept {
-    if (context == nullptr || !attached_.load(std::memory_order_acquire)) return false;
-    const uint32_t snapshot_index =
+    if (execution_epoch == 0 || context == nullptr ||
+        !attached_.load(std::memory_order_acquire) ||
+        execution_epoch_.load(std::memory_order_acquire) != execution_epoch) {
+        return false;
+    }
+    uint32_t snapshot_index =
             guest_snapshot_index_.load(std::memory_order_acquire) & 1U;
+    if (guest_snapshots_[snapshot_index].execution_epoch.load(
+                std::memory_order_acquire) != execution_epoch) {
+        snapshot_index ^= 1U;
+    }
     const GuestSnapshot &snapshot = guest_snapshots_[snapshot_index];
+    if (snapshot.execution_epoch.load(std::memory_order_acquire) !=
+        execution_epoch) return false;
     for (size_t index = 0; index < context->regs.size(); ++index) {
         context->regs[index] = snapshot.words[index].load(std::memory_order_relaxed);
     }
@@ -460,17 +524,36 @@ bool SignalBrokerThreadState::load_guest(
     if (direct_svc_pc != nullptr) {
         *direct_svc_pc = snapshot.direct_svc_pc.load(std::memory_order_relaxed);
     }
-    return true;
+    return snapshot.execution_epoch.load(std::memory_order_acquire) ==
+                   execution_epoch &&
+           execution_epoch_.load(std::memory_order_acquire) == execution_epoch;
 }
 
-void SignalBrokerThreadState::publish_guest(
+bool SignalBrokerThreadState::publish_guest(
         const Arm64SignalContext &context, QBDI::GPRState *gpr,
-        uint64_t direct_delivery, uintptr_t direct_svc_pc) noexcept {
+        uint64_t execution_epoch, uint64_t direct_delivery,
+        uintptr_t direct_svc_pc) noexcept {
     const uint32_t snapshot_index =
             (guest_snapshot_index_.load(std::memory_order_relaxed) ^ 1U) & 1U;
     GuestSnapshot &snapshot = guest_snapshots_[snapshot_index];
+    uint32_t expected = 0;
+    if (!snapshot.writer_state.compare_exchange_strong(
+                expected, 1, std::memory_order_acq_rel,
+                std::memory_order_relaxed)) {
+        return false;
+    }
+    if ((guest_snapshot_index_.load(std::memory_order_acquire) & 1U) ==
+        snapshot_index) {
+        snapshot.writer_state.store(0, std::memory_order_release);
+        return false;
+    }
     for (size_t index = 0; index < context.regs.size(); ++index) {
         snapshot.words[index].store(context.regs[index], std::memory_order_relaxed);
+#if defined(QTRACE_HOST_TEST)
+        if (index == 15 && g_guest_publication_gate != nullptr) {
+            g_guest_publication_gate();
+        }
+#endif
     }
     snapshot.words[31].store(context.sp, std::memory_order_relaxed);
     snapshot.words[32].store(context.pc, std::memory_order_relaxed);
@@ -478,15 +561,26 @@ void SignalBrokerThreadState::publish_guest(
     snapshot.gpr.store(gpr, std::memory_order_relaxed);
     snapshot.direct_delivery.store(direct_delivery, std::memory_order_relaxed);
     snapshot.direct_svc_pc.store(direct_svc_pc, std::memory_order_relaxed);
+    snapshot.execution_epoch.store(execution_epoch, std::memory_order_release);
     guest_snapshot_index_.store(snapshot_index, std::memory_order_release);
+    snapshot.writer_state.store(0, std::memory_order_release);
+    return true;
 }
 
 bool SignalBrokerThreadState::store_guest(
         const Arm64SignalContext &context, QBDI::GPRState *gpr,
-        uint64_t direct_delivery, uintptr_t direct_svc_pc) noexcept {
-    if (gpr == nullptr) return false;
-    publish_guest(context, gpr, direct_delivery, direct_svc_pc);
-    return true;
+        uint64_t execution_epoch, uint64_t direct_delivery,
+        uintptr_t direct_svc_pc) noexcept {
+    if (gpr == nullptr || execution_epoch == 0 ||
+        execution_epoch_.load(std::memory_order_acquire) != execution_epoch) {
+        return false;
+    }
+#if defined(QTRACE_HOST_TEST)
+    if (g_guest_store_gate != nullptr) g_guest_store_gate();
+#endif
+    return publish_guest(context, gpr, execution_epoch, direct_delivery,
+                         direct_svc_pc) &&
+           execution_epoch_.load(std::memory_order_acquire) == execution_epoch;
 }
 
 __attribute__((no_stack_protector)) void
@@ -508,7 +602,11 @@ __attribute__((no_stack_protector)) bool
 SignalBrokerThreadState::queue_returned_guest(
         const Arm64SignalContext &initial,
         const Arm64SignalContext &returned,
-        uint64_t action_generation) noexcept {
+        uint64_t action_generation, uint64_t execution_epoch) noexcept {
+    if (execution_epoch == 0 ||
+        execution_epoch_.load(std::memory_order_acquire) != execution_epoch) {
+        return true;
+    }
     uint64_t changed_mask = 0;
     for (size_t index = 0; index < initial.regs.size(); ++index) {
         if (initial.regs[index] != returned.regs[index]) {
@@ -555,7 +653,13 @@ SignalBrokerThreadState::queue_returned_guest(
     claimed->changed_mask.store(changed_mask, std::memory_order_relaxed);
     claimed->action_generation.store(action_generation,
                                      std::memory_order_relaxed);
+    claimed->execution_epoch.store(execution_epoch,
+                                   std::memory_order_relaxed);
     claimed->sequence.store(sequence, std::memory_order_relaxed);
+    if (execution_epoch_.load(std::memory_order_acquire) != execution_epoch) {
+        claimed->state.store(kReturnedFree, std::memory_order_release);
+        return true;
+    }
     claimed->state.store(kReturnedReady, std::memory_order_release);
     return true;
 }
@@ -564,6 +668,9 @@ bool SignalBrokerThreadState::apply_returned_guest(
         QBDI::GPRState *gpr, bool *pc_changed) noexcept {
     if (pc_changed != nullptr) *pc_changed = false;
     if (gpr == nullptr) return false;
+    const uint64_t execution_epoch =
+            execution_epoch_.load(std::memory_order_acquire);
+    if (execution_epoch == 0) return true;
     const uintptr_t original_pc = gpr->pc;
     Arm64SignalContext merged{};
     if (!qbdi_gpr_to_signal_context(*gpr, &merged)) return false;
@@ -596,6 +703,11 @@ bool SignalBrokerThreadState::apply_returned_guest(
             publish_coverage_gap();
             return false;
         }
+        if (selected->execution_epoch.load(std::memory_order_relaxed) !=
+            execution_epoch) {
+            selected->state.store(kReturnedFree, std::memory_order_release);
+            continue;
+        }
         const uint64_t changed_mask =
                 selected->changed_mask.load(std::memory_order_relaxed);
         for (size_t index = 0; index < merged.regs.size(); ++index) {
@@ -615,10 +727,24 @@ bool SignalBrokerThreadState::apply_returned_guest(
         }
         selected->state.store(kReturnedFree, std::memory_order_release);
     }
+    if (execution_epoch_.load(std::memory_order_acquire) != execution_epoch) {
+        return true;
+    }
     if (!signal_context_to_qbdi_gpr(merged, gpr)) return false;
     if (pc_changed != nullptr) *pc_changed = gpr->pc != original_pc;
     return true;
 }
+
+#if defined(QTRACE_HOST_TEST)
+size_t SignalBrokerThreadState::test_returned_snapshot_count() const noexcept {
+    size_t count = 0;
+    for (const ReturnedSnapshot &snapshot : returned_snapshots_) {
+        if (snapshot.state.load(std::memory_order_acquire) ==
+            kReturnedReady) ++count;
+    }
+    return count;
+}
+#endif
 
 SignalBroker::SignalBroker() noexcept : SignalBroker(default_platform()) {}
 
@@ -750,6 +876,26 @@ void signal_broker_test_set_action_reset_gate(
 void signal_broker_test_set_return_publication_gate(
         SignalBrokerTestGate gate) noexcept {
     g_return_publication_gate = gate;
+}
+
+void signal_broker_test_set_dispatch_epoch_gate(
+        SignalBrokerTestGate gate) noexcept {
+    g_dispatch_epoch_gate = gate;
+}
+
+void signal_broker_test_set_dispatch_return_gate(
+        SignalBrokerTestGate gate) noexcept {
+    g_dispatch_return_gate = gate;
+}
+
+void signal_broker_test_set_guest_store_gate(
+        SignalBrokerTestGate gate) noexcept {
+    g_guest_store_gate = gate;
+}
+
+void signal_broker_test_set_guest_publication_gate(
+        SignalBrokerTestGate gate) noexcept {
+    g_guest_publication_gate = gate;
 }
 
 uint32_t SignalBroker::test_active_action_readers(
@@ -927,6 +1073,9 @@ bool SignalBroker::publish_guest_state(SignalBrokerThreadState *thread,
                                        const QBDI::GPRState &gpr,
                                        const Arm64SyscallSnapshot *delivery) noexcept {
     if (thread == nullptr || detached()) return false;
+    const uint64_t execution_epoch =
+            thread->execution_epoch_.load(std::memory_order_acquire);
+    if (execution_epoch == 0) return false;
     Arm64SignalContext context{};
     if (!qbdi_gpr_to_signal_context(gpr, &context)) return false;
     uint64_t direct_delivery = 0;
@@ -947,9 +1096,14 @@ bool SignalBroker::publish_guest_state(SignalBrokerThreadState *thread,
                     kArm64Tgkill, static_cast<uint32_t>(delivery->args[2]));
         }
     }
-    thread->publish_guest(context, const_cast<QBDI::GPRState *>(&gpr),
-                          direct_delivery, direct_delivery != 0 ? context.pc : 0);
-    return true;
+    if (!thread->publish_guest(context, const_cast<QBDI::GPRState *>(&gpr),
+                               execution_epoch, direct_delivery,
+                               direct_delivery != 0 ? context.pc : 0)) {
+        thread->publish_coverage_gap();
+        return false;
+    }
+    return thread->execution_epoch_.load(std::memory_order_acquire) ==
+           execution_epoch;
 }
 
 bool SignalBroker::apply_pending_guest_state(
@@ -1003,6 +1157,25 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
     if (thread == nullptr) {
         thread = find_thread(static_cast<uint32_t>(
                 platform_.gettid(platform_.opaque)));
+    }
+    uint64_t execution_epoch = 0;
+    Arm64SignalContext guest{};
+    QBDI::GPRState *guest_gpr = nullptr;
+    uint64_t direct_delivery = 0;
+    uintptr_t direct_svc_pc = 0;
+    if (thread != nullptr) {
+        execution_epoch =
+                thread->execution_epoch_.load(std::memory_order_acquire);
+#if defined(QTRACE_HOST_TEST)
+        if (g_dispatch_epoch_gate != nullptr) g_dispatch_epoch_gate();
+#endif
+        if (execution_epoch == 0 ||
+            !thread->load_guest(execution_epoch, &guest, &guest_gpr,
+                                &direct_delivery, &direct_svc_pc) ||
+            thread->execution_epoch_.load(std::memory_order_acquire) !=
+                    execution_epoch) {
+            thread = nullptr;
+        }
     }
     if (thread == nullptr) {
         if (delivery.action.handler == kIgnoreHandler) return true;
@@ -1072,12 +1245,7 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
     }
     const uint32_t handler_flags =
             signal_handler_flags(depth, nested_deliveries);
-    Arm64SignalContext guest{};
-    QBDI::GPRState *guest_gpr = nullptr;
-    uint64_t direct_delivery = 0;
-    uintptr_t direct_svc_pc = 0;
-    bool have_guest = thread->load_guest(
-            &guest, &guest_gpr, &direct_delivery, &direct_svc_pc);
+    bool have_guest = true;
     const bool nested_context = depth > 1 && native_context != nullptr;
     DirectDeliveryProof direct_proof = DirectDeliveryProof::NotCompleted;
     if (depth == 1 && direct_delivery != 0) {
@@ -1128,7 +1296,19 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
                           have_guest ? guest.pc : 0,
                           have_guest ? guest.sp : 0, fault,
                           static_cast<uint32_t>(signal_number), code,
-                          handler_flags);
+                          handler_flags, nullptr,
+                          depth == 1 &&
+                                          direct_proof ==
+                                                  DirectDeliveryProof::Completed &&
+                                          delivery.action.handler ==
+                                                  kIgnoreHandler
+                                  ? static_cast<uint32_t>(signal_number)
+                                  : 0U,
+                          depth == 1 &&
+                                          direct_proof ==
+                                                  DirectDeliveryProof::Completed
+                                  ? static_cast<uint32_t>(direct_delivery >> 32U)
+                                  : 0U);
 
     if (delivery.action.handler == kIgnoreHandler) {
         thread->active_deliveries_.fetch_sub(1, std::memory_order_release);
@@ -1250,19 +1430,28 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
 #if defined(__ANDROID__) && defined(__aarch64__)
     (void)returned_mask;
 #endif
+#if defined(QTRACE_HOST_TEST)
+    if (g_dispatch_return_gate != nullptr) g_dispatch_return_gate();
+#endif
+    const bool execution_still_active =
+            thread->execution_epoch_.load(std::memory_order_acquire) ==
+            execution_epoch;
     const uint64_t retained_direct_delivery =
             direct_svc_resume ? 0 : direct_delivery;
     const uintptr_t retained_direct_svc_pc =
             direct_svc_resume ? 0 : direct_svc_pc;
-    const bool stored = mapped &&
-                        (depth != 1 || thread->store_guest(
-                                                guest, guest_gpr,
-                                                retained_direct_delivery,
-                                                retained_direct_svc_pc));
-    const bool queued = mapped && thread->queue_returned_guest(
-                                           handler_entry, guest,
-                                           delivery.generation);
-    if (!stored || !queued) {
+    const bool stored = !mapped || !execution_still_active || depth != 1 ||
+                        thread->store_guest(
+                                guest, guest_gpr, execution_epoch,
+                                retained_direct_delivery,
+                                retained_direct_svc_pc);
+    const bool queued = !mapped || !execution_still_active ||
+                        thread->queue_returned_guest(
+                                handler_entry, guest, delivery.generation,
+                                execution_epoch);
+    if ((!stored || !queued) &&
+        thread->execution_epoch_.load(std::memory_order_acquire) ==
+                execution_epoch) {
         thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
     }
     (void)thread->publish(FlightRecordType::SignalHandlerReturn, guest.pc,
@@ -1271,7 +1460,18 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
                           signal_handler_flags(
                                   depth,
                                   thread->nested_deliveries_.load(
-                                          std::memory_order_acquire)));
+                                          std::memory_order_acquire)),
+                          nullptr,
+                          depth == 1 &&
+                                          direct_proof ==
+                                                  DirectDeliveryProof::Completed
+                                  ? static_cast<uint32_t>(signal_number)
+                                  : 0U,
+                          depth == 1 &&
+                                          direct_proof ==
+                                                  DirectDeliveryProof::Completed
+                                  ? static_cast<uint32_t>(direct_delivery >> 32U)
+                                  : 0U);
     thread->active_deliveries_.fetch_sub(1, std::memory_order_release);
 #if !defined(__ANDROID__) || !defined(__aarch64__)
     const uint64_t restore_mask =
@@ -1372,6 +1572,7 @@ QBDI::VMAction TerminationObserver::before_svc(
             snapshot.args[1], static_cast<uint32_t>(snapshot.number),
             static_cast<uint32_t>(snapshot.args[2]),
             static_cast<uint32_t>(snapshot.args[3]));
+    if (snapshot.number == 138) writer->publish_coverage_gap();
     return QBDI::CONTINUE;
 }
 

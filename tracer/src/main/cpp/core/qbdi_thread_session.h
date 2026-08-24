@@ -29,6 +29,38 @@ using QbdiThreadSessionLifecycleReporter =
         bool (*)(void *opaque, uint32_t tid, bool begin, uint32_t creator_tid,
                  uintptr_t start_routine) noexcept;
 
+using QbdiVmExecutionActivate = uint64_t (*)(
+        void *opaque, QBDI::GPRState *gpr) noexcept;
+using QbdiVmExecutionClear = void (*)(void *opaque) noexcept;
+using QbdiVmExecutionTargetPost = void (*)(
+        void *opaque, const QBDI::GPRState *gpr,
+        uintptr_t return_address) noexcept;
+
+struct QbdiVmExecutionLifecycle {
+    void *opaque = nullptr;
+    QbdiVmExecutionActivate activate_callback = nullptr;
+    QbdiVmExecutionClear clear_callback = nullptr;
+    QbdiVmExecutionTargetPost target_post_callback = nullptr;
+
+    bool activate(QBDI::GPRState *gpr) const noexcept {
+        return activate_callback == nullptr ||
+               activate_callback(opaque, gpr) != 0;
+    }
+    void clear() const noexcept {
+        if (clear_callback != nullptr) clear_callback(opaque);
+    }
+    void observe_target_post(const QBDI::GPRState *gpr,
+                             uintptr_t return_address) const noexcept {
+        if (target_post_callback != nullptr) {
+            target_post_callback(opaque, gpr, return_address);
+        }
+    }
+};
+
+void observe_qbdi_vm_target_post(
+        const QbdiVmExecutionLifecycle &signal_execution,
+        const QBDI::GPRState *gpr, uintptr_t return_address) noexcept;
+
 #if defined(QTRACE_HOST_TEST)
 using QbdiThreadSessionTestExecutor = TraceRunResult (*)(
         void *opaque, QbdiThreadSession *session, uintptr_t entry,
@@ -66,7 +98,8 @@ public:
             QbdiThreadSessionLifecycleReporter lifecycle_reporter = nullptr,
             void *lifecycle_opaque = nullptr,
             QbdiThreadSessionTestContinuation continuation = nullptr,
-            QbdiControlExtentRegistration control_registration = {}) noexcept;
+            QbdiControlExtentRegistration control_registration = {},
+            QbdiVmExecutionLifecycle signal_execution = {}) noexcept;
 #endif
 
     TraceRunResult call(uintptr_t entry, const uint64_t args[8],
@@ -96,6 +129,8 @@ public:
 
 private:
     friend class CaptureCoordinator;
+    friend std::shared_ptr<CaptureCoordinator>
+    current_capture_coordinator() noexcept;
 
     struct Impl;
 
@@ -119,12 +154,15 @@ private:
     QbdiThreadSessionGapReporter gap_reporter_ = nullptr;
     void *gap_opaque_ = nullptr;
     std::weak_ptr<CaptureCoordinator> capture_owner_;
+    std::shared_ptr<CaptureCoordinator> active_capture_owner_;
+    bool capture_owner_required_ = false;
 #if defined(QTRACE_HOST_TEST)
     QbdiThreadSessionTestExecutor test_executor_ = nullptr;
     void *test_executor_opaque_ = nullptr;
     QbdiThreadSessionLifecycleReporter lifecycle_reporter_ = nullptr;
     void *lifecycle_opaque_ = nullptr;
     QbdiThreadSessionTestContinuation test_continuation_ = nullptr;
+    QbdiVmExecutionLifecycle test_signal_execution_{};
     QbdiControlExtentRegistration test_control_registration_{};
 #endif
     QbdiControlExtentSet control_extents_;

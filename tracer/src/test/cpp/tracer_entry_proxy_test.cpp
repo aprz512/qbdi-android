@@ -18,6 +18,7 @@
 #include <mutex>
 #include <new>
 #include <memory>
+#include <link.h>
 #include <string>
 #include <thread>
 #include <sys/wait.h>
@@ -41,6 +42,10 @@ size_t trace_proxy_test_generation(size_t scene_index);
 void trace_proxy_test_set_coordinator(
         const std::shared_ptr<CaptureCoordinator> &coordinator);
 CaptureCoordinator *trace_proxy_test_hook_coordinator(size_t generation);
+void trace_proxy_test_install_loading_module(const ModuleRange &module);
+void trace_proxy_test_module_fini(uintptr_t module_base,
+                                  const char *module_path);
+bool trace_proxy_test_generation_retired(size_t generation);
 
 void check(bool condition, const char *expression, int line) {
     if (condition) return;
@@ -788,6 +793,84 @@ void observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map() {
     CHECK(!normalize_module_ranges(g_fake_maps, "libtarget.so", 0, 0, &normalized));
 }
 
+void constructor_phdr_range_uses_load_bias_and_preserves_executable_segments() {
+    const std::array<ElfW(Phdr), 3> headers{{
+            {.p_type = PT_LOAD, .p_flags = PF_R, .p_offset = 0,
+             .p_vaddr = 0, .p_paddr = 0, .p_filesz = 0,
+             .p_memsz = 0x800, .p_align = 0},
+            {.p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_offset = 0x1000,
+             .p_vaddr = 0x3000, .p_paddr = 0, .p_filesz = 0,
+             .p_memsz = 0x801, .p_align = 0},
+            {.p_type = PT_LOAD, .p_flags = PF_X, .p_offset = 0x2000,
+             .p_vaddr = 0x6000, .p_paddr = 0, .p_filesz = 0,
+             .p_memsz = 0x1001, .p_align = 0},
+    }};
+    dl_phdr_info info{};
+    info.dlpi_addr = 0x71000000;
+    info.dlpi_name = "/data/app/example/libflight-proxy.so";
+    info.dlpi_phdr = headers.data();
+    info.dlpi_phnum = headers.size();
+
+    ModuleRange module;
+    CHECK(module_range_from_phdr(info, &module));
+    CHECK(module.start == 0x71000000);
+    CHECK(module.end == 0x71008000);
+    CHECK(module.path == info.dlpi_name);
+    CHECK(module.readable_executable_range_count == 2);
+    CHECK(module.readable_executable_ranges[0].start == 0x71003000);
+    CHECK(module.readable_executable_ranges[0].end == 0x71003801);
+    CHECK(module.readable_executable_ranges[1].start == 0x71006000);
+    CHECK(module.readable_executable_ranges[1].end == 0x71007001);
+}
+
+void constructor_phdr_range_rejects_invalid_or_unrepresentable_loads() {
+    dl_phdr_info info{};
+    info.dlpi_addr = 0x71000000;
+    info.dlpi_name = "/data/app/example/libflight-proxy.so";
+    ModuleRange module;
+
+    const std::array<ElfW(Phdr), 1> missing{{
+            {.p_type = PT_NOTE, .p_flags = 0, .p_offset = 0,
+             .p_vaddr = 0, .p_paddr = 0, .p_filesz = 0,
+             .p_memsz = 0x100, .p_align = 0},
+    }};
+    info.dlpi_phdr = missing.data();
+    info.dlpi_phnum = missing.size();
+    CHECK(!module_range_from_phdr(info, &module));
+
+    const std::array<ElfW(Phdr), 1> segment_overflow{{
+            {.p_type = PT_LOAD, .p_flags = PF_X,
+             .p_offset = 0, .p_vaddr = UINTPTR_MAX - 0x80U,
+             .p_paddr = 0, .p_filesz = 0, .p_memsz = 0x100,
+             .p_align = 0},
+    }};
+    info.dlpi_phdr = segment_overflow.data();
+    info.dlpi_phnum = segment_overflow.size();
+    CHECK(!module_range_from_phdr(info, &module));
+
+    const std::array<ElfW(Phdr), 1> base_overflow{{
+            {.p_type = PT_LOAD, .p_flags = PF_X,
+             .p_offset = 0, .p_vaddr = 0x1000, .p_paddr = 0,
+             .p_filesz = 0, .p_memsz = 0x1000, .p_align = 0},
+    }};
+    info.dlpi_addr = UINTPTR_MAX - 0x1000U;
+    info.dlpi_phdr = base_overflow.data();
+    info.dlpi_phnum = base_overflow.size();
+    CHECK(!module_range_from_phdr(info, &module));
+
+    std::array<ElfW(Phdr), 9> executable{};
+    for (size_t index = 0; index < executable.size(); ++index) {
+        executable[index].p_type = PT_LOAD;
+        executable[index].p_flags = PF_X;
+        executable[index].p_vaddr = index * 0x1000;
+        executable[index].p_memsz = 0x800;
+    }
+    info.dlpi_addr = 0x71000000;
+    info.dlpi_phdr = executable.data();
+    info.dlpi_phnum = executable.size();
+    CHECK(!module_range_from_phdr(info, &module));
+}
+
 void scene_offsets_must_stay_inside_the_normalized_module() {
     reset_fakes();
     const TraceConfig config = config_named("bounded-scene");
@@ -1233,6 +1316,43 @@ void active_flight_reconfiguration_is_rejected_as_incomplete() {
     CHECK(result == 0x147);
 }
 
+void fini_retires_only_the_exact_loading_generation_and_marks_a_gap() {
+    reset_fakes();
+    const SceneConfig scene = scene_named("init", 0x100);
+    const TraceConfig config = flight_proxy_config(scene);
+    ModuleRange module;
+    module.start = 0x71000000;
+    module.end = 0x71004000;
+    module.permissions = "r-xp";
+    module.path = "/data/app/example/libflight-proxy.so";
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator(
+            new CaptureCoordinator(flight_proxy_factories()));
+    CHECK(coordinator != nullptr);
+    trace_proxy_test_set_coordinator(coordinator);
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+
+    trace_proxy_test_install_loading_module(module);
+    const size_t generation = trace_proxy_test_generation(scene.index);
+    CHECK(generation != 4096);
+    CHECK(coordinator->started());
+    CHECK(!trace_proxy_test_generation_retired(generation));
+
+    trace_proxy_test_module_fini(module.start + 0x1000, module.path.c_str());
+    trace_proxy_test_module_fini(module.start, "/other/libflight-proxy.so");
+    CHECK(!trace_proxy_test_generation_retired(generation));
+    CHECK(g_flight_factory.coverage_gaps.load(std::memory_order_relaxed) == 0);
+
+    trace_proxy_test_module_fini(module.start, module.path.c_str());
+    CHECK(trace_proxy_test_generation_retired(generation));
+    CHECK(coordinator->incomplete());
+    CHECK(g_flight_factory.coverage_gaps.load(std::memory_order_relaxed) == 1);
+    CHECK(g_flight_factory.last_gap_pc.load(std::memory_order_relaxed) ==
+          module.start);
+    CHECK(g_flight_factory.last_gap_reason.load(std::memory_order_relaxed) ==
+          CoverageGapReason::ModuleGeneration);
+}
+
 } // namespace
 
 bool init_inline_hook() { return true; }
@@ -1240,7 +1360,11 @@ bool init_inline_hook() { return true; }
 bool configure_inline_hook_dl_init_helper_path(const char *) { return true; }
 
 bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback,
-                                           InlineHookDlInitCallback,
+                                           void *) {
+    return true;
+}
+
+bool register_inline_hook_dl_fini_callback(InlineHookDlInitCallback,
                                            void *) {
     return true;
 }
@@ -1368,6 +1492,8 @@ int main(int argc, char **argv) {
     failed_same_generation_install_is_retried();
     duplicate_during_an_active_call_schedules_only_the_required_rehook();
     observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map();
+    constructor_phdr_range_uses_load_bias_and_preserves_executable_segments();
+    constructor_phdr_range_rejects_invalid_or_unrepresentable_loads();
     scene_offsets_must_stay_inside_the_normalized_module();
     scene_indices_outside_the_stub_region_are_rejected();
     proxy_generation_identities_are_never_reused_and_exhaust_safely();
@@ -1384,6 +1510,7 @@ int main(int argc, char **argv) {
     flight_rejects_a_different_same_basename_mapping();
     flight_native_bypass_latches_a_coverage_gap();
     active_flight_reconfiguration_is_rejected_as_incomplete();
+    fini_retires_only_the_exact_loading_generation_and_marks_a_gap();
     atfork_install_failure_bypasses_tracing_and_executes_target_once();
     return 0;
 }

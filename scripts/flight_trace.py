@@ -792,8 +792,17 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
             # publication advances the even generation exactly once and the
             # global sequence allocator is monotonic. Anything else is a stale
             # cell left outside the current old-or-new publication pair.
-            if (newer[0] == older[0] + 2 and
-                    newer_sequence > older_sequence):
+            older_kind, older_tid = int(older[1][0]), int(older[1][1])
+            newer_kind, newer_tid = int(newer[1][0]), int(newer[1][1])
+            termination_signal = _termination_intended_signal(older[1])
+            pinned_pair = (
+                older_kind == 14 and newer_kind in (11, 12, 13) and
+                older_tid == newer_tid and
+                termination_signal == int(newer[1][6]) and
+                int(newer[1][8]) & 0xFFFF == 1
+            )
+            if (newer_sequence > older_sequence and
+                    (newer[0] == older[0] + 2 or pinned_pair)):
                 selected = [older, newer]
         pointer_maximum = (1 << (8 * superblock.pointer_width)) - 1
         for _, values in selected:
@@ -816,6 +825,15 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
                 data["dropped_gap_count"] = code
             events.append(FlightEvent(sequence, tid, RECORD_NAMES[kind], data))
     return events
+
+
+def _termination_intended_signal(values: tuple[int, ...]) -> int | None:
+    syscall_number = int(values[6])
+    if syscall_number in (129, 130, 138):
+        return int(values[5])
+    if syscall_number == 131:
+        return int(values[7])
+    return None
 
 
 def _ranges(values: set[int]) -> list[list[int]]:
@@ -864,6 +882,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     chunk_headers: dict[int, tuple[int, int, int]] = {}
     sealed_ranges: list[tuple[int, int]] = []
     decoded_chunks: list[_DecodedChunk] = []
+    active_chunk_indexes: list[int] = []
 
     for index in range(superblock.chunk_count):
         offset = superblock.chunk_offset + index * superblock.chunk_bytes
@@ -882,6 +901,8 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             raise FlightTraceError(f"invalid chunk ownership at index {index}")
         capacity = superblock.chunk_bytes - CHUNK_HEADER_BYTES
         chunk_headers[index] = (tid, generation, state)
+        if state == 1:
+            active_chunk_indexes.append(index)
         if state == 2:
             if (first == 0) != (last == 0) or (first != 0 and first > last):
                 raise FlightTraceError(f"invalid chunk sequence range at index {index}")
@@ -911,8 +932,8 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                             f"active chunk {index} data")
             records = _scan_chunk_data(data, generation, active=True)
         if not records:
-            label = "sealed" if state == 2 else "active"
-            damage.append(f"empty {label} chunk {index}")
+            if state == 2:
+                damage.append(f"empty sealed chunk {index}")
             continue
         chunk_events: list[FlightEvent] = []
         chunk_fragments: list[_FragmentValue] = []
@@ -1029,9 +1050,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             "returned": returned,
             "unreturned_ancestor_count": max(depth - 1, 0),
         })
-    active_chunks = sorted(
-        decoded.index for decoded in decoded_chunks if decoded.state == 1
-    )
+    active_chunks = sorted(active_chunk_indexes)
     lifecycle_balance: dict[int, int] = {}
     for event in events:
         if event.kind == "thread_begin":
@@ -1068,8 +1087,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         "pointer_width": superblock.pointer_width,
         "artifact_flags": superblock.flags,
         "complete": (superblock.flags == 0 and not damage and not coverage and
-                     not incomplete_logical_events and not stale_entries and
-                     not active_chunks and not unterminated_threads),
+                     not incomplete_logical_events and not stale_entries),
         "termination": termination,
         "final_signal": next((event.data for event in reversed(events)
                               if event.kind == "signal"), None),

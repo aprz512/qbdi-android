@@ -323,6 +323,7 @@ struct ArtifactFixture {
         gpr.pc = 0x71001234U;
         gpr.nzcv = 0x60000000U;
         CHECK(thread.initialize(tid, &artifact, registration, &gpr));
+        CHECK(thread.activate_execution(&gpr) != 0);
     }
 
     ~ArtifactFixture() {
@@ -345,6 +346,139 @@ struct ArtifactFixture {
     QBDI::GPRState gpr{};
     SignalBrokerThreadState thread{};
 };
+
+struct EmergencyCells {
+    std::array<FlightEmergencyRecord, 2> records{};
+    std::array<bool, 2> valid{};
+};
+
+EmergencyCells emergency_cells(const ArtifactFixture &fixture) {
+    EmergencyCells cells;
+    const uint8_t *slot = fixture.artifact.emergency_bytes(
+            fixture.registration.directory_index);
+    for (size_t index = 0; index < cells.records.size(); ++index) {
+        std::array<uint8_t, kFlightEmergencySlotBytes> isolated{};
+        std::memcpy(isolated.data(),
+                    slot + index * kFlightEmergencyRecordBytes,
+                    kFlightEmergencyRecordBytes);
+        cells.valid[index] =
+                scan_flight_emergency(isolated.data(), &cells.records[index]);
+    }
+    return cells;
+}
+
+size_t emergency_cell_with(const EmergencyCells &cells,
+                           FlightRecordType type) {
+    for (size_t index = 0; index < cells.records.size(); ++index) {
+        if (cells.valid[index] &&
+            cells.records[index].type == static_cast<uint32_t>(type)) {
+            return index;
+        }
+    }
+    return cells.records.size();
+}
+
+size_t emergency_cell_count(const EmergencyCells &cells,
+                            FlightRecordType type) {
+    size_t count = 0;
+    for (size_t index = 0; index < cells.records.size(); ++index) {
+        if (cells.valid[index] &&
+            cells.records[index].type == static_cast<uint32_t>(type)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void publish_direct_signal_intent(SignalBroker *broker, ArtifactFixture *fixture,
+                                  int signal_number, uintptr_t svc_pc = 0) {
+    Arm64SyscallSnapshot snapshot{};
+    snapshot.pc = svc_pc != 0 ? svc_pc : 0x71003000U;
+    snapshot.number = 131;
+    snapshot.args = {4242, fixture->registration.tid,
+                     static_cast<uint64_t>(signal_number), 0, 0, 0};
+    CHECK(TerminationObserver::before_svc(snapshot, &fixture->thread) ==
+          QBDI::CONTINUE);
+    if (svc_pc != 0) {
+        fixture->gpr.pc = svc_pc;
+        CHECK(broker->publish_guest_state(&fixture->thread, fixture->gpr,
+                                          &snapshot));
+    }
+}
+
+void publish_rt_sigqueueinfo_intent(SignalBroker *broker,
+                                    ArtifactFixture *fixture,
+                                    int signal_number,
+                                    uintptr_t svc_pc = 0) {
+    Arm64SyscallSnapshot snapshot{};
+    snapshot.pc = svc_pc != 0 ? svc_pc : 0x71003100U;
+    snapshot.number = 138;
+    snapshot.args = {4242, static_cast<uint64_t>(signal_number),
+                     0x7100a000U, 0, 0, 0};
+    CHECK(TerminationObserver::before_svc(snapshot, &fixture->thread) ==
+          QBDI::CONTINUE);
+    if (svc_pc != 0) {
+        fixture->gpr.pc = svc_pc;
+        CHECK(broker->publish_guest_state(&fixture->thread, fixture->gpr,
+                                          &snapshot));
+    }
+}
+
+SignalBrokerGuestContext completed_direct_context(uint32_t syscall_number,
+                                                   uint32_t tid,
+                                                   int signal_number,
+                                                   uintptr_t resume_pc) {
+    SignalBrokerGuestContext context{};
+    context.registers.regs[0] = 0;
+    context.registers.regs[1] =
+            syscall_number == 131 ? tid : static_cast<uint32_t>(signal_number);
+    context.registers.regs[2] =
+            syscall_number == 131 ? static_cast<uint32_t>(signal_number) : 0;
+    context.registers.regs[8] = syscall_number;
+    context.registers.pc = resume_pc;
+    return context;
+}
+
+siginfo_t direct_signal_info(uint32_t syscall_number, int pid) {
+    siginfo_t info{};
+    info.si_code = syscall_number == 138 ? SI_QUEUE : SI_TKILL;
+    info.si_pid = pid;
+    return info;
+}
+
+Arm64SyscallSnapshot direct_signal_snapshot(uint32_t syscall_number,
+                                            uint32_t tid, int signal_number,
+                                            uintptr_t svc_pc) {
+    Arm64SyscallSnapshot snapshot{};
+    snapshot.pc = svc_pc;
+    snapshot.number = syscall_number;
+    if (syscall_number == 130) {
+        snapshot.args = {tid, static_cast<uint64_t>(signal_number), 0, 0, 0, 0};
+    } else if (syscall_number == 131) {
+        snapshot.args = {4242, tid, static_cast<uint64_t>(signal_number),
+                         0, 0, 0};
+    } else {
+        snapshot.args = {4242, static_cast<uint64_t>(signal_number),
+                         0x7100a000U, 0, 0, 0};
+    }
+    return snapshot;
+}
+
+void publish_pinned_intent_with_candidate(
+        SignalBroker *broker, ArtifactFixture *fixture,
+        uint32_t pinned_syscall, uint32_t candidate_syscall,
+        int signal_number, uintptr_t svc_pc) {
+    const Arm64SyscallSnapshot pinned = direct_signal_snapshot(
+            pinned_syscall, fixture->registration.tid, signal_number, svc_pc);
+    CHECK(TerminationObserver::before_svc(pinned, &fixture->thread) ==
+          QBDI::CONTINUE);
+    const Arm64SyscallSnapshot candidate = direct_signal_snapshot(
+            candidate_syscall, fixture->registration.tid, signal_number,
+            svc_pc);
+    fixture->gpr.pc = svc_pc;
+    CHECK(broker->publish_guest_state(&fixture->thread, fixture->gpr,
+                                      &candidate));
+}
 
 Arm64SyscallSnapshot sigaction_call(int signal_number,
                                     const KernelSignalAction *action,
@@ -823,6 +957,7 @@ struct HandlerFixture {
     uintptr_t observed_pc = 0;
     uintptr_t nested_observed_pc = 0;
     bool begin_was_persistent = false;
+    bool termination_intent_was_persistent = false;
     uint32_t nested_failure_record_type = 0;
     uint32_t nested_failure_flags = 0;
     bool nested_failure_was_incomplete = false;
@@ -835,6 +970,16 @@ struct HandlerFixture {
 HandlerFixture *g_handler_fixture = nullptr;
 FakeKernel *g_unregistered_mask_kernel = nullptr;
 uint64_t g_unregistered_observed_mask = 0;
+SignalBroker *g_guest_publication_broker = nullptr;
+SignalBrokerThreadState *g_guest_publication_thread = nullptr;
+
+void interrupt_guest_publication_with_returned_handler() {
+    signal_broker_test_set_guest_publication_gate(nullptr);
+    CHECK(g_guest_publication_broker != nullptr);
+    CHECK(g_guest_publication_thread != nullptr);
+    CHECK(g_guest_publication_broker->dispatch(
+            SIGUSR1, nullptr, nullptr, g_guest_publication_thread));
+}
 
 void fallback_handler(int) { ++g_fallback_calls; }
 
@@ -849,6 +994,9 @@ void normal_handler(int) {
     fixture.begin_was_persistent =
             fixture.artifact->emergency().type ==
             static_cast<uint32_t>(FlightRecordType::SignalHandlerBegin);
+    fixture.termination_intent_was_persistent =
+            emergency_cell_with(emergency_cells(*fixture.artifact),
+                                FlightRecordType::TerminationIntent) < 2;
 }
 
 void siginfo_handler(int, siginfo_t *, void *context) {
@@ -928,6 +1076,41 @@ uint32_t g_bounded_return_calls = 0;
 uintptr_t g_deferred_return_pc = 0;
 SignalBroker *g_return_publication_broker = nullptr;
 SignalBrokerThreadState *g_return_publication_thread = nullptr;
+SignalBrokerThreadState *g_epoch_gate_thread = nullptr;
+QBDI::GPRState *g_epoch_gate_next_gpr = nullptr;
+uintptr_t g_native_epoch_pc = 0;
+uint32_t g_native_epoch_calls = 0;
+
+void native_epoch_handler(int, siginfo_t *, void *context) {
+    ++g_native_epoch_calls;
+    auto *native = static_cast<SignalBrokerGuestContext *>(context);
+    g_native_epoch_pc = native != nullptr ? native->registers.pc : 0;
+    if (native != nullptr) native->registers.regs[0] = 0xabcdefU;
+}
+
+void deactivate_during_epoch_validation() {
+    signal_broker_test_set_dispatch_epoch_gate(nullptr);
+    CHECK(g_epoch_gate_thread != nullptr);
+    g_epoch_gate_thread->deactivate_execution();
+}
+
+void replace_epoch_after_guest_handler() {
+    signal_broker_test_set_dispatch_return_gate(nullptr);
+    CHECK(g_epoch_gate_thread != nullptr);
+    CHECK(g_epoch_gate_next_gpr != nullptr);
+    const uint64_t previous = g_epoch_gate_thread->test_execution_epoch();
+    g_epoch_gate_thread->deactivate_execution();
+    CHECK(g_epoch_gate_thread->activate_execution(g_epoch_gate_next_gpr) >
+          previous);
+}
+
+void replace_epoch_during_guest_store() {
+    signal_broker_test_set_guest_store_gate(nullptr);
+    CHECK(g_epoch_gate_thread != nullptr);
+    CHECK(g_epoch_gate_next_gpr != nullptr);
+    g_epoch_gate_thread->deactivate_execution();
+    CHECK(g_epoch_gate_thread->activate_execution(g_epoch_gate_next_gpr) != 0);
+}
 
 void deferred_return_handler(int, siginfo_t *, void *context) {
     auto *guest = static_cast<SignalBrokerGuestContext *>(context);
@@ -1084,6 +1267,306 @@ void native_dispatch_persists_interval_preserves_masks_and_applies_guest_context
     CHECK(artifact.emergency().type ==
           static_cast<uint32_t>(FlightRecordType::SignalHandlerReturn));
     g_handler_fixture = nullptr;
+}
+
+void custom_return_overwrites_the_exact_pinned_intent_cell() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = &handler;
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(normal_handler), 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    publish_direct_signal_intent(&broker, &artifact, SIGUSR1,
+                                 reinterpret_cast<uintptr_t>(&code[0]));
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(artifact), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+
+    siginfo_t info = direct_signal_info(131, 4242);
+    SignalBrokerGuestContext context = completed_direct_context(
+            131, artifact.registration.tid, SIGUSR1,
+            reinterpret_cast<uintptr_t>(&code[1]));
+    CHECK(broker.dispatch(SIGUSR1, &info, &context, &artifact.thread));
+
+    const EmergencyCells final = emergency_cells(artifact);
+    CHECK(handler.termination_intent_was_persistent);
+    CHECK(final.valid[intent_cell]);
+    CHECK(final.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::SignalHandlerReturn));
+    CHECK(emergency_cell_with(final, FlightRecordType::SignalHandlerBegin) < 2);
+    CHECK(emergency_cell_with(final, FlightRecordType::TerminationIntent) == 2);
+    g_handler_fixture = nullptr;
+}
+
+void ignored_direct_signal_atomically_replaces_the_pinned_intent() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction ignored{1, 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &ignored, nullptr), &syscall_gpr) ==
+          QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    publish_direct_signal_intent(&broker, &artifact, SIGUSR1,
+                                 reinterpret_cast<uintptr_t>(&code[0]));
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(artifact), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+
+    siginfo_t info = direct_signal_info(131, 4242);
+    SignalBrokerGuestContext context = completed_direct_context(
+            131, artifact.registration.tid, SIGUSR1,
+            reinterpret_cast<uintptr_t>(&code[1]));
+    CHECK(broker.dispatch(SIGUSR1, &info, &context, &artifact.thread));
+
+    const EmergencyCells final = emergency_cells(artifact);
+    CHECK(final.valid[intent_cell]);
+    CHECK(final.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::Signal));
+    CHECK(emergency_cell_count(final, FlightRecordType::Signal) == 1);
+    CHECK(emergency_cell_with(final, FlightRecordType::TerminationIntent) == 2);
+}
+
+void interrupted_ignore_cancellation_never_exposes_a_false_intent() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction ignored{1, 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &ignored, nullptr), &syscall_gpr) ==
+          QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    publish_direct_signal_intent(&broker, &artifact, SIGUSR1,
+                                 reinterpret_cast<uintptr_t>(&code[0]));
+    artifact.artifact.test_interrupt_emergency_publication(
+            FlightRecordType::Signal, 0, 1);
+
+    siginfo_t info = direct_signal_info(131, 4242);
+    SignalBrokerGuestContext context = completed_direct_context(
+            131, artifact.registration.tid, SIGUSR1,
+            reinterpret_cast<uintptr_t>(&code[1]));
+    CHECK(broker.dispatch(SIGUSR1, &info, &context, &artifact.thread));
+
+    CHECK(emergency_cell_with(emergency_cells(artifact),
+                              FlightRecordType::TerminationIntent) == 2);
+}
+
+void default_direct_signal_preserves_the_pinned_intent() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction default_action{0, 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &default_action, nullptr),
+                  &syscall_gpr) == QBDI::SKIP_INST);
+    publish_direct_signal_intent(&broker, &artifact, SIGUSR1);
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(artifact), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, &artifact.thread));
+
+    const EmergencyCells final = emergency_cells(artifact);
+    CHECK(final.valid[intent_cell]);
+    CHECK(final.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::TerminationIntent));
+}
+
+void rt_sigqueueinfo_pre_marks_incomplete_and_ignore_cannot_cancel_intent() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction ignored{1, 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &ignored, nullptr), &syscall_gpr) ==
+          QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    publish_rt_sigqueueinfo_intent(&broker, &artifact, SIGUSR1,
+                                   reinterpret_cast<uintptr_t>(&code[0]));
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(artifact), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+    CHECK(artifact.artifact.incomplete());
+    CHECK(emergency_cell_with(emergency_cells(artifact),
+                              FlightRecordType::CoverageGap) < 2);
+
+    siginfo_t info = direct_signal_info(138, 4242);
+    SignalBrokerGuestContext context = completed_direct_context(
+            138, artifact.registration.tid, SIGUSR1,
+            reinterpret_cast<uintptr_t>(&code[1]));
+    CHECK(broker.dispatch(SIGUSR1, &info, &context, &artifact.thread));
+
+    const EmergencyCells final = emergency_cells(artifact);
+    CHECK(final.valid[intent_cell]);
+    CHECK(final.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::TerminationIntent));
+    CHECK(emergency_cell_with(final, FlightRecordType::CoverageGap) < 2);
+}
+
+void rt_sigqueueinfo_custom_return_cannot_cancel_intent() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = &handler;
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(normal_handler), 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    publish_rt_sigqueueinfo_intent(&broker, &artifact, SIGUSR1,
+                                   reinterpret_cast<uintptr_t>(&code[0]));
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(artifact), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+    CHECK(artifact.artifact.incomplete());
+    CHECK(emergency_cell_with(emergency_cells(artifact),
+                              FlightRecordType::CoverageGap) < 2);
+
+    siginfo_t info = direct_signal_info(138, 4242);
+    SignalBrokerGuestContext context = completed_direct_context(
+            138, artifact.registration.tid, SIGUSR1,
+            reinterpret_cast<uintptr_t>(&code[1]));
+    CHECK(broker.dispatch(SIGUSR1, &info, &context, &artifact.thread));
+
+    const EmergencyCells final = emergency_cells(artifact);
+    CHECK(handler.termination_intent_was_persistent);
+    CHECK(final.valid[intent_cell]);
+    CHECK(final.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::TerminationIntent));
+    CHECK(emergency_cell_with(final, FlightRecordType::CoverageGap) < 2);
+    g_handler_fixture = nullptr;
+}
+
+void rt_sigqueueinfo_cross_thread_receiver_cannot_cancel_sender_intent() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture sender;
+    CHECK(broker.register_thread(&sender.thread));
+    KernelSignalAction ignored{1, 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &ignored, nullptr), &syscall_gpr) ==
+          QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    publish_rt_sigqueueinfo_intent(&broker, &sender, SIGUSR1,
+                                   reinterpret_cast<uintptr_t>(&code[0]));
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(sender), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+
+    FlightThreadRegistration receiver_registration{};
+    CHECK(sender.artifact.register_thread(732, &receiver_registration));
+    QBDI::GPRState receiver_gpr = sender.gpr;
+    SignalBrokerThreadState receiver{};
+    CHECK(receiver.initialize(732, &sender.artifact, receiver_registration,
+                              &receiver_gpr));
+    CHECK(receiver.activate_execution(&receiver_gpr) != 0);
+    CHECK(broker.register_thread(&receiver));
+    CHECK(broker.publish_guest_state(&receiver, receiver_gpr));
+    siginfo_t info = direct_signal_info(138, 4242);
+    SignalBrokerGuestContext context = completed_direct_context(
+            138, 732, SIGUSR1, reinterpret_cast<uintptr_t>(&code[1]));
+
+    CHECK(broker.dispatch(SIGUSR1, &info, &context, &receiver));
+
+    const EmergencyCells final = emergency_cells(sender);
+    CHECK(final.valid[intent_cell]);
+    CHECK(final.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::TerminationIntent));
+    CHECK(sender.artifact.incomplete());
+    broker.unregister_thread(&receiver);
+}
+
+void completed_direct_delivery_requires_the_exact_pinned_syscall() {
+    struct Scenario {
+        uint32_t pinned_syscall;
+        uint32_t candidate_syscall;
+        bool expects_gap;
+    };
+    constexpr Scenario scenarios[]{
+            {138, 130, true}, {138, 131, true},
+            {130, 131, false}, {131, 130, false},
+    };
+    for (const Scenario &scenario : scenarios) {
+        FakeKernel kernel;
+        SignalBroker broker(kernel.platform());
+        ArtifactFixture artifact;
+        CHECK(broker.register_thread(&artifact.thread));
+        KernelSignalAction ignored{1, 0, 0, 0};
+        QBDI::GPRState syscall_gpr{};
+        CHECK(broker.observe_rt_sigaction(
+                      sigaction_call(SIGUSR1, &ignored, nullptr), &syscall_gpr) ==
+              QBDI::SKIP_INST);
+        alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+        publish_pinned_intent_with_candidate(
+                &broker, &artifact, scenario.pinned_syscall,
+                scenario.candidate_syscall, SIGUSR1,
+                reinterpret_cast<uintptr_t>(&code[0]));
+        const size_t intent_cell = emergency_cell_with(
+                emergency_cells(artifact), FlightRecordType::TerminationIntent);
+        CHECK(intent_cell < 2);
+
+        siginfo_t info = direct_signal_info(scenario.candidate_syscall, 4242);
+        SignalBrokerGuestContext context = completed_direct_context(
+                scenario.candidate_syscall, artifact.registration.tid, SIGUSR1,
+                reinterpret_cast<uintptr_t>(&code[1]));
+        CHECK(broker.dispatch(SIGUSR1, &info, &context, &artifact.thread));
+
+        const EmergencyCells final = emergency_cells(artifact);
+        CHECK(final.valid[intent_cell]);
+        CHECK(final.records[intent_cell].type ==
+              static_cast<uint32_t>(FlightRecordType::TerminationIntent));
+        CHECK((emergency_cell_with(final, FlightRecordType::CoverageGap) < 2) ==
+              scenario.expects_gap);
+    }
+}
+
+void matching_tkill_ignore_overwrites_the_exact_pinned_intent() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    KernelSignalAction ignored{1, 0, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &ignored, nullptr), &syscall_gpr) ==
+          QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    publish_pinned_intent_with_candidate(
+            &broker, &artifact, 130, 130, SIGUSR1,
+            reinterpret_cast<uintptr_t>(&code[0]));
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(artifact), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+    siginfo_t info = direct_signal_info(130, 4242);
+    SignalBrokerGuestContext context = completed_direct_context(
+            130, artifact.registration.tid, SIGUSR1,
+            reinterpret_cast<uintptr_t>(&code[1]));
+
+    CHECK(broker.dispatch(SIGUSR1, &info, &context, &artifact.thread));
+
+    const EmergencyCells final = emergency_cells(artifact);
+    CHECK(final.valid[intent_cell]);
+    CHECK(final.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::Signal));
+    CHECK(emergency_cell_with(final, FlightRecordType::TerminationIntent) == 2);
 }
 
 void nested_delivery_maps_the_interrupted_guest_handler_context() {
@@ -1252,6 +1735,48 @@ void asynchronous_delivery_never_observes_a_torn_guest_snapshot() {
     CHECK(!g_snapshot_was_torn.load(std::memory_order_relaxed));
 }
 
+void reentrant_handler_store_cannot_mix_the_inactive_guest_snapshot() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = &handler;
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(siginfo_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    CHECK(broker.register_thread(&artifact.thread));
+
+    QBDI::GPRState next{};
+    for (size_t index = 0; index < 31; ++index) {
+        QBDI_GPR_SET(&next, index, 0x4400000000000000ULL + index);
+    }
+    next.sp = 0x5500000000000000ULL;
+    next.pc = 0x6600000000000000ULL;
+    next.nzcv = 0x7700000000000000ULL;
+    g_guest_publication_broker = &broker;
+    g_guest_publication_thread = &artifact.thread;
+    signal_broker_test_set_guest_publication_gate(
+            interrupt_guest_publication_with_returned_handler);
+
+    CHECK(broker.publish_guest_state(&artifact.thread, next));
+
+    Arm64SignalContext retained{};
+    CHECK(artifact.thread.test_load_guest(&retained));
+    for (size_t index = 0; index < 31; ++index) {
+        CHECK(retained.regs[index] == 0x4400000000000000ULL + index);
+    }
+    CHECK(retained.sp == next.sp);
+    CHECK(retained.pc == next.pc);
+    CHECK(retained.pstate == next.nzcv);
+    CHECK(artifact.artifact.incomplete());
+    g_guest_publication_broker = nullptr;
+    g_guest_publication_thread = nullptr;
+    g_handler_fixture = nullptr;
+}
+
 void production_master_dispatches_registered_thread_without_qbdi_execution() {
     struct sigaction previous{};
     CHECK(::sigaction(SIGUSR2, nullptr, &previous) == 0);
@@ -1280,6 +1805,186 @@ void production_master_dispatches_registered_thread_without_qbdi_execution() {
                                       FlightRecordType::SignalHandlerReturn));
     broker.unregister_thread(&artifact.thread);
     CHECK(::sigaction(SIGUSR2, &previous, nullptr) == 0);
+}
+
+void inactive_registered_thread_fails_open_to_native_without_guest_records() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    artifact.thread.deactivate_execution();
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(native_epoch_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    CHECK(broker.register_thread(&artifact.thread));
+    SignalBrokerGuestContext native{};
+    native.registers.pc = 0x7f001234U;
+    g_native_epoch_pc = 0;
+    g_native_epoch_calls = 0;
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, &native, &artifact.thread));
+
+    CHECK(g_native_epoch_calls == 1);
+    CHECK(g_native_epoch_pc == 0x7f001234U);
+    CHECK(native.registers.regs[0] == 0xabcdefU);
+    CHECK(artifact.gpr.x0 == 0x1000U);
+    FlightEmergencyRecord recovered{};
+    CHECK(!scan_flight_emergency(
+            artifact.artifact.emergency_bytes(
+                    artifact.registration.directory_index),
+            &recovered));
+    CHECK(artifact.thread.test_returned_snapshot_count() == 0);
+}
+
+void active_execution_virtualizes_delivery_against_the_guest_snapshot() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = &handler;
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(siginfo_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    SignalBrokerGuestContext native{};
+    native.registers.pc = 0x7f009999U;
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, &native, &artifact.thread));
+
+    CHECK(handler.siginfo_calls == 1);
+    CHECK(handler.observed_pc == 0x71001234U);
+    CHECK(artifact.emergency().type == static_cast<uint32_t>(
+                                                FlightRecordType::SignalHandlerReturn));
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &artifact.gpr));
+    CHECK(artifact.gpr.pc == 0x71009990U);
+    g_handler_fixture = nullptr;
+}
+
+void deactivation_between_dispatch_epoch_reads_fails_open_to_native() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(native_epoch_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    CHECK(broker.register_thread(&artifact.thread));
+    SignalBrokerGuestContext native{};
+    native.registers.pc = 0x7f00abcdU;
+    g_native_epoch_pc = 0;
+    g_native_epoch_calls = 0;
+    g_epoch_gate_thread = &artifact.thread;
+    signal_broker_test_set_dispatch_epoch_gate(
+            deactivate_during_epoch_validation);
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, &native, &artifact.thread));
+
+    CHECK(g_native_epoch_calls == 1);
+    CHECK(g_native_epoch_pc == 0x7f00abcdU);
+    FlightEmergencyRecord recovered{};
+    CHECK(!scan_flight_emergency(
+            artifact.artifact.emergency_bytes(
+                    artifact.registration.directory_index),
+            &recovered));
+    CHECK(artifact.thread.test_returned_snapshot_count() == 0);
+    g_epoch_gate_thread = nullptr;
+}
+
+void returned_guest_from_epoch_n_is_not_applied_to_epoch_n_plus_one() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = &handler;
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(siginfo_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    QBDI::GPRState next{};
+    next.pc = 0x72000040U;
+    next.x0 = 0x2222U;
+    g_epoch_gate_thread = &artifact.thread;
+    g_epoch_gate_next_gpr = &next;
+    signal_broker_test_set_dispatch_return_gate(replace_epoch_after_guest_handler);
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, &artifact.thread));
+    CHECK(broker.apply_pending_guest_state(&artifact.thread, &next));
+
+    CHECK(next.pc == 0x72000040U);
+    CHECK(next.x0 == 0x2222U);
+    CHECK(artifact.thread.test_returned_snapshot_count() == 0);
+    CHECK(!artifact.artifact.incomplete());
+    g_epoch_gate_thread = nullptr;
+    g_epoch_gate_next_gpr = nullptr;
+    g_handler_fixture = nullptr;
+}
+
+void target_return_postinst_clears_the_active_execution_at_pc_42() {
+    ArtifactFixture artifact;
+    CHECK(artifact.thread.test_execution_epoch() != 0);
+    artifact.gpr.pc = 41;
+    artifact.thread.observe_target_post(&artifact.gpr, 42);
+    CHECK(artifact.thread.test_execution_epoch() != 0);
+
+    artifact.gpr.pc = 42;
+    artifact.thread.observe_target_post(&artifact.gpr, 42);
+    CHECK(artifact.thread.test_execution_epoch() == 0);
+}
+
+void execution_epoch_exhaustion_never_wraps_or_reuses_an_old_epoch() {
+    ArtifactFixture artifact;
+    artifact.thread.deactivate_execution();
+    artifact.thread.test_seed_next_execution_epoch(UINT64_MAX - 1U);
+
+    CHECK(artifact.thread.activate_execution(&artifact.gpr) ==
+          UINT64_MAX - 1U);
+    artifact.thread.deactivate_execution();
+    CHECK(artifact.thread.activate_execution(&artifact.gpr) == 0);
+    CHECK(artifact.thread.activate_execution(&artifact.gpr) == 0);
+    CHECK(artifact.thread.test_execution_epoch() == 0);
+}
+
+void late_epoch_n_store_cannot_replace_epoch_n_plus_one_snapshot() {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = &handler;
+    KernelSignalAction action{
+            reinterpret_cast<uintptr_t>(siginfo_handler),
+            SA_SIGINFO | SA_NODEFER, 0, 0};
+    QBDI::GPRState syscall_gpr{};
+    CHECK(broker.observe_rt_sigaction(sigaction_call(SIGUSR1, &action, nullptr),
+                                      &syscall_gpr) == QBDI::SKIP_INST);
+    CHECK(broker.register_thread(&artifact.thread));
+    QBDI::GPRState next{};
+    next.pc = 0x73000080U;
+    next.x0 = 0x3333U;
+    g_epoch_gate_thread = &artifact.thread;
+    g_epoch_gate_next_gpr = &next;
+    signal_broker_test_set_guest_store_gate(replace_epoch_during_guest_store);
+
+    CHECK(broker.dispatch(SIGUSR1, nullptr, nullptr, &artifact.thread));
+
+    Arm64SignalContext retained{};
+    CHECK(artifact.thread.test_load_guest(&retained));
+    CHECK(retained.pc == 0x73000080U);
+    CHECK(retained.regs[0] == 0x3333U);
+    CHECK(artifact.thread.test_returned_snapshot_count() == 0);
+    CHECK(!artifact.artifact.incomplete());
+    g_epoch_gate_thread = nullptr;
+    g_epoch_gate_next_gpr = nullptr;
+    g_handler_fixture = nullptr;
 }
 
 void occupied_coverage_gap_stays_sticky_and_counts_signal_publication_loss() {
@@ -1526,6 +2231,88 @@ void same_signal_before_self_signal_svc_cannot_claim_the_resume_pc() {
                               &artifact.thread));
         CHECK(g_deferred_entry_pc == reinterpret_cast<uintptr_t>(&code[1]));
     }
+}
+
+void same_signal_pre_window_only_completed_delivery_cancels_intent(
+        bool ignored) {
+    FakeKernel kernel;
+    SignalBroker broker(kernel.platform());
+    ArtifactFixture artifact;
+    CHECK(broker.register_thread(&artifact.thread));
+    HandlerFixture handler{&broker, &artifact.thread, &artifact, &kernel};
+    g_handler_fixture = ignored ? nullptr : &handler;
+    KernelSignalAction action{
+            ignored ? 1U : reinterpret_cast<uintptr_t>(normal_handler),
+            SA_NODEFER, 0, 0};
+    QBDI::GPRState install_gpr{};
+    CHECK(broker.observe_rt_sigaction(
+                  sigaction_call(SIGUSR1, &action, nullptr), &install_gpr) ==
+          QBDI::SKIP_INST);
+    alignas(uint32_t) uint32_t code[]{0xd4000001U, 0xd503201fU};
+    QBDI::GPRState gpr{};
+    gpr.pc = reinterpret_cast<uintptr_t>(&code[0]);
+    gpr.x8 = 131;
+    gpr.x0 = 4242;
+    gpr.x1 = 731;
+    gpr.x2 = SIGUSR1;
+    TraceOptions options{};
+    ModuleRange module{};
+    module.start = reinterpret_cast<uintptr_t>(&code[0]);
+    module.end = reinterpret_cast<uintptr_t>(&code[2]);
+    InstructionCollector collector(nullptr, nullptr, nullptr, nullptr, nullptr,
+                                   options, module, &broker, &artifact.thread);
+    CHECK(collector.on_pre(nullptr, &gpr, nullptr) == QBDI::CONTINUE);
+    const size_t intent_cell = emergency_cell_with(
+            emergency_cells(artifact), FlightRecordType::TerminationIntent);
+    CHECK(intent_cell < 2);
+
+    siginfo_t same_number_info{};
+    same_number_info.si_code = SI_TKILL;
+    same_number_info.si_pid = 4242;
+    alignas(uint32_t) uint32_t native_code[]{
+            0xd503201fU, 0xd4000001U, 0xd503201fU};
+    SignalBrokerGuestContext before_svc{};
+    before_svc.registers.regs[0] = 0;
+    before_svc.registers.regs[1] = 731;
+    before_svc.registers.regs[2] = SIGUSR1;
+    before_svc.registers.regs[8] = 131;
+    before_svc.registers.pc = reinterpret_cast<uintptr_t>(&native_code[1]);
+
+    CHECK(broker.dispatch(SIGUSR1, &same_number_info, &before_svc,
+                          &artifact.thread));
+
+    const EmergencyCells before = emergency_cells(artifact);
+    CHECK(before.valid[intent_cell]);
+    CHECK(before.records[intent_cell].type ==
+          static_cast<uint32_t>(FlightRecordType::TerminationIntent));
+
+    SignalBrokerGuestContext after_svc = before_svc;
+    after_svc.registers.pc = reinterpret_cast<uintptr_t>(&native_code[2]);
+    CHECK(broker.dispatch(SIGUSR1, &same_number_info, &after_svc,
+                          &artifact.thread));
+
+    const EmergencyCells after = emergency_cells(artifact);
+    CHECK(emergency_cell_with(after, FlightRecordType::TerminationIntent) == 2);
+    CHECK(after.valid[intent_cell]);
+    if (ignored) {
+        CHECK(after.records[intent_cell].type ==
+              static_cast<uint32_t>(FlightRecordType::Signal));
+        CHECK(emergency_cell_count(after, FlightRecordType::Signal) == 2);
+    } else {
+        CHECK(after.records[intent_cell].type == static_cast<uint32_t>(
+                                                       FlightRecordType::SignalHandlerReturn));
+        CHECK(emergency_cell_with(after, FlightRecordType::SignalHandlerBegin) <
+              2);
+    }
+    g_handler_fixture = nullptr;
+}
+
+void ignored_same_signal_pre_window_preserves_intent_until_completed_delivery() {
+    same_signal_pre_window_only_completed_delivery_cancels_intent(true);
+}
+
+void custom_same_signal_pre_window_preserves_intent_until_completed_delivery() {
+    same_signal_pre_window_only_completed_delivery_cancels_intent(false);
 }
 
 void direct_delivery_resume_pc_is_bound_to_the_original_svc() {
@@ -1897,9 +2684,26 @@ int main() {
     delivery_without_a_registered_flight_thread_preserves_incumbent_behavior();
     thread_attachment_rejects_a_missing_returned_register_mapping();
     asynchronous_delivery_never_observes_a_torn_guest_snapshot();
+    reentrant_handler_store_cannot_mix_the_inactive_guest_snapshot();
     production_master_dispatches_registered_thread_without_qbdi_execution();
+    inactive_registered_thread_fails_open_to_native_without_guest_records();
+    active_execution_virtualizes_delivery_against_the_guest_snapshot();
+    deactivation_between_dispatch_epoch_reads_fails_open_to_native();
+    returned_guest_from_epoch_n_is_not_applied_to_epoch_n_plus_one();
+    target_return_postinst_clears_the_active_execution_at_pc_42();
+    execution_epoch_exhaustion_never_wraps_or_reuses_an_old_epoch();
+    late_epoch_n_store_cannot_replace_epoch_n_plus_one_snapshot();
     occupied_coverage_gap_stays_sticky_and_counts_signal_publication_loss();
     native_dispatch_persists_interval_preserves_masks_and_applies_guest_context();
+    custom_return_overwrites_the_exact_pinned_intent_cell();
+    ignored_direct_signal_atomically_replaces_the_pinned_intent();
+    interrupted_ignore_cancellation_never_exposes_a_false_intent();
+    default_direct_signal_preserves_the_pinned_intent();
+    rt_sigqueueinfo_pre_marks_incomplete_and_ignore_cannot_cancel_intent();
+    rt_sigqueueinfo_custom_return_cannot_cancel_intent();
+    rt_sigqueueinfo_cross_thread_receiver_cannot_cancel_sender_intent();
+    completed_direct_delivery_requires_the_exact_pinned_syscall();
+    matching_tkill_ignore_overwrites_the_exact_pinned_intent();
     nested_delivery_maps_the_interrupted_guest_handler_context();
     nested_begin_interruption_retains_mmap_ancestor_and_marks_incomplete();
     pending_signal_cannot_reenter_before_return_publication_and_depth_transition();
@@ -1908,6 +2712,8 @@ int main() {
     direct_signal_delivery_svc_defers_resume_pc_until_the_signal_matches();
     unrelated_signal_during_delivery_svc_keeps_the_interrupted_pc();
     same_signal_before_self_signal_svc_cannot_claim_the_resume_pc();
+    ignored_same_signal_pre_window_preserves_intent_until_completed_delivery();
+    custom_same_signal_pre_window_preserves_intent_until_completed_delivery();
     direct_delivery_resume_pc_is_bound_to_the_original_svc();
     unreadable_direct_delivery_proof_marks_gap_before_dispatch();
     handler_changes_are_merged_after_qbdi_syscall_writeback();

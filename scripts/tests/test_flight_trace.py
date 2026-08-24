@@ -324,6 +324,142 @@ class FlightRecoveryTests(unittest.TestCase):
             [(event.global_seq, event.kind) for event in recovered_newest.merged],
         )
 
+    def test_v2_recovers_pre_delivery_pinned_intent_with_each_top_level_signal_kind(self):
+        intent = emergency(
+            14, 77, 40, signal=131, code=12, version=2,
+        )
+        for outcome, kind, name in (
+            ("ignore", 11, "signal"),
+            ("custom", 12, "signal_handler_begin"),
+            ("custom_return", 13, "signal_handler_return"),
+            ("default", 11, "signal"),
+        ):
+            with self.subTest(outcome=outcome):
+                matching = emergency(
+                    kind, 77, 55, fault=54 if kind == 13 else 0,
+                    signal=12, flags=1, version=18,
+                )
+                raw = artifact(
+                    directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+                    chunks=[bytes(2048)], emergencies=[intent + matching],
+                    wire_version=2, emergency_slot_bytes=128,
+                )
+                recovered = recover_flight(io.BytesIO(raw))
+                self.assertEqual(
+                    [(40, "termination_intent"), (55, name)],
+                    [(event.global_seq, event.kind) for event in recovered.merged],
+                )
+
+    def test_v2_pinned_pair_rejects_signal_mismatch_tid_mismatch_and_nested_depth(self):
+        intent = emergency(14, 77, 40, signal=131, code=12, version=2)
+        for stale, newer in (
+            (emergency(14, 77, 40, signal=131, code=10, version=2),
+             emergency(13, 77, 55, fault=54, signal=12,
+                       flags=1, version=18)),
+            (intent, emergency(12, 78, 55, signal=12, flags=1, version=18)),
+            (intent, emergency(12, 77, 55, signal=12, flags=2, version=18)),
+        ):
+            with self.subTest(stale=stale[4:16], newer=newer[4:16]):
+                raw = artifact(
+                    directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+                    chunks=[bytes(2048)], emergencies=[stale + newer],
+                    wire_version=2, emergency_slot_bytes=128,
+                )
+                recovered = recover_flight(io.BytesIO(raw))
+                self.assertNotIn(
+                    "termination_intent", [event.kind for event in recovered.merged]
+                )
+
+    def test_completed_ignore_and_custom_return_overwrites_do_not_recover_intent(self):
+        for outcome, replacement in (
+            ("ignore", emergency(11, 77, 55, signal=12, flags=1, version=18)),
+            ("custom", emergency(13, 77, 55, fault=54, signal=12,
+                                 flags=1, version=18)),
+        ):
+            with self.subTest(outcome=outcome):
+                previous = emergency(12, 77, 39, signal=10, flags=1, version=2)
+                raw = artifact(
+                    directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+                    chunks=[bytes(2048)], emergencies=[previous + replacement],
+                    wire_version=2, emergency_slot_bytes=128,
+                )
+                recovered = recover_flight(io.BytesIO(raw))
+                self.assertNotIn(
+                    "termination_intent", [event.kind for event in recovered.merged]
+                )
+
+    def test_interrupted_overwrite_does_not_resurrect_invalid_or_incomplete_intent(self):
+        for interrupted in (
+            emergency(14, 77, 40, signal=131, code=12,
+                      committed=False, version=18),
+            emergency(14, 77, 40, signal=131, code=12, version=19),
+        ):
+            with self.subTest(version=struct.unpack_from("<I", interrupted, 60)[0]):
+                previous = emergency(11, 77, 39, signal=10, flags=1, version=2)
+                raw = artifact(
+                    directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+                    chunks=[bytes(2048)], emergencies=[previous + interrupted],
+                    wire_version=2, emergency_slot_bytes=128,
+                )
+                recovered = recover_flight(io.BytesIO(raw))
+                self.assertNotIn(
+                    "termination_intent", [event.kind for event in recovered.merged]
+                )
+
+    def test_pinned_pair_uses_the_explicit_termination_syscall_signal_mapping(self):
+        begin = emergency(12, 77, 55, signal=12, flags=1, version=18)
+        rt_sigqueueinfo = emergency(
+            14, 77, 40, fault=12, signal=138, code=0x7100A000, version=2,
+        )
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[rt_sigqueueinfo + begin],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+
+        recovered = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual(
+            [(40, "termination_intent"), (55, "signal_handler_begin")],
+            [(event.global_seq, event.kind) for event in recovered.merged],
+        )
+
+        for syscall_number in (93, 94):
+            with self.subTest(syscall_number=syscall_number):
+                non_signal = emergency(
+                    14, 77, 40, fault=12, signal=syscall_number,
+                    code=12, version=2,
+                )
+                raw = artifact(
+                    directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+                    chunks=[bytes(2048)], emergencies=[non_signal + begin],
+                    wire_version=2, emergency_slot_bytes=128,
+                )
+                recovered = recover_flight(io.BytesIO(raw))
+                self.assertNotIn(
+                    "termination_intent", [event.kind for event in recovered.merged]
+                )
+
+    def test_rt_sigqueueinfo_intent_signal_decodes_with_explicit_incomplete_gap(self):
+        intent = emergency(
+            14, 77, 40, fault=12, signal=138, code=0x7100A000, version=2,
+        )
+        gap = emergency(15, 77, 41, flags=2, version=2)
+        raw = artifact(
+            directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],
+            chunks=[bytes(2048)], emergencies=[intent, gap],
+            wire_version=2, emergency_slot_bytes=128,
+        )
+
+        recovered = recover_flight(io.BytesIO(raw))
+
+        self.assertEqual(
+            "termination_intent", recovered.summary["termination"]["cause"]
+        )
+        self.assertEqual(138, recovered.summary["termination"]["signal_number"])
+        self.assertEqual(12, recovered.summary["termination"]["fault_address"])
+        self.assertFalse(recovered.summary["complete"])
+
     def test_excludes_an_empty_sealed_chunk_as_damaged_evidence(self):
         raw = artifact(
             directories=[directory_entry(7, 0, 0, 0, 1)],
@@ -336,7 +472,7 @@ class FlightRecoveryTests(unittest.TestCase):
         self.assertFalse(recovery.summary["complete"])
         self.assertIn("empty sealed chunk", recovery.summary["recovery_damage"][0])
 
-    def test_tolerates_an_empty_active_chunk_only_as_incomplete_evidence(self):
+    def test_tolerates_an_empty_active_chunk_as_a_crash_prefix(self):
         raw = artifact(
             directories=[directory_entry(7, 0, 0, 0, 1)],
             chunks=[chunk(0, 7, 1, [], state=1)],
@@ -345,8 +481,9 @@ class FlightRecoveryTests(unittest.TestCase):
         recovery = recover_flight(io.BytesIO(raw))
 
         self.assertEqual({}, recovery.threads)
-        self.assertFalse(recovery.summary["complete"])
-        self.assertIn("empty active chunk", recovery.summary["recovery_damage"][0])
+        self.assertTrue(recovery.summary["complete"])
+        self.assertEqual([0], recovery.summary["active_chunks"])
+        self.assertEqual([], recovery.summary["recovery_damage"])
 
     def test_recovers_active_prefix_deltas_terminal_and_sequence_gap(self):
         records = core_records(321, generation=2, start=5)
@@ -375,7 +512,7 @@ class FlightRecoveryTests(unittest.TestCase):
         self.assertEqual(17, recovery.summary["module_generation"])
         self.assertEqual("libtarget.so", recovery.summary["target_module"])
 
-    def test_active_thread_begin_without_end_or_seal_is_artifact_incomplete(self):
+    def test_crash_recovers_committed_active_prefix_without_terminal_marker(self):
         tid = 701
         generation = 9
         begin = struct.pack("<IIQQ", 700, tid, 0x71004568, generation)
@@ -396,7 +533,9 @@ class FlightRecoveryTests(unittest.TestCase):
         self.assertEqual([(3, "thread_begin", tid)], [
             (event.global_seq, event.kind, event.tid) for event in lifecycle
         ])
-        self.assertFalse(recovery.summary["complete"])
+        self.assertTrue(recovery.summary["complete"])
+        self.assertEqual([0], recovery.summary["active_chunks"])
+        self.assertEqual([tid], recovery.summary["unterminated_threads"])
 
     def test_external_start_below_module_base_uses_retained_chunk_target(self):
         tid = 703

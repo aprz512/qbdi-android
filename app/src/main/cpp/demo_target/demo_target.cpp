@@ -48,6 +48,13 @@ static jstring native_run_benchmark_case(JNIEnv *env, jobject /* thiz */) {
     return to_jstring(env, summary.str());
 }
 
+static jlong native_run_flight_acceptance(JNIEnv *, jobject, jlong seed, jint mode,
+                                          jint selected_worker) {
+    return static_cast<jlong>(demo_flight_acceptance_case(
+        static_cast<uint64_t>(seed), static_cast<uint32_t>(mode),
+        static_cast<uint32_t>(selected_worker)));
+}
+
 JNINativeMethod kNativeMethods[] = {
     {const_cast<char *>("runJniCase"), const_cast<char *>("()Ljava/lang/String;"),
      reinterpret_cast<void *>(native_run_jni_case)},
@@ -59,6 +66,8 @@ JNINativeMethod kNativeMethods[] = {
      reinterpret_cast<void *>(native_run_integrity_case)},
     {const_cast<char *>("runBenchmarkCase"), const_cast<char *>("()Ljava/lang/String;"),
      reinterpret_cast<void *>(native_run_benchmark_case)},
+    {const_cast<char *>("runFlightAcceptance"), const_cast<char *>("(JII)J"),
+     reinterpret_cast<void *>(native_run_flight_acceptance)},
 };
 
 __attribute__((constructor)) void native_constructor() {
