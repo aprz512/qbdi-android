@@ -33,6 +33,20 @@ void jni_env_entries_follow_the_standard_native_interface_slots() {
     CHECK(standard_slot("GetFieldID", "JNIEnv", 4) == 94);
     CHECK(standard_slot("GetStaticMethodID", "JNIEnv", 4) == 113);
     CHECK(standard_slot("GetStaticFieldID", "JNIEnv", 4) == 144);
+    CHECK(standard_slot("GetArrayLength", "JNIEnv", 4) == 171);
+    CHECK(standard_slot("NewBooleanArray", "JNIEnv", 4) == 175);
+    CHECK(standard_slot("GetBooleanArrayElements", "JNIEnv", 4) == 183);
+    CHECK(standard_slot("ReleaseBooleanArrayElements", "JNIEnv", 4) == 191);
+    CHECK(standard_slot("GetBooleanArrayRegion", "JNIEnv", 4) == 199);
+    CHECK(standard_slot("SetBooleanArrayRegion", "JNIEnv", 4) == 207);
+    CHECK(standard_slot("GetJavaVM", "JNIEnv", 4) == 219);
+    CHECK(standard_slot("GetStringRegion", "JNIEnv", 4) == 220);
+    CHECK(standard_slot("GetPrimitiveArrayCritical", "JNIEnv", 4) == 222);
+    CHECK(standard_slot("GetStringCritical", "JNIEnv", 4) == 224);
+    CHECK(standard_slot("NewWeakGlobalRef", "JNIEnv", 4) == 226);
+    CHECK(standard_slot("ExceptionCheck", "JNIEnv", 4) == 228);
+    CHECK(standard_slot("NewDirectByteBuffer", "JNIEnv", 4) == 229);
+    CHECK(standard_slot("GetObjectRefType", "JNIEnv", 4) == 232);
 }
 
 void java_vm_entries_follow_the_standard_invoke_interface_slots() {

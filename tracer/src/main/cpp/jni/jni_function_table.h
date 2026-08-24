@@ -203,10 +203,6 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     table.push_back({"GetStringUTFLength",   JniType::kSize,    "JNIEnv", {JniType::kString}});
     table.push_back({"GetStringUTFChars",    JniType::kCString, "JNIEnv", {JniType::kString, JniType::kBoolean}});
     table.push_back({"ReleaseStringUTFChars",JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kCString}});
-    table.push_back({"GetStringRegion",      JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kSize, JniType::kSize, JniType::kPointer}});
-    table.push_back({"GetStringUTFRegion",   JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kSize, JniType::kSize, JniType::kPointer}});
-    table.push_back({"GetStringCritical",    JniType::kPointer, "JNIEnv", {JniType::kString, JniType::kBoolean}});
-    table.push_back({"ReleaseStringCritical",JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kPointer}});
 
     // ─── 数组操作 ───
     table.push_back({"GetArrayLength",       JniType::kSize,   "JNIEnv", {JniType::kArray}});
@@ -214,25 +210,58 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     table.push_back({"GetObjectArrayElement",JniType::kObject, "JNIEnv", {JniType::kArray, JniType::kSize}});
     table.push_back({"SetObjectArrayElement",JniType::kVoid,   "JNIEnv", {JniType::kArray, JniType::kSize, JniType::kObject}});
 
-    // jni.h: jbooleanArray, jbyteArray, ... 都是 jobject 的子类型, args 统一用 kArray
-    #define PRIMITIVE_ARRAY_OPS(JavaType) \
-        table.push_back({"New" #JavaType "Array",              JniType::kArray,  "JNIEnv", {JniType::kSize}}); \
-        table.push_back({"Get" #JavaType "ArrayElements",      JniType::kPointer,"JNIEnv", {JniType::kArray, JniType::kBoolean}}); \
-        table.push_back({"Release" #JavaType "ArrayElements",  JniType::kVoid,   "JNIEnv", {JniType::kArray, JniType::kPointer, JniType::kInt}}); \
-        table.push_back({"Get" #JavaType "ArrayRegion",        JniType::kVoid,   "JNIEnv", {JniType::kArray, JniType::kSize, JniType::kSize, JniType::kPointer}}); \
-        table.push_back({"Set" #JavaType "ArrayRegion",        JniType::kVoid,   "JNIEnv", {JniType::kArray, JniType::kSize, JniType::kSize, JniType::kPointer}});
+    // jni.h groups primitive array operations by operation, then primitive type.
+    #define NEW_PRIMITIVE_ARRAY(JavaType) \
+        table.push_back({"New" #JavaType "Array", JniType::kArray, "JNIEnv", {JniType::kSize}});
+    #define GET_PRIMITIVE_ARRAY_ELEMENTS(JavaType) \
+        table.push_back({"Get" #JavaType "ArrayElements", JniType::kPointer, "JNIEnv", {JniType::kArray, JniType::kBoolean}});
+    #define RELEASE_PRIMITIVE_ARRAY_ELEMENTS(JavaType) \
+        table.push_back({"Release" #JavaType "ArrayElements", JniType::kVoid, "JNIEnv", {JniType::kArray, JniType::kPointer, JniType::kInt}});
+    #define GET_PRIMITIVE_ARRAY_REGION(JavaType) \
+        table.push_back({"Get" #JavaType "ArrayRegion", JniType::kVoid, "JNIEnv", {JniType::kArray, JniType::kSize, JniType::kSize, JniType::kPointer}});
+    #define SET_PRIMITIVE_ARRAY_REGION(JavaType) \
+        table.push_back({"Set" #JavaType "ArrayRegion", JniType::kVoid, "JNIEnv", {JniType::kArray, JniType::kSize, JniType::kSize, JniType::kPointer}});
 
-    PRIMITIVE_ARRAY_OPS(Boolean)
-    PRIMITIVE_ARRAY_OPS(Byte)
-    PRIMITIVE_ARRAY_OPS(Char)
-    PRIMITIVE_ARRAY_OPS(Short)
-    PRIMITIVE_ARRAY_OPS(Int)
-    PRIMITIVE_ARRAY_OPS(Long)
-    PRIMITIVE_ARRAY_OPS(Float)
-    PRIMITIVE_ARRAY_OPS(Double)
-
-    table.push_back({"GetPrimitiveArrayCritical",    JniType::kPointer, "JNIEnv", {JniType::kArray, JniType::kBoolean}});
-    table.push_back({"ReleasePrimitiveArrayCritical",JniType::kVoid,    "JNIEnv", {JniType::kArray, JniType::kPointer, JniType::kInt}});
+    NEW_PRIMITIVE_ARRAY(Boolean)
+    NEW_PRIMITIVE_ARRAY(Byte)
+    NEW_PRIMITIVE_ARRAY(Char)
+    NEW_PRIMITIVE_ARRAY(Short)
+    NEW_PRIMITIVE_ARRAY(Int)
+    NEW_PRIMITIVE_ARRAY(Long)
+    NEW_PRIMITIVE_ARRAY(Float)
+    NEW_PRIMITIVE_ARRAY(Double)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Boolean)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Byte)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Char)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Short)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Int)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Long)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Float)
+    GET_PRIMITIVE_ARRAY_ELEMENTS(Double)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Boolean)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Byte)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Char)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Short)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Int)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Long)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Float)
+    RELEASE_PRIMITIVE_ARRAY_ELEMENTS(Double)
+    GET_PRIMITIVE_ARRAY_REGION(Boolean)
+    GET_PRIMITIVE_ARRAY_REGION(Byte)
+    GET_PRIMITIVE_ARRAY_REGION(Char)
+    GET_PRIMITIVE_ARRAY_REGION(Short)
+    GET_PRIMITIVE_ARRAY_REGION(Int)
+    GET_PRIMITIVE_ARRAY_REGION(Long)
+    GET_PRIMITIVE_ARRAY_REGION(Float)
+    GET_PRIMITIVE_ARRAY_REGION(Double)
+    SET_PRIMITIVE_ARRAY_REGION(Boolean)
+    SET_PRIMITIVE_ARRAY_REGION(Byte)
+    SET_PRIMITIVE_ARRAY_REGION(Char)
+    SET_PRIMITIVE_ARRAY_REGION(Short)
+    SET_PRIMITIVE_ARRAY_REGION(Int)
+    SET_PRIMITIVE_ARRAY_REGION(Long)
+    SET_PRIMITIVE_ARRAY_REGION(Float)
+    SET_PRIMITIVE_ARRAY_REGION(Double)
 
     // ─── 注册 Native 方法 ───
     table.push_back({"RegisterNatives",   JniType::kInt,   "JNIEnv", {JniType::kClass, JniType::kPointer, JniType::kInt}});
@@ -245,15 +274,22 @@ inline std::vector<JniFuncInfo> build_jni_function_table() {
     // ─── JavaVM ───
     table.push_back({"GetJavaVM",    JniType::kInt,  "JNIEnv", {JniType::kPointer}});
 
-    // ─── NIO ───
-    table.push_back({"NewDirectByteBuffer",     JniType::kObject,  "JNIEnv", {JniType::kPointer, JniType::kLong}});
-    table.push_back({"GetDirectBufferAddress",  JniType::kPointer, "JNIEnv", {JniType::kObject}});
-    table.push_back({"GetDirectBufferCapacity", JniType::kLong,    "JNIEnv", {JniType::kObject}});
+    table.push_back({"GetStringRegion",      JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kSize, JniType::kSize, JniType::kPointer}});
+    table.push_back({"GetStringUTFRegion",   JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kSize, JniType::kSize, JniType::kPointer}});
+    table.push_back({"GetPrimitiveArrayCritical",    JniType::kPointer, "JNIEnv", {JniType::kArray, JniType::kBoolean}});
+    table.push_back({"ReleasePrimitiveArrayCritical",JniType::kVoid,    "JNIEnv", {JniType::kArray, JniType::kPointer, JniType::kInt}});
+    table.push_back({"GetStringCritical",    JniType::kPointer, "JNIEnv", {JniType::kString, JniType::kBoolean}});
+    table.push_back({"ReleaseStringCritical",JniType::kVoid,    "JNIEnv", {JniType::kString, JniType::kPointer}});
 
     // ─── 弱引用 ───
     table.push_back({"NewWeakGlobalRef",   JniType::kWeak,  "JNIEnv", {JniType::kObject}});
     table.push_back({"DeleteWeakGlobalRef",JniType::kVoid,  "JNIEnv", {JniType::kWeak}});
     table.push_back({"ExceptionCheck",     JniType::kBoolean,"JNIEnv",{}});
+
+    // ─── NIO ───
+    table.push_back({"NewDirectByteBuffer",     JniType::kObject,  "JNIEnv", {JniType::kPointer, JniType::kLong}});
+    table.push_back({"GetDirectBufferAddress",  JniType::kPointer, "JNIEnv", {JniType::kObject}});
+    table.push_back({"GetDirectBufferCapacity", JniType::kLong,    "JNIEnv", {JniType::kObject}});
     table.push_back({"GetObjectRefType",   JniType::kInt,   "JNIEnv", {JniType::kObject}});
 
     // ─── JavaVM 方法 (JNIInvokeInterface vtable) ───
