@@ -53,6 +53,9 @@ void trace_proxy_test_install_loading_module(const ModuleRange &module);
 void trace_proxy_test_module_fini(uintptr_t module_base,
                                   const char *module_path);
 bool trace_proxy_test_generation_retired(size_t generation);
+bool trace_proxy_test_current_configuration(uint64_t *generation,
+                                            TraceConfig *config);
+CaptureCoordinator *trace_proxy_test_current_coordinator();
 
 void check(bool condition, const char *expression, int line) {
     if (condition) return;
@@ -65,22 +68,51 @@ void check(bool condition, const char *expression, int line) {
 volatile sig_atomic_t g_fail_on_child_delete = 0;
 volatile sig_atomic_t g_fail_next_nothrow_allocation = 0;
 std::atomic<size_t> g_throwing_allocation_calls{0};
+bool g_fail_inline_hook_init = false;
+
+std::string json_abi_request(std::string package_name,
+                             std::string target_module,
+                             bool flight_enabled = false,
+                             std::string entry_scene = {},
+                             nlohmann::json scenes = nlohmann::json::array()) {
+    return nlohmann::json({
+            {"schemaVersion", 1},
+            {"packageName", std::move(package_name)},
+            {"targetModule", std::move(target_module)},
+            {"trace", {
+                    {"profile", "fast"},
+                    {"compression", true},
+                    {"lz4Level", 2},
+                    {"autoBuffer", true},
+                    {"bufferMb", 0},
+                    {"hexdumpLimit", 32},
+            }},
+            {"flight", {
+                    {"enabled", flight_enabled},
+                    {"entryScene", std::move(entry_scene)},
+                    {"capacityMb", 512},
+                    {"chunkKb", 256},
+                    {"maxThreads", 256},
+                    {"protectedChunks", 4},
+            }},
+            {"scenes", std::move(scenes)},
+    }).dump();
+}
+
+nlohmann::json call_json_configure(const std::string &request) {
+    std::vector<char> response(64U * 1024U);
+    uint64_t response_size = 0;
+    CHECK(qbdi_tracer_configure_json(request.data(), request.size(), response.data(),
+                                     response.size(), &response_size) == QTRACE_JSON_OK);
+    CHECK(response_size > 1);
+    CHECK(response.at(response_size - 1) == '\0');
+    return nlohmann::json::parse(response.data());
+}
 
 void json_configuration_abi_is_transactional_and_nul_terminated() {
-    const std::string request = R"json({
-      "schemaVersion": 1,
-      "packageName": "com.aprz.qbdiandroid",
-      "targetModule": "libqtrace-json-abi-test-never-loaded.so",
-      "trace": {
-        "profile": "fast", "compression": true, "lz4Level": 2,
-        "autoBuffer": true, "bufferMb": 0, "hexdumpLimit": 32
-      },
-      "flight": {
-        "enabled": false, "entryScene": "", "capacityMb": 512,
-        "chunkKb": 256, "maxThreads": 256, "protectedChunks": 4
-      },
-      "scenes": []
-    })json";
+    const std::string request = json_abi_request(
+            "com.aprz.qbdiandroid",
+            "libqtrace-json-abi-test-never-loaded.so");
     char small_response[] = {'x'};
     uint64_t response_size = 99;
 
@@ -117,6 +149,10 @@ void json_configuration_abi_is_transactional_and_nul_terminated() {
           QTRACE_JSON_RESPONSE_TOO_SMALL);
     CHECK(response_size > sizeof(small_response));
     CHECK(small_response[0] == 'x');
+    uint64_t active_generation = 0;
+    TraceConfig active_config;
+    CHECK(!trace_proxy_test_current_configuration(&active_generation,
+                                                  &active_config));
 
     uint64_t missing_size = 0;
     std::vector<char> missing_buffer(64U * 1024U);
@@ -135,6 +171,12 @@ void json_configuration_abi_is_transactional_and_nul_terminated() {
     const nlohmann::json accepted = nlohmann::json::parse(response.data());
     CHECK(accepted.at("ok") == true);
     CHECK(accepted.at("generation") == 1);
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &active_config));
+    CHECK(active_generation == 1);
+    CHECK(active_config.package_name == "com.aprz.qbdiandroid");
+    CHECK(active_config.target_so ==
+          "libqtrace-json-abi-test-never-loaded.so");
 
     small_response[0] = 'y';
     CHECK(qbdi_tracer_get_status_json(1, small_response, sizeof(small_response),
@@ -152,6 +194,63 @@ void json_configuration_abi_is_transactional_and_nul_terminated() {
     CHECK(status.at("state") == "waiting_for_module");
 
     CHECK(qbdi_tracer_configure == nullptr);
+}
+
+void rejected_configuration_preserves_the_active_runtime_snapshot() {
+    uint64_t before_generation = 0;
+    TraceConfig before_config;
+    CHECK(trace_proxy_test_current_configuration(&before_generation,
+                                                 &before_config));
+
+    const nlohmann::json rejected = call_json_configure("{]");
+    CHECK(rejected.at("ok") == false);
+    CHECK(rejected.at("error").at("code") == "MALFORMED_JSON");
+
+    uint64_t after_generation = 0;
+    TraceConfig after_config;
+    CHECK(trace_proxy_test_current_configuration(&after_generation,
+                                                 &after_config));
+    CHECK(after_generation == before_generation);
+    CHECK(after_config.package_name == before_config.package_name);
+    CHECK(after_config.target_so == before_config.target_so);
+}
+
+void accepted_configuration_is_active_when_inline_setup_fails() {
+    g_fail_inline_hook_init = true;
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.setup-failure",
+            "libqtrace-setup-failure-never-loaded.so"));
+    CHECK(accepted.at("ok") == true);
+
+    uint64_t active_generation = 0;
+    TraceConfig active_config;
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &active_config));
+    CHECK(active_generation == accepted.at("generation").get<uint64_t>());
+    CHECK(active_config.package_name == "com.example.setup-failure");
+    CHECK(active_config.target_so == "libqtrace-setup-failure-never-loaded.so");
+    CHECK(!g_fail_inline_hook_init);
+}
+
+void flight_configuration_activates_its_explicit_entry_scene() {
+    const nlohmann::json scenes = nlohmann::json::array({
+            {{"name", "worker"}, {"location", {{"offset", "0x100"}}}},
+            {{"name", "boot"}, {"location", {{"offset", "0x200"}}}},
+    });
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.flight-entry",
+            "libqtrace-flight-entry-never-loaded.so", true, "boot", scenes));
+    CHECK(accepted.at("ok") == true);
+
+    uint64_t active_generation = 0;
+    TraceConfig active_config;
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &active_config));
+    CHECK(active_generation == accepted.at("generation").get<uint64_t>());
+    CHECK(active_config.flight.entry_scene == "boot");
+    CHECK(active_config.scenes.at(0).name == "worker");
+    CHECK(active_config.scenes.at(1).name == "boot");
+    CHECK(trace_proxy_test_current_coordinator() != nullptr);
 }
 
 extern "C" void *__real__Znwm(std::size_t);
@@ -475,6 +574,7 @@ TraceConfig flight_proxy_config(const SceneConfig &scene) {
     config.flight.capacity_bytes = 64ULL * 1024ULL * 1024ULL;
     config.flight.chunk_bytes = 64U * 1024U;
     config.flight.protected_chunks = 1;
+    config.flight.entry_scene = scene.name;
     config.scenes.push_back(scene);
     return config;
 }
@@ -1450,7 +1550,11 @@ void fini_retires_only_the_exact_loading_generation_and_marks_a_gap() {
 
 } // namespace
 
-bool init_inline_hook() { return true; }
+bool init_inline_hook() {
+    if (!g_fail_inline_hook_init) return true;
+    g_fail_inline_hook_init = false;
+    return false;
+}
 
 bool configure_inline_hook_dl_init_helper_path(const char *) { return true; }
 
@@ -1576,6 +1680,9 @@ int main(int argc, char **argv) {
         return 2;
     }
     json_configuration_abi_is_transactional_and_nul_terminated();
+    rejected_configuration_preserves_the_active_runtime_snapshot();
+    accepted_configuration_is_active_when_inline_setup_fails();
+    flight_configuration_activates_its_explicit_entry_scene();
     branch_before_dispatch_keeps_its_generation_snapshot_and_bypass();
     entrant_registration_and_snapshot_are_atomic_with_install();
     unhook_failure_uses_the_saved_original_exactly_once();

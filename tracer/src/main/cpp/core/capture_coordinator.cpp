@@ -492,18 +492,18 @@ QbdiThreadSession *CaptureCoordinator::enter_thread(uint32_t tid,
         entry == 0) {
         return nullptr;
     }
-    const SceneConfig *init_scene = nullptr;
+    const SceneConfig *entry_scene = nullptr;
     for (const SceneConfig &scene : config_.scenes) {
-        if (scene.index == 0 && scene.name == "init") {
-            init_scene = &scene;
+        if (scene.name == config_.flight.entry_scene) {
+            entry_scene = &scene;
             break;
         }
     }
-    if (init_scene == nullptr) {
+    if (entry_scene == nullptr) {
         mark_coverage_gap_locked(tid, entry, CoverageGapReason::SessionFailure);
         return nullptr;
     }
-    return enter_locked(tid, *init_scene, entry);
+    return enter_locked(tid, *entry_scene, entry);
 }
 
 QbdiThreadSession *CaptureCoordinator::enter_locked(

@@ -31,6 +31,8 @@ struct FakeFactory {
     uint32_t session_module_generation = 0;
     uint32_t last_gap_tid = 0;
     uintptr_t last_gap_pc = 0;
+    std::string session_scene;
+    uintptr_t session_scene_offset = 0;
     CoverageGapReason last_gap_reason = CoverageGapReason::SessionFailure;
     std::string target;
     std::string path;
@@ -66,11 +68,13 @@ TraceRunResult no_op_execution(void *opaque, QbdiThreadSession *session, uintptr
 }
 
 QbdiThreadSession *create_session(void *opaque, void *, const TraceConfig &,
-                                  const ModuleRange &, const SceneConfig &, uint32_t tid,
+                                  const ModuleRange &, const SceneConfig &scene, uint32_t tid,
                                   uint32_t module_generation) noexcept {
     auto *factory = static_cast<FakeFactory *>(opaque);
     ++factory->session_creates;
     factory->session_module_generation = module_generation;
+    factory->session_scene = scene.name;
+    factory->session_scene_offset = scene.offset;
     return QbdiThreadSession::create_for_test(tid, module_generation,
                                               no_op_execution, factory);
 }
@@ -105,6 +109,7 @@ TraceConfig flight_config() {
     config.flight.capacity_bytes = 64ULL * 1024ULL * 1024ULL;
     config.flight.chunk_bytes = 64U * 1024U;
     config.flight.protected_chunks = 1;
+    config.flight.entry_scene = "init";
     config.scenes[0].offset = 0x100;
     return config;
 }
@@ -254,6 +259,24 @@ void failed_artifact_start_is_permanent_and_not_retried() {
     CHECK(coordinator.incomplete());
 }
 
+void thread_entry_uses_the_explicit_flight_entry_scene() {
+    FakeFactory factory;
+    CaptureCoordinator coordinator(factories(&factory));
+    TraceConfig config = flight_config();
+    config.flight.entry_scene = "boot";
+    config.scenes = {
+            {0, "worker", 0x100},
+            {1, "boot", 0x200},
+    };
+    CHECK(coordinator.start(config, retained_module(), 15));
+
+    QbdiThreadSession *session = coordinator.enter_thread(555, 0x71000200);
+    CHECK(session != nullptr);
+    CHECK(factory.session_scene == "boot");
+    CHECK(factory.session_scene_offset == 0x200);
+    coordinator.leave(session);
+}
+
 } // namespace
 
 int main() {
@@ -262,4 +285,5 @@ int main() {
     child_detach_never_destroys_or_marks_inherited_state();
     session_gap_latches_the_coordinator_incomplete();
     failed_artifact_start_is_permanent_and_not_retried();
+    thread_entry_uses_the_explicit_flight_entry_scene();
 }

@@ -217,6 +217,7 @@ TraceConfig flight_config(uint32_t max_threads = 16) {
   config.flight.capacity_bytes = 64ULL * 1024ULL * 1024ULL;
   config.flight.chunk_bytes = 64U * 1024U;
   config.flight.protected_chunks = 1;
+  config.flight.entry_scene = "init";
   config.scenes.push_back({0, "init", 0, 0});
   return config;
 }

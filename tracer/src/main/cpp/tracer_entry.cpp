@@ -610,6 +610,21 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     g_stub_entry_gate.store(nullptr, std::memory_order_release);
 }
 
+bool trace_proxy_test_current_configuration(uint64_t *generation,
+                                            TraceConfig *config) {
+    if (generation == nullptr || config == nullptr) return false;
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (!g_configured) return false;
+    *generation = g_config_generation;
+    *config = g_config;
+    return true;
+}
+
+CaptureCoordinator *trace_proxy_test_current_coordinator() {
+    std::lock_guard<std::mutex> guard(g_lock);
+    return g_capture_coordinator.get();
+}
+
 bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene,
                              const ModuleRange &module) {
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return false;
@@ -763,25 +778,9 @@ static void apply_accepted_configuration(TraceConfig config,
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;
     std::shared_ptr<CaptureCoordinator> coordinator;
     if (config.flight.enabled) {
-        const SceneConfig *init_scene = nullptr;
-        for (const SceneConfig &scene : config.scenes) {
-            if (scene.index == 0 && scene.name == "init") {
-                init_scene = &scene;
-                break;
-            }
-        }
-        if (init_scene == nullptr || init_scene->offset == 0) {
-            QTRACE_E("flight capture requires a configured init scene");
-            return;
-        }
         coordinator.reset(new (std::nothrow) CaptureCoordinator());
-        if (coordinator == nullptr) {
-            QTRACE_E("cannot allocate flight capture coordinator");
-            return;
-        }
     }
-    if (!init_inline_hook()) return;
-    if (!prepare_module_callbacks()) return;
+    const bool coordinator_ready = !config.flight.enabled || coordinator != nullptr;
     {
         std::lock_guard<std::mutex> guard(g_lock);
         g_config = config;
@@ -791,6 +790,12 @@ static void apply_accepted_configuration(TraceConfig config,
     }
     QTRACE_I("configure tracer package=%s target=%s", config.package_name.c_str(),
              config.target_so.c_str());
+    if (!coordinator_ready) {
+        QTRACE_E("cannot allocate flight capture coordinator");
+        return;
+    }
+    if (!init_inline_hook()) return;
+    if (!prepare_module_callbacks()) return;
     if (!config.jni_backtrace_funcs.empty()) {
         set_jni_backtrace_funcs(config.jni_backtrace_funcs);
         QTRACE_I("jni backtrace enabled for %zu functions",
