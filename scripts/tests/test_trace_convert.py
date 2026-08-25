@@ -112,7 +112,12 @@ class DocumentationContractTests(unittest.TestCase):
             "python3 scripts/trace_convert.py input.trace.bin.lz4 --output output.trace.txt",
             pull_section,
         )
-        self.assertIn("metrics_version=2", pull_section)
+        self.assertIn("metrics_version=3", pull_section)
+        self.assertIn("QTRB 1.0/1.1 + metrics v2", pull_section)
+        self.assertIn("QTRB 1.2 type 9 + metrics v3", pull_section)
+        self.assertIn("QTRB 1.2 type 10 + metrics v3", pull_section)
+        self.assertIn("truncated + valid crash marker", pull_section)
+        self.assertNotIn("文本格式 3", readme)
         self.assertIn("app-private", pull_section)
         compatibility = protocol.split("## Artifact set", 1)[1].split("## QTRB v1 stream", 1)[0]
         self.assertIn("format-2 `.trace.txt.lz4`", compatibility)
@@ -126,21 +131,26 @@ class DocumentationContractTests(unittest.TestCase):
         protocol = Path(__file__).parents[2].joinpath(
             "docs", "trace-format.md"
         ).read_text(encoding="utf-8")
-        text_format = protocol.split("## Text format 3", 1)[1].split("## Profiles", 1)[0]
+        text_format = protocol.split("## Text format 4", 1)[1].split("## Profiles", 1)[0]
         rendered = [line for line in text_format.splitlines() if line.startswith((
             "TRACE_BEGIN ", "INST ", "MEMORY ", "CALL ", "RULE ", "ERROR ", "TRACE_END ",
         ))]
-        self.assertEqual(7, len(rendered))
-        self.assertTrue(rendered[0].startswith("TRACE_BEGIN format=3 scene="))
+        self.assertEqual(8, len(rendered))
+        self.assertTrue(rendered[0].startswith("TRACE_BEGIN format=4 scene="))
         self.assertIn("metadata_id=... opcode=0x...", rendered[1])
-        self.assertTrue(rendered[-1].startswith("TRACE_END status=ok return=0x..."))
+        self.assertTrue(rendered[-2].startswith(
+            "TRACE_END status=completed return_valid=1 return=0x..."
+        ))
+        self.assertTrue(rendered[-1].startswith(
+            "TRACE_END status=stopped reason=duration_elapsed return_valid=0"
+        ))
         self.assertIn("String escaping is JSON string escaping", text_format)
         conversion = protocol.split("## Pulling and conversion", 1)[1].split(
             "## Crash partial semantics", 1
         )[0]
         self.assertIn(
-            "status 0 for complete success, status 1 for an error with no text publication, and\n"
-            "status 2 for valid crash-partial recovery",
+            "status 0 for a completed or stopped terminal, status 1 for an error with no text\n"
+            "publication, and status 2 for valid crash-partial recovery",
             conversion,
         )
 
@@ -149,13 +159,16 @@ class DocumentationContractTests(unittest.TestCase):
             "docs", "trace-format.md"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'StreamHeader {\n  magic: "QTRB"[4]\n  major: u8 = 1\n  minor: u8 = 1\n'
+            'StreamHeader {\n  magic: "QTRB"[4]\n  major: u8 = 1\n  minor: u8 = 0 | 1 | 2\n'
             '  endian: u8 = 1\n  pointer_width: u8 = 4 | 8\n'
             '  profile: u8                 # fast=0, balanced=1, full=2\n'
             '  reserved: u8 = 0\n  header_bytes: u16 = 16\n'
-            '  required_features: u32 = 0\n}',
+            '  required_features: u32\n}',
             protocol,
         )
+        self.assertIn("| 0 | 0 |", protocol)
+        self.assertIn("| 1 | 0 |", protocol)
+        self.assertIn("| 2 | 1 |", protocol)
         self.assertIn(
             "RecordHeader {\n  type: u16\n  flags: u16\n  payload_bytes: u32\n}",
             protocol,
@@ -179,6 +192,7 @@ class DocumentationContractTests(unittest.TestCase):
             "ERROR": ("8", "0", "name string; detail string", "4", "4363"),
             "ERROR_CONTINUATION": ("8", "0x0001", "event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; name string; detail_fragment string", "20", "3355"),
             "TRACE_END": ("9", "0", "success u8; return_value u64; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64", "97", "105"),
+            "TRACE_STOP": ("10", "0", "reason u8; reserved[7] = 0; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64", "96", "104"),
         }
         self.assertEqual(expected, {
             row["Record"]: (
@@ -351,7 +365,7 @@ class DocumentationContractTests(unittest.TestCase):
         protocol = Path(__file__).parents[2].joinpath(
             "docs", "trace-format.md"
         ).read_text(encoding="utf-8")
-        metrics = protocol.split("## Metrics v2", 1)[1].split("## Pulling and conversion", 1)[0]
+        metrics = protocol.split("## Metrics v3", 1)[1].split("## Pulling and conversion", 1)[0]
         metrics = " ".join(metrics.replace("`", "").split())
         self.assertIn(
             "elapsed_ms stops after traced target execution and producer callbacks, before final "
@@ -359,7 +373,10 @@ class DocumentationContractTests(unittest.TestCase):
             metrics,
         )
         self.assertIn("not end-to-end publication throughput", metrics)
-        self.assertIn("encoded_bytes is complete after TRACE_END is committed", metrics)
+        self.assertIn("termination is completed or stopped", metrics)
+        self.assertIn("return_valid is respectively 1 or 0", metrics)
+        self.assertIn("stopped terminal fixes return=0x0", metrics)
+        self.assertIn("encoded_bytes is complete after the terminal is committed", metrics)
         self.assertIn(
             "compressed_bytes is complete after all frames, padding, drain, and close finish",
             metrics,

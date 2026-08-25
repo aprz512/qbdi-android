@@ -13,7 +13,7 @@ Frida spawn 注入 → ShadowHook 接管场景入口 → QBDI 执行与采集 �
 - **完整注入链路**：Frida spawn 注入 `libqbdi_tracer.so`，ShadowHook 在目标库初始化前安装入口 hook，QBDI 接管指定 native 场景。
 - **多类演示场景**：覆盖 native constructor、JNI、libc、计算逻辑、完整性检查和确定性 benchmark。
 - **三级采集配置**：`fast` 记录指令与寄存器，`balanced` 增加内存访问元数据，`full` 再增加受限长度的内存前后快照。
-- **紧凑二进制轨迹**：设备端写入 QTRB v1 事件流，支持异步双缓冲和 LZ4 分帧压缩；主机可转换为文本格式 3。
+- **紧凑二进制轨迹**：设备端写入 QTRB v1 事件流，支持异步双缓冲和 LZ4 分帧压缩；主机可转换为文本格式 4。
 - **持久 Flight Recorder**：使用固定容量的多线程环形文件保留崩溃前窗口，进程异常退出后仍可恢复已提交记录。
 - **崩溃与信号语义**：支持 guest signal disposition 虚拟化、handler 区间记录及部分终止 syscall 解释；恢复报告会明确覆盖缺口和损坏范围。
 - **完整性实验扩展**：通过原生 CodeRules 按模块偏移修改寄存器、参数、返回值、PC、标志位或内存。
@@ -344,11 +344,20 @@ python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
 python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
   --force --output pulled-traces
 
-# 手动把 QTRB/LZ4 转成文本格式 3。
+# 手动把 QTRB/LZ4 转成文本格式 4。
 python3 scripts/trace_convert.py input.trace.bin.lz4 --output output.trace.txt
 ```
 
-完整的 QTRB 产物带有 `metrics_version=2` sidecar。工具会校验容器、footer、指标和指令序列，再原子发布文本；默认拒绝覆盖已有文件。
+完整的 QTRB 产物带有严格的 `metrics_version=3` sidecar。工具会校验容器、终端、指标和指令序列，再原子发布文本；默认拒绝覆盖已有文件。完成的 type 9 终端显示为 `status=completed`，有效 stopped type 10 终端显示为 `status=stopped`，两者均以 exit 0 返回；带有效 crash marker 的截断产物只恢复完整先前帧，仍以 exit 2/`crashed` 返回，且不会伪造 terminal。
+
+兼容矩阵：
+
+| 输入 | 含义 | 支持 |
+| --- | --- | --- |
+| QTRB 1.0/1.1 + metrics v2 | 旧 completed 输入 | 可读取 |
+| QTRB 1.2 type 9 + metrics v3 | completed | 可读取，文本 format 4 |
+| QTRB 1.2 type 10 + metrics v3 | stopped | 可读取，文本 format 4 |
+| truncated + valid crash marker | recovered/partial | 只恢复完整先前帧，不伪造 terminal |
 
 对于 `.flight.bin`，正常拉取会保留原文件，并生成：
 
@@ -428,7 +437,7 @@ integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。运行�
 
 ## 深入文档
 
-- [QTRB v1、文本格式 3、指标与崩溃恢复](docs/trace-format.md)
+- [QTRB v1、文本格式 4、指标与崩溃恢复](docs/trace-format.md)
 - [IDA/objdump 场景偏移定位](docs/ida-offsets.md)
 - [完整性检查与 CodeRules](docs/integrity-bypass.md)
 - [QTRB v1 性能与大小基线](docs/benchmarks/binary-trace-baseline.md)

@@ -408,11 +408,16 @@ def pull_artifact_set(
         except BinaryTraceError as error:
             raise PullTraceError(str(error)) from error
         pulled.append(destination)
+        if stats.partial:
+            return PullResult(
+                name, classification.status, tuple(pulled), exit_code=EXIT_PARTIAL
+            )
+        status = "stopped" if stats.termination == "stopped" else "complete"
         return PullResult(
             name,
-            classification.status,
+            status,
             tuple(pulled),
-            exit_code=EXIT_PARTIAL if stats.partial else EXIT_OK,
+            exit_code=EXIT_OK,
         )
     if decoder is None:
         decoder = decode_lz4_file

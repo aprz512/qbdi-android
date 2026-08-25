@@ -26,7 +26,12 @@ from scripts.tests.test_flight_trace import (
     directory_entry as flight_directory_entry,
 )
 from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
-from scripts.tests.test_trace_binary import complete_stream
+from scripts.tests.test_trace_binary import (
+    complete_stream,
+    instruction,
+    instruction_definition,
+    stopped,
+)
 from scripts.tests.test_trace_convert import fake_lz4_executable
 
 
@@ -46,6 +51,37 @@ def recoverable_flight_artifact(tid=321):
         directories=[flight_directory_entry(tid, 1, 2, 0, 1)],
         chunks=[flight_chunk(0, tid, 1, flight_core_records(tid))],
     )
+
+
+def v3_sidecar(*, termination, return_valid, profile, instructions, elapsed_ms,
+               encoded_bytes, compressed_bytes):
+    def fixed_six(numerator, denominator):
+        whole, remainder = divmod(numerator, denominator)
+        return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
+
+    return (
+        f"metrics_version=3\ntermination={termination}\nreturn_valid={return_valid}\n"
+        f"profile={profile}\nreturn={'0x55' if return_valid else '0x0'}\n"
+        f"instructions={instructions}\nelapsed_ms={elapsed_ms}\n"
+        f"instructions_per_second={fixed_six(instructions * 1000, elapsed_ms)}\n"
+        f"encoded_bytes={encoded_bytes}\ncompressed_bytes={compressed_bytes}\n"
+        f"encoded_bytes_per_second={fixed_six(encoded_bytes * 1000, elapsed_ms)}\n"
+        f"disk_bytes_per_second={fixed_six(compressed_bytes * 1000, elapsed_ms)}\n"
+        f"compression_ratio={fixed_six(compressed_bytes, encoded_bytes)}\n"
+        "cache_hits=9\ncache_misses=1\ncache_collisions=0\ncache_hit_rate=0.900000\n"
+        "buffer_swaps=2\nproducer_waits=0\nproducer_wait_ns=0\n"
+        "effective_buffer_bytes=4096\n"
+    ).encode("ascii")
+
+
+def stopped_raw_stream():
+    completed = complete_stream(instruction_definition(), instruction(), compression=0)
+    prefix = bytearray(completed[:-105])
+    prefix[5] = 2
+    prefix[12:16] = (1).to_bytes(4, "little")
+    terminal_bytes = len(stopped(encoded_bytes=0, compressed_bytes=0))
+    total = len(prefix) + terminal_bytes
+    return bytes(prefix) + stopped(encoded_bytes=total, compressed_bytes=total)
 
 
 class ArtifactClassificationTests(unittest.TestCase):
@@ -352,6 +388,36 @@ class PullArtifactTests(unittest.TestCase):
             self.assertEqual(binary, (Path(directory) / name).read_bytes())
             text = Path(directory) / "123_algorithm.trace.txt"
             self.assertIn("TRACE_END status=completed", text.read_text(encoding="utf-8"))
+
+    def test_pulls_stopped_binary_as_successful_stopped_artifact(self):
+        name = "123_algorithm.trace.bin"
+        binary = stopped_raw_stream()
+        sidecar = v3_sidecar(
+            termination="stopped", return_valid=0, profile="full", instructions=1,
+            elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(binary),
+        )
+        client = self.FakeClient({name: binary, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = pull_artifact_set(client, name, client.files, root)
+
+            self.assertEqual(0, result.exit_code)
+            self.assertEqual("stopped", result.status)
+            self.assertIn("status=stopped", (root / "123_algorithm.trace.txt").read_text())
+
+    def test_rejects_stopped_sidecar_for_completed_binary(self):
+        name = "123_algorithm.trace.bin"
+        binary = complete_stream(compression=0)
+        sidecar = v3_sidecar(
+            termination="stopped", return_valid=0, profile="full", instructions=0,
+            elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(binary),
+        )
+        client = self.FakeClient({name: binary, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+                PullTraceError, "sidecar mismatch for termination"):
+            pull_artifact_set(client, name, client.files, Path(directory))
 
     def test_pulls_compressed_binary_and_routes_sidecar_through_converter(self):
         name = "123_algorithm.trace.bin.lz4"

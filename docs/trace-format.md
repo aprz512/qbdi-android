@@ -1,4 +1,4 @@
-# QTRB v1 Binary Trace and Text Format 3
+# QTRB v1 Binary Trace and Text Format 4
 
 Trace artifacts live in the debuggable app's app-private directory:
 
@@ -12,7 +12,7 @@ on the traced thread.
 
 Tracer configuration is a separate control plane: `scripts/spawn_trace.js` serializes the
 versioned `config.tracer` JSON object and receives JSON configure/status responses. This does not
-change QTRB, text format 3, Flight Recorder artifacts, or retained historical formats described
+change QTRB, text format 4, Flight Recorder artifacts, or retained historical formats described
 below.
 
 ## Artifact set
@@ -28,10 +28,10 @@ The files are:
 - `<basename>.trace.bin.lz4`: production output, a sequence of independent LZ4 frames containing
   QTRB v1 records. A final complete run also has one LZ4 skippable padding frame.
 - `<basename>.trace.bin`: Debug-only compression-off output.
-- `<artifact>.metrics`: metrics v2, published only after successful finalization.
+- `<artifact>.metrics`: strict metrics v3, published only after a completed or stopped terminal.
 - `<artifact>.crash`: a 12-byte little-endian crash marker retained only after a handled fatal
   signal. It contains magic `0x51435248`, the signal, and a positive TID.
-- `<basename>.trace.txt`: host-converted text format 3.
+- `<basename>.trace.txt`: host-converted text format 4.
 - `<basename>.partial.trace.txt`: recoverable complete frames from a crash-truncated artifact.
 - `<run_id>_<pid>_<target>.flight.bin`: preallocated persistent cross-thread flight ring.
 - `<flight-basename>.merged.trace.txt`: recovered events merged by process-wide sequence.
@@ -51,15 +51,26 @@ bytes without a terminator. The 16-byte stream header is:
 StreamHeader {
   magic: "QTRB"[4]
   major: u8 = 1
-  minor: u8 = 1
+  minor: u8 = 0 | 1 | 2
   endian: u8 = 1
   pointer_width: u8 = 4 | 8
   profile: u8                 # fast=0, balanced=1, full=2
   reserved: u8 = 0
   header_bytes: u16 = 16
-  required_features: u32 = 0
+  required_features: u32
 }
 ```
+
+Only these `(minor, required_features)` combinations are valid:
+
+| Minor | Required features | Meaning |
+| ---: | ---: | --- |
+| 0 | 0 | Original v1 records; only CALL continuation is available. |
+| 1 | 0 | Adds RULE/ERROR continuation and optional-record skipping. |
+| 2 | 1 | Adds the required `TRACE_STOP` terminal (type 10). |
+
+Any other pair is rejected. In particular, v1.2 requires feature bit 0 and that feature bit is not
+valid on v1.0 or v1.1.
 
 Every record starts with this exact eight-byte header:
 
@@ -97,10 +108,17 @@ definitions, or memory operands.
 | 8 | `ERROR` | 0 | `name string; detail string` | 4 | 4363 |
 | 8 | `ERROR_CONTINUATION` | 0x0001 | `event_id u64; total_detail_bytes u32; chunk_index u16; chunk_count u16; name string; detail_fragment string` | 20 | 3355 |
 | 9 | `TRACE_END` | 0 | `success u8; return_value u64; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64` | 97 | 105 |
+| 10 | `TRACE_STOP` | 0 | `reason u8; reserved[7] = 0; elapsed_ms u64; instructions u64; encoded_bytes u64; compressed_bytes u64; cache_hits u64; cache_misses u64; cache_collisions u64; buffer_swaps u64; producer_waits u64; producer_wait_ns u64; effective_buffer_bytes u64` | 96 | 104 |
 
 Maximum record bytes include the eight-byte `RecordHeader`. `TRACE_END.encoded_bytes` includes its
-own 105 bytes. `TRACE_END.compressed_bytes` is the final artifact size, including the final LZ4
-skippable padding frame when compression is enabled. `TRACE_END.success` is 0 or 1.
+own 105 bytes; `TRACE_STOP.encoded_bytes` likewise includes its own 104 bytes. Both terminal
+`compressed_bytes` values are the final artifact size, including the final LZ4 skippable padding
+frame when compression is enabled. `TRACE_END.success` is 0 or 1.
+
+`TRACE_STOP` is valid only for `(minor, required_features) = (2, 1)`, has zero flags, and has an
+exactly 96-byte payload. Its first byte is `reason`; the following seven reserved bytes are zero;
+the remaining eleven `u64` fields occur in exactly the order shown in the table. Reason `1` means
+`duration_elapsed`; reason `0` is invalid; every other value is reserved and rejected.
 
 ### Nested wire layouts
 
@@ -154,29 +172,33 @@ A continuation group must be contiguous, start at index zero, keep identical typ
 count, and name (plus CALL category), and contain every index exactly once. UTF-8 validation occurs
 after raw detail fragments are reassembled.
 
-The current producer emits major 1 minor 1. The converter preserves retained v1.0 artifacts: v1.0
-supports zero-flag RULE/ERROR and CALL continuation, while v1.1 additionally supports RULE/ERROR
-continuation. A v1.0 RULE/ERROR record with flag `0x0001` fails closed. Record types
-`0x8000..0xffff` are the optional extension namespace: a minor-1 decoder skips a well-framed,
-zero-flag unknown optional record only
-between `TRACE_BEGIN` and `TRACE_END` and never through a continuation group. Types below `0x8000`
-are required records. Unknown required feature bits, required record types, flags, references,
-lifecycle violations, minor versions above 1, or incompatible major versions fail closed.
+The current producer emits major 1 minor 2 with required feature bit 0. The converter preserves
+retained v1.0 artifacts: v1.0 supports zero-flag RULE/ERROR and CALL continuation, while v1.1
+additionally supports RULE/ERROR continuation. A v1.0 RULE/ERROR record with flag `0x0001` fails
+closed. Record types `0x8000..0xffff` are the optional extension namespace: a minor-1 decoder
+skips a well-framed, zero-flag unknown optional record only between `TRACE_BEGIN` and its terminal
+and never through a continuation group. Types below `0x8000` are required records. Unknown required
+feature bits, required record types, flags, references, lifecycle violations, unsupported
+minor/features pairs, or incompatible major versions fail closed.
 
-## Text format 3
+## Text format 4
 
 `scripts/trace_convert.py` writes UTF-8 with one visible event per line. Field order is fixed by
-format 3 and shown below:
+format 4 and shown below:
 
 ```text
-TRACE_BEGIN format=3 scene="..." target="..." target_offset=0x... base=0x... address=0x... pid=... tid=... profile=... compression=... effective_buffer_bytes=... run_id=...
+TRACE_BEGIN format=4 scene="..." target="..." target_offset=0x... base=0x... address=0x... pid=... tid=... profile=... compression=... effective_buffer_bytes=... run_id=...
 INST seq=1 module="..." module_base=0x... pc=0x... relative_pc=0x... metadata_id=... opcode=0x... asm="..." flags=0x... condition=... reads=[...] writes=[...] slow_memory_path=... memory_operands=[...]
 MEMORY module="..." module_base=0x... pc=0x... relative_pc=0x... kind=... metadata_available=... flags=0x... address=0x... size=... value=0x... before=... after=...
 CALL category="..." name="..." detail="..."
 RULE name="..." detail="..."
 ERROR name="..." detail="..."
-TRACE_END status=ok return=0x... elapsed_ms=... instructions=... encoded_bytes=... compressed_bytes=... cache_hits=... cache_misses=... cache_collisions=... buffer_swaps=... producer_waits=... producer_wait_ns=... effective_buffer_bytes=...
+TRACE_END status=completed return_valid=1 return=0x... elapsed_ms=... instructions=... encoded_bytes=... compressed_bytes=... cache_hits=... cache_misses=... cache_collisions=... buffer_swaps=... producer_waits=... producer_wait_ns=... effective_buffer_bytes=...
+TRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=... instructions=... encoded_bytes=... compressed_bytes=... cache_hits=... cache_misses=... cache_collisions=... buffer_swaps=... producer_waits=... producer_wait_ns=... effective_buffer_bytes=...
 ```
+
+The completed and stopped lines are the two format-4 terminal forms. A stopped terminal has no
+`return=` field because `return_valid=0`.
 
 String escaping is JSON string escaping without ASCII forcing: quotes, backslashes, and control
 characters use JSON escapes, while valid non-ASCII UTF-8 remains readable. Integers are decimal
@@ -195,26 +217,32 @@ using 64-bit wrapping and the recorded current-PC or current-page base kind.
 No profile samples, overwrites, drops, or reorders events. When both asynchronous buffers are busy,
 the producer waits and records that backpressure.
 
-## Metrics v2
+## Metrics v3
 
-Binary sidecars begin with `metrics_version=2`. They contain:
+Binary sidecars begin with `metrics_version=3`. Metrics v3 has a fixed terminal contract:
+`termination` is `completed` or `stopped`; `return_valid` is respectively `1` or `0`; and a stopped
+terminal fixes `return=0x0`. These fields are mandatory and are checked against the QTRB terminal
+before text publication. A stopped metrics sidecar therefore cannot accompany a completed
+`TRACE_END`, and a completed sidecar cannot accompany `TRACE_STOP`.
 
 | Metric | Meaning |
 | --- | --- |
-| `profile`, `return`, `instructions`, `elapsed_ms` | Run identity and result. |
+| `metrics_version`, `termination`, `return_valid`, `profile`, `return` | Fixed terminal identity and result contract. |
+| `instructions`, `elapsed_ms` | Terminal counters. |
 | `instructions_per_second` | `instructions * 1000 / elapsed_ms`. |
-| `encoded_bytes` | Uncompressed QTRB bytes, including header and footer. |
+| `encoded_bytes` | Uncompressed QTRB bytes, including header and its terminal record. |
 | `compressed_bytes` | Exact `.trace.bin.lz4` artifact bytes, including final padding. |
 | `encoded_bytes_per_second`, `disk_bytes_per_second`, `compression_ratio` | Fixed-six derived rates. |
 | `cache_hits`, `cache_misses`, `cache_collisions`, `cache_hit_rate` | Decode-cache counters and rate. |
 | `buffer_swaps`, `producer_waits`, `producer_wait_ns` | Async writer/backpressure counters. |
 | `effective_buffer_bytes` | Actual capacity of each producer buffer after fallback. |
 
-The converter checks the footer against the artifact size and adjacent v2 sidecar before atomic
+The converter checks the terminal against the artifact size and adjacent v3 sidecar before atomic
 publication. Pull, conversion, and benchmarking use one suffix-aware strict parser: legacy
 format-2 v1 metrics are valid only beside `.trace.txt.lz4` when `metrics_version` is absent and
-`raw_bytes` is present, while v2 is valid only beside QTRB artifacts. Mixed generations are
-rejected. All five fixed-six rates are mandatory and recomputed from validated counters.
+`raw_bytes` is present, while QTRB metrics v2 and v3 are valid only beside QTRB artifacts. Mixed
+generations are rejected. All five fixed-six rates are mandatory and recomputed from validated
+counters.
 Recomputation exactly reproduces the producer's unsigned integer truncation to six fractional
 digits, including a zero denominator; an adjacent `0.000001` value is inconsistent and rejected.
 
@@ -222,9 +250,18 @@ digits, including a zero denominator; an adjacent `0.000001` value is inconsiste
 footer, and sidecar publication.
 Thus all three derived rates use hot-path elapsed time and are comparable with the format-2
 baseline, but they are not end-to-end publication throughput. `encoded_bytes` is complete after
-`TRACE_END` is committed. `compressed_bytes` is complete after all frames, padding, drain, and
+the terminal is committed. `compressed_bytes` is complete after all frames, padding, drain, and
 close finish. The large and 4 KiB acceptance runs separately exercise streaming, backpressure, and
 final drain behavior.
+
+### Compatibility matrix
+
+| Input artifact and sidecar | Terminal meaning | Host support |
+| --- | --- | --- |
+| QTRB 1.0/1.1 + metrics v2 | Completed legacy input | Readable. |
+| QTRB 1.2 type 9 + metrics v3 | Completed | Readable as format-4 `status=completed`. |
+| QTRB 1.2 type 10 + metrics v3 | Stopped | Readable as format-4 `status=stopped`. |
+| Truncated + valid crash marker | Recovered/partial | Only complete prior frames are recovered; no terminal is fabricated. |
 
 ## Pulling and conversion
 
@@ -249,8 +286,9 @@ python3 scripts/trace_convert.py input.trace.bin.lz4 --output output.trace.txt
 python3 scripts/trace_convert.py input.trace.bin --output output.trace.txt
 ```
 
-Both tools use status 0 for complete success, status 1 for an error with no text publication, and
-status 2 for valid crash-partial recovery. `benchmark_trace.py --compare` also uses status 2 when
+Both tools use status 0 for a completed or stopped terminal, status 1 for an error with no text
+publication, and status 2 for valid crash-partial recovery. `pull_trace.py` reports the corresponding
+successful status as `complete` or `stopped`. `benchmark_trace.py --compare` also uses status 2 when
 a speed or size acceptance gate is missed while still printing the complete JSON verdict.
 
 ## Persistent flight recorder
@@ -293,10 +331,11 @@ unterminated lifecycle evidence are surfaced explicitly and fail completeness cl
 
 ## Crash partial semantics
 
-A complete run has a valid QTRB header, `TRACE_BEGIN`, continuous instruction sequence,
-`TRACE_END`, matching v2 sidecar, and no retained crash marker. A valid crash marker plus a
-truncated final LZ4 frame permits recovery of complete prior frames only. The tools publish
-`<basename>.partial.trace.txt`, omit an incomplete final record/frame, and return status 2.
+A completed or stopped run has a valid QTRB header, `TRACE_BEGIN`, continuous instruction sequence,
+the matching terminal, a matching v3 sidecar, and no retained crash marker. A valid crash marker
+plus a truncated final LZ4 frame permits recovery of complete prior frames only. The tools publish
+`<basename>.partial.trace.txt`, omit an incomplete final record/frame, return status 2, and never
+fabricate a `TRACE_END` terminal for that crash-marked partial.
 
 Truncation without a valid crash marker, corruption in a complete frame, invalid dictionaries or
 sequence, or sidecar/footer disagreement returns status 1 and publishes no text. A raw
