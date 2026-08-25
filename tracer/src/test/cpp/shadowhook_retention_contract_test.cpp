@@ -138,8 +138,22 @@ int main() {
             "tracer/src",
             std::string("flight_atomic_fetch_") + "and_u32");
     const std::string spawn = read_repo_source("scripts/spawn_trace.js");
-    assert(spawn.find("if (!config.flight.enabled) installModuleObserver") !=
-           std::string::npos);
+    const std::string spawn_main =
+            function_body(spawn, "function main()", "if (globalThis.__QTRACE_TEST__");
+    const size_t load_tracer = spawn_main.find("loadLibrary(dir + '/' + config.loader.tracer)");
+    const size_t configure_helper = spawn_main.find("configureShadowHookHelper(");
+    const size_t configure_tracer = spawn_main.find(
+            "configureTracer(JSON.stringify(config.tracer), tracerModule)");
+    const size_t read_status = spawn_main.find(
+            "statusReader(tracerModule, configureResponse.generation)");
+    assert(load_tracer != std::string::npos);
+    assert(configure_helper != std::string::npos);
+    assert(configure_tracer != std::string::npos);
+    assert(read_status != std::string::npos);
+    assert(load_tracer < configure_helper);
+    assert(configure_helper < configure_tracer);
+    assert(configure_tracer < read_status);
+    assert(spawn.find("Process.attachModuleObserver") == std::string::npos);
     const std::string tracer_child =
             function_body(tracer, "static void tracer_atfork_child()",
                           "static void install_hooks_for_module");

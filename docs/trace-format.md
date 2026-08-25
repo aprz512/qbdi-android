@@ -10,6 +10,11 @@ The production tracer writes a compact little-endian QTRB v1 event stream. Human
 generated on the host, so hexadecimal, decimal, register-name, and disassembly rendering do not run
 on the traced thread.
 
+Tracer configuration is a separate control plane: `scripts/spawn_trace.js` serializes the
+versioned `config.tracer` JSON object and receives JSON configure/status responses. This does not
+change QTRB, text format 3, Flight Recorder artifacts, or retained historical formats described
+below.
+
 ## Artifact set
 
 Each run has a unique basename:

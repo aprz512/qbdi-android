@@ -9,6 +9,26 @@ ROOT = Path(__file__).resolve().parents[2]
 ANDROID_NAMESPACE = "http://schemas.android.com/apk/res/android"
 GRADLE_TIMEOUT_SECONDS = 300
 
+LEGACY_CONFIGURATION_MARKERS = (
+    "qbdi_tracer_configure(",
+    "parse_trace_config(",
+    "scenes=replace",
+    "scene=",
+)
+CONFIGURATION_SOURCES = (
+    ROOT / "tracer/src/main/cpp/core/trace_config.h",
+    ROOT / "tracer/src/main/cpp/core/trace_config.cpp",
+    ROOT / "tracer/src/main/cpp/core/tracer_configuration.h",
+    ROOT / "tracer/src/main/cpp/core/tracer_configuration.cpp",
+)
+CONFIGURATION_ABI_SOURCE = ROOT / "tracer/src/main/cpp/tracer_entry.cpp"
+FRIDA_AGENT_PRODUCERS = (
+    ROOT / "scripts/spawn_trace.js",
+    ROOT / "scripts/benchmark_trace.js",
+    ROOT / "scripts/benchmark_trace.py",
+    ROOT / "scripts/flight_acceptance.py",
+)
+
 
 def run_gradle(*arguments, environment=None):
     process_environment = os.environ.copy()
@@ -29,6 +49,24 @@ def run_gradle(*arguments, environment=None):
         check=False,
         timeout=GRADLE_TIMEOUT_SECONDS,
     )
+
+
+class StructuredConfigurationContractTests(unittest.TestCase):
+    def test_production_configuration_has_no_legacy_protocol(self):
+        source_groups = (
+            (CONFIGURATION_SOURCES + FRIDA_AGENT_PRODUCERS,
+             LEGACY_CONFIGURATION_MARKERS),
+            # Native trace/log records legitimately contain scene=. The ABI
+            # adapter is scanned only for parser/export protocol markers.
+            ((CONFIGURATION_ABI_SOURCE,), LEGACY_CONFIGURATION_MARKERS[:-1]),
+        )
+
+        for production_sources, markers in source_groups:
+            for path in production_sources:
+                source = path.read_text(encoding="utf-8")
+                for marker in markers:
+                    with self.subTest(path=path.relative_to(ROOT), marker=marker):
+                        self.assertNotIn(marker, source)
 
 
 class ManifestIntegrationTests(unittest.TestCase):

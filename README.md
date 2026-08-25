@@ -35,7 +35,6 @@ Frida spawn 注入 → ShadowHook 接管场景入口 → QBDI 执行与采集 �
 app/                         Kotlin 演示 APK 与 native 目标库
 tracer/                      QBDI tracer、ShadowHook、QTRB 与 Flight Recorder
 scripts/spawn_trace.js       可直接交给 Frida 的自包含注入脚本
-scripts/trace_config.js      主机脚本共享配置
 scripts/pull_trace.py        从 app-private 目录拉取、校验并转换轨迹
 scripts/benchmark_trace.py   多进程 benchmark 与基线验收
 docs/                        格式、偏移、完整性与性能证据
@@ -60,7 +59,10 @@ Frida 主机工具与设备端 server 应使用匹配版本。主机转换 `.tra
 git lfs pull
 ```
 
-当前依赖包括 QBDI 0.12.1 Android AARCH64、vendored ByteDance ShadowHook，以及 LZ4 1.10.0。
+当前依赖包括 QBDI 0.12.1 Android AARCH64、vendored ByteDance ShadowHook、LZ4 1.10.0，
+以及 vendored nlohmann/json 3.12.0。JSON 单头文件与许可证分别位于
+`tracer/src/main/cpp/third_party/nlohmann/json.hpp` 和
+`tracer/src/main/cpp/third_party/nlohmann/LICENSE.MIT`。
 
 ## 构建
 
@@ -93,6 +95,14 @@ out/arm64-v8a/libshadowhook_nothing.so
 
 ```bash
 python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
+Frida/GumJS adapter 的 host 测试是显式 opt-in；它要求可用的 Frida Python package 和
+本机 attach 能力，不属于默认 Python 套件：
+
+```bash
+QTRACE_RUN_FRIDA_HOST_TESTS=1 \
+  python3 -m unittest scripts.tests.test_spawn_trace_gumjs -v
 ```
 
 构建契约属于显式集成套件。它会实际运行 Debug/Release manifest 合并、解析合并后的 manifest，并运行 Native Host Gradle/CTest 链；每次 Gradle 子进程有 300 秒 timeout：
@@ -128,9 +138,75 @@ adb push out/arm64-v8a/libqbdi_tracer.so /data/local/tmp/qbdi-android/
 
 若设备的 SELinux/linker namespace 不允许应用从 `/data/local/tmp` 映射 tracer，可参考下文 benchmark 流程，将 tracer 暂存到 debuggable 应用私有目录并通过应用 class loader 加载。
 
-## 配置场景偏移
+## 配置 tracer
 
-tracer 不依赖运行时符号名，而是使用目标模块相对偏移。打开本次构建生成的：
+`scripts/spawn_trace.js` 顶部的 `config` 是普通交互追踪唯一需要人工维护的配置源。
+`loader` 只供 Frida adapter 加载动态库；只有 `config.tracer` 会经
+`JSON.stringify` 发送到 native tracer。完整形状如下：
+
+```javascript
+const config = {
+  loader: {
+    remoteDir: '/data/local/tmp/qbdi-android',
+    tracer: 'libqbdi_tracer.so',
+    shadowhookCompanion: 'libshadowhook_nothing.so'
+  },
+
+  tracer: {
+    schemaVersion: 1,
+    packageName: 'com.aprz.qbdiandroid',
+    targetModule: 'libdemo_target.so',
+
+    trace: {
+      profile: 'fast',
+      compression: true,
+      lz4Level: 2,
+      autoBuffer: true,
+      bufferMb: 0,
+      hexdumpLimit: 32
+    },
+
+    flight: {
+      enabled: true,
+      entryScene: 'init',
+      capacityMb: 512,
+      chunkKb: 256,
+      maxThreads: 256,
+      protectedChunks: 4
+    },
+
+    scenes: [
+      {
+        name: 'init',
+        location: {
+          offset: '0x6ac90',
+          endOffset: '0x6ad00'
+        }
+      },
+      {
+        name: 'algorithm',
+        location: {
+          imageBase: '0x10000',
+          address: '0x7db38',
+          endAddress: '0x7dc00'
+        }
+      }
+    ]
+  }
+};
+```
+
+场景位置只接受两种互斥形式：`offset`（可带 `endOffset`），或
+`imageBase + address`（可带 `endAddress`）。所有地址必须是 `0x` 十六进制字符串，
+不能写成 JSON number；native 会把后一种形式归一化为
+`offset = address - imageBase`。所有 `endOffset`/`endAddress` 都是 exclusive end，
+必须严格大于起始位置。没有范围时省略 end 字段。
+
+Flight Recorder 启用时，`flight.entryScene` 必须精确命名 `scenes` 中的一项；数组顺序
+不再隐含入口语义。若只需要普通单场景轨迹，在这个唯一配置中把 `flight.enabled`
+设为 `false`。
+
+tracer 不依赖运行时符号名。要确定本次构建的地址，打开：
 
 ```text
 app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libdemo_target.so
@@ -144,7 +220,9 @@ app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/ar
 - `demo_algorithm_case`
 - `demo_integrity_case`
 
-将相对偏移同步写入 `scripts/trace_config.js` 和 `scripts/spawn_trace.js` 内嵌的 `config.scenes`。详细步骤见 [IDA/objdump 偏移指南](docs/ida-offsets.md)。目标库布局变化后必须重新核对，不能照搬其他 APK 的数值。
+把相对偏移或 IDA/Ghidra image-base 地址写入 `scripts/spawn_trace.js` 的
+`config.tracer.scenes`。详细步骤见 [IDA/objdump 偏移指南](docs/ida-offsets.md)。目标库布局
+变化后必须重新核对，不能照搬其他 APK 的数值。
 
 ## 注入与采集
 
@@ -156,19 +234,52 @@ frida -U -f com.aprz.qbdiandroid -l scripts/spawn_trace.js
 
 脚本完成配置后，恢复应用并在界面选择 JNI、libc、algorithm、integrity 或 benchmark 场景。constructor、持久 `pthread_create` gateway 和 signal gateway 都需要在目标初始化前安装；attach 到已运行进程无法补回遗漏的开头。
 
-默认启用 Flight Recorder：
+configure 成功后，Frida console 会先打印 generation 和归一化 offset，再轮询同一
+generation 的 status。状态依次可能是 `waiting_for_module`、`installing`，以及终态
+`installed`、`hook_failed`、`rollback_failed` 或 `superseded`；场景状态还包括
+`pending`、`rolled_back`。相同 status 不会重复打印，warning 用 `[!]` 输出且不等于失败。
 
-```javascript
-flight: {
-  enabled: true,
-  capacityMb: 512,
-  chunkKb: 256,
-  maxThreads: 256,
-  protectedChunks: 4
-}
+JSON schema 是严格的：malformed JSON、unknown/missing/wrong-type 字段、JSON number 地址、
+冲突 locator、地址减法/加法溢出、非法范围或无效 `flight.entryScene` 都会拒绝候选，且不会
+替换当前 generation。常见稳定错误码包括 `MALFORMED_JSON`、`UNKNOWN_FIELD`、
+`TYPE_MISMATCH`、`INVALID_HEX_ADDRESS`、`CONFLICTING_LOCATION`、
+`ADDRESS_BELOW_IMAGE_BASE`、`ADDRESS_OVERFLOW`、`INVALID_RANGE` 和
+`INVALID_FLIGHT_ENTRY_SCENE`。
+
+与此不同，packed library 的实际映射可能偏离静态 ELF。`ADDRESS_OUTSIDE_TARGET_MODULE`、
+`ADDRESS_NOT_EXECUTABLE` 和 `ADDRESS_IN_RUNTIME_MAPPING` 只产生 warning，tracer 仍会尝试
+安装 hook。真正的安装/回滚失败使用 `HOOK_INSTALL_FAILED`、`HOOK_INSTALL_RESIDUAL` 或
+`HOOK_ROLLBACK_FAILED` 等稳定码，并保留 ShadowHook integer error。status 查询未知或已淘汰
+generation 时返回 `GENERATION_NOT_FOUND`。
+
+ABI transport code 只描述 JSON 是否完整传输：`0` 为 `QTRACE_JSON_OK`，`1` 为
+`QTRACE_JSON_RESPONSE_TOO_SMALL`（可按返回的含 NUL size 安全重试，首次尝试不发布配置），
+`2` 为 `QTRACE_JSON_INVALID_ARGUMENT`。schema/config/hook 结果都在 transport code 0 的 JSON
+response 中，以 `responseSchemaVersion: 1`、`ok`、稳定 `error.code` 和 `error.path` 表示。
+
+### arm64 设备验收（opt-in）
+
+部署上面的 Debug APK、tracer 和 companion 后，在一台 arm64 设备上执行四次 spawn：
+
+1. 使用 `offset` locator。
+2. 改成等价的 `imageBase + address` locator；确认 Frida status 中的 normalized offset 和
+   runtime address 与第 1 次一致。
+3. 使用可解释但映射可疑的地址；确认 warning 先出现，随后仍有真实 hook 结果。
+4. 在一个有效配置之后提交 invalid JSON；确认拒绝码出现，之前的 generation 仍可查询和使用。
+
+每次都使用完全相同的注入命令：
+
+```bash
+frida -U -f com.aprz.qbdiandroid -l scripts/spawn_trace.js
 ```
 
-若只需要普通单场景轨迹，可在两份配置中关闭 `flight`。普通轨迹默认使用 `fast` profile 和 LZ4 压缩。
+分别记录 Frida console 和 Logcat 中的 generation、warning/error code；两边应一致。完成运行后
+拉取并验证产物：
+
+```bash
+python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --output pulled-traces
+```
 
 ## 采集配置
 
