@@ -17,18 +17,24 @@ import scripts.lz4_frames as lz4_frames
 from scripts.trace_binary import BinaryTraceError
 from scripts.trace_convert import convert_binary_file, main
 from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
-from scripts.tests.test_trace_binary import complete_stream, stopped_stream
+from scripts.tests.test_trace_binary import complete_stream, stopped_stream, stream_header
 
 
 def raw_stream(*events):
-    return complete_stream(*events, compression=0)
+    return complete_stream(*events, compression=0).replace(
+        stream_header(), stream_header(minor=2, features=1), 1
+    )
 
 
 def compressed_artifact(*, compression=1):
-    probe = complete_stream(compression=compression)
+    probe = complete_stream(compression=compression).replace(
+        stream_header(), stream_header(minor=2, features=1), 1
+    )
     size = len(uncompressed_lz4_frame(probe))
     return uncompressed_lz4_frame(
-        complete_stream(compression=compression, compressed_bytes=size)
+        complete_stream(compression=compression, compressed_bytes=size).replace(
+            stream_header(), stream_header(minor=2, features=1), 1
+        )
     )
 
 
@@ -73,6 +79,25 @@ def metrics_sidecar(source: Path, extra: str = "", *, termination: str = "comple
         "cache_hit_rate=0.900000\n"
         "buffer_swaps=2\nproducer_waits=0\nproducer_wait_ns=0\n"
         "effective_buffer_bytes=4096\n" + extra
+    )
+
+
+def legacy_v2_metrics_sidecar(source: Path) -> str:
+    size = source.stat().st_size
+
+    def fixed_six(numerator: int, denominator: int) -> str:
+        whole, remainder = divmod(numerator, denominator)
+        return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
+
+    return (
+        "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
+        "elapsed_ms=17\ninstructions_per_second=0.000000\n"
+        f"encoded_bytes={size}\ncompressed_bytes={size}\n"
+        f"encoded_bytes_per_second={fixed_six(size * 1000, 17)}\n"
+        f"disk_bytes_per_second={fixed_six(size * 1000, 17)}\n"
+        "compression_ratio=1.000000\ncache_hits=9\ncache_misses=1\n"
+        "cache_collisions=0\ncache_hit_rate=0.900000\nbuffer_swaps=2\n"
+        "producer_waits=0\nproducer_wait_ns=0\neffective_buffer_bytes=4096\n"
     )
 
 
@@ -458,6 +483,38 @@ class TraceConvertFileTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(BinaryTraceError, "sidecar mismatch.*return"):
                 convert_binary_file(source, root / "out.txt", lz4=None, crash_marked=False)
+
+    def test_converts_legacy_qtrb_with_a_strict_v2_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "legacy.trace.bin"
+            source.write_bytes(complete_stream(compression=0))
+            Path(str(source) + ".metrics").write_text(
+                legacy_v2_metrics_sidecar(source), encoding="utf-8"
+            )
+
+            stats = convert_binary_file(source, root / "legacy.trace.txt", lz4=None,
+                                        crash_marked=False)
+
+            self.assertFalse(stats.partial)
+            self.assertIn("TRACE_END status=completed", (root / "legacy.trace.txt").read_text())
+
+    def test_rejects_metrics_generation_mixed_with_qtrb_minor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy.trace.bin"
+            legacy.write_bytes(complete_stream(compression=0))
+            Path(str(legacy) + ".metrics").write_text(metrics_sidecar(legacy), encoding="utf-8")
+            with self.assertRaisesRegex(BinaryTraceError, "QTRB 1.0/1.1.*metrics v2"):
+                convert_binary_file(legacy, root / "legacy.txt", lz4=None, crash_marked=False)
+
+            current = root / "current.trace.bin"
+            current.write_bytes(raw_stream())
+            Path(str(current) + ".metrics").write_text(
+                legacy_v2_metrics_sidecar(current), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(BinaryTraceError, "QTRB 1.2.*metrics v3"):
+                convert_binary_file(current, root / "current.txt", lz4=None, crash_marked=False)
 
     def test_rejects_well_formed_but_inconsistent_v3_rates(self):
         with tempfile.TemporaryDirectory() as directory:

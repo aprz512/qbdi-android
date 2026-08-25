@@ -126,6 +126,8 @@ class _ConversionDetails:
     profile: str
     compression_enabled: bool
     terminal: TraceTerminal | None
+    stream_minor: int
+    stream_features: int
 
     @property
     def footer(self) -> TraceTerminal | None:
@@ -702,7 +704,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
     )
     assert begin_compression is not None
     return _ConversionDetails(
-        stats, PROFILE_NAMES[profile_value], begin_compression, terminal
+        stats, PROFILE_NAMES[profile_value], begin_compression, terminal, minor, features
     )
 
 

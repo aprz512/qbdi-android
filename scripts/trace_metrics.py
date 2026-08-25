@@ -118,7 +118,12 @@ def parse_metrics(sidecar: str | bytes, artifact_name: str | None = None
             raise ValueError("metrics v3 must accompany a binary trace artifact")
     if values["profile"] not in ("fast", "balanced", "full"):
         raise ValueError("invalid profile metric")
-    if re.fullmatch(r"0x[0-9a-fA-F]+", values["return"]) is None:
+    return_pattern = (
+        r"0x(?:0|[1-9a-f][0-9a-f]*)" if version == 3 else r"0x[0-9a-fA-F]+"
+    )
+    if re.fullmatch(return_pattern, values["return"]) is None:
+        if version == 3:
+            raise ValueError("invalid canonical return metric")
         raise ValueError("invalid return metric")
     if int(values["return"], 16) > UINT64_MAX:
         raise ValueError("return metric exceeds uint64")

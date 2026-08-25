@@ -81,10 +81,23 @@ def _validate_sidecar(path: Path, details: _ConversionDetails, artifact_size: in
     except ValueError as error:
         raise BinaryTraceError(str(error)) from error
     actual = values
-    expected = {
-        "metrics_version": 3,
-        "termination": terminal.termination,
-        "return_valid": int(terminal.return_valid),
+    if (details.stream_minor, details.stream_features) in ((0, 0), (1, 0)):
+        metrics_version = 2
+        generation = "QTRB 1.0/1.1"
+    elif (details.stream_minor, details.stream_features) == (2, 1):
+        metrics_version = 3
+        generation = "QTRB 1.2"
+    else:  # _convert_binary_stream rejects unsupported tuples before conversion.
+        raise BinaryTraceError("unsupported QTRB generation")
+    if actual["metrics_version"] != metrics_version:
+        raise BinaryTraceError(f"{generation} requires metrics v{metrics_version}")
+    expected = {"metrics_version": metrics_version}
+    if metrics_version == 3:
+        expected.update({
+            "termination": terminal.termination,
+            "return_valid": int(terminal.return_valid),
+        })
+    expected.update({
         "profile": details.profile,
         "return": f"0x{terminal.return_value:x}" if terminal.return_valid else "0x0",
         "instructions": terminal.instructions,
@@ -98,7 +111,7 @@ def _validate_sidecar(path: Path, details: _ConversionDetails, artifact_size: in
         "producer_waits": terminal.producer_waits,
         "producer_wait_ns": terminal.producer_wait_ns,
         "effective_buffer_bytes": terminal.effective_buffer_bytes,
-    }
+    })
     for key, expected_value in expected.items():
         if actual[key] != expected_value:
             raise BinaryTraceError(

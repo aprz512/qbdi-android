@@ -89,6 +89,14 @@ class TraceMetricsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "metrics v3.*binary"):
             parse_metrics(stopped.encode("ascii"), "run.trace.txt.lz4")
 
+    def test_completed_v3_return_is_lowercase_minimal_hexadecimal(self):
+        self.assertEqual("0x55", parse_metrics(v3_metrics())["return"])
+        self.assertEqual("0x0", parse_metrics(v3_metrics(return_value="0x0"))["return"])
+        for return_value in ("0x00", "0x01", "0xA", "0xAb"):
+            with self.subTest(return_value=return_value), self.assertRaisesRegex(
+                    ValueError, "canonical return"):
+                parse_metrics(v3_metrics(return_value=return_value))
+
 
 if __name__ == "__main__":
     unittest.main()

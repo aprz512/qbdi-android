@@ -10,7 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from scripts.tests.test_trace_binary import complete_stream
+from scripts.tests.test_trace_binary import complete_stream, stream_header
 
 import scripts.benchmark_trace as benchmark_trace
 
@@ -663,7 +663,9 @@ effective_buffer_bytes=67108864
                 select_exact_new_optimized_metrics([*pair, extra])
 
     def test_collects_raw_binary_atomically_and_validates_footer_sidecar_container(self):
-        binary = complete_stream(compression=0)
+        binary = complete_stream(compression=0).replace(
+            stream_header(), stream_header(minor=2, features=1), 1
+        )
 
         def fixed_six(numerator, denominator):
             whole, remainder = divmod(numerator, denominator)
@@ -708,6 +710,42 @@ effective_buffer_bytes=67108864
                 converted.read_text(encoding="utf-8"),
             )
             self.assertEqual([], list(Path(directory).glob(".benchmark-*")))
+
+    def test_collects_legacy_v2_binary_for_baseline_validation(self):
+        binary = complete_stream(compression=0)
+
+        def fixed_six(numerator, denominator):
+            whole, remainder = divmod(numerator, denominator)
+            return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
+
+        sidecar = (
+            "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
+            "elapsed_ms=17\ninstructions_per_second=0.000000\n"
+            f"encoded_bytes={len(binary)}\ncompressed_bytes={len(binary)}\n"
+            f"encoded_bytes_per_second={fixed_six(len(binary) * 1000, 17)}\n"
+            f"disk_bytes_per_second={fixed_six(len(binary) * 1000, 17)}\n"
+            "compression_ratio=1.000000\ncache_hits=9\ncache_misses=1\n"
+            "cache_collisions=0\ncache_hit_rate=0.900000\nbuffer_swaps=2\n"
+            "producer_waits=0\nproducer_wait_ns=0\neffective_buffer_bytes=4096\n"
+        ).encode("ascii")
+        metrics = parse_metrics(sidecar)
+
+        def fake_adb(_args, *command, **kwargs):
+            kwargs["stdout"].write(binary)
+            return subprocess.CompletedProcess(command, 0, stdout=None, stderr=b"")
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            benchmark_trace, "adb", side_effect=fake_adb
+        ):
+            args = SimpleNamespace(
+                artifact_output=directory, package="com.example.app", lz4="lz4"
+            )
+            result = collect_and_validate_optimized_artifact(
+                args, "legacy_benchmark.trace.bin", sidecar, metrics
+            )
+
+            self.assertEqual(2, result["metrics_version"])
+            self.assertTrue((Path(directory) / "legacy_benchmark.trace.txt").is_file())
 
     def test_benchmark_artifact_pull_error_removes_partial_temporary(self):
         def failing_adb(_args, *command, **kwargs):

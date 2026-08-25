@@ -77,6 +77,31 @@ def v3_sidecar(*, termination, return_valid, profile, instructions, elapsed_ms,
     ).encode("ascii")
 
 
+def v2_sidecar(*, profile, instructions, elapsed_ms, encoded_bytes, compressed_bytes):
+    def fixed_six(numerator, denominator):
+        whole, remainder = divmod(numerator, denominator)
+        return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
+
+    return (
+        f"metrics_version=2\nprofile={profile}\nreturn=0x55\n"
+        f"instructions={instructions}\nelapsed_ms={elapsed_ms}\n"
+        f"instructions_per_second={fixed_six(instructions * 1000, elapsed_ms)}\n"
+        f"encoded_bytes={encoded_bytes}\ncompressed_bytes={compressed_bytes}\n"
+        f"encoded_bytes_per_second={fixed_six(encoded_bytes * 1000, elapsed_ms)}\n"
+        f"disk_bytes_per_second={fixed_six(compressed_bytes * 1000, elapsed_ms)}\n"
+        f"compression_ratio={fixed_six(compressed_bytes, encoded_bytes)}\n"
+        "cache_hits=9\ncache_misses=1\ncache_collisions=0\ncache_hit_rate=0.900000\n"
+        "buffer_swaps=2\nproducer_waits=0\nproducer_wait_ns=0\n"
+        "effective_buffer_bytes=4096\n"
+    ).encode("ascii")
+
+
+def current_complete_stream(*, compression, compressed_bytes=None):
+    return complete_stream(
+        compression=compression, compressed_bytes=compressed_bytes
+    ).replace(stream_header(), stream_header(minor=2, features=1), 1)
+
+
 def stopped_binary_stream(*, compression, compressed_bytes=None):
     prefix = (
         stream_header(minor=2, features=1)
@@ -421,7 +446,7 @@ class PullArtifactTests(unittest.TestCase):
 
     def test_rejects_stopped_sidecar_for_completed_binary(self):
         name = "123_algorithm.trace.bin"
-        binary = complete_stream(compression=0)
+        binary = current_complete_stream(compression=0)
         sidecar = v3_sidecar(
             termination="stopped", return_valid=0, profile="full", instructions=0,
             elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(binary),
@@ -441,7 +466,7 @@ class PullArtifactTests(unittest.TestCase):
 
     def test_compressed_only_rejects_stopped_sidecar_for_completed_binary(self):
         name = "123_algorithm.trace.bin"
-        binary = complete_stream(compression=0)
+        binary = current_complete_stream(compression=0)
         sidecar = v3_sidecar(
             termination="stopped", return_valid=0, profile="full", instructions=0,
             elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(binary),
@@ -475,9 +500,9 @@ class PullArtifactTests(unittest.TestCase):
 
     def test_compressed_only_rejects_stopped_sidecar_for_completed_lz4_binary(self):
         name = "123_algorithm.trace.bin.lz4"
-        probe = complete_stream(compression=1)
+        probe = current_complete_stream(compression=1)
         compressed_bytes = len(uncompressed_lz4_frame(probe))
-        binary = complete_stream(compression=1, compressed_bytes=compressed_bytes)
+        binary = current_complete_stream(compression=1, compressed_bytes=compressed_bytes)
         artifact = uncompressed_lz4_frame(binary)
         sidecar = v3_sidecar(
             termination="stopped", return_valid=0, profile="full", instructions=0,
@@ -497,9 +522,9 @@ class PullArtifactTests(unittest.TestCase):
 
     def test_pulls_compressed_binary_and_routes_sidecar_through_converter(self):
         name = "123_algorithm.trace.bin.lz4"
-        probe = complete_stream(compression=1)
+        probe = current_complete_stream(compression=1)
         artifact_size = len(uncompressed_lz4_frame(probe))
-        binary = complete_stream(compression=1, compressed_bytes=artifact_size)
+        binary = current_complete_stream(compression=1, compressed_bytes=artifact_size)
         artifact = uncompressed_lz4_frame(binary)
 
         def fixed_six(numerator, denominator):
@@ -530,6 +555,22 @@ class PullArtifactTests(unittest.TestCase):
             self.assertEqual(0, result.exit_code)
             self.assertEqual("complete", result.status)
             self.assertIn("TRACE_END status=completed", (root / "123_algorithm.trace.txt").read_text())
+
+    def test_pulls_legacy_binary_with_a_v2_sidecar(self):
+        name = "123_legacy.trace.bin"
+        binary = complete_stream(compression=0)
+        sidecar = v2_sidecar(
+            profile="full", instructions=0, elapsed_ms=17, encoded_bytes=len(binary),
+            compressed_bytes=len(binary),
+        )
+        client = self.FakeClient({name: binary, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = pull_artifact_set(client, name, client.files, root)
+
+            self.assertEqual(0, result.exit_code)
+            self.assertIn("TRACE_END status=completed", (root / "123_legacy.trace.txt").read_text())
 
     def test_compressed_binary_crash_truncation_routes_to_partial_output(self):
         name = "123_algorithm.trace.bin.lz4"
