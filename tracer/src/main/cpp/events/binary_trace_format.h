@@ -10,7 +10,7 @@
 // width so a decoder can validate the producer ABI.
 inline constexpr uint8_t kBinaryTraceMagic[] = {'Q', 'T', 'R', 'B'};
 inline constexpr uint8_t kBinaryTraceMajorVersion = 1;
-inline constexpr uint8_t kBinaryTraceMinorVersion = 1;
+inline constexpr uint8_t kBinaryTraceMinorVersion = 2;
 inline constexpr uint8_t kBinaryLittleEndianMarker = 1;
 inline constexpr uint16_t kBinaryStreamHeaderBytes = 16;
 inline constexpr uint16_t kBinaryRecordHeaderBytes = 8;
@@ -20,7 +20,9 @@ inline constexpr uint16_t kBinaryRecordFlags = 0;
 // layout.
 inline constexpr uint16_t kBinaryCallChunkFlag = 1U << 0U;
 inline constexpr uint16_t kBinaryEventChunkFlag = 1U << 0U;
-inline constexpr uint32_t kBinaryRequiredFeatures = 0;
+inline constexpr uint32_t kBinaryStoppedTerminalFeature = 1U << 0U;
+inline constexpr uint32_t kBinaryRequiredFeatures =
+        kBinaryStoppedTerminalFeature;
 
 // StreamHeader (16 bytes): magic[4], major u8, minor u8, endian u8, pointer_width u8,
 // profile u8 (fast=0, balanced=1, full=2), reserved u8=0, header_bytes u16,
@@ -36,6 +38,11 @@ enum class BinaryRecordType : uint16_t {
     Rule = 7,
     Error = 8,
     TraceEnd = 9,
+    TraceStop = 10,
+};
+
+enum class TraceStopReason : uint8_t {
+    DurationElapsed = 1,
 };
 
 // RecordHeader (8 bytes): type u16, flags u16, payload_bytes u32. Flags are zero except for the
@@ -144,6 +151,12 @@ inline constexpr size_t kBinaryTraceEndPayloadBytes = 97;
 inline constexpr size_t kBinaryTraceEndRecordBytes =
         kBinaryRecordHeaderBytes + kBinaryTraceEndPayloadBytes;
 
+// TRACE_STOP payload: reason u8, reserved[7] = 0, elapsed_ms u64, then ten u64 counters in
+// TraceMetrics declaration order.
+inline constexpr size_t kBinaryTraceStopPayloadBytes = 96;
+inline constexpr size_t kBinaryTraceStopRecordBytes =
+        kBinaryRecordHeaderBytes + kBinaryTraceStopPayloadBytes;
+
 static_assert(kBinaryMaxTraceBeginRecordBytes == 572);
 static_assert(kBinaryMaxModuleDefinitionRecordBytes == 277);
 static_assert(kBinaryMaxInstructionDefinitionRecordBytes == 1646);
@@ -154,3 +167,4 @@ static_assert(kBinaryMaxCallChunkRecordBytes == 3612);
 static_assert(kBinaryMaxRuleErrorRecordBytes == 4363);
 static_assert(kBinaryMaxEventChunkRecordBytes == 3355);
 static_assert(kBinaryTraceEndRecordBytes == 105);
+static_assert(kBinaryTraceStopRecordBytes == 104);

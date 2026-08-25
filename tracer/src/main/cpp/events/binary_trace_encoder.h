@@ -62,4 +62,6 @@ public:
                                           std::string_view) const noexcept;
     BinaryEncodeResult encode_end(uint8_t *, size_t, bool, uint64_t, uint64_t,
                                   const TraceMetrics &) const noexcept;
+    BinaryEncodeResult encode_stop(uint8_t *, size_t, TraceStopReason, uint64_t,
+                                   const TraceMetrics &) const noexcept;
 };

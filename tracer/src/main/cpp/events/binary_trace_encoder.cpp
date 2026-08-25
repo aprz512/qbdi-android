@@ -181,6 +181,10 @@ bool semantic_event_type(BinaryRecordType type) noexcept {
     return type == BinaryRecordType::Rule || type == BinaryRecordType::Error;
 }
 
+bool valid_trace_stop_reason(TraceStopReason reason) noexcept {
+    return reason == TraceStopReason::DurationElapsed;
+}
+
 } // namespace
 
 BinaryEncodeResult BinaryTraceEncoder::encode_stream_header(
@@ -493,6 +497,31 @@ BinaryEncodeResult BinaryTraceEncoder::encode_end(
     append_record_header(buffer, BinaryRecordType::TraceEnd, kBinaryTraceEndPayloadBytes);
     append_u8(buffer, success ? 1U : 0U);
     append_u64(buffer, return_value);
+    append_u64(buffer, elapsed_ms);
+    append_u64(buffer, metrics.instructions);
+    append_u64(buffer, metrics.encoded_bytes);
+    append_u64(buffer, metrics.compressed_bytes);
+    append_u64(buffer, metrics.cache_hits);
+    append_u64(buffer, metrics.cache_misses);
+    append_u64(buffer, metrics.cache_collisions);
+    append_u64(buffer, metrics.buffer_swaps);
+    append_u64(buffer, metrics.producer_waits);
+    append_u64(buffer, metrics.producer_wait_ns);
+    append_u64(buffer, metrics.effective_buffer_bytes);
+    return {true, buffer.offset};
+}
+
+BinaryEncodeResult BinaryTraceEncoder::encode_stop(
+        uint8_t *output, size_t capacity, TraceStopReason reason, uint64_t elapsed_ms,
+        const TraceMetrics &metrics) const noexcept {
+    if (!valid_trace_stop_reason(reason)) return {};
+    const BinaryEncodeResult result = preflight(output, capacity, kBinaryTraceStopRecordBytes);
+    if (!result.ok) return result;
+
+    AppendBuffer buffer{output};
+    append_record_header(buffer, BinaryRecordType::TraceStop, kBinaryTraceStopPayloadBytes);
+    append_u8(buffer, static_cast<uint8_t>(reason));
+    for (size_t index = 0; index < 7; ++index) append_u8(buffer, 0);
     append_u64(buffer, elapsed_ms);
     append_u64(buffer, metrics.instructions);
     append_u64(buffer, metrics.encoded_bytes);

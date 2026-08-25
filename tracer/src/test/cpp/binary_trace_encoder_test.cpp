@@ -41,14 +41,14 @@ void stream_header_is_exact_and_tagged() {
     CHECK(result.size == kBinaryStreamHeaderBytes);
     CHECK(std::memcmp(bytes, "QTRB", 4) == 0);
     CHECK(bytes[4] == 1);
-    CHECK(bytes[5] == 1);
+    CHECK(bytes[5] == 2);
     CHECK(bytes[6] == 1);
     CHECK(bytes[7] == sizeof(uintptr_t));
     CHECK(bytes[8] == 0);
     CHECK(bytes[9] == 0);
     CHECK(bytes[10] == 16);
     CHECK(bytes[11] == 0);
-    CHECK(bytes[12] == 0);
+    CHECK(bytes[12] == 1);
     CHECK(bytes[13] == 0);
     CHECK(bytes[14] == 0);
     CHECK(bytes[15] == 0);
@@ -429,6 +429,40 @@ void trace_end_has_exact_golden_bytes() {
     });
 }
 
+void stopped_terminal_has_exact_v12_golden_bytes() {
+    TraceMetrics metrics{};
+    metrics.instructions = 2;
+    metrics.encoded_bytes = 0x68;
+    metrics.compressed_bytes = 0x70;
+    uint8_t bytes[kBinaryTraceStopRecordBytes]{};
+    const BinaryEncodeResult result = BinaryTraceEncoder{}.encode_stop(
+            bytes, sizeof(bytes), TraceStopReason::DurationElapsed, 17, metrics);
+    CHECK(result.ok);
+    CHECK(result.size == 104);
+    CHECK(bytes[0] == 10 && bytes[1] == 0);       // type
+    CHECK(bytes[2] == 0 && bytes[3] == 0);        // flags
+    CHECK(bytes[4] == 96 && bytes[5] == 0);       // payload bytes
+    CHECK(bytes[8] == 1);                         // duration_elapsed
+    for (size_t i = 9; i < 16; ++i) CHECK(bytes[i] == 0);
+    CHECK(bytes[16] == 17);                       // elapsed_ms, LE
+    CHECK(bytes[24] == 2);                        // instructions, LE
+    CHECK(bytes[32] == 0x68);                     // encoded_bytes, LE
+    CHECK(bytes[40] == 0x70);                     // compressed_bytes, LE
+}
+
+void stopped_terminal_rejects_unknown_reason_without_writing() {
+    std::array<uint8_t, kBinaryTraceStopRecordBytes> bytes{};
+    std::fill(bytes.begin(), bytes.end(), 0x5a);
+
+    const BinaryEncodeResult result = BinaryTraceEncoder{}.encode_stop(
+            bytes.data(), bytes.size(), static_cast<TraceStopReason>(2), 17, {});
+
+    CHECK(!result.ok);
+    CHECK(result.size == 0);
+    CHECK(std::all_of(bytes.begin(), bytes.end(),
+                      [](uint8_t value) { return value == 0x5a; }));
+}
+
 template <typename Encode>
 void check_one_byte_short_is_atomic(const Encode &encode) {
     std::array<uint8_t, kBinaryMaxRecordBytes> full{};
@@ -656,6 +690,8 @@ int main() {
     chunked_call_has_reversible_golden_bytes_and_atomic_failures();
     chunked_rule_has_reversible_golden_bytes_and_atomic_failures();
     trace_end_has_exact_golden_bytes();
+    stopped_terminal_has_exact_v12_golden_bytes();
+    stopped_terminal_rejects_unknown_reason_without_writing();
     every_encoding_is_atomic_when_capacity_is_one_byte_short();
     rejects_invalid_or_oversized_inputs_without_writing();
     declared_record_maxima_are_exact_and_encodable();
