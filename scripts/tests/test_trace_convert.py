@@ -222,6 +222,11 @@ class DocumentationContractTests(unittest.TestCase):
                 row["Fixed payload bytes"], row["Maximum record bytes"],
             ) for row in rows
         })
+        self.assertIn(
+            "`TRACE_END.success` must be `1` for a valid completed trace.\n"
+            "Failed executions write no terminal; readers reject legacy `success=0` terminals.",
+            protocol,
+        )
 
         wire_header = Path(__file__).parents[2].joinpath(
             "tracer", "src", "main", "cpp", "events", "binary_trace_format.h"

@@ -361,17 +361,18 @@ def pull_artifact_set(
         )
         for sidecar in sidecar_names
     }
-    metrics: dict[str, Any] | None = None
     if metrics_name in sidecars:
         try:
-            metrics = parse_metrics(sidecars[metrics_name], name)
+            parse_metrics(sidecars[metrics_name], name)
         except ValueError as error:
             raise PullTraceError(str(error)) from error
     classification = classify_artifacts({name: b"", **sidecars})[name]
     is_text = trace_suffix == TEXT_TRACE_SUFFIX
     is_compressed_binary = trace_suffix == BINARY_TRACE_SUFFIX
-    validate_v3 = metrics is not None and metrics["metrics_version"] == 3
-    needs_conversion = not compressed_only or (not is_text and validate_v3)
+    # Compressed-only avoids publishing converted text, not binary protocol validation. In
+    # particular, conversion enforces the adjacent-sidecar generation and v3 terminal contract for
+    # QTRB 1.2 before any requested source or sidecar can become visible.
+    needs_conversion = not compressed_only or not is_text
     if needs_conversion and (is_text or is_compressed_binary) and not lz4:
         raise PullTraceError(
             "host lz4 CLI is required for decompression; install the 'lz4' command"

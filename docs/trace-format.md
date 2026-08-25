@@ -113,7 +113,8 @@ definitions, or memory operands.
 Maximum record bytes include the eight-byte `RecordHeader`. `TRACE_END.encoded_bytes` includes its
 own 105 bytes; `TRACE_STOP.encoded_bytes` likewise includes its own 104 bytes. Both terminal
 `compressed_bytes` values are the final artifact size, including the final LZ4 skippable padding
-frame when compression is enabled. `TRACE_END.success` is 0 or 1.
+frame when compression is enabled. `TRACE_END.success` must be `1` for a valid completed trace.
+Failed executions write no terminal; readers reject legacy `success=0` terminals.
 
 `TRACE_STOP` is valid only for `(minor, required_features) = (2, 1)`, has zero flags, and has an
 exactly 96-byte payload. Its first byte is `reason`; the following seven reserved bytes are zero;

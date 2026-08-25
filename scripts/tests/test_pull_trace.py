@@ -498,6 +498,113 @@ class PullArtifactTests(unittest.TestCase):
             self.assertEqual({name, name + ".metrics"}, {path.name for path in result.outputs})
             self.assertFalse((root / "123_algorithm.trace.txt").exists())
 
+    def test_compressed_only_pulls_matching_current_completed_binary_without_text(self):
+        name = "123_algorithm.trace.bin"
+        binary = current_complete_stream(compression=0)
+        sidecar = v3_sidecar(
+            termination="completed", return_valid=1, profile="full", instructions=0,
+            elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(binary),
+        )
+        client = self.FakeClient({name: binary, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = pull_artifact_set(client, name, client.files, root, compressed_only=True)
+
+            self.assertEqual(0, result.exit_code)
+            self.assertEqual("complete", result.status)
+            self.assertEqual({name, name + ".metrics"}, {path.name for path in result.outputs})
+            self.assertFalse((root / "123_algorithm.trace.txt").exists())
+
+    def test_compressed_only_rejects_current_qtrb_without_v3_sidecar(self):
+        cases = (
+            ("123_algorithm.trace.bin", current_complete_stream(compression=0), None),
+            ("123_algorithm.trace.bin.lz4", None, "lz4"),
+        )
+        for name, raw_binary, decoder_kind in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if decoder_kind is None:
+                    artifact = raw_binary
+                    decoder = None
+                else:
+                    probe = current_complete_stream(compression=1)
+                    compressed_bytes = len(uncompressed_lz4_frame(probe))
+                    binary = current_complete_stream(
+                        compression=1, compressed_bytes=compressed_bytes
+                    )
+                    artifact = uncompressed_lz4_frame(binary)
+                    tools = root / "tools"
+                    tools.mkdir()
+                    decoder = fake_lz4_executable(tools)
+                client = self.FakeClient({name: artifact})
+                retained = root / "retain.txt"
+                retained.write_bytes(b"keep")
+
+                with self.assertRaisesRegex(PullTraceError, "QTRB 1.2 requires metrics v3"):
+                    pull_artifact_set(
+                        client, name, client.files, root, compressed_only=True,
+                        lz4=None if decoder is None else str(decoder),
+                    )
+
+                expected = {"retain.txt"}
+                if decoder_kind is not None:
+                    expected.add("tools")
+                self.assertEqual(expected, {path.name for path in root.iterdir()})
+                self.assertEqual(b"keep", retained.read_bytes())
+
+    def test_default_rejects_current_qtrb_without_v3_sidecar_before_publication(self):
+        name = "123_algorithm.trace.bin"
+        binary = current_complete_stream(compression=0)
+        client = self.FakeClient({name: binary})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            retained = root / "retain.txt"
+            retained.write_bytes(b"keep")
+
+            with self.assertRaisesRegex(PullTraceError, "QTRB 1.2 requires metrics v3"):
+                pull_artifact_set(client, name, client.files, root)
+
+            self.assertEqual({"retain.txt"}, {path.name for path in root.iterdir()})
+            self.assertEqual(b"keep", retained.read_bytes())
+
+    def test_compressed_only_rejects_current_qtrb_with_v2_sidecar(self):
+        name = "123_algorithm.trace.bin"
+        binary = current_complete_stream(compression=0)
+        sidecar = v2_sidecar(
+            profile="full", instructions=0, elapsed_ms=17,
+            encoded_bytes=len(binary), compressed_bytes=len(binary),
+        )
+        client = self.FakeClient({name: binary, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(PullTraceError, "QTRB 1.2 requires metrics v3"):
+                pull_artifact_set(client, name, client.files, root, compressed_only=True)
+
+            self.assertEqual([], list(root.iterdir()))
+
+    def test_compressed_only_publishes_legacy_binary_without_sidecar(self):
+        name = "123_algorithm.trace.bin"
+        for minor in (0, 1):
+            with self.subTest(minor=minor), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = complete_stream(compression=0).replace(
+                    stream_header(), stream_header(minor=minor), 1
+                )
+                client = self.FakeClient({name: binary})
+
+                result = pull_artifact_set(
+                    client, name, client.files, root, compressed_only=True
+                )
+
+                self.assertEqual(0, result.exit_code)
+                self.assertEqual("complete", result.status)
+                self.assertEqual((root / name,), result.outputs)
+                self.assertEqual({name}, {path.name for path in root.iterdir()})
+                self.assertFalse((root / "123_algorithm.trace.txt").exists())
+
     def test_compressed_only_rejects_stopped_sidecar_for_completed_lz4_binary(self):
         name = "123_algorithm.trace.bin.lz4"
         probe = current_complete_stream(compression=1)
