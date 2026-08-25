@@ -28,6 +28,31 @@ struct TraceGenerationSnapshot {
     bool detached = false;
 };
 
+struct TraceGenerationLimits {
+    size_t max_scenes = 256;
+    uint32_t flight_max_threads = 256;
+};
+
+enum class TraceAdmissionStatus : uint8_t {
+    Admitted,
+    NotRunning,
+    Duplicate,
+    ActiveSessionLimit,
+    WrongGeneration,
+};
+
+struct TraceAdmission {
+    uint64_t generation = 0;
+    size_t scene_index = 0;
+    uint32_t tid = 0;
+    uint64_t serial = 0;
+};
+
+struct TraceAdmissionResult {
+    TraceAdmissionStatus status = TraceAdmissionStatus::NotRunning;
+    TraceAdmission admission{};
+};
+
 class TraceStopToken final {
 public:
     bool requested() const noexcept;
@@ -47,10 +72,21 @@ struct DeadlineWait {
     void (*wait_until)(void *opaque, uint64_t deadline_monotonic_ns) noexcept = nullptr;
 };
 
+#if defined(QTRACE_HOST_TEST)
+struct TraceGenerationTestHooks {
+    void *opaque = nullptr;
+    void (*after_active_removal)(void *opaque) noexcept = nullptr;
+    void (*before_deadline_stop_lock)(void *opaque) noexcept = nullptr;
+};
+#endif
+
 class TraceGenerationRuntime final {
 public:
     static std::shared_ptr<TraceGenerationRuntime> create(
             uint64_t generation, SessionOptions session, DeadlineWait wait = {}) noexcept;
+    static std::shared_ptr<TraceGenerationRuntime> create(
+            uint64_t generation, SessionOptions session, TraceGenerationLimits limits,
+            DeadlineWait wait = {}) noexcept;
 
     ~TraceGenerationRuntime();
 
@@ -58,9 +94,10 @@ public:
     TraceGenerationRuntime &operator=(const TraceGenerationRuntime &) = delete;
 
     bool arm() noexcept;
-    bool try_begin_call(size_t scene_index, uint32_t tid) noexcept;
-    void finish_call(size_t scene_index, uint32_t tid, bool sealed) noexcept;
-    void acknowledge_sealed(size_t scene_index, uint32_t tid) noexcept;
+    TraceAdmissionResult try_begin_call(
+            uint64_t generation, size_t scene_index, uint32_t tid) noexcept;
+    void finish_call(const TraceAdmission &admission, bool sealed) noexcept;
+    void acknowledge_sealed(const TraceAdmission &admission) noexcept;
     const TraceStopToken &stop_token() const noexcept;
     TraceGenerationSnapshot snapshot() const noexcept;
 
@@ -72,24 +109,33 @@ public:
     // hook makes deterministic injected-wait tests able to observe the worker.
     void join_deadline_for_test() noexcept;
 
+#if defined(QTRACE_HOST_TEST)
+    void set_test_hooks(TraceGenerationTestHooks hooks) noexcept;
+#endif
+
 private:
     struct ActiveCall {
         size_t scene_index = 0;
         uint32_t tid = 0;
+        uint64_t serial = 0;
     };
 
-    // 256 configured scenes plus the default maximum number of flight threads.
-    // This is fixed storage so entry/finish cannot allocate in a callback.
-    static constexpr size_t kMaxActiveCalls = 512;
+    // The planner bounds configuration at 256 scenes and 1024 flight threads.
+    // Fixed storage keeps instruction callbacks allocation-free; active_capacity_
+    // applies the actual configuration limit at runtime.
+    static constexpr size_t kMaxScenes = 256;
+    static constexpr size_t kMaxFlightThreads = 1024;
+    static constexpr size_t kMaxActiveCalls = kMaxScenes + kMaxFlightThreads;
 
     TraceGenerationRuntime(uint64_t generation, SessionOptions session,
-                           DeadlineWait wait) noexcept;
+                           TraceGenerationLimits limits, DeadlineWait wait) noexcept;
 
     static void *deadline_entry(void *opaque) noexcept;
     static void monotonic_wait_until(void *opaque, uint64_t deadline_monotonic_ns) noexcept;
     void request_deadline_stop() noexcept;
-    void complete_stop_if_idle() noexcept;
-    void complete_call(size_t scene_index, uint32_t tid, bool sealed) noexcept;
+    void publish_deadline_stop_locked() noexcept;
+    void complete_stop_if_idle_locked() noexcept;
+    void complete_call_locked(const TraceAdmission &admission, bool sealed) noexcept;
     void join_deadline() noexcept;
 
     uint64_t generation_ = 0;
@@ -97,16 +143,21 @@ private:
     DeadlineWait wait_;
     std::atomic<TraceGenerationPhase> phase_{TraceGenerationPhase::Waiting};
     TraceStopToken stop_token_;
-    std::atomic<size_t> active_count_{0};
-    std::atomic<size_t> pending_admissions_{0};
+    std::atomic<bool> deadline_pending_{false};
     std::atomic<bool> stop_incomplete_{false};
-    std::mutex active_mutex_;
+    mutable std::mutex active_mutex_;
     std::array<ActiveCall, kMaxActiveCalls> active_calls_{};
     size_t active_size_ = 0;
+    size_t active_capacity_ = 0;
+    uint64_t next_admission_serial_ = 1;
     pthread_t deadline_thread_{};
     std::atomic<bool> deadline_thread_started_{false};
     uint64_t deadline_monotonic_ns_ = 0;
     std::atomic<bool> armed_{false};
     std::atomic<bool> detached_{false};
     pid_t owner_pid_ = 0;
+
+#if defined(QTRACE_HOST_TEST)
+    TraceGenerationTestHooks test_hooks_{};
+#endif
 };

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <sched.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -43,6 +44,13 @@ void wait_for(const std::atomic<bool> &value) {
     while (!value.load(std::memory_order_acquire)) ::sched_yield();
 }
 
+TraceAdmission admit(const std::shared_ptr<TraceGenerationRuntime> &runtime,
+                     uint64_t generation, size_t scene_index, uint32_t tid) {
+    const TraceAdmissionResult result = runtime->try_begin_call(generation, scene_index, tid);
+    CHECK(result.status == TraceAdmissionStatus::Admitted);
+    return result.admission;
+}
+
 // Catches an implementation that permits new calls after a deadline request or
 // never seals the active pair that acknowledged the requested stop.
 void deadline_requests_stop_and_the_active_call_seals_the_generation() {
@@ -51,14 +59,14 @@ void deadline_requests_stop_and_the_active_call_seals_the_generation() {
             3, timed_session(60000), DeadlineWait{&deadline, &FakeDeadline::wait_until});
     CHECK(runtime != nullptr);
     CHECK(runtime->arm());
-    CHECK(runtime->try_begin_call(3, 101));
+    const TraceAdmission admission = admit(runtime, 3, 3, 101);
     wait_for(deadline.entered);
     deadline.release.store(true, std::memory_order_release);
     runtime->join_deadline_for_test();
     CHECK(runtime->stop_token().requested());
     CHECK(runtime->stop_token().reason() == TraceStopReason::DurationElapsed);
-    CHECK(!runtime->try_begin_call(3, 102));
-    runtime->acknowledge_sealed(3, 101);
+    CHECK(runtime->try_begin_call(3, 3, 102).status == TraceAdmissionStatus::NotRunning);
+    runtime->acknowledge_sealed(admission);
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
 }
 
@@ -70,16 +78,16 @@ void wrong_pair_and_repeated_acknowledgements_are_idempotent() {
             7, timed_session(60000), DeadlineWait{&deadline, &FakeDeadline::wait_until});
     CHECK(runtime != nullptr);
     CHECK(runtime->arm());
-    CHECK(runtime->try_begin_call(7, 303));
+    const TraceAdmission admission = admit(runtime, 7, 7, 303);
     wait_for(deadline.entered);
     deadline.release.store(true, std::memory_order_release);
     runtime->join_deadline_for_test();
 
-    runtime->acknowledge_sealed(8, 303);
+    runtime->acknowledge_sealed(TraceAdmission{7, 8, 303, admission.serial});
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopRequested);
-    runtime->acknowledge_sealed(7, 303);
+    runtime->acknowledge_sealed(admission);
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
-    runtime->acknowledge_sealed(7, 303);
+    runtime->acknowledge_sealed(admission);
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
 }
 
@@ -95,7 +103,7 @@ void idle_generation_seals_immediately_after_the_deadline() {
     deadline.release.store(true, std::memory_order_release);
     runtime->join_deadline_for_test();
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
-    CHECK(!runtime->try_begin_call(9, 404));
+    CHECK(runtime->try_begin_call(9, 9, 404).status == TraceAdmissionStatus::NotRunning);
 }
 
 // Catches monitor mode accidentally creating a deadline thread or rejecting
@@ -110,8 +118,7 @@ void monitor_mode_runs_without_a_deadline_worker() {
     CHECK(runtime->arm());
     CHECK(!deadline.entered.load(std::memory_order_acquire));
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Running);
-    CHECK(runtime->try_begin_call(11, 505));
-    runtime->finish_call(11, 505, false);
+    runtime->finish_call(admit(runtime, 11, 11, 505), false);
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Running);
 }
 
@@ -138,11 +145,11 @@ void unsealed_last_active_call_marks_stop_incomplete() {
             14, timed_session(60000), DeadlineWait{&deadline, &FakeDeadline::wait_until});
     CHECK(runtime != nullptr);
     CHECK(runtime->arm());
-    CHECK(runtime->try_begin_call(14, 606));
+    const TraceAdmission admission = admit(runtime, 14, 14, 606);
     wait_for(deadline.entered);
     deadline.release.store(true, std::memory_order_release);
     runtime->join_deadline_for_test();
-    runtime->finish_call(14, 606, false);
+    runtime->finish_call(admission, false);
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopIncomplete);
 }
 
@@ -151,13 +158,15 @@ void unsealed_last_active_call_marks_stop_incomplete() {
 void admission_rejects_calls_beyond_the_fixed_capacity() {
     SessionOptions session{};
     session.id = "monitor";
-    auto runtime = TraceGenerationRuntime::create(17, session);
+    auto runtime = TraceGenerationRuntime::create(
+            17, session, TraceGenerationLimits{2, 3});
     CHECK(runtime != nullptr);
     CHECK(runtime->arm());
-    for (uint32_t tid = 1; tid <= 512; ++tid) CHECK(runtime->try_begin_call(17, tid));
-    CHECK(!runtime->try_begin_call(17, 513));
-    CHECK(runtime->snapshot().active_calls == 512);
-    for (uint32_t tid = 1; tid <= 512; ++tid) runtime->finish_call(17, tid, false);
+    std::array<TraceAdmission, 5> admissions{};
+    for (uint32_t tid = 1; tid <= 5; ++tid) admissions[tid - 1] = admit(runtime, 17, 0, tid);
+    CHECK(runtime->try_begin_call(17, 0, 6).status == TraceAdmissionStatus::ActiveSessionLimit);
+    CHECK(runtime->snapshot().active_calls == 5);
+    for (const TraceAdmission &admission : admissions) runtime->finish_call(admission, false);
     CHECK(runtime->snapshot().active_calls == 0);
 }
 
@@ -169,11 +178,96 @@ void admission_rejects_a_duplicate_active_pair() {
     auto runtime = TraceGenerationRuntime::create(18, session);
     CHECK(runtime != nullptr);
     CHECK(runtime->arm());
-    CHECK(runtime->try_begin_call(18, 707));
-    CHECK(!runtime->try_begin_call(18, 707));
+    const TraceAdmission admission = admit(runtime, 18, 0, 707);
+    CHECK(runtime->try_begin_call(18, 0, 707).status == TraceAdmissionStatus::Duplicate);
     CHECK(runtime->snapshot().active_calls == 1);
-    runtime->finish_call(18, 707, false);
+    runtime->finish_call(admission, false);
     CHECK(runtime->snapshot().active_calls == 0);
+}
+
+// Catches callers that cannot distinguish a stopped runtime, another
+// generation, a duplicate pair, and capacity exhaustion for policy reporting.
+void admission_statuses_identify_every_rejection_reason() {
+    SessionOptions session{};
+    session.id = "monitor";
+    auto runtime = TraceGenerationRuntime::create(19, session, TraceGenerationLimits{1, 0});
+    CHECK(runtime != nullptr);
+    CHECK(runtime->try_begin_call(19, 0, 1).status == TraceAdmissionStatus::NotRunning);
+    CHECK(runtime->arm());
+    CHECK(runtime->try_begin_call(20, 0, 1).status == TraceAdmissionStatus::WrongGeneration);
+    const TraceAdmission admission = admit(runtime, 19, 0, 1);
+    CHECK(runtime->try_begin_call(19, 0, 1).status == TraceAdmissionStatus::Duplicate);
+    CHECK(runtime->try_begin_call(19, 0, 2).status == TraceAdmissionStatus::ActiveSessionLimit);
+    runtime->finish_call(admission, false);
+}
+
+// Catches invalid capacity configuration before it can produce an unbounded or
+// zero-sized callback-time admission store.
+void invalid_generation_limits_are_rejected() {
+    SessionOptions session{};
+    session.id = "monitor";
+    CHECK(TraceGenerationRuntime::create(20, session, TraceGenerationLimits{257, 0}) == nullptr);
+    CHECK(TraceGenerationRuntime::create(20, session, TraceGenerationLimits{256, 1025}) == nullptr);
+    CHECK(TraceGenerationRuntime::create(20, session, TraceGenerationLimits{0, 0}) == nullptr);
+}
+
+// Catches a stale generation or serial acknowledgement removing a later call
+// that reuses the same (scene, tid) pair.
+void stale_admission_cannot_remove_a_reused_pair() {
+    SessionOptions session{};
+    session.id = "monitor";
+    auto runtime = TraceGenerationRuntime::create(21, session);
+    CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
+    const TraceAdmission old_admission = admit(runtime, 21, 1, 808);
+    runtime->finish_call(old_admission, false);
+    const TraceAdmission current_admission = admit(runtime, 21, 1, 808);
+    runtime->acknowledge_sealed(old_admission);
+    runtime->acknowledge_sealed(TraceAdmission{22, 1, 808, current_admission.serial});
+    CHECK(runtime->snapshot().active_calls == 1);
+    runtime->finish_call(current_admission, false);
+    CHECK(runtime->snapshot().active_calls == 0);
+}
+
+struct StopRaceBarrier {
+    static void after_active_removal(void *opaque) noexcept {
+        auto *barrier = static_cast<StopRaceBarrier *>(opaque);
+        barrier->active_removed.store(true, std::memory_order_release);
+        while (!barrier->allow_finish.load(std::memory_order_acquire)) ::sched_yield();
+    }
+
+    static void before_deadline_stop_lock(void *opaque) noexcept {
+        static_cast<StopRaceBarrier *>(opaque)->deadline_attempted.store(
+                true, std::memory_order_release);
+    }
+
+    std::atomic<bool> active_removed{false};
+    std::atomic<bool> deadline_attempted{false};
+    std::atomic<bool> allow_finish{false};
+};
+
+// Catches the former interleaving where finish removed the final call before
+// recording failure and the deadline worker then sealed it as successful.
+void concurrent_deadline_and_unsealed_last_finish_select_stop_incomplete() {
+    FakeDeadline deadline;
+    StopRaceBarrier barrier;
+    auto runtime = TraceGenerationRuntime::create(
+            23, timed_session(60000), DeadlineWait{&deadline, &FakeDeadline::wait_until});
+    CHECK(runtime != nullptr);
+    runtime->set_test_hooks(TraceGenerationTestHooks{
+            &barrier, &StopRaceBarrier::after_active_removal,
+            &StopRaceBarrier::before_deadline_stop_lock});
+    CHECK(runtime->arm());
+    const TraceAdmission admission = admit(runtime, 23, 0, 909);
+    wait_for(deadline.entered);
+    std::thread finisher([&] { runtime->finish_call(admission, false); });
+    wait_for(barrier.active_removed);
+    deadline.release.store(true, std::memory_order_release);
+    wait_for(barrier.deadline_attempted);
+    barrier.allow_finish.store(true, std::memory_order_release);
+    finisher.join();
+    runtime->join_deadline_for_test();
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopIncomplete);
 }
 
 // Catches destructors that abandon a completed deadline pthread rather than
@@ -226,6 +320,10 @@ int main() {
     unsealed_last_active_call_marks_stop_incomplete();
     admission_rejects_calls_beyond_the_fixed_capacity();
     admission_rejects_a_duplicate_active_pair();
+    admission_statuses_identify_every_rejection_reason();
+    invalid_generation_limits_are_rejected();
+    stale_admission_cannot_remove_a_reused_pair();
+    concurrent_deadline_and_unsealed_last_finish_select_stop_incomplete();
     destruction_joins_the_deadline_worker();
     forked_child_detaches_the_inherited_deadline_worker();
 }
