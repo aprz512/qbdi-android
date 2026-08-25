@@ -27,10 +27,13 @@ from scripts.tests.test_flight_trace import (
 )
 from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
 from scripts.tests.test_trace_binary import (
+    begin,
     complete_stream,
     instruction,
     instruction_definition,
+    module,
     stopped,
+    stream_header,
 )
 from scripts.tests.test_trace_convert import fake_lz4_executable
 
@@ -74,14 +77,24 @@ def v3_sidecar(*, termination, return_valid, profile, instructions, elapsed_ms,
     ).encode("ascii")
 
 
-def stopped_raw_stream():
-    completed = complete_stream(instruction_definition(), instruction(), compression=0)
-    prefix = bytearray(completed[:-105])
-    prefix[5] = 2
-    prefix[12:16] = (1).to_bytes(4, "little")
+def stopped_binary_stream(*, compression, compressed_bytes=None):
+    prefix = (
+        stream_header(minor=2, features=1)
+        + begin(compression=compression)
+        + module()
+        + instruction_definition()
+        + instruction()
+    )
     terminal_bytes = len(stopped(encoded_bytes=0, compressed_bytes=0))
     total = len(prefix) + terminal_bytes
-    return bytes(prefix) + stopped(encoded_bytes=total, compressed_bytes=total)
+    return prefix + stopped(
+        encoded_bytes=total,
+        compressed_bytes=total if compressed_bytes is None else compressed_bytes,
+    )
+
+
+def stopped_raw_stream():
+    return stopped_binary_stream(compression=0)
 
 
 class ArtifactClassificationTests(unittest.TestCase):
@@ -415,9 +428,72 @@ class PullArtifactTests(unittest.TestCase):
         )
         client = self.FakeClient({name: binary, name + ".metrics": sidecar})
 
-        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
-                PullTraceError, "sidecar mismatch for termination"):
-            pull_artifact_set(client, name, client.files, Path(directory))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            retained = root / "retain.txt"
+            retained.write_bytes(b"keep")
+
+            with self.assertRaisesRegex(PullTraceError, "sidecar mismatch for termination"):
+                pull_artifact_set(client, name, client.files, root)
+
+            self.assertEqual(b"keep", retained.read_bytes())
+            self.assertEqual({"retain.txt"}, {path.name for path in root.iterdir()})
+
+    def test_compressed_only_rejects_stopped_sidecar_for_completed_binary(self):
+        name = "123_algorithm.trace.bin"
+        binary = complete_stream(compression=0)
+        sidecar = v3_sidecar(
+            termination="stopped", return_valid=0, profile="full", instructions=0,
+            elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(binary),
+        )
+        client = self.FakeClient({name: binary, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(PullTraceError, "sidecar mismatch for termination"):
+                pull_artifact_set(client, name, client.files, root, compressed_only=True)
+
+            self.assertEqual([], list(root.iterdir()))
+
+    def test_compressed_only_pulls_matching_stopped_binary_without_text(self):
+        name = "123_algorithm.trace.bin"
+        binary = stopped_raw_stream()
+        sidecar = v3_sidecar(
+            termination="stopped", return_valid=0, profile="full", instructions=1,
+            elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(binary),
+        )
+        client = self.FakeClient({name: binary, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = pull_artifact_set(client, name, client.files, root, compressed_only=True)
+
+            self.assertEqual(0, result.exit_code)
+            self.assertEqual("stopped", result.status)
+            self.assertEqual({name, name + ".metrics"}, {path.name for path in result.outputs})
+            self.assertFalse((root / "123_algorithm.trace.txt").exists())
+
+    def test_compressed_only_rejects_stopped_sidecar_for_completed_lz4_binary(self):
+        name = "123_algorithm.trace.bin.lz4"
+        probe = complete_stream(compression=1)
+        compressed_bytes = len(uncompressed_lz4_frame(probe))
+        binary = complete_stream(compression=1, compressed_bytes=compressed_bytes)
+        artifact = uncompressed_lz4_frame(binary)
+        sidecar = v3_sidecar(
+            termination="stopped", return_valid=0, profile="full", instructions=0,
+            elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(artifact),
+        )
+        client = self.FakeClient({name: artifact, name + ".metrics": sidecar})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            decoder = fake_lz4_executable(root)
+            with self.assertRaisesRegex(PullTraceError, "sidecar mismatch for termination"):
+                pull_artifact_set(
+                    client, name, client.files, root, compressed_only=True, lz4=str(decoder)
+                )
+
+            self.assertEqual({"lz4"}, {path.name for path in root.iterdir()})
 
     def test_pulls_compressed_binary_and_routes_sidecar_through_converter(self):
         name = "123_algorithm.trace.bin.lz4"
@@ -710,6 +786,35 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("status=incomplete", stdout.getvalue())
         self.assertIn(name, stdout.getvalue())
         self.assertEqual("", stderr.getvalue())
+
+    def test_compressed_only_cli_validates_v3_lz4_stopped_artifact(self):
+        name = "new.trace.bin.lz4"
+        probe = stopped_binary_stream(compression=1, compressed_bytes=0)
+        compressed_bytes = len(uncompressed_lz4_frame(probe))
+        binary = stopped_binary_stream(compression=1, compressed_bytes=compressed_bytes)
+        artifact = uncompressed_lz4_frame(binary)
+        sidecar = v3_sidecar(
+            termination="stopped", return_valid=0, profile="full", instructions=1,
+            elapsed_ms=17, encoded_bytes=len(binary), compressed_bytes=len(artifact),
+        )
+        client = PullArtifactTests.FakeClient({name: artifact, name + ".metrics": sidecar})
+        client.list_names = lambda: [name, name + ".metrics"]
+        stdout = StringIO()
+
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stdout):
+            root = Path(directory)
+            decoder = fake_lz4_executable(root)
+            exit_code = main(
+                ["--package", "com.example.app", "--output", directory, "--compressed-only"],
+                client_factory=lambda **kwargs: client,
+                lz4_finder=lambda command: str(decoder),
+            )
+
+            self.assertEqual(0, exit_code)
+            self.assertIn(f"trace={name} status=stopped", stdout.getvalue())
+            self.assertTrue((root / name).is_file())
+            self.assertTrue((root / (name + ".metrics")).is_file())
+            self.assertFalse((root / "new.trace.txt").exists())
 
     def test_raw_binary_cli_pulls_and_converts_end_to_end_without_lz4(self):
         name = "new.trace.bin"

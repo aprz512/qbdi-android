@@ -361,84 +361,99 @@ def pull_artifact_set(
         )
         for sidecar in sidecar_names
     }
+    metrics: dict[str, Any] | None = None
     if metrics_name in sidecars:
         try:
-            parse_metrics(sidecars[metrics_name], name)
+            metrics = parse_metrics(sidecars[metrics_name], name)
         except ValueError as error:
             raise PullTraceError(str(error)) from error
     classification = classify_artifacts({name: b"", **sidecars})[name]
-    pulled: list[Path] = []
-    compressed_temporary = _temporary_path(output_directory)
-    try:
-        with compressed_temporary.open("wb") as output:
-            client.stream_file(name, output)
-        _publish_temp(compressed_temporary, compressed_path, force)
-        pulled.append(compressed_path)
-    finally:
-        compressed_temporary.unlink(missing_ok=True)
-    for sidecar_name, data in sidecars.items():
-        destination = output_directory / sidecar_name
-        _write_atomic(data, destination, force)
-        pulled.append(destination)
-
-    if compressed_only:
-        return PullResult(name, classification.status, tuple(pulled))
     is_text = trace_suffix == TEXT_TRACE_SUFFIX
     is_compressed_binary = trace_suffix == BINARY_TRACE_SUFFIX
-    if (is_text or is_compressed_binary) and not lz4:
+    validate_v3 = metrics is not None and metrics["metrics_version"] == 3
+    needs_conversion = not compressed_only or (not is_text and validate_v3)
+    if needs_conversion and (is_text or is_compressed_binary) and not lz4:
         raise PullTraceError(
-            "host lz4 CLI is required for decompression; install the 'lz4' command "
-            "or use --compressed-only"
+            "host lz4 CLI is required for decompression; install the 'lz4' command"
         )
-    if not is_text:
-        binary_partial = (
-            is_compressed_binary
-            and scan_lz4_file(compressed_path).truncated
-            and classification.crash_marker is not None
-        )
-        destination = partial_path if binary_partial else normal_path
-        try:
-            stats = convert_binary_file(
-                compressed_path,
-                destination,
-                lz4=lz4 if is_compressed_binary else None,
-                crash_marked=classification.crash_marker is not None,
-                force=force,
-            )
-        except BinaryTraceError as error:
-            raise PullTraceError(str(error)) from error
-        pulled.append(destination)
-        if stats.partial:
-            return PullResult(
-                name, classification.status, tuple(pulled), exit_code=EXIT_PARTIAL
-            )
-        status = "stopped" if stats.termination == "stopped" else "complete"
-        return PullResult(
-            name,
-            status,
-            tuple(pulled),
-            exit_code=EXIT_OK,
-        )
-    if decoder is None:
-        decoder = decode_lz4_file
-    decoded_temporary = _temporary_path(output_directory)
+
     try:
-        truncated = decoder(compressed_path, decoded_temporary, lz4)
-        if truncated:
-            if classification.crash_marker is None:
-                raise PullTraceError(
-                    "truncated LZ4 stream has no valid crash marker; no partial text was published"
+        with tempfile.TemporaryDirectory(
+                prefix=".pull-trace-", dir=output_directory) as staging_name:
+            staging = Path(staging_name)
+            staged_source = staging / name
+            with staged_source.open("wb") as output:
+                client.stream_file(name, output)
+                output.flush()
+                os.fsync(output.fileno())
+            staged_sidecars = []
+            for sidecar_name, data in sidecars.items():
+                staged_sidecar = staging / sidecar_name
+                with staged_sidecar.open("wb") as output:
+                    output.write(data)
+                    output.flush()
+                    os.fsync(output.fileno())
+                staged_sidecars.append(staged_sidecar)
+
+            staged_text: Path | None = None
+            status = classification.status
+            exit_code = EXIT_OK
+            if not is_text and needs_conversion:
+                binary_partial = (
+                    is_compressed_binary
+                    and scan_lz4_file(staged_source).truncated
+                    and classification.crash_marker is not None
                 )
-            _publish_temp(decoded_temporary, partial_path, force)
-            pulled.append(partial_path)
-            return PullResult(
-                name, classification.status, tuple(pulled), exit_code=EXIT_PARTIAL
-            )
-        _publish_temp(decoded_temporary, normal_path, force)
-        pulled.append(normal_path)
-        return PullResult(name, classification.status, tuple(pulled))
-    finally:
-        decoded_temporary.unlink(missing_ok=True)
+                staged_text = staging / (
+                    partial_path.name if binary_partial else normal_path.name
+                )
+                try:
+                    stats = convert_binary_file(
+                        staged_source,
+                        staged_text,
+                        lz4=lz4 if is_compressed_binary else None,
+                        crash_marked=classification.crash_marker is not None,
+                        force=False,
+                    )
+                except BinaryTraceError as error:
+                    raise PullTraceError(str(error)) from error
+                if stats.partial:
+                    status = classification.status
+                    exit_code = EXIT_PARTIAL
+                else:
+                    status = "stopped" if stats.termination == "stopped" else "complete"
+            elif is_text and needs_conversion:
+                if decoder is None:
+                    decoder = decode_lz4_file
+                staged_text = staging / normal_path.name
+                truncated = decoder(staged_source, staged_text, lz4)
+                if truncated:
+                    if classification.crash_marker is None:
+                        raise PullTraceError(
+                            "truncated LZ4 stream has no valid crash marker; no partial text was published"
+                        )
+                    partial_staged_text = staging / partial_path.name
+                    staged_text.replace(partial_staged_text)
+                    staged_text = partial_staged_text
+                    status = classification.status
+                    exit_code = EXIT_PARTIAL
+
+            pairs = [
+                (staged_source, compressed_path),
+                *zip(staged_sidecars, (output_directory / item for item in sidecar_names), strict=True),
+            ]
+            outputs = [compressed_path, *(output_directory / item for item in sidecar_names)]
+            if not compressed_only and staged_text is not None:
+                destination = partial_path if exit_code == EXIT_PARTIAL else normal_path
+                pairs.append((staged_text, destination))
+                outputs.append(destination)
+            try:
+                publish_flight_file_set(pairs, force)
+            except (FlightTraceError, FileExistsError) as error:
+                raise PullTraceError(str(error)) from error
+            return PullResult(name, status, tuple(outputs), exit_code=exit_code)
+    except OSError as error:
+        raise PullTraceError(f"trace artifact staging failed: {error}") from error
 
 
 def select_trace_name(names: Iterable[str], requested: str | None = None) -> str:
@@ -487,7 +502,7 @@ def main(
         names = client.list_names()
         selected = select_trace_name(names, args.name)
         requires_lz4 = selected.endswith((TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX))
-        lz4 = None if args.compressed_only or not requires_lz4 else lz4_finder("lz4")
+        lz4 = lz4_finder("lz4") if requires_lz4 else None
         if not args.compressed_only and requires_lz4 and lz4 is None:
             raise PullTraceError(
                 "host lz4 CLI is required for decompression; install the 'lz4' command "
