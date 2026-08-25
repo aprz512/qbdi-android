@@ -145,12 +145,75 @@ int main() {
     too_many_scenes += ']';
     expect_rejection(document_with_scenes(too_many_scenes), "TOO_MANY_SCENES", "$.scenes");
 
-    expect_rejection(replace_once(document_with_scenes("[]"), "\"lz4Level\": 2",
-                                  "\"lz4Level\": 13"),
-                     "INVALID_TRACE_OPTIONS", "$.trace.lz4Level");
-    expect_rejection(replace_once(document_with_scenes("[]"), "\"capacityMb\": 512",
-                                  "\"capacityMb\": 63"),
-                     "INVALID_FLIGHT_OPTIONS", "$.flight.capacityMb");
+    const std::string numeric_options = document_with_scenes("[]");
+    struct RejectionCase {
+        std::string_view from;
+        std::string_view to;
+        const char *code;
+        const char *path;
+    };
+    const RejectionCase numeric_rejections[] = {
+            {"\"lz4Level\": 2", "\"lz4Level\": 13", "INVALID_TRACE_OPTIONS", "$.trace.lz4Level"},
+            {"\"bufferMb\": 0", "\"bufferMb\": 7", "INVALID_TRACE_OPTIONS", "$.trace.bufferMb"},
+            {"\"bufferMb\": 0", "\"bufferMb\": 129", "INVALID_TRACE_OPTIONS", "$.trace.bufferMb"},
+            {"\"autoBuffer\": true", "\"autoBuffer\": false", "INVALID_TRACE_OPTIONS", "$.trace.autoBuffer"},
+            {"\"hexdumpLimit\": 32", "\"hexdumpLimit\": 65", "INVALID_TRACE_OPTIONS", "$.trace.hexdumpLimit"},
+            {"\"capacityMb\": 512", "\"capacityMb\": 63", "INVALID_FLIGHT_OPTIONS", "$.flight.capacityMb"},
+            {"\"capacityMb\": 512", "\"capacityMb\": 2049", "INVALID_FLIGHT_OPTIONS", "$.flight.capacityMb"},
+            {"\"chunkKb\": 256", "\"chunkKb\": 63", "INVALID_FLIGHT_OPTIONS", "$.flight.chunkKb"},
+            {"\"chunkKb\": 256", "\"chunkKb\": 96", "INVALID_FLIGHT_OPTIONS", "$.flight.chunkKb"},
+            {"\"chunkKb\": 256", "\"chunkKb\": 1025", "INVALID_FLIGHT_OPTIONS", "$.flight.chunkKb"},
+            {"\"maxThreads\": 256", "\"maxThreads\": 0", "INVALID_FLIGHT_OPTIONS", "$.flight.maxThreads"},
+            {"\"maxThreads\": 256", "\"maxThreads\": 1025", "INVALID_FLIGHT_OPTIONS", "$.flight.maxThreads"},
+            {"\"protectedChunks\": 4", "\"protectedChunks\": 0", "INVALID_FLIGHT_OPTIONS", "$.flight.protectedChunks"},
+            {"\"protectedChunks\": 4", "\"protectedChunks\": 4294967296", "INVALID_FLIGHT_OPTIONS", "$.flight.protectedChunks"},
+    };
+    for (const RejectionCase &test_case: numeric_rejections) {
+        expect_rejection(replace_once(numeric_options, test_case.from, test_case.to),
+                         test_case.code, test_case.path);
+    }
+    expect_rejection(replace_once(numeric_options, "\"bufferMb\": 0", "\"bufferMb\": 8"),
+                     "INVALID_TRACE_OPTIONS", "$.trace.autoBuffer");
+    expect_rejection(replace_once(replace_once(replace_once(numeric_options,
+                                                             "\"capacityMb\": 512", "\"capacityMb\": 64"),
+                                                "\"chunkKb\": 256", "\"chunkKb\": 1024"),
+                                      "\"protectedChunks\": 4", "\"protectedChunks\": 65"),
+                     "INVALID_FLIGHT_OPTIONS", "$.flight.protectedChunks");
+
+    const std::string accepted_numeric_boundaries[] = {
+            replace_once(numeric_options, "\"lz4Level\": 2", "\"lz4Level\": 0"),
+            replace_once(numeric_options, "\"lz4Level\": 2", "\"lz4Level\": 12"),
+            replace_once(replace_once(numeric_options, "\"bufferMb\": 0", "\"bufferMb\": 8"),
+                         "\"autoBuffer\": true", "\"autoBuffer\": false"),
+            replace_once(replace_once(numeric_options, "\"bufferMb\": 0", "\"bufferMb\": 128"),
+                         "\"autoBuffer\": true", "\"autoBuffer\": false"),
+            replace_once(numeric_options, "\"hexdumpLimit\": 32", "\"hexdumpLimit\": 0"),
+            replace_once(numeric_options, "\"hexdumpLimit\": 32", "\"hexdumpLimit\": 64"),
+            replace_once(numeric_options, "\"capacityMb\": 512", "\"capacityMb\": 64"),
+            replace_once(numeric_options, "\"capacityMb\": 512", "\"capacityMb\": 2048"),
+            replace_once(numeric_options, "\"chunkKb\": 256", "\"chunkKb\": 64"),
+            replace_once(numeric_options, "\"chunkKb\": 256", "\"chunkKb\": 1024"),
+            replace_once(numeric_options, "\"maxThreads\": 256", "\"maxThreads\": 1"),
+            replace_once(numeric_options, "\"maxThreads\": 256", "\"maxThreads\": 1024"),
+            replace_once(numeric_options, "\"protectedChunks\": 4", "\"protectedChunks\": 1"),
+            replace_once(replace_once(replace_once(numeric_options,
+                                                    "\"capacityMb\": 512", "\"capacityMb\": 2048"),
+                                       "\"chunkKb\": 256", "\"chunkKb\": 64"),
+                         "\"protectedChunks\": 4", "\"protectedChunks\": 32768"),
+    };
+    for (const std::string &boundary_request: accepted_numeric_boundaries) {
+        CHECK(prepare_tracer_configuration(boundary_request).accepted());
+    }
+
+    expect_rejection("", "INVALID_REQUEST_SIZE", "$");
+    expect_rejection("{", "MALFORMED_JSON", "$");
+    std::string maximum_request = numeric_options;
+    maximum_request.append(1024U * 1024U - maximum_request.size(), ' ');
+    CHECK(maximum_request.size() == 1024U * 1024U);
+    CHECK(prepare_tracer_configuration(maximum_request).accepted());
+    maximum_request.push_back(' ');
+    expect_rejection(maximum_request, "INVALID_REQUEST_SIZE", "$");
+
     expect_rejection(replace_once(request, "\"entryScene\": \"init\"",
                                   "\"entryScene\": \"missing\""),
                      "INVALID_FLIGHT_ENTRY_SCENE", "$.flight.entryScene");
