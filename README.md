@@ -240,11 +240,18 @@ generation 的 status。状态依次可能是 `waiting_for_module`、`installing
 `pending`、`rolled_back`。相同 status 不会重复打印，warning 用 `[!]` 输出且不等于失败。
 
 JSON schema 是严格的：malformed JSON、unknown/missing/wrong-type 字段、JSON number 地址、
-冲突 locator、地址减法/加法溢出、非法范围或无效 `flight.entryScene` 都会拒绝候选，且不会
-替换当前 generation。常见稳定错误码包括 `MALFORMED_JSON`、`UNKNOWN_FIELD`、
+冲突 locator、`address - imageBase` 减法下溢、解析出的地址超出 `uintptr_t`、非法范围或无效
+`flight.entryScene` 都会在发布前拒绝候选，且不会替换当前 generation。常见稳定错误码包括
+`MALFORMED_JSON`、`UNKNOWN_FIELD`、
 `TYPE_MISMATCH`、`INVALID_HEX_ADDRESS`、`CONFLICTING_LOCATION`、
 `ADDRESS_BELOW_IMAGE_BASE`、`ADDRESS_OVERFLOW`、`INVALID_RANGE` 和
 `INVALID_FLIGHT_ENTRY_SCENE`。
+
+另一个 `ADDRESS_OVERFLOW` 发生在模块加载后计算
+`runtimeAddress = moduleBase + normalizedOffset` 时。此时配置已经被接受并获得 generation；
+它不是 configure rejection，而会令对应场景以
+`error: {code: "ADDRESS_OVERFLOW", hookError: 0}` 进入 `hook_failed`，generation 最终为
+`hook_failed`（或在回滚不能完成时为 `rollback_failed`）。
 
 与此不同，packed library 的实际映射可能偏离静态 ELF。`ADDRESS_OUTSIDE_TARGET_MODULE`、
 `ADDRESS_NOT_EXECUTABLE` 和 `ADDRESS_IN_RUNTIME_MAPPING` 只产生 warning，tracer 仍会尝试
@@ -255,7 +262,9 @@ generation 时返回 `GENERATION_NOT_FOUND`。
 ABI transport code 只描述 JSON 是否完整传输：`0` 为 `QTRACE_JSON_OK`，`1` 为
 `QTRACE_JSON_RESPONSE_TOO_SMALL`（可按返回的含 NUL size 安全重试，首次尝试不发布配置），
 `2` 为 `QTRACE_JSON_INVALID_ARGUMENT`。schema/config/hook 结果都在 transport code 0 的 JSON
-response 中，以 `responseSchemaVersion: 1`、`ok`、稳定 `error.code` 和 `error.path` 表示。
+response 中。Configure rejection 或 status lookup rejection 使用
+`error: {code, path, message}`；accepted generation 的 per-scene hook/runtime failure 使用
+`error: {code, hookError}`，没有 `path` 或 `message`。
 
 ### arm64 设备验收（opt-in）
 
@@ -265,13 +274,25 @@ response 中，以 `responseSchemaVersion: 1`、`ok`、稳定 `error.code` 和 `
 2. 改成等价的 `imageBase + address` locator；确认 Frida status 中的 normalized offset 和
    runtime address 与第 1 次一致。
 3. 使用可解释但映射可疑的地址；确认 warning 先出现，随后仍有真实 hook 结果。
-4. 在一个有效配置之后提交 invalid JSON；确认拒绝码出现，之前的 generation 仍可查询和使用。
+4. 用下面的专用 harness 在同一进程依次提交 `config.tracer`、malformed JSON `{`，再查询
+   第一次返回的 generation；确认输出包含相同 generation、
+   `"rejectedCode": "MALFORMED_JSON"` 和 retained terminal/current state。
 
-每次都使用完全相同的注入命令：
+普通追踪以及第 1–3 项仍使用完全相同的注入命令：
 
 ```bash
 frida -U -f com.aprz.qbdiandroid -l scripts/spawn_trace.js
 ```
+
+第 4 项使用同一份 `spawn_trace.js` 配置的 opt-in Python/Frida harness，不复制 scene 配置：
+
+```bash
+python3 scripts/config_retention_acceptance.py \
+  --package com.aprz.qbdiandroid
+```
+
+该 harness 需要 Frida Python package 和 USB device；它只用于验收，不是第二份普通配置源。
+本仓库的当前 host 验证没有执行这条设备命令。
 
 分别记录 Frida console 和 Logcat 中的 generation、warning/error code；两边应一致。完成运行后
 拉取并验证产物：

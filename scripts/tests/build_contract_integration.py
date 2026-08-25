@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import unittest
 import xml.etree.ElementTree as ET
@@ -9,25 +10,31 @@ ROOT = Path(__file__).resolve().parents[2]
 ANDROID_NAMESPACE = "http://schemas.android.com/apk/res/android"
 GRADLE_TIMEOUT_SECONDS = 300
 
-LEGACY_CONFIGURATION_MARKERS = (
-    "qbdi_tracer_configure(",
-    "parse_trace_config(",
-    "scenes=replace",
-    "scene=",
+LEGACY_CONFIGURATION_PATTERNS = (
+    r"\bqbdi_tracer_configure\b",
+    r"\bparse_trace_config\b",
+    r"scenes=replace",
+    r"waiting for qbdi_tracer_configure",
 )
-CONFIGURATION_SOURCES = (
-    ROOT / "tracer/src/main/cpp/core/trace_config.h",
-    ROOT / "tracer/src/main/cpp/core/trace_config.cpp",
-    ROOT / "tracer/src/main/cpp/core/tracer_configuration.h",
-    ROOT / "tracer/src/main/cpp/core/tracer_configuration.cpp",
-)
-CONFIGURATION_ABI_SOURCE = ROOT / "tracer/src/main/cpp/tracer_entry.cpp"
-FRIDA_AGENT_PRODUCERS = (
+CONFIGURATION_PRODUCERS = (
     ROOT / "scripts/spawn_trace.js",
     ROOT / "scripts/benchmark_trace.js",
     ROOT / "scripts/benchmark_trace.py",
     ROOT / "scripts/flight_acceptance.py",
 )
+NATIVE_SOURCE_SUFFIXES = frozenset((".c", ".cc", ".cpp", ".h", ".hpp"))
+
+
+def production_native_sources():
+    native_root = ROOT / "tracer/src/main/cpp"
+    return tuple(
+        path
+        for path in native_root.rglob("*")
+        if path.is_file()
+        and path.suffix in NATIVE_SOURCE_SUFFIXES
+        and "third_party" not in path.relative_to(native_root).parts
+        and "build" not in path.relative_to(native_root).parts
+    )
 
 
 def run_gradle(*arguments, environment=None):
@@ -53,20 +60,20 @@ def run_gradle(*arguments, environment=None):
 
 class StructuredConfigurationContractTests(unittest.TestCase):
     def test_production_configuration_has_no_legacy_protocol(self):
-        source_groups = (
-            (CONFIGURATION_SOURCES + FRIDA_AGENT_PRODUCERS,
-             LEGACY_CONFIGURATION_MARKERS),
-            # Native trace/log records legitimately contain scene=. The ABI
-            # adapter is scanned only for parser/export protocol markers.
-            ((CONFIGURATION_ABI_SOURCE,), LEGACY_CONFIGURATION_MARKERS[:-1]),
-        )
+        native_sources = production_native_sources()
+        self.assertTrue(native_sources)
+        for path in native_sources + CONFIGURATION_PRODUCERS:
+            source = path.read_text(encoding="utf-8")
+            for pattern in LEGACY_CONFIGURATION_PATTERNS:
+                with self.subTest(path=path.relative_to(ROOT), pattern=pattern):
+                    self.assertIsNone(re.search(pattern, source))
 
-        for production_sources, markers in source_groups:
-            for path in production_sources:
-                source = path.read_text(encoding="utf-8")
-                for marker in markers:
-                    with self.subTest(path=path.relative_to(ROOT), marker=marker):
-                        self.assertNotIn(marker, source)
+        # scene= remains valid trace/log output. Only configuration producers
+        # are forbidden from emitting the removed assignment protocol.
+        for path in CONFIGURATION_PRODUCERS:
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(ROOT), marker="scene="):
+                self.assertNotIn("scene=", source)
 
 
 class ManifestIntegrationTests(unittest.TestCase):

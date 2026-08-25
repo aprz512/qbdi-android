@@ -153,3 +153,84 @@ procedure and exact injection/pull commands.
   sufficient.
 - Android builds emit the existing CMake SDK XML compatibility warning
   (`CXX5304`), but both Debug and Release builds exit successfully.
+
+## Fix round 1
+
+### Review findings addressed
+
+1. README and `docs/ida-offsets.md` now distinguish parse-time locator
+   arithmetic errors from runtime `moduleBase + normalizedOffset` overflow. The
+   latter occurs after generation publication and ends the scene/generation in
+   `hook_failed` with per-scene `ADDRESS_OVERFLOW` and `hookError: 0` (or
+   `rollback_failed` if cleanup cannot complete).
+2. README documents configure/status-lookup rejection errors as
+   `{code, path, message}` and accepted-generation per-scene hook/runtime errors
+   as `{code, hookError}` without implying that every error has a JSON path.
+3. `scripts/config_retention_acceptance.py` is a concrete opt-in device harness.
+   It loads the committed `spawn_trace.js` source with normal startup suppressed,
+   invokes `runConfigurationRetentionAcceptance()`, submits the valid
+   `config.tracer`, submits malformed `{` in the same process, and queries the
+   accepted generation. It duplicates no scene/config object. README gives its
+   exact command and keeps the normal Frida command unchanged.
+4. The build contract recursively scans owned native `.c/.cc/.cpp/.h/.hpp`
+   sources, excluding vendored/build paths, plus all configuration producers for
+   legacy parser/export/producer/log patterns. `scene=` remains scoped only to
+   configuration producers so trace/log records are valid. The stale production
+   log naming the removed configure export now says it is waiting for structured
+   JSON configuration.
+5. `shadowhook_retention_contract_test` now protects the native accepted-config
+   seam directly: inline-hook initialization must precede
+   `prepare_module_callbacks()`, which must precede loaded-target observation.
+   Existing callback/trampoline retention, unhook, loader ordering, and
+   `-z,nodelete` checks remain.
+
+The two ledgered Minor items (`flight.entryScene` when disabled and `0x` prefix
+wording) remain deferred and were not changed.
+
+### Red evidence
+
+- Recursive legacy contract: 1 expected failure on
+  `tracer/src/main/cpp/tracer_entry.cpp` containing
+  `waiting for qbdi_tracer_configure`.
+- Retention acceptance contract: 1 expected failure because
+  `scripts/config_retention_acceptance.py` did not exist.
+- Native callback mutation check: temporarily removing the accepted-config
+  `prepare_module_callbacks()` block made the focused CTest abort at
+  `prepare_callbacks != std::string::npos`. The production block was restored
+  before any permanent implementation edit.
+
+### Green verification
+
+- Focused recursive legacy contract: 1 test passed.
+- `scripts.tests.test_spawn_trace_contract`: 4 tests passed.
+- Focused `shadowhook_retention_contract_test`: 1 of 1 passed.
+- `./gradlew nativeHostTest --no-daemon`: 43 of 43 CTest targets passed.
+- `python3 -m unittest discover -s scripts/tests -p 'test_*.py'`: 259 tests
+  passed; 8 explicit opt-in tests skipped.
+- `ANDROID_HOME="${ANDROID_HOME}" python3 -m unittest
+  scripts.tests.build_contract_integration -v`: 6 tests passed.
+- Debug app/tracer/copy build: succeeded; 65 actionable tasks, 10 executed and
+  55 up-to-date.
+- Release app/tracer build: succeeded; 78 actionable tasks, 10 executed and
+  68 up-to-date.
+- `python3 -m py_compile` for the new harness and changed Python contracts,
+  `python3 scripts/config_retention_acceptance.py --help`, and
+  `node --check scripts/spawn_trace.js`: exited 0.
+- `git diff --check`: exited 0. The scoped textual scan reports only deliberate
+  test assertions; the recursive executable contract reports no production
+  legacy match.
+
+### Environment limitation and self-review
+
+The GumJS opt-in was attempted again and ran 0 tests because importing `frida`
+failed with `ModuleNotFoundError`. Consequently the new device harness was not
+executed, and no live preservation result is claimed. Its static contract,
+Python compilation/help path, reused `spawn_trace.js` configuration, and GumJS
+syntax are verified.
+
+This round changes runtime-owned code only to rename the stale constructor log
+and factor the existing tracer-load/helper sequence for reuse by the opt-in
+acceptance helper. The normal configuration, exact normal Frida command, hook
+semantics, and artifact formats are unchanged. This supersedes the earlier
+self-review statements that native log records were outside the legacy scan and
+that Task 8 had no runtime-owned source edit.

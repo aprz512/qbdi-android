@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SPAWN_TRACE = ROOT / "scripts/spawn_trace.js"
+RETENTION_ACCEPTANCE = ROOT / "scripts/config_retention_acceptance.py"
 
 
 class SpawnTraceContractTests(unittest.TestCase):
@@ -46,6 +47,17 @@ class SpawnTraceContractTests(unittest.TestCase):
                 self.assertIn(f"function {helper}", source)
         self.assertIn("if (globalThis.__QTRACE_TEST__ !== true) {", source)
         self.assertIn("setImmediate(main);", source)
+
+    def test_retention_acceptance_reuses_spawn_configuration(self):
+        spawn_source = SPAWN_TRACE.read_text(encoding="utf-8")
+        self.assertTrue(RETENTION_ACCEPTANCE.is_file())
+        harness_source = RETENTION_ACCEPTANCE.read_text(encoding="utf-8")
+
+        self.assertIn("function runConfigurationRetentionAcceptance", spawn_source)
+        self.assertIn("scripts/spawn_trace.js", harness_source)
+        self.assertIn("globalThis.__QTRACE_TEST__ = true", harness_source)
+        self.assertIn("runConfigurationRetentionAcceptance()", harness_source)
+        self.assertNotIn("schemaVersion", harness_source)
 
 
 if __name__ == "__main__":

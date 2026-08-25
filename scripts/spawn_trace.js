@@ -401,11 +401,42 @@ function configureShadowHookHelper(path, tracerModule) {
   }
 }
 
-function main() {
+function loadConfiguredTracer() {
   const dir = config.loader.remoteDir.replace(/\/$/, '');
   const tracerModule = loadLibrary(dir + '/' + config.loader.tracer);
   configureShadowHookHelper(
     dir + '/' + config.loader.shadowhookCompanion, tracerModule);
+  return tracerModule;
+}
+
+function runConfigurationRetentionAcceptance() {
+  const tracerModule = loadConfiguredTracer();
+  const accepted = validateConfigureResponse(configureTracer(
+    JSON.stringify(config.tracer), tracerModule));
+  if (!accepted.ok) {
+    throw new Error('valid configuration was rejected: ' + accepted.error.code);
+  }
+
+  const rejected = validateConfigureResponse(configureTracer('{', tracerModule));
+  if (rejected.ok || rejected.error.code !== 'MALFORMED_JSON') {
+    throw new Error('malformed configuration did not return MALFORMED_JSON');
+  }
+
+  const retained = validateStatusResponse(
+    statusReader(tracerModule, accepted.generation)());
+  if (!retained.ok || retained.generation !== accepted.generation) {
+    throw new Error('accepted generation was not retained after rejection');
+  }
+  return {
+    generation: accepted.generation,
+    rejectedCode: rejected.error.code,
+    retainedState: retained.state,
+    targetModule: retained.targetModule
+  };
+}
+
+function main() {
+  const tracerModule = loadConfiguredTracer();
 
   const configurePayload = configureTracer(JSON.stringify(config.tracer), tracerModule);
   const configureResponse = validateConfigureResponse(configurePayload);

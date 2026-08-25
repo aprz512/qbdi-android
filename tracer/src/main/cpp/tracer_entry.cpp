@@ -1392,5 +1392,5 @@ __attribute__((constructor)) static void qbdi_tracer_init() {
         QTRACE_E("cannot install tracer fork lifecycle error=%d", install_error);
         return;
     }
-    QTRACE_I("libqbdi_tracer loaded; waiting for qbdi_tracer_configure");
+    QTRACE_I("libqbdi_tracer loaded; waiting for structured JSON configuration");
 }

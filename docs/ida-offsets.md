@@ -57,5 +57,8 @@ Packed libraries may unpack or generate executable code outside the target ELF's
 mapping. `ADDRESS_OUTSIDE_TARGET_MODULE`, `ADDRESS_NOT_EXECUTABLE`, and
 `ADDRESS_IN_RUNTIME_MAPPING` are therefore diagnostics: the tracer reports them as warnings
 and still attempts the hook. Invalid hex, incomplete/conflicting locator forms, subtraction
-underflow, addition overflow, and empty/reversed ranges are strict configuration failures and
-do not replace the active generation.
+underflow, parsed values outside `uintptr_t`, and empty/reversed ranges are strict configure
+failures and do not replace the active generation. A later overflow in
+`moduleBase + normalizedOffset` occurs only after the target mapping is observed: the accepted
+generation remains published, but that scene ends in `hook_failed` with `ADDRESS_OVERFLOW`
+(`hookError: 0`).

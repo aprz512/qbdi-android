@@ -138,22 +138,44 @@ int main() {
             "tracer/src",
             std::string("flight_atomic_fetch_") + "and_u32");
     const std::string spawn = read_repo_source("scripts/spawn_trace.js");
+    const std::string configured_loader =
+            function_body(spawn, "function loadConfiguredTracer()",
+                          "function runConfigurationRetentionAcceptance()");
+    const size_t load_tracer = configured_loader.find(
+            "loadLibrary(dir + '/' + config.loader.tracer)");
+    const size_t configure_helper =
+            configured_loader.find("configureShadowHookHelper(");
+    assert(load_tracer != std::string::npos);
+    assert(configure_helper != std::string::npos);
+    assert(load_tracer < configure_helper);
     const std::string spawn_main =
             function_body(spawn, "function main()", "if (globalThis.__QTRACE_TEST__");
-    const size_t load_tracer = spawn_main.find("loadLibrary(dir + '/' + config.loader.tracer)");
-    const size_t configure_helper = spawn_main.find("configureShadowHookHelper(");
+    const size_t load_configured_tracer =
+            spawn_main.find("const tracerModule = loadConfiguredTracer()");
     const size_t configure_tracer = spawn_main.find(
             "configureTracer(JSON.stringify(config.tracer), tracerModule)");
     const size_t read_status = spawn_main.find(
             "statusReader(tracerModule, configureResponse.generation)");
-    assert(load_tracer != std::string::npos);
-    assert(configure_helper != std::string::npos);
+    assert(load_configured_tracer != std::string::npos);
     assert(configure_tracer != std::string::npos);
     assert(read_status != std::string::npos);
-    assert(load_tracer < configure_helper);
-    assert(configure_helper < configure_tracer);
+    assert(load_configured_tracer < configure_tracer);
     assert(configure_tracer < read_status);
     assert(spawn.find("Process.attachModuleObserver") == std::string::npos);
+    const std::string accepted_configuration =
+            function_body(tracer, "static void apply_accepted_configuration(",
+                          "static int32_t write_json_result(");
+    const size_t initialize_hooks =
+            accepted_configuration.find("init_inline_hook()");
+    const size_t prepare_callbacks =
+            accepted_configuration.find("prepare_module_callbacks()");
+    const size_t find_loaded_target =
+            accepted_configuration.find("find_loaded_module(config.target_so");
+    assert(initialize_hooks != std::string::npos);
+    assert(prepare_callbacks != std::string::npos);
+    assert(find_loaded_target != std::string::npos);
+    assert(initialize_hooks < prepare_callbacks);
+    assert(prepare_callbacks < find_loaded_target);
     const std::string tracer_child =
             function_body(tracer, "static void tracer_atfork_child()",
                           "static void install_hooks_for_module");
