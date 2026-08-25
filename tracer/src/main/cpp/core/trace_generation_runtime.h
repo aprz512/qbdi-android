@@ -77,6 +77,9 @@ struct TraceGenerationTestHooks {
     void *opaque = nullptr;
     void (*after_active_removal)(void *opaque) noexcept = nullptr;
     void (*before_deadline_stop_lock)(void *opaque) noexcept = nullptr;
+    void (*after_arm_enters_arming)(void *opaque) noexcept = nullptr;
+    bool (*fail_clock_read)(void *opaque) noexcept = nullptr;
+    bool (*fail_thread_create)(void *opaque) noexcept = nullptr;
 };
 #endif
 
@@ -114,6 +117,8 @@ public:
 #endif
 
 private:
+    enum class ArmState : uint8_t { Unarmed, Arming, Armed, Failed };
+
     struct ActiveCall {
         size_t scene_index = 0;
         uint32_t tid = 0;
@@ -153,7 +158,7 @@ private:
     pthread_t deadline_thread_{};
     std::atomic<bool> deadline_thread_started_{false};
     uint64_t deadline_monotonic_ns_ = 0;
-    std::atomic<bool> armed_{false};
+    std::atomic<ArmState> arm_state_{ArmState::Unarmed};
     std::atomic<bool> detached_{false};
     pid_t owner_pid_ = 0;
 

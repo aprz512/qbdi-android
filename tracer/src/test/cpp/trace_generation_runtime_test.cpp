@@ -246,6 +246,70 @@ struct StopRaceBarrier {
     std::atomic<bool> allow_finish{false};
 };
 
+struct ArmBarrier {
+    static void after_enters_arming(void *opaque) noexcept {
+        auto *barrier = static_cast<ArmBarrier *>(opaque);
+        barrier->entered.store(true, std::memory_order_release);
+        while (!barrier->release.load(std::memory_order_acquire)) ::sched_yield();
+    }
+
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+};
+
+struct ArmFailure {
+    static bool fail_clock(void *opaque) noexcept {
+        return static_cast<ArmFailure *>(opaque)->clock;
+    }
+
+    static bool fail_thread_create(void *opaque) noexcept {
+        return static_cast<ArmFailure *>(opaque)->thread_create;
+    }
+
+    bool clock = false;
+    bool thread_create = false;
+};
+
+// Catches the former false-success path where a second caller observed only
+// armed_=true while the first caller was still performing fallible setup.
+void concurrent_arm_reports_success_only_after_setup_completes() {
+    SessionOptions session{};
+    session.id = "monitor";
+    ArmBarrier barrier;
+    auto runtime = TraceGenerationRuntime::create(24, session);
+    CHECK(runtime != nullptr);
+    TraceGenerationTestHooks hooks{};
+    hooks.opaque = &barrier;
+    hooks.after_arm_enters_arming = &ArmBarrier::after_enters_arming;
+    runtime->set_test_hooks(hooks);
+
+    std::atomic<bool> first_result{false};
+    std::thread first([&] { first_result.store(runtime->arm(), std::memory_order_release); });
+    wait_for(barrier.entered);
+    CHECK(!runtime->arm());
+    barrier.release.store(true, std::memory_order_release);
+    first.join();
+    CHECK(first_result.load(std::memory_order_acquire));
+    CHECK(runtime->arm());
+}
+
+// Catches failed clock or pthread setup being advertised as a successfully
+// armed generation to a later caller.
+void failed_arm_is_never_reported_as_successful() {
+    for (const ArmFailure failure : {ArmFailure{true, false}, ArmFailure{false, true}}) {
+        ArmFailure injected = failure;
+        auto runtime = TraceGenerationRuntime::create(25, timed_session(60000));
+        CHECK(runtime != nullptr);
+        TraceGenerationTestHooks hooks{};
+        hooks.opaque = &injected;
+        hooks.fail_clock_read = &ArmFailure::fail_clock;
+        hooks.fail_thread_create = &ArmFailure::fail_thread_create;
+        runtime->set_test_hooks(hooks);
+        CHECK(!runtime->arm());
+        CHECK(!runtime->arm());
+    }
+}
+
 // Catches the former interleaving where finish removed the final call before
 // recording failure and the deadline worker then sealed it as successful.
 void concurrent_deadline_and_unsealed_last_finish_select_stop_incomplete() {
@@ -323,6 +387,8 @@ int main() {
     admission_statuses_identify_every_rejection_reason();
     invalid_generation_limits_are_rejected();
     stale_admission_cannot_remove_a_reused_pair();
+    concurrent_arm_reports_success_only_after_setup_completes();
+    failed_arm_is_never_reported_as_successful();
     concurrent_deadline_and_unsealed_last_finish_select_stop_incomplete();
     destruction_joins_the_deadline_worker();
     forked_child_detaches_the_inherited_deadline_worker();

@@ -71,27 +71,48 @@ std::shared_ptr<TraceGenerationRuntime> TraceGenerationRuntime::create(
 }
 
 bool TraceGenerationRuntime::arm() noexcept {
-    bool expected = false;
-    if (!armed_.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                        std::memory_order_acquire)) {
-        return phase_.load(std::memory_order_acquire) != TraceGenerationPhase::StopIncomplete;
+    ArmState expected = ArmState::Unarmed;
+    if (!arm_state_.compare_exchange_strong(expected, ArmState::Arming, std::memory_order_acq_rel,
+                                            std::memory_order_acquire)) {
+        return expected == ArmState::Armed;
     }
+#if defined(QTRACE_HOST_TEST)
+    if (test_hooks_.after_arm_enters_arming != nullptr)
+        test_hooks_.after_arm_enters_arming(test_hooks_.opaque);
+#endif
 
     if (session_.timed()) {
-        const uint64_t now = monotonic_now_ns();
+        uint64_t now = monotonic_now_ns();
+#if defined(QTRACE_HOST_TEST)
+        if (test_hooks_.fail_clock_read != nullptr &&
+            test_hooks_.fail_clock_read(test_hooks_.opaque)) {
+            now = 0;
+        }
+#endif
         const uint64_t duration = session_.duration_ms;
         if (now == 0 || duration > std::numeric_limits<uint64_t>::max() / kNanosecondsPerMillisecond ||
             now > std::numeric_limits<uint64_t>::max() - duration * kNanosecondsPerMillisecond) {
             std::lock_guard<std::mutex> lock(active_mutex_);
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
+            arm_state_.store(ArmState::Failed, std::memory_order_release);
             return false;
         }
         deadline_monotonic_ns_ = now + duration * kNanosecondsPerMillisecond;
-        const int error = ::pthread_create(&deadline_thread_, nullptr,
-                                           &TraceGenerationRuntime::deadline_entry, this);
+        int error = 0;
+#if defined(QTRACE_HOST_TEST)
+        if (test_hooks_.fail_thread_create != nullptr &&
+            test_hooks_.fail_thread_create(test_hooks_.opaque)) {
+            error = EAGAIN;
+        } else
+#endif
+        {
+            error = ::pthread_create(&deadline_thread_, nullptr,
+                                     &TraceGenerationRuntime::deadline_entry, this);
+        }
         if (error != 0) {
             std::lock_guard<std::mutex> lock(active_mutex_);
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
+            arm_state_.store(ArmState::Failed, std::memory_order_release);
             return false;
         }
         deadline_thread_started_.store(true, std::memory_order_release);
@@ -107,6 +128,7 @@ bool TraceGenerationRuntime::arm() noexcept {
         publish_deadline_stop_locked();
         complete_stop_if_idle_locked();
     }
+    arm_state_.store(ArmState::Armed, std::memory_order_release);
     return true;
 }
 
