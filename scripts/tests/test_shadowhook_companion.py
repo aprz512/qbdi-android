@@ -27,15 +27,14 @@ class ShadowHookCompanionContractTests(unittest.TestCase):
 
         self.assertIn("shadowhookCompanion: 'libshadowhook_nothing.so'", source)
         self.assertNotIn("loadLibrary(dir + '/' + config.shadowhookCompanion)", source)
-        self.assertNotIn("loadLibrary(dir + '/' + config.targetSo)", source)
+        self.assertNotIn("loadLibrary(dir + '/' + config.tracer.targetModule)", source)
         self.assertIn("qbdi_tracer_set_shadowhook_helper_path", source)
         self.assertLess(
-            source.index("const tracerModule = loadLibrary(dir + '/' + config.tracer)"),
+            source.index("const tracerModule = loadLibrary(dir + '/' + config.loader.tracer)"),
             source.rindex("configureShadowHookHelper"),
         )
         self.assertLess(source.rindex("configureShadowHookHelper"),
-                        source.index("configureTracer(encodeConfig"))
-        self.assertIn("if (!config.flight.enabled) installModuleObserver", source)
+                        source.index("configureTracer(JSON.stringify(config.tracer)"))
         self.assertIn("failed to configure ShadowHook companion path", source)
 
         tracer = (ROOT / "tracer/src/main/cpp/tracer_entry.cpp").read_text()

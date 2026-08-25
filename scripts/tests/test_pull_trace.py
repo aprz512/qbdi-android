@@ -1,5 +1,4 @@
 import json
-import re
 import signal
 import subprocess
 import sys
@@ -565,47 +564,30 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual("new.flight.bin", select_trace_name(names))
         self.assertEqual("old.flight.bin", select_trace_name(names, "old.flight.bin"))
 
-    def test_frida_configs_share_exact_flight_defaults_and_encoded_fields(self):
-        expected = (
-            "flight: { enabled: true, capacityMb: 512, chunkKb: 256, "
-            "maxThreads: 256, protectedChunks: 4 }"
-        )
+    def test_spawn_trace_contains_exact_flight_defaults(self):
         root = Path(__file__).resolve().parents[2]
-        module_config = (root / "scripts/trace_config.js").read_text(encoding="utf-8")
         spawn_config = (root / "scripts/spawn_trace.js").read_text(encoding="utf-8")
 
-        self.assertIn(expected, module_config)
-        self.assertIn(expected, spawn_config)
-        for encoded in (
-            "flight=", "flight_mb=", "flight_chunk_kb=",
-            "flight_max_threads=", "flight_protected_chunks=",
+        for field in (
+            "enabled: true",
+            "entryScene: 'init'",
+            "capacityMb: 512",
+            "chunkKb: 256",
+            "maxThreads: 256",
+            "protectedChunks: 4",
         ):
-            with self.subTest(encoded=encoded):
-                self.assertIn(encoded, spawn_config)
+            with self.subTest(field=field):
+                self.assertIn(field, spawn_config)
 
-    def test_frida_configs_share_demo_scene_offsets(self):
+    def test_spawn_trace_contains_demo_scene_locations(self):
         root = Path(__file__).resolve().parents[2]
-        module_config = (root / "scripts/trace_config.js").read_text(encoding="utf-8")
         spawn_config = (root / "scripts/spawn_trace.js").read_text(encoding="utf-8")
 
-        for scene in ("init", "jni", "libc", "algorithm", "integrity"):
-            pattern = rf"{scene}: \{{ offset: '([^']+)' \}}"
-            module_match = re.search(pattern, module_config)
-            spawn_match = re.search(pattern, spawn_config)
-            self.assertIsNotNone(module_match, f"missing {scene} in trace_config.js")
-            self.assertIsNotNone(spawn_match, f"missing {scene} in spawn_trace.js")
-            self.assertEqual(
-                module_match.group(1),
-                spawn_match.group(1),
-            )
-
-        integrity_pattern = r"integrity: \{ offset: '([^']+)' \}"
-        module_integrity = re.search(integrity_pattern, module_config)
-        spawn_integrity = re.search(integrity_pattern, spawn_config)
-        self.assertIsNotNone(module_integrity, "missing integrity in trace_config.js")
-        self.assertIsNotNone(spawn_integrity, "missing integrity in spawn_trace.js")
-        self.assertEqual("0x6E584", module_integrity.group(1))
-        self.assertEqual("0x6E584", spawn_integrity.group(1))
+        self.assertIn("name: 'init'", spawn_config)
+        self.assertIn("location: { offset: '0x6ac90' }", spawn_config)
+        self.assertIn("name: 'algorithm'", spawn_config)
+        self.assertIn("imageBase: '0x0'", spawn_config)
+        self.assertIn("address: '0x6db38'", spawn_config)
 
     def test_flight_cli_recovers_missing_terminal_without_lz4(self):
         name = "new.flight.bin"

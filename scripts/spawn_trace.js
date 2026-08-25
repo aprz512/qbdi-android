@@ -1,62 +1,220 @@
 'use strict';
 
 // Frida -l executes this file in the target process, without Node require().
-// Keep this config in sync with scripts/trace_config.js after finding offsets.
+// This is the only user-edited tracer configuration.
 const config = {
-  packageName: 'com.aprz.qbdiandroid',
-  remoteDir: '/data/local/tmp/qbdi-android',
-  shadowhookCompanion: 'libshadowhook_nothing.so',
-  tracer: 'libqbdi_tracer.so',
-  targetSo: 'libdemo_target.so',
-  trace: {
-    profile: 'fast',
-    compression: true,
-    lz4Level: 2,
-    autoBuffer: true,
-    bufferMb: 0,
-    hexdumpLimit: 32
+  loader: {
+    remoteDir: '/data/local/tmp/qbdi-android',
+    tracer: 'libqbdi_tracer.so',
+    shadowhookCompanion: 'libshadowhook_nothing.so'
   },
-  flight: { enabled: true, capacityMb: 512, chunkKb: 256, maxThreads: 256, protectedChunks: 4 },
-  scenes: {
-    init: { offset: '0x6AC90' },
-    jni: { offset: '0x6DCA8' },
-    libc: { offset: '0x6E204' },
-    algorithm: { offset: '0x6DB38' },
-    integrity: { offset: '0x6E584' }
+
+  tracer: {
+    schemaVersion: 1,
+    packageName: 'com.aprz.qbdiandroid',
+    targetModule: 'libdemo_target.so',
+
+    trace: {
+      profile: 'fast',
+      compression: true,
+      lz4Level: 2,
+      autoBuffer: true,
+      bufferMb: 0,
+      hexdumpLimit: 32
+    },
+
+    flight: {
+      enabled: true,
+      entryScene: 'init',
+      capacityMb: 512,
+      chunkKb: 256,
+      maxThreads: 256,
+      protectedChunks: 4
+    },
+
+    scenes: [
+      {
+        name: 'init',
+        location: { offset: '0x6ac90' }
+      },
+      {
+        name: 'algorithm',
+        location: {
+          imageBase: '0x0',
+          address: '0x6db38'
+        }
+      }
+    ]
   }
 };
 
-let moduleObserver = null;
+const QTRACE_JSON_OK = 0;
+const QTRACE_JSON_RESPONSE_TOO_SMALL = 1;
+const INITIAL_RESPONSE_CAPACITY = 16 * 1024;
+const MAX_JSON_BYTES = 1024 * 1024;
+const TERMINAL_STATES = new Set([
+  'installed', 'hook_failed', 'rollback_failed', 'superseded'
+]);
+
+function utf8ByteLength(value) {
+  let bytes = 0;
+  for (const character of value) {
+    const point = character.codePointAt(0);
+    if (point <= 0x7f) bytes += 1;
+    else if (point <= 0x7ff) bytes += 2;
+    else if (point <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
+
+function callJsonAbi(call) {
+  let capacity = INITIAL_RESPONSE_CAPACITY;
+  while (true) {
+    const response = Memory.alloc(capacity);
+    const responseSize = Memory.alloc(8);
+    responseSize.writeU64(new UInt64(0));
+    const transportCode = call(response, capacity, responseSize);
+    const requiredSize = responseSize.readU64().toNumber();
+
+    if (requiredSize > MAX_JSON_BYTES) {
+      throw new Error('JSON ABI response exceeds 1 MiB: ' + requiredSize);
+    }
+    if (transportCode === QTRACE_JSON_RESPONSE_TOO_SMALL) {
+      if (requiredSize <= capacity) {
+        throw new Error('JSON ABI returned an invalid retry size: ' + requiredSize);
+      }
+      capacity = requiredSize;
+      continue;
+    }
+    if (transportCode !== QTRACE_JSON_OK) {
+      throw new Error('JSON ABI transport failed with code ' + transportCode);
+    }
+    if (requiredSize === 0 || requiredSize > capacity) {
+      throw new Error('JSON ABI returned an invalid response size: ' + requiredSize);
+    }
+    if (response.add(requiredSize - 1).readU8() !== 0) {
+      throw new Error('JSON ABI response is not NUL terminated');
+    }
+    return response.readUtf8String(requiredSize - 1);
+  }
+}
+
+function responseObject(response) {
+  return typeof response === 'string' ? JSON.parse(response) : response;
+}
+
+function renderWarning(owner, warning) {
+  const code = warning.code ? ' [' + warning.code + ']' : '';
+  return '[!] ' + owner + code + ': ' + warning.message;
+}
+
+function renderConfigureResponse(value) {
+  const response = responseObject(value);
+  if (!response.ok) {
+    const error = response.error || {};
+    return ['[-] tracer config rejected ' + (error.code || 'UNKNOWN_ERROR') +
+      ' at ' + (error.path || '$') + ': ' + (error.message || 'unknown error')];
+  }
+
+  const lines = [
+    '[+] tracer config accepted schema=' + response.responseSchemaVersion +
+      ' generation=' + response.generation
+  ];
+  for (const scene of response.scenes || []) {
+    let line = '[+] scene ' + scene.name + ': offset=' + scene.offset;
+    if (scene.endOffset !== null && scene.endOffset !== undefined) {
+      line += ' endOffset=' + scene.endOffset;
+    }
+    lines.push(line);
+  }
+  for (const warning of response.warnings || []) {
+    lines.push(renderWarning('configuration', warning));
+  }
+  return lines;
+}
+
+function renderStatusResponse(value, includeWaitingForModule) {
+  const response = responseObject(value);
+  const showWaiting = includeWaitingForModule !== false;
+  if (!response.ok) {
+    const error = response.error || {};
+    return ['[-] status lookup failed ' + (error.code || 'UNKNOWN_ERROR') +
+      ' at ' + (error.path || '$') + ': ' + (error.message || 'unknown error')];
+  }
+
+  const lines = [];
+  if (response.state === 'waiting_for_module' && showWaiting) {
+    lines.push('[+] waiting for ' + response.targetModule);
+  }
+  for (const warning of response.warnings || []) {
+    lines.push(renderWarning('generation ' + response.generation, warning));
+  }
+  for (const scene of response.scenes || []) {
+    for (const warning of scene.warnings || []) {
+      lines.push(renderWarning('scene ' + scene.name, warning));
+    }
+    if (scene.state === 'installed') {
+      const address = scene.runtimeAddress ||
+        (response.targetModule + '+' + scene.offset);
+      lines.push('[+] scene ' + scene.name + ' installed at ' + address);
+    } else if (scene.state === 'hook_failed' ||
+               scene.state === 'rollback_failed') {
+      const error = scene.error || {};
+      let failure = '[-] scene ' + scene.name + ' ' + scene.state + ': ' +
+        (error.code || 'UNKNOWN_ERROR');
+      if (error.hookError !== undefined) failure += ' hookError=' + error.hookError;
+      lines.push(failure);
+    }
+  }
+
+  if (response.state === 'installed') {
+    lines.push('[+] generation ' + response.generation + ' installed');
+  } else if (TERMINAL_STATES.has(response.state)) {
+    lines.push('[-] generation ' + response.generation +
+      ' finished with ' + response.state);
+  }
+  return lines;
+}
+
+function pollGeneration(getStatus, schedule, emit) {
+  let lastPayload = null;
+  let waitingForModuleEmitted = false;
+
+  function poll() {
+    let payload;
+    let status;
+    try {
+      payload = getStatus();
+      status = responseObject(payload);
+    } catch (error) {
+      emit('[-] tracer status polling failed: ' + error);
+      return;
+    }
+
+    if (payload !== lastPayload) {
+      const includeWaiting = status.state !== 'waiting_for_module' ||
+        !waitingForModuleEmitted;
+      for (const line of renderStatusResponse(status, includeWaiting)) emit(line);
+      if (status.state === 'waiting_for_module') waitingForModuleEmitted = true;
+      lastPayload = payload;
+    }
+    if (!status.ok || TERMINAL_STATES.has(status.state)) return;
+    schedule(poll);
+  }
+
+  poll();
+}
 
 function loadLibrary(path) {
   try {
     const module = Module.load(path);
     console.log('[+] loaded ' + path + ' base=' + module.base);
     return module;
-  } catch (e) {
-    console.error('[-] failed to load ' + path + ': ' + e);
-    throw e;
+  } catch (error) {
+    console.error('[-] failed to load ' + path + ': ' + error);
+    throw error;
   }
-}
-
-function encodeConfig(cfg) {
-  const parts = ['package=' + cfg.packageName, 'target=' + cfg.targetSo];
-  parts.push(
-    'profile=' + cfg.trace.profile,
-    'compression=' + (cfg.trace.compression ? '1' : '0'),
-    'lz4_level=' + cfg.trace.lz4Level,
-    'auto_buffer=' + (cfg.trace.autoBuffer ? '1' : '0'),
-    'buffer_mb=' + cfg.trace.bufferMb,
-    'hexdump_limit=' + cfg.trace.hexdumpLimit,
-    'flight=' + (cfg.flight.enabled ? '1' : '0'),
-    'flight_mb=' + cfg.flight.capacityMb,
-    'flight_chunk_kb=' + cfg.flight.chunkKb,
-    'flight_max_threads=' + cfg.flight.maxThreads,
-    'flight_protected_chunks=' + cfg.flight.protectedChunks);
-  for (const [name, scene] of Object.entries(cfg.scenes)) {
-    parts.push(['scene=' + name, scene.offset].join(','));
-  }
-  return parts.join(';');
 }
 
 function findTracerExport(tracerModule, symbol) {
@@ -65,7 +223,9 @@ function findTracerExport(tracerModule, symbol) {
   }
 
   if (typeof Process.getModuleByName === 'function') {
-    const moduleNames = [tracerModule && tracerModule.name, config.tracer].filter(Boolean);
+    const moduleNames = [
+      tracerModule && tracerModule.name, config.loader.tracer
+    ].filter(Boolean);
     for (const moduleName of moduleNames) {
       try {
         return Process.getModuleByName(moduleName).getExportByName(symbol);
@@ -75,11 +235,10 @@ function findTracerExport(tracerModule, symbol) {
   }
 
   if (typeof Module.getExportByName === 'function') {
-    const moduleNames = [config.tracer, null];
-    for (const moduleName of moduleNames) {
+    for (const moduleName of [config.loader.tracer, null]) {
       try {
-        const ptr = Module.getExportByName(moduleName, symbol);
-        if (!ptr.isNull()) return ptr;
+        const address = Module.getExportByName(moduleName, symbol);
+        if (!address.isNull()) return address;
       } catch (_) {
       }
     }
@@ -88,16 +247,29 @@ function findTracerExport(tracerModule, symbol) {
   if (typeof Module.getGlobalExportByName === 'function') {
     return Module.getGlobalExportByName(symbol);
   }
-
   throw new Error(symbol + ' export not found');
 }
 
-function configureTracer(encoded, tracerModule) {
-  const configurePtr = findTracerExport(tracerModule, 'qbdi_tracer_configure');
-  const configure = new NativeFunction(configurePtr, 'void', ['pointer']);
-  const nativeConfig = Memory.allocUtf8String(encoded);
-  configure(nativeConfig);
-  console.log('[+] tracer configured: ' + encoded);
+function configureTracer(request, tracerModule) {
+  const requestSize = utf8ByteLength(request);
+  if (requestSize === 0 || requestSize > MAX_JSON_BYTES) {
+    throw new Error('tracer configuration must be between 1 byte and 1 MiB');
+  }
+
+  const configurePtr = findTracerExport(tracerModule, 'qbdi_tracer_configure_json');
+  const configure = new NativeFunction(configurePtr, 'int32', ['pointer', 'uint64', 'pointer', 'uint64', 'pointer']);
+  const nativeRequest = Memory.allocUtf8String(request);
+  return callJsonAbi((response, capacity, responseSize) => configure(
+    nativeRequest, new UInt64(requestSize), response, new UInt64(capacity),
+    responseSize));
+}
+
+function statusReader(tracerModule, generation) {
+  const statusPtr = findTracerExport(tracerModule, 'qbdi_tracer_get_status_json');
+  const getStatus = new NativeFunction(statusPtr, 'int32', ['uint64', 'pointer', 'uint64', 'pointer']);
+  const nativeGeneration = new UInt64(String(generation));
+  return () => callJsonAbi((response, capacity, responseSize) => getStatus(
+    nativeGeneration, response, new UInt64(capacity), responseSize));
 }
 
 function configureShadowHookHelper(path, tracerModule) {
@@ -109,33 +281,23 @@ function configureShadowHookHelper(path, tracerModule) {
   }
 }
 
-function installModuleObserver(tracerModule) {
-  // Native ShadowHook pre-init owns constructor-time installation. This
-  // observer is only a synchronous fallback/dedupe for an already loaded SO.
-  const installPtr = findTracerExport(tracerModule, 'qbdi_tracer_install_module');
-  const installModule = new NativeFunction(installPtr, 'void', ['pointer', 'pointer', 'pointer']);
-
-  function maybeInstall(module) {
-    if (module.name !== config.targetSo) return;
-    const path = module.path || module.name;
-    installModule(Memory.allocUtf8String(path), module.base, ptr(module.size));
-    console.log('[+] install requested for ' + module.name + ' base=' + module.base + ' size=0x' + module.size.toString(16));
-  }
-
-  moduleObserver = Process.attachModuleObserver({
-    onAdded(module) {
-      maybeInstall(module);
-    }
-  });
-}
-
 function main() {
-  const dir = config.remoteDir.replace(/\/$/, '');
-  const tracerModule = loadLibrary(dir + '/' + config.tracer);
-  configureShadowHookHelper(dir + '/' + config.shadowhookCompanion, tracerModule);
-  configureTracer(encodeConfig(config), tracerModule);
-  if (!config.flight.enabled) installModuleObserver(tracerModule);
+  const dir = config.loader.remoteDir.replace(/\/$/, '');
+  const tracerModule = loadLibrary(dir + '/' + config.loader.tracer);
+  configureShadowHookHelper(
+    dir + '/' + config.loader.shadowhookCompanion, tracerModule);
+
+  const configurePayload = configureTracer(JSON.stringify(config.tracer), tracerModule);
+  const configureResponse = responseObject(configurePayload);
+  for (const line of renderConfigureResponse(configureResponse)) console.log(line);
+  if (!configureResponse.ok) return;
+
+  const getStatus = statusReader(tracerModule, configureResponse.generation);
+  pollGeneration(getStatus, callback => setTimeout(callback, 250),
+    line => console.log(line));
   console.log('[+] tracer injected; tap a demo button for non-init scenes');
 }
 
-setImmediate(main);
+if (globalThis.__QTRACE_TEST__ !== true) {
+  setImmediate(main);
+}
