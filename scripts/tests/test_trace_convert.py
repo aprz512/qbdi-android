@@ -137,6 +137,15 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("QTRB 1.0/1.1 + metrics v2", pull_section)
         self.assertIn("QTRB 1.2 type 9 + metrics v3", pull_section)
         self.assertIn("QTRB 1.2 type 10 + metrics v3", pull_section)
+        self.assertIn(
+            "QTRB `.trace.bin.lz4` 始终需要主机 `lz4`，包括 `--compressed-only`。",
+            readme,
+        )
+        self.assertIn(
+            "遗留 `.trace.txt.lz4` 与 Flight Recorder `.flight.bin` 使用 `--compressed-only` "
+            "可原样拉取，无需解压。",
+            readme,
+        )
         self.assertIn("truncated + valid crash marker", pull_section)
         self.assertNotIn("文本格式 3", readme)
         self.assertIn("app-private", pull_section)

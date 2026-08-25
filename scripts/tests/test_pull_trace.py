@@ -994,7 +994,37 @@ class CommandLineTests(unittest.TestCase):
 
         self.assertEqual(1, exit_code)
         self.assertIn("host lz4 CLI is required", stderr.getvalue())
+        self.assertIn("legacy .trace.txt.lz4", stderr.getvalue())
         self.assertIn("--compressed-only", stderr.getvalue())
+
+    def test_compressed_only_cli_requires_lz4_for_qtrb_validation(self):
+        name = "new.trace.bin.lz4"
+        client = PullArtifactTests.FakeClient({name: b"compressed"})
+        client.list_names = lambda: [name]
+        stderr = StringIO()
+
+        with tempfile.TemporaryDirectory() as directory, redirect_stderr(stderr):
+            exit_code = main(
+                ["--package", "com.example.app", "--output", directory, "--compressed-only"],
+                client_factory=lambda **kwargs: client,
+                lz4_finder=lambda command: None,
+            )
+
+        self.assertEqual(1, exit_code)
+        self.assertIn("QTRB .trace.bin.lz4", stderr.getvalue())
+        self.assertIn("including --compressed-only", stderr.getvalue())
+        self.assertNotIn("or use --compressed-only", stderr.getvalue())
+
+    def test_cli_help_explains_compressed_only_validation_boundary(self):
+        stdout = StringIO()
+
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as exit_error:
+            main(["--help"])
+
+        self.assertEqual(0, exit_error.exception.code)
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn("QTRB .trace.bin.lz4 still requires host lz4", help_text)
+        self.assertIn("legacy .trace.txt.lz4 and .flight.bin may be pulled unchanged", help_text)
 
     def test_cli_translates_local_filesystem_errors_without_a_traceback(self):
         name = "new.trace.txt.lz4"

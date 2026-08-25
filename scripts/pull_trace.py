@@ -485,7 +485,12 @@ def argument_parser() -> argparse.ArgumentParser:
         "--name", help="specific .flight.bin, .trace.txt.lz4, .trace.bin.lz4, or .trace.bin artifact"
     )
     parser.add_argument(
-        "--compressed-only", action="store_true", help="pull artifacts without decompression"
+        "--compressed-only",
+        action="store_true",
+        help=(
+            "suppress converted text; QTRB .trace.bin.lz4 still requires host lz4 for "
+            "validation, while legacy .trace.txt.lz4 and .flight.bin may be pulled unchanged"
+        ),
     )
     parser.add_argument("--force", action="store_true", help="replace existing local outputs")
     return parser
@@ -502,12 +507,19 @@ def main(
         client = client_factory(package=args.package, device=args.device, adb=args.adb)
         names = client.list_names()
         selected = select_trace_name(names, args.name)
-        requires_lz4 = selected.endswith((TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX))
+        is_binary_lz4 = selected.endswith(BINARY_TRACE_SUFFIX)
+        is_text_lz4 = selected.endswith(TEXT_TRACE_SUFFIX)
+        requires_lz4 = is_binary_lz4 or (is_text_lz4 and not args.compressed_only)
         lz4 = lz4_finder("lz4") if requires_lz4 else None
-        if not args.compressed_only and requires_lz4 and lz4 is None:
+        if is_binary_lz4 and lz4 is None:
             raise PullTraceError(
-                "host lz4 CLI is required for decompression; install the 'lz4' command "
-                "or use --compressed-only"
+                "host lz4 CLI is required to validate QTRB .trace.bin.lz4 artifacts, including "
+                "--compressed-only; install the 'lz4' command"
+            )
+        if is_text_lz4 and not args.compressed_only and lz4 is None:
+            raise PullTraceError(
+                "host lz4 CLI is required to decode legacy .trace.txt.lz4 artifacts; install the "
+                "'lz4' command or use --compressed-only to pull it unchanged"
             )
         result = pull_artifact_set(
             client,

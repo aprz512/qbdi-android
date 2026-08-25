@@ -51,7 +51,7 @@ java -version
 git lfs version
 ```
 
-Frida 主机工具与设备端 server 应使用匹配版本。主机转换 `.trace.bin.lz4` 还需安装 `lz4`；没有该命令时可用 `--compressed-only` 只拉取原始产物。
+Frida 主机工具与设备端 server 应使用匹配版本。QTRB `.trace.bin.lz4` 始终需要主机 `lz4`，包括 `--compressed-only`。后者只抑制转换文本发布，仍会解压校验 QTRB 版本、terminal 和 sidecar。遗留 `.trace.txt.lz4` 与 Flight Recorder `.flight.bin` 使用 `--compressed-only` 可原样拉取，无需解压。
 
 拉取由 Git LFS 管理的 QBDI 静态库：
 
@@ -336,9 +336,13 @@ python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
 python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
   --name <trace-file>.flight.bin --output pulled-traces
 
-# 不依赖主机 lz4，只拉取压缩产物与 sidecar。
+# 遗留 `.trace.txt.lz4` 可不依赖主机 lz4 原样拉取；用 --name 避免自动选中 QTRB。
 python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
+  --name <legacy-trace>.trace.txt.lz4 \
   --compressed-only --output pulled-traces
+
+# `.flight.bin` 也可用 --compressed-only 原样拉取。QTRB `.trace.bin.lz4` 即使使用
+# --compressed-only 仍需要 lz4，以在发布前校验版本、terminal 和 sidecar。
 
 # 明确允许替换已有本地输出。
 python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
@@ -421,7 +425,7 @@ integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。运行�
 
 ### 找不到 host `lz4`
 
-安装 LZ4 CLI，或先使用 `pull_trace.py --compressed-only` 保存原始产物。Flight Recorder 的 `.flight.bin` 本身不需要 LZ4。
+若选中 QTRB `.trace.bin.lz4`，安装 LZ4 CLI；`--compressed-only` 只不发布文本，不能绕过解压后的版本、terminal 和 sidecar 校验。遗留 `.trace.txt.lz4` 可使用带 `--name` 的 `pull_trace.py --compressed-only` 原样保存；Flight Recorder 的 `.flight.bin` 本身不需要 LZ4。
 
 ### constructor 没有轨迹
 
