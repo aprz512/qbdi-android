@@ -4,12 +4,23 @@
 const config = {
   shadowhookCompanion: 'libshadowhook_nothing.so',
   tracer: 'libqbdi_tracer.so',
-  targetSo: 'libdemo_target.so',
-  profile: '__QTRACE_PROFILE__',
-  compression: '__QTRACE_COMPRESSION__',
   iterations: 256,
   seed: '0x514244492d626173'
 };
+const request = __QTRACE_CONFIG_JSON__;
+const RESPONSE_CAPACITY = 64 * 1024;
+
+function utf8ByteLength(value) {
+  let bytes = 0;
+  for (const character of value) {
+    const point = character.codePointAt(0);
+    if (point <= 0x7f) bytes += 1;
+    else if (point <= 0x7ff) bytes += 2;
+    else if (point <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
 
 function findTracerExport(tracerModule, symbol) {
   if (typeof tracerModule.getExportByName === 'function') {
@@ -57,13 +68,35 @@ function startBenchmark(targetModule) {
     const offset = benchmark.sub(targetModule.base);
     const tracer = loadTracerThroughApplicationLoader();
     const configure = new NativeFunction(
-      findTracerExport(tracer, 'qbdi_tracer_configure'), 'void', ['pointer']);
+      findTracerExport(tracer, 'qbdi_tracer_configure_json'), 'int32',
+      ['pointer', 'uint64', 'pointer', 'uint64', 'pointer']);
     const install = new NativeFunction(
       findTracerExport(tracer, 'qbdi_tracer_install_module'), 'void', ['pointer', 'pointer', 'pointer']);
-    configure(Memory.allocUtf8String(
-      'target=' + config.targetSo + ';scene=benchmark,0x' + offset.toString(16) +
-      ';profile=' + config.profile + ';compression=' + config.compression +
-      '__QTRACE_TEST_CONFIG__'));
+    request.scenes[0].location.offset = '0x' + offset.toString(16);
+    const encoded = JSON.stringify(request);
+    const responseBuffer = Memory.alloc(RESPONSE_CAPACITY);
+    const responseSizeBuffer = Memory.alloc(8);
+    responseSizeBuffer.writeU64(new UInt64(0));
+    const transportCode = configure(
+      Memory.allocUtf8String(encoded), new UInt64(utf8ByteLength(encoded)),
+      responseBuffer, new UInt64(RESPONSE_CAPACITY), responseSizeBuffer);
+    if (transportCode !== 0) {
+      throw new Error('benchmark configuration transport failed with code ' + transportCode);
+    }
+    const responseSize = responseSizeBuffer.readU64().toNumber();
+    if (responseSize === 0 || responseSize > RESPONSE_CAPACITY ||
+        responseBuffer.add(responseSize - 1).readU8() !== 0) {
+      throw new Error('benchmark configuration returned an invalid response');
+    }
+    const response = JSON.parse(responseBuffer.readUtf8String(responseSize - 1));
+    if (response === null || typeof response !== 'object' || Array.isArray(response) ||
+        response.responseSchemaVersion !== 1 || typeof response.ok !== 'boolean') {
+      throw new Error('benchmark configuration returned an invalid response object');
+    }
+    if (response.ok !== true) {
+      const code = response && response.error && response.error.code;
+      throw new Error('benchmark configuration rejected: ' + (code || 'unknown error'));
+    }
     install(Memory.allocUtf8String(targetModule.path), targetModule.base, ptr(targetModule.size));
 
     const call = new NativeFunction(benchmark, 'uint64', ['uint64', 'uint64']);
@@ -75,7 +108,7 @@ function startBenchmark(targetModule) {
 }
 
 function waitForTarget() {
-  const loaded = Process.findModuleByName(config.targetSo);
+  const loaded = Process.findModuleByName(request.targetModule);
   if (loaded !== null) {
     startBenchmark(loaded);
     return;

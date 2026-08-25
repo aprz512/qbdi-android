@@ -1,6 +1,7 @@
 import unittest
 import contextlib
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -687,49 +688,89 @@ effective_buffer_bytes=67108864
                 benchmark_trace._publish_remote_file(args, "run.trace.bin", root / "run.trace.bin")
             self.assertEqual([], list(root.iterdir()))
 
-    def test_configures_the_requested_profile_for_the_fresh_process_agent(self):
-        source = "const profile = '__QTRACE_PROFILE__'; const test = '__QTRACE_TEST_CONFIG__';"
+    def test_builds_the_structured_benchmark_agent_request(self):
+        self.assertTrue(
+            hasattr(benchmark_trace, "benchmark_agent_request"),
+            "benchmark_agent_request must build the structured request",
+        )
+        request = benchmark_trace.benchmark_agent_request("balanced", False, 4096, True)
+
+        self.assertEqual(1, request["schemaVersion"])
+        self.assertEqual("balanced", request["trace"]["profile"])
+        self.assertTrue(request["trace"]["compression"])
+        self.assertEqual("benchmark", request["scenes"][0]["name"])
+        self.assertEqual("0x0", request["scenes"][0]["location"]["offset"])
+        self.assertEqual(4096, request["debug"]["bufferBytes"])
+        self.assertTrue(request["debug"]["failSetup"])
+
+    def test_preserves_compression_and_optional_test_injection_behavior(self):
+        helper = benchmark_trace.benchmark_agent_request
+        normal = helper("fast", False, None, False)
+        legacy = helper("full", True, None, False)
+        buffer_only = helper("balanced", False, 4096, False)
+        failure_only = helper("balanced", False, None, True)
+
+        self.assertTrue(normal["trace"]["compression"])
+        self.assertNotIn("debug", normal)
+        self.assertFalse(legacy["trace"]["compression"])
+        self.assertEqual({"bufferBytes": 4096}, buffer_only["debug"])
+        self.assertEqual({"failSetup": True}, failure_only["debug"])
+
+    def test_injects_compact_json_into_one_unquoted_agent_placeholder(self):
+        source = "const request = __QTRACE_CONFIG_JSON__;"
+
+        configured = configure_agent_source(source, "balanced", False, 4096, True)
+        encoded = configured.removeprefix("const request = ").removesuffix(";")
+        request = json.loads(encoded)
 
         self.assertEqual(
-            "const profile = 'balanced'; const test = '';",
-            configure_agent_source(source, "balanced"),
+            benchmark_trace.benchmark_agent_request("balanced", False, 4096, True), request
         )
-        self.assertEqual(
-            "const profile = 'balanced'; const test = ';test_buffer_bytes=4096';",
-            configure_agent_source(source, "balanced", False, 4096),
-        )
-        self.assertEqual(
-            "const profile = 'balanced'; const test = ';test_fail_setup=1';",
-            configure_agent_source(source, "balanced", False, None, True),
-        )
+        self.assertNotIn("__QTRACE_CONFIG_JSON__", configured)
+        self.assertNotIn("scene=", configured)
+        self.assertNotIn("__QTRACE_TEST_CONFIG__", configured)
+
+    def test_rejects_invalid_benchmark_agent_request_options(self):
         with self.assertRaisesRegex(ValueError, "profile"):
-            configure_agent_source(source, "invalid")
+            benchmark_trace.benchmark_agent_request("invalid", False, None, False)
         with self.assertRaisesRegex(ValueError, "test buffer"):
-            configure_agent_source(source, "balanced", False, 8192)
+            benchmark_trace.benchmark_agent_request("balanced", False, 8192, False)
 
-    def test_rejects_custom_agent_without_test_config_for_requested_test_options(self):
-        custom_agent = "const profile = '__QTRACE_PROFILE__'; const compression = '__QTRACE_COMPRESSION__';"
+    def test_requires_exactly_one_json_placeholder(self):
+        missing = "const request = {};"
+        duplicate = "__QTRACE_CONFIG_JSON__ __QTRACE_CONFIG_JSON__"
 
-        for test_buffer_bytes, test_fail_setup in ((4096, False), (None, True), (4096, True)):
-            with self.subTest(test_buffer_bytes=test_buffer_bytes, test_fail_setup=test_fail_setup):
-                with self.assertRaisesRegex(ValueError, "__QTRACE_TEST_CONFIG__ exactly once"):
-                    configure_agent_source(
-                        custom_agent, "balanced", False, test_buffer_bytes, test_fail_setup
-                    )
+        for source in (missing, duplicate):
+            with self.subTest(source=source), self.assertRaisesRegex(
+                ValueError, "__QTRACE_CONFIG_JSON__ exactly once"
+            ):
+                configure_agent_source(source, "balanced")
 
-    def test_allows_custom_agent_without_test_config_when_no_test_option_is_requested(self):
-        custom_agent = "const profile = '__QTRACE_PROFILE__'; const compression = '__QTRACE_COMPRESSION__';"
-
-        self.assertEqual(
-            "const profile = 'fast'; const compression = '1';",
-            configure_agent_source(custom_agent, "fast"),
+    def test_benchmark_agent_uses_json_response_before_installing_or_calling(self):
+        source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(
+            encoding="utf-8"
         )
+        configured = configure_agent_source(source, "balanced", False, 4096, True)
 
-    def test_rejects_duplicate_test_config_marker_when_test_option_is_requested(self):
-        duplicate = "__QTRACE_PROFILE__ __QTRACE_TEST_CONFIG__ __QTRACE_TEST_CONFIG__"
-
-        with self.assertRaisesRegex(ValueError, "__QTRACE_TEST_CONFIG__ exactly once"):
-            configure_agent_source(duplicate, "balanced", False, 4096)
+        self.assertNotIn("scene=", configured)
+        self.assertNotIn("__QTRACE_TEST_CONFIG__", configured)
+        self.assertNotIn("'qbdi_tracer_configure'", configured)
+        self.assertIn("'qbdi_tracer_configure_json'", configured)
+        self.assertIn("const RESPONSE_CAPACITY = 64 * 1024;", configured)
+        self.assertIn("response.responseSchemaVersion !== 1", configured)
+        offset_assignment = configured.index(
+            "request.scenes[0].location.offset = '0x' + offset.toString(16);"
+        )
+        encoding = configured.index("const encoded = JSON.stringify(request);")
+        schema_check = configured.index("response.responseSchemaVersion !== 1")
+        response_check = configured.index("response.ok !== true")
+        install = configured.index("install(Memory.allocUtf8String(targetModule.path)")
+        call = configured.index("const returned = call(")
+        self.assertLess(offset_assignment, encoding)
+        self.assertLess(encoding, schema_check)
+        self.assertLess(schema_check, response_check)
+        self.assertLess(response_check, install)
+        self.assertLess(response_check, call)
 
     def test_benchmark_agent_loads_the_tracer_through_the_application_loader(self):
         source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(

@@ -417,31 +417,60 @@ def verify_setup_failure_smoke(
     return actual
 
 
+def benchmark_agent_request(
+    profile: str, legacy: bool, test_buffer_bytes: int | None,
+    test_fail_setup: bool,
+) -> dict[str, object]:
+    if profile not in ("fast", "balanced", "full"):
+        raise ValueError(f"invalid benchmark profile: {profile}")
+    if test_buffer_bytes not in (None, 4096):
+        raise ValueError("test buffer must be exactly 4096 bytes")
+
+    request: dict[str, object] = {
+        "schemaVersion": 1,
+        "packageName": "com.aprz.qbdiandroid",
+        "targetModule": "libdemo_target.so",
+        "trace": {
+            "profile": profile,
+            "compression": not legacy,
+            "lz4Level": 2,
+            "autoBuffer": True,
+            "bufferMb": 0,
+            "hexdumpLimit": 32,
+        },
+        "flight": {
+            "enabled": False,
+            "entryScene": "",
+            "capacityMb": 512,
+            "chunkKb": 256,
+            "maxThreads": 256,
+            "protectedChunks": 4,
+        },
+        "scenes": [{"name": "benchmark", "location": {"offset": "0x0"}}],
+    }
+    debug: dict[str, object] = {}
+    if test_buffer_bytes is not None:
+        debug["bufferBytes"] = test_buffer_bytes
+    if test_fail_setup:
+        debug["failSetup"] = True
+    if debug:
+        request["debug"] = debug
+    return request
+
+
 def configure_agent_source(
     source: str, profile: str, legacy: bool = False, test_buffer_bytes: int | None = None,
     test_fail_setup: bool = False,
 ) -> str:
-    if profile not in ("fast", "balanced", "full"):
-        raise ValueError(f"invalid benchmark profile: {profile}")
-    if "__QTRACE_PROFILE__" not in source:
-        raise ValueError("benchmark agent has no profile placeholder")
-    if test_buffer_bytes not in (None, 4096):
-        raise ValueError("test buffer must be exactly 4096 bytes")
-    test_options: list[str] = []
-    if test_buffer_bytes is not None:
-        test_options.append(f"test_buffer_bytes={test_buffer_bytes}")
-    if test_fail_setup:
-        test_options.append("test_fail_setup=1")
-    if test_options and source.count("__QTRACE_TEST_CONFIG__") != 1:
+    if source.count("__QTRACE_CONFIG_JSON__") != 1:
         raise ValueError(
-            "benchmark agent must contain __QTRACE_TEST_CONFIG__ exactly once when test options are requested"
+            "benchmark agent must contain __QTRACE_CONFIG_JSON__ exactly once"
         )
-    test_config = "" if not test_options else ";" + ";".join(test_options)
-    return source.replace("__QTRACE_PROFILE__", profile).replace(
-        "__QTRACE_COMPRESSION__", "0" if legacy else "1"
-    ).replace(
-        "__QTRACE_TEST_CONFIG__", test_config,
+    request = benchmark_agent_request(
+        profile, legacy, test_buffer_bytes, test_fail_setup,
     )
+    encoded = json.dumps(request, separators=(",", ":"), sort_keys=True)
+    return source.replace("__QTRACE_CONFIG_JSON__", encoded)
 
 
 def inject_java_bridge(bridge_source: str, agent_source: str) -> str:
