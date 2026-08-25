@@ -28,6 +28,7 @@ struct TraceOptions {
 
 struct FlightOptions {
     bool enabled = false;
+    std::string entry_scene;
     uint64_t capacity_bytes = 512ULL * 1024 * 1024;
     uint32_t chunk_bytes = 256U * 1024;
     uint32_t max_threads = 256;

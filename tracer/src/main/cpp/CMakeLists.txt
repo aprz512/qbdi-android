@@ -97,6 +97,7 @@ add_library(qbdi_tracer SHARED
         flight/flight_encoder.cpp
         flight/flight_trace_sink.cpp
         core/trace_config.cpp
+        core/tracer_configuration.cpp
         hooks/inline_hook_adapter.cpp
         hooks/thread_create_gateway.cpp
         core/qbdi_runner.cpp
@@ -110,6 +111,11 @@ add_library(qbdi_tracer SHARED
         jni/jni_state.cpp
         jni/jni_state_updater.cpp
         jni/jni_formatter.cpp)
+
+# nlohmann/json reports malformed input through C++ exceptions.  Keep that boundary
+# local to the cold configuration parser; the rest of the tracer remains no-exception.
+set_source_files_properties(core/tracer_configuration.cpp PROPERTIES
+        COMPILE_OPTIONS "-fexceptions")
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
 target_compile_options(qbdi_tracer PRIVATE
