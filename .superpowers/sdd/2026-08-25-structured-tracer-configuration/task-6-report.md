@@ -99,3 +99,68 @@ first and failed because `response.responseSchemaVersion !== 1` was absent.
 - Verification is host-side. No Android device/Frida benchmark was run in this
   task, so actual device behavior remains covered by the repository's existing
   manual benchmark workflow rather than this host session.
+
+## Fix round 1
+
+### Review finding
+
+The initial envelope guard accepted any object with response schema version 1
+and boolean `ok`. Consequently, a malformed accepted response such as
+`{"responseSchemaVersion":1,"ok":true}` reached `install()` and the benchmark
+call despite omitting the documented generation, state, target module, scenes,
+and warnings.
+
+### Changes
+
+- Added a self-contained configure-response validator following the established
+  `spawn_trace.js` contract. It validates the response envelope and rejected
+  error shape, plus positive integer generation, exact `waiting_for_module`
+  state, non-empty target module, scenes/warnings arrays, normalized scene
+  fields, and warning entries for accepted responses.
+- Added a Node-based behavioral GumJS regression that executes the generated
+  production agent with fake native boundaries. Seven malformed accepted
+  envelopes cover missing fields, wrong generation/target/scenes/warnings
+  types, wrong state, and an invalid normalized-scene offset. Every malformed
+  case must emit `benchmark-error` with zero install/call counts. A complete
+  accepted envelope remains the positive control and must install/call/result.
+- The behavioral test skips when Node is absent, so Node remains optional for
+  the default Python suite as required by the global plan.
+
+### Red evidence
+
+Before the production fix:
+
+```bash
+python3 -m unittest \
+  scripts.tests.test_benchmark_trace.OptimizedMetricsParserTests.test_benchmark_agent_rejects_malformed_accepted_responses_before_execution \
+  -v
+```
+
+Result: one test ran with 7 failing subtests. Every malformed envelope recorded
+`installs == 1`, proving it reached installation and benchmark execution.
+
+### Green evidence
+
+- The focused behavioral command above: 1 test passed; all 7 malformed cases
+  stopped and the complete accepted control executed.
+- `python3 -m unittest scripts.tests.test_benchmark_trace -v`: 49 tests passed.
+- `python3 -m unittest discover -s scripts/tests -p 'test_*.py'`: 255 tests
+  passed, 7 opt-in tests skipped.
+- `python3 -m py_compile scripts/benchmark_trace.py scripts/tests/test_benchmark_trace.py`:
+  exited 0.
+- `node --check scripts/benchmark_trace.js`: exited 0.
+- Generated-agent syntax check through `node --check -`: exited 0.
+- `git diff --check`: exited 0.
+
+### Self-review and concerns
+
+- Validation occurs immediately after JSON parsing and before the existing
+  `response.ok !== true` rejection branch, target installation, NativeFunction
+  creation for the benchmark, and benchmark invocation.
+- Each accepted field serialized by native configuration is type/shape checked;
+  malformed rejection objects also fail closed as `benchmark-error`.
+- Independent review reported READY with no Critical, Important, or Minor
+  findings and confirmed the executable regression reaches the real configured
+  agent source.
+- Scope remains Task 6: only the benchmark agent, its test, and this report are
+  changed. Verification remains host-side; no Android device run was performed.

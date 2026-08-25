@@ -22,6 +22,63 @@ function utf8ByteLength(value) {
   return bytes;
 }
 
+function invalidResponse(message) {
+  throw new Error('benchmark configuration returned an invalid response: ' + message);
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateWarningArray(warnings, path) {
+  if (!Array.isArray(warnings)) invalidResponse(path + ' must be an array');
+  for (let index = 0; index < warnings.length; ++index) {
+    const warning = warnings[index];
+    if (!isObject(warning) || typeof warning.code !== 'string' ||
+        typeof warning.message !== 'string') {
+      invalidResponse(path + '[' + index + '] must contain string code and message');
+    }
+  }
+}
+
+function validateConfigureResponse(response) {
+  if (!isObject(response)) invalidResponse('root must be an object');
+  if (response.responseSchemaVersion !== 1) {
+    invalidResponse('responseSchemaVersion must equal 1');
+  }
+  if (typeof response.ok !== 'boolean') invalidResponse('ok must be a boolean');
+  if (!response.ok) {
+    const error = response.error;
+    if (!isObject(error) || typeof error.code !== 'string' ||
+        typeof error.path !== 'string' || typeof error.message !== 'string') {
+      invalidResponse('error must contain string code, path, and message');
+    }
+    return response;
+  }
+  if (typeof response.generation !== 'number' ||
+      !Number.isInteger(response.generation) || response.generation <= 0) {
+    invalidResponse('generation must be a positive integer');
+  }
+  if (response.state !== 'waiting_for_module') {
+    invalidResponse('configure state must be waiting_for_module');
+  }
+  if (typeof response.targetModule !== 'string' || response.targetModule.length === 0) {
+    invalidResponse('targetModule must be a non-empty string');
+  }
+  if (!Array.isArray(response.scenes)) invalidResponse('scenes must be an array');
+  validateWarningArray(response.warnings, 'warnings');
+  for (let index = 0; index < response.scenes.length; ++index) {
+    const scene = response.scenes[index];
+    if (!isObject(scene) || typeof scene.name !== 'string' ||
+        typeof scene.offset !== 'string' ||
+        !Object.prototype.hasOwnProperty.call(scene, 'endOffset') ||
+        (scene.endOffset !== null && typeof scene.endOffset !== 'string')) {
+      invalidResponse('scenes[' + index + '] has an invalid normalized scene shape');
+    }
+  }
+  return response;
+}
+
 function findTracerExport(tracerModule, symbol) {
   if (typeof tracerModule.getExportByName === 'function') {
     return tracerModule.getExportByName(symbol);
@@ -88,11 +145,8 @@ function startBenchmark(targetModule) {
         responseBuffer.add(responseSize - 1).readU8() !== 0) {
       throw new Error('benchmark configuration returned an invalid response');
     }
-    const response = JSON.parse(responseBuffer.readUtf8String(responseSize - 1));
-    if (response === null || typeof response !== 'object' || Array.isArray(response) ||
-        response.responseSchemaVersion !== 1 || typeof response.ok !== 'boolean') {
-      throw new Error('benchmark configuration returned an invalid response object');
-    }
+    const response = validateConfigureResponse(
+      JSON.parse(responseBuffer.readUtf8String(responseSize - 1)));
     if (response.ok !== true) {
       const code = response && response.error && response.error.code;
       throw new Error('benchmark configuration rejected: ' + (code || 'unknown error'));

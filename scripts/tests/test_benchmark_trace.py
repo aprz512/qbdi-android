@@ -2,6 +2,7 @@ import unittest
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -758,19 +759,165 @@ effective_buffer_bytes=67108864
         self.assertIn("'qbdi_tracer_configure_json'", configured)
         self.assertIn("const RESPONSE_CAPACITY = 64 * 1024;", configured)
         self.assertIn("response.responseSchemaVersion !== 1", configured)
+        self.assertIn("function validateConfigureResponse(response)", configured)
         offset_assignment = configured.index(
             "request.scenes[0].location.offset = '0x' + offset.toString(16);"
         )
         encoding = configured.index("const encoded = JSON.stringify(request);")
-        schema_check = configured.index("response.responseSchemaVersion !== 1")
+        response_validation = configured.index("const response = validateConfigureResponse(")
         response_check = configured.index("response.ok !== true")
         install = configured.index("install(Memory.allocUtf8String(targetModule.path)")
         call = configured.index("const returned = call(")
         self.assertLess(offset_assignment, encoding)
-        self.assertLess(encoding, schema_check)
-        self.assertLess(schema_check, response_check)
+        self.assertLess(encoding, response_validation)
+        self.assertLess(response_validation, response_check)
         self.assertLess(response_check, install)
         self.assertLess(response_check, call)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for GumJS emulation")
+    def test_benchmark_agent_rejects_malformed_accepted_responses_before_execution(self):
+        source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(
+            encoding="utf-8"
+        )
+        configured = configure_agent_source(source, "balanced")
+        accepted = {
+            "responseSchemaVersion": 1,
+            "ok": True,
+            "generation": 7,
+            "state": "waiting_for_module",
+            "targetModule": "libdemo_target.so",
+            "scenes": [{"name": "benchmark", "offset": "0x40", "endOffset": None}],
+            "warnings": [],
+        }
+        malformed = [
+            {"responseSchemaVersion": 1, "ok": True},
+            {**accepted, "generation": "7"},
+            {**accepted, "state": "installed"},
+            {**accepted, "targetModule": 7},
+            {**accepted, "scenes": {}},
+            {**accepted, "warnings": {}},
+            {
+                **accepted,
+                "scenes": [{"name": "benchmark", "offset": 64, "endOffset": None}],
+            },
+        ]
+        harness = r"""
+const vm = require('vm');
+const source = JSON.parse(process.argv[1]);
+const responses = JSON.parse(process.argv[2]);
+
+class U64 {
+  constructor(value) {
+    this.value = BigInt(value instanceof U64 ? value.value : value);
+  }
+  toString(radix) { return this.value.toString(radix); }
+  toNumber() { return Number(this.value); }
+}
+
+function runCase(configureResponse) {
+  const state = {installs: 0, calls: 0, messages: []};
+  const benchmark = {sub: () => new U64(0x40)};
+  const target = {
+    base: new U64(0x1000),
+    size: 0x1000,
+    path: '/data/app/libdemo_target.so',
+    getExportByName: name => name === 'demo_benchmark_case' ? benchmark : null
+  };
+  const tracer = {getExportByName: symbol => symbol};
+
+  function NativeFunction(address) {
+    if (address === 'qbdi_tracer_set_shadowhook_helper_path') return () => 0;
+    if (address === 'qbdi_tracer_install_module') {
+      return () => { state.installs += 1; };
+    }
+    if (address === 'qbdi_tracer_configure_json') {
+      return (_request, _requestSize, response, _capacity, responseSize) => {
+        response.text = JSON.stringify(configureResponse);
+        responseSize.writeU64(new U64(Buffer.byteLength(response.text, 'utf8') + 1));
+        return 0;
+      };
+    }
+    if (address === benchmark) {
+      return () => { state.calls += 1; return new U64(0x55); };
+    }
+    throw new Error('unexpected native function: ' + address);
+  }
+
+  const sandbox = {
+    UInt64: U64,
+    NativeFunction,
+    ptr: value => value,
+    setImmediate: callback => callback(),
+    setTimeout: () => { throw new Error('unexpected target wait'); },
+    send: message => state.messages.push(message),
+    Process: {
+      findModuleByName: name => name === 'libdemo_target.so' ? target : tracer
+    },
+    Module: {getGlobalExportByName: symbol => symbol},
+    Memory: {
+      allocUtf8String: value => value,
+      alloc: size => Number(size) === 8 ? {
+        value: 0,
+        writeU64(value) { this.value = value.toNumber(); },
+        readU64() { return new U64(this.value); }
+      } : {
+        text: '',
+        add(index) {
+          const owner = this;
+          return {
+            readU8: () => index === Buffer.byteLength(owner.text, 'utf8') ? 0 : 1
+          };
+        },
+        readUtf8String() { return this.text; }
+      }
+    },
+    Java: {
+      available: true,
+      performNow: callback => callback(),
+      use: name => name === 'android.app.ActivityThread' ? {
+        currentApplication: () => ({
+          getApplicationInfo: () => ({nativeLibraryDir: {value: '/data/app/lib'}}),
+          getFilesDir: () => ({getAbsolutePath: () => '/data/user/0/files'}),
+          getClass: () => ({})
+        })
+      } : {
+        getRuntime: () => ({load0: {overload: () => ({call: () => {}})}})
+      }
+    }
+  };
+  vm.runInNewContext(source, sandbox, {filename: 'benchmark_trace.js'});
+  return state;
+}
+
+process.stdout.write(JSON.stringify(responses.map(runCase)));
+"""
+        completed = subprocess.run(
+            [
+                shutil.which("node"),
+                "-e",
+                harness,
+                json.dumps(configured),
+                json.dumps([*malformed, accepted]),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        results = json.loads(completed.stdout)
+        self.assertEqual(len(malformed) + 1, len(results))
+        for index, result in enumerate(results[:-1]):
+            with self.subTest(case=index):
+                self.assertEqual(0, result["installs"])
+                self.assertEqual(0, result["calls"])
+                self.assertEqual(1, len(result["messages"]))
+                self.assertEqual("benchmark-error", result["messages"][0]["type"])
+        accepted_result = results[-1]
+        self.assertEqual(1, accepted_result["installs"])
+        self.assertEqual(1, accepted_result["calls"])
+        self.assertEqual("benchmark-result", accepted_result["messages"][0]["type"])
 
     def test_benchmark_agent_loads_the_tracer_through_the_application_loader(self):
         source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(
