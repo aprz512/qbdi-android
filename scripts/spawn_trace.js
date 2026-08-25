@@ -55,6 +55,14 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const TERMINAL_STATES = new Set([
   'installed', 'hook_failed', 'rollback_failed', 'superseded'
 ]);
+const STATUS_STATES = new Set([
+  'waiting_for_module', 'installing', 'installed', 'hook_failed',
+  'rollback_failed', 'superseded'
+]);
+const SCENE_STATES = new Set([
+  'pending', 'installing', 'installed', 'hook_failed', 'rolled_back',
+  'rollback_failed'
+]);
 
 function utf8ByteLength(value) {
   let bytes = 0;
@@ -70,7 +78,7 @@ function utf8ByteLength(value) {
 
 function callJsonAbi(call) {
   let capacity = INITIAL_RESPONSE_CAPACITY;
-  while (true) {
+  for (let attempt = 0; attempt < 2; ++attempt) {
     const response = Memory.alloc(capacity);
     const responseSize = Memory.alloc(8);
     responseSize.writeU64(new UInt64(0));
@@ -81,6 +89,9 @@ function callJsonAbi(call) {
       throw new Error('JSON ABI response exceeds 1 MiB: ' + requiredSize);
     }
     if (transportCode === QTRACE_JSON_RESPONSE_TOO_SMALL) {
+      if (attempt !== 0) {
+        throw new Error('JSON ABI response was too small more than once');
+      }
       if (requiredSize <= capacity) {
         throw new Error('JSON ABI returned an invalid retry size: ' + requiredSize);
       }
@@ -98,10 +109,114 @@ function callJsonAbi(call) {
     }
     return response.readUtf8String(requiredSize - 1);
   }
+  throw new Error('JSON ABI retry loop exhausted');
 }
 
 function responseObject(response) {
-  return typeof response === 'string' ? JSON.parse(response) : response;
+  try {
+    return typeof response === 'string' ? JSON.parse(response) : response;
+  } catch (error) {
+    throw new Error('invalid JSON ABI response: malformed JSON: ' + error);
+  }
+}
+
+function invalidResponse(message) {
+  throw new Error('invalid JSON ABI response: ' + message);
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateWarningArray(warnings, path) {
+  if (!Array.isArray(warnings)) invalidResponse(path + ' must be an array');
+  for (let index = 0; index < warnings.length; ++index) {
+    const warning = warnings[index];
+    if (!isObject(warning) || typeof warning.code !== 'string' ||
+        typeof warning.message !== 'string') {
+      invalidResponse(path + '[' + index + '] must contain string code and message');
+    }
+  }
+}
+
+function validateErrorResponse(response) {
+  const error = response.error;
+  if (!isObject(error) || typeof error.code !== 'string' ||
+      typeof error.path !== 'string' || typeof error.message !== 'string') {
+    invalidResponse('error must contain string code, path, and message');
+  }
+}
+
+function validateResponseEnvelope(value) {
+  const response = responseObject(value);
+  if (!isObject(response)) invalidResponse('root must be an object');
+  if (response.responseSchemaVersion !== 1) {
+    invalidResponse('responseSchemaVersion must equal 1');
+  }
+  if (typeof response.ok !== 'boolean') invalidResponse('ok must be a boolean');
+  if (!response.ok) {
+    validateErrorResponse(response);
+    return response;
+  }
+  if (typeof response.generation !== 'number' ||
+      !Number.isInteger(response.generation) || response.generation <= 0) {
+    invalidResponse('generation must be a positive integer');
+  }
+  if (typeof response.state !== 'string') invalidResponse('state must be a string');
+  if (typeof response.targetModule !== 'string' || response.targetModule.length === 0) {
+    invalidResponse('targetModule must be a non-empty string');
+  }
+  if (!Array.isArray(response.scenes)) invalidResponse('scenes must be an array');
+  validateWarningArray(response.warnings, 'warnings');
+  return response;
+}
+
+function validateConfigureResponse(value) {
+  const response = validateResponseEnvelope(value);
+  if (!response.ok) return response;
+  if (response.state !== 'waiting_for_module') {
+    invalidResponse('configure state must be waiting_for_module');
+  }
+  for (let index = 0; index < response.scenes.length; ++index) {
+    const scene = response.scenes[index];
+    if (!isObject(scene) || typeof scene.name !== 'string' ||
+        typeof scene.offset !== 'string' ||
+        !Object.prototype.hasOwnProperty.call(scene, 'endOffset') ||
+        (scene.endOffset !== null && typeof scene.endOffset !== 'string')) {
+      invalidResponse('scenes[' + index + '] has an invalid normalized scene shape');
+    }
+  }
+  return response;
+}
+
+function validateStatusResponse(value) {
+  const response = validateResponseEnvelope(value);
+  if (!response.ok) return response;
+  if (!STATUS_STATES.has(response.state)) invalidResponse('unknown status state');
+  if (!Object.prototype.hasOwnProperty.call(response, 'moduleBase') ||
+      (response.moduleBase !== null && typeof response.moduleBase !== 'string')) {
+    invalidResponse('moduleBase must be null or a string');
+  }
+  for (let index = 0; index < response.scenes.length; ++index) {
+    const scene = response.scenes[index];
+    if (!isObject(scene) || typeof scene.name !== 'string' ||
+        typeof scene.offset !== 'string' ||
+        !Object.prototype.hasOwnProperty.call(scene, 'runtimeAddress') ||
+        (scene.runtimeAddress !== null && typeof scene.runtimeAddress !== 'string') ||
+        !Object.prototype.hasOwnProperty.call(scene, 'runtimeEnd') ||
+        (scene.runtimeEnd !== null && typeof scene.runtimeEnd !== 'string') ||
+        !SCENE_STATES.has(scene.state)) {
+      invalidResponse('scenes[' + index + '] has an invalid status scene shape');
+    }
+    validateWarningArray(scene.warnings, 'scenes[' + index + '].warnings');
+    if (scene.error !== undefined &&
+        (!isObject(scene.error) || typeof scene.error.code !== 'string' ||
+         typeof scene.error.hookError !== 'number' ||
+         !Number.isInteger(scene.error.hookError))) {
+      invalidResponse('scenes[' + index + '].error has an invalid shape');
+    }
+  }
+  return response;
 }
 
 function renderWarning(owner, warning) {
@@ -110,7 +225,7 @@ function renderWarning(owner, warning) {
 }
 
 function renderConfigureResponse(value) {
-  const response = responseObject(value);
+  const response = validateConfigureResponse(value);
   if (!response.ok) {
     const error = response.error || {};
     return ['[-] tracer config rejected ' + (error.code || 'UNKNOWN_ERROR') +
@@ -135,7 +250,7 @@ function renderConfigureResponse(value) {
 }
 
 function renderStatusResponse(value, includeWaitingForModule) {
-  const response = responseObject(value);
+  const response = validateStatusResponse(value);
   const showWaiting = includeWaitingForModule !== false;
   if (!response.ok) {
     const error = response.error || {};
@@ -158,6 +273,8 @@ function renderStatusResponse(value, includeWaitingForModule) {
       const address = scene.runtimeAddress ||
         (response.targetModule + '+' + scene.offset);
       lines.push('[+] scene ' + scene.name + ' installed at ' + address);
+    } else if (scene.state === 'rolled_back') {
+      lines.push('[+] scene ' + scene.name + ' rolled back');
     } else if (scene.state === 'hook_failed' ||
                scene.state === 'rollback_failed') {
       const error = scene.error || {};
@@ -170,6 +287,9 @@ function renderStatusResponse(value, includeWaitingForModule) {
 
   if (response.state === 'installed') {
     lines.push('[+] generation ' + response.generation + ' installed');
+  } else if (response.state === 'hook_failed') {
+    lines.push('[-] generation ' + response.generation +
+      ' finished with hook_failed; rollback complete');
   } else if (TERMINAL_STATES.has(response.state)) {
     lines.push('[-] generation ' + response.generation +
       ' finished with ' + response.state);
@@ -186,7 +306,7 @@ function pollGeneration(getStatus, schedule, emit) {
     let status;
     try {
       payload = getStatus();
-      status = responseObject(payload);
+      status = validateStatusResponse(payload);
     } catch (error) {
       emit('[-] tracer status polling failed: ' + error);
       return;
@@ -288,7 +408,7 @@ function main() {
     dir + '/' + config.loader.shadowhookCompanion, tracerModule);
 
   const configurePayload = configureTracer(JSON.stringify(config.tracer), tracerModule);
-  const configureResponse = responseObject(configurePayload);
+  const configureResponse = validateConfigureResponse(configurePayload);
   for (const line of renderConfigureResponse(configureResponse)) console.log(line);
   if (!configureResponse.ok) return;
 

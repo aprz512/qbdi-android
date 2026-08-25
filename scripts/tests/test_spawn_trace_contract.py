@@ -36,6 +36,8 @@ class SpawnTraceContractTests(unittest.TestCase):
         for helper in (
             "utf8ByteLength",
             "callJsonAbi",
+            "validateConfigureResponse",
+            "validateStatusResponse",
             "renderConfigureResponse",
             "renderStatusResponse",
             "pollGeneration",

@@ -39,6 +39,81 @@ rpc.exports = {
     return {calls, response};
   },
 
+  retrylimit() {
+    let calls = 0;
+    let error = null;
+    try {
+      callJsonAbi((buffer, capacity, responseSize) => {
+        calls += 1;
+        if (calls <= 2) {
+          responseSize.writeU64(new UInt64(calls === 1 ? 20000 : 30000));
+          return QTRACE_JSON_RESPONSE_TOO_SMALL;
+        }
+        const payload = JSON.stringify({ok: true});
+        buffer.writeUtf8String(payload);
+        responseSize.writeU64(new UInt64(utf8ByteLength(payload) + 1));
+        return QTRACE_JSON_OK;
+      });
+    } catch (caught) {
+      error = String(caught);
+    }
+    return {calls, error};
+  },
+
+  invalidresponses() {
+    const accepted = {
+      responseSchemaVersion: 1,
+      ok: true,
+      generation: 7,
+      state: 'waiting_for_module',
+      targetModule: 'libdemo_target.so',
+      scenes: [{name: 'init', offset: '0x6ac90', endOffset: null}],
+      warnings: []
+    };
+    const status = {
+      responseSchemaVersion: 1,
+      ok: true,
+      generation: 7,
+      state: 'installing',
+      targetModule: 'libdemo_target.so',
+      moduleBase: '0x70000000',
+      scenes: [{
+        name: 'init',
+        offset: '0x6ac90',
+        runtimeAddress: '0x7006ac90',
+        runtimeEnd: null,
+        state: 'installing',
+        warnings: []
+      }],
+      warnings: []
+    };
+    const cases = [
+      ['configure', {...accepted, responseSchemaVersion: 2}],
+      ['configure', {...accepted, ok: 'false'}],
+      ['configure', {...accepted, generation: undefined}],
+      ['configure', {...accepted, state: undefined}],
+      ['configure', {...accepted, scenes: {}}],
+      ['configure', {...accepted, warnings: {}}],
+      ['configure', {
+        responseSchemaVersion: 1,
+        ok: false,
+        error: {code: 'BAD', path: '$'}
+      }],
+      ['status', {...status, responseSchemaVersion: 2}],
+      ['status', {...status, scenes: undefined}],
+      ['status', {...status, warnings: undefined}]
+    ];
+    return cases.map(([kind, response]) => {
+      try {
+        if (kind === 'configure') renderConfigureResponse(response);
+        else renderStatusResponse(response);
+        return null;
+      } catch (error) {
+        return String(error);
+      }
+    });
+  },
+
   renderwarnings() {
     return renderConfigureResponse({
       responseSchemaVersion: 1,
@@ -60,6 +135,7 @@ rpc.exports = {
         name: 'init',
         offset: '0x6ac90',
         runtimeAddress: '0x7006ac90',
+        runtimeEnd: null,
         state: 'installing',
         warnings: [
           {code: 'SCENE_WARNING_ONE', message: 'first scene warning'},
@@ -67,6 +143,37 @@ rpc.exports = {
         ]
       }]
     }));
+  },
+
+  renderrollback() {
+    return renderStatusResponse({
+      responseSchemaVersion: 1,
+      ok: true,
+      generation: 11,
+      state: 'hook_failed',
+      targetModule: 'libdemo_target.so',
+      moduleBase: '0x70000000',
+      warnings: [],
+      scenes: [
+        {
+          name: 'init',
+          offset: '0x6ac90',
+          runtimeAddress: '0x7006ac90',
+          runtimeEnd: null,
+          state: 'rolled_back',
+          warnings: []
+        },
+        {
+          name: 'algorithm',
+          offset: '0x6db38',
+          runtimeAddress: '0x7006db38',
+          runtimeEnd: null,
+          state: 'hook_failed',
+          warnings: [],
+          error: {code: 'HOOK_INSTALL_FAILED', hookError: 73}
+        }
+      ]
+    });
   },
 
   pollstatuses(payloads) {
@@ -106,6 +213,20 @@ rpc.exports = {
             {"ok": True, "value": "retried"}, json.loads(result["response"])
         )
 
+    def test_refuses_a_second_response_too_small_result(self):
+        result = self.exports.retrylimit()
+
+        self.assertEqual(2, result["calls"])
+        self.assertIn("more than once", result["error"])
+
+    def test_rejects_malformed_or_unsupported_responses_before_rendering(self):
+        errors = self.exports.invalidresponses()
+
+        self.assertEqual(10, len(errors))
+        for error in errors:
+            with self.subTest(error=error):
+                self.assertIn("invalid JSON ABI response", error)
+
     def test_renders_every_warning_with_warning_prefix(self):
         lines = self.exports.renderwarnings()
         warning_lines = [line for line in lines if line.startswith("[!]")]
@@ -115,6 +236,17 @@ rpc.exports = {
         self.assertTrue(any("status warning" in line for line in warning_lines))
         self.assertTrue(any("first scene warning" in line for line in warning_lines))
         self.assertTrue(any("second scene warning" in line for line in warning_lines))
+
+    def test_renders_rolled_back_scenes_and_completed_rollback(self):
+        lines = self.exports.renderrollback()
+
+        self.assertIn("[+] scene init rolled back", lines)
+        self.assertTrue(
+            any("scene algorithm hook_failed" in line for line in lines)
+        )
+        self.assertIn(
+            "[-] generation 11 finished with hook_failed; rollback complete", lines
+        )
 
     def test_suppresses_unchanged_status_and_stops_at_terminal_state(self):
         waiting = {
