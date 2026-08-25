@@ -1,4 +1,4 @@
-"""Strict bounded-memory decoder and format-3 renderer for QTRB v1 traces."""
+"""Strict bounded-memory decoder and format-4 renderer for QTRB v1 traces."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ INSTRUCTION_FIXED = struct.Struct("<QIQIBB")
 MEMORY_FIXED = struct.Struct("<IQBBHQIQ")
 CALL_CHUNK_FIXED = struct.Struct("<QIHH")
 TRACE_END_FIXED = struct.Struct("<BQQ" + "Q" * 10)
+TRACE_STOP_FIXED = struct.Struct("<B7s" + "Q" * 11)
 
 MAX_RECORD_PAYLOAD = 4612
 MAX_CONTEXT_STRING = 255
@@ -35,7 +36,7 @@ MAX_REGISTER_NAME = 16
 MAX_MEMORY_OPERANDS = 4
 MAX_CAPTURED_MEMORY = 64
 MAX_DICTIONARY_ENTRIES = 1 << 16
-MAX_COMPATIBLE_MINOR = 1
+SUPPORTED_MINOR_FEATURES = frozenset(((0, 0), (1, 0), (2, 1)))
 OPTIONAL_RECORD_TYPE_MIN = 0x8000
 VALID_INSTRUCTION_FLAGS = 0xF
 PROFILE_NAMES = ("fast", "balanced", "full")
@@ -53,6 +54,7 @@ class ConversionStats:
     instructions: int
     converted_text_bytes: int
     partial: bool
+    termination: str | None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -100,8 +102,10 @@ class _ModuleDefinition:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class _Footer:
-    success: int
+class TraceTerminal:
+    termination: str
+    reason: str | None
+    return_valid: bool
     return_value: int
     elapsed_ms: int
     instructions: int
@@ -121,7 +125,12 @@ class _ConversionDetails:
     stats: ConversionStats
     profile: str
     compression_enabled: bool
-    footer: _Footer | None
+    terminal: TraceTerminal | None
+
+    @property
+    def footer(self) -> TraceTerminal | None:
+        """Compatibility alias for conversion consumers pending their terminal migration."""
+        return self.terminal
 
 
 @dataclasses.dataclass(slots=True)
@@ -328,8 +337,6 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
         raise BinaryTraceError("invalid QTRB magic")
     if major != 1:
         raise BinaryTraceError("unsupported major version")
-    if minor > MAX_COMPATIBLE_MINOR:
-        raise BinaryTraceError("unsupported minor version")
     if endian != 1:
         raise BinaryTraceError("invalid endian marker")
     if pointer_width not in (4, 8):
@@ -340,8 +347,8 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
         raise BinaryTraceError("nonzero reserved stream header byte")
     if size != STREAM_HEADER.size:
         raise BinaryTraceError("invalid stream header size")
-    if features != 0:
-        raise BinaryTraceError("unknown required features")
+    if (minor, features) not in SUPPORTED_MINOR_FEATURES:
+        raise BinaryTraceError("unsupported minor/features")
 
     modules: dict[int, _ModuleDefinition] = {}
     definitions: dict[int, _InstructionDefinition] = {}
@@ -352,7 +359,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
     text_bytes = 0
     begin_effective_buffer = 0
     begin_compression: bool | None = None
-    footer: _Footer | None = None
+    terminal: TraceTerminal | None = None
     pending_call: _PendingCall | None = None
     pending_event: _PendingEvent | None = None
 
@@ -395,7 +402,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
             if flags != 0:
                 raise BinaryTraceError("unknown flags")
             continue
-        if record_type not in range(1, 10):
+        if record_type not in range(1, 11):
             raise BinaryTraceError(f"unknown record type {record_type} (required record)")
 
         if record_type == 1:
@@ -415,7 +422,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
             begin_effective_buffer = effective_buffer
             begin_compression = bool(compression)
             emit(
-                f"TRACE_BEGIN format=3 scene={_quoted(scene)} target={_quoted(target)} "
+                f"TRACE_BEGIN format=4 scene={_quoted(scene)} target={_quoted(target)} "
                 f"target_offset={_hex(target_offset)} base={_hex(module_base)} "
                 f"address={_hex(target_address)} pid={pid} tid={tid} "
                 f"profile={PROFILE_NAMES[profile_value]} compression={compression} "
@@ -621,26 +628,62 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
         elif record_type == 9:
             if flags or len(payload) != TRACE_END_FIXED.size:
                 raise BinaryTraceError("invalid TRACE_END payload")
-            values = TRACE_END_FIXED.unpack(payload)
-            footer = _Footer(*values)
-            if footer.success not in (0, 1):
+            success, return_value, elapsed_ms, *metrics = TRACE_END_FIXED.unpack(payload)
+            if success not in (0, 1):
                 raise BinaryTraceError("invalid TRACE_END status")
-            if footer.instructions != instruction_count:
+            terminal = TraceTerminal(
+                "completed", None, True, return_value, elapsed_ms, *metrics
+            )
+            if terminal.instructions != instruction_count:
                 raise BinaryTraceError("footer instruction count mismatch")
-            if footer.encoded_bytes != reader.total:
+            if terminal.encoded_bytes != reader.total:
                 raise BinaryTraceError("footer encoded byte count mismatch")
-            if footer.effective_buffer_bytes != begin_effective_buffer:
+            if terminal.effective_buffer_bytes != begin_effective_buffer:
                 raise BinaryTraceError("footer effective buffer mismatch")
             ended = True
             emit(
-                f"TRACE_END status={'ok' if footer.success else 'failed'} "
-                f"return={_hex(footer.return_value)} elapsed_ms={footer.elapsed_ms} "
-                f"instructions={footer.instructions} encoded_bytes={footer.encoded_bytes} "
-                f"compressed_bytes={footer.compressed_bytes} cache_hits={footer.cache_hits} "
-                f"cache_misses={footer.cache_misses} cache_collisions={footer.cache_collisions} "
-                f"buffer_swaps={footer.buffer_swaps} producer_waits={footer.producer_waits} "
-                f"producer_wait_ns={footer.producer_wait_ns} "
-                f"effective_buffer_bytes={footer.effective_buffer_bytes}"
+                f"TRACE_END status=completed return_valid=1 "
+                f"return={_hex(terminal.return_value)} elapsed_ms={terminal.elapsed_ms} "
+                f"instructions={terminal.instructions} encoded_bytes={terminal.encoded_bytes} "
+                f"compressed_bytes={terminal.compressed_bytes} cache_hits={terminal.cache_hits} "
+                f"cache_misses={terminal.cache_misses} "
+                f"cache_collisions={terminal.cache_collisions} "
+                f"buffer_swaps={terminal.buffer_swaps} "
+                f"producer_waits={terminal.producer_waits} "
+                f"producer_wait_ns={terminal.producer_wait_ns} "
+                f"effective_buffer_bytes={terminal.effective_buffer_bytes}"
+            )
+        elif record_type == 10:
+            if minor != 2:
+                raise BinaryTraceError("TRACE_STOP requires minor 2")
+            if flags or len(payload) != TRACE_STOP_FIXED.size:
+                raise BinaryTraceError("invalid TRACE_STOP payload")
+            reason, reserved, elapsed_ms, *metrics = TRACE_STOP_FIXED.unpack(payload)
+            if reason != 1:
+                raise BinaryTraceError("invalid TRACE_STOP reason")
+            if reserved != b"\0" * 7:
+                raise BinaryTraceError("nonzero TRACE_STOP reserved bytes")
+            terminal = TraceTerminal(
+                "stopped", "duration_elapsed", False, 0, elapsed_ms, *metrics
+            )
+            if terminal.instructions != instruction_count:
+                raise BinaryTraceError("footer instruction count mismatch")
+            if terminal.encoded_bytes != reader.total:
+                raise BinaryTraceError("footer encoded byte count mismatch")
+            if terminal.effective_buffer_bytes != begin_effective_buffer:
+                raise BinaryTraceError("footer effective buffer mismatch")
+            ended = True
+            emit(
+                "TRACE_END status=stopped reason=duration_elapsed return_valid=0 "
+                f"elapsed_ms={terminal.elapsed_ms} instructions={terminal.instructions} "
+                f"encoded_bytes={terminal.encoded_bytes} "
+                f"compressed_bytes={terminal.compressed_bytes} "
+                f"cache_hits={terminal.cache_hits} cache_misses={terminal.cache_misses} "
+                f"cache_collisions={terminal.cache_collisions} "
+                f"buffer_swaps={terminal.buffer_swaps} "
+                f"producer_waits={terminal.producer_waits} "
+                f"producer_wait_ns={terminal.producer_wait_ns} "
+                f"effective_buffer_bytes={terminal.effective_buffer_bytes}"
             )
         else:
             raise BinaryTraceError(f"unknown record type {record_type}")
@@ -653,10 +696,13 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
         raise BinaryTraceError("missing TRACE_BEGIN")
     if not ended and not allow_partial:
         raise BinaryTraceError("missing TRACE_END")
-    stats = ConversionStats(instruction_count, text_bytes, not ended)
+    stats = ConversionStats(
+        instruction_count, text_bytes, not ended,
+        terminal.termination if terminal is not None else None,
+    )
     assert begin_compression is not None
     return _ConversionDetails(
-        stats, PROFILE_NAMES[profile_value], begin_compression, footer
+        stats, PROFILE_NAMES[profile_value], begin_compression, terminal
     )
 
 

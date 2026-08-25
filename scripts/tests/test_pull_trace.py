@@ -351,7 +351,7 @@ class PullArtifactTests(unittest.TestCase):
             self.assertEqual(0, result.exit_code)
             self.assertEqual(binary, (Path(directory) / name).read_bytes())
             text = Path(directory) / "123_algorithm.trace.txt"
-            self.assertIn("TRACE_END status=ok", text.read_text(encoding="utf-8"))
+            self.assertIn("TRACE_END status=completed", text.read_text(encoding="utf-8"))
 
     def test_pulls_compressed_binary_and_routes_sidecar_through_converter(self):
         name = "123_algorithm.trace.bin.lz4"
@@ -386,7 +386,7 @@ class PullArtifactTests(unittest.TestCase):
 
             self.assertEqual(0, result.exit_code)
             self.assertEqual("complete", result.status)
-            self.assertIn("TRACE_END status=ok", (root / "123_algorithm.trace.txt").read_text())
+            self.assertIn("TRACE_END status=completed", (root / "123_algorithm.trace.txt").read_text())
 
     def test_compressed_binary_crash_truncation_routes_to_partial_output(self):
         name = "123_algorithm.trace.bin.lz4"
@@ -657,7 +657,7 @@ class CommandLineTests(unittest.TestCase):
             )
 
             self.assertEqual(0, exit_code)
-            self.assertIn("TRACE_END status=ok", (Path(directory) / "new.trace.txt").read_text())
+            self.assertIn("TRACE_END status=completed", (Path(directory) / "new.trace.txt").read_text())
         self.assertIn("output=", stdout.getvalue())
 
     def test_cli_clearly_reports_missing_lz4(self):

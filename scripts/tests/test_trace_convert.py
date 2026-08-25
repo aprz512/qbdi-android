@@ -370,7 +370,7 @@ class TraceConvertFileTests(unittest.TestCase):
             source.write_bytes(raw_stream())
             stats = convert_binary_file(source, destination, lz4=None, crash_marked=False)
             self.assertFalse(stats.partial)
-            self.assertIn("TRACE_END status=ok", destination.read_text())
+            self.assertIn("TRACE_END status=completed", destination.read_text())
             with self.assertRaisesRegex(BinaryTraceError, "already exists"):
                 convert_binary_file(source, destination, lz4=None, crash_marked=False)
 

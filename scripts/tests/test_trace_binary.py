@@ -10,6 +10,7 @@ from scripts.trace_binary import BinaryTraceError, convert_binary_stream
 
 HEADER = struct.Struct("<4sBBBBBBHI")
 RECORD = struct.Struct("<HHI")
+TRACE_STOP = struct.Struct("<B7x" + "Q" * 11)
 
 
 def text(value: bytes | str) -> bytes:
@@ -126,6 +127,11 @@ def footer(*, instructions: int = 1, encoded_bytes: int = 0,
     return record(9, struct.pack("<BQQ" + "Q" * 10, 1, 0x55, 17, *metrics))
 
 
+def stopped(*, encoded_bytes: int, compressed_bytes: int) -> bytes:
+    values = (1, 17, 1, encoded_bytes, compressed_bytes, 9, 1, 0, 2, 0, 0, 4096)
+    return record(10, TRACE_STOP.pack(*values))
+
+
 def complete_stream(*events: bytes, profile: int = 2, compression: int = 1,
                     compressed_bytes: int | None = None) -> bytes:
     prefix = (stream_header(profile) + begin(profile, compression=compression)
@@ -139,11 +145,74 @@ def complete_stream(*events: bytes, profile: int = 2, compression: int = 1,
     )
 
 
+def stopped_stream() -> bytes:
+    prefix = (stream_header(minor=2, features=1) + begin() + module()
+              + instruction_definition() + instruction())
+    terminal_size = len(stopped(encoded_bytes=0, compressed_bytes=0))
+    total = len(prefix) + terminal_size
+    return prefix + stopped(encoded_bytes=total, compressed_bytes=total)
+
+
 class BinaryTraceConversionTests(unittest.TestCase):
     def convert(self, data: bytes, *, partial: bool = False):
         output = io.StringIO()
         stats = convert_binary_stream(io.BytesIO(data), output, allow_partial=partial)
         return output.getvalue(), stats
+
+    def test_normalizes_stopped_v12_terminal_and_exposes_its_public_model(self):
+        output, stats = self.convert(stopped_stream())
+
+        self.assertIn("TRACE_BEGIN format=4", output)
+        self.assertIn(
+            "TRACE_END status=stopped reason=duration_elapsed return_valid=0", output
+        )
+        self.assertEqual("stopped", stats.termination)
+
+    def test_rejects_malformed_stopped_terminals_and_stops_stream_parsing(self):
+        complete = stopped_stream()
+        header = stream_header(minor=2, features=1)
+        terminal_start = len(complete) - RECORD.size - TRACE_STOP.size
+        prefix = complete[:terminal_start]
+        terminal_payload = complete[-TRACE_STOP.size:]
+        reserved = bytearray(terminal_payload)
+        reserved[1] = 1
+        bad_reason = bytearray(terminal_payload)
+        bad_reason[0] = 0
+        cases = (
+            ("invalid TRACE_STOP reason", prefix + record(10, bytes(bad_reason))),
+            ("nonzero TRACE_STOP reserved bytes", prefix + record(10, bytes(reserved))),
+            ("invalid TRACE_STOP payload", prefix + record(10, b"\x01")),
+            ("record after TRACE_END", complete + call()),
+            ("TRACE_STOP requires minor 2", complete.replace(
+                header, stream_header(minor=1), 1)),
+            ("unsupported minor/features", complete.replace(
+                header, stream_header(minor=2), 1)),
+        )
+        for message, data in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(BinaryTraceError, message):
+                self.convert(data)
+
+    def test_normalizes_legacy_failed_trace_end_without_fabricating_a_failure_terminal(self):
+        complete = complete_stream()
+        terminal_start = len(complete) - RECORD.size - 97
+        failed = bytearray(complete[-97:])
+        failed[0] = 0
+
+        output, stats = self.convert(complete[:terminal_start] + record(9, bytes(failed)))
+
+        self.assertIn("TRACE_END status=completed return_valid=1", output)
+        self.assertNotIn("status=failed", output)
+        self.assertEqual("completed", stats.termination)
+
+    def test_legacy_completed_streams_normalize_to_format_four_and_completed(self):
+        for minor in (0, 1):
+            with self.subTest(minor=minor):
+                output, stats = self.convert(complete_stream().replace(
+                    stream_header(), stream_header(minor=minor), 1
+                ))
+                self.assertTrue(output.startswith("TRACE_BEGIN format=4"))
+                self.assertIn("TRACE_END status=completed return_valid=1", output)
+                self.assertEqual("completed", stats.termination)
 
     def test_renders_all_records_profiles_and_static_dynamic_semantics(self):
         data = complete_stream(
@@ -157,7 +226,7 @@ class BinaryTraceConversionTests(unittest.TestCase):
         self.assertFalse(stats.partial)
         self.assertEqual(
             [
-                'TRACE_BEGIN format=3 scene="scene\\n\\\"x" target="lib.so" '
+                'TRACE_BEGIN format=4 scene="scene\\n\\\"x" target="lib.so" '
                 'target_offset=0x40 base=0x100000 address=0x100040 pid=12 tid=13 '
                 'profile=full compression=1 effective_buffer_bytes=4096 run_id=7',
                 'INST seq=1 module="lib.so" module_base=0x100000 pc=0x102345 '
@@ -172,7 +241,7 @@ class BinaryTraceConversionTests(unittest.TestCase):
                 'CALL category="jni" name="Find" detail="line\\n\\\"quoted\\\""',
                 'RULE name="guard" detail="hit"',
                 'ERROR name="fatal" detail="bad"',
-                'TRACE_END status=ok return=0x55 elapsed_ms=17 instructions=1 '
+                'TRACE_END status=completed return_valid=1 return=0x55 elapsed_ms=17 instructions=1 '
                 f'encoded_bytes={len(data)} compressed_bytes={len(data)} cache_hits=9 '
                 'cache_misses=1 cache_collisions=0 buffer_swaps=2 producer_waits=0 '
                 'producer_wait_ns=0 effective_buffer_bytes=4096',
@@ -222,7 +291,7 @@ class BinaryTraceConversionTests(unittest.TestCase):
         output = io.StringIO()
         stats = convert_binary_stream(ShortReader(data), output)
         self.assertEqual(1, stats.instructions)
-        self.assertIn("TRACE_END status=ok", output.getvalue())
+        self.assertIn("TRACE_END status=completed", output.getvalue())
 
     def test_current_pc_and_current_page_targets_wrap_at_64_bits(self):
         page = complete_stream(instruction_definition(displacement=-0x3000), instruction())
@@ -247,6 +316,7 @@ class BinaryTraceConversionTests(unittest.TestCase):
         data = stream_header(0) + begin(0) + module() + instruction_definition() + instruction()
         output, stats = self.convert(data, partial=True)
         self.assertTrue(stats.partial)
+        self.assertIsNone(stats.termination)
         self.assertEqual(1, stats.instructions)
         self.assertNotIn("TRACE_END", output)
         with self.assertRaisesRegex(BinaryTraceError, "TRACE_END"):
@@ -255,20 +325,20 @@ class BinaryTraceConversionTests(unittest.TestCase):
             self.convert(data[:-1], partial=True)
 
     def test_rejects_invalid_headers_flags_lengths_and_order(self):
-        mutations = {
-            "magic": b"BAD!" + complete_stream()[4:],
-            "major version": stream_header(major=2) + begin() + module(),
-            "minor version": stream_header(minor=2) + begin() + module(),
-            "endian": stream_header(endian=2) + begin() + module(),
-            "pointer width": stream_header(pointer=3) + begin() + module(),
-            "reserved": stream_header(reserved=1) + begin() + module(),
-            "header size": stream_header(size=15) + begin() + module(),
-            "required features": stream_header(features=1) + begin() + module(),
-            "unknown flags": stream_header() + begin() + record(7, text("") + text(""), 2),
-            "record payload exceeds": stream_header() + begin() + RECORD.pack(7, 0, 4621),
-            "TRACE_BEGIN must be first": stream_header() + module(),
-        }
-        for message, data in mutations.items():
+        mutations = (
+            ("magic", b"BAD!" + complete_stream()[4:]),
+            ("major version", stream_header(major=2) + begin() + module()),
+            ("unsupported minor/features", stream_header(minor=2) + begin() + module()),
+            ("endian", stream_header(endian=2) + begin() + module()),
+            ("pointer width", stream_header(pointer=3) + begin() + module()),
+            ("reserved", stream_header(reserved=1) + begin() + module()),
+            ("header size", stream_header(size=15) + begin() + module()),
+            ("unsupported minor/features", stream_header(features=1) + begin() + module()),
+            ("unknown flags", stream_header() + begin() + record(7, text("") + text(""), 2)),
+            ("record payload exceeds", stream_header() + begin() + RECORD.pack(7, 0, 4621)),
+            ("TRACE_BEGIN must be first", stream_header() + module()),
+        )
+        for message, data in mutations:
             with self.subTest(message=message), self.assertRaisesRegex(BinaryTraceError, message):
                 self.convert(data)
 
@@ -357,10 +427,10 @@ class BinaryTraceConversionTests(unittest.TestCase):
         rendered, _ = self.convert(complete_stream(optional).replace(
             stream_header(), stream_header(minor=1), 1))
         self.assertIn("TRACE_END", rendered)
-        with self.assertRaisesRegex(BinaryTraceError, "unknown.*required.*record"):
+        with self.assertRaisesRegex(BinaryTraceError, "TRACE_STOP requires minor 2"):
             self.convert(complete_stream(record(10, b"opaque")).replace(
                 stream_header(), stream_header(minor=1), 1))
-        with self.assertRaisesRegex(BinaryTraceError, "required features"):
+        with self.assertRaisesRegex(BinaryTraceError, "unsupported minor/features"):
             self.convert(complete_stream(optional).replace(
                 stream_header(), stream_header(minor=1, features=1), 1))
 
@@ -368,7 +438,7 @@ class BinaryTraceConversionTests(unittest.TestCase):
         complete = complete_stream()
         for message, data in (
             ("record after TRACE_END", complete + call()),
-            ("unknown record type", stream_header() + begin() + record(10, b"")),
+            ("TRACE_STOP requires minor 2", stream_header() + begin() + record(10, b"")),
             ("TRACE_END", stream_header() + begin() + module()),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(BinaryTraceError, message):

@@ -670,7 +670,7 @@ effective_buffer_bytes=67108864
             self.assertEqual(converted.stat().st_size, result["converted_text_bytes"])
             self.assertEqual(64, len(result["artifact_sha256"]))
             self.assertIn(
-                "TRACE_END status=ok",
+                "TRACE_END status=completed",
                 converted.read_text(encoding="utf-8"),
             )
             self.assertEqual([], list(Path(directory).glob(".benchmark-*")))
