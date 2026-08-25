@@ -24,6 +24,7 @@
 #include <limits>
 #include <sys/syscall.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -79,6 +80,7 @@ static std::atomic<int> g_module_callback_state{0};
 using RegistrationGate = void (*)();
 static RegistrationGate g_registration_gate = nullptr;
 static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
+static std::atomic<bool> g_throw_during_configuration_apply{false};
 #endif
 
 static void *proxy_for_generation(size_t generation);
@@ -133,7 +135,11 @@ static bool finish_module_observation_failure(uint64_t generation) {
 
 static void install_nonflight_hooks_when_ready(
         const TraceConfig &config, uint64_t generation) {
-    for (int attempt = 0; attempt < 200; ++attempt) {
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> guard(g_lock);
+            if (!g_configured || g_config_generation != generation) return;
+        }
         ModuleRange module;
         if (find_loaded_module(config.target_so, 0, 0, &module)) {
             install_hooks_for_module(module, generation, false);
@@ -141,7 +147,6 @@ static void install_nonflight_hooks_when_ready(
         }
         (void)::usleep(50 * 1000);
     }
-    (void)finish_module_observation_failure(generation);
 }
 
 static void retire_module_generation(uintptr_t module_base,
@@ -785,6 +790,11 @@ bool trace_proxy_test_generation_installed(size_t generation) {
 bool trace_proxy_test_finish_module_observation_failure(uint64_t generation) {
     return finish_module_observation_failure(generation);
 }
+
+void trace_proxy_test_throw_during_configuration_apply() {
+    g_throw_during_configuration_apply.store(true,
+                                             std::memory_order_release);
+}
 #endif
 
 static void tracer_atfork_prepare() {
@@ -854,6 +864,20 @@ static std::vector<SceneConfigurationStatus> installation_statuses(
     return statuses;
 }
 
+static void deactivate_flight_gateway_if_current(
+        uint64_t generation, bool registry_locked) {
+    bool deactivate = false;
+    if (registry_locked) {
+        deactivate = g_configured && g_config_generation == generation &&
+                     g_config.flight.enabled;
+    } else {
+        std::lock_guard<std::mutex> guard(g_lock);
+        deactivate = g_configured && g_config_generation == generation &&
+                     g_config.flight.enabled;
+    }
+    if (deactivate) process_thread_create_gateway().deactivate();
+}
+
 static void fail_installation_statuses(
         uint64_t generation, std::vector<SceneConfigurationStatus> *statuses,
         const char *code, int hook_error, bool registry_locked) {
@@ -872,6 +896,7 @@ static void fail_installation_statuses(
         cleanup_succeeded = retire_superseded_hooks(
                 generation, statuses, true);
     }
+    deactivate_flight_gateway_if_current(generation, registry_locked);
     g_tracer_configuration.finish_install(
             generation,
             cleanup_succeeded ? ConfigurationState::HookFailed
@@ -1223,71 +1248,105 @@ static void install_hooks_for_module(const ModuleRange &module,
     const ConfigurationState terminal = rollback_failed
                                         ? ConfigurationState::RollbackFailed
                                         : ConfigurationState::HookFailed;
+    deactivate_flight_gateway_if_current(generation, true);
     g_tracer_configuration.finish_install(generation, terminal,
                                            std::move(statuses));
 }
 
 static void apply_accepted_configuration(TraceConfig config,
-                                         uint64_t generation) {
-    if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;
-    std::shared_ptr<CaptureCoordinator> coordinator;
-    if (config.flight.enabled) {
-        coordinator.reset(new (std::nothrow) CaptureCoordinator());
-    }
-    const bool coordinator_ready = !config.flight.enabled || coordinator != nullptr;
-    {
-        std::lock_guard<std::mutex> guard(g_lock);
-        g_config = config;
-        g_capture_coordinator = std::move(coordinator);
-        g_configured = true;
-        g_config_generation = generation;
-    }
-    QTRACE_I("generation=%llu configure tracer package=%s target=%s",
-             static_cast<unsigned long long>(generation),
-             config.package_name.c_str(), config.target_so.c_str());
-    if (!coordinator_ready) {
-        constexpr const char *code = "COORDINATOR_ALLOCATION_FAILED";
-        QTRACE_E("generation=%llu code=%s cannot allocate flight capture coordinator",
+                                         TraceConfig active_config,
+                                         uint64_t generation) noexcept {
+    static_assert(std::is_nothrow_move_constructible_v<TraceConfig>);
+    static_assert(std::is_nothrow_move_assignable_v<TraceConfig>);
+    try {
+        if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;
+        process_thread_create_gateway().deactivate();
+        std::shared_ptr<CaptureCoordinator> coordinator;
+        if (config.flight.enabled) {
+            CaptureCoordinator *const allocated =
+                    new (std::nothrow) CaptureCoordinator();
+            if (allocated != nullptr) {
+                try {
+                    coordinator.reset(allocated);
+                } catch (...) {
+                    // shared_ptr construction deletes the supplied pointer on failure.
+                }
+            }
+        }
+        const bool coordinator_ready = !config.flight.enabled || coordinator != nullptr;
+        {
+            std::lock_guard<std::mutex> guard(g_lock);
+            g_config = std::move(active_config);
+            g_capture_coordinator = std::move(coordinator);
+            g_configured = true;
+            g_config_generation = generation;
+        }
+#if defined(QTRACE_HOST_TEST)
+        if (g_throw_during_configuration_apply.exchange(
+                    false, std::memory_order_acq_rel)) {
+            throw std::bad_alloc();
+        }
+#endif
+        QTRACE_I("generation=%llu configure tracer package=%s target=%s",
+                 static_cast<unsigned long long>(generation),
+                 config.package_name.c_str(), config.target_so.c_str());
+        if (!coordinator_ready) {
+            constexpr const char *code = "COORDINATOR_ALLOCATION_FAILED";
+            QTRACE_E("generation=%llu code=%s cannot allocate flight capture coordinator",
+                     static_cast<unsigned long long>(generation), code);
+            std::vector<SceneConfigurationStatus> statuses =
+                    installation_statuses(config, {});
+            fail_installation_statuses(generation, &statuses, code, 0);
+            return;
+        }
+        if (!init_inline_hook()) {
+            constexpr const char *code = "HOOK_INITIALIZATION_FAILED";
+            QTRACE_E("generation=%llu code=%s cannot initialize inline hooks",
+                     static_cast<unsigned long long>(generation), code);
+            std::vector<SceneConfigurationStatus> statuses =
+                    installation_statuses(config, {});
+            fail_installation_statuses(generation, &statuses, code, 0);
+            return;
+        }
+        if (!prepare_module_callbacks()) {
+            constexpr const char *code = "MODULE_CALLBACK_REGISTRATION_FAILED";
+            QTRACE_E("generation=%llu code=%s cannot register linker module lifecycle callbacks",
+                     static_cast<unsigned long long>(generation), code);
+            std::vector<SceneConfigurationStatus> statuses =
+                    installation_statuses(config, {});
+            fail_installation_statuses(generation, &statuses, code, 0);
+            return;
+        }
+        if (!config.jni_backtrace_funcs.empty()) {
+            set_jni_backtrace_funcs(config.jni_backtrace_funcs);
+            QTRACE_I("jni backtrace enabled for %zu functions",
+                     config.jni_backtrace_funcs.size());
+        }
+        ModuleRange loaded;
+        if (find_loaded_module(config.target_so, 0, 0, &loaded)) {
+            install_hooks_for_module(loaded, generation, false);
+        } else if (!config.flight.enabled) {
+            std::thread(install_nonflight_hooks_when_ready, config,
+                        generation).detach();
+        }
+    } catch (...) {
+        constexpr const char *code = "CONFIGURATION_APPLY_EXCEPTION";
+        QTRACE_E("generation=%llu code=%s unexpected configuration activation exception",
                  static_cast<unsigned long long>(generation), code);
-        std::vector<SceneConfigurationStatus> statuses =
-                installation_statuses(config, {});
-        fail_installation_statuses(generation, &statuses, code, 0);
-        return;
-    }
-    if (!init_inline_hook()) {
-        constexpr const char *code = "HOOK_INITIALIZATION_FAILED";
-        QTRACE_E("generation=%llu code=%s cannot initialize inline hooks",
-                 static_cast<unsigned long long>(generation), code);
-        std::vector<SceneConfigurationStatus> statuses =
-                installation_statuses(config, {});
-        fail_installation_statuses(generation, &statuses, code, 0);
-        return;
-    }
-    if (!prepare_module_callbacks()) {
-        constexpr const char *code = "MODULE_CALLBACK_REGISTRATION_FAILED";
-        QTRACE_E("generation=%llu code=%s cannot register linker module lifecycle callbacks",
-                 static_cast<unsigned long long>(generation), code);
-        std::vector<SceneConfigurationStatus> statuses =
-                installation_statuses(config, {});
-        fail_installation_statuses(generation, &statuses, code, 0);
-        return;
-    }
-    if (!config.jni_backtrace_funcs.empty()) {
-        set_jni_backtrace_funcs(config.jni_backtrace_funcs);
-        QTRACE_I("jni backtrace enabled for %zu functions",
-                 config.jni_backtrace_funcs.size());
-    }
-    ModuleRange loaded;
-    if (find_loaded_module(config.target_so, 0, 0, &loaded)) {
-        install_hooks_for_module(loaded, generation, false);
-    } else if (!config.flight.enabled) {
-        std::thread(install_nonflight_hooks_when_ready, config,
-                    generation).detach();
+        process_thread_create_gateway().deactivate();
+        try {
+            std::vector<SceneConfigurationStatus> statuses =
+                    installation_statuses(config, {});
+            fail_installation_statuses(generation, &statuses, code, 0);
+        } catch (...) {
+            // The ABI response is already accepted; preserve no-unwind even if
+            // terminal status enrichment also runs out of memory.
+        }
     }
 }
 
 static int32_t write_json_result(const JsonCallResult &result, char *response,
-                                 uint64_t *response_size) {
+                                 uint64_t *response_size) noexcept {
     *response_size = result.required_size;
     if (result.transport_code != QTRACE_JSON_OK) return result.transport_code;
     if (result.required_size != result.payload.size() + 1) {
@@ -1298,10 +1357,24 @@ static int32_t write_json_result(const JsonCallResult &result, char *response,
     return QTRACE_JSON_OK;
 }
 
+static int32_t write_internal_error_json(
+        char *response, uint64_t response_capacity,
+        uint64_t *response_size) noexcept {
+    static constexpr char payload[] =
+            R"json({"responseSchemaVersion":1,"ok":false,"error":{"code":"INTERNAL_ERROR","path":"$","message":"internal tracer configuration error"}})json";
+    constexpr uint64_t required_size = sizeof(payload);
+    *response_size = required_size;
+    if (response_capacity < required_size) {
+        return QTRACE_JSON_RESPONSE_TOO_SMALL;
+    }
+    std::memcpy(response, payload, sizeof(payload));
+    return QTRACE_JSON_OK;
+}
+
 extern "C" __attribute__((visibility("default"))) int32_t
 qbdi_tracer_configure_json(const char *request, uint64_t request_size,
                            char *response, uint64_t response_capacity,
-                           uint64_t *response_size) {
+                           uint64_t *response_size) noexcept {
     if (response_size == nullptr) return QTRACE_JSON_INVALID_ARGUMENT;
     *response_size = 0;
     if (request == nullptr || response == nullptr ||
@@ -1313,31 +1386,31 @@ qbdi_tracer_configure_json(const char *request, uint64_t request_size,
         return QTRACE_JSON_INVALID_ARGUMENT;
     }
 
-    std::lock_guard<std::mutex> call_guard(g_configuration_call_lock);
-    uint64_t previous_generation = 0;
-    TraceConfig previous_config;
-    const bool had_configuration = g_tracer_configuration.current(
-            &previous_generation, &previous_config);
-    const JsonCallResult result = g_tracer_configuration.configure(
-            std::string_view(request, static_cast<size_t>(request_size)),
-            response_capacity);
-    const int32_t transport_code = write_json_result(result, response,
-                                                     response_size);
-    if (transport_code != QTRACE_JSON_OK) return transport_code;
-
-    uint64_t generation = 0;
-    TraceConfig config;
-    if (g_tracer_configuration.current(&generation, &config) &&
-        (!had_configuration || generation != previous_generation)) {
-        apply_accepted_configuration(std::move(config), generation);
+    try {
+        std::lock_guard<std::mutex> call_guard(g_configuration_call_lock);
+        JsonCallResult result = g_tracer_configuration.configure(
+                std::string_view(request, static_cast<size_t>(request_size)),
+                response_capacity);
+        const int32_t transport_code = write_json_result(
+                result, response, response_size);
+        if (transport_code != QTRACE_JSON_OK) return transport_code;
+        if (result.published()) {
+            apply_accepted_configuration(
+                    std::move(result.published_config),
+                    std::move(result.active_config),
+                    result.published_generation);
+        }
+        return QTRACE_JSON_OK;
+    } catch (...) {
+        return write_internal_error_json(response, response_capacity,
+                                         response_size);
     }
-    return QTRACE_JSON_OK;
 }
 
 extern "C" __attribute__((visibility("default"))) int32_t
 qbdi_tracer_get_status_json(uint64_t generation, char *response,
                             uint64_t response_capacity,
-                            uint64_t *response_size) {
+                            uint64_t *response_size) noexcept {
     if (response_size == nullptr) return QTRACE_JSON_INVALID_ARGUMENT;
     *response_size = 0;
     if (response == nullptr ||
@@ -1347,9 +1420,14 @@ qbdi_tracer_get_status_json(uint64_t generation, char *response,
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) {
         return QTRACE_JSON_INVALID_ARGUMENT;
     }
-    return write_json_result(g_tracer_configuration.status(
-                                     generation, response_capacity),
-                             response, response_size);
+    try {
+        return write_json_result(g_tracer_configuration.status(
+                                         generation, response_capacity),
+                                 response, response_size);
+    } catch (...) {
+        return write_internal_error_json(response, response_capacity,
+                                         response_size);
+    }
 }
 
 extern "C" __attribute__((visibility("default"))) int

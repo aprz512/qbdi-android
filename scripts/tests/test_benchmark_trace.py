@@ -800,6 +800,29 @@ effective_buffer_bytes=67108864
                 **accepted,
                 "scenes": [{"name": "benchmark", "offset": 64, "endOffset": None}],
             },
+            {**accepted, "targetModule": "libwrong-target.so"},
+            {**accepted, "scenes": []},
+            {
+                **accepted,
+                "scenes": [
+                    {"name": "benchmark", "offset": "0x40", "endOffset": None},
+                    {"name": "extra", "offset": "0x80", "endOffset": None},
+                ],
+            },
+            {
+                **accepted,
+                "scenes": [{"name": "other", "offset": "0x40", "endOffset": None}],
+            },
+            {
+                **accepted,
+                "scenes": [{"name": "benchmark", "offset": "0x41", "endOffset": None}],
+            },
+            {
+                **accepted,
+                "scenes": [
+                    {"name": "benchmark", "offset": "0x40", "endOffset": "0x80"}
+                ],
+            },
         ]
         harness = r"""
 const vm = require('vm');

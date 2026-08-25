@@ -59,7 +59,25 @@ struct JsonCallResult {
     int32_t transport_code = 0;
     uint64_t required_size = 0;
     std::string payload;
+    uint64_t published_generation = 0;
+    TraceConfig published_config;
+    TraceConfig active_config;
+
+    bool published() const noexcept { return published_generation != 0; }
 };
+
+#if defined(QTRACE_HOST_TEST)
+enum class TracerConfigurationFaultPoint : uint32_t {
+    ParsePrepared = 1,
+    SnapshotPrepared = 2,
+    ResponsePrepared = 3,
+    ReplacementPrepared = 4,
+    StatusSerialization = 5,
+};
+
+void tracer_configuration_test_throw_at(
+        TracerConfigurationFaultPoint fault_point) noexcept;
+#endif
 
 class TracerConfiguration {
 public:

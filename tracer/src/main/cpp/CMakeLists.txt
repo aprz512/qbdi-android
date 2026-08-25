@@ -112,9 +112,13 @@ add_library(qbdi_tracer SHARED
         jni/jni_state_updater.cpp
         jni/jni_formatter.cpp)
 
-# nlohmann/json reports malformed input through C++ exceptions.  Keep that boundary
-# local to the cold configuration parser; the rest of the tracer remains no-exception.
-set_source_files_properties(core/tracer_configuration.cpp PROPERTIES
+# nlohmann/json reports malformed input through C++ exceptions, and the exported
+# JSON ABI must contain allocation failures before they cross the C boundary. Keep
+# exception support local to the cold configuration/parser and ABI entry points.
+set_source_files_properties(
+        tracer_entry.cpp
+        core/tracer_configuration.cpp
+        PROPERTIES
         COMPILE_OPTIONS "-fexceptions")
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)

@@ -198,6 +198,11 @@ bool ThreadCreateGateway::install(
   return true;
 }
 
+void ThreadCreateGateway::deactivate() noexcept {
+  std::lock_guard<std::mutex> guard(coordinator_mutex_);
+  coordinator_.reset();
+}
+
 bool ThreadCreateGateway::should_capture(
     PthreadStartRoutine start_routine) const noexcept {
   if (!installed_.load(std::memory_order_acquire) ||

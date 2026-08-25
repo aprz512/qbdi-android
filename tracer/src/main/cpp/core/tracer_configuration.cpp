@@ -2,9 +2,11 @@
 
 #include "third_party/nlohmann/json.hpp"
 
+#include <atomic>
 #include <charconv>
 #include <initializer_list>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -16,6 +18,23 @@ using nlohmann::json;
 
 constexpr size_t kMaximumRequestBytes = 1024U * 1024U;
 constexpr size_t kMaximumScenes = 256;
+
+#if defined(QTRACE_HOST_TEST)
+std::atomic<uint32_t> g_configuration_fault_point{0};
+
+void throw_at_fault_point(TracerConfigurationFaultPoint fault_point) {
+    uint32_t expected = static_cast<uint32_t>(fault_point);
+    if (!g_configuration_fault_point.compare_exchange_strong(
+                expected, 0, std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+        return;
+    }
+    if (fault_point == TracerConfigurationFaultPoint::StatusSerialization) {
+        throw 1;
+    }
+    throw std::bad_alloc();
+}
+#endif
 
 const char *configuration_state_name(ConfigurationState state) noexcept {
     switch (state) {
@@ -51,6 +70,20 @@ const char *scene_configuration_state_name(SceneConfigurationState state) noexce
             return "rollback_failed";
     }
     return "hook_failed";
+}
+
+bool configuration_state_terminal(ConfigurationState state) noexcept {
+    switch (state) {
+        case ConfigurationState::Installed:
+        case ConfigurationState::HookFailed:
+        case ConfigurationState::RollbackFailed:
+        case ConfigurationState::Superseded:
+            return true;
+        case ConfigurationState::WaitingForModule:
+        case ConfigurationState::Installing:
+            return false;
+    }
+    return true;
 }
 
 std::string hexadecimal(uintptr_t value) {
@@ -480,6 +513,9 @@ PreparedConfiguration prepare_tracer_configuration(std::string_view request) {
 
     try {
         const json root = json::parse(request.begin(), request.end());
+#if defined(QTRACE_HOST_TEST)
+        throw_at_fault_point(TracerConfigurationFaultPoint::ParsePrepared);
+#endif
         if (!root.is_object()) return reject("TYPE_MISMATCH", "$", "request root must be an object");
         ConfigurationIssue issue;
 #ifndef NDEBUG
@@ -578,6 +614,8 @@ PreparedConfiguration prepare_tracer_configuration(std::string_view request) {
         PreparedConfiguration prepared;
         prepared.config = std::move(config);
         return prepared;
+    } catch (const std::bad_alloc &) {
+        throw;
     } catch (const json::exception &) {
         return reject("MALFORMED_JSON", "$", "request is not valid JSON");
     } catch (...) {
@@ -602,6 +640,15 @@ JsonCallResult TracerConfiguration::configure(std::string_view request,
                             response_capacity);
     }
 
+    GenerationSnapshot snapshot;
+    snapshot.config = std::move(prepared.config);
+    snapshot.scenes = pending_scene_statuses(snapshot.config);
+    TraceConfig published_config = snapshot.config;
+    TraceConfig active_config = snapshot.config;
+#if defined(QTRACE_HOST_TEST)
+    throw_at_fault_point(TracerConfigurationFaultPoint::SnapshotPrepared);
+#endif
+
     std::lock_guard<std::mutex> guard(mutex_);
     const uint64_t generation = next_generation_;
     const json response = {
@@ -609,22 +656,32 @@ JsonCallResult TracerConfiguration::configure(std::string_view request,
             {"ok", true},
             {"generation", generation},
             {"state", "waiting_for_module"},
-            {"targetModule", prepared.config.target_so},
-            {"scenes", serialize_normalized_scenes(prepared.config)},
+            {"targetModule", snapshot.config.target_so},
+            {"scenes", serialize_normalized_scenes(snapshot.config)},
             {"warnings", json::array()},
     };
     JsonCallResult result = sized_result(response.dump(), response_capacity);
     if (result.transport_code != QTRACE_JSON_OK) return result;
+    result.published_generation = generation;
+    result.published_config = std::move(published_config);
+    result.active_config = std::move(active_config);
+#if defined(QTRACE_HOST_TEST)
+    throw_at_fault_point(TracerConfigurationFaultPoint::ResponsePrepared);
+#endif
 
+    std::vector<GenerationSnapshot> replacement;
+    replacement.reserve(2);
     if (!generations_.empty()) {
-        generations_.back().state = ConfigurationState::Superseded;
+        GenerationSnapshot previous = generations_.back();
+        previous.state = ConfigurationState::Superseded;
+        replacement.push_back(std::move(previous));
     }
-    GenerationSnapshot snapshot;
     snapshot.generation = generation;
-    snapshot.config = std::move(prepared.config);
-    snapshot.scenes = pending_scene_statuses(snapshot.config);
-    generations_.push_back(std::move(snapshot));
-    if (generations_.size() > 2) generations_.erase(generations_.begin());
+    replacement.push_back(std::move(snapshot));
+#if defined(QTRACE_HOST_TEST)
+    throw_at_fault_point(TracerConfigurationFaultPoint::ReplacementPrepared);
+#endif
+    generations_.swap(replacement);
     ++next_generation_;
     return result;
 }
@@ -645,6 +702,9 @@ JsonCallResult TracerConfiguration::status(uint64_t generation,
                                     "configuration generation is not retained"}),
                             response_capacity);
     }
+#if defined(QTRACE_HOST_TEST)
+    throw_at_fault_point(TracerConfigurationFaultPoint::StatusSerialization);
+#endif
 
     json scenes = json::array();
     for (const SceneConfigurationStatus &scene: snapshot->scenes) {
@@ -683,6 +743,14 @@ JsonCallResult TracerConfiguration::status(uint64_t generation,
     return sized_result(response.dump(), response_capacity);
 }
 
+#if defined(QTRACE_HOST_TEST)
+void tracer_configuration_test_throw_at(
+        TracerConfigurationFaultPoint fault_point) noexcept {
+    g_configuration_fault_point.store(static_cast<uint32_t>(fault_point),
+                                      std::memory_order_relaxed);
+}
+#endif
+
 bool TracerConfiguration::current(uint64_t *generation,
                                   TraceConfig *config) const {
     if (generation == nullptr || config == nullptr) return false;
@@ -699,7 +767,7 @@ void TracerConfiguration::mark_installing(
     std::lock_guard<std::mutex> guard(mutex_);
     for (GenerationSnapshot &snapshot: generations_) {
         if (snapshot.generation != generation ||
-            snapshot.state == ConfigurationState::Superseded) {
+            configuration_state_terminal(snapshot.state)) {
             continue;
         }
         snapshot.module = module;
@@ -734,9 +802,12 @@ void TracerConfiguration::finish_install(
         std::vector<SceneConfigurationStatus> scenes) {
     std::lock_guard<std::mutex> guard(mutex_);
     for (GenerationSnapshot &snapshot: generations_) {
-        if (snapshot.generation != generation ||
-            snapshot.state == ConfigurationState::Superseded) {
-            continue;
+        if (snapshot.generation != generation) continue;
+        if (configuration_state_terminal(snapshot.state)) {
+            if (snapshot.state == state) {
+                snapshot.scenes = std::move(scenes);
+            }
+            return;
         }
         snapshot.state = state;
         snapshot.scenes = std::move(scenes);

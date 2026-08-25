@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <string>
 #include <string_view>
 
@@ -165,6 +166,112 @@ static void generation_registry_is_transactional_and_retains_two_generations() {
             configuration.status(1, 64U * 1024U));
     CHECK(expired.at("ok") == false);
     CHECK(expired.at("error").at("code") == "GENERATION_NOT_FOUND");
+}
+
+static void terminal_generations_ignore_late_install_callbacks() {
+    TracerConfiguration configuration;
+    const std::string request = document_with_scenes(
+            R"json([{"name":"terminal","location":{"offset":"0x10"}}])json");
+    ModuleRange module;
+    module.start = 0x71000000;
+    module.end = 0x71001000;
+    module.path = "/data/app/libdemo_target.so";
+    SceneAddressDiagnostics diagnostics;
+    diagnostics.valid = true;
+    diagnostics.runtime_address = module.start + 0x10;
+    SceneConfigurationStatus scene;
+    scene.name = "terminal";
+    scene.offset = 0x10;
+    scene.runtime_address = diagnostics.runtime_address;
+    scene.state = SceneConfigurationState::Installed;
+
+    const struct TerminalCase {
+        ConfigurationState state;
+        const char *name;
+    } cases[] = {
+            {ConfigurationState::Installed, "installed"},
+            {ConfigurationState::HookFailed, "hook_failed"},
+            {ConfigurationState::RollbackFailed, "rollback_failed"},
+    };
+    uint64_t previous_generation = 0;
+    for (const TerminalCase &test_case: cases) {
+        const nlohmann::json accepted = parse_payload(
+                configuration.configure(request, 64U * 1024U));
+        const uint64_t generation = accepted.at("generation").get<uint64_t>();
+        configuration.mark_installing(generation, module, {diagnostics});
+        configuration.finish_install(generation, test_case.state, {scene});
+
+        configuration.mark_installing(generation, module, {diagnostics});
+        configuration.finish_install(
+                generation, ConfigurationState::Installed, {scene});
+        CHECK(parse_payload(configuration.status(generation, 64U * 1024U))
+                      .at("state") == test_case.name);
+
+        if (previous_generation != 0) {
+            configuration.mark_installing(previous_generation, module,
+                                           {diagnostics});
+            configuration.finish_install(
+                    previous_generation, ConfigurationState::Installed,
+                    {scene});
+            CHECK(parse_payload(configuration.status(
+                                      previous_generation, 64U * 1024U))
+                          .at("state") == "superseded");
+        }
+        previous_generation = generation;
+    }
+
+    (void)parse_payload(configuration.configure(request, 64U * 1024U));
+    configuration.mark_installing(previous_generation, module, {diagnostics});
+    configuration.finish_install(previous_generation,
+                                 ConfigurationState::Installed, {scene});
+    CHECK(parse_payload(configuration.status(previous_generation,
+                                             64U * 1024U))
+                  .at("state") == "superseded");
+}
+
+static void publication_faults_preserve_the_prior_generation() {
+    TracerConfiguration configuration;
+    const std::string first_request = document_with_scenes(
+            R"json([{"name":"first","location":{"offset":"0x10"}}])json");
+    const std::string second_request = document_with_scenes(
+            R"json([{"name":"second","location":{"offset":"0x20"}}])json");
+    const nlohmann::json first = parse_payload(
+            configuration.configure(first_request, 64U * 1024U));
+    CHECK(first.at("generation") == 1);
+    SceneConfigurationStatus installed;
+    installed.name = "first";
+    installed.offset = 0x10;
+    installed.state = SceneConfigurationState::Installed;
+    configuration.finish_install(1, ConfigurationState::Installed,
+                                 {installed});
+
+    const TracerConfigurationFaultPoint fault_points[] = {
+            TracerConfigurationFaultPoint::ParsePrepared,
+            TracerConfigurationFaultPoint::SnapshotPrepared,
+            TracerConfigurationFaultPoint::ResponsePrepared,
+            TracerConfigurationFaultPoint::ReplacementPrepared,
+    };
+    for (const TracerConfigurationFaultPoint fault_point: fault_points) {
+        tracer_configuration_test_throw_at(fault_point);
+        bool threw = false;
+        try {
+            (void)configuration.configure(second_request, 64U * 1024U);
+        } catch (const std::bad_alloc &) {
+            threw = true;
+        }
+        CHECK(threw);
+        uint64_t generation = 0;
+        TraceConfig config;
+        CHECK(configuration.current(&generation, &config));
+        CHECK(generation == 1);
+        CHECK(config.scenes.at(0).name == "first");
+        CHECK(parse_payload(configuration.status(1, 64U * 1024U))
+                      .at("state") == "installed");
+    }
+
+    const nlohmann::json second = parse_payload(
+            configuration.configure(second_request, 64U * 1024U));
+    CHECK(second.at("generation") == 2);
 }
 
 int main() {
@@ -357,4 +464,6 @@ int main() {
                      "UNKNOWN_FIELD", "$.debug");
 #endif
     generation_registry_is_transactional_and_retains_two_generations();
+    terminal_generations_ignore_late_install_callbacks();
+    publication_faults_preserve_the_prior_generation();
 }

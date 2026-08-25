@@ -959,6 +959,41 @@ void queued_thread_start_keeps_its_coordinator_generation_alive() {
   CHECK(old_lifetime.expired());
 }
 
+void deactivation_preserves_queued_owners_and_makes_new_calls_pass_through() {
+  reset_runtime();
+  Factory factory;
+  auto coordinator =
+      std::make_shared<CaptureCoordinator>(factories(&factory));
+  const TraceConfig config = flight_config();
+  CHECK(coordinator->start(config, module_for(identity_start), 64));
+  ThreadCreateGateway gateway(fake_deferred_hook);
+  CHECK(gateway.install(coordinator));
+
+  int queued_token = 79;
+  pthread_t thread{};
+  CHECK(gateway.create(&thread, nullptr, identity_start, &queued_token) == 0);
+  const StartRoutine queued =
+      g_last_created_start.load(std::memory_order_relaxed);
+  void *const queued_argument =
+      g_last_created_argument.load(std::memory_order_relaxed);
+  CHECK(queued != nullptr && queued != identity_start);
+
+  gateway.deactivate();
+  CHECK(!gateway.should_capture(identity_start));
+  int passthrough_token = 80;
+  CHECK(gateway.create(&thread, nullptr, identity_start,
+                       &passthrough_token) == 0);
+  CHECK(g_last_created_start.load(std::memory_order_relaxed) ==
+        identity_start);
+  CHECK(g_last_created_argument.load(std::memory_order_relaxed) ==
+        &passthrough_token);
+
+  CHECK(queued(queued_argument) == &queued_token);
+  CHECK(factory.session_creates.load(std::memory_order_relaxed) == 1);
+  CHECK(factory.thread_begins.load(std::memory_order_relaxed) == 1);
+  CHECK(factory.thread_ends.load(std::memory_order_relaxed) == 1);
+}
+
 ThreadCreateGateway *g_installing_gateway = nullptr;
 std::atomic<int> g_install_window_status{-1};
 std::atomic<void *> g_install_window_result{nullptr};
@@ -1074,6 +1109,7 @@ int main() {
   residual_hook_failure_permanently_fails_open_through_retained_original();
   child_detach_uses_only_the_inherited_original_path();
   queued_thread_start_keeps_its_coordinator_generation_alive();
+  deactivation_preserves_queued_owners_and_makes_new_calls_pass_through();
   live_hook_publication_window_uses_the_exact_retained_bypass();
   persistent_gateway_survives_concurrent_create_stress();
 }

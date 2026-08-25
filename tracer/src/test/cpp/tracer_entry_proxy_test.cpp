@@ -8,6 +8,7 @@
 #include "core/tracer_configuration.h"
 #include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
+#include "hooks/thread_create_gateway.h"
 #include "third_party/nlohmann/json.hpp"
 
 #include <atomic>
@@ -60,6 +61,7 @@ bool trace_proxy_test_finish_module_observation_failure(uint64_t generation);
 bool trace_proxy_test_current_configuration(uint64_t *generation,
                                             TraceConfig *config);
 CaptureCoordinator *trace_proxy_test_current_coordinator();
+void trace_proxy_test_throw_during_configuration_apply();
 
 void check(bool condition, const char *expression, int line) {
     if (condition) return;
@@ -255,6 +257,24 @@ void accepted_configuration_is_active_when_inline_setup_fails() {
           "HOOK_INITIALIZATION_FAILED");
 }
 
+void nonflight_configuration_waits_beyond_the_old_timeout_boundary() {
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.no-module-timeout",
+            "libqtrace-no-module-timeout-never-loaded.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "late"},
+                     {"location", {{"offset", "0x100"}}}},
+            })));
+    CHECK(accepted.at("ok") == true);
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10'250));
+
+    const nlohmann::json status = call_json_status(generation);
+    CHECK(status.at("state") == "waiting_for_module");
+    CHECK(status.at("scenes").at(0).at("state") == "pending");
+}
+
 void flight_configuration_activates_its_explicit_entry_scene() {
     const nlohmann::json scenes = nlohmann::json::array({
             {{"name", "worker"}, {"location", {{"offset", "0x100"}}}},
@@ -274,6 +294,86 @@ void flight_configuration_activates_its_explicit_entry_scene() {
     CHECK(active_config.scenes.at(0).name == "worker");
     CHECK(active_config.scenes.at(1).name == "boot");
     CHECK(trace_proxy_test_current_coordinator() != nullptr);
+}
+
+void configuration_abi_catches_publication_and_status_exceptions() {
+    const nlohmann::json baseline = call_json_configure(json_abi_request(
+            "com.example.exception-baseline",
+            "libexception-baseline-never-loaded.so"));
+    CHECK(baseline.at("ok") == true);
+    const uint64_t baseline_generation =
+            baseline.at("generation").get<uint64_t>();
+    uint64_t active_generation = 0;
+    TraceConfig active_config;
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &active_config));
+    CHECK(active_generation == baseline_generation);
+
+    const std::string replacement = json_abi_request(
+            "com.example.exception-replacement",
+            "libexception-replacement-never-loaded.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "replacement"},
+                     {"location", {{"offset", "0x100"}}}},
+            }));
+    const TracerConfigurationFaultPoint configure_faults[] = {
+            TracerConfigurationFaultPoint::ParsePrepared,
+            TracerConfigurationFaultPoint::SnapshotPrepared,
+            TracerConfigurationFaultPoint::ResponsePrepared,
+            TracerConfigurationFaultPoint::ReplacementPrepared,
+    };
+    for (const TracerConfigurationFaultPoint fault: configure_faults) {
+        tracer_configuration_test_throw_at(fault);
+        std::vector<char> response(64U * 1024U);
+        uint64_t response_size = 0;
+        CHECK(qbdi_tracer_configure_json(
+                      replacement.data(), replacement.size(), response.data(),
+                      response.size(), &response_size) == QTRACE_JSON_OK);
+        CHECK(response_size > 1);
+        CHECK(response.at(response_size - 1) == '\0');
+        const nlohmann::json failure = nlohmann::json::parse(response.data());
+        CHECK(failure.at("ok") == false);
+        CHECK(failure.at("error").at("code") == "INTERNAL_ERROR");
+        CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                     &active_config));
+        CHECK(active_generation == baseline_generation);
+        CHECK(active_config.package_name == "com.example.exception-baseline");
+        CHECK(call_json_status(baseline_generation).at("ok") == true);
+    }
+
+    tracer_configuration_test_throw_at(
+            TracerConfigurationFaultPoint::StatusSerialization);
+    std::vector<char> response(64U * 1024U);
+    uint64_t response_size = 0;
+    CHECK(qbdi_tracer_get_status_json(
+                  baseline_generation, response.data(), response.size(),
+                  &response_size) == QTRACE_JSON_OK);
+    CHECK(response.at(response_size - 1) == '\0');
+    const nlohmann::json status_failure =
+            nlohmann::json::parse(response.data());
+    CHECK(status_failure.at("ok") == false);
+    CHECK(status_failure.at("error").at("code") == "INTERNAL_ERROR");
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &active_config));
+    CHECK(active_generation == baseline_generation);
+
+    trace_proxy_test_throw_during_configuration_apply();
+    const nlohmann::json accepted_with_apply_failure =
+            call_json_configure(replacement);
+    CHECK(accepted_with_apply_failure.at("ok") == true);
+    const uint64_t failed_generation =
+            accepted_with_apply_failure.at("generation").get<uint64_t>();
+    CHECK(failed_generation == baseline_generation + 1);
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &active_config));
+    CHECK(active_generation == failed_generation);
+    CHECK(active_config.package_name ==
+          "com.example.exception-replacement");
+    const nlohmann::json failed_status =
+            call_json_status(failed_generation);
+    CHECK(failed_status.at("state") == "hook_failed");
+    CHECK(failed_status.at("scenes").at(0).at("error").at("code") ==
+          "CONFIGURATION_APPLY_EXCEPTION");
 }
 
 extern "C" void *__real__Znwm(std::size_t);
@@ -622,6 +722,67 @@ std::shared_ptr<CaptureCoordinator> start_flight_proxy_coordinator(
     CHECK(coordinator->start(config, module, 77));
     trace_proxy_test_set_coordinator(coordinator);
     return coordinator;
+}
+
+void accepted_nonflight_generation_deactivates_the_flight_gateway() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("flight-gateway-transition-reset"));
+    const ModuleRange module = module_named(
+            "/data/app/libflight-gateway-transition.so");
+    const nlohmann::json flight_accepted = call_json_configure(
+            json_abi_request(
+                    "com.example.flight-gateway-transition",
+                    "libflight-gateway-transition.so", true, "flight-entry",
+                    nlohmann::json::array({
+                            {{"name", "flight-entry"},
+                             {"location", {{"offset", "0x40"}}}},
+                    })));
+    const uint64_t flight_generation =
+            flight_accepted.at("generation").get<uint64_t>();
+    uint64_t active_generation = 0;
+    TraceConfig flight_config;
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &flight_config));
+    CHECK(active_generation == flight_generation);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(flight_config, module);
+    trace_proxy_test_install_loading_module(module);
+    CHECK(call_json_status(flight_generation).at("state") == "installed");
+    CHECK(process_thread_create_gateway().should_capture(
+            reinterpret_cast<PthreadStartRoutine>(old_target)));
+
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.nonflight-gateway-transition",
+                  "libnonflight-gateway-transition-never-loaded.so"))
+                  .at("ok") == true);
+
+    CHECK(!process_thread_create_gateway().should_capture(
+            reinterpret_cast<PthreadStartRoutine>(old_target)));
+    CHECK(coordinator->started());
+
+    const nlohmann::json failing_flight_accepted = call_json_configure(
+            json_abi_request(
+                    "com.example.failed-flight-gateway-transition",
+                    "libflight-gateway-transition.so", true, "replacement",
+                    nlohmann::json::array({
+                            {{"name", "replacement"},
+                             {"location", {{"offset", "0x80"}}}},
+                    })));
+    const uint64_t failing_generation =
+            failing_flight_accepted.at("generation").get<uint64_t>();
+    TraceConfig failing_flight_config;
+    CHECK(trace_proxy_test_current_configuration(&active_generation,
+                                                 &failing_flight_config));
+    const std::shared_ptr<CaptureCoordinator> failing_coordinator =
+            start_flight_proxy_coordinator(failing_flight_config, module);
+
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json failed = call_json_status(failing_generation);
+    CHECK(failed.at("state") == "hook_failed");
+    CHECK(!process_thread_create_gateway().should_capture(
+            reinterpret_cast<PthreadStartRoutine>(old_target)));
+    CHECK(failing_coordinator->incomplete());
 }
 
 void invalid_target_module_observation_finishes_with_a_stable_code() {
@@ -2323,14 +2484,25 @@ int main(int argc, char **argv) {
             active_flight_reconfiguration_is_rejected_as_incomplete();
             return 0;
         }
+        if (selected == "gateway-deactivation") {
+            accepted_nonflight_generation_deactivates_the_flight_gateway();
+            return 0;
+        }
+        if (selected == "config-exception-safety") {
+            configuration_abi_catches_publication_and_status_exceptions();
+            return 0;
+        }
         return 2;
     }
     json_configuration_abi_is_transactional_and_nul_terminated();
     rejected_configuration_preserves_the_active_runtime_snapshot();
     accepted_configuration_is_active_when_inline_setup_fails();
+    nonflight_configuration_waits_beyond_the_old_timeout_boundary();
     flight_configuration_activates_its_explicit_entry_scene();
+    configuration_abi_catches_publication_and_status_exceptions();
     invalid_target_module_observation_finishes_with_a_stable_code();
     callback_registration_failure_preserves_the_shadowhook_error();
+    accepted_nonflight_generation_deactivates_the_flight_gateway();
     branch_before_dispatch_keeps_its_generation_snapshot_and_bypass();
     entrant_registration_and_snapshot_are_atomic_with_install();
     unhook_failure_uses_the_saved_original_exactly_once();

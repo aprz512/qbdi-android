@@ -25,6 +25,7 @@ public:
   ThreadCreateGateway &operator=(const ThreadCreateGateway &) = delete;
 
   bool install(const std::shared_ptr<CaptureCoordinator> &coordinator) noexcept;
+  void deactivate() noexcept;
   bool should_capture(PthreadStartRoutine start_routine) const noexcept;
   int create(pthread_t *thread, const pthread_attr_t *attributes,
              PthreadStartRoutine start_routine, void *argument) noexcept;
