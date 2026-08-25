@@ -1,14 +1,15 @@
+import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
-import unittest
 import types
-import sys
-import json
-import shutil
-import subprocess
-from unittest.mock import patch
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.flight_acceptance import (
     AcceptanceError,
@@ -30,6 +31,7 @@ from scripts.flight_acceptance import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+RUN_HOST_TESTS = os.environ.get("QTRACE_RUN_FRIDA_HOST_TESTS") == "1"
 
 
 class FlightAcceptanceTests(unittest.TestCase):
@@ -179,7 +181,10 @@ class FlightAcceptanceTests(unittest.TestCase):
             source.index("files/libqbdi_tracer.so"),
         )
 
-    @unittest.skipUnless(shutil.which("node"), "Node.js is required for GumJS emulation")
+    @unittest.skipUnless(
+        RUN_HOST_TESTS and shutil.which("node"),
+        "set QTRACE_RUN_FRIDA_HOST_TESTS=1 and install Node.js for GumJS emulation",
+    )
     def test_agent_reports_configure_failures_without_starting_acceptance(self):
         source = _agent_source(
             AcceptanceCase(101, "direct_tgkill", 3),
@@ -204,6 +209,30 @@ class FlightAcceptanceTests(unittest.TestCase):
                 "ok": False,
                 "error": {"code": "INVALID_FLIGHT_ENTRY_SCENE",
                           "path": "$.flight.entryScene", "message": "bad entry"},
+            }},
+            {"transportCode": 0, "response": {
+                **accepted, "targetModule": "libwrong_target.so",
+            }},
+            {"transportCode": 0, "response": {**accepted, "scenes": []}},
+            {"transportCode": 0, "response": {
+                **accepted,
+                "scenes": [
+                    {"name": "init", "offset": "0x100", "endOffset": None},
+                    {"name": "extra", "offset": "0x200", "endOffset": None},
+                ],
+            }},
+            {"transportCode": 0, "response": {
+                **accepted,
+                "scenes": [{"name": "jni", "offset": "0x100", "endOffset": None}],
+            }},
+            {"transportCode": 0, "response": {
+                **accepted,
+                "scenes": [{"name": "init", "offset": "0x101", "endOffset": None}],
+            }},
+            {"transportCode": 0, "response": {
+                **accepted,
+                "scenes": [{"name": "init", "offset": "0x100",
+                            "endOffset": "0x200"}],
             }},
             {"transportCode": 0, "response": accepted},
         ]
@@ -290,10 +319,12 @@ process.stdout.write(JSON.stringify(cases.map(runCase)));
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         results = json.loads(completed.stdout)
-        for result in results[:-1]:
-            self.assertEqual(0, result["observers"])
-            self.assertEqual(0, result["installs"])
-            self.assertEqual("flight-agent-error", result["messages"][0]["type"])
+        for index, result in enumerate(results[:-1]):
+            with self.subTest(case=index):
+                self.assertEqual(0, result["observers"])
+                self.assertEqual(0, result["installs"])
+                self.assertEqual(1, len(result["messages"]))
+                self.assertEqual("flight-agent-error", result["messages"][0]["type"])
         success = results[-1]
         self.assertEqual(1, success["observers"])
         self.assertEqual(0, success["installs"])

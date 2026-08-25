@@ -112,3 +112,72 @@ mailbox event.
 - Verification is host-side. No Android device or live Frida Flight acceptance
   run was available in this task; device behavior remains covered by the
   repository's existing manual acceptance workflow.
+
+## Fix round 1
+
+### Review findings
+
+1. An accepted response was shape-checked but not cross-checked against its
+   request. A wrong target module, empty or extra scenes, or a substituted
+   entry-scene name, offset, or end offset could register the target observer
+   and emit `flight-agent-ready`.
+2. The Node/GumJS behavioral harness ran automatically whenever Node was
+   installed instead of following the repository's explicit host-test opt-in
+   contract.
+
+The ledgered Minor issue allowing arbitrary `flight_options` keys to override
+fixed request fields remains deferred as directed.
+
+### Changes
+
+- Accepted configure responses must name `request.targetModule` and contain
+  exactly one normalized scene. That scene must match both the submitted scene
+  and `flight.entryScene`, retain the submitted `0x100` offset, and have the
+  expected null end offset.
+- The executable GumJS regression now includes six adversarial accepted
+  envelopes: wrong target, no scenes, an extra scene, wrong entry-scene name,
+  wrong offset, and an unexpected end offset. Every case must emit exactly one
+  `flight-agent-error` with zero observers and installs.
+- The Node test now requires `QTRACE_RUN_FRIDA_HOST_TESTS=1` as well as Node,
+  matching the existing opt-in host-test convention. Default discovery skips
+  it deterministically.
+
+### Red evidence
+
+Before the production identity checks:
+
+```bash
+QTRACE_RUN_FRIDA_HOST_TESTS=1 python3 -m unittest \
+  scripts.tests.test_flight_acceptance.FlightAcceptanceTests.test_agent_reports_configure_failures_without_starting_acceptance \
+  -v
+```
+
+Result: one test ran with six failing subtests. Cases 3 through 8 each observed
+one target observer instead of zero, proving every wrong accepted identity
+reached the ready path.
+
+### Green evidence
+
+- The explicit opt-in behavioral command above: one test passed; all nine
+  failure cases stopped before observer registration and the valid control
+  emitted `flight-agent-ready`.
+- `python3 -m unittest scripts.tests.test_flight_acceptance -v`: 24 tests ran,
+  23 passed and the GumJS behavior test was skipped by the documented opt-in.
+- `python3 -m unittest discover -s scripts/tests -p 'test_*.py'`: 258 tests
+  ran successfully, with 8 opt-in tests skipped.
+- `python3 -m py_compile scripts/flight_acceptance.py scripts/tests/test_flight_acceptance.py`:
+  exited 0.
+- Generated `_agent_source(...)` piped to `node --check`: exited 0.
+- `git diff --check` and `git diff --cached --check`: exited 0.
+
+### Self-review and concerns
+
+- Identity validation occurs after complete accepted-response shape validation
+  and before `configureResponse` can satisfy the observer gate.
+- Missing/extra scenes cannot bypass the exact cardinality check; a correctly
+  shaped but substituted scene cannot bypass name, offset, or end-offset
+  equality.
+- Default tests no longer depend on Node presence. The explicit opt-in command
+  still executes the generated production agent under the Node VM harness.
+- Scope remains Task 7 implementation, tests, and this report. Task 8 files
+  remain untouched. Live Android/Frida device verification was not performed.

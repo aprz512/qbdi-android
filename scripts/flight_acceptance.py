@@ -323,6 +323,9 @@ function validateConfigureResponse(response) {{
   if (typeof response.targetModule !== 'string' || response.targetModule.length === 0) {{
     invalidResponse('targetModule must be a non-empty string');
   }}
+  if (response.targetModule !== request.targetModule) {{
+    invalidResponse('targetModule does not match the submitted request');
+  }}
   if (!Array.isArray(response.scenes)) invalidResponse('scenes must be an array');
   validateWarningArray(response.warnings, 'warnings');
   for (let index = 0; index < response.scenes.length; ++index) {{
@@ -333,6 +336,15 @@ function validateConfigureResponse(response) {{
         (scene.endOffset !== null && typeof scene.endOffset !== 'string')) {{
       invalidResponse('scenes[' + index + '] has an invalid normalized scene shape');
     }}
+  }}
+  if (response.scenes.length !== 1) {{
+    invalidResponse('scenes must contain exactly the submitted entry scene');
+  }}
+  const scene = response.scenes[0];
+  const expectedScene = request.scenes[0];
+  if (scene.name !== request.flight.entryScene || scene.name !== expectedScene.name ||
+      scene.offset !== expectedScene.location.offset || scene.endOffset !== null) {{
+    invalidResponse('normalized entry scene does not match the submitted request');
   }}
   return response;
 }}
