@@ -4,6 +4,9 @@ import time
 import unittest
 import types
 import sys
+import json
+import shutil
+import subprocess
 from unittest.mock import patch
 from pathlib import Path
 
@@ -19,6 +22,7 @@ from scripts.flight_acceptance import (
     decode_status,
     expand_cases,
     exact_artifact,
+    flight_agent_request,
     run_as_command,
     run_as_kill_command,
     run_case,
@@ -29,6 +33,32 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FlightAcceptanceTests(unittest.TestCase):
+    def test_flight_request_configures_only_the_explicit_init_entry_scene(self):
+        offsets = {
+            "init": 0x100,
+            "jni": 0x200,
+            "libc": 0x300,
+            "algorithm": 0x400,
+            "integrity": 0x500,
+        }
+        options = {
+            "capacityMb": 512,
+            "chunkKb": 256,
+            "maxThreads": 256,
+            "protectedChunks": 4,
+        }
+        request = flight_agent_request(offsets, options)
+
+        self.assertEqual(1, request["schemaVersion"])
+        self.assertEqual("init", request["flight"]["entryScene"])
+        self.assertEqual(["init"], [scene["name"] for scene in request["scenes"]])
+        self.assertEqual("0x100", request["scenes"][0]["location"]["offset"])
+        self.assertEqual("full", request["trace"]["profile"])
+        self.assertFalse(request["trace"]["compression"])
+        self.assertEqual(options, {
+            name: request["flight"][name] for name in options
+        })
+
     def test_sync_fault_uses_top_level_handler_begin_as_original_fault_site(self):
         recovery = types.SimpleNamespace(merged=[
             types.SimpleNamespace(
@@ -122,7 +152,7 @@ class FlightAcceptanceTests(unittest.TestCase):
         self.assertIn("acceptance_worker,", fixture)
         self.assertIn("*control = {logical_entry, range.start,", coordinator)
 
-    def test_agent_replaces_defaults_with_only_the_nonzero_init_scene(self):
+    def test_agent_submits_self_contained_json_for_only_the_init_scene(self):
         offsets = {
             "init": 0x100,
             "jni": 0x200,
@@ -135,18 +165,140 @@ class FlightAcceptanceTests(unittest.TestCase):
             AcceptanceCase(101, "direct_tgkill", 3), offsets, 512
         )
 
-        self.assertEqual(source.count("scene="), 1)
-        self.assertIn("scenes=replace;", source)
-        self.assertLess(source.index("scenes=replace;"), source.index("scene=init,"))
-        self.assertIn("scene=init,0x100", source)
-        for name in ("jni", "libc", "algorithm", "integrity"):
-            self.assertNotIn(f"scene={name},", source)
+        self.assertNotIn("scenes=replace", source)
+        self.assertNotIn("scene=", source)
+        self.assertNotIn("'qbdi_tracer_configure'", source)
+        self.assertIn("'qbdi_tracer_configure_json'", source)
+        self.assertIn("const RESPONSE_CAPACITY = 64 * 1024;", source)
+        self.assertNotIn("__QTRACE_CONFIG_JSON__", source)
+        self.assertIn('"entryScene":"init"', source)
+        self.assertIn('"offset":"0x100"', source)
         self.assertNotIn("benchmark", source)
-        self.assertNotRegex(source, r"scene=[^,;]+,0x0(?:;|')")
         self.assertLess(
             source.index("files/libshadowhook_nothing.so"),
             source.index("files/libqbdi_tracer.so"),
         )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for GumJS emulation")
+    def test_agent_reports_configure_failures_without_starting_acceptance(self):
+        source = _agent_source(
+            AcceptanceCase(101, "direct_tgkill", 3),
+            {"init": 0x100, "jni": 0x200, "libc": 0x300,
+             "algorithm": 0x400, "integrity": 0x500},
+            512,
+        )
+        accepted = {
+            "responseSchemaVersion": 1,
+            "ok": True,
+            "generation": 7,
+            "state": "waiting_for_module",
+            "targetModule": "libdemo_target.so",
+            "scenes": [{"name": "init", "offset": "0x100", "endOffset": None}],
+            "warnings": [],
+        }
+        cases = [
+            {"transportCode": 2, "response": accepted},
+            {"transportCode": 0, "response": {"responseSchemaVersion": 1, "ok": True}},
+            {"transportCode": 0, "response": {
+                "responseSchemaVersion": 1,
+                "ok": False,
+                "error": {"code": "INVALID_FLIGHT_ENTRY_SCENE",
+                          "path": "$.flight.entryScene", "message": "bad entry"},
+            }},
+            {"transportCode": 0, "response": accepted},
+        ]
+        harness = r"""
+const vm = require('vm');
+const source = JSON.parse(process.argv[1]);
+const cases = JSON.parse(process.argv[2]);
+
+class U64 {
+  constructor(value) { this.value = BigInt(value instanceof U64 ? value.value : value); }
+  toString(radix) { return this.value.toString(radix); }
+  toNumber() { return Number(this.value); }
+}
+
+function runCase(current) {
+  const state = {messages: [], observers: 0, installs: 0};
+  const tracer = {
+    base: new U64(0x7000), size: 0x1000,
+    getExportByName: symbol => symbol
+  };
+  const target = {
+    name: 'libdemo_target.so', base: new U64(0x9000), size: 0x2000,
+    getExportByName: symbol => symbol
+  };
+  function NativeFunction(address) {
+    if (address === 'qbdi_tracer_set_shadowhook_helper_path') return () => 0;
+    if (address === 'qbdi_tracer_install_module') {
+      return () => { state.installs += 1; };
+    }
+    if (address === 'qbdi_tracer_configure_json') {
+      return (_request, _requestSize, response, _capacity, responseSize) => {
+        response.text = JSON.stringify(current.response);
+        responseSize.writeU64(new U64(Buffer.byteLength(response.text, 'utf8') + 1));
+        return current.transportCode;
+      };
+    }
+    throw new Error('unexpected native function: ' + address);
+  }
+  const sandbox = {
+    UInt64: U64,
+    NativeFunction,
+    ptr: value => value,
+    send: message => state.messages.push(message),
+    recv: () => ({wait() {}}),
+    setInterval: () => 1,
+    clearInterval: () => {},
+    setTimeout: () => 1,
+    Process: {
+      attachModuleObserver(observer) {
+        state.observers += 1;
+        observer.onAdded(target);
+      }
+    },
+    Module: {
+      load: () => tracer,
+      getGlobalExportByName: symbol => symbol
+    },
+    Memory: {
+      allocUtf8String: value => value,
+      alloc: size => Number(size) === 8 ? {
+        value: 0,
+        writeU64(value) { this.value = value.toNumber(); },
+        readU64() { return new U64(this.value); }
+      } : {
+        text: '',
+        add(index) {
+          const owner = this;
+          return {readU8: () => index === Buffer.byteLength(owner.text, 'utf8') ? 0 : 1};
+        },
+        readUtf8String() { return this.text; }
+      }
+    }
+  };
+  vm.runInNewContext(source, sandbox, {filename: 'flight_acceptance.js'});
+  return state;
+}
+
+process.stdout.write(JSON.stringify(cases.map(runCase)));
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness, json.dumps(source), json.dumps(cases)],
+            capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        results = json.loads(completed.stdout)
+        for result in results[:-1]:
+            self.assertEqual(0, result["observers"])
+            self.assertEqual(0, result["installs"])
+            self.assertEqual("flight-agent-error", result["messages"][0]["type"])
+        success = results[-1]
+        self.assertEqual(1, success["observers"])
+        self.assertEqual(0, success["installs"])
+        self.assertEqual("flight-agent-ready", success["messages"][0]["type"])
+        self.assertEqual(accepted, success["messages"][0]["configure_response"])
 
     def test_agent_uses_nonblocking_snapshot_messages_and_never_logcat(self):
         source = _agent_source(
@@ -222,9 +374,20 @@ class FlightAcceptanceTests(unittest.TestCase):
 
     def test_oracle_timeout_retains_message_diagnostics(self):
         mailbox = OracleMailbox(AcceptanceCase(101, "direct_tgkill", 3))
-        mailbox.handle({"type": "send", "payload": {"type": "acceptance-installed"}})
-        with self.assertRaisesRegex(AcceptanceError, "acceptance-installed"):
+        mailbox.handle({"type": "send", "payload": {"type": "flight-agent-ready"}})
+        with self.assertRaisesRegex(AcceptanceError, "flight-agent-ready"):
             mailbox.wait(0.001)
+
+    def test_configure_error_message_fails_the_mailbox_immediately(self):
+        mailbox = OracleMailbox(AcceptanceCase(101, "direct_tgkill", 3))
+        mailbox.handle({
+            "type": "send",
+            "payload": {"type": "flight-agent-error", "error": "configuration rejected"},
+        })
+
+        self.assertTrue(mailbox._event.is_set())
+        with self.assertRaisesRegex(AcceptanceError, "configuration rejected"):
+            mailbox.wait(10)
 
     def test_cleanup_is_bounded_when_frida_detach_hangs(self):
         blocker = threading.Event()

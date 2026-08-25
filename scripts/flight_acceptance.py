@@ -222,40 +222,163 @@ def _adb(serial: str, *arguments: str, timeout: float = 60.0,
         raise AcceptanceError(f"adb command failed: {arguments!r}: {error}") from error
 
 
+def flight_agent_request(
+    scene_offsets: dict[str, int], flight_options: dict[str, int],
+) -> dict[str, object]:
+    return {
+        "schemaVersion": 1,
+        "packageName": "com.aprz.qbdiandroid",
+        "targetModule": "libdemo_target.so",
+        "trace": {
+            "profile": "full",
+            "compression": False,
+            "lz4Level": 2,
+            "autoBuffer": True,
+            "bufferMb": 0,
+            "hexdumpLimit": 32,
+        },
+        "flight": {
+            "enabled": True,
+            "entryScene": "init",
+            **flight_options,
+        },
+        "scenes": [{
+            "name": "init",
+            "location": {"offset": f"0x{scene_offsets['init']:x}"},
+        }],
+    }
+
+
 def _agent_source(case: AcceptanceCase, scene_offsets: dict[str, int],
                   artifact_mb: int) -> str:
     if set(scene_offsets) != set(SCENE_SYMBOLS) or any(
             offset <= 0 for offset in scene_offsets.values()):
         raise AcceptanceError("all acceptance scene offsets must be nonzero")
     selected = case.terminator if case.terminator is not None else 0
-    encoded_scenes = f"scene=init,0x{scene_offsets['init']:x}"
+    request = flight_agent_request(scene_offsets, {
+        "capacityMb": artifact_mb,
+        "chunkKb": 256,
+        "maxThreads": 256,
+        "protectedChunks": 4,
+    })
+    request_json = json.dumps(request, separators=(",", ":"), sort_keys=True)
     return f"""'use strict';
-const targetName = 'libdemo_target.so';
+const request = {request_json};
+const targetName = request.targetModule;
 const helperPath = '/data/data/com.aprz.qbdiandroid/files/libshadowhook_nothing.so';
 const tracer = Module.load('/data/data/com.aprz.qbdiandroid/files/libqbdi_tracer.so');
+const RESPONSE_CAPACITY = 64 * 1024;
 function exported(name) {{
   if (typeof tracer.getExportByName === 'function') return tracer.getExportByName(name);
   return Module.getGlobalExportByName(name);
 }}
-const configure = new NativeFunction(exported('qbdi_tracer_configure'), 'void', ['pointer']);
+function utf8ByteLength(value) {{
+  let bytes = 0;
+  for (const character of value) {{
+    const point = character.codePointAt(0);
+    if (point <= 0x7f) bytes += 1;
+    else if (point <= 0x7ff) bytes += 2;
+    else if (point <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }}
+  return bytes;
+}}
+function invalidResponse(message) {{
+  throw new Error('flight configuration returned an invalid response: ' + message);
+}}
+function isObject(value) {{
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}}
+function validateWarningArray(warnings, path) {{
+  if (!Array.isArray(warnings)) invalidResponse(path + ' must be an array');
+  for (let index = 0; index < warnings.length; ++index) {{
+    const warning = warnings[index];
+    if (!isObject(warning) || typeof warning.code !== 'string' ||
+        typeof warning.message !== 'string') {{
+      invalidResponse(path + '[' + index + '] must contain string code and message');
+    }}
+  }}
+}}
+function validateConfigureResponse(response) {{
+  if (!isObject(response)) invalidResponse('root must be an object');
+  if (response.responseSchemaVersion !== 1) {{
+    invalidResponse('responseSchemaVersion must equal 1');
+  }}
+  if (typeof response.ok !== 'boolean') invalidResponse('ok must be a boolean');
+  if (!response.ok) {{
+    const error = response.error;
+    if (!isObject(error) || typeof error.code !== 'string' ||
+        typeof error.path !== 'string' || typeof error.message !== 'string') {{
+      invalidResponse('error must contain string code, path, and message');
+    }}
+    return response;
+  }}
+  if (typeof response.generation !== 'number' ||
+      !Number.isInteger(response.generation) || response.generation <= 0) {{
+    invalidResponse('generation must be a positive integer');
+  }}
+  if (response.state !== 'waiting_for_module') {{
+    invalidResponse('configure state must be waiting_for_module');
+  }}
+  if (typeof response.targetModule !== 'string' || response.targetModule.length === 0) {{
+    invalidResponse('targetModule must be a non-empty string');
+  }}
+  if (!Array.isArray(response.scenes)) invalidResponse('scenes must be an array');
+  validateWarningArray(response.warnings, 'warnings');
+  for (let index = 0; index < response.scenes.length; ++index) {{
+    const scene = response.scenes[index];
+    if (!isObject(scene) || typeof scene.name !== 'string' ||
+        typeof scene.offset !== 'string' ||
+        !Object.prototype.hasOwnProperty.call(scene, 'endOffset') ||
+        (scene.endOffset !== null && typeof scene.endOffset !== 'string')) {{
+      invalidResponse('scenes[' + index + '] has an invalid normalized scene shape');
+    }}
+  }}
+  return response;
+}}
+const configure = new NativeFunction(
+  exported('qbdi_tracer_configure_json'), 'int32',
+  ['pointer', 'uint64', 'pointer', 'uint64', 'pointer']);
 const setHelper = new NativeFunction(
   exported('qbdi_tracer_set_shadowhook_helper_path'), 'int', ['pointer']);
-if (setHelper(Memory.allocUtf8String(helperPath)) !== 0) {{
-  throw new Error('failed to configure ShadowHook companion path: ' + helperPath);
+let configureResponse = null;
+let encoded = null;
+try {{
+  if (setHelper(Memory.allocUtf8String(helperPath)) !== 0) {{
+    throw new Error('failed to configure ShadowHook companion path: ' + helperPath);
+  }}
+  encoded = JSON.stringify(request);
+  const responseBuffer = Memory.alloc(RESPONSE_CAPACITY);
+  const responseSizeBuffer = Memory.alloc(8);
+  responseSizeBuffer.writeU64(new UInt64(0));
+  const transportCode = configure(
+    Memory.allocUtf8String(encoded), new UInt64(utf8ByteLength(encoded)),
+    responseBuffer, new UInt64(RESPONSE_CAPACITY), responseSizeBuffer);
+  if (transportCode !== 0) {{
+    throw new Error('flight configuration transport failed with code ' + transportCode);
+  }}
+  const responseSize = responseSizeBuffer.readU64().toNumber();
+  if (responseSize === 0 || responseSize > RESPONSE_CAPACITY ||
+      responseBuffer.add(responseSize - 1).readU8() !== 0) {{
+    throw new Error('flight configuration returned an invalid response');
+  }}
+  configureResponse = validateConfigureResponse(
+    JSON.parse(responseBuffer.readUtf8String(responseSize - 1)));
+  if (configureResponse.ok !== true) {{
+    throw new Error('flight configuration rejected: ' + configureResponse.error.code);
+  }}
+}} catch (error) {{
+  send({{type: 'flight-agent-error', error: String(error)}});
 }}
-const encoded = 'package=com.aprz.qbdiandroid;target=' + targetName +
-  ';scenes=replace;{encoded_scenes};profile=full;compression=0;flight=1;' +
-  'flight_mb={artifact_mb};flight_chunk_kb=256;flight_max_threads=256;' +
-  'flight_protected_chunks=4';
-configure(Memory.allocUtf8String(encoded));
 let launched = false;
-Process.attachModuleObserver({{
+if (configureResponse !== null && configureResponse.ok === true) Process.attachModuleObserver({{
   onAdded(module) {{
     if (launched || module.name !== targetName) return;
     launched = true;
-    send({{type: 'acceptance-installed', target_base: module.base.toString(),
+    send({{type: 'flight-agent-ready', target_base: module.base.toString(),
           target_size: module.size, tracer_base: tracer.base.toString(),
-          tracer_size: tracer.size, config: encoded}});
+          tracer_size: tracer.size, config: encoded,
+          configure_response: configureResponse}});
     setTimeout(() => {{
       try {{
         const start = new NativeFunction(
@@ -419,7 +542,7 @@ class OracleMailbox:
             if message.get("type") != "send" or not isinstance(payload, dict):
                 return None
             message_type = payload.get("type")
-            if message_type == "acceptance-error":
+            if message_type in ("acceptance-error", "flight-agent-error"):
                 self._error = f"Frida acceptance error: {payload.get('error')}"
                 self._event.set()
                 return None
@@ -567,7 +690,7 @@ def run_case(args: argparse.Namespace, case: AcceptanceCase,
         installed = next((message["payload"] for message in messages
                           if message.get("type") == "send" and
                           isinstance(message.get("payload"), dict) and
-                          message["payload"].get("type") == "acceptance-installed"), None)
+                          message["payload"].get("type") == "flight-agent-ready"), None)
         if installed is None:
             raise AcceptanceError("agent did not confirm production installation")
         if case.mode == "external_sigkill":
