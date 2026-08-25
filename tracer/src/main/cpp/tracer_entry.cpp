@@ -6,6 +6,7 @@
 #include "core/qbdi_thread_session.h"
 #include "core/trace_config.h"
 #include "core/trace_process_lifecycle.h"
+#include "core/tracer_configuration.h"
 #include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
 #include "hooks/thread_create_gateway.h"
@@ -20,6 +21,7 @@
 #include <new>
 #include <pthread.h>
 #include <link.h>
+#include <limits>
 #include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
@@ -53,6 +55,8 @@ struct ProxyCallRuntime {
 };
 
 static std::mutex g_lock;
+static std::mutex g_configuration_call_lock;
+static TracerConfiguration g_tracer_configuration;
 static TraceConfig g_config = default_trace_config();
 static bool g_configured = false;
 static uint64_t g_config_generation = 0;
@@ -679,6 +683,7 @@ bool trace_proxy_test_generation_retired(size_t generation) {
 
 static void tracer_atfork_prepare() {
     if (trace_process_child_detached()) return;
+    g_configuration_call_lock.lock();
     g_lock.lock();
     g_atfork_locked_generations = 0;
     for (size_t generation = 0; generation < g_next_proxy_generation; ++generation) {
@@ -698,6 +703,7 @@ static void tracer_atfork_parent() {
     }
     g_atfork_locked_generations = 0;
     g_lock.unlock();
+    g_configuration_call_lock.unlock();
 }
 
 static void tracer_atfork_child() {
@@ -752,14 +758,9 @@ static void install_hooks_for_module(const ModuleRange &module,
     }
 }
 
-extern "C" __attribute__((visibility("default"))) void
-qbdi_tracer_configure(const char *encoded_config) {
+static void apply_accepted_configuration(TraceConfig config,
+                                         uint64_t generation) {
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;
-    TraceConfig config = parse_trace_config(encoded_config);
-    if (!config.valid) {
-        QTRACE_E("invalid tracer configuration: %s", config.error.c_str());
-        return;
-    }
     std::shared_ptr<CaptureCoordinator> coordinator;
     if (config.flight.enabled) {
         const SceneConfig *init_scene = nullptr;
@@ -781,13 +782,12 @@ qbdi_tracer_configure(const char *encoded_config) {
     }
     if (!init_inline_hook()) return;
     if (!prepare_module_callbacks()) return;
-    uint64_t generation = 0;
     {
         std::lock_guard<std::mutex> guard(g_lock);
         g_config = config;
         g_capture_coordinator = std::move(coordinator);
         g_configured = true;
-        generation = ++g_config_generation;
+        g_config_generation = generation;
     }
     QTRACE_I("configure tracer package=%s target=%s", config.package_name.c_str(),
              config.target_so.c_str());
@@ -803,6 +803,72 @@ qbdi_tracer_configure(const char *encoded_config) {
         std::thread(install_nonflight_hooks_when_ready, config,
                     generation).detach();
     }
+}
+
+static int32_t write_json_result(const JsonCallResult &result, char *response,
+                                 uint64_t *response_size) {
+    *response_size = result.required_size;
+    if (result.transport_code != QTRACE_JSON_OK) return result.transport_code;
+    if (result.required_size != result.payload.size() + 1) {
+        *response_size = 0;
+        return QTRACE_JSON_INVALID_ARGUMENT;
+    }
+    std::memcpy(response, result.payload.c_str(), result.payload.size() + 1);
+    return QTRACE_JSON_OK;
+}
+
+extern "C" __attribute__((visibility("default"))) int32_t
+qbdi_tracer_configure_json(const char *request, uint64_t request_size,
+                           char *response, uint64_t response_capacity,
+                           uint64_t *response_size) {
+    if (response_size == nullptr) return QTRACE_JSON_INVALID_ARGUMENT;
+    *response_size = 0;
+    if (request == nullptr || response == nullptr ||
+        request_size > std::numeric_limits<size_t>::max() ||
+        response_capacity > std::numeric_limits<size_t>::max()) {
+        return QTRACE_JSON_INVALID_ARGUMENT;
+    }
+    if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) {
+        return QTRACE_JSON_INVALID_ARGUMENT;
+    }
+
+    std::lock_guard<std::mutex> call_guard(g_configuration_call_lock);
+    uint64_t previous_generation = 0;
+    TraceConfig previous_config;
+    const bool had_configuration = g_tracer_configuration.current(
+            &previous_generation, &previous_config);
+    const JsonCallResult result = g_tracer_configuration.configure(
+            std::string_view(request, static_cast<size_t>(request_size)),
+            response_capacity);
+    const int32_t transport_code = write_json_result(result, response,
+                                                     response_size);
+    if (transport_code != QTRACE_JSON_OK) return transport_code;
+
+    uint64_t generation = 0;
+    TraceConfig config;
+    if (g_tracer_configuration.current(&generation, &config) &&
+        (!had_configuration || generation != previous_generation)) {
+        apply_accepted_configuration(std::move(config), generation);
+    }
+    return QTRACE_JSON_OK;
+}
+
+extern "C" __attribute__((visibility("default"))) int32_t
+qbdi_tracer_get_status_json(uint64_t generation, char *response,
+                            uint64_t response_capacity,
+                            uint64_t *response_size) {
+    if (response_size == nullptr) return QTRACE_JSON_INVALID_ARGUMENT;
+    *response_size = 0;
+    if (response == nullptr ||
+        response_capacity > std::numeric_limits<size_t>::max()) {
+        return QTRACE_JSON_INVALID_ARGUMENT;
+    }
+    if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) {
+        return QTRACE_JSON_INVALID_ARGUMENT;
+    }
+    return write_json_result(g_tracer_configuration.status(
+                                     generation, response_capacity),
+                             response, response_size);
 }
 
 extern "C" __attribute__((visibility("default"))) int

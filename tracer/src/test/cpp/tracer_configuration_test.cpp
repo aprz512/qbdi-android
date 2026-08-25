@@ -54,6 +54,96 @@ static std::string replace_once(std::string value, std::string_view from,
     return value;
 }
 
+static nlohmann::json parse_payload(const JsonCallResult &result) {
+    CHECK(result.transport_code == QTRACE_JSON_OK);
+    CHECK(result.required_size == result.payload.size() + 1);
+    return nlohmann::json::parse(result.payload);
+}
+
+static void generation_registry_is_transactional_and_retains_two_generations() {
+    TracerConfiguration configuration;
+    const std::string first_request = document_with_scenes(
+            R"json([{"name":"first","location":{"offset":"0x10"}}])json");
+
+    uint64_t generation = 0;
+    TraceConfig current_config;
+    CHECK(!configuration.current(&generation, &current_config));
+
+    const JsonCallResult no_fit = configuration.configure(first_request, 1);
+    CHECK(no_fit.transport_code == QTRACE_JSON_RESPONSE_TOO_SMALL);
+    CHECK(no_fit.required_size > 1);
+    CHECK(!configuration.current(&generation, &current_config));
+
+    const JsonCallResult first = configuration.configure(first_request,
+                                                          no_fit.required_size);
+    const nlohmann::json first_response = parse_payload(first);
+    CHECK(first_response.at("ok") == true);
+    CHECK(first_response.at("generation") == 1);
+    CHECK(first_response.at("state") == "waiting_for_module");
+    CHECK(first_response.at("scenes").at(0).at("offset") == "0x10");
+    CHECK(configuration.current(&generation, &current_config));
+    CHECK(generation == 1);
+    CHECK(current_config.scenes.at(0).name == "first");
+
+    const nlohmann::json rejection = parse_payload(
+            configuration.configure("{]", 64U * 1024U));
+    CHECK(rejection.at("ok") == false);
+    CHECK(rejection.at("error").at("code") == "MALFORMED_JSON");
+    CHECK(configuration.current(&generation, &current_config));
+    CHECK(generation == 1);
+
+    const std::string second_request = document_with_scenes(
+            R"json([{"name":"second","location":{"offset":"0x20"}}])json");
+    const nlohmann::json second = parse_payload(
+            configuration.configure(second_request, 64U * 1024U));
+    CHECK(second.at("generation") == 2);
+    CHECK(configuration.current(&generation, &current_config));
+    CHECK(generation == 2);
+    CHECK(current_config.scenes.at(0).name == "second");
+
+    const nlohmann::json superseded = parse_payload(
+            configuration.status(1, 64U * 1024U));
+    CHECK(superseded.at("ok") == true);
+    CHECK(superseded.at("generation") == 1);
+    CHECK(superseded.at("state") == "superseded");
+
+    const std::string third_request = document_with_scenes(
+            R"json([{"name":"third","location":{"offset":"0x30"}}])json");
+    const nlohmann::json third = parse_payload(
+            configuration.configure(third_request, 64U * 1024U));
+    CHECK(third.at("generation") == 3);
+
+    ModuleRange module;
+    module.start = 0x70000000;
+    module.end = 0x70010000;
+    module.path = "/data/app/libdemo_target.so";
+    SceneConfigurationStatus installing_scene;
+    installing_scene.name = "third";
+    installing_scene.offset = 0x30;
+    installing_scene.runtime_address = 0x70000030;
+    installing_scene.state = SceneConfigurationState::Installing;
+    configuration.mark_installing(3, module, {installing_scene});
+    const nlohmann::json installing = parse_payload(
+            configuration.status(3, 64U * 1024U));
+    CHECK(installing.at("state") == "installing");
+    CHECK(installing.at("moduleBase") == "0x70000000");
+    CHECK(installing.at("scenes").at(0).at("state") == "installing");
+    CHECK(installing.at("scenes").at(0).at("runtimeAddress") == "0x70000030");
+
+    installing_scene.state = SceneConfigurationState::Installed;
+    configuration.finish_install(3, ConfigurationState::Installed,
+                                 {installing_scene});
+    const nlohmann::json installed = parse_payload(
+            configuration.status(3, 64U * 1024U));
+    CHECK(installed.at("state") == "installed");
+    CHECK(installed.at("scenes").at(0).at("state") == "installed");
+
+    const nlohmann::json expired = parse_payload(
+            configuration.status(1, 64U * 1024U));
+    CHECK(expired.at("ok") == false);
+    CHECK(expired.at("error").at("code") == "GENERATION_NOT_FOUND");
+}
+
 int main() {
     const char request[] = R"json({
       "schemaVersion": 1,
@@ -243,4 +333,5 @@ int main() {
                                   "\"scenes\": [], \"debug\": {}"),
                      "UNKNOWN_FIELD", "$.debug");
 #endif
+    generation_registry_is_transactional_and_retains_two_generations();
 }

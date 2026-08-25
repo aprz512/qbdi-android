@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 
 namespace {
 
@@ -15,6 +16,92 @@ using nlohmann::json;
 
 constexpr size_t kMaximumRequestBytes = 1024U * 1024U;
 constexpr size_t kMaximumScenes = 256;
+
+const char *configuration_state_name(ConfigurationState state) noexcept {
+    switch (state) {
+        case ConfigurationState::WaitingForModule:
+            return "waiting_for_module";
+        case ConfigurationState::Installing:
+            return "installing";
+        case ConfigurationState::Installed:
+            return "installed";
+        case ConfigurationState::HookFailed:
+            return "hook_failed";
+        case ConfigurationState::RollbackFailed:
+            return "rollback_failed";
+        case ConfigurationState::Superseded:
+            return "superseded";
+    }
+    return "hook_failed";
+}
+
+const char *scene_configuration_state_name(SceneConfigurationState state) noexcept {
+    switch (state) {
+        case SceneConfigurationState::Pending:
+            return "pending";
+        case SceneConfigurationState::Installing:
+            return "installing";
+        case SceneConfigurationState::Installed:
+            return "installed";
+        case SceneConfigurationState::HookFailed:
+            return "hook_failed";
+        case SceneConfigurationState::RolledBack:
+            return "rolled_back";
+        case SceneConfigurationState::RollbackFailed:
+            return "rollback_failed";
+    }
+    return "hook_failed";
+}
+
+std::string hexadecimal(uintptr_t value) {
+    char digits[2 * sizeof(uintptr_t) + 1]{};
+    const auto converted = std::to_chars(digits, digits + sizeof(digits), value, 16);
+    return "0x" + std::string(digits, converted.ptr);
+}
+
+json serialize_warnings(const std::vector<ConfigurationIssue> &warnings) {
+    json serialized = json::array();
+    for (const ConfigurationIssue &warning: warnings) {
+        serialized.push_back({{"code", warning.code}, {"message", warning.message}});
+    }
+    return serialized;
+}
+
+JsonCallResult sized_result(std::string payload, uint64_t response_capacity) {
+    JsonCallResult result;
+    result.required_size = static_cast<uint64_t>(payload.size()) + 1;
+    result.payload = std::move(payload);
+    result.transport_code = result.required_size > response_capacity
+                            ? QTRACE_JSON_RESPONSE_TOO_SMALL
+                            : QTRACE_JSON_OK;
+    return result;
+}
+
+json serialize_normalized_scenes(const TraceConfig &config) {
+    json scenes = json::array();
+    for (const SceneConfig &scene: config.scenes) {
+        scenes.push_back({
+                {"name", scene.name},
+                {"offset", hexadecimal(scene.offset)},
+                {"endOffset", scene.end_offset == 0 ? json(nullptr)
+                                                      : json(hexadecimal(scene.end_offset))},
+        });
+    }
+    return scenes;
+}
+
+std::vector<SceneConfigurationStatus> pending_scene_statuses(
+        const TraceConfig &config) {
+    std::vector<SceneConfigurationStatus> scenes;
+    scenes.reserve(config.scenes.size());
+    for (const SceneConfig &scene: config.scenes) {
+        SceneConfigurationStatus status;
+        status.name = scene.name;
+        status.offset = scene.offset;
+        scenes.push_back(std::move(status));
+    }
+    return scenes;
+}
 
 PreparedConfiguration reject(std::string code, std::string path, std::string message) {
     PreparedConfiguration prepared;
@@ -505,4 +592,132 @@ std::string serialize_configure_rejection(const ConfigurationIssue &issue) {
             {"error", {{"code", issue.code}, {"path", issue.path}, {"message", issue.message}}},
     };
     return response.dump();
+}
+
+JsonCallResult TracerConfiguration::configure(std::string_view request,
+                                              uint64_t response_capacity) {
+    PreparedConfiguration prepared = prepare_tracer_configuration(request);
+    if (!prepared.accepted()) {
+        return sized_result(serialize_configure_rejection(prepared.error),
+                            response_capacity);
+    }
+
+    std::lock_guard<std::mutex> guard(mutex_);
+    const uint64_t generation = next_generation_;
+    const json response = {
+            {"responseSchemaVersion", 1},
+            {"ok", true},
+            {"generation", generation},
+            {"state", "waiting_for_module"},
+            {"targetModule", prepared.config.target_so},
+            {"scenes", serialize_normalized_scenes(prepared.config)},
+            {"warnings", json::array()},
+    };
+    JsonCallResult result = sized_result(response.dump(), response_capacity);
+    if (result.transport_code != QTRACE_JSON_OK) return result;
+
+    if (!generations_.empty()) {
+        generations_.back().state = ConfigurationState::Superseded;
+    }
+    GenerationSnapshot snapshot;
+    snapshot.generation = generation;
+    snapshot.config = std::move(prepared.config);
+    snapshot.scenes = pending_scene_statuses(snapshot.config);
+    generations_.push_back(std::move(snapshot));
+    if (generations_.size() > 2) generations_.erase(generations_.begin());
+    ++next_generation_;
+    return result;
+}
+
+JsonCallResult TracerConfiguration::status(uint64_t generation,
+                                           uint64_t response_capacity) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    const GenerationSnapshot *snapshot = nullptr;
+    for (const GenerationSnapshot &candidate: generations_) {
+        if (candidate.generation == generation) {
+            snapshot = &candidate;
+            break;
+        }
+    }
+    if (snapshot == nullptr) {
+        return sized_result(serialize_configure_rejection({
+                                    "GENERATION_NOT_FOUND", "$.generation",
+                                    "configuration generation is not retained"}),
+                            response_capacity);
+    }
+
+    json scenes = json::array();
+    for (const SceneConfigurationStatus &scene: snapshot->scenes) {
+        json serialized = {
+                {"name", scene.name},
+                {"offset", hexadecimal(scene.offset)},
+                {"runtimeAddress", scene.runtime_address == 0
+                                           ? json(nullptr)
+                                           : json(hexadecimal(scene.runtime_address))},
+                {"state", scene_configuration_state_name(scene.state)},
+                {"warnings", serialize_warnings(scene.warnings)},
+        };
+        if (!scene.error_code.empty()) {
+            serialized["error"] = {
+                    {"code", scene.error_code},
+                    {"hookError", scene.hook_error},
+            };
+        }
+        scenes.push_back(std::move(serialized));
+    }
+    const json response = {
+            {"responseSchemaVersion", 1},
+            {"ok", true},
+            {"generation", snapshot->generation},
+            {"state", configuration_state_name(snapshot->state)},
+            {"targetModule", snapshot->config.target_so},
+            {"moduleBase", snapshot->has_module
+                                   ? json(hexadecimal(snapshot->module.start))
+                                   : json(nullptr)},
+            {"scenes", std::move(scenes)},
+            {"warnings", json::array()},
+    };
+    return sized_result(response.dump(), response_capacity);
+}
+
+bool TracerConfiguration::current(uint64_t *generation,
+                                  TraceConfig *config) const {
+    if (generation == nullptr || config == nullptr) return false;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (generations_.empty()) return false;
+    *generation = generations_.back().generation;
+    *config = generations_.back().config;
+    return true;
+}
+
+void TracerConfiguration::mark_installing(
+        uint64_t generation, const ModuleRange &module,
+        std::vector<SceneConfigurationStatus> scenes) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    for (GenerationSnapshot &snapshot: generations_) {
+        if (snapshot.generation != generation ||
+            snapshot.state == ConfigurationState::Superseded) {
+            continue;
+        }
+        snapshot.module = module;
+        snapshot.has_module = true;
+        snapshot.state = ConfigurationState::Installing;
+        snapshot.scenes = std::move(scenes);
+        return;
+    }
+}
+
+void TracerConfiguration::finish_install(
+        uint64_t generation, ConfigurationState state,
+        std::vector<SceneConfigurationStatus> scenes) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    for (GenerationSnapshot &snapshot: generations_) {
+        if (snapshot.generation != generation ||
+            snapshot.state == ConfigurationState::Superseded) {
+            continue;
+        }
+        snapshot.state = state;
+        snapshot.scenes = std::move(scenes);
+        return;
+    }
 }

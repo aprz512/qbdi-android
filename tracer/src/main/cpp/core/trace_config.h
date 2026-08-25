@@ -46,12 +46,8 @@ struct TraceConfig {
 #ifndef NDEBUG
     bool test_fail_setup = false;
 #endif
-    bool valid = true;
-    std::string error;
 };
 
 TraceConfig default_trace_config();
-
-TraceConfig parse_trace_config(const char *encoded_config);
 
 const char *trace_profile_name(TraceProfile profile);

@@ -23,10 +23,6 @@ function(add_trace_test name)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-add_trace_test(trace_config_test
-    trace_config_test.cpp
-    ../../main/cpp/core/trace_config.cpp)
-
 add_trace_test(tracer_configuration_test
     tracer_configuration_test.cpp
     ../../main/cpp/core/trace_config.cpp
@@ -365,7 +361,8 @@ add_trace_test(tracer_entry_proxy_test
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
-    ../../main/cpp/core/trace_config.cpp)
+    ../../main/cpp/core/trace_config.cpp
+    ../../main/cpp/core/tracer_configuration.cpp)
 target_link_libraries(tracer_entry_proxy_test PRIVATE Threads::Threads)
 target_link_options(tracer_entry_proxy_test PRIVATE
     -Wl,--wrap=_Znwm

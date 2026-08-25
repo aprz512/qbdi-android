@@ -5,8 +5,10 @@
 #include "core/qbdi_thread_session.h"
 #include "core/trace_process_lifecycle.h"
 #include "core/trace_config.h"
+#include "core/tracer_configuration.h"
 #include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
+#include "third_party/nlohmann/json.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -26,6 +28,11 @@
 
 extern "C" uint64_t trace_proxy_dispatch(size_t index, const uint64_t args[8],
                                           uint64_t indirect_result);
+extern "C" int32_t qbdi_tracer_configure_json(
+        const char *, uint64_t, char *, uint64_t, uint64_t *);
+extern "C" int32_t qbdi_tracer_get_status_json(
+        uint64_t, char *, uint64_t, uint64_t *);
+extern "C" void qbdi_tracer_configure(const char *) __attribute__((weak));
 extern "C" {
 char trace_proxy_stubs[32768]{};
 }
@@ -58,6 +65,94 @@ void check(bool condition, const char *expression, int line) {
 volatile sig_atomic_t g_fail_on_child_delete = 0;
 volatile sig_atomic_t g_fail_next_nothrow_allocation = 0;
 std::atomic<size_t> g_throwing_allocation_calls{0};
+
+void json_configuration_abi_is_transactional_and_nul_terminated() {
+    const std::string request = R"json({
+      "schemaVersion": 1,
+      "packageName": "com.aprz.qbdiandroid",
+      "targetModule": "libqtrace-json-abi-test-never-loaded.so",
+      "trace": {
+        "profile": "fast", "compression": true, "lz4Level": 2,
+        "autoBuffer": true, "bufferMb": 0, "hexdumpLimit": 32
+      },
+      "flight": {
+        "enabled": false, "entryScene": "", "capacityMb": 512,
+        "chunkKb": 256, "maxThreads": 256, "protectedChunks": 4
+      },
+      "scenes": []
+    })json";
+    char small_response[] = {'x'};
+    uint64_t response_size = 99;
+
+    CHECK(qbdi_tracer_configure_json(nullptr, 0, small_response,
+                                     sizeof(small_response), &response_size) ==
+          QTRACE_JSON_INVALID_ARGUMENT);
+    CHECK(qbdi_tracer_configure_json(request.data(), request.size(), nullptr,
+                                     sizeof(small_response), &response_size) ==
+          QTRACE_JSON_INVALID_ARGUMENT);
+    CHECK(qbdi_tracer_configure_json(request.data(), request.size(), small_response,
+                                     sizeof(small_response), nullptr) ==
+          QTRACE_JSON_INVALID_ARGUMENT);
+    CHECK(qbdi_tracer_get_status_json(1, nullptr, sizeof(small_response),
+                                      &response_size) == QTRACE_JSON_INVALID_ARGUMENT);
+    CHECK(qbdi_tracer_get_status_json(1, small_response, sizeof(small_response),
+                                      nullptr) == QTRACE_JSON_INVALID_ARGUMENT);
+
+    std::string embedded_nul = request;
+    embedded_nul.insert(embedded_nul.size() / 2, 1, '\0');
+    std::vector<char> rejection_buffer(64U * 1024U);
+    CHECK(qbdi_tracer_configure_json(
+                  embedded_nul.data(), embedded_nul.size(), rejection_buffer.data(),
+                  rejection_buffer.size(), &response_size) == QTRACE_JSON_OK);
+    CHECK(response_size > 1);
+    CHECK(rejection_buffer.at(response_size - 1) == '\0');
+    const nlohmann::json rejection = nlohmann::json::parse(rejection_buffer.data());
+    CHECK(rejection.at("ok") == false);
+    CHECK(rejection.at("error").at("code") == "MALFORMED_JSON");
+
+    small_response[0] = 'x';
+    CHECK(qbdi_tracer_configure_json(
+                  request.data(), request.size(), small_response,
+                  sizeof(small_response), &response_size) ==
+          QTRACE_JSON_RESPONSE_TOO_SMALL);
+    CHECK(response_size > sizeof(small_response));
+    CHECK(small_response[0] == 'x');
+
+    uint64_t missing_size = 0;
+    std::vector<char> missing_buffer(64U * 1024U);
+    CHECK(qbdi_tracer_get_status_json(1, missing_buffer.data(), missing_buffer.size(),
+                                      &missing_size) == QTRACE_JSON_OK);
+    const nlohmann::json missing = nlohmann::json::parse(missing_buffer.data());
+    CHECK(missing.at("ok") == false);
+    CHECK(missing.at("error").at("code") == "GENERATION_NOT_FOUND");
+
+    std::vector<char> response(response_size);
+    CHECK(qbdi_tracer_configure_json(request.data(), request.size(), response.data(),
+                                     response.size(), &response_size) == QTRACE_JSON_OK);
+    CHECK(response_size == response.size());
+    CHECK(response.at(response_size - 1) == '\0');
+    CHECK(std::strlen(response.data()) + 1 == response_size);
+    const nlohmann::json accepted = nlohmann::json::parse(response.data());
+    CHECK(accepted.at("ok") == true);
+    CHECK(accepted.at("generation") == 1);
+
+    small_response[0] = 'y';
+    CHECK(qbdi_tracer_get_status_json(1, small_response, sizeof(small_response),
+                                      &response_size) ==
+          QTRACE_JSON_RESPONSE_TOO_SMALL);
+    CHECK(small_response[0] == 'y');
+    std::vector<char> status_response(response_size);
+    CHECK(qbdi_tracer_get_status_json(1, status_response.data(),
+                                      status_response.size(), &response_size) ==
+          QTRACE_JSON_OK);
+    CHECK(status_response.at(response_size - 1) == '\0');
+    const nlohmann::json status = nlohmann::json::parse(status_response.data());
+    CHECK(status.at("ok") == true);
+    CHECK(status.at("generation") == 1);
+    CHECK(status.at("state") == "waiting_for_module");
+
+    CHECK(qbdi_tracer_configure == nullptr);
+}
 
 extern "C" void *__real__Znwm(std::size_t);
 extern "C" void *__wrap__Znwm(std::size_t size) {
@@ -1480,6 +1575,7 @@ int main(int argc, char **argv) {
         }
         return 2;
     }
+    json_configuration_abi_is_transactional_and_nul_terminated();
     branch_before_dispatch_keeps_its_generation_snapshot_and_bypass();
     entrant_registration_and_snapshot_are_atomic_with_install();
     unhook_failure_uses_the_saved_original_exactly_once();
