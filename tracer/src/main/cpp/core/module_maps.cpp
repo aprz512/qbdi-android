@@ -177,3 +177,97 @@ bool module_offset_address(const ModuleRange &module, uintptr_t offset,
     *address = module.start + offset;
     return true;
 }
+
+bool checked_offset_address(uintptr_t base, uintptr_t offset,
+                            uintptr_t *address) noexcept {
+    if (address == nullptr || offset > std::numeric_limits<uintptr_t>::max() - base) {
+        return false;
+    }
+    *address = base + offset;
+    return true;
+}
+
+namespace {
+
+bool contains_address(const ModuleRange &range, uintptr_t address) {
+    return range.start < range.end && range.start <= address && address < range.end;
+}
+
+bool contains_scene_range(const ModuleRange &range, uintptr_t start, uintptr_t end) {
+    if (start == end) return contains_address(range, start);
+    return range.start < range.end && range.start <= start && end <= range.end;
+}
+
+bool executable_scene_range(const std::vector<ModuleRange> &maps,
+                            uintptr_t start, uintptr_t end) {
+    if (start == end) {
+        for (const ModuleRange &range: maps) {
+            if (range.executable() && contains_address(range, start)) return true;
+        }
+        return false;
+    }
+
+    uintptr_t covered = start;
+    while (covered < end) {
+        uintptr_t next = covered;
+        for (const ModuleRange &range: maps) {
+            if (range.executable() && contains_address(range, covered)) {
+                next = std::max(next, range.end);
+            }
+        }
+        if (next == covered) return false;
+        if (next >= end) return true;
+        covered = next;
+    }
+    return true;
+}
+
+const ModuleRange *mapping_at(const std::vector<ModuleRange> &maps, uintptr_t address) {
+    for (const ModuleRange &range: maps) {
+        if (contains_address(range, address)) return &range;
+    }
+    return nullptr;
+}
+
+void warn(SceneAddressDiagnostics *diagnostics, const char *code, const char *message) {
+    diagnostics->warnings.push_back({code, message});
+}
+
+} // namespace
+
+SceneAddressDiagnostics diagnose_scene_address(
+        const ModuleRange &module,
+        const std::vector<ModuleRange> &process_maps,
+        const SceneConfig &scene) {
+    SceneAddressDiagnostics diagnostics;
+    if (!checked_offset_address(module.start, scene.offset,
+                                &diagnostics.runtime_address)) {
+        diagnostics.error = {"ADDRESS_OVERFLOW", "runtime address overflows uintptr_t"};
+        return diagnostics;
+    }
+    if (scene.end_offset != 0 &&
+        !checked_offset_address(module.start, scene.end_offset,
+                                &diagnostics.runtime_end)) {
+        diagnostics.error = {"ADDRESS_OVERFLOW", "runtime end address overflows uintptr_t"};
+        return diagnostics;
+    }
+
+    const uintptr_t range_end = scene.end_offset == 0 ? diagnostics.runtime_address
+                                                       : diagnostics.runtime_end;
+    if (!contains_scene_range(module, diagnostics.runtime_address, range_end)) {
+        warn(&diagnostics, "ADDRESS_OUTSIDE_TARGET_MODULE",
+             "runtime address is outside the target module mapping");
+    }
+    if (!executable_scene_range(process_maps, diagnostics.runtime_address, range_end)) {
+        warn(&diagnostics, "ADDRESS_NOT_EXECUTABLE",
+             "runtime address is not executable");
+    }
+    const ModuleRange *runtime_mapping = mapping_at(process_maps, diagnostics.runtime_address);
+    if (runtime_mapping != nullptr &&
+        (runtime_mapping->path.empty() || runtime_mapping->path != module.path)) {
+        warn(&diagnostics, "ADDRESS_IN_RUNTIME_MAPPING",
+             "runtime address is in an anonymous or runtime-generated mapping");
+    }
+    diagnostics.valid = true;
+    return diagnostics;
+}

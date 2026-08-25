@@ -48,6 +48,7 @@ struct SceneConfigurationStatus {
     std::string name;
     uintptr_t offset = 0;
     uintptr_t runtime_address = 0;
+    uintptr_t runtime_end = 0;
     SceneConfigurationState state = SceneConfigurationState::Pending;
     std::vector<ConfigurationIssue> warnings;
     std::string error_code;
@@ -69,7 +70,7 @@ public:
     bool current(uint64_t *generation, TraceConfig *config) const;
     void mark_installing(uint64_t generation,
                          const ModuleRange &module,
-                         std::vector<SceneConfigurationStatus> scenes);
+                         const std::vector<SceneAddressDiagnostics> &diagnostics);
     void finish_install(uint64_t generation,
                         ConfigurationState state,
                         std::vector<SceneConfigurationStatus> scenes);

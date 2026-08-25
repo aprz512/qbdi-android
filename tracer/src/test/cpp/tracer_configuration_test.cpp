@@ -108,7 +108,7 @@ static void generation_registry_is_transactional_and_retains_two_generations() {
     CHECK(superseded.at("state") == "superseded");
 
     const std::string third_request = document_with_scenes(
-            R"json([{"name":"third","location":{"offset":"0x30"}}])json");
+            R"json([{"name":"third","location":{"offset":"0x30","endOffset":"0x50"}}])json");
     const nlohmann::json third = parse_payload(
             configuration.configure(third_request, 64U * 1024U));
     CHECK(third.at("generation") == 3);
@@ -117,26 +117,49 @@ static void generation_registry_is_transactional_and_retains_two_generations() {
     module.start = 0x70000000;
     module.end = 0x70010000;
     module.path = "/data/app/libdemo_target.so";
-    SceneConfigurationStatus installing_scene;
-    installing_scene.name = "third";
-    installing_scene.offset = 0x30;
+    SceneAddressDiagnostics installing_scene;
+    installing_scene.valid = true;
     installing_scene.runtime_address = 0x70000030;
-    installing_scene.state = SceneConfigurationState::Installing;
+    installing_scene.runtime_end = 0x70000050;
+    installing_scene.warnings = {
+            {"ADDRESS_OUTSIDE_TARGET_MODULE", "runtime address is outside the target module mapping"},
+            {"ADDRESS_IN_RUNTIME_MAPPING", "runtime address is in an anonymous or runtime-generated mapping"},
+    };
     configuration.mark_installing(3, module, {installing_scene});
     const nlohmann::json installing = parse_payload(
             configuration.status(3, 64U * 1024U));
     CHECK(installing.at("state") == "installing");
     CHECK(installing.at("moduleBase") == "0x70000000");
     CHECK(installing.at("scenes").at(0).at("state") == "installing");
+    CHECK(installing.at("scenes").at(0).at("offset") == "0x30");
     CHECK(installing.at("scenes").at(0).at("runtimeAddress") == "0x70000030");
+    CHECK(installing.at("scenes").at(0).at("runtimeEnd") == "0x70000050");
+    CHECK(installing.at("scenes").at(0).at("warnings").at(0).at("code") ==
+          "ADDRESS_OUTSIDE_TARGET_MODULE");
+    CHECK(installing.at("scenes").at(0).at("warnings").at(0).at("message") ==
+          "runtime address is outside the target module mapping");
+    CHECK(installing.at("scenes").at(0).at("warnings").at(1).at("code") ==
+          "ADDRESS_IN_RUNTIME_MAPPING");
 
-    installing_scene.state = SceneConfigurationState::Installed;
+    SceneConfigurationStatus installed_scene;
+    installed_scene.name = "third";
+    installed_scene.offset = 0x30;
+    installed_scene.runtime_address = 0x70000030;
+    installed_scene.runtime_end = 0x70000050;
+    installed_scene.state = SceneConfigurationState::Installed;
+    installed_scene.warnings = {
+            {"ADDRESS_OUTSIDE_TARGET_MODULE", "$.scenes[0].location",
+             "runtime address is outside the target module mapping"},
+            {"ADDRESS_IN_RUNTIME_MAPPING", "$.scenes[0].location",
+             "runtime address is in an anonymous or runtime-generated mapping"},
+    };
     configuration.finish_install(3, ConfigurationState::Installed,
-                                 {installing_scene});
+                                 {installed_scene});
     const nlohmann::json installed = parse_payload(
             configuration.status(3, 64U * 1024U));
     CHECK(installed.at("state") == "installed");
     CHECK(installed.at("scenes").at(0).at("state") == "installed");
+    CHECK(installed.at("scenes").at(0).at("warnings").size() == 2);
 
     const nlohmann::json expired = parse_payload(
             configuration.status(1, 64U * 1024U));

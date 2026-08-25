@@ -28,6 +28,10 @@ add_trace_test(tracer_configuration_test
     ../../main/cpp/core/trace_config.cpp
     ../../main/cpp/core/tracer_configuration.cpp)
 
+add_trace_test(module_maps_test
+    module_maps_test.cpp
+    ../../main/cpp/core/module_maps.cpp)
+
 add_trace_test(safe_memory_string_test
     safe_memory_string_test.cpp
     ../../main/cpp/core/safe_memory.cpp)

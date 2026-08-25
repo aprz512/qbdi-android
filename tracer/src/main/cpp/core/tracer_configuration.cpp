@@ -654,6 +654,9 @@ JsonCallResult TracerConfiguration::status(uint64_t generation,
                 {"runtimeAddress", scene.runtime_address == 0
                                            ? json(nullptr)
                                            : json(hexadecimal(scene.runtime_address))},
+                {"runtimeEnd", scene.runtime_end == 0
+                                       ? json(nullptr)
+                                       : json(hexadecimal(scene.runtime_end))},
                 {"state", scene_configuration_state_name(scene.state)},
                 {"warnings", serialize_warnings(scene.warnings)},
         };
@@ -692,7 +695,7 @@ bool TracerConfiguration::current(uint64_t *generation,
 
 void TracerConfiguration::mark_installing(
         uint64_t generation, const ModuleRange &module,
-        std::vector<SceneConfigurationStatus> scenes) {
+        const std::vector<SceneAddressDiagnostics> &diagnostics) {
     std::lock_guard<std::mutex> guard(mutex_);
     for (GenerationSnapshot &snapshot: generations_) {
         if (snapshot.generation != generation ||
@@ -702,7 +705,26 @@ void TracerConfiguration::mark_installing(
         snapshot.module = module;
         snapshot.has_module = true;
         snapshot.state = ConfigurationState::Installing;
-        snapshot.scenes = std::move(scenes);
+        snapshot.scenes.clear();
+        snapshot.scenes.reserve(snapshot.config.scenes.size());
+        for (size_t index = 0; index < snapshot.config.scenes.size(); ++index) {
+            const SceneConfig &scene = snapshot.config.scenes[index];
+            SceneConfigurationStatus status;
+            status.name = scene.name;
+            status.offset = scene.offset;
+            status.state = SceneConfigurationState::Installing;
+            if (index < diagnostics.size()) {
+                const SceneAddressDiagnostics &diagnostic = diagnostics[index];
+                status.runtime_address = diagnostic.runtime_address;
+                status.runtime_end = diagnostic.runtime_end;
+                for (const AddressDiagnostic &warning: diagnostic.warnings) {
+                    status.warnings.push_back({warning.code,
+                                               "$.scenes[" + std::to_string(index) + "].location",
+                                               warning.message});
+                }
+            }
+            snapshot.scenes.push_back(std::move(status));
+        }
         return;
     }
 }

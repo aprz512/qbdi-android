@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/trace_config.h"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -10,6 +12,19 @@ struct dl_phdr_info;
 struct AddressRange {
     uintptr_t start = 0;
     uintptr_t end = 0;
+};
+
+struct AddressDiagnostic {
+    std::string code;
+    std::string message;
+};
+
+struct SceneAddressDiagnostics {
+    bool valid = false;
+    uintptr_t runtime_address = 0;
+    uintptr_t runtime_end = 0;
+    std::vector<AddressDiagnostic> warnings;
+    AddressDiagnostic error;
 };
 
 struct ModuleRange {
@@ -43,5 +58,13 @@ bool find_loaded_module(const std::string &requested_path, uintptr_t observed_ba
 
 bool module_offset_address(const ModuleRange &module, uintptr_t offset,
                            bool allow_end, uintptr_t *address);
+
+bool checked_offset_address(uintptr_t base, uintptr_t offset,
+                            uintptr_t *address) noexcept;
+
+SceneAddressDiagnostics diagnose_scene_address(
+        const ModuleRange &module,
+        const std::vector<ModuleRange> &process_maps,
+        const SceneConfig &scene);
 
 std::string basename_of(const std::string &path);
