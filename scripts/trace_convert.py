@@ -182,8 +182,12 @@ def convert_binary_file(source: Path, destination: Path, *, lz4: str | None,
                 f"expected {details.footer.compressed_bytes}, got {source.stat().st_size}"
             )
         sidecar = Path(str(source) + ".metrics")
-        if sidecar.exists() and not details.stats.partial:
-            _validate_sidecar(sidecar, details, source.stat().st_size)
+        if not details.stats.partial:
+            if ((details.stream_minor, details.stream_features) == (2, 1)
+                    and not sidecar.exists()):
+                raise BinaryTraceError("QTRB 1.2 requires metrics v3 sidecar")
+            if sidecar.exists():
+                _validate_sidecar(sidecar, details, source.stat().st_size)
         _publish(text_temporary, destination, force)
         return details.stats
     except BinaryTraceError:

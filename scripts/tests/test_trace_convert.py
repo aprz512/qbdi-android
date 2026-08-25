@@ -27,14 +27,10 @@ def raw_stream(*events):
 
 
 def compressed_artifact(*, compression=1):
-    probe = complete_stream(compression=compression).replace(
-        stream_header(), stream_header(minor=2, features=1), 1
-    )
+    probe = complete_stream(compression=compression)
     size = len(uncompressed_lz4_frame(probe))
     return uncompressed_lz4_frame(
-        complete_stream(compression=compression, compressed_bytes=size).replace(
-            stream_header(), stream_header(minor=2, features=1), 1
-        )
+        complete_stream(compression=compression, compressed_bytes=size)
     )
 
 
@@ -415,6 +411,7 @@ class TraceConvertFileTests(unittest.TestCase):
             source = root / "run.trace.bin"
             destination = root / "run.trace.txt"
             source.write_bytes(raw_stream())
+            Path(str(source) + ".metrics").write_text(metrics_sidecar(source), encoding="utf-8")
             stats = convert_binary_file(source, destination, lz4=None, crash_marked=False)
             self.assertFalse(stats.partial)
             self.assertIn("TRACE_END status=completed", destination.read_text())
@@ -433,6 +430,42 @@ class TraceConvertFileTests(unittest.TestCase):
                                     crash_marked=False, force=True)
             self.assertEqual("keep", destination.read_text(encoding="utf-8"))
             self.assertEqual([], list(root.glob(".trace-convert-*")))
+
+    def test_complete_qtrb_v12_requires_v3_sidecar_before_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            completed = root / "completed.trace.bin"
+            completed.write_bytes(raw_stream())
+            completed_text = root / "completed.trace.txt"
+            completed_text.write_text("keep-completed", encoding="utf-8")
+            with self.assertRaisesRegex(BinaryTraceError, "QTRB 1.2 requires metrics v3 sidecar"):
+                convert_binary_file(completed, completed_text, lz4=None,
+                                    crash_marked=False, force=True)
+            self.assertEqual("keep-completed", completed_text.read_text(encoding="utf-8"))
+
+            decoder = fake_lz4_executable(root)
+            stopped = root / "stopped.trace.bin.lz4"
+            binary = bytearray(stopped_stream())
+            struct.pack_into("<Q", binary, len(binary) - 64, len(uncompressed_lz4_frame(binary)))
+            stopped.write_bytes(uncompressed_lz4_frame(binary))
+            stopped_text = root / "stopped.trace.txt"
+            stopped_text.write_text("keep-stopped", encoding="utf-8")
+            with self.assertRaisesRegex(BinaryTraceError, "QTRB 1.2 requires metrics v3 sidecar"):
+                convert_binary_file(stopped, stopped_text, lz4=str(decoder),
+                                    crash_marked=False, force=True)
+            self.assertEqual("keep-stopped", stopped_text.read_text(encoding="utf-8"))
+
+    def test_complete_legacy_qtrb_allows_no_sidecar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "legacy.trace.bin"
+            destination = root / "legacy.trace.txt"
+            source.write_bytes(complete_stream(compression=0))
+
+            stats = convert_binary_file(source, destination, lz4=None, crash_marked=False)
+
+            self.assertFalse(stats.partial)
+            self.assertIn("TRACE_END status=completed", destination.read_text(encoding="utf-8"))
 
     def test_raw_missing_footer_is_not_recoverable_even_with_crash_marker(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -462,7 +495,9 @@ class TraceConvertFileTests(unittest.TestCase):
             self.assertFalse(convert_binary_file(source, output, lz4=str(decoder),
                                                  crash_marked=False).partial)
 
-            partial_binary = complete_stream()[:-105]
+            partial_binary = complete_stream().replace(
+                stream_header(), stream_header(minor=2, features=1), 1
+            )[:-105]
             source.write_bytes(uncompressed_lz4_frame(partial_binary)
                                + uncompressed_lz4_frame(b"tail")[:-3])
             partial = root / "run.partial.trace.txt"
@@ -711,7 +746,7 @@ class TraceConvertFileTests(unittest.TestCase):
             stderr = io.StringIO()
 
             raw = root / "success.trace.bin"
-            raw.write_bytes(raw_stream())
+            raw.write_bytes(complete_stream(compression=0))
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 self.assertEqual(0, main([str(raw)]))
             self.assertTrue((root / "success.trace.txt").exists())
@@ -750,7 +785,7 @@ class TraceConvertFileTests(unittest.TestCase):
             root = Path(directory)
             decoder = fake_lz4_executable(root)
             raw = root / "success.trace.bin"
-            raw.write_bytes(raw_stream())
+            raw.write_bytes(complete_stream(compression=0))
             success = subprocess.run(
                 [sys.executable, str(script), str(raw)], cwd=repository, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
@@ -824,7 +859,7 @@ class TraceConvertFileTests(unittest.TestCase):
             root = Path(directory)
             source = root / "run.trace.bin"
             destination = root / "run.trace.txt"
-            source.write_bytes(raw_stream())
+            source.write_bytes(complete_stream(compression=0))
             observations = []
 
             def observe(path):
