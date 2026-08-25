@@ -55,6 +55,11 @@ static std::string replace_once(std::string value, std::string_view from,
     return value;
 }
 
+static std::string document_with_session(std::string_view session) {
+    return replace_once(document_with_scenes("[]"), "\"scenes\": []",
+                        "\"scenes\": [], \"session\": " + std::string(session));
+}
+
 static nlohmann::json parse_payload(const JsonCallResult &result) {
     CHECK(result.transport_code == QTRACE_JSON_OK);
     CHECK(result.required_size == result.payload.size() + 1);
@@ -166,6 +171,33 @@ static void generation_registry_is_transactional_and_retains_two_generations() {
             configuration.status(1, 64U * 1024U));
     CHECK(expired.at("ok") == false);
     CHECK(expired.at("error").at("code") == "GENERATION_NOT_FOUND");
+}
+
+static void configure_and_status_serialize_normalized_session() {
+    TracerConfiguration configuration;
+    const std::string request = document_with_session(
+            R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","durationMs":60000})json");
+
+    const nlohmann::json configured = parse_payload(
+            configuration.configure(request, 64U * 1024U));
+    CHECK(configured.at("session").at("id") == "7d5807cf-cf09-4f21-92de-1ad92802610a");
+    CHECK(configured.at("session").at("durationMs") == 60000);
+
+    const nlohmann::json status = parse_payload(
+            configuration.status(configured.at("generation").get<uint64_t>(), 64U * 1024U));
+    CHECK(status.at("session").at("id") == "7d5807cf-cf09-4f21-92de-1ad92802610a");
+    CHECK(status.at("session").at("durationMs") == 60000);
+
+    TracerConfiguration legacy_configuration;
+    const nlohmann::json legacy_configured = parse_payload(
+            legacy_configuration.configure(document_with_scenes("[]"), 64U * 1024U));
+    CHECK(legacy_configured.at("session").at("id") == "");
+    CHECK(legacy_configured.at("session").at("durationMs") == 0);
+    const nlohmann::json legacy_status = parse_payload(
+            legacy_configuration.status(
+                    legacy_configured.at("generation").get<uint64_t>(), 64U * 1024U));
+    CHECK(legacy_status.at("session").at("id") == "");
+    CHECK(legacy_status.at("session").at("durationMs") == 0);
 }
 
 static void terminal_generations_ignore_late_install_callbacks() {
@@ -303,6 +335,53 @@ int main() {
     CHECK(prepared.config.scenes[1].offset == 0x6db38);
     CHECK(prepared.config.scenes[1].end_offset == 0x6dc00);
     CHECK(prepared.config.flight.entry_scene == "init");
+
+    const auto timed_session = prepare_tracer_configuration(document_with_session(
+            R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","durationMs":60000})json"));
+    CHECK(timed_session.accepted());
+    CHECK(timed_session.config.session.id == "7d5807cf-cf09-4f21-92de-1ad92802610a");
+    CHECK(timed_session.config.session.duration_ms == 60000);
+    CHECK(timed_session.config.session.enabled());
+    CHECK(timed_session.config.session.timed());
+
+    const auto minimum_duration_session = prepare_tracer_configuration(document_with_session(
+            R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","durationMs":100})json"));
+    CHECK(minimum_duration_session.accepted());
+    const auto maximum_duration_session = prepare_tracer_configuration(document_with_session(
+            R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","durationMs":86400000})json"));
+    CHECK(maximum_duration_session.accepted());
+
+    const auto monitor_session = prepare_tracer_configuration(document_with_session(
+            R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a"})json"));
+    CHECK(monitor_session.accepted());
+    CHECK(monitor_session.config.session.duration_ms == 0);
+    CHECK(monitor_session.config.session.enabled());
+    CHECK(!monitor_session.config.session.timed());
+    const auto legacy_session = prepare_tracer_configuration(document_with_scenes("[]"));
+    CHECK(legacy_session.accepted());
+    CHECK(!legacy_session.config.session.enabled());
+    CHECK(legacy_session.config.session.duration_ms == 0);
+
+    expect_rejection(document_with_session(
+                             R"json({"id":"7D5807CF-CF09-4F21-92DE-1AD92802610A"})json"),
+                     "INVALID_SESSION_ID", "$.session.id");
+    expect_rejection(document_with_session(
+                             R"json({"id":"7d5807cfcf094f2192de1ad92802610a"})json"),
+                     "INVALID_SESSION_ID", "$.session.id");
+    expect_rejection(document_with_session(
+                             R"json({"id":"00000000-0000-0000-0000-000000000000"})json"),
+                     "INVALID_SESSION_ID", "$.session.id");
+    expect_rejection(document_with_session(R"json({"durationMs":60000})json"),
+                     "MISSING_FIELD", "$.session.id");
+    expect_rejection(document_with_session(
+                             R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","durationMs":99})json"),
+                     "INVALID_SESSION_DURATION", "$.session.durationMs");
+    expect_rejection(document_with_session(
+                             R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","durationMs":86400001})json"),
+                     "INVALID_SESSION_DURATION", "$.session.durationMs");
+    expect_rejection(document_with_session(
+                             R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","unexpected":true})json"),
+                     "UNKNOWN_FIELD", "$.session.unexpected");
 
     expect_rejection("{]", "MALFORMED_JSON", "$");
     const std::string embedded_nul = std::string("{\"schemaVersion\":1}") + '\0';
@@ -464,6 +543,7 @@ int main() {
                      "UNKNOWN_FIELD", "$.debug");
 #endif
     generation_registry_is_transactional_and_retains_two_generations();
+    configure_and_status_serialize_normalized_session();
     terminal_generations_ignore_late_install_callbacks();
     publication_faults_preserve_the_prior_generation();
 }

@@ -35,6 +35,14 @@ struct FlightOptions {
     uint32_t protected_chunks = 4;
 };
 
+struct SessionOptions {
+    std::string id;
+    uint64_t duration_ms = 0;
+
+    bool enabled() const noexcept { return !id.empty(); }
+    bool timed() const noexcept { return duration_ms != 0; }
+};
+
 struct TraceConfig {
     std::string package_name = "com.aprz.qbdiandroid";
     std::string target_so = "libdemo_target.so";
@@ -43,6 +51,7 @@ struct TraceConfig {
     std::vector<std::string> jni_backtrace_funcs;
     TraceOptions trace;
     FlightOptions flight;
+    SessionOptions session;
 #ifndef NDEBUG
     bool test_fail_setup = false;
 #endif

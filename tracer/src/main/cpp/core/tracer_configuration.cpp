@@ -123,6 +123,13 @@ json serialize_normalized_scenes(const TraceConfig &config) {
     return scenes;
 }
 
+json serialize_normalized_session(const SessionOptions &session) {
+    return {
+            {"id", session.id},
+            {"durationMs", session.duration_ms},
+    };
+}
+
 std::vector<SceneConfigurationStatus> pending_scene_statuses(
         const TraceConfig &config) {
     std::vector<SceneConfigurationStatus> scenes;
@@ -272,6 +279,63 @@ bool unsigned_member(const json &object, std::string_view name, uint64_t *value,
         return false;
     }
     *value = member->get<uint64_t>();
+    return true;
+}
+
+bool valid_uuid_v4(const std::string &value) noexcept {
+    if (value.size() != 36 || value[8] != '-' || value[13] != '-' ||
+        value[18] != '-' || value[23] != '-' || value[14] != '4' ||
+        (value[19] != '8' && value[19] != '9' && value[19] != 'a' && value[19] != 'b')) {
+        return false;
+    }
+
+    bool all_zero = true;
+    for (size_t index = 0; index != value.size(); ++index) {
+        if (index == 8 || index == 13 || index == 18 || index == 23) continue;
+        const char character = value[index];
+        if (!((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'f'))) {
+            return false;
+        }
+        all_zero = all_zero && character == '0';
+    }
+    return !all_zero;
+}
+
+bool parse_session(const json &session, SessionOptions *options,
+                   ConfigurationIssue *issue) {
+    if (!session.is_object()) {
+        *issue = {"TYPE_MISMATCH", "$.session", "session must be an object"};
+        return false;
+    }
+    if (!exact_keys(session, {"id", "durationMs"}, issue, "$.session")) return false;
+
+    const json *id = required_member(session, "id", issue, "$.session");
+    if (id == nullptr) return false;
+    if (!id->is_string()) {
+        *issue = {"TYPE_MISMATCH", "$.session.id", "session id must be a string"};
+        return false;
+    }
+    options->id = id->get<std::string>();
+    if (!valid_uuid_v4(options->id)) {
+        *issue = {"INVALID_SESSION_ID", "$.session.id",
+                  "session id must be a lowercase non-nil UUIDv4"};
+        return false;
+    }
+
+    if (!session.contains("durationMs")) return true;
+    const json &duration = session.at("durationMs");
+    if (!duration.is_number_unsigned()) {
+        *issue = {"TYPE_MISMATCH", "$.session.durationMs",
+                  "durationMs must be an unsigned integer"};
+        return false;
+    }
+    options->duration_ms = duration.get<uint64_t>();
+    if (options->duration_ms < 100 || options->duration_ms > 86400000) {
+        *issue = {"INVALID_SESSION_DURATION", "$.session.durationMs",
+                  "durationMs must be 100 through 86400000"};
+        return false;
+    }
     return true;
 }
 
@@ -520,10 +584,10 @@ PreparedConfiguration prepare_tracer_configuration(std::string_view request) {
         ConfigurationIssue issue;
 #ifndef NDEBUG
         if (!exact_keys(root, {"schemaVersion", "packageName", "targetModule", "trace", "flight",
-                               "scenes", "debug"}, &issue, "$")) {
+                               "scenes", "session", "debug"}, &issue, "$")) {
 #else
         if (!exact_keys(root, {"schemaVersion", "packageName", "targetModule", "trace", "flight",
-                               "scenes"}, &issue, "$")) {
+                               "scenes", "session"}, &issue, "$")) {
 #endif
             PreparedConfiguration prepared;
             prepared.error = std::move(issue);
@@ -544,6 +608,12 @@ PreparedConfiguration prepare_tracer_configuration(std::string_view request) {
         TraceConfig config;
         if (!string_member(root, "packageName", &config.package_name, &issue, "$", true, 512) ||
             !string_member(root, "targetModule", &config.target_so, &issue, "$", true, 512)) {
+            PreparedConfiguration prepared;
+            prepared.error = std::move(issue);
+            return prepared;
+        }
+        if (root.contains("session") &&
+            !parse_session(root.at("session"), &config.session, &issue)) {
             PreparedConfiguration prepared;
             prepared.error = std::move(issue);
             return prepared;
@@ -657,6 +727,7 @@ JsonCallResult TracerConfiguration::configure(std::string_view request,
             {"generation", generation},
             {"state", "waiting_for_module"},
             {"targetModule", snapshot.config.target_so},
+            {"session", serialize_normalized_session(snapshot.config.session)},
             {"scenes", serialize_normalized_scenes(snapshot.config)},
             {"warnings", json::array()},
     };
@@ -737,6 +808,7 @@ JsonCallResult TracerConfiguration::status(uint64_t generation,
             {"moduleBase", snapshot->has_module
                                    ? json(hexadecimal(snapshot->module.start))
                                    : json(nullptr)},
+            {"session", serialize_normalized_session(snapshot->config.session)},
             {"scenes", std::move(scenes)},
             {"warnings", json::array()},
     };
