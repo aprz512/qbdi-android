@@ -631,7 +631,9 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
             if flags or len(payload) != TRACE_END_FIXED.size:
                 raise BinaryTraceError("invalid TRACE_END payload")
             success, return_value, elapsed_ms, *metrics = TRACE_END_FIXED.unpack(payload)
-            if success not in (0, 1):
+            if success == 0:
+                raise BinaryTraceError("failed TRACE_END cannot be converted as completed")
+            if success != 1:
                 raise BinaryTraceError("invalid TRACE_END status")
             terminal = TraceTerminal(
                 "completed", None, True, return_value, elapsed_ms, *metrics

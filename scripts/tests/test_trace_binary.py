@@ -192,17 +192,24 @@ class BinaryTraceConversionTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(BinaryTraceError, message):
                 self.convert(data)
 
-    def test_normalizes_legacy_failed_trace_end_without_fabricating_a_failure_terminal(self):
+    def test_rejects_failed_trace_end_for_every_supported_minor(self):
         complete = complete_stream()
         terminal_start = len(complete) - RECORD.size - 97
         failed = bytearray(complete[-97:])
         failed[0] = 0
+        failed_stream = complete[:terminal_start] + record(9, bytes(failed))
 
-        output, stats = self.convert(complete[:terminal_start] + record(9, bytes(failed)))
+        for minor, features in ((0, 0), (1, 0), (2, 1)):
+            with self.subTest(minor=minor, features=features):
+                output = io.StringIO()
+                data = failed_stream.replace(
+                    stream_header(), stream_header(minor=minor, features=features), 1
+                )
 
-        self.assertIn("TRACE_END status=completed return_valid=1", output)
-        self.assertNotIn("status=failed", output)
-        self.assertEqual("completed", stats.termination)
+                with self.assertRaisesRegex(
+                        BinaryTraceError, "failed TRACE_END cannot be converted as completed"):
+                    convert_binary_stream(io.BytesIO(data), output)
+                self.assertNotIn("TRACE_END status=completed", output.getvalue())
 
     def test_legacy_completed_streams_normalize_to_format_four_and_completed(self):
         for minor in (0, 1):
