@@ -524,6 +524,7 @@ bool BinaryTraceWriter::error(const std::string &message) {
 bool BinaryTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
     if (!opened_ || !began_ || termination_ != TraceTermination::None || close_called_)
         return false;
+    if (!ok) return fail(ECANCELED);
     return finalize_terminal(TraceTermination::Completed, TraceStopReason{}, retval, ok,
                              elapsed_ms);
 }

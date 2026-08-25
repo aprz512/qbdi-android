@@ -681,6 +681,76 @@ void compressed_stopped_stream_has_one_terminal_and_v3_metrics() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+void uncompressed_failed_completion_latches_without_a_terminal_or_sidecar() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    CachedInstruction decoded{};
+    decoded.opcode = 0xd503201fU;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.instruction(context, instruction(1, &decoded)));
+    CHECK(!writer.end(0x55, false, 17));
+    CHECK(writer.failed());
+    CHECK(writer.error_code() == ECANCELED);
+    CHECK(!writer.end(0x55, true, 18));
+    CHECK(!writer.stop(TraceStopReason::DurationElapsed, 18));
+    CHECK(!writer.instruction(context, instruction(2, &decoded)));
+    CHECK(!writer.close());
+    CHECK(!writer.close());
+
+    const std::vector<uint8_t> bytes = read_bytes(artifact_path(writer));
+    const std::vector<BinaryRecordType> types = record_types(bytes);
+    CHECK(count_type(types, BinaryRecordType::TraceEnd) == 0);
+    CHECK(count_type(types, BinaryRecordType::TraceStop) == 0);
+    CHECK(::access(sidecar_path(writer).c_str(), F_OK) != 0);
+
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void compressed_failed_completion_latches_without_a_terminal_or_sidecar() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = true;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    CachedInstruction decoded{};
+    decoded.opcode = 0xd503201fU;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.instruction(context, instruction(1, &decoded)));
+    CHECK(!writer.end(0x55, false, 17));
+    CHECK(writer.failed());
+    CHECK(writer.error_code() == ECANCELED);
+    CHECK(!writer.end(0x55, true, 18));
+    CHECK(!writer.stop(TraceStopReason::DurationElapsed, 18));
+    CHECK(!writer.close());
+    CHECK(!writer.close());
+
+    size_t frames = 0;
+    const std::vector<uint8_t> bytes =
+            decompress_frames(read_bytes(artifact_path(writer)), &frames);
+    CHECK(frames >= 1);
+    const std::vector<BinaryRecordType> types = record_types(bytes);
+    CHECK(count_type(types, BinaryRecordType::TraceEnd) == 0);
+    CHECK(count_type(types, BinaryRecordType::TraceStop) == 0);
+    CHECK(::access(sidecar_path(writer).c_str(), F_OK) != 0);
+
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 void maximum_rule_and_error_survive_four_kib_buffers_in_order() {
     const std::string directory = temporary_directory();
     TraceOptions options{};
@@ -1266,6 +1336,8 @@ int main() {
     uncompressed_stream_uses_binary_suffix_and_exact_byte_counts();
     uncompressed_stopped_stream_has_one_terminal_and_v3_metrics();
     compressed_stopped_stream_has_one_terminal_and_v3_metrics();
+    uncompressed_failed_completion_latches_without_a_terminal_or_sidecar();
+    compressed_failed_completion_latches_without_a_terminal_or_sidecar();
     maximum_rule_and_error_survive_four_kib_buffers_in_order();
     instruction_memory_and_continuations_keep_producer_order();
     sidecar_retries_eintr_and_partial_writes();

@@ -98,12 +98,8 @@ void early_execution_setup_failure_finalizes_one_failed_binary_run() {
     CHECK(!finalization.footer_success);
     CHECK(!finalization.completion_success);
     const std::vector<uint8_t> bytes = read_bytes(writer.path());
-    CHECK(bytes.size() >= kBinaryTraceEndRecordBytes);
-    const size_t footer = bytes.size() - kBinaryTraceEndRecordBytes;
-    CHECK(bytes[footer] == static_cast<uint8_t>(BinaryRecordType::TraceEnd));
-    CHECK(bytes[footer + kBinaryRecordHeaderBytes] == 0);
-    CHECK(u64(bytes, footer + kBinaryRecordHeaderBytes + 1) == 0);
-    remove_artifact(writer, directory, true);
+    CHECK(bytes.size() >= kBinaryStreamHeaderBytes);
+    remove_artifact(writer, directory, false);
 }
 
 void callback_registration_failure_blocks_execution_and_success_metrics() {
@@ -142,7 +138,7 @@ void callback_registration_failure_blocks_execution_and_success_metrics() {
         CHECK(!finalization.footer_success);
         CHECK(!finalization.completion_success);
         CHECK(metrics.instructions == 0);
-        remove_artifact(writer, directory, true);
+        remove_artifact(writer, directory, false);
     }
 }
 
@@ -164,7 +160,7 @@ void memory_instrumentation_failure_blocks_execution_and_success_metrics() {
     CHECK(!finalization.footer_success);
     CHECK(!finalization.completion_success);
     CHECK(metrics.instructions == 0);
-    remove_artifact(writer, directory, true);
+    remove_artifact(writer, directory, false);
 }
 
 void successful_target_has_one_authoritative_return_and_metrics() {
