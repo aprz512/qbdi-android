@@ -297,6 +297,12 @@ target_link_libraries(failure_state_test PRIVATE lz4_static Threads::Threads)
 add_trace_test(trace_callback_gate_test
     trace_callback_gate_test.cpp)
 
+add_trace_test(trace_generation_runtime_test
+    trace_generation_runtime_test.cpp
+    ../../main/cpp/core/trace_generation_runtime.cpp)
+target_link_libraries(trace_generation_runtime_test PRIVATE Threads::Threads)
+target_compile_options(trace_generation_runtime_test PRIVATE -fno-exceptions -fno-rtti)
+
 add_trace_test(trace_number_formatter_test
     trace_number_formatter_test.cpp)
 

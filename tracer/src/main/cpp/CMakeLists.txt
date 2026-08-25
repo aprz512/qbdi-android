@@ -76,6 +76,7 @@ add_library(qbdi_tracer SHARED
         core/arm64_memory_operand.cpp
         core/memory_trace_policy.cpp
         core/trace_run_session.cpp
+        core/trace_generation_runtime.cpp
         core/trace_process_lifecycle.cpp
         core/qbdi_runner_lifecycle.cpp
         core/qbdi_execution_control.cpp
@@ -120,6 +121,11 @@ set_source_files_properties(
         core/tracer_configuration.cpp
         PROPERTIES
         COMPILE_OPTIONS "-fexceptions")
+
+set_source_files_properties(
+        core/trace_generation_runtime.cpp
+        PROPERTIES
+        COMPILE_OPTIONS "-fno-exceptions;-fno-rtti")
 
 target_compile_features(qbdi_tracer PRIVATE cxx_std_20)
 target_compile_options(qbdi_tracer PRIVATE
