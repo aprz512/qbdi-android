@@ -9,6 +9,10 @@ using ShadowHookAddressFunction = void *(*)(void *, void *, void **);
 
 bool hook_address(uintptr_t target, void *replacement, HookHandle *handle,
                   ShadowHookAddressFunction hooker) {
+    if (handle != nullptr) {
+        handle->hook_error = 0;
+        handle->unhook_error = 0;
+    }
     if (target == 0 || replacement == nullptr || handle == nullptr ||
         hooker == nullptr) {
         return false;
@@ -27,28 +31,22 @@ bool hook_address(uintptr_t target, void *replacement, HookHandle *handle,
                           original_output);
     handle->original = __atomic_load_n(original_output, __ATOMIC_ACQUIRE);
     if (handle->stub == nullptr) {
-        int err = shadowhook_get_errno();
-        QTRACE_E("hook 0x%lx failed: %d %s", static_cast<unsigned long>(target), err,
-                 shadowhook_to_errmsg(err));
+        const int err = shadowhook_get_errno();
+        handle->hook_error = err;
         return false;
     }
     if (handle->original == nullptr) {
-        QTRACE_E("hook 0x%lx returned no original bypass",
-                 static_cast<unsigned long>(target));
         if (shadowhook_unhook(handle->stub) == 0) {
             handle->stub = nullptr;
             handle->target = 0;
         } else {
+            handle->unhook_error = shadowhook_get_errno();
             handle->residual_hook = true;
-            QTRACE_E("cleanup unhook 0x%lx failed; preserving residual hook ownership",
-                     static_cast<unsigned long>(target));
         }
         return false;
     }
     handle->retained_original = handle->original;
     handle->retained_original_bytes = kShadowHookArm64OriginalSlotBytes;
-    QTRACE_I("hooked 0x%lx original=%p", static_cast<unsigned long>(target),
-             handle->original);
     return true;
 }
 
@@ -56,11 +54,7 @@ bool hook_address(uintptr_t target, void *replacement, HookHandle *handle,
 
 bool init_inline_hook() {
     int result = shadowhook_init(SHADOWHOOK_MODE_UNIQUE, true);
-    if (result != 0) {
-        QTRACE_E("shadowhook_init failed: %d", result);
-        return false;
-    }
-    return true;
+    return result == 0;
 }
 
 bool configure_inline_hook_dl_init_helper_path(const char *helper_path) {
@@ -76,22 +70,14 @@ bool register_inline_hook_dl_init_callback(InlineHookDlInitCallback callback,
                                            void *opaque) {
     const int result = shadowhook_register_dl_init_callback(
             callback, nullptr, opaque);
-    if (result != 0) {
-        QTRACE_E("shadowhook dl-init callback registration failed: %d", result);
-        return false;
-    }
-    return true;
+    return result == 0;
 }
 
 bool register_inline_hook_dl_fini_callback(InlineHookDlInitCallback callback,
                                            void *opaque) {
     const int result = shadowhook_register_dl_fini_callback(
             nullptr, callback, opaque);
-    if (result != 0) {
-        QTRACE_E("shadowhook dl-fini callback registration failed: %d", result);
-        return false;
-    }
-    return true;
+    return result == 0;
 }
 
 bool hook_function_address(uintptr_t target, void *replacement, HookHandle *handle) {
@@ -103,13 +89,13 @@ bool hook_symbol_address(uintptr_t target, void *replacement, HookHandle *handle
 }
 
 bool unhook_function(HookHandle *handle) {
+    if (handle != nullptr) handle->unhook_error = 0;
     if (handle == nullptr || handle->stub == nullptr) return true;
     void *retained = nullptr;
     int result = shadowhook_unhook_qtrace_retain(handle->stub, &retained);
     if (result != 0) {
-        int err = shadowhook_get_errno();
-        QTRACE_E("unhook 0x%lx failed: %d %s", static_cast<unsigned long>(handle->target), err,
-                 shadowhook_to_errmsg(err));
+        const int err = shadowhook_get_errno();
+        handle->unhook_error = err;
         return false;
     }
     handle->stub = nullptr;

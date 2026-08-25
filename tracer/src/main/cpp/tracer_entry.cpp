@@ -44,6 +44,7 @@ struct InstalledSceneHook {
     uint64_t config_generation = 0;
     uint64_t pending_config_generation = 0;
     bool pending_install = false;
+    bool pending_batch_install = false;
     bool unhook_failed_window = false;
     bool installed = false;
     bool retired = false;
@@ -92,7 +93,14 @@ static void install_hooks_for_module(const ModuleRange &module,
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
                                       const ModuleRange &module,
                                       uint64_t config_generation,
-                                      const std::shared_ptr<CaptureCoordinator> &coordinator);
+                                      const std::shared_ptr<CaptureCoordinator> &coordinator,
+                                      bool batch_install = false);
+static std::vector<SceneConfigurationStatus> installation_statuses(
+        const TraceConfig &config,
+        const std::vector<SceneAddressDiagnostics> &diagnostics);
+static void fail_installation_statuses(
+        uint64_t generation, std::vector<SceneConfigurationStatus> *statuses,
+        const char *code, int hook_error);
 extern "C" char trace_proxy_stubs[];
 
 static bool tracer_fork_lifecycle_ready() noexcept {
@@ -110,7 +118,13 @@ static void install_nonflight_hooks_when_ready(
         }
         (void)::usleep(50 * 1000);
     }
-    QTRACE_E("target module %s not found", config.target_so.c_str());
+    constexpr const char *code = "MODULE_OBSERVATION_FAILED";
+    QTRACE_E("generation=%llu code=%s target module %s not found",
+             static_cast<unsigned long long>(generation), code,
+             config.target_so.c_str());
+    std::vector<SceneConfigurationStatus> statuses =
+            installation_statuses(config, {});
+    fail_installation_statuses(generation, &statuses, code, 0);
 }
 
 static void retire_module_generation(uintptr_t module_base,
@@ -175,16 +189,12 @@ static bool prepare_module_callbacks() noexcept {
     const bool registered = init_registered && fini_registered;
     g_module_callback_state.store(registered ? 1 : -1,
                                   std::memory_order_release);
-    if (!registered) {
-        QTRACE_E("cannot register linker module lifecycle callbacks");
-        return false;
-    }
-    return true;
+    return registered;
 }
 static uintptr_t scene_logical_pc(const ModuleRange &module,
                                   const SceneConfig &scene) noexcept {
     uintptr_t pc = 0;
-    return module_offset_address(module, scene.offset, false, &pc) ? pc : 0;
+    return checked_offset_address(module.start, scene.offset, &pc) ? pc : 0;
 }
 
 static void mark_flight_gateway_gap(
@@ -199,8 +209,6 @@ static void mark_flight_gateway_gap(
         return;
     }
     const uintptr_t pc = scene_logical_pc(module, scene);
-    QTRACE_E("flight gateway coverage gap scene=%s pc=0x%lx reason=%s",
-             scene.name.c_str(), static_cast<unsigned long>(pc), reason);
     coordinator->mark_coverage_gap(
             static_cast<uint32_t>(::syscall(SYS_gettid)), pc, gap_reason);
 }
@@ -395,15 +403,28 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     // refcount-owning object in this one heap allocation and intentionally leak it in
     // the child; the inherited allocator and pthread state must remain untouched.
     if (trace_process_child_detached()) return result;
+    bool resume_pending_batch = false;
+    ModuleRange pending_batch_module;
+    uint64_t pending_batch_generation = 0;
     {
         std::lock_guard<std::mutex> registry_guard(g_lock);
         std::lock_guard<std::mutex> transition_guard(runtime->hook->transition_mutex);
         --runtime->hook->active_proxy_calls;
         if (runtime->hook->active_proxy_calls == 0) {
             if (!runtime->hook->retired && runtime->hook->pending_install) {
+                const bool pending_batch =
+                        runtime->hook->pending_batch_install;
                 if (runtime->hook->installed &&
                     !unhook_function(&runtime->hook->hook)) {
                     runtime->hook->unhook_failed_window = false;
+                    if (pending_batch) {
+                        pending_batch_module = runtime->hook->pending_module;
+                        pending_batch_generation =
+                                runtime->hook->pending_config_generation;
+                        runtime->hook->pending_install = false;
+                        runtime->hook->pending_batch_install = false;
+                        resume_pending_batch = true;
+                    }
                 } else {
                     runtime->hook->installed = false;
                     runtime->hook->unhook_failed_window = false;
@@ -419,9 +440,16 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                     const uint64_t pending_config_generation =
                             runtime->hook->pending_config_generation;
                     runtime->hook->pending_install = false;
-                    (void)create_hook_generation_locked(
-                            pending_config, pending_scene, pending_module,
-                            pending_config_generation, pending_coordinator);
+                    runtime->hook->pending_batch_install = false;
+                    if (pending_batch) {
+                        pending_batch_module = pending_module;
+                        pending_batch_generation = pending_config_generation;
+                        resume_pending_batch = true;
+                    } else {
+                        (void)create_hook_generation_locked(
+                                pending_config, pending_scene, pending_module,
+                                pending_config_generation, pending_coordinator);
+                    }
                 }
             } else if (!runtime->hook->retired && !runtime->hook->installed) {
                 // Every physical hook installation gets a distinct proxy identity.
@@ -435,6 +463,10 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                 runtime->hook->unhook_failed_window = false;
             }
         }
+    }
+    if (resume_pending_batch) {
+        install_hooks_for_module(pending_batch_module,
+                                 pending_batch_generation, false);
     }
     delete runtime;
     if (deferred_thread_exit) {
@@ -455,20 +487,22 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                           uint64_t config_generation,
                                           const std::shared_ptr<CaptureCoordinator> &coordinator) {
     if (g_next_proxy_generation >= kMaxProxyGenerations) {
-        QTRACE_E("proxy generation capacity exhausted=%zu", kMaxProxyGenerations);
+        QTRACE_E("generation=%llu code=HOOK_INSTALL_FAILED proxy capacity exhausted=%zu",
+                 static_cast<unsigned long long>(config_generation),
+                 kMaxProxyGenerations);
         mark_flight_gateway_gap(config, coordinator, module, scene,
                                 CoverageGapReason::HookSetup,
                                 "proxy generation capacity exhausted");
         return false;
     }
     uintptr_t target = 0;
-    if (!module_offset_address(module, scene.offset, false, &target)) {
-        QTRACE_E("scene %s offset=0x%lx outside module size=0x%lx", scene.name.c_str(),
-                 static_cast<unsigned long>(scene.offset),
-                 static_cast<unsigned long>(module.size()));
+    if (!checked_offset_address(module.start, scene.offset, &target)) {
+        QTRACE_E("generation=%llu code=ADDRESS_OVERFLOW scene=%s offset=0x%lx",
+                 static_cast<unsigned long long>(config_generation),
+                 scene.name.c_str(), static_cast<unsigned long>(scene.offset));
         mark_flight_gateway_gap(config, coordinator, module, scene,
                                 CoverageGapReason::HookSetup,
-                                "scene target outside retained module generation");
+                                "scene target address overflow");
         return false;
     }
     const size_t generation = g_next_proxy_generation++;
@@ -487,6 +521,15 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                               &slot->hook);
     slot->installed = hooked || slot->hook.residual_hook;
     if (!hooked) {
+        const char *code = slot->hook.residual_hook
+                           ? "HOOK_INSTALL_RESIDUAL"
+                           : "HOOK_INSTALL_FAILED";
+        const int hook_error = slot->hook.unhook_error != 0
+                               ? slot->hook.unhook_error
+                               : slot->hook.hook_error;
+        QTRACE_E("generation=%llu code=%s scene=%s hook_error=%d",
+                 static_cast<unsigned long long>(config_generation), code,
+                 scene.name.c_str(), hook_error);
         mark_flight_gateway_gap(config, coordinator, module, scene,
                                 CoverageGapReason::HookSetup,
                                 slot->hook.residual_hook
@@ -499,7 +542,8 @@ static bool create_hook_generation_locked(const TraceConfig &config,
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
                                       const ModuleRange &module,
                                       uint64_t config_generation,
-                                      const std::shared_ptr<CaptureCoordinator> &coordinator) {
+                                      const std::shared_ptr<CaptureCoordinator> &coordinator,
+                                      bool batch_install) {
     if (config.flight.enabled && coordinator != nullptr &&
         coordinator->started() && !coordinator->matches_module(module)) {
         mark_flight_gateway_gap(config, coordinator, module, scene,
@@ -508,21 +552,25 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         return false;
     }
     if (scene.offset == 0) {
-        QTRACE_W("scene %s offset is 0, skip", scene.name.c_str());
+        QTRACE_E("generation=%llu code=ZERO_SCENE_OFFSET scene=%s",
+                 static_cast<unsigned long long>(config_generation),
+                 scene.name.c_str());
         mark_flight_gateway_gap(config, coordinator, module, scene,
                                 CoverageGapReason::HookSetup,
                                 "gateway offset is zero");
         return false;
     }
     if (scene.index >= kMaxScenes) {
-        QTRACE_E("scene index=%zu exceeds proxy stub capacity=%zu", scene.index, kMaxScenes);
+        QTRACE_E("generation=%llu code=HOOK_INSTALL_FAILED scene=%s index=%zu capacity=%zu",
+                 static_cast<unsigned long long>(config_generation),
+                 scene.name.c_str(), scene.index, kMaxScenes);
         mark_flight_gateway_gap(config, coordinator, module, scene,
                                 CoverageGapReason::HookSetup,
                                 "gateway scene index exceeds capacity");
         return false;
     }
     uintptr_t target = 0;
-    if (!module_offset_address(module, scene.offset, false, &target)) {
+    if (!checked_offset_address(module.start, scene.offset, &target)) {
         mark_flight_gateway_gap(config, coordinator, module, scene,
                                 CoverageGapReason::HookSetup,
                                 "gateway target outside module generation");
@@ -530,7 +578,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
     }
     if (scene.end_offset != 0) {
         uintptr_t range_end = 0;
-        if (!module_offset_address(module, scene.end_offset, true, &range_end) ||
+        if (!checked_offset_address(module.start, scene.end_offset, &range_end) ||
             range_end <= target) {
             mark_flight_gateway_gap(config, coordinator, module, scene,
                                     CoverageGapReason::HookSetup,
@@ -542,8 +590,8 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
     if (previous != nullptr) {
         std::lock_guard<std::mutex> transition_guard(previous->transition_mutex);
         uintptr_t previous_target = 0;
-        const bool previous_target_valid = module_offset_address(
-                previous->module, previous->scene.offset, false, &previous_target);
+        const bool previous_target_valid = checked_offset_address(
+                previous->module.start, previous->scene.offset, &previous_target);
         if (!previous->retired && previous->installed &&
             previous->config_generation == config_generation &&
             previous_target_valid && previous_target == target &&
@@ -579,9 +627,13 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
             previous->pending_coordinator = coordinator;
             previous->pending_config_generation = config_generation;
             previous->pending_install = true;
+            previous->pending_batch_install = batch_install;
             return true;
         }
         if (previous->installed && !unhook_function(&previous->hook)) {
+            QTRACE_E("generation=%llu code=HOOK_INSTALL_RESIDUAL scene=%s hook_error=%d",
+                     static_cast<unsigned long long>(config_generation),
+                     scene.name.c_str(), previous->hook.unhook_error);
             mark_flight_gateway_gap(config, coordinator, module, scene,
                                     CoverageGapReason::HookSetup,
                                     "previous gateway unhook failed");
@@ -694,6 +746,13 @@ bool trace_proxy_test_generation_retired(size_t generation) {
            g_hook_generations[generation] != nullptr &&
            g_hook_generations[generation]->retired;
 }
+
+bool trace_proxy_test_generation_installed(size_t generation) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    return generation < g_next_proxy_generation &&
+           g_hook_generations[generation] != nullptr &&
+           g_hook_generations[generation]->installed;
+}
 #endif
 
 static void tracer_atfork_prepare() {
@@ -736,6 +795,142 @@ static void tracer_atfork_child() {
     }
 }
 
+static std::vector<SceneConfigurationStatus> installation_statuses(
+        const TraceConfig &config,
+        const std::vector<SceneAddressDiagnostics> &diagnostics) {
+    std::vector<SceneConfigurationStatus> statuses;
+    statuses.reserve(config.scenes.size());
+    for (size_t index = 0; index < config.scenes.size(); ++index) {
+        const SceneConfig &scene = config.scenes[index];
+        SceneConfigurationStatus status;
+        status.name = scene.name;
+        status.offset = scene.offset;
+        status.state = SceneConfigurationState::Installing;
+        if (index < diagnostics.size()) {
+            const SceneAddressDiagnostics &diagnostic = diagnostics[index];
+            status.runtime_address = diagnostic.runtime_address;
+            status.runtime_end = diagnostic.runtime_end;
+            for (const AddressDiagnostic &warning : diagnostic.warnings) {
+                status.warnings.push_back(
+                        {warning.code,
+                         "$.scenes[" + std::to_string(index) + "].location",
+                         warning.message});
+            }
+        }
+        statuses.push_back(std::move(status));
+    }
+    return statuses;
+}
+
+static void fail_installation_statuses(
+        uint64_t generation, std::vector<SceneConfigurationStatus> *statuses,
+        const char *code, int hook_error) {
+    if (statuses == nullptr) return;
+    for (SceneConfigurationStatus &status : *statuses) {
+        status.state = SceneConfigurationState::HookFailed;
+        status.error_code = code;
+        status.hook_error = hook_error;
+    }
+    g_tracer_configuration.finish_install(
+            generation, ConfigurationState::HookFailed, std::move(*statuses));
+}
+
+enum class BatchRollbackKind {
+    PhysicalHook,
+    PendingUpdate,
+    MetadataUpdate,
+};
+
+struct BatchInstalledScene {
+    size_t status_index = 0;
+    BatchRollbackKind rollback_kind = BatchRollbackKind::PhysicalHook;
+    std::shared_ptr<InstalledSceneHook> hook;
+    TraceConfig previous_config;
+    SceneConfig previous_scene;
+    ModuleRange previous_module;
+    std::shared_ptr<CaptureCoordinator> previous_coordinator;
+    uint64_t previous_config_generation = 0;
+};
+
+static void set_status_hook_ownership(
+        SceneConfigurationStatus *status,
+        const InstalledSceneHook &hook) {
+    if (status == nullptr) return;
+    status->name = hook.scene.name;
+    status->offset = hook.scene.offset;
+    status->runtime_address = 0;
+    status->runtime_end = 0;
+    status->warnings.clear();
+    (void)checked_offset_address(hook.module.start, hook.scene.offset,
+                                 &status->runtime_address);
+    if (hook.scene.end_offset != 0) {
+        (void)checked_offset_address(hook.module.start, hook.scene.end_offset,
+                                     &status->runtime_end);
+    }
+}
+
+static bool remove_superseded_hooks_after_failed_batch(
+        uint64_t generation,
+        std::vector<SceneConfigurationStatus> *statuses) {
+    bool cleanup_failed = false;
+    for (size_t scene_index = g_scene_hooks.size(); scene_index-- > 0;) {
+        const std::shared_ptr<InstalledSceneHook> hook =
+                g_scene_hooks[scene_index];
+        if (hook == nullptr || hook->config_generation == generation ||
+            hook->retired) {
+            continue;
+        }
+        if (statuses != nullptr && scene_index < statuses->size() &&
+            statuses->at(scene_index).state ==
+                    SceneConfigurationState::RollbackFailed) {
+            cleanup_failed = true;
+            continue;
+        }
+        std::lock_guard<std::mutex> transition_guard(hook->transition_mutex);
+        if (!hook->installed) {
+            hook->pending_install = false;
+            hook->pending_batch_install = false;
+            hook->unhook_failed_window = false;
+            hook->retired = true;
+            if (g_scene_hooks[scene_index] == hook) {
+                g_scene_hooks[scene_index].reset();
+            }
+            continue;
+        }
+        if (hook->active_proxy_calls != 0 ||
+            !unhook_function(&hook->hook)) {
+            hook->hook.residual_hook = true;
+            cleanup_failed = true;
+            if (statuses != nullptr) {
+                SceneConfigurationStatus residual_status;
+                set_status_hook_ownership(&residual_status, *hook);
+                residual_status.state =
+                        SceneConfigurationState::RollbackFailed;
+                residual_status.error_code = "HOOK_ROLLBACK_FAILED";
+                residual_status.hook_error = hook->hook.unhook_error;
+                if (scene_index < statuses->size()) {
+                    statuses->at(scene_index) = std::move(residual_status);
+                } else {
+                    statuses->push_back(std::move(residual_status));
+                }
+            }
+            QTRACE_E("generation=%llu code=HOOK_ROLLBACK_FAILED scene=%s hook_error=%d",
+                     static_cast<unsigned long long>(generation),
+                     hook->scene.name.c_str(), hook->hook.unhook_error);
+            continue;
+        }
+        hook->pending_install = false;
+        hook->pending_batch_install = false;
+        hook->installed = false;
+        hook->unhook_failed_window = false;
+        hook->retired = true;
+        if (g_scene_hooks[scene_index] == hook) {
+            g_scene_hooks[scene_index].reset();
+        }
+    }
+    return !cleanup_failed;
+}
+
 static void install_hooks_for_module(const ModuleRange &module,
                                      uint64_t expected_generation,
                                      bool loading) {
@@ -745,32 +940,220 @@ static void install_hooks_for_module(const ModuleRange &module,
     if (expected_generation != 0 && expected_generation != g_config_generation) return;
     if (basename_of(module.path) != g_config.target_so) return;
     (void)loading;
+    const uint64_t generation = g_config_generation;
+    const std::vector<ModuleRange> process_maps = read_process_maps();
+    std::vector<SceneAddressDiagnostics> diagnostics;
+    diagnostics.reserve(g_config.scenes.size());
+    for (const SceneConfig &scene : g_config.scenes) {
+        diagnostics.push_back(diagnose_scene_address(module, process_maps, scene));
+    }
+    g_tracer_configuration.mark_installing(generation, module, diagnostics);
+    std::vector<SceneConfigurationStatus> statuses =
+            installation_statuses(g_config, diagnostics);
     if (g_config.flight.enabled) {
-        if (g_capture_coordinator == nullptr || g_config_generation == 0 ||
-            g_config_generation > UINT32_MAX) {
-            QTRACE_E("flight coordinator unavailable");
+        if (g_capture_coordinator == nullptr || generation == 0 ||
+            generation > UINT32_MAX) {
+            constexpr const char *code = "COORDINATOR_UNAVAILABLE";
+            QTRACE_E("generation=%llu code=%s flight coordinator unavailable",
+                     static_cast<unsigned long long>(generation), code);
+            fail_installation_statuses(generation, &statuses, code, 0);
             return;
         }
         if (!g_capture_coordinator->started() &&
             !g_capture_coordinator->start(
                     g_config, module,
-                    static_cast<uint32_t>(g_config_generation))) {
-            QTRACE_E("cannot start flight capture artifact");
+                    static_cast<uint32_t>(generation))) {
+            constexpr const char *code = "COORDINATOR_START_FAILED";
+            QTRACE_E("generation=%llu code=%s cannot start flight capture artifact",
+                     static_cast<unsigned long long>(generation), code);
+            fail_installation_statuses(generation, &statuses, code, 0);
             return;
         }
         g_capture_coordinator->set_thread_start_resolver(
                 resolve_flight_thread_start, g_capture_coordinator.get());
         if (!process_thread_create_gateway().install(
                     g_capture_coordinator)) {
-            QTRACE_E("cannot install persistent pthread_create gateway");
+            constexpr const char *code = "CALLBACK_REGISTRATION_FAILED";
+            const int hook_error =
+                    process_thread_create_gateway().hook_error();
+            QTRACE_E("generation=%llu code=%s hook_error=%d cannot install "
+                     "persistent pthread_create gateway",
+                     static_cast<unsigned long long>(generation), code,
+                     hook_error);
+            fail_installation_statuses(generation, &statuses, code,
+                                       hook_error);
+            return;
         }
     }
-    QTRACE_I("target module %s base=0x%lx", g_config.target_so.c_str(),
+    QTRACE_I("generation=%llu target module %s base=0x%lx",
+             static_cast<unsigned long long>(generation),
+             g_config.target_so.c_str(),
              static_cast<unsigned long>(module.start));
-    for (const auto &scene: g_config.scenes) {
-        install_scene_hook_locked(g_config, scene, module, g_config_generation,
-                                  g_capture_coordinator);
+    std::vector<BatchInstalledScene> installed;
+    installed.reserve(g_config.scenes.size());
+    size_t failed_index = g_config.scenes.size();
+    bool failed_scene_residual = false;
+    for (size_t index = 0; index < g_config.scenes.size(); ++index) {
+        const SceneConfig &scene = g_config.scenes[index];
+        const std::shared_ptr<InstalledSceneHook> previous =
+                scene.index < g_scene_hooks.size()
+                        ? g_scene_hooks[scene.index]
+                        : nullptr;
+        const uint64_t previous_generation =
+                previous == nullptr ? 0 : previous->config_generation;
+        TraceConfig previous_config;
+        SceneConfig previous_scene;
+        ModuleRange previous_module;
+        std::shared_ptr<CaptureCoordinator> previous_coordinator;
+        if (previous != nullptr) {
+            previous_config = previous->config;
+            previous_scene = previous->scene;
+            previous_module = previous->module;
+            previous_coordinator = previous->coordinator;
+        }
+
+        if (!install_scene_hook_locked(g_config, scene, module, generation,
+                                       g_capture_coordinator, true)) {
+            failed_index = index;
+            SceneConfigurationStatus &status = statuses[index];
+            status.state = SceneConfigurationState::HookFailed;
+            const std::shared_ptr<InstalledSceneHook> failed =
+                    scene.index < g_scene_hooks.size()
+                            ? g_scene_hooks[scene.index]
+                            : nullptr;
+            if (scene.offset == 0) {
+                status.error_code = "ZERO_SCENE_OFFSET";
+            } else if (!diagnostics[index].valid) {
+                status.error_code = diagnostics[index].error.code;
+            } else if (failed != nullptr && failed->hook.residual_hook) {
+                set_status_hook_ownership(&status, *failed);
+                status.state = SceneConfigurationState::RollbackFailed;
+                status.error_code = "HOOK_INSTALL_RESIDUAL";
+                status.hook_error = failed->hook.unhook_error != 0
+                                    ? failed->hook.unhook_error
+                                    : failed->hook.hook_error;
+                failed_scene_residual = true;
+            } else if (failed != nullptr && failed == previous &&
+                       failed->installed && failed->hook.unhook_error != 0) {
+                set_status_hook_ownership(&status, *failed);
+                status.state = SceneConfigurationState::RollbackFailed;
+                status.error_code = "HOOK_INSTALL_RESIDUAL";
+                status.hook_error = failed->hook.unhook_error;
+                failed_scene_residual = true;
+            } else {
+                status.error_code = "HOOK_INSTALL_FAILED";
+                if (failed != nullptr && failed->config_generation == generation) {
+                    status.hook_error = failed->hook.hook_error;
+                }
+            }
+            QTRACE_E("generation=%llu code=%s scene=%s hook_error=%d",
+                     static_cast<unsigned long long>(generation),
+                     status.error_code.c_str(), status.name.c_str(),
+                     status.hook_error);
+            break;
+        }
+
+        statuses[index].state = SceneConfigurationState::Installed;
+        const std::shared_ptr<InstalledSceneHook> current =
+                g_scene_hooks[scene.index];
+        BatchInstalledScene member;
+        member.status_index = index;
+        member.hook = current;
+        member.previous_config = std::move(previous_config);
+        member.previous_scene = std::move(previous_scene);
+        member.previous_module = std::move(previous_module);
+        member.previous_coordinator = std::move(previous_coordinator);
+        member.previous_config_generation = previous_generation;
+        if (current == previous && current != nullptr &&
+            current->pending_install &&
+            current->pending_config_generation == generation) {
+            member.rollback_kind = BatchRollbackKind::PendingUpdate;
+        } else if (current == previous && current != nullptr &&
+                   previous_generation != generation &&
+                   current->config_generation == generation) {
+            member.rollback_kind = BatchRollbackKind::MetadataUpdate;
+        } else {
+            member.rollback_kind = BatchRollbackKind::PhysicalHook;
+        }
+        installed.push_back(std::move(member));
+        if (installed.back().rollback_kind ==
+            BatchRollbackKind::PendingUpdate) {
+            return;
+        }
     }
+
+    if (failed_index == g_config.scenes.size()) {
+        g_tracer_configuration.finish_install(
+                generation, ConfigurationState::Installed, std::move(statuses));
+        QTRACE_I("generation=%llu hooks installed scenes=%zu",
+                 static_cast<unsigned long long>(generation),
+                 g_config.scenes.size());
+        return;
+    }
+
+    for (size_t index = failed_index + 1; index < statuses.size(); ++index) {
+        statuses[index].state = SceneConfigurationState::HookFailed;
+        statuses[index].error_code = "HOOK_INSTALL_FAILED";
+    }
+
+    bool rollback_failed = failed_scene_residual;
+    for (auto iterator = installed.rbegin(); iterator != installed.rend(); ++iterator) {
+        BatchInstalledScene &member = *iterator;
+        SceneConfigurationStatus &status = statuses[member.status_index];
+        if (member.hook == nullptr) {
+            status.state = SceneConfigurationState::RollbackFailed;
+            status.error_code = "HOOK_ROLLBACK_FAILED";
+            rollback_failed = true;
+            continue;
+        }
+        std::lock_guard<std::mutex> transition_guard(
+                member.hook->transition_mutex);
+        if (member.rollback_kind == BatchRollbackKind::PendingUpdate) {
+            member.hook->pending_install = false;
+            member.hook->pending_batch_install = false;
+            status.state = SceneConfigurationState::RolledBack;
+            continue;
+        }
+        if (member.rollback_kind == BatchRollbackKind::MetadataUpdate) {
+            member.hook->config = std::move(member.previous_config);
+            member.hook->scene = std::move(member.previous_scene);
+            member.hook->module = std::move(member.previous_module);
+            member.hook->coordinator = std::move(member.previous_coordinator);
+            member.hook->config_generation = member.previous_config_generation;
+            status.state = SceneConfigurationState::RolledBack;
+            continue;
+        }
+        if (member.hook->active_proxy_calls != 0 ||
+            (member.hook->installed &&
+             !unhook_function(&member.hook->hook))) {
+            member.hook->hook.residual_hook = true;
+            status.state = SceneConfigurationState::RollbackFailed;
+            status.error_code = "HOOK_ROLLBACK_FAILED";
+            status.hook_error = member.hook->hook.unhook_error;
+            rollback_failed = true;
+            QTRACE_E("generation=%llu code=%s scene=%s hook_error=%d",
+                     static_cast<unsigned long long>(generation),
+                     status.error_code.c_str(), status.name.c_str(),
+                     status.hook_error);
+            continue;
+        }
+        member.hook->installed = false;
+        member.hook->unhook_failed_window = false;
+        member.hook->retired = true;
+        if (member.hook->scene.index < g_scene_hooks.size() &&
+            g_scene_hooks[member.hook->scene.index] == member.hook) {
+            g_scene_hooks[member.hook->scene.index].reset();
+        }
+        status.state = SceneConfigurationState::RolledBack;
+    }
+    if (!remove_superseded_hooks_after_failed_batch(generation, &statuses)) {
+        rollback_failed = true;
+    }
+    const ConfigurationState terminal = rollback_failed
+                                        ? ConfigurationState::RollbackFailed
+                                        : ConfigurationState::HookFailed;
+    g_tracer_configuration.finish_install(generation, terminal,
+                                           std::move(statuses));
 }
 
 static void apply_accepted_configuration(TraceConfig config,
@@ -788,14 +1171,36 @@ static void apply_accepted_configuration(TraceConfig config,
         g_configured = true;
         g_config_generation = generation;
     }
-    QTRACE_I("configure tracer package=%s target=%s", config.package_name.c_str(),
-             config.target_so.c_str());
+    QTRACE_I("generation=%llu configure tracer package=%s target=%s",
+             static_cast<unsigned long long>(generation),
+             config.package_name.c_str(), config.target_so.c_str());
     if (!coordinator_ready) {
-        QTRACE_E("cannot allocate flight capture coordinator");
+        constexpr const char *code = "COORDINATOR_ALLOCATION_FAILED";
+        QTRACE_E("generation=%llu code=%s cannot allocate flight capture coordinator",
+                 static_cast<unsigned long long>(generation), code);
+        std::vector<SceneConfigurationStatus> statuses =
+                installation_statuses(config, {});
+        fail_installation_statuses(generation, &statuses, code, 0);
         return;
     }
-    if (!init_inline_hook()) return;
-    if (!prepare_module_callbacks()) return;
+    if (!init_inline_hook()) {
+        constexpr const char *code = "HOOK_INITIALIZATION_FAILED";
+        QTRACE_E("generation=%llu code=%s cannot initialize inline hooks",
+                 static_cast<unsigned long long>(generation), code);
+        std::vector<SceneConfigurationStatus> statuses =
+                installation_statuses(config, {});
+        fail_installation_statuses(generation, &statuses, code, 0);
+        return;
+    }
+    if (!prepare_module_callbacks()) {
+        constexpr const char *code = "MODULE_CALLBACK_REGISTRATION_FAILED";
+        QTRACE_E("generation=%llu code=%s cannot register linker module lifecycle callbacks",
+                 static_cast<unsigned long long>(generation), code);
+        std::vector<SceneConfigurationStatus> statuses =
+                installation_statuses(config, {});
+        fail_installation_statuses(generation, &statuses, code, 0);
+        return;
+    }
     if (!config.jni_backtrace_funcs.empty()) {
         set_jni_backtrace_funcs(config.jni_backtrace_funcs);
         QTRACE_I("jni backtrace enabled for %zu functions",
@@ -885,18 +1290,32 @@ extern "C" __attribute__((visibility("default"))) void
 qbdi_tracer_install_module(const char *module_path, uintptr_t module_base, uintptr_t module_size) {
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;
     if (module_path == nullptr || module_base == 0 || module_size == 0) return;
-
-    ModuleRange module;
-    if (!find_loaded_module(module_path, module_base, module_size, &module)) {
-        QTRACE_E("cannot validate observer module path=%s base=0x%lx size=0x%lx", module_path,
-                 static_cast<unsigned long>(module_base),
-                 static_cast<unsigned long>(module_size));
+    uint64_t generation = 0;
+    TraceConfig config;
+    if (!g_tracer_configuration.current(&generation, &config) ||
+        basename_of(module_path) != config.target_so) {
         return;
     }
 
-    QTRACE_I("install hooks from observer module=%s base=0x%lx size=0x%lx", module_path,
+    ModuleRange module;
+    if (!find_loaded_module(module_path, module_base, module_size, &module)) {
+        constexpr const char *code = "MODULE_OBSERVATION_FAILED";
+        QTRACE_E("generation=%llu code=%s cannot validate observer module "
+                 "path=%s base=0x%lx size=0x%lx",
+                 static_cast<unsigned long long>(generation), code, module_path,
+                 static_cast<unsigned long>(module_base),
+                 static_cast<unsigned long>(module_size));
+        std::vector<SceneConfigurationStatus> statuses =
+                installation_statuses(config, {});
+        fail_installation_statuses(generation, &statuses, code, 0);
+        return;
+    }
+
+    QTRACE_I("generation=%llu install hooks from observer module=%s "
+             "base=0x%lx size=0x%lx",
+             static_cast<unsigned long long>(generation), module_path,
              static_cast<unsigned long>(module.start), static_cast<unsigned long>(module.size()));
-    install_hooks_for_module(module, 0, false);
+    install_hooks_for_module(module, generation, false);
 }
 
 __attribute__((constructor)) static void qbdi_tracer_init() {

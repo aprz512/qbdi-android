@@ -32,6 +32,8 @@ extern "C" int32_t qbdi_tracer_configure_json(
         const char *, uint64_t, char *, uint64_t, uint64_t *);
 extern "C" int32_t qbdi_tracer_get_status_json(
         uint64_t, char *, uint64_t, uint64_t *);
+extern "C" void qbdi_tracer_install_module(
+        const char *, uintptr_t, uintptr_t);
 extern "C" void qbdi_tracer_configure(const char *) __attribute__((weak));
 extern "C" {
 char trace_proxy_stubs[32768]{};
@@ -53,6 +55,7 @@ void trace_proxy_test_install_loading_module(const ModuleRange &module);
 void trace_proxy_test_module_fini(uintptr_t module_base,
                                   const char *module_path);
 bool trace_proxy_test_generation_retired(size_t generation);
+bool trace_proxy_test_generation_installed(size_t generation);
 bool trace_proxy_test_current_configuration(uint64_t *generation,
                                             TraceConfig *config);
 CaptureCoordinator *trace_proxy_test_current_coordinator();
@@ -104,6 +107,16 @@ nlohmann::json call_json_configure(const std::string &request) {
     uint64_t response_size = 0;
     CHECK(qbdi_tracer_configure_json(request.data(), request.size(), response.data(),
                                      response.size(), &response_size) == QTRACE_JSON_OK);
+    CHECK(response_size > 1);
+    CHECK(response.at(response_size - 1) == '\0');
+    return nlohmann::json::parse(response.data());
+}
+
+nlohmann::json call_json_status(uint64_t generation) {
+    std::vector<char> response(64U * 1024U);
+    uint64_t response_size = 0;
+    CHECK(qbdi_tracer_get_status_json(generation, response.data(), response.size(),
+                                      &response_size) == QTRACE_JSON_OK);
     CHECK(response_size > 1);
     CHECK(response.at(response_size - 1) == '\0');
     return nlohmann::json::parse(response.data());
@@ -219,7 +232,11 @@ void accepted_configuration_is_active_when_inline_setup_fails() {
     g_fail_inline_hook_init = true;
     const nlohmann::json accepted = call_json_configure(json_abi_request(
             "com.example.setup-failure",
-            "libqtrace-setup-failure-never-loaded.so"));
+            "libqtrace-setup-failure-never-loaded.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "setup"},
+                     {"location", {{"offset", "0x100"}}}},
+            })));
     CHECK(accepted.at("ok") == true);
 
     uint64_t active_generation = 0;
@@ -230,6 +247,11 @@ void accepted_configuration_is_active_when_inline_setup_fails() {
     CHECK(active_config.package_name == "com.example.setup-failure");
     CHECK(active_config.target_so == "libqtrace-setup-failure-never-loaded.so");
     CHECK(!g_fail_inline_hook_init);
+    const nlohmann::json status = call_json_status(active_generation);
+    CHECK(status.at("state") == "hook_failed");
+    CHECK(status.at("scenes").at(0).at("state") == "hook_failed");
+    CHECK(status.at("scenes").at(0).at("error").at("code") ==
+          "HOOK_INITIALIZATION_FAILED");
 }
 
 void flight_configuration_activates_its_explicit_entry_scene() {
@@ -305,8 +327,12 @@ size_t g_hook_calls = 0;
 size_t g_unhook_calls = 0;
 bool g_fail_unhook = false;
 bool g_fail_next_hook = false;
+size_t g_fail_hook_call = 0;
+int g_hook_failure_error = 0;
+int g_unhook_failure_error = 0;
 bool g_install_residual_hook = false;
 uintptr_t g_original_override = 0;
+std::vector<uintptr_t> g_hook_targets;
 std::atomic<size_t> g_old_calls{0};
 std::atomic<size_t> g_new_calls{0};
 int g_nested_fork_status = -1;
@@ -397,8 +423,12 @@ void reset_fakes() {
     g_unhook_calls = 0;
     g_fail_unhook = false;
     g_fail_next_hook = false;
+    g_fail_hook_call = 0;
+    g_hook_failure_error = 0;
+    g_unhook_failure_error = 0;
     g_install_residual_hook = false;
     g_original_override = 0;
+    g_hook_targets.clear();
     g_runner_forks = false;
     g_runner_fork_child = -1;
     g_fail_on_child_delete = 0;
@@ -587,6 +617,61 @@ std::shared_ptr<CaptureCoordinator> start_flight_proxy_coordinator(
     CHECK(coordinator->start(config, module, 77));
     trace_proxy_test_set_coordinator(coordinator);
     return coordinator;
+}
+
+void invalid_target_module_observation_finishes_with_a_stable_code() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("module-observation-reset"));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.module-observation", "libmodule-observation.so",
+            false, {}, nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", "0x100"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+
+    qbdi_tracer_install_module("/data/app/libmodule-observation.so", 1, 1);
+
+    const nlohmann::json status = call_json_status(generation);
+    CHECK(status.at("state") == "hook_failed");
+    CHECK(status.at("scenes").at(0).at("error").at("code") ==
+          "MODULE_OBSERVATION_FAILED");
+}
+
+void callback_registration_failure_preserves_the_shadowhook_error() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("callback-registration-reset"));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.callback-registration", "libcallback-registration.so",
+            true, "boot", nlohmann::json::array({
+                    {{"name", "boot"},
+                     {"location", {{"offset", "0x100"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    uint64_t active_generation = 0;
+    TraceConfig config;
+    CHECK(trace_proxy_test_current_configuration(&active_generation, &config));
+    CHECK(active_generation == generation);
+    ModuleRange module;
+    module.start = 0x75000000;
+    module.end = module.start + 0x1000;
+    module.permissions = "r-xp";
+    module.path = "/data/app/libcallback-registration.so";
+    const std::shared_ptr<CaptureCoordinator> coordinator(
+            new CaptureCoordinator(flight_proxy_factories()));
+    CHECK(coordinator->start(config, module,
+                             static_cast<uint32_t>(generation)));
+    trace_proxy_test_set_coordinator(coordinator);
+    g_fail_hook_call = 1;
+    g_hook_failure_error = 87;
+
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json status = call_json_status(generation);
+    CHECK(status.at("state") == "hook_failed");
+    CHECK(status.at("scenes").at(0).at("error").at("code") ==
+          "CALLBACK_REGISTRATION_FAILED");
+    CHECK(status.at("scenes").at(0).at("error").at("hookError") == 87);
 }
 
 void branch_before_dispatch_keeps_its_generation_snapshot_and_bypass() {
@@ -921,6 +1006,59 @@ void duplicate_during_an_active_call_schedules_only_the_required_rehook() {
     CHECK(trace_proxy_test_generation(scene.index) != first_generation);
 }
 
+void batch_reconfiguration_stays_installing_until_pending_rehook_succeeds() {
+    reset_fakes();
+    TraceConfig old_config = config_named("active-batch-old");
+    old_config.target_so = "libactive-batch.so";
+    const SceneConfig old_scene = scene_named(
+            "entry", reinterpret_cast<uintptr_t>(old_target));
+    const ModuleRange module = module_named("/data/app/libactive-batch.so");
+    trace_proxy_test_reset(old_config);
+    CHECK(trace_proxy_test_update(old_config, old_scene, module));
+    const size_t old_generation = trace_proxy_test_generation(old_scene.index);
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_use_runner_gate = true;
+    }
+
+    uint64_t args[8]{29};
+    uint64_t result = 0;
+    std::thread active([&] {
+        result = trace_proxy_dispatch(old_generation, args, 0);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_runner_entered; });
+    }
+
+    char offset[2 * sizeof(uintptr_t) + 3]{};
+    std::snprintf(offset, sizeof(offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(old_target)));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.active-batch", "libactive-batch.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", offset}}}},
+            })));
+    const uint64_t config_generation =
+            accepted.at("generation").get<uint64_t>();
+    trace_proxy_test_install_loading_module(module);
+    CHECK(call_json_status(config_generation).at("state") == "installing");
+
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_runner = true;
+    }
+    g_gate_condition.notify_all();
+    active.join();
+
+    CHECK(result == 0x11d);
+    CHECK(call_json_status(config_generation).at("state") == "installed");
+    CHECK(g_hook_calls == 2);
+    CHECK(g_unhook_calls == 1);
+}
+
 void observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map() {
     reset_fakes();
     ModuleRange read_only;
@@ -1066,26 +1204,222 @@ void constructor_phdr_range_rejects_invalid_or_unrepresentable_loads() {
     CHECK(!module_range_from_phdr(info, &module));
 }
 
-void scene_offsets_must_stay_inside_the_normalized_module() {
+void outside_scene_warning_does_not_block_hook_installation() {
     reset_fakes();
-    const TraceConfig config = config_named("bounded-scene");
-    trace_proxy_test_reset(config);
-    const ModuleRange module = module_named("bounded-module", 0x100);
+    trace_proxy_test_reset(config_named("outside-warning-reset"));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.outside-warning", "liboutside-warning.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "outside"},
+                     {"location", {{"offset", "0x200"}}}},
+            })));
+    CHECK(accepted.at("ok") == true);
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    ModuleRange module;
+    module.start = 0x71000000;
+    module.end = module.start + 0x100;
+    module.permissions = "r-xp";
+    module.path = "/data/app/liboutside-warning.so";
 
-    SceneConfig outside = scene_named("outside", 0x100);
-    CHECK(!trace_proxy_test_repeat_current_install(outside, module));
+    trace_proxy_test_install_loading_module(module);
 
-    SceneConfig bad_end = scene_named("bad-end", 0x80);
-    bad_end.end_offset = 0x101;
-    CHECK(!trace_proxy_test_repeat_current_install(bad_end, module));
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(g_hook_calls == 1);
+    CHECK(g_hook_targets.at(0) == module.start + 0x200);
+    CHECK(snapshot.at("state") == "installed");
+    CHECK(snapshot.at("scenes").at(0).at("state") == "installed");
+    CHECK(snapshot.at("scenes").at(0).at("runtimeAddress") == "0x71000200");
+    bool found_outside_warning = false;
+    for (const auto &warning : snapshot.at("scenes").at(0).at("warnings")) {
+        if (warning.at("code") == "ADDRESS_OUTSIDE_TARGET_MODULE") {
+            found_outside_warning = true;
+        }
+    }
+    CHECK(found_outside_warning);
+}
 
-    uintptr_t address = 0;
-    CHECK(module_offset_address(module, 0xff, false, &address));
-    CHECK(address == 0xff);
-    CHECK(module_offset_address(module, 0x100, true, &address));
-    CHECK(address == 0x100);
-    CHECK(!module_offset_address(module, 0x100, false, &address));
-    CHECK(!module_offset_address(module, 0x101, true, &address));
+void second_hook_failure_rolls_back_the_batch_in_reverse() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("batch-failure-reset"));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.batch-failure", "libbatch-failure.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "first"}, {"location", {{"offset", "0x40"}}}},
+                    {{"name", "second"}, {"location", {{"offset", "0x80"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    g_fail_hook_call = 2;
+    g_hook_failure_error = 73;
+    ModuleRange module;
+    module.start = 0x72000000;
+    module.end = module.start + 0x1000;
+    module.permissions = "r-xp";
+    module.path = "/data/app/libbatch-failure.so";
+
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "hook_failed");
+    CHECK(snapshot.at("scenes").at(0).at("state") == "rolled_back");
+    CHECK(snapshot.at("scenes").at(1).at("state") == "hook_failed");
+    CHECK(snapshot.at("scenes").at(1).at("error").at("code") ==
+          "HOOK_INSTALL_FAILED");
+    CHECK(snapshot.at("scenes").at(1).at("error").at("hookError") == 73);
+    CHECK(g_hook_calls == 2);
+    CHECK(g_unhook_calls == 1);
+    CHECK(!trace_proxy_test_generation_installed(
+            trace_proxy_test_generation(0)));
+}
+
+void rollback_failure_reports_and_retains_the_residual_hook() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("rollback-failure-reset"));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.rollback-failure", "librollback-failure.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "first"}, {"location", {{"offset", "0x40"}}}},
+                    {{"name", "second"}, {"location", {{"offset", "0x80"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    g_fail_hook_call = 2;
+    g_hook_failure_error = 73;
+    g_fail_unhook = true;
+    g_unhook_failure_error = 91;
+    ModuleRange module;
+    module.start = 0x73000000;
+    module.end = module.start + 0x1000;
+    module.permissions = "r-xp";
+    module.path = "/data/app/librollback-failure.so";
+
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(0).at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(0).at("error").at("code") ==
+          "HOOK_ROLLBACK_FAILED");
+    CHECK(snapshot.at("scenes").at(0).at("error").at("hookError") == 91);
+    CHECK(snapshot.at("scenes").at(1).at("state") == "hook_failed");
+    CHECK(g_unhook_calls == 1);
+    CHECK(trace_proxy_test_generation_installed(
+            trace_proxy_test_generation(0)));
+}
+
+void failed_replacement_batch_removes_unattempted_prior_generation_hooks() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("replacement-cleanup-reset"));
+    char old_offset[2 * sizeof(uintptr_t) + 3]{};
+    char new_offset[2 * sizeof(uintptr_t) + 3]{};
+    std::snprintf(old_offset, sizeof(old_offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(old_target)));
+    std::snprintf(new_offset, sizeof(new_offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(new_target)));
+    const nlohmann::json old_accepted = call_json_configure(json_abi_request(
+            "com.example.replacement-old", "libreplacement-cleanup.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "first"}, {"location", {{"offset", old_offset}}}},
+                    {{"name", "second"}, {"location", {{"offset", old_offset}}}},
+                    {{"name", "third"}, {"location", {{"offset", old_offset}}}},
+            })));
+    CHECK(old_accepted.at("ok") == true);
+    const ModuleRange module = module_named(
+            "/data/app/libreplacement-cleanup.so");
+    trace_proxy_test_install_loading_module(module);
+    const size_t old_third_generation = trace_proxy_test_generation(2);
+    CHECK(trace_proxy_test_generation_installed(old_third_generation));
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_use_runner_gate = true;
+    }
+    uint64_t args[8]{31};
+    uint64_t active_result = 0;
+    std::thread active([&] {
+        active_result = trace_proxy_dispatch(old_third_generation, args, 0);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_runner_entered; });
+    }
+
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.replacement-new", "libreplacement-cleanup.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "first"}, {"location", {{"offset", new_offset}}}},
+                    {{"name", "second"}, {"location", {{"offset", new_offset}}}},
+                    {{"name", "third"}, {"location", {{"offset", new_offset}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    g_fail_hook_call = g_hook_calls + 2;
+    g_hook_failure_error = 73;
+
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "hook_failed");
+    CHECK(snapshot.at("scenes").at(0).at("state") == "rolled_back");
+    CHECK(snapshot.at("scenes").at(1).at("state") == "hook_failed");
+    CHECK(!trace_proxy_test_generation_installed(old_third_generation));
+    CHECK(g_unhook_calls == 4);
+    const size_t hook_calls_before_release = g_hook_calls;
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_runner = true;
+    }
+    g_gate_condition.notify_all();
+    active.join();
+    CHECK(active_result == 0x11f);
+    CHECK(g_hook_calls == hook_calls_before_release);
+}
+
+void removed_prior_scene_residual_is_appended_to_rollback_status() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("removed-residual-reset"));
+    char old_offset[2 * sizeof(uintptr_t) + 3]{};
+    char new_offset[2 * sizeof(uintptr_t) + 3]{};
+    std::snprintf(old_offset, sizeof(old_offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(old_target)));
+    std::snprintf(new_offset, sizeof(new_offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(new_target)));
+    const ModuleRange module = module_named(
+            "/data/app/libremoved-residual.so");
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.removed-residual-old", "libremoved-residual.so",
+                  false, {}, nlohmann::json::array({
+                          {{"name", "old-first"},
+                           {"location", {{"offset", old_offset}}}},
+                          {{"name", "old-removed"},
+                           {"location", {{"offset", old_offset}}}},
+                  }))).at("ok") == true);
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.removed-residual-new", "libremoved-residual.so",
+            false, {}, nlohmann::json::array({
+                    {{"name", "new-only"},
+                     {"location", {{"offset", new_offset}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    g_fail_unhook = true;
+    g_unhook_failure_error = 91;
+
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").size() == 2);
+    CHECK(snapshot.at("scenes").at(0).at("name") == "old-first");
+    CHECK(snapshot.at("scenes").at(0).at("offset") == old_offset);
+    CHECK(snapshot.at("scenes").at(0).at("runtimeAddress") == old_offset);
+    CHECK(snapshot.at("scenes").at(0).at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(1).at("name") == "old-removed");
+    CHECK(snapshot.at("scenes").at(1).at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(1).at("error").at("code") ==
+          "HOOK_ROLLBACK_FAILED");
+    CHECK(snapshot.at("scenes").at(1).at("error").at("hookError") == 91);
 }
 
 void scene_indices_outside_the_stub_region_are_rejected() {
@@ -1571,17 +1905,23 @@ bool register_inline_hook_dl_fini_callback(InlineHookDlInitCallback,
 bool hook_function_address(uintptr_t target, void *, HookHandle *handle) {
     std::lock_guard<std::mutex> lock(g_fake_mutex);
     ++g_hook_calls;
+    g_hook_targets.push_back(target);
+    handle->hook_error = 0;
+    handle->unhook_error = 0;
     if (g_install_residual_hook) {
         g_install_residual_hook = false;
         handle->target = target;
         handle->original = nullptr;
         handle->retained_original = nullptr;
         handle->stub = reinterpret_cast<void *>(g_hook_calls + 1);
+        handle->hook_error = g_hook_failure_error;
         handle->residual_hook = true;
         return false;
     }
-    if (g_fail_next_hook) {
+    if (g_fail_next_hook ||
+        (g_fail_hook_call != 0 && g_hook_calls == g_fail_hook_call)) {
         g_fail_next_hook = false;
+        handle->hook_error = g_hook_failure_error;
         return false;
     }
     handle->target = target;
@@ -1601,7 +1941,11 @@ bool hook_symbol_address(uintptr_t target, void *replacement,
 bool unhook_function(HookHandle *handle) {
     std::lock_guard<std::mutex> lock(g_fake_mutex);
     ++g_unhook_calls;
-    if (g_fail_unhook) return false;
+    handle->unhook_error = 0;
+    if (g_fail_unhook) {
+        handle->unhook_error = g_unhook_failure_error;
+        return false;
+    }
     handle->stub = nullptr;
     handle->original = reinterpret_cast<void *>(new_target);
     return true;
@@ -1683,6 +2027,8 @@ int main(int argc, char **argv) {
     rejected_configuration_preserves_the_active_runtime_snapshot();
     accepted_configuration_is_active_when_inline_setup_fails();
     flight_configuration_activates_its_explicit_entry_scene();
+    invalid_target_module_observation_finishes_with_a_stable_code();
+    callback_registration_failure_preserves_the_shadowhook_error();
     branch_before_dispatch_keeps_its_generation_snapshot_and_bypass();
     entrant_registration_and_snapshot_are_atomic_with_install();
     unhook_failure_uses_the_saved_original_exactly_once();
@@ -1694,10 +2040,15 @@ int main(int argc, char **argv) {
     duplicate_install_for_one_configuration_generation_is_idempotent();
     failed_same_generation_install_is_retried();
     duplicate_during_an_active_call_schedules_only_the_required_rehook();
+    batch_reconfiguration_stays_installing_until_pending_rehook_succeeds();
     observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map();
     constructor_phdr_range_uses_load_bias_and_preserves_executable_segments();
     constructor_phdr_range_rejects_invalid_or_unrepresentable_loads();
-    scene_offsets_must_stay_inside_the_normalized_module();
+    outside_scene_warning_does_not_block_hook_installation();
+    second_hook_failure_rolls_back_the_batch_in_reverse();
+    rollback_failure_reports_and_retains_the_residual_hook();
+    failed_replacement_batch_removes_unattempted_prior_generation_hooks();
+    removed_prior_scene_residual_is_appended_to_rollback_status();
     scene_indices_outside_the_stub_region_are_rejected();
     proxy_generation_identities_are_never_reused_and_exhaust_safely();
     residual_hook_without_an_original_never_branches_to_null();

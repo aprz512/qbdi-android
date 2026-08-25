@@ -30,6 +30,8 @@ struct HookHandle {
     void *retained_resource = nullptr;
     size_t retained_original_bytes = 0;
     uintptr_t target = 0;
+    int hook_error = 0;
+    int unhook_error = 0;
     bool residual_hook = false;
 };
 

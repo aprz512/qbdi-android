@@ -34,6 +34,10 @@ public:
     return installed_.load(std::memory_order_acquire);
   }
 
+  int hook_error() const noexcept {
+    return hook_.unhook_error != 0 ? hook_.unhook_error : hook_.hook_error;
+  }
+
 private:
   ThreadCreateHookInstaller installer_ = nullptr;
   HookHandle hook_{};
