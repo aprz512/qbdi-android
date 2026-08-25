@@ -56,6 +56,7 @@ void trace_proxy_test_module_fini(uintptr_t module_base,
                                   const char *module_path);
 bool trace_proxy_test_generation_retired(size_t generation);
 bool trace_proxy_test_generation_installed(size_t generation);
+bool trace_proxy_test_finish_module_observation_failure(uint64_t generation);
 bool trace_proxy_test_current_configuration(uint64_t *generation,
                                             TraceConfig *config);
 CaptureCoordinator *trace_proxy_test_current_coordinator();
@@ -326,6 +327,7 @@ size_t g_bridge_calls = 0;
 size_t g_hook_calls = 0;
 size_t g_unhook_calls = 0;
 bool g_fail_unhook = false;
+size_t g_fail_unhook_call = 0;
 bool g_fail_next_hook = false;
 size_t g_fail_hook_call = 0;
 int g_hook_failure_error = 0;
@@ -422,6 +424,7 @@ void reset_fakes() {
     g_hook_calls = 0;
     g_unhook_calls = 0;
     g_fail_unhook = false;
+    g_fail_unhook_call = 0;
     g_fail_next_hook = false;
     g_fail_hook_call = 0;
     g_hook_failure_error = 0;
@@ -1422,6 +1425,247 @@ void removed_prior_scene_residual_is_appended_to_rollback_status() {
     CHECK(snapshot.at("scenes").at(1).at("error").at("hookError") == 91);
 }
 
+void successful_scene_removal_retires_the_old_hook_before_installed() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("successful-removal-reset"));
+    const ModuleRange module = module_named(
+            "/data/app/libsuccessful-removal.so");
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.successful-removal-old",
+                  "libsuccessful-removal.so", false, {},
+                  nlohmann::json::array({
+                          {{"name", "kept"},
+                           {"location", {{"offset", "0x40"}}}},
+                          {{"name", "removed"},
+                           {"location", {{"offset", "0x80"}}}},
+                  }))).at("ok") == true);
+    trace_proxy_test_install_loading_module(module);
+    const size_t removed_generation = trace_proxy_test_generation(1);
+    CHECK(trace_proxy_test_generation_installed(removed_generation));
+
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.successful-removal-new", "libsuccessful-removal.so",
+            false, {}, nlohmann::json::array({
+                    {{"name", "kept"},
+                     {"location", {{"offset", "0xc0"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "installed");
+    CHECK(snapshot.at("scenes").size() == 1);
+    CHECK(!trace_proxy_test_generation_installed(removed_generation));
+    CHECK(trace_proxy_test_generation_retired(removed_generation));
+    CHECK(g_unhook_calls == 2);
+}
+
+void failed_scene_retirement_rolls_back_the_new_batch() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("retirement-rollback-reset"));
+    const ModuleRange module = module_named(
+            "/data/app/libretirement-rollback.so");
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.retirement-rollback-old",
+                  "libretirement-rollback.so", false, {},
+                  nlohmann::json::array({
+                          {{"name", "old-kept"},
+                           {"location", {{"offset", "0x40"}}}},
+                          {{"name", "old-removed"},
+                           {"location", {{"offset", "0x80"}}}},
+                  }))).at("ok") == true);
+    trace_proxy_test_install_loading_module(module);
+    const size_t removed_generation = trace_proxy_test_generation(1);
+
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.retirement-rollback-new",
+            "libretirement-rollback.so", false, {}, nlohmann::json::array({
+                    {{"name", "new-kept"},
+                     {"location", {{"offset", "0xc0"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    g_fail_unhook_call = 2;
+    g_unhook_failure_error = 91;
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(0).at("state") == "rolled_back");
+    CHECK(snapshot.at("scenes").at(1).at("name") == "old-removed");
+    CHECK(snapshot.at("scenes").at(1).at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(1).at("error").at("code") ==
+          "HOOK_ROLLBACK_FAILED");
+    CHECK(snapshot.at("scenes").at(1).at("error").at("hookError") == 91);
+    CHECK(!trace_proxy_test_generation_installed(2));
+    CHECK(trace_proxy_test_generation_retired(2));
+    CHECK(trace_proxy_test_generation_installed(removed_generation));
+    CHECK(g_unhook_calls == 3);
+}
+
+void residual_same_generation_retry_never_becomes_installed() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("residual-retry-reset"));
+    const ModuleRange module = module_named(
+            "/data/app/libresidual-retry.so");
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.residual-retry", "libresidual-retry.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", "0x40"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    g_install_residual_hook = true;
+    g_hook_failure_error = 73;
+    trace_proxy_test_install_loading_module(module);
+    CHECK(call_json_status(generation).at("state") == "rollback_failed");
+    const size_t proxy_generation = trace_proxy_test_generation(0);
+    CHECK(trace_proxy_test_generation_installed(proxy_generation));
+
+    g_fail_unhook = true;
+    g_unhook_failure_error = 91;
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(0).at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").at(0).at("error").at("code") ==
+          "HOOK_INSTALL_RESIDUAL");
+    CHECK(snapshot.at("scenes").at(0).at("error").at("hookError") == 91);
+    CHECK(g_hook_calls == 1);
+}
+
+void flight_residual_same_generation_retry_is_not_idempotent() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "flight-residual-retry",
+            reinterpret_cast<uintptr_t>(old_target));
+    const TraceConfig config = flight_proxy_config(scene);
+    const ModuleRange module = module_named(
+            "/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator(
+            new CaptureCoordinator(flight_proxy_factories()));
+    CHECK(coordinator->start(config, module, 77));
+    trace_proxy_test_set_coordinator(coordinator);
+    g_install_residual_hook = true;
+    g_hook_failure_error = 73;
+    CHECK(!trace_proxy_test_update(config, scene, module));
+
+    g_fail_unhook = true;
+    g_unhook_failure_error = 91;
+    CHECK(!trace_proxy_test_repeat_current_install(scene, module));
+    CHECK(g_hook_calls == 1);
+    CHECK(g_unhook_calls == 1);
+}
+
+void setup_failure_retires_prior_generation_hooks() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("setup-cleanup-reset"));
+    const ModuleRange module = module_named(
+            "/data/app/libsetup-cleanup.so");
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.setup-cleanup-old", "libsetup-cleanup.so",
+                  false, {}, nlohmann::json::array({
+                          {{"name", "old"},
+                           {"location", {{"offset", "0x40"}}}},
+                  }))).at("ok") == true);
+    trace_proxy_test_install_loading_module(module);
+    const size_t old_generation = trace_proxy_test_generation(0);
+    CHECK(trace_proxy_test_generation_installed(old_generation));
+
+    g_fail_inline_hook_init = true;
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.setup-cleanup-new", "libsetup-cleanup.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "new"},
+                     {"location", {{"offset", "0x80"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "hook_failed");
+    CHECK(snapshot.at("scenes").at(0).at("error").at("code") ==
+          "HOOK_INITIALIZATION_FAILED");
+    CHECK(!trace_proxy_test_generation_installed(old_generation));
+    CHECK(trace_proxy_test_generation_retired(old_generation));
+    CHECK(g_unhook_calls == 1);
+}
+
+void setup_failure_reports_every_prior_residual_hook() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("setup-residual-reset"));
+    const ModuleRange module = module_named(
+            "/data/app/libsetup-residual.so");
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.setup-residual-old", "libsetup-residual.so",
+                  false, {}, nlohmann::json::array({
+                          {{"name", "old-zero"},
+                           {"location", {{"offset", "0x40"}}}},
+                          {{"name", "old-one"},
+                           {"location", {{"offset", "0x80"}}}},
+                          {{"name", "old-two"},
+                           {"location", {{"offset", "0xc0"}}}},
+                  }))).at("ok") == true);
+    trace_proxy_test_install_loading_module(module);
+
+    g_fail_inline_hook_init = true;
+    g_fail_unhook = true;
+    g_unhook_failure_error = 91;
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.setup-residual-new", "libsetup-residual.so", false,
+            {}, nlohmann::json::array({
+                    {{"name", "new"},
+                     {"location", {{"offset", "0x100"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "rollback_failed");
+    CHECK(snapshot.at("scenes").size() == 4);
+    std::vector<std::string> residual_names;
+    for (const auto &scene : snapshot.at("scenes")) {
+        if (scene.at("state") == "rollback_failed") {
+            CHECK(scene.at("error").at("code") == "HOOK_ROLLBACK_FAILED");
+            CHECK(scene.at("error").at("hookError") == 91);
+            residual_names.push_back(scene.at("name").get<std::string>());
+        }
+    }
+    std::sort(residual_names.begin(), residual_names.end());
+    CHECK(residual_names == std::vector<std::string>(
+            {"old-one", "old-two", "old-zero"}));
+}
+
+void superseded_module_waiter_emits_no_terminal_outcome() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("superseded-waiter-reset"));
+    const TraceConfig stale_config = [] {
+        TraceConfig config = config_named("superseded-waiter-old");
+        config.target_so = "libsuperseded-waiter-old.so";
+        config.scenes.push_back(scene_named("old", 0x40));
+        return config;
+    }();
+    const nlohmann::json stale_accepted = call_json_configure(
+            json_abi_request("com.example.superseded-waiter-old",
+                             stale_config.target_so, false, {},
+                             nlohmann::json::array({
+                                     {{"name", "old"},
+                                      {"location", {{"offset", "0x40"}}}},
+                             })));
+    const uint64_t stale_generation =
+            stale_accepted.at("generation").get<uint64_t>();
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.superseded-waiter-new",
+                  "libsuperseded-waiter-new.so", false, {},
+                  nlohmann::json::array({
+                          {{"name", "new"},
+                           {"location", {{"offset", "0x80"}}}},
+                  }))).at("ok") == true);
+
+    CHECK(!trace_proxy_test_finish_module_observation_failure(
+            stale_generation));
+    CHECK(call_json_status(stale_generation).at("state") == "superseded");
+}
+
 void scene_indices_outside_the_stub_region_are_rejected() {
     reset_fakes();
     const TraceConfig config = config_named("bounds");
@@ -1942,7 +2186,9 @@ bool unhook_function(HookHandle *handle) {
     std::lock_guard<std::mutex> lock(g_fake_mutex);
     ++g_unhook_calls;
     handle->unhook_error = 0;
-    if (g_fail_unhook) {
+    if (g_fail_unhook ||
+        (g_fail_unhook_call != 0 &&
+         g_unhook_calls == g_fail_unhook_call)) {
         handle->unhook_error = g_unhook_failure_error;
         return false;
     }
@@ -2049,6 +2295,13 @@ int main(int argc, char **argv) {
     rollback_failure_reports_and_retains_the_residual_hook();
     failed_replacement_batch_removes_unattempted_prior_generation_hooks();
     removed_prior_scene_residual_is_appended_to_rollback_status();
+    successful_scene_removal_retires_the_old_hook_before_installed();
+    failed_scene_retirement_rolls_back_the_new_batch();
+    residual_same_generation_retry_never_becomes_installed();
+    flight_residual_same_generation_retry_is_not_idempotent();
+    setup_failure_retires_prior_generation_hooks();
+    setup_failure_reports_every_prior_residual_hook();
+    superseded_module_waiter_emits_no_terminal_outcome();
     scene_indices_outside_the_stub_region_are_rejected();
     proxy_generation_identities_are_never_reused_and_exhaust_safely();
     residual_hook_without_an_original_never_branches_to_null();
