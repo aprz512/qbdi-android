@@ -1043,6 +1043,17 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
         self.assertEqual("undetermined", encoding_diagnosis["dominant_cost"])
         self.assertIn("raw_bytes_per_second", encoding_diagnosis)
 
+    def test_diagnoses_below_target_fast_metrics_v3_with_encoded_rate(self):
+        metrics = parse_metrics(self.METRICS_V3.replace(
+            "profile=balanced\ninstructions=100000\ninstructions_per_second=2000000.000000",
+            "profile=fast\ninstructions=25000\ninstructions_per_second=500000.000000",
+        ))
+
+        diagnosis = fast_cost_diagnosis(metrics)
+
+        self.assertEqual("undetermined", diagnosis["dominant_cost"])
+        self.assertEqual(Decimal("209715200.000000"), diagnosis["encoded_bytes_per_second"])
+
     def test_invoke_benchmark_releases_every_owned_frida_resource_on_failures(self):
         class FakeScript:
             def __init__(self, stage, calls):

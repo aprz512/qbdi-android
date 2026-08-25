@@ -518,7 +518,7 @@ def fast_cost_diagnosis(
     dominant = "producer_wait_time" if wait_fraction > Decimal("0.5") else "undetermined"
     byte_rate = (
         "encoded_bytes_per_second"
-        if int(metrics.get("metrics_version", 1)) == 2
+        if int(metrics.get("metrics_version", 1)) in (2, 3)
         else "raw_bytes_per_second"
     )
     return {

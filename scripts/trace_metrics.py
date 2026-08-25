@@ -1,4 +1,4 @@
-"""Single strict parser for v1 text and v2 QTRB trace metrics sidecars."""
+"""Single strict parser for v1 text and v2/v3 QTRB trace metrics sidecars."""
 
 from __future__ import annotations
 

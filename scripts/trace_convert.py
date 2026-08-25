@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Atomically convert raw or LZ4-framed QTRB traces to readable format 3."""
+"""Atomically convert raw or LZ4-framed QTRB traces to readable format 4."""
 
 from __future__ import annotations
 
