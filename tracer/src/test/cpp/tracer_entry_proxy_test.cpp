@@ -328,6 +328,7 @@ size_t g_hook_calls = 0;
 size_t g_unhook_calls = 0;
 bool g_fail_unhook = false;
 size_t g_fail_unhook_call = 0;
+std::vector<size_t> g_fail_unhook_calls;
 bool g_fail_next_hook = false;
 size_t g_fail_hook_call = 0;
 int g_hook_failure_error = 0;
@@ -425,6 +426,7 @@ void reset_fakes() {
     g_unhook_calls = 0;
     g_fail_unhook = false;
     g_fail_unhook_call = 0;
+    g_fail_unhook_calls.clear();
     g_fail_next_hook = false;
     g_fail_hook_call = 0;
     g_hook_failure_error = 0;
@@ -1502,6 +1504,58 @@ void failed_scene_retirement_rolls_back_the_new_batch() {
     CHECK(g_unhook_calls == 3);
 }
 
+void reordered_scene_residuals_are_tracked_by_physical_hook() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("physical-residual-reset"));
+    const ModuleRange module = module_named(
+            "/data/app/libphysical-residual.so");
+    CHECK(call_json_configure(json_abi_request(
+                  "com.example.physical-residual-old",
+                  "libphysical-residual.so", false, {},
+                  nlohmann::json::array({
+                          {{"name", "old-zero"},
+                           {"location", {{"offset", "0x80"}}}},
+                          {{"name", "old-one"},
+                           {"location", {{"offset", "0x100"}}}},
+                          {{"name", "shared"},
+                           {"location", {{"offset", "0x40"}}}},
+                  }))).at("ok") == true);
+    trace_proxy_test_install_loading_module(module);
+    const size_t prior_shared_generation = trace_proxy_test_generation(2);
+
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.physical-residual-new", "libphysical-residual.so",
+            false, {}, nlohmann::json::array({
+                    {{"name", "shared"},
+                     {"location", {{"offset", "0x40"}}}},
+                    {{"name", "new-fail"},
+                     {"location", {{"offset", "0x180"}}}},
+            })));
+    const uint64_t generation = accepted.at("generation").get<uint64_t>();
+    g_fail_hook_call = g_hook_calls + 2;
+    g_hook_failure_error = 73;
+    g_fail_unhook_calls = {3, 4};
+    g_unhook_failure_error = 91;
+    trace_proxy_test_install_loading_module(module);
+
+    const nlohmann::json snapshot = call_json_status(generation);
+    CHECK(snapshot.at("state") == "rollback_failed");
+    CHECK(g_unhook_calls == 4);
+    CHECK(snapshot.at("scenes").size() == 3);
+    size_t shared_residuals = 0;
+    for (const auto &scene : snapshot.at("scenes")) {
+        if (scene.at("name") == "shared" &&
+            scene.at("state") == "rollback_failed") {
+            CHECK(scene.at("error").at("code") == "HOOK_ROLLBACK_FAILED");
+            CHECK(scene.at("error").at("hookError") == 91);
+            ++shared_residuals;
+        }
+    }
+    CHECK(shared_residuals == 2);
+    CHECK(trace_proxy_test_generation_installed(prior_shared_generation));
+    CHECK(trace_proxy_test_generation_installed(3));
+}
+
 void residual_same_generation_retry_never_becomes_installed() {
     reset_fakes();
     trace_proxy_test_reset(config_named("residual-retry-reset"));
@@ -2188,7 +2242,9 @@ bool unhook_function(HookHandle *handle) {
     handle->unhook_error = 0;
     if (g_fail_unhook ||
         (g_fail_unhook_call != 0 &&
-         g_unhook_calls == g_fail_unhook_call)) {
+         g_unhook_calls == g_fail_unhook_call) ||
+        std::find(g_fail_unhook_calls.begin(), g_fail_unhook_calls.end(),
+                  g_unhook_calls) != g_fail_unhook_calls.end()) {
         handle->unhook_error = g_unhook_failure_error;
         return false;
     }
@@ -2297,6 +2353,7 @@ int main(int argc, char **argv) {
     removed_prior_scene_residual_is_appended_to_rollback_status();
     successful_scene_removal_retires_the_old_hook_before_installed();
     failed_scene_retirement_rolls_back_the_new_batch();
+    reordered_scene_residuals_are_tracked_by_physical_hook();
     residual_same_generation_retry_never_becomes_installed();
     flight_residual_same_generation_retry_is_not_idempotent();
     setup_failure_retires_prior_generation_hooks();

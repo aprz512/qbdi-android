@@ -104,7 +104,8 @@ static void fail_installation_statuses(
 static bool retire_superseded_hooks(
         uint64_t generation,
         std::vector<SceneConfigurationStatus> *statuses,
-        bool append_residual_status = false);
+        bool append_residual_status = false,
+        std::vector<size_t> *reported_residual_generations = nullptr);
 extern "C" char trace_proxy_stubs[];
 
 static bool tracer_fork_lifecycle_ready() noexcept {
@@ -915,7 +916,8 @@ static void set_status_hook_ownership(
 static bool retire_superseded_hooks(
         uint64_t generation,
         std::vector<SceneConfigurationStatus> *statuses,
-        bool append_residual_status) {
+        bool append_residual_status,
+        std::vector<size_t> *reported_residual_generations) {
     bool cleanup_failed = false;
     for (size_t scene_index = g_scene_hooks.size(); scene_index-- > 0;) {
         const std::shared_ptr<InstalledSceneHook> hook =
@@ -925,12 +927,10 @@ static bool retire_superseded_hooks(
             continue;
         }
         bool residual_already_reported = false;
-        if (statuses != nullptr) {
-            for (const SceneConfigurationStatus &status : *statuses) {
-                if (status.state == SceneConfigurationState::RollbackFailed &&
-                    status.error_code == "HOOK_ROLLBACK_FAILED" &&
-                    status.name == hook->scene.name &&
-                    status.offset == hook->scene.offset) {
+        if (reported_residual_generations != nullptr) {
+            for (const size_t reported_generation :
+                 *reported_residual_generations) {
+                if (reported_generation == hook->proxy_generation) {
                     residual_already_reported = true;
                     break;
                 }
@@ -955,6 +955,10 @@ static bool retire_superseded_hooks(
             !unhook_function(&hook->hook)) {
             hook->hook.residual_hook = true;
             cleanup_failed = true;
+            if (reported_residual_generations != nullptr) {
+                reported_residual_generations->push_back(
+                        hook->proxy_generation);
+            }
             if (statuses != nullptr) {
                 SceneConfigurationStatus residual_status;
                 set_status_hook_ownership(&residual_status, *hook);
@@ -1046,6 +1050,7 @@ static void install_hooks_for_module(const ModuleRange &module,
              static_cast<unsigned long>(module.start));
     std::vector<BatchInstalledScene> installed;
     installed.reserve(g_config.scenes.size());
+    std::vector<size_t> reported_residual_generations;
     size_t failed_index = g_config.scenes.size();
     bool failed_scene_residual = false;
     for (size_t index = 0; index < g_config.scenes.size(); ++index) {
@@ -1138,7 +1143,8 @@ static void install_hooks_for_module(const ModuleRange &module,
     }
 
     if (failed_index == g_config.scenes.size() &&
-        retire_superseded_hooks(generation, &statuses)) {
+        retire_superseded_hooks(generation, &statuses, false,
+                                &reported_residual_generations)) {
         g_tracer_configuration.finish_install(
                 generation, ConfigurationState::Installed, std::move(statuses));
         QTRACE_I("generation=%llu hooks installed scenes=%zu",
@@ -1192,6 +1198,8 @@ static void install_hooks_for_module(const ModuleRange &module,
             status.state = SceneConfigurationState::RollbackFailed;
             status.error_code = "HOOK_ROLLBACK_FAILED";
             status.hook_error = member.hook->hook.unhook_error;
+            reported_residual_generations.push_back(
+                    member.hook->proxy_generation);
             rollback_failed = true;
             QTRACE_E("generation=%llu code=%s scene=%s hook_error=%d",
                      static_cast<unsigned long long>(generation),
@@ -1208,7 +1216,8 @@ static void install_hooks_for_module(const ModuleRange &module,
         }
         status.state = SceneConfigurationState::RolledBack;
     }
-    if (!retire_superseded_hooks(generation, &statuses)) {
+    if (!retire_superseded_hooks(generation, &statuses, false,
+                                 &reported_residual_generations)) {
         rollback_failed = true;
     }
     const ConfigurationState terminal = rollback_failed
