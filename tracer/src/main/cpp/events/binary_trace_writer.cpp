@@ -218,7 +218,8 @@ bool BinaryTraceWriter::healthy_writer_state() const {
 }
 
 bool BinaryTraceWriter::writable_event_state() const {
-    return opened_ && began_ && !ended_ && !close_called_ && healthy_writer_state();
+    return opened_ && began_ && termination_ == TraceTermination::None && !close_called_ &&
+           healthy_writer_state();
 }
 
 bool BinaryTraceWriter::open(const TraceContext &context) {
@@ -272,7 +273,10 @@ bool BinaryTraceWriter::open_prepared() {
 }
 
 bool BinaryTraceWriter::begin(const TraceContext &context) {
-    if (!opened_ || began_ || ended_ || close_called_ || !healthy_writer_state()) return false;
+    if (!opened_ || began_ || termination_ != TraceTermination::None || close_called_ ||
+        !healthy_writer_state()) {
+        return false;
+    }
 
     WritableSpan span = writer_.reserve(kBinaryStreamHeaderBytes);
     if (span.data == nullptr) return fail();
@@ -518,34 +522,55 @@ bool BinaryTraceWriter::error(const std::string &message) {
 }
 
 bool BinaryTraceWriter::end(uint64_t retval, bool ok, long elapsed_ms) {
-    if (!opened_ || !began_ || ended_ || close_called_) return false;
+    if (!opened_ || !began_ || termination_ != TraceTermination::None || close_called_)
+        return false;
+    return finalize_terminal(TraceTermination::Completed, TraceStopReason{}, retval, ok,
+                             elapsed_ms);
+}
+
+bool BinaryTraceWriter::stop(TraceStopReason reason, long elapsed_ms) {
+    if (termination_ == TraceTermination::Stopped) return true;
+    if (!opened_ || !began_ || termination_ != TraceTermination::None || close_called_)
+        return false;
+    return finalize_terminal(TraceTermination::Stopped, reason, 0, false, elapsed_ms);
+}
+
+bool BinaryTraceWriter::finalize_terminal(TraceTermination termination,
+                                          TraceStopReason stop_reason, uint64_t retval, bool ok,
+                                          long elapsed_ms) {
+    const size_t terminal_bytes = termination == TraceTermination::Stopped
+                                          ? kBinaryTraceStopRecordBytes
+                                          : kBinaryTraceEndRecordBytes;
     elapsed_ms_ = elapsed_ms > 0 ? static_cast<uint64_t>(elapsed_ms) : 0;
     retval_ = retval;
     if (!healthy_writer_state()) return false;
     if (!writer_.drain()) return fail(writer_.error_code());
     TraceMetrics footer_metrics = producer_metrics_snapshot(*metrics_);
-    footer_metrics.encoded_bytes += kBinaryTraceEndRecordBytes;
+    footer_metrics.encoded_bytes += terminal_bytes;
     ++footer_metrics.buffer_swaps;
-    if (!writer_.final_file_target(kBinaryTraceEndRecordBytes,
-                                   &footer_metrics.compressed_bytes)) {
+    if (!writer_.final_file_target(terminal_bytes, &footer_metrics.compressed_bytes)) {
         return fail(writer_.error_code());
     }
-    uint8_t footer[kBinaryTraceEndRecordBytes];
-    const BinaryEncodeResult result = encoder_.encode_end(
-            footer, sizeof(footer), ok, retval, elapsed_ms_, footer_metrics);
-    if (!result.ok || result.size != sizeof(footer)) return fail(EINVAL);
+    uint8_t terminal[kBinaryTraceEndRecordBytes];
+    const BinaryEncodeResult result = termination == TraceTermination::Stopped
+            ? encoder_.encode_stop(terminal, sizeof(terminal), stop_reason, elapsed_ms_,
+                                   footer_metrics)
+            : encoder_.encode_end(terminal, sizeof(terminal), ok, retval, elapsed_ms_,
+                                  footer_metrics);
+    if (!result.ok || result.size != terminal_bytes) return fail(EINVAL);
     if (!writer_.final_frame_padding(
-                {reinterpret_cast<const char *>(footer), sizeof(footer)},
+                {reinterpret_cast<const char *>(terminal), terminal_bytes},
                 &final_padding_bytes_)) {
         return fail(writer_.error_code());
     }
-    WritableSpan span = writer_.reserve(sizeof(footer));
+    WritableSpan span = writer_.reserve(terminal_bytes);
     if (span.data == nullptr) return fail();
-    std::memcpy(span.data, footer, sizeof(footer));
-    writer_.commit(sizeof(footer));
+    std::memcpy(span.data, terminal, terminal_bytes);
+    writer_.commit(terminal_bytes);
     if (writer_.failed()) return fail();
-    ended_ = true;
-    successful_end_ = ok;
+    termination_ = termination;
+    return_valid_ = termination == TraceTermination::Completed;
+    stop_reason_ = stop_reason;
     return true;
 }
 
@@ -568,9 +593,13 @@ bool BinaryTraceWriter::write_metrics_sidecar() {
     }
 
     const bool ok =
-            write_unsigned_metric(fd, "metrics_version", 2) &&
+            write_unsigned_metric(fd, "metrics_version", 3) &&
+            write_string_metric(fd, "termination",
+                                termination_ == TraceTermination::Stopped ? "stopped"
+                                                                         : "completed") &&
+            write_unsigned_metric(fd, "return_valid", return_valid_ ? 1 : 0) &&
+            write_hex_metric(fd, "return", return_valid_ ? retval_ : 0) &&
             write_string_metric(fd, "profile", profile_name(options_.profile)) &&
-            write_hex_metric(fd, "return", retval_) &&
             write_unsigned_metric(fd, "instructions", metrics_->instructions) &&
             write_unsigned_metric(fd, "elapsed_ms", elapsed_ms_) &&
             write_rate_metric(fd, "instructions_per_second",
@@ -614,14 +643,16 @@ bool BinaryTraceWriter::close() {
     const bool trace_ok = writer_.finish(final_padding_bytes_);
     if (!trace_ok) fail(writer_.error_code());
     opened_ = false;
-    const bool metrics_ok = !successful_end_ || !trace_ok || write_metrics_sidecar();
+    const bool metrics_ok = termination_ == TraceTermination::None || !trace_ok ||
+                            write_metrics_sidecar();
     if ((!trace_ok || !metrics_ok) && path_size_ != 0) {
         char sidecar[kPathCapacity + sizeof(".metrics")];
         const int sidecar_size = std::snprintf(sidecar, sizeof(sidecar), "%s.metrics", path_);
         if (sidecar_size > 0 && static_cast<size_t>(sidecar_size) < sizeof(sidecar))
             (void)::unlink(sidecar);
     }
-    close_result_ = trace_ok && ended_ && healthy_writer_state() && metrics_ok;
-    if (ended_ && !close_result_) facade_failed_ = true;
+    close_result_ = trace_ok && termination_ != TraceTermination::None &&
+                    healthy_writer_state() && metrics_ok;
+    if (termination_ != TraceTermination::None && !close_result_) facade_failed_ = true;
     return close_result_;
 }

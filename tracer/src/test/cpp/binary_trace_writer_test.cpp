@@ -472,7 +472,25 @@ void check_footer_matches_sidecar(const std::vector<uint8_t> &stream,
     }
 }
 
-void compressed_stream_definitions_footer_and_metrics_v2_are_consistent() {
+void check_stop_matches_sidecar(const std::vector<uint8_t> &stream,
+                                const std::string &sidecar) {
+    const size_t payload = stream.size() - kBinaryTraceStopRecordBytes + kBinaryRecordHeaderBytes;
+    struct Field {
+        size_t offset;
+        const char *name;
+    };
+    for (const Field field : {Field{8, "elapsed_ms"}, Field{16, "instructions"},
+                              Field{24, "encoded_bytes"}, Field{32, "compressed_bytes"},
+                              Field{40, "cache_hits"}, Field{48, "cache_misses"},
+                              Field{56, "cache_collisions"}, Field{64, "buffer_swaps"},
+                              Field{72, "producer_waits"}, Field{80, "producer_wait_ns"},
+                              Field{88, "effective_buffer_bytes"}}) {
+        CHECK(u64(stream, payload + field.offset) ==
+              std::stoull(metric_value(sidecar, field.name)));
+    }
+}
+
+void compressed_stream_definitions_footer_and_metrics_v3_are_consistent() {
     const std::string directory = temporary_directory();
     TraceOptions options{};
     options.profile = TraceProfile::Balanced;
@@ -536,7 +554,9 @@ void compressed_stream_definitions_footer_and_metrics_v2_are_consistent() {
 
     const std::string sidecar = read_text(sidecar_path(writer));
     check_footer_matches_sidecar(decoded_stream, sidecar);
-    CHECK(metric_value(sidecar, "metrics_version") == "2");
+    CHECK(metric_value(sidecar, "metrics_version") == "3");
+    CHECK(metric_value(sidecar, "termination") == "completed");
+    CHECK(metric_value(sidecar, "return_valid") == "1");
     CHECK(metric_value(sidecar, "profile") == "balanced");
     CHECK(metric_value(sidecar, "return") == "0x42");
     CHECK(metric_value(sidecar, "instructions") == "400");
@@ -586,6 +606,75 @@ void uncompressed_stream_uses_binary_suffix_and_exact_byte_counts() {
     check_footer_matches_sidecar(bytes, sidecar);
     CHECK(metric_value(sidecar, "encoded_bytes") == std::to_string(bytes.size()));
     CHECK(metric_value(sidecar, "compressed_bytes") == std::to_string(bytes.size()));
+
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void uncompressed_stopped_stream_has_one_terminal_and_v3_metrics() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    CachedInstruction decoded{};
+    decoded.opcode = 0xd503201fU;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.instruction(context, instruction(1, &decoded)));
+    CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
+    CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
+    CHECK(!writer.end(0x55, true, 18));
+    CHECK(writer.close());
+
+    const std::vector<uint8_t> bytes = read_bytes(artifact_path(writer));
+    CHECK(count_type(record_types(bytes), BinaryRecordType::TraceStop) == 1);
+    const std::string sidecar = read_text(sidecar_path(writer));
+    check_stop_matches_sidecar(bytes, sidecar);
+    CHECK(sidecar.find("metrics_version=3\n") != std::string::npos);
+    CHECK(sidecar.find("termination=stopped\n") != std::string::npos);
+    CHECK(sidecar.find("return_valid=0\nreturn=0x0\n") != std::string::npos);
+
+    CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
+    CHECK(::unlink(artifact_path(writer).c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
+void compressed_stopped_stream_has_one_terminal_and_v3_metrics() {
+    const std::string directory = temporary_directory();
+    TraceOptions options{};
+    options.compression_enabled = true;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    BinaryTraceWriter writer(options, &metrics);
+    const TraceContext context = context_for(directory);
+    CachedInstruction decoded{};
+    decoded.opcode = 0xd503201fU;
+
+    CHECK(writer.open(context));
+    CHECK(writer.begin(context));
+    CHECK(writer.instruction(context, instruction(1, &decoded)));
+    CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
+    CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
+    CHECK(!writer.end(0x55, true, 18));
+    CHECK(writer.close());
+
+    size_t frames = 0;
+    const std::vector<uint8_t> bytes =
+            decompress_frames(read_bytes(artifact_path(writer)), &frames);
+    CHECK(frames >= 1);
+    CHECK(count_type(record_types(bytes), BinaryRecordType::TraceStop) == 1);
+    const std::string sidecar = read_text(sidecar_path(writer));
+    check_stop_matches_sidecar(bytes, sidecar);
+    CHECK(sidecar.find("metrics_version=3\n") != std::string::npos);
+    CHECK(sidecar.find("termination=stopped\n") != std::string::npos);
+    CHECK(sidecar.find("return_valid=0\nreturn=0x0\n") != std::string::npos);
 
     CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
     CHECK(::unlink(artifact_path(writer).c_str()) == 0);
@@ -1173,8 +1262,10 @@ void padded_footer_is_total_for_exact_cycle_and_adversarial_prefixes() {
 } // namespace
 
 int main() {
-    compressed_stream_definitions_footer_and_metrics_v2_are_consistent();
+    compressed_stream_definitions_footer_and_metrics_v3_are_consistent();
     uncompressed_stream_uses_binary_suffix_and_exact_byte_counts();
+    uncompressed_stopped_stream_has_one_terminal_and_v3_metrics();
+    compressed_stopped_stream_has_one_terminal_and_v3_metrics();
     maximum_rule_and_error_survive_four_kib_buffers_in_order();
     instruction_memory_and_continuations_keep_producer_order();
     sidecar_retries_eintr_and_partial_writes();

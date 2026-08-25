@@ -103,7 +103,7 @@ void early_execution_setup_failure_finalizes_one_failed_binary_run() {
     CHECK(bytes[footer] == static_cast<uint8_t>(BinaryRecordType::TraceEnd));
     CHECK(bytes[footer + kBinaryRecordHeaderBytes] == 0);
     CHECK(u64(bytes, footer + kBinaryRecordHeaderBytes + 1) == 0);
-    remove_artifact(writer, directory, false);
+    remove_artifact(writer, directory, true);
 }
 
 void callback_registration_failure_blocks_execution_and_success_metrics() {
@@ -142,7 +142,7 @@ void callback_registration_failure_blocks_execution_and_success_metrics() {
         CHECK(!finalization.footer_success);
         CHECK(!finalization.completion_success);
         CHECK(metrics.instructions == 0);
-        remove_artifact(writer, directory, false);
+        remove_artifact(writer, directory, true);
     }
 }
 
@@ -164,7 +164,7 @@ void memory_instrumentation_failure_blocks_execution_and_success_metrics() {
     CHECK(!finalization.footer_success);
     CHECK(!finalization.completion_success);
     CHECK(metrics.instructions == 0);
-    remove_artifact(writer, directory, false);
+    remove_artifact(writer, directory, true);
 }
 
 void successful_target_has_one_authoritative_return_and_metrics() {
