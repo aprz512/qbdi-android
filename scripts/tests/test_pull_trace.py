@@ -365,7 +365,8 @@ class PullArtifactTests(unittest.TestCase):
             return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
 
         sidecar = (
-            "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
+            "metrics_version=3\ntermination=completed\nreturn_valid=1\n"
+            "profile=full\nreturn=0x55\ninstructions=0\n"
             f"elapsed_ms=17\ninstructions_per_second=0.000000\nencoded_bytes={len(binary)}\n"
             f"compressed_bytes={len(artifact)}\n"
             f"encoded_bytes_per_second={fixed_six(len(binary) * 1000, 17)}\n"

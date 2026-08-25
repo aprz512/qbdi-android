@@ -71,8 +71,8 @@ def _publish(temporary: Path, destination: Path, force: bool) -> None:
 
 
 def _validate_sidecar(path: Path, details: _ConversionDetails, artifact_size: int) -> None:
-    footer = details.footer
-    if footer is None:
+    terminal = details.terminal
+    if terminal is None:
         raise BinaryTraceError("complete metrics sidecar cannot accompany a partial trace")
     if path.stat().st_size > MAX_METRICS_BYTES:
         raise BinaryTraceError("metrics sidecar exceeds size limit")
@@ -80,34 +80,33 @@ def _validate_sidecar(path: Path, details: _ConversionDetails, artifact_size: in
         values = parse_metrics(path.read_bytes(), path.name.removesuffix(".metrics"))
     except ValueError as error:
         raise BinaryTraceError(str(error)) from error
-    actual = {
-        **values,
-        "return": int(str(values["return"]), 16),
-    }
+    actual = values
     expected = {
-        "metrics_version": 2,
+        "metrics_version": 3,
+        "termination": terminal.termination,
+        "return_valid": int(terminal.return_valid),
         "profile": details.profile,
-        "return": footer.return_value,
-        "instructions": footer.instructions,
-        "elapsed_ms": footer.elapsed_ms,
-        "encoded_bytes": footer.encoded_bytes,
-        "compressed_bytes": footer.compressed_bytes,
-        "cache_hits": footer.cache_hits,
-        "cache_misses": footer.cache_misses,
-        "cache_collisions": footer.cache_collisions,
-        "buffer_swaps": footer.buffer_swaps,
-        "producer_waits": footer.producer_waits,
-        "producer_wait_ns": footer.producer_wait_ns,
-        "effective_buffer_bytes": footer.effective_buffer_bytes,
+        "return": f"0x{terminal.return_value:x}" if terminal.return_valid else "0x0",
+        "instructions": terminal.instructions,
+        "elapsed_ms": terminal.elapsed_ms,
+        "encoded_bytes": terminal.encoded_bytes,
+        "compressed_bytes": terminal.compressed_bytes,
+        "cache_hits": terminal.cache_hits,
+        "cache_misses": terminal.cache_misses,
+        "cache_collisions": terminal.cache_collisions,
+        "buffer_swaps": terminal.buffer_swaps,
+        "producer_waits": terminal.producer_waits,
+        "producer_wait_ns": terminal.producer_wait_ns,
+        "effective_buffer_bytes": terminal.effective_buffer_bytes,
     }
     for key, expected_value in expected.items():
         if actual[key] != expected_value:
             raise BinaryTraceError(
                 f"sidecar mismatch for {key}: expected {expected_value!r}, got {actual[key]!r}"
             )
-    if footer.compressed_bytes != artifact_size:
+    if terminal.compressed_bytes != artifact_size:
         raise BinaryTraceError(
-            f"sidecar mismatch for artifact size: expected {footer.compressed_bytes}, "
+            f"sidecar mismatch for artifact size: expected {terminal.compressed_bytes}, "
             f"got {artifact_size}"
         )
 
@@ -185,7 +184,7 @@ def convert_binary_file(source: Path, destination: Path, *, lz4: str | None,
 
 
 def argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Convert a QTRB binary trace to text format 3")
+    parser = argparse.ArgumentParser(description="Convert a QTRB binary trace to text format 4")
     parser.add_argument("source", type=Path, nargs="?", help=".trace.bin or .trace.bin.lz4 input")
     parser.add_argument("--output", type=Path, help="destination text path")
     parser.add_argument("--lz4", default="lz4", help="host lz4 executable (default: lz4)")

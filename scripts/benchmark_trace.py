@@ -44,6 +44,13 @@ TRACE_FOOTER = re.compile(
     rb"buffer_swaps=\d+ producer_waits=\d+ producer_wait_ns=\d+)\s*$",
     re.MULTILINE,
 )
+TRACE_FORMAT_FOUR_FOOTER = re.compile(
+    rb"^TRACE_END status=completed return_valid=1 return=(0x[0-9a-fA-F]+) elapsed_ms=(\d+) "
+    rb"instructions=\d+ encoded_bytes=\d+ compressed_bytes=\d+ cache_hits=\d+ "
+    rb"cache_misses=\d+ cache_collisions=\d+ buffer_swaps=\d+ producer_waits=\d+ "
+    rb"producer_wait_ns=\d+ effective_buffer_bytes=\d+\s*$",
+    re.MULTILINE,
+)
 TRACE_SEQUENCE = re.compile(rb"^(\d+)\s", re.MULTILINE)
 TRACE_DIRECTORY = "files/qbdi-traces"
 ARTIFACT_NAME = re.compile(r"[A-Za-z0-9_.-]+\Z")
@@ -63,15 +70,15 @@ PROFILE_RATE_TARGETS = {
 
 
 def require_binary_acceptance_candidate(run: dict[str, int | Decimal | str]) -> None:
-    if int(run.get("metrics_version", 0)) != 2:
-        raise ValueError("binary acceptance requires metrics_version=2")
+    if int(run.get("metrics_version", 0)) != 3:
+        raise ValueError("binary acceptance requires metrics_version=3")
     if not str(run.get("trace", "")).endswith(BINARY_TRACE_SUFFIX):
         raise ValueError("binary acceptance requires .trace.bin.lz4 artifacts")
 
 
 def parse_legacy_trace(trace: bytes, file_bytes: int) -> dict[str, int | str]:
     """Extract metrics from one complete, uncompressed legacy text trace."""
-    footer = TRACE_FOOTER.search(trace)
+    footer = TRACE_FOOTER.search(trace) or TRACE_FORMAT_FOUR_FOOTER.search(trace)
     if footer is None:
         raise ValueError("trace has no successful TRACE_END footer")
 
@@ -383,6 +390,10 @@ def classify_run_as_build_type(returncode: int, stderr: str) -> str:
 def ensure_artifact_return(
     returned: str, metrics: dict[str, int | Decimal | str], artifact: str
 ) -> None:
+    if (int(metrics.get("metrics_version", 1)) == 3
+            and (metrics.get("termination") != "completed"
+                 or int(metrics.get("return_valid", 0)) != 1)):
+        raise RuntimeError(f"benchmark artifact {artifact} has no completed terminal return")
     artifact_return = str(metrics["return"])
     if returned.lower() != artifact_return.lower():
         raise RuntimeError(
@@ -398,6 +409,8 @@ def ensure_metrics_container(
         raise RuntimeError("metrics v1 must accompany a .trace.txt.lz4 artifact")
     if version == 2 and not artifact.endswith((BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)):
         raise RuntimeError("metrics v2 must accompany a binary trace artifact")
+    if version == 3 and not artifact.endswith((BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)):
+        raise RuntimeError("metrics v3 must accompany a binary trace artifact")
 
 
 def verify_setup_failure_smoke(
@@ -563,8 +576,8 @@ def median_report(
             raise ValueError("metrics versions differ")
         version = versions.pop()
         report["metrics_version"] = version
-        integer_fields = V2_INTEGER_FIELDS if version == 2 else V1_INTEGER_FIELDS
-        rate_fields = V2_RATE_FIELDS if version == 2 else V1_RATE_FIELDS
+        integer_fields = V2_INTEGER_FIELDS if version in (2, 3) else V1_INTEGER_FIELDS
+        rate_fields = V2_RATE_FIELDS if version in (2, 3) else V1_RATE_FIELDS
         for key in integer_fields:
             if any(key not in run for run in runs):
                 raise ValueError(f"optimized run is missing {key}")
@@ -884,7 +897,8 @@ def collect_and_validate_optimized_artifact(
 
         result = dict(metrics)
         result["artifact_sha256"] = _sha256_file(artifact)
-        if int(metrics["metrics_version"]) == 2:
+        version = int(metrics["metrics_version"])
+        if version in (2, 3) and artifact_name.endswith((BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)):
             suffix = (
                 BINARY_TRACE_SUFFIX
                 if artifact_name.endswith(BINARY_TRACE_SUFFIX) else BINARY_RAW_SUFFIX
@@ -902,7 +916,7 @@ def collect_and_validate_optimized_artifact(
                 raise RuntimeError(f"binary artifact validation failed: {error}") from error
             result["converted_text_bytes"] = stats.converted_text_bytes
             result.update(streaming_semantic_oracle(text))
-        else:
+        elif version == 1 and artifact_name.endswith(TEXT_TRACE_SUFFIX):
             decoded = root / (artifact_name.removesuffix(TEXT_TRACE_SUFFIX) + ".trace.txt")
             try:
                 truncated = decode_lz4_file(
@@ -914,6 +928,8 @@ def collect_and_validate_optimized_artifact(
                 raise RuntimeError("complete format-2 metrics accompany a truncated artifact")
             _validate_format_two_file(decoded, metrics)
             result["converted_text_bytes"] = decoded.stat().st_size
+        else:
+            raise RuntimeError("metrics/container version mismatch")
         if output_root is not None:
             staged = sorted(root.iterdir())
             existing = next(
@@ -1027,6 +1043,8 @@ def run_once(args: argparse.Namespace) -> dict[str, int | Decimal | str]:
     ensure_artifact_return(returned, parsed, name)
     artifact_name = name.removesuffix(".metrics")
     ensure_metrics_container(parsed, artifact_name)
+    if int(parsed["metrics_version"]) != 3:
+        raise RuntimeError("new binary benchmark candidates require metrics_version=3")
     parsed = collect_and_validate_optimized_artifact(args, artifact_name, sidecar, parsed)
     parsed["metrics"] = name
     parsed["trace"] = artifact_name

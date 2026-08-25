@@ -37,7 +37,7 @@ def canonical_fixed_six(numerator: int, denominator: int) -> str:
 
 def expected_rates(metrics: dict[str, int | Decimal | str]) -> dict[str, str]:
     elapsed_ms = int(metrics["elapsed_ms"])
-    byte_field = "encoded_bytes" if int(metrics.get("metrics_version", 1)) == 2 else "raw_bytes"
+    byte_field = "encoded_bytes" if int(metrics.get("metrics_version", 1)) in (2, 3) else "raw_bytes"
     encoded_bytes = int(metrics[byte_field])
     compressed_bytes = int(metrics["compressed_bytes"])
     cache_hits = int(metrics["cache_hits"])
@@ -67,7 +67,7 @@ def parse_metrics(sidecar: str | bytes, artifact_name: str | None = None
     if len(encoded_sidecar) > MAX_METRICS_BYTES:
         raise ValueError("metrics sidecar exceeds size limit")
     lines = sidecar.splitlines()
-    if len(lines) > 20:
+    if len(lines) > 21:
         raise ValueError("metrics sidecar exceeds field count limit")
     values: dict[str, str] = {}
     for line in lines:
@@ -87,6 +87,9 @@ def parse_metrics(sidecar: str | bytes, artifact_name: str | None = None
     elif version_text == "2":
         version, integer_fields, rate_fields = 2, V2_INTEGER_FIELDS, V2_RATE_FIELDS
         forbidden = ("raw_bytes", "raw_bytes_per_second")
+    elif version_text == "3":
+        version, integer_fields, rate_fields = 3, V2_INTEGER_FIELDS, V2_RATE_FIELDS
+        forbidden = ("raw_bytes", "raw_bytes_per_second")
     else:
         raise ValueError("unsupported metrics_version")
     mixed = [key for key in forbidden if key in values]
@@ -95,6 +98,11 @@ def parse_metrics(sidecar: str | bytes, artifact_name: str | None = None
     required = {"profile", "return", *integer_fields, *rate_fields}
     if version == 2:
         required.add("metrics_version")
+    elif version == 3:
+        required = {
+            "metrics_version", "termination", "return_valid", "return",
+            "profile", *integer_fields, *rate_fields,
+        }
     unknown = sorted(values.keys() - required)
     if unknown:
         raise ValueError("unknown metrics sidecar key " + unknown[0])
@@ -106,17 +114,34 @@ def parse_metrics(sidecar: str | bytes, artifact_name: str | None = None
             raise ValueError("metrics v1 must accompany a .trace.txt.lz4 artifact")
         if version == 2 and not artifact_name.endswith(BINARY_TRACE_SUFFIXES):
             raise ValueError("metrics v2 must accompany a binary trace artifact")
+        if version == 3 and not artifact_name.endswith(BINARY_TRACE_SUFFIXES):
+            raise ValueError("metrics v3 must accompany a binary trace artifact")
     if values["profile"] not in ("fast", "balanced", "full"):
         raise ValueError("invalid profile metric")
     if re.fullmatch(r"0x[0-9a-fA-F]+", values["return"]) is None:
         raise ValueError("invalid return metric")
     if int(values["return"], 16) > UINT64_MAX:
         raise ValueError("return metric exceeds uint64")
+    if version == 3:
+        termination = values["termination"]
+        if termination not in ("completed", "stopped"):
+            raise ValueError("invalid termination metric")
+        if values["return_valid"] not in ("0", "1"):
+            raise ValueError("invalid return_valid metric")
+        if termination == "completed" and values["return_valid"] != "1":
+            raise ValueError("completed terminal requires return_valid=1")
+        if termination == "stopped" and values["return_valid"] != "0":
+            raise ValueError("stopped terminal requires return_valid=0")
+        if termination == "stopped" and values["return"] != "0x0":
+            raise ValueError("stopped terminal requires return=0x0")
 
     parsed: dict[str, int | Decimal | str] = {
         "profile": values["profile"], "return": values["return"].lower(),
         "metrics_version": version,
     }
+    if version == 3:
+        parsed["termination"] = values["termination"]
+        parsed["return_valid"] = int(values["return_valid"])
     try:
         for key in integer_fields:
             if re.fullmatch(r"\d+", values[key]) is None:

@@ -32,6 +32,7 @@ from scripts.benchmark_trace import (
     parse_baseline_document,
     parse_baseline_report,
     parse_metrics,
+    require_binary_acceptance_candidate,
     require_balanced_comparison,
     render_report,
     ensure_same_device,
@@ -75,9 +76,9 @@ TRACE_END status=ok ret=0x42 elapsed_ms=20 bytes=0
             parse_legacy_trace(trace, file_bytes=len(trace))
 
     def test_parses_current_uncompressed_format_two_footer(self):
-        trace = b"""TRACE_BEGIN format=2 scene=benchmark
+        trace = b"""TRACE_BEGIN format=4 scene=benchmark
 1 libdemo_target.so+0x10 nop
-TRACE_END status=ok ret=0x42 elapsed_ms=7 instructions=1 raw_bytes=200 cache_hit_rate=0.500000 buffer_swaps=1 producer_waits=0 producer_wait_ns=0
+TRACE_END status=completed return_valid=1 return=0x42 elapsed_ms=7 instructions=1 encoded_bytes=200 compressed_bytes=100 cache_hits=1 cache_misses=1 cache_collisions=0 buffer_swaps=1 producer_waits=0 producer_wait_ns=0 effective_buffer_bytes=4096
 """
 
         parsed = parse_legacy_trace(trace, file_bytes=256)
@@ -186,6 +187,28 @@ producer_waits=0
 producer_wait_ns=0
 effective_buffer_bytes=67108864
 """
+    METRICS_V3 = """metrics_version=3
+termination=completed
+return_valid=1
+profile=balanced
+return=0x42
+instructions=100000
+elapsed_ms=50
+instructions_per_second=2000000.000000
+encoded_bytes=10485760
+compressed_bytes=1048576
+encoded_bytes_per_second=209715200.000000
+disk_bytes_per_second=20971520.000000
+compression_ratio=0.100000
+cache_hits=90000
+cache_misses=10000
+cache_collisions=123
+cache_hit_rate=0.900000
+buffer_swaps=7
+producer_waits=0
+producer_wait_ns=0
+effective_buffer_bytes=67108864
+"""
 
     def test_parses_exact_metrics_v2_without_redefining_raw_bytes(self):
         current = parse_metrics(self.METRICS_V2)
@@ -200,19 +223,23 @@ effective_buffer_bytes=67108864
             parse_metrics(self.METRICS_V2 + "raw_bytes=10485760\n")
         with self.assertRaisesRegex(ValueError, "encoded_bytes"):
             parse_metrics(self.METRICS + "encoded_bytes=10485760\n")
-        with self.assertRaisesRegex(ValueError, "metrics_version"):
+        with self.assertRaisesRegex(ValueError, "return_valid"):
             parse_metrics(self.METRICS_V2.replace("metrics_version=2", "metrics_version=3"))
 
     def test_rejects_metrics_container_version_mismatch_without_fallback(self):
         v1 = parse_metrics(self.METRICS)
         v2 = parse_metrics(self.METRICS_V2)
+        v3 = parse_metrics(self.METRICS_V3)
         ensure_metrics_container(v1, "run.trace.txt.lz4")
         ensure_metrics_container(v2, "run.trace.bin.lz4")
         ensure_metrics_container(v2, "run.trace.bin")
+        ensure_metrics_container(v3, "run.trace.bin.lz4")
         with self.assertRaisesRegex(RuntimeError, "v1"):
             ensure_metrics_container(v1, "run.trace.bin.lz4")
         with self.assertRaisesRegex(RuntimeError, "v2"):
             ensure_metrics_container(v2, "run.trace.txt.lz4")
+        with self.assertRaisesRegex(RuntimeError, "v3"):
+            ensure_metrics_container(v3, "run.trace.txt.lz4")
 
     def test_v2_medians_preserve_decimal_rates_and_full_uint64(self):
         maximum = self.METRICS_V2.replace(
@@ -236,7 +263,7 @@ effective_buffer_bytes=67108864
     def test_profile_comparison_preserves_oracle_identity_and_uses_compressed_size(self):
         oracle = {"decoded_event_count": 100000, "first_instruction": "1 lib.so+0x0 A",
                   "last_instruction": "100000 lib.so+0x4 RET"}
-        run = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4", **oracle}
+        run = {**parse_metrics(self.METRICS_V3), "trace": "run.trace.bin.lz4", **oracle}
         runs = [run] * 5
         current = median_report(runs)
         current["return"] = "0x42"
@@ -263,9 +290,9 @@ effective_buffer_bytes=67108864
     def test_acceptance_checks_every_compressed_binary_artifact_not_the_median(self):
         oracle = {"decoded_event_count": 100000, "first_instruction": "1 start",
                   "last_instruction": "100000 end"}
-        first = {**parse_metrics(self.METRICS_V2), "compressed_bytes": 90,
+        first = {**parse_metrics(self.METRICS_V3), "compressed_bytes": 90,
                  "trace": "first.trace.bin.lz4", **oracle}
-        second = {**parse_metrics(self.METRICS_V2), "compressed_bytes": 110,
+        second = {**parse_metrics(self.METRICS_V3), "compressed_bytes": 110,
                   "trace": "second.trace.bin.lz4", **oracle}
         runs = [first, first, first, first, second]
         current = median_report(runs)
@@ -280,18 +307,20 @@ effective_buffer_bytes=67108864
         self.assertEqual(110, comparison["maximum_compressed_bytes"])
         self.assertFalse(comparison["meets_size_target"])
 
-    def test_acceptance_requires_metrics_v2_compressed_qtrb_runs(self):
+    def test_acceptance_requires_metrics_v3_compressed_qtrb_runs(self):
         oracle = {"decoded_event_count": 100000, "first_instruction": "1 start",
                   "last_instruction": "100000 end"}
         baseline = {"profile": "balanced", "instructions": 100000, "return": "0x42",
                     "compressed_bytes": 20_000_000, **oracle}
-        v2 = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4", **oracle}
-        report = median_report([v2] * 5)
+        v3 = {**parse_metrics(self.METRICS_V3), "trace": "run.trace.bin.lz4", **oracle}
+        report = median_report([v3] * 5)
         report["return"] = "0x42"
-        compare_to_profile_baseline(report, baseline, [v2] * 5)
+        compare_to_profile_baseline(report, baseline, [v3] * 5)
         v1 = {**parse_metrics(self.METRICS), "trace": "run.trace.txt.lz4"}
-        raw = {**v2, "trace": "run.trace.bin"}
-        for candidate, message in ((v1, "metrics_version=2"), (raw, "trace.bin.lz4")):
+        v2 = {**parse_metrics(self.METRICS_V2), "trace": "run.trace.bin.lz4"}
+        raw = {**v3, "trace": "run.trace.bin"}
+        for candidate, message in ((v1, "metrics_version=3"), (v2, "metrics_version=3"),
+                                   (raw, "trace.bin.lz4")):
             with self.subTest(trace=candidate["trace"]), self.assertRaisesRegex(ValueError, message):
                 candidate.update(oracle)
                 candidate_report = median_report([candidate] * 5)
@@ -366,7 +395,7 @@ effective_buffer_bytes=67108864
         self.assertEqual("Debug", live["app_build_type"])
 
     def test_cli_returns_acceptance_miss_and_preserves_json_verdict(self):
-        run = {**parse_metrics(self.METRICS_V2), "profile": "balanced",
+        run = {**parse_metrics(self.METRICS_V3), "profile": "balanced",
                "instructions": 21718, "return": "0x5745c858653f5a7f",
                "compressed_bytes": 999_999_999, "trace": "run.trace.bin.lz4",
                "decoded_event_count": 21718,
@@ -641,7 +670,8 @@ effective_buffer_bytes=67108864
             return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
 
         sidecar = (
-            "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
+            "metrics_version=3\ntermination=completed\nreturn_valid=1\n"
+            "profile=full\nreturn=0x55\ninstructions=0\n"
             f"elapsed_ms=17\ninstructions_per_second=0.000000\nencoded_bytes={len(binary)}\n"
             f"compressed_bytes={len(binary)}\n"
             f"encoded_bytes_per_second={fixed_six(len(binary) * 1000, 17)}\n"
@@ -651,6 +681,10 @@ effective_buffer_bytes=67108864
             "producer_waits=0\nproducer_wait_ns=0\neffective_buffer_bytes=4096\n"
         ).encode("ascii")
         metrics = parse_metrics(sidecar)
+        ensure_metrics_container(metrics, "run_benchmark.trace.bin")
+        require_binary_acceptance_candidate({
+            **metrics, "trace": "run_benchmark.trace.bin.lz4",
+        })
 
         def fake_adb(_args, *command, **kwargs):
             kwargs["stdout"].write(binary)
@@ -964,6 +998,15 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
             ensure_artifact_return("0x43", metrics, "benchmark.trace.txt.lz4.metrics")
         with self.assertRaisesRegex(ValueError, "return"):
             parse_metrics(self.METRICS.replace("return=0x42", "return=0x10000000000000000"))
+
+    def test_return_oracle_rejects_stopped_v3_benchmark_terminal(self):
+        stopped = parse_metrics(self.METRICS_V3.replace(
+            "termination=completed\nreturn_valid=1\nprofile=balanced\nreturn=0x42",
+            "termination=stopped\nreturn_valid=0\nprofile=balanced\nreturn=0x0",
+        ))
+
+        with self.assertRaisesRegex(RuntimeError, "completed terminal"):
+            ensure_artifact_return("0x0", stopped, "run.trace.bin.lz4.metrics")
 
     def test_verifies_setup_failure_without_publishing_artifacts(self):
         self.assertEqual(

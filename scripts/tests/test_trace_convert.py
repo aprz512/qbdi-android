@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ import scripts.lz4_frames as lz4_frames
 from scripts.trace_binary import BinaryTraceError
 from scripts.trace_convert import convert_binary_file, main
 from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
-from scripts.tests.test_trace_binary import complete_stream
+from scripts.tests.test_trace_binary import complete_stream, stopped_stream
 
 
 def raw_stream(*events):
@@ -52,14 +53,18 @@ def fake_lz4_executable(root: Path) -> Path:
     return decoder
 
 
-def metrics_sidecar(source: Path, extra: str = "") -> str:
+def metrics_sidecar(source: Path, extra: str = "", *, termination: str = "completed",
+                    return_valid: int = 1, return_value: str = "0x55",
+                    instructions: int = 0) -> str:
     size = source.stat().st_size
     def fixed_six(numerator: int, denominator: int) -> str:
         whole, remainder = divmod(numerator, denominator)
         return f"{whole}.{remainder * 1_000_000 // denominator:06d}"
     return (
-        "metrics_version=2\nprofile=full\nreturn=0x55\ninstructions=0\n"
-        f"elapsed_ms=17\ninstructions_per_second=0.000000\n"
+        "metrics_version=3\n"
+        f"termination={termination}\nreturn_valid={return_valid}\n"
+        f"profile=full\nreturn={return_value}\ninstructions={instructions}\n"
+        f"elapsed_ms=17\ninstructions_per_second={fixed_six(instructions * 1000, 17)}\n"
         f"encoded_bytes={size}\ncompressed_bytes={size}\n"
         f"encoded_bytes_per_second={fixed_six(size * 1000, 17)}\n"
         f"disk_bytes_per_second={fixed_six(size * 1000, 17)}\n"
@@ -431,20 +436,13 @@ class TraceConvertFileTests(unittest.TestCase):
             source = root / "run.trace.bin"
             source.write_bytes(raw_stream())
             (root / "run.trace.bin.metrics").write_text(
-                "metrics_version=2\nprofile=full\nreturn=0x999\ninstructions=0\n"
-                "elapsed_ms=17\ninstructions_per_second=0.000000\n"
-                "encoded_bytes=0\ncompressed_bytes=0\n"
-                "encoded_bytes_per_second=0.000000\ndisk_bytes_per_second=0.000000\n"
-                "compression_ratio=0.000000\n"
-                "cache_hits=9\ncache_misses=1\ncache_collisions=0\n"
-                "cache_hit_rate=0.900000\n"
-                "buffer_swaps=2\nproducer_waits=0\nproducer_wait_ns=0\n"
-                "effective_buffer_bytes=4096\n", encoding="utf-8"
+                metrics_sidecar(source).replace("return=0x55", "return=0x999"),
+                encoding="utf-8",
             )
             with self.assertRaisesRegex(BinaryTraceError, "sidecar mismatch.*return"):
                 convert_binary_file(source, root / "out.txt", lz4=None, crash_marked=False)
 
-    def test_rejects_well_formed_but_inconsistent_v2_rates(self):
+    def test_rejects_well_formed_but_inconsistent_v3_rates(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "run.trace.bin"
@@ -461,9 +459,11 @@ class TraceConvertFileTests(unittest.TestCase):
                                     crash_marked=False)
 
     def test_cli_help(self):
-        with self.assertRaises(SystemExit) as caught:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as caught:
             main(["--help"])
         self.assertEqual(0, caught.exception.code)
+        self.assertIn("text format 4", output.getvalue())
 
     def test_container_compression_flag_must_match_raw_lz4_and_recovery(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -497,12 +497,20 @@ class TraceConvertFileTests(unittest.TestCase):
             with self.assertRaisesRegex(BinaryTraceError, "sidecar.*limit"):
                 convert_binary_file(source, root / "large.txt", lz4=None,
                                     crash_marked=False)
-            sidecar.write_text(metrics_sidecar(source, "mystery=1\n"), encoding="utf-8")
+            sidecar.write_text(
+                metrics_sidecar(source).replace("effective_buffer_bytes=4096", "mystery=1"),
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(BinaryTraceError, "unknown metrics sidecar key"):
                 convert_binary_file(source, root / "unknown.txt", lz4=None,
                                     crash_marked=False)
 
-            sidecar.write_text(metrics_sidecar(source, "profile=full\n"), encoding="utf-8")
+            sidecar.write_text(
+                metrics_sidecar(source).replace(
+                    "effective_buffer_bytes=4096\n", ""
+                ) + "profile=full\n",
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(BinaryTraceError, "duplicate metrics sidecar key"):
                 convert_binary_file(source, root / "duplicate.txt", lz4=None,
                                     crash_marked=False)
@@ -535,6 +543,25 @@ class TraceConvertFileTests(unittest.TestCase):
             with self.assertRaisesRegex(BinaryTraceError, "invalid.*cache_hit_rate"):
                 convert_binary_file(source, root / "rate.txt", lz4=None,
                                     crash_marked=False)
+
+    def test_rejects_stopped_sidecar_with_terminal_counter_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            decoder = fake_lz4_executable(root)
+            source = root / "stopped.trace.bin.lz4"
+            binary = bytearray(stopped_stream())
+            struct.pack_into("<Q", binary, len(binary) - 64, len(uncompressed_lz4_frame(binary)))
+            source.write_bytes(uncompressed_lz4_frame(binary))
+            Path(str(source) + ".metrics").write_text(
+                metrics_sidecar(
+                    source, termination="stopped", return_valid=0, return_value="0x0",
+                    instructions=2,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(BinaryTraceError, "sidecar mismatch.*instructions"):
+                convert_binary_file(source, root / "out.txt", lz4=str(decoder), crash_marked=False)
 
     def test_many_frame_compressed_conversion_has_frame_count_independent_memory(self):
         class FakeStdin:
