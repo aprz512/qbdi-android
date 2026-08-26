@@ -180,6 +180,75 @@ void directory_sync_failure_without_a_previous_status_leaves_no_status_file() {
     session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
 }
 
+// Catches a first-status rollback whose unlink succeeded but whose directory
+// fsync failed: recovery still needs a durable marker to retry that fsync.
+void no_previous_rollback_directory_sync_retains_a_recoverable_marker() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    const std::string rollback_marker = std::string(publisher.path()) + ".rollback";
+    session_status_test_inject_fault(SessionStatusFaultPoint::DirectoryFsync, EIO);
+    session_status_test_inject_followup_fault(SessionStatusFaultPoint::RollbackDirFsync, EPERM);
+    CHECK(!publisher.publish(sealed_snapshot()));
+    CHECK(publisher.error_code() == EIO);
+    CHECK(publisher.recovery_error() == EPERM);
+    CHECK(::access(std::string(publisher.path()).c_str(), F_OK) != 0);
+    CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
+
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(directory_is_empty(root.path()));
+    CHECK(has_no_temporary_files(root.path()));
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+}
+
+// Catches cleanup that drops the only committed marker before its directory
+// fsync; the next opener must retain the status and retry marker cleanup.
+void committed_marker_cleanup_directory_sync_retries_on_the_next_open() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    const std::string committed_marker = std::string(publisher.path()) + ".commit";
+    session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCleanupDirFsync, EIO);
+    CHECK(!publisher.publish(sealed_snapshot()));
+    CHECK(publisher.error_code() == EIO);
+    CHECK(publisher.recovery_error() == EIO);
+    CHECK(::access(std::string(publisher.path()).c_str(), F_OK) == 0);
+    CHECK(::access(committed_marker.c_str(), F_OK) == 0);
+
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(read_text(recovered.path()) == read_text(publisher.path()));
+    CHECK(::access(committed_marker.c_str(), F_OK) != 0);
+    CHECK(has_no_temporary_files(root.path()));
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+}
+
+// Catches a rollback-marker cleanup fsync that fails after the status is gone:
+// the marker is recreated and a later opener completes the cleanup.
+void rollback_marker_cleanup_directory_sync_retries_on_the_next_open() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    const std::string rollback_marker = std::string(publisher.path()) + ".rollback";
+    session_status_test_inject_fault(SessionStatusFaultPoint::DirectoryFsync, EIO);
+    session_status_test_inject_followup_fault(SessionStatusFaultPoint::RollbackDirFsync, EPERM);
+    CHECK(!publisher.publish(sealed_snapshot()));
+    CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
+
+    SessionStatusPublisher cleanup_failed;
+    session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCleanupDirFsync, EBUSY);
+    CHECK(!cleanup_failed.open(configured_trace(), 3, root.path()));
+    CHECK(cleanup_failed.recovery_error() == EBUSY);
+    CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
+
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(directory_is_empty(root.path()));
+    CHECK(has_no_temporary_files(root.path()));
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+}
+
 // Catches a failure path that replaces the last good JSON with a partial file,
 // leaves a temporary sibling behind, or overwrites the first diagnostic errno.
 void failed_publications_preserve_the_previous_status_and_latch_first_errno() {
@@ -376,6 +445,9 @@ void rejects_non_utf8_snapshot_strings_before_creating_a_status_file() {
 int main() {
     writes_the_complete_session_status_schema_atomically();
     failed_publications_preserve_the_previous_status_and_latch_first_errno();
+    no_previous_rollback_directory_sync_retains_a_recoverable_marker();
+    committed_marker_cleanup_directory_sync_retries_on_the_next_open();
+    rollback_marker_cleanup_directory_sync_retries_on_the_next_open();
     failed_rollback_retains_the_old_backup_until_the_next_open_recovers_it();
     rollback_failures_are_recovered_by_the_next_open();
     directory_sync_failure_without_a_previous_status_leaves_no_status_file();

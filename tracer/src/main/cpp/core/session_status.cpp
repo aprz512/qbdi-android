@@ -248,6 +248,96 @@ bool rollback_directory_sync(int directory_fd) noexcept {
     return ::fsync(directory_fd) == 0;
 }
 
+bool marker_file_sync(int fd) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::MarkerFileFsync, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::fsync(fd) == 0;
+}
+
+bool marker_prepare_directory_sync(int directory_fd) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::MarkerPrepareDirFsync, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::fsync(directory_fd) == 0;
+}
+
+bool marker_commit_rename(const char *from, const char *to) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::MarkerCommitRename, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::rename(from, to) == 0;
+}
+
+bool marker_commit_directory_sync(int directory_fd) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::MarkerCommitDirFsync, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::fsync(directory_fd) == 0;
+}
+
+bool marker_cleanup_unlink(const char *path) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::MarkerCleanupUnlink, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::unlink(path) == 0;
+}
+
+bool marker_cleanup_directory_sync(int directory_fd) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::MarkerCleanupDirFsync, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::fsync(directory_fd) == 0;
+}
+
+bool create_marker(const char *path, int directory_fd) noexcept {
+    const int marker_fd = ::open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (marker_fd < 0) return false;
+    if (!marker_file_sync(marker_fd)) {
+        const int error = errno;
+        (void)::close(marker_fd);
+        errno = error;
+        return false;
+    }
+    if (::close(marker_fd) != 0) return false;
+    return marker_prepare_directory_sync(directory_fd);
+}
+
+bool cleanup_marker(const char *path, int directory_fd) noexcept {
+    if (!marker_cleanup_unlink(path)) return false;
+    if (marker_cleanup_directory_sync(directory_fd)) return true;
+    const int error = errno;
+    // A failed cleanup fsync leaves deletion durability unknown. Restore a
+    // durable marker in the live directory so the next open/publish retries.
+    (void)create_marker(path, directory_fd);
+    errno = error;
+    return false;
+}
+
 bool valid_state(std::string_view state) noexcept {
     return state == "installed" || state == "running" || state == "stop_requested" ||
            state == "stopping" || state == "sealed" || state == "stop_incomplete" ||
@@ -402,16 +492,26 @@ bool SessionStatusPublisher::recover_pending_transaction() noexcept {
         return false;
     }
 
-    const int marker_result = ::access(rollback_path_, F_OK);
-    if (marker_result == 0) {
-        // This marker is written only when a no-previous-status rollback
-        // could not remove its newly renamed main path.
+    const int rollback_marker_result = ::access(rollback_path_, F_OK);
+    const int rollback_marker_error = rollback_marker_result == 0 ? 0 : errno;
+    const int commit_marker_result = ::access(commit_path_, F_OK);
+    const int commit_marker_error = commit_marker_result == 0 ? 0 : errno;
+    if ((rollback_marker_result != 0 && rollback_marker_error != ENOENT) ||
+        (commit_marker_result != 0 && commit_marker_error != ENOENT) ||
+        (rollback_marker_result == 0 && commit_marker_result == 0)) {
+        const int error = rollback_marker_result != 0 && rollback_marker_error != ENOENT
+                ? rollback_marker_error
+                : commit_marker_result != 0 && commit_marker_error != ENOENT
+                        ? commit_marker_error
+                        : EINVAL;
+        (void)::close(directory_fd);
+        record_recovery_error(error);
+        return false;
+    }
+    if (rollback_marker_result == 0) {
+        // A durable pre-rename marker means this first status never committed.
+        // Keep it until the status deletion and its directory fsync both pass.
         if (!rollback_unlink(path_) && errno != ENOENT) {
-            record_recovery_error(errno);
-            (void)::close(directory_fd);
-            return false;
-        }
-        if (!rollback_unlink(rollback_path_)) {
             record_recovery_error(errno);
             (void)::close(directory_fd);
             return false;
@@ -421,11 +521,25 @@ bool SessionStatusPublisher::recover_pending_transaction() noexcept {
             (void)::close(directory_fd);
             return false;
         }
-    } else if (errno != ENOENT) {
-        const int error = errno;
-        (void)::close(directory_fd);
-        record_recovery_error(error);
-        return false;
+        if (!cleanup_marker(rollback_path_, directory_fd)) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
+    } else if (commit_marker_result == 0) {
+        // A durable commit marker never rolls the newly fsynced status back;
+        // it merely makes marker cleanup retryable across future opens.
+        if (::access(path_, F_OK) != 0) {
+            const int error = errno == 0 ? EIO : errno;
+            (void)::close(directory_fd);
+            record_recovery_error(error);
+            return false;
+        }
+        if (!cleanup_marker(commit_path_, directory_fd)) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
     }
     if (::close(directory_fd) != 0) {
         record_recovery_error(errno);
@@ -466,8 +580,10 @@ bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation
     path_size_ = static_cast<size_t>(path_count);
     const int backup_count = std::snprintf(backup_path_, sizeof(backup_path_), "%s.backup", path_);
     const int rollback_count = std::snprintf(rollback_path_, sizeof(rollback_path_), "%s.rollback", path_);
+    const int commit_count = std::snprintf(commit_path_, sizeof(commit_path_), "%s.commit", path_);
     if (backup_count <= 0 || static_cast<size_t>(backup_count) >= sizeof(backup_path_) ||
-        rollback_count <= 0 || static_cast<size_t>(rollback_count) >= sizeof(rollback_path_)) {
+        rollback_count <= 0 || static_cast<size_t>(rollback_count) >= sizeof(rollback_path_) ||
+        commit_count <= 0 || static_cast<size_t>(commit_count) >= sizeof(commit_path_)) {
         record_error(ENAMETOOLONG);
         return false;
     }
@@ -552,6 +668,12 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
             record_error(error);
             return false;
         }
+    } else if (!create_marker(rollback_path_, directory_fd)) {
+        const int error = errno == 0 ? EIO : errno;
+        (void)::close(directory_fd);
+        (void)::unlink(temporary);
+        record_error(error);
+        return false;
     }
 #if defined(QTRACE_HOST_TEST)
     int rename_fault = 0;
@@ -591,22 +713,33 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
                 if (!rollback_directory_sync(directory_fd)) record_recovery_error(errno);
             }
         } else {
-            if (!rollback_unlink(path_)) {
-                const int rollback_error = errno;
-                record_recovery_error(rollback_error);
-                const int marker_fd = ::open(rollback_path_, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-                if (marker_fd >= 0) {
-                    if (::close(marker_fd) != 0) record_recovery_error(errno);
-                } else if (errno != EEXIST) {
-                    record_recovery_error(errno);
-                }
-                if (!rollback_directory_sync(directory_fd)) record_recovery_error(errno);
-            } else if (!rollback_directory_sync(directory_fd)) {
-                record_recovery_error(errno);
-            }
+            (void)recover_pending_transaction();
         }
         (void)::close(directory_fd);
         return false;
+    }
+    if (!had_previous) {
+        if (!marker_commit_rename(rollback_path_, commit_path_)) {
+            const int error = errno == 0 ? EIO : errno;
+            record_error(error);
+            record_recovery_error(error);
+            (void)::close(directory_fd);
+            return false;
+        }
+        if (!marker_commit_directory_sync(directory_fd)) {
+            const int error = errno == 0 ? EIO : errno;
+            record_error(error);
+            record_recovery_error(error);
+            (void)::close(directory_fd);
+            return false;
+        }
+        if (!cleanup_marker(commit_path_, directory_fd)) {
+            const int error = errno == 0 ? EIO : errno;
+            record_error(error);
+            record_recovery_error(error);
+            (void)::close(directory_fd);
+            return false;
+        }
     }
     if (had_previous && ::unlink(backup_path_) != 0) {
         const int error = errno;

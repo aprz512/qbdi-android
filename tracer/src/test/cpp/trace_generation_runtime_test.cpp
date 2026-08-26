@@ -1,4 +1,5 @@
 #include "core/trace_generation_runtime.h"
+#include "third_party/nlohmann/json.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -625,7 +626,103 @@ void status_metadata_producers_publish_artifacts_warnings_and_errors() {
     CHECK(published.find("\"code\":\"FLIGHT_DEGRADED\"") != std::string::npos);
     CHECK(published.find("\"code\":\"SEAL_FAILED\"") != std::string::npos);
     CHECK(published.find("\"code\":\"STATUS_ARTIFACT_DUPLICATE\"") != std::string::npos);
-    CHECK(published.find("\"code\":\"STATUS_METADATA_OVERFLOW\"") != std::string::npos);
+    CHECK(published.find("\"code\":\"STATUS_ARTIFACT_CAPACITY\"") != std::string::npos);
+    runtime.reset();
+}
+
+// Catches producer diagnostics consuming the warning/error capacity or
+// classifying duplicate and invalid inputs as generic metadata overflow.
+void status_metadata_producers_deduplicate_and_classify_each_rejection() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    auto runtime = TraceGenerationRuntime::create(
+            36, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
+    CHECK(runtime != nullptr);
+    wait_for_count(poll.waits, 1);
+
+    CHECK(runtime->record_artifact("one.trace"));
+    CHECK(!runtime->record_artifact("one.trace"));
+    CHECK(!runtime->record_artifact("one.trace"));
+    CHECK(!runtime->record_artifact("../invalid.trace"));
+    size_t accepted_artifacts = 1;
+    for (size_t index = 0; index != 64; ++index) {
+        const std::string artifact = "artifact-" + std::to_string(index) + ".trace";
+        if (!runtime->record_artifact(artifact)) break;
+        ++accepted_artifacts;
+    }
+    CHECK(!runtime->record_artifact("after-artifact-capacity.trace"));
+    CHECK(runtime->record_status_warning("WARN", "$.warning", "one"));
+    CHECK(!runtime->record_status_warning("WARN", "$.warning", "one"));
+    CHECK(!runtime->record_status_warning("WARN", "$.warning", "one"));
+    CHECK(runtime->record_status_error("ERROR", "$.error", "one"));
+    CHECK(!runtime->record_status_error("ERROR", "$.error", "one"));
+    CHECK(!runtime->record_status_error("ERROR", "$.error", "one"));
+    CHECK(!runtime->record_status_warning("", "$.warning", "invalid"));
+    CHECK(!runtime->record_status_error("ERROR", "$.error", std::string(129, 'x')));
+
+    size_t accepted_warnings = 1;
+    for (size_t index = 0; index != 64; ++index) {
+        const std::string message = "warning-" + std::to_string(index);
+        if (!runtime->record_status_warning("WARN", "$.warning", message)) break;
+        ++accepted_warnings;
+    }
+    CHECK(!runtime->record_status_warning("WARN", "$.warning", "after-capacity"));
+
+    size_t accepted_errors = 1;
+    for (size_t index = 0; index != 64; ++index) {
+        const std::string message = "error-" + std::to_string(index);
+        if (!runtime->record_status_error("ERROR", "$.error", message)) break;
+        ++accepted_errors;
+    }
+    CHECK(!runtime->record_status_error("ERROR", "$.error", "after-capacity"));
+
+    poll.allow_one();
+    wait_for_count(poll.waits, 2);
+    const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
+    const nlohmann::json published = nlohmann::json::parse(read_text(path));
+    CHECK(published.at("artifacts").size() == accepted_artifacts);
+    CHECK(published.at("warnings").size() == accepted_warnings);
+    size_t actual_error_count = 0;
+    size_t artifact_duplicate_count = 0;
+    size_t warning_duplicate_count = 0;
+    size_t error_duplicate_count = 0;
+    size_t artifact_invalid_count = 0;
+    size_t artifact_capacity_count = 0;
+    size_t warning_invalid_count = 0;
+    size_t error_invalid_count = 0;
+    size_t warning_capacity_count = 0;
+    size_t error_capacity_count = 0;
+    for (const nlohmann::json &error : published.at("errors")) {
+        const std::string code = error.at("code");
+        if (code == "ERROR") ++actual_error_count;
+        if (code == "STATUS_ARTIFACT_DUPLICATE") ++artifact_duplicate_count;
+        if (code == "STATUS_ARTIFACT_INVALID") ++artifact_invalid_count;
+        if (code == "STATUS_ARTIFACT_CAPACITY") ++artifact_capacity_count;
+        if (code == "STATUS_WARNING_DUPLICATE") ++warning_duplicate_count;
+        if (code == "STATUS_ERROR_DUPLICATE") ++error_duplicate_count;
+        if (code == "STATUS_WARNING_INVALID") ++warning_invalid_count;
+        if (code == "STATUS_ERROR_INVALID") ++error_invalid_count;
+        if (code == "STATUS_WARNING_CAPACITY") ++warning_capacity_count;
+        if (code == "STATUS_ERROR_CAPACITY") ++error_capacity_count;
+        CHECK(code != "STATUS_METADATA_OVERFLOW");
+    }
+    CHECK(actual_error_count == accepted_errors);
+    CHECK(artifact_duplicate_count == 1);
+    CHECK(artifact_invalid_count == 1);
+    CHECK(artifact_capacity_count == 1);
+    CHECK(warning_duplicate_count == 1);
+    CHECK(error_duplicate_count == 1);
+    CHECK(warning_invalid_count == 1);
+    CHECK(error_invalid_count == 1);
+    CHECK(warning_capacity_count == 1);
+    CHECK(error_capacity_count == 1);
     runtime.reset();
 }
 
@@ -654,4 +751,5 @@ int main() {
     status_worker_publishes_only_transition_snapshots_outside_runtime_transitions();
     status_publication_failure_is_exposed_and_retried_without_a_runtime_event();
     status_metadata_producers_publish_artifacts_warnings_and_errors();
+    status_metadata_producers_deduplicate_and_classify_each_rejection();
 }

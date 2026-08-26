@@ -271,21 +271,19 @@ bool TraceGenerationRuntime::record_artifact(std::string_view artifact_basename)
     std::lock_guard<std::mutex> lock(status_metadata_mutex_);
     if (!session_status_artifact_basename_is_valid(artifact_basename) ||
         !session_status_string_is_valid_utf8(artifact_basename)) {
-        record_metadata_error_locked("STATUS_ARTIFACT_INVALID", "$.artifacts",
-                                     "artifact must be a UTF-8 basename");
+        record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactInvalid);
         note_transition();
         return false;
     }
     for (const std::string &artifact : status_artifacts_) {
         if (artifact == artifact_basename) {
-            record_metadata_error_locked("STATUS_ARTIFACT_DUPLICATE", "$.artifacts",
-                                         "artifact was already recorded");
+            record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactDuplicate);
             note_transition();
             return false;
         }
     }
     if (status_artifacts_.size() >= kMaxStatusArtifacts) {
-        status_metadata_overflow_ = true;
+        record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactCapacity);
         note_transition();
         return false;
     }
@@ -304,34 +302,47 @@ bool TraceGenerationRuntime::record_status_error(
     return record_status_issue(false, code, path, message);
 }
 
-void TraceGenerationRuntime::record_metadata_error_locked(
-        std::string_view code, std::string_view path, std::string_view message) noexcept {
-    if (status_errors_.size() >= kMaxStatusIssues) {
-        status_metadata_overflow_ = true;
-        return;
-    }
-    status_errors_.push_back(ConfigurationIssue{std::string(code), std::string(path),
-                                                std::string(message)});
+void TraceGenerationRuntime::record_metadata_diagnostic_locked(
+        StatusMetadataDiagnostic diagnostic) noexcept {
+    const uint16_t bit = static_cast<uint16_t>(
+            1U << static_cast<unsigned int>(diagnostic));
+    status_metadata_diagnostics_ |= bit;
 }
 
 bool TraceGenerationRuntime::record_status_issue(
         bool warning, std::string_view code, std::string_view path, std::string_view message) noexcept {
     std::lock_guard<std::mutex> lock(status_metadata_mutex_);
+    const StatusMetadataDiagnostic invalid = warning
+            ? StatusMetadataDiagnostic::WarningInvalid
+            : StatusMetadataDiagnostic::ErrorInvalid;
+    const StatusMetadataDiagnostic duplicate = warning
+            ? StatusMetadataDiagnostic::WarningDuplicate
+            : StatusMetadataDiagnostic::ErrorDuplicate;
+    const StatusMetadataDiagnostic capacity = warning
+            ? StatusMetadataDiagnostic::WarningCapacity
+            : StatusMetadataDiagnostic::ErrorCapacity;
     if (code.empty() || path.empty() || !session_status_string_is_valid_utf8(code) ||
         !session_status_string_is_valid_utf8(path) || !session_status_string_is_valid_utf8(message)) {
-        status_metadata_overflow_ = true;
+        record_metadata_diagnostic_locked(invalid);
         note_transition();
         return false;
     }
     if (code.size() > kMaxStatusTextBytes || path.size() > kMaxStatusTextBytes ||
         message.size() > kMaxStatusTextBytes) {
-        status_metadata_overflow_ = true;
+        record_metadata_diagnostic_locked(invalid);
         note_transition();
         return false;
     }
     std::vector<ConfigurationIssue> &issues = warning ? status_warnings_ : status_errors_;
+    for (const ConfigurationIssue &issue : issues) {
+        if (issue.code == code && issue.path == path && issue.message == message) {
+            record_metadata_diagnostic_locked(duplicate);
+            note_transition();
+            return false;
+        }
+    }
     if (issues.size() >= kMaxStatusIssues) {
-        status_metadata_overflow_ = true;
+        record_metadata_diagnostic_locked(capacity);
         note_transition();
         return false;
     }
@@ -503,10 +514,43 @@ SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {
         snapshot.artifacts = status_artifacts_;
         snapshot.warnings = status_warnings_;
         snapshot.errors = status_errors_;
-        if (status_metadata_overflow_) {
-            snapshot.errors.push_back(ConfigurationIssue{
-                    "STATUS_METADATA_OVERFLOW", "$.status", "status metadata capacity exceeded"});
-        }
+        const auto append_diagnostic = [&snapshot, this](
+                                               StatusMetadataDiagnostic diagnostic,
+                                               const char *code, const char *path,
+                                               const char *message) {
+            const uint16_t bit = static_cast<uint16_t>(
+                    1U << static_cast<unsigned int>(diagnostic));
+            if ((status_metadata_diagnostics_ & bit) != 0) {
+                snapshot.errors.push_back(ConfigurationIssue{code, path, message});
+            }
+        };
+        append_diagnostic(StatusMetadataDiagnostic::ArtifactInvalid,
+                          "STATUS_ARTIFACT_INVALID", "$.artifacts",
+                          "artifact must be a UTF-8 basename");
+        append_diagnostic(StatusMetadataDiagnostic::ArtifactDuplicate,
+                          "STATUS_ARTIFACT_DUPLICATE", "$.artifacts",
+                          "artifact was already recorded");
+        append_diagnostic(StatusMetadataDiagnostic::ArtifactCapacity,
+                          "STATUS_ARTIFACT_CAPACITY", "$.artifacts",
+                          "artifact metadata capacity exceeded");
+        append_diagnostic(StatusMetadataDiagnostic::WarningInvalid,
+                          "STATUS_WARNING_INVALID", "$.warnings",
+                          "warning metadata is invalid");
+        append_diagnostic(StatusMetadataDiagnostic::WarningDuplicate,
+                          "STATUS_WARNING_DUPLICATE", "$.warnings",
+                          "warning was already recorded");
+        append_diagnostic(StatusMetadataDiagnostic::WarningCapacity,
+                          "STATUS_WARNING_CAPACITY", "$.warnings",
+                          "warning metadata capacity exceeded");
+        append_diagnostic(StatusMetadataDiagnostic::ErrorInvalid,
+                          "STATUS_ERROR_INVALID", "$.errors",
+                          "error metadata is invalid");
+        append_diagnostic(StatusMetadataDiagnostic::ErrorDuplicate,
+                          "STATUS_ERROR_DUPLICATE", "$.errors",
+                          "error was already recorded");
+        append_diagnostic(StatusMetadataDiagnostic::ErrorCapacity,
+                          "STATUS_ERROR_CAPACITY", "$.errors",
+                          "error metadata capacity exceeded");
     }
     const int error = status_error_.load(std::memory_order_acquire);
     if (error != 0) {

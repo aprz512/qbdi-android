@@ -153,6 +153,17 @@ private:
     struct StatusWorkerContext;
     struct DeadlineThreadStart;
     struct StatusThreadStart;
+    enum class StatusMetadataDiagnostic : uint8_t {
+        ArtifactInvalid,
+        ArtifactDuplicate,
+        ArtifactCapacity,
+        WarningInvalid,
+        WarningDuplicate,
+        WarningCapacity,
+        ErrorInvalid,
+        ErrorDuplicate,
+        ErrorCapacity,
+    };
 
     // The planner bounds configuration at 256 scenes and 1024 flight threads.
     // Fixed storage keeps instruction callbacks allocation-free; active_capacity_
@@ -181,8 +192,7 @@ private:
     SessionStatusSnapshot status_snapshot() const;
     bool record_status_issue(bool warning, std::string_view code,
                              std::string_view path, std::string_view message) noexcept;
-    void record_metadata_error_locked(std::string_view code, std::string_view path,
-                                      std::string_view message) noexcept;
+    void record_metadata_diagnostic_locked(StatusMetadataDiagnostic diagnostic) noexcept;
     void note_transition() noexcept;
 
     uint64_t generation_ = 0;
@@ -206,7 +216,7 @@ private:
     std::vector<std::string> status_artifacts_;
     std::vector<ConfigurationIssue> status_warnings_;
     std::vector<ConfigurationIssue> status_errors_;
-    bool status_metadata_overflow_ = false;
+    uint16_t status_metadata_diagnostics_ = 0;
     pthread_t deadline_thread_{};
     std::atomic<bool> deadline_thread_started_{false};
     std::shared_ptr<DeadlineWorkerContext> deadline_context_;

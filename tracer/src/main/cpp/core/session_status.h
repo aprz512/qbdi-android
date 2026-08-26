@@ -48,6 +48,12 @@ enum class SessionStatusFaultPoint : uint8_t {
     RollbackRename,
     RollbackUnlink,
     RollbackDirFsync,
+    MarkerFileFsync,
+    MarkerPrepareDirFsync,
+    MarkerCommitRename,
+    MarkerCommitDirFsync,
+    MarkerCleanupUnlink,
+    MarkerCleanupDirFsync,
 };
 
 void session_status_test_inject_fault(SessionStatusFaultPoint point, int error) noexcept;
@@ -78,6 +84,7 @@ private:
     char path_[kPathCapacity]{};
     char backup_path_[kPathCapacity]{};
     char rollback_path_[kPathCapacity]{};
+    char commit_path_[kPathCapacity]{};
     char package_[513]{};
     char session_id_[37]{};
     uint64_t generation_ = 0;
