@@ -5,6 +5,7 @@
 #include <fstream>
 #include <regex>
 #include <string>
+#include <string_view>
 
 #include "events/trace_record.h"
 
@@ -34,6 +35,91 @@ std::string read_command(const std::string &command) {
     }
     CHECK(::pclose(pipe) == 0);
     return output;
+}
+
+size_t occurrence_count(std::string_view source, std::string_view needle) {
+    size_t count = 0;
+    size_t offset = 0;
+    while ((offset = source.find(needle, offset)) != std::string_view::npos) {
+        ++count;
+        offset += needle.size();
+    }
+    return count;
+}
+
+std::string_view function_source(std::string_view source,
+                                 std::string_view signature) {
+    const size_t start = source.find(signature);
+    CHECK(start != std::string_view::npos);
+    const size_t opening = source.find('{', start + signature.size());
+    CHECK(opening != std::string_view::npos);
+    size_t depth = 0;
+    char quote = '\0';
+    bool escaped = false;
+    bool line_comment = false;
+    bool block_comment = false;
+    for (size_t index = opening; index < source.size(); ++index) {
+        const char current = source[index];
+        const char next = index + 1 < source.size() ? source[index + 1] : '\0';
+        if (line_comment) {
+            if (current == '\n') line_comment = false;
+            continue;
+        }
+        if (block_comment) {
+            if (current == '*' && next == '/') {
+                block_comment = false;
+                ++index;
+            }
+            continue;
+        }
+        if (quote != '\0') {
+            if (escaped) {
+                escaped = false;
+            } else if (current == '\\') {
+                escaped = true;
+            } else if (current == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (current == '/' && next == '/') {
+            line_comment = true;
+            ++index;
+            continue;
+        }
+        if (current == '/' && next == '*') {
+            block_comment = true;
+            ++index;
+            continue;
+        }
+        if (current == '"' || current == '\'') {
+            quote = current;
+            continue;
+        }
+        if (current == '{') {
+            ++depth;
+        } else if (current == '}' && --depth == 0) {
+            return source.substr(start, index - start + 1);
+        }
+    }
+    CHECK(false);
+    return {};
+}
+
+void function_source_ignores_non_code_braces() {
+    constexpr std::string_view source = R"cpp(
+void selected() {
+    const char *text = "}";
+    const char brace = '{';
+    // }
+    /* { } */
+    if (true) { return; }
+}
+void next() {}
+)cpp";
+    const std::string_view selected = function_source(source, "void selected()");
+    CHECK(selected.find("if (true) { return; }") != std::string_view::npos);
+    CHECK(selected.find("void next()") == std::string_view::npos);
 }
 
 void production_sources_have_only_the_binary_trace_facade() {
@@ -237,9 +323,82 @@ void final_sentinel_postinst_clears_before_vm_run_returns() {
     CHECK(post < clear && clear < next_function);
 }
 
+void accepted_generation_owns_one_runtime_and_private_status_publisher() {
+    const std::filesystem::path root(QTRACE_CPP_SOURCE_DIR);
+    const std::string tracer_entry = read_file(root / "tracer_entry.cpp");
+    const std::string runtime_header =
+            read_file(root / "core" / "trace_generation_runtime.h");
+    const std::string status = read_file(root / "core" / "session_status.cpp");
+    const std::string_view apply = function_source(
+            tracer_entry, "static void apply_accepted_configuration(");
+
+    CHECK(occurrence_count(
+                  tracer_entry,
+                  "static std::shared_ptr<TraceGenerationRuntime> "
+                  "g_generation_runtime;") == 1);
+    CHECK(occurrence_count(
+                  apply, "create_generation_runtime(config, generation)") == 1);
+    CHECK(apply.find("g_generation_runtime = std::move(runtime);") !=
+          std::string_view::npos);
+    CHECK(runtime_header.find("SessionStatusPublisher status_publisher_;") !=
+          std::string::npos);
+    CHECK(status.find("/data/data/%s/files/qbdi-traces") !=
+          std::string::npos);
+}
+
+void proxy_admission_precedes_qbdi_and_stop_completes_control_only() {
+    const std::filesystem::path root(QTRACE_CPP_SOURCE_DIR);
+    const std::string tracer_entry = read_file(root / "tracer_entry.cpp");
+    const std::string session =
+            read_file(root / "core" / "qbdi_thread_session.cpp");
+    const std::string_view proxy = function_source(
+            tracer_entry, "extern \"C\" uint64_t trace_proxy_dispatch(");
+    const size_t admission = proxy.find("->try_begin_call(");
+    const size_t qbdi = proxy.find("run_with_qbdi(");
+    CHECK(admission != std::string_view::npos);
+    CHECK(qbdi != std::string_view::npos);
+    CHECK(admission < qbdi);
+
+    const std::string_view target_pre = function_source(
+            session, "static QBDI::VMAction on_target_pre(");
+    CHECK(target_pre.find("return QBDI::STOP;") != std::string_view::npos);
+    const std::string_view call_gateway = function_source(
+            session, "TraceRunResult QbdiThreadSession::call_gateway(");
+    const size_t seal = call_gateway.find("seal_observed_stop(");
+    const size_t continuation = call_gateway.find("continue_execution();");
+    CHECK(seal != std::string_view::npos);
+    CHECK(continuation != std::string_view::npos);
+    CHECK(seal < continuation);
+    CHECK(session.find(
+                  "return impl_ != nullptr ? impl_->continue_control_only()") !=
+          std::string::npos);
+}
+
+void deadline_worker_only_requests_stop_and_runtime_stop_has_no_rpc() {
+    const std::filesystem::path root(QTRACE_CPP_SOURCE_DIR);
+    const std::filesystem::path repo(QTRACE_REPO_DIR);
+    const std::string runtime =
+            read_file(root / "core" / "trace_generation_runtime.cpp");
+    const std::string tracer_entry = read_file(root / "tracer_entry.cpp");
+    const std::string spawn_agent = read_file(repo / "scripts" / "spawn_trace.js");
+    const std::string_view deadline = function_source(
+            runtime, "void *TraceGenerationRuntime::deadline_entry(");
+
+    CHECK(deadline.find("request_deadline_stop()") != std::string_view::npos);
+    for (std::string_view forbidden : {
+                 "BinaryTraceWriter", "writer_", ".stop(", ".close(",
+                 "seal_observed_stop"}) {
+        CHECK(deadline.find(forbidden) == std::string_view::npos);
+    }
+    CHECK(tracer_entry.find("qbdi_tracer_stop_json") == std::string::npos);
+    CHECK(tracer_entry.find("qbdi_tracer_stop") == std::string::npos);
+    CHECK(spawn_agent.find("rpc.exports.stop") == std::string::npos);
+}
+
 } // namespace
 
 int main() {
+    function_source_ignores_non_code_braces();
     production_sources_have_only_the_binary_trace_facade();
     instruction_event_model_has_no_text_hot_fields();
     pending_instruction_reuse_does_not_clear_the_whole_hot_record();
@@ -249,4 +408,7 @@ int main() {
     qbdi_thread_session_object_has_no_tls_destructor_registration();
     signal_virtualization_is_scoped_to_each_vm_run_epoch();
     final_sentinel_postinst_clears_before_vm_run_returns();
+    accepted_generation_owns_one_runtime_and_private_status_publisher();
+    proxy_admission_precedes_qbdi_and_stop_completes_control_only();
+    deadline_worker_only_requests_stop_and_runtime_stop_has_no_rpc();
 }

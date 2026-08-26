@@ -62,6 +62,7 @@ TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)
 OPTIMIZED_INTEGER_FIELDS = V1_INTEGER_FIELDS
 OPTIMIZED_RATE_FIELDS = V1_RATE_FIELDS
 MAX_METRICS_BYTES = 64 * 1024
+ACCEPTANCE_RUN_COUNT = 5
 PROFILE_RATE_TARGETS = {
     "fast": Decimal(1_000_000),
     "balanced": Decimal(800_000),
@@ -159,7 +160,7 @@ def compare_to_profile_baseline(
     runs: Iterable[dict[str, int | Decimal | str]],
 ) -> dict[str, Any]:
     measured = list(runs)
-    if len(measured) != 5:
+    if len(measured) != ACCEPTANCE_RUN_COUNT:
         raise ValueError("binary acceptance requires exactly five measured runs")
     for run in measured:
         require_binary_acceptance_candidate(run)
@@ -1109,7 +1110,7 @@ def main() -> int:
     args = parse_args()
     if args.runs < 1:
         raise SystemExit("--runs must be at least one")
-    if args.compare and args.runs != 5:
+    if args.compare and args.runs != ACCEPTANCE_RUN_COUNT:
         raise ValueError("acceptance comparison requires exactly five measured runs")
     if args.test_fail_setup:
         if args.runs != 1:

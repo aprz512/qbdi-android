@@ -15,6 +15,33 @@ versioned `config.tracer` JSON object and receives JSON configure/status respons
 change QTRB, text format 4, Flight Recorder artifacts, or retained historical formats described
 below.
 
+## Autonomous session lifecycle
+
+Including `durationMs` in `session` selects a timed capture. Its exact control sequence is:
+
+```text
+Frida load/init -> resume -> Installed -> Frida detach
+-> native deadline -> stop_requested -> per-thread seal
+-> control-only real return
+```
+
+Frida is a startup loader/configuration adapter, not the owner of the running capture. One native
+`TraceGenerationRuntime` owns each accepted generation. When `session.id` is supplied, that runtime
+publishes status in the app-private trace directory. It is armed only after every hook in the
+generation is installed and the `Installed` status is committed, so Frida may detach before the
+deadline.
+
+The deadline worker only requests cooperative stop. It neither seals nor closes a trace writer.
+An admitted target thread observes `stop_requested` at a QBDI boundary, seals its own artifact and
+acknowledges that admission, then disables collection while QBDI continues control-only to the real
+target return. New calls bypass QBDI after stop admission closes. A target thread blocked in native
+code or a system call may delay acknowledgement; the configured duration is therefore a stop-request
+deadline, not a forced-return deadline. qtrace never kills the app to satisfy duration.
+
+A `session` containing only `id` (with `durationMs` omitted) selects monitor capture. It has no
+native deadline and keeps collecting until the app exits or the user ends the app. The strict
+schema has no `mode` field. Artifacts remain app-private and can be pulled manually afterward.
+
 ## Artifact set
 
 Each run has a unique basename:

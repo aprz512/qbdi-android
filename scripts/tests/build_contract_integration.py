@@ -23,6 +23,14 @@ CONFIGURATION_PRODUCERS = (
     ROOT / "scripts/flight_acceptance.py",
 )
 NATIVE_SOURCE_SUFFIXES = frozenset((".c", ".cc", ".cpp", ".h", ".hpp"))
+RUNTIME_STOP_RPC_PATTERNS = (
+    re.compile(r"\brpc\s*\.\s*exports\s*\.\s*stop\b"),
+    re.compile(r"\brpc\s*\.\s*exports\s*\[\s*(['\"])stop\1\s*\]"),
+    re.compile(
+        r"\brpc\s*\.\s*exports\s*=\s*\{.*?(?:\bstop\b|['\"]stop['\"])\s*(?:\(|:)",
+        re.DOTALL,
+    ),
+)
 
 
 def production_native_sources():
@@ -35,6 +43,10 @@ def production_native_sources():
         and "third_party" not in path.relative_to(native_root).parts
         and "build" not in path.relative_to(native_root).parts
     )
+
+
+def produces_runtime_stop_rpc(source):
+    return any(pattern.search(source) is not None for pattern in RUNTIME_STOP_RPC_PATTERNS)
 
 
 def run_gradle(*arguments, environment=None):
@@ -74,6 +86,57 @@ class StructuredConfigurationContractTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             with self.subTest(path=path.relative_to(ROOT), marker="scene="):
                 self.assertNotIn("scene=", source)
+
+
+class AutonomousStopBuildContractTests(unittest.TestCase):
+    def test_tsan_lane_runs_runtime_and_coordinator_stop_races(self):
+        cmake = (ROOT / "tracer/src/test/cpp/CMakeLists.txt").read_text(
+            encoding="utf-8"
+        )
+
+        for target in (
+            "trace_generation_runtime_tsan_test",
+            "capture_coordinator_tsan_test",
+        ):
+            with self.subTest(target=target):
+                self.assertRegex(cmake, rf"add_trace_tsan_test\(\s*{target}\b")
+        helper_start = cmake.index("function(add_trace_tsan_test name)")
+        helper = cmake[helper_start : cmake.index("endfunction()", helper_start)]
+        self.assertIn("-fsanitize=thread", helper)
+        self.assertIn("add_test(NAME ${name}", helper)
+        self.assertIn("${QTRACE_SETARCH_EXECUTABLE}", helper)
+
+    def test_stop_rpc_detector_covers_property_and_object_exports(self):
+        for source in (
+            "rpc.exports.stop = function () {};",
+            "rpc.exports['stop'] = function () {};",
+            'rpc.exports["stop"] = function () {};',
+            "rpc.exports = { stop() {} };",
+            "rpc.exports = { stop: async function () {} };",
+            'rpc.exports = { "stop": function () {} };',
+            "rpc.exports = { 'stop'() {} };",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(produces_runtime_stop_rpc(source))
+        self.assertFalse(produces_runtime_stop_rpc("function stop() {}"))
+        self.assertFalse(
+            produces_runtime_stop_rpc(
+                "rpc.exports = { configure() { const stop_requested = true; } };"
+            )
+        )
+
+    def test_runtime_stop_has_no_exported_rpc_producer(self):
+        native = "\n".join(
+            path.read_text(encoding="utf-8") for path in production_native_sources()
+        )
+        self.assertNotRegex(
+            native, r"\b(?:qbdi_tracer|qtrace)_stop[A-Za-z0-9_]*\b"
+        )
+
+        for producer in (ROOT / "scripts").glob("*.js"):
+            with self.subTest(producer=producer.relative_to(ROOT)):
+                source = producer.read_text(encoding="utf-8")
+                self.assertFalse(produces_runtime_stop_rpc(source))
 
 
 class ManifestIntegrationTests(unittest.TestCase):

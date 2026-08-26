@@ -232,6 +232,24 @@ app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/ar
 frida -U -f com.aprz.qbdiandroid -l scripts/spawn_trace.js
 ```
 
+在 `session` 中提供 `durationMs` 即为 timed 采集，其控制链路的精确顺序是：
+
+```text
+Frida load/init -> resume -> Installed -> Frida detach
+-> native deadline -> stop_requested -> per-thread seal
+-> control-only real return
+```
+
+Frida 只负责启动期加载、配置和 hook 安装；`Installed` 发布后可以 detach，时限由目标进程内
+每个 accepted generation 唯一的 native runtime 负责。deadline worker 只发布停止请求，不会
+关闭 writer；已进入 QBDI 的目标线程会在观察到请求后各自 seal，再以 control-only 方式运行到
+真实目标返回。阻塞在目标代码或系统调用中的线程可能延迟 acknowledgement，因此时长是停止请求
+的 deadline，不是强制退出时刻。qtrace 不会为了满足时长而 kill App。
+
+`session` 仅含 `id`、省略 `durationMs` 时即为 monitor 采集：它没有 native deadline，会持续
+采集到 App 自行退出或用户结束 App；后续仍可用手动拉取命令读取 app-private 产物。strict
+schema 不接受额外的 `mode` 字段。
+
 脚本完成配置后，恢复应用并在界面选择 JNI、libc、algorithm、integrity 或 benchmark 场景。constructor、持久 `pthread_create` gateway 和 signal gateway 都需要在目标初始化前安装；attach 到已运行进程无法补回遗漏的开头。
 
 configure 成功后，Frida console 会先打印 generation 和归一化 offset，再轮询同一

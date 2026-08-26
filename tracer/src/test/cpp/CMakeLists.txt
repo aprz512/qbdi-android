@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22.1)
 project(qbdi_tracer_native_tests LANGUAGES C CXX)
 enable_testing()
 find_package(Threads REQUIRED)
-option(QTRACE_ENABLE_TSAN "Build the opt-in JNI state ThreadSanitizer test" OFF)
+option(QTRACE_ENABLE_TSAN "Build opt-in ThreadSanitizer concurrency tests" OFF)
 
 set(LZ4_ROOT ../../main/cpp/third_party/lz4/lib)
 add_library(lz4_static STATIC
@@ -62,24 +62,52 @@ target_link_libraries(jni_state_test PRIVATE Threads::Threads)
 
 if(QTRACE_ENABLE_TSAN)
     find_program(QTRACE_SETARCH_EXECUTABLE setarch REQUIRED)
-    add_executable(jni_state_tsan_test
+
+    function(add_trace_tsan_test name)
+        add_executable(${name} ${ARGN})
+        target_compile_features(${name} PRIVATE cxx_std_20)
+        target_compile_definitions(${name} PRIVATE QTRACE_HOST_TEST=1)
+        target_include_directories(${name} PRIVATE
+            ../../main/cpp
+            ../../main/cpp/third_party/qbdi/include)
+        target_compile_options(${name} PRIVATE
+            -fsanitize=thread
+            -fno-omit-frame-pointer)
+        target_link_options(${name} PRIVATE
+            -fsanitize=thread
+            -no-pie)
+        target_link_libraries(${name} PRIVATE Threads::Threads)
+        add_test(NAME ${name}
+            COMMAND ${QTRACE_SETARCH_EXECUTABLE} ${CMAKE_SYSTEM_PROCESSOR} -R
+                    $<TARGET_FILE:${name}>)
+    endfunction()
+
+    add_trace_tsan_test(jni_state_tsan_test
         jni_state_test.cpp
         ../../main/cpp/jni/jni_state.cpp)
-    target_compile_features(jni_state_tsan_test PRIVATE cxx_std_20)
-    target_compile_definitions(jni_state_tsan_test PRIVATE QTRACE_HOST_TEST=1)
-    target_include_directories(jni_state_tsan_test PRIVATE
-        ../../main/cpp
-        ../../main/cpp/third_party/qbdi/include)
-    target_compile_options(jni_state_tsan_test PRIVATE
-        -fsanitize=thread
-        -fno-omit-frame-pointer)
-    target_link_options(jni_state_tsan_test PRIVATE
-        -fsanitize=thread
-        -no-pie)
-    target_link_libraries(jni_state_tsan_test PRIVATE Threads::Threads)
-    add_test(NAME jni_state_tsan_test
-        COMMAND ${QTRACE_SETARCH_EXECUTABLE} ${CMAKE_SYSTEM_PROCESSOR} -R
-                $<TARGET_FILE:jni_state_tsan_test>)
+
+    add_trace_tsan_test(trace_generation_runtime_tsan_test
+        trace_generation_runtime_test.cpp
+        ../../main/cpp/core/trace_generation_runtime.cpp
+        ../../main/cpp/core/session_status.cpp
+        ../../main/cpp/core/trace_config.cpp)
+    target_compile_options(trace_generation_runtime_tsan_test PRIVATE
+        -fno-exceptions
+        -fno-rtti)
+
+    add_trace_tsan_test(capture_coordinator_tsan_test
+        capture_coordinator_test.cpp
+        ../../main/cpp/core/capture_coordinator.cpp
+        ../../main/cpp/core/qbdi_execution_control.cpp
+        ../../main/cpp/core/qbdi_thread_session.cpp
+        ../../main/cpp/core/module_maps.cpp
+        ../../main/cpp/core/session_status.cpp
+        ../../main/cpp/core/trace_config.cpp
+        ../../main/cpp/core/trace_generation_runtime.cpp
+        ../../main/cpp/core/trace_process_lifecycle.cpp)
+    target_compile_options(capture_coordinator_tsan_test PRIVATE
+        -fno-exceptions
+        -fno-rtti)
 endif()
 
 add_trace_test(jni_state_updater_test
@@ -190,7 +218,8 @@ add_trace_test(production_trace_contract_test
     production_trace_contract_test.cpp)
 target_compile_definitions(production_trace_contract_test PRIVATE
     QTRACE_CPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp"
-    QTRACE_HOST_BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+    QTRACE_HOST_BUILD_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+    QTRACE_REPO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../..")
 
 add_trace_test(binary_trace_encoder_test
     binary_trace_encoder_test.cpp

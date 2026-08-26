@@ -15,6 +15,8 @@ from scripts.tests.test_trace_binary import complete_stream, stream_header
 import scripts.benchmark_trace as benchmark_trace
 
 from scripts.benchmark_trace import (
+    ACCEPTANCE_RUN_COUNT,
+    PROFILE_RATE_TARGETS,
     compare_to_baseline,
     compare_to_profile_baseline,
     classify_run_as_build_type,
@@ -286,6 +288,85 @@ effective_buffer_bytes=67108864
         with self.assertRaisesRegex(ValueError, "first_instruction"):
             compare_to_profile_baseline(current,
                                         {**baseline, "first_instruction": "WRONG"}, runs)
+
+    def test_acceptance_uses_five_run_median_and_fixed_profile_targets(self):
+        self.assertEqual(5, ACCEPTANCE_RUN_COUNT)
+        self.assertEqual(
+            {
+                "fast": Decimal(1_000_000),
+                "balanced": Decimal(800_000),
+                "full": Decimal(500_000),
+            },
+            PROFILE_RATE_TARGETS,
+        )
+        oracle = {
+            "decoded_event_count": 100_000,
+            "first_instruction": "1 start",
+            "last_instruction": "100000 end",
+        }
+        run = {
+            **parse_metrics(self.METRICS_V3.replace("profile=balanced", "profile=fast")),
+            "trace": "run.trace.bin.lz4",
+            **oracle,
+        }
+        measured = [
+            {**run, "instructions_per_second": Decimal(rate)}
+            for rate in ("900000", "1100000", "1000000", "800000", "1200000")
+        ]
+        current = median_report(measured)
+        current["return"] = "0x42"
+        baseline = {
+            "profile": "fast",
+            "instructions": 100_000,
+            "return": "0x42",
+            "compressed_bytes": 1_048_576,
+            **oracle,
+        }
+
+        comparison = compare_to_profile_baseline(current, baseline, measured)
+
+        self.assertEqual(Decimal(1_000_000), current["instructions_per_second"])
+        self.assertTrue(comparison["meets_rate_target"])
+        with self.assertRaisesRegex(ValueError, "exactly five"):
+            compare_to_profile_baseline(
+                median_report([measured[0]]), baseline, [measured[0]]
+            )
+
+    def test_single_fast_diagnostic_run_has_no_acceptance_verdict(self):
+        oracle = {
+            "decoded_event_count": 100_000,
+            "first_instruction": "1 start",
+            "last_instruction": "100000 end",
+        }
+        run = {
+            **parse_metrics(self.METRICS_V3.replace("profile=balanced", "profile=fast")),
+            "trace": "run.trace.bin.lz4",
+            **oracle,
+        }
+        args = SimpleNamespace(
+            runs=1,
+            test_fail_setup=False,
+            compare=None,
+            profile="fast",
+            legacy=False,
+            candidate_tracer=None,
+        )
+        for rate in (Decimal("2000000"), Decimal("100000")):
+            with self.subTest(rate=rate):
+                measured = {**run, "instructions_per_second": rate}
+                output = io.StringIO()
+                with patch.object(benchmark_trace, "parse_args", return_value=args), \
+                     patch.object(
+                         benchmark_trace, "run_once", side_effect=[measured, measured]
+                     ), \
+                     contextlib.redirect_stdout(output):
+                    status = benchmark_trace.main()
+
+                self.assertEqual(0, status)
+                report = json.loads(output.getvalue())
+                self.assertNotIn("comparison", report)
+                if rate < PROFILE_RATE_TARGETS["fast"]:
+                    self.assertIn("fast_target_diagnosis", report)
 
     def test_acceptance_checks_every_compressed_binary_artifact_not_the_median(self):
         oracle = {"decoded_event_count": 100000, "first_instruction": "1 start",
