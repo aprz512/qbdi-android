@@ -49,12 +49,34 @@ class QtraceErrorTests(unittest.TestCase):
         self.assertNotIn("\n", str(error))
         self.assertNotIn("\r", str(error))
 
+    def test_normalizes_short_lone_surrogate_to_valid_utf8(self):
+        error = QtraceError("BROKEN", "test", "before\ud800after")
+
+        self.assertEqual(error.detail, "before?after")
+        self.assertEqual(str(error).encode("utf-8").decode("utf-8"), str(error))
+
+    def test_sanitizes_controls_and_invalid_unicode_in_code_and_stage(self):
+        error = QtraceError("BAD\r\n\0CODE", "pre\nflight\t\ud800", "detail\x1ftext")
+
+        self.assertEqual(error.code, "BAD   CODE")
+        self.assertEqual(error.stage, "pre flight ?")
+        self.assertEqual(error.detail, "detail text")
+        rendered = str(error)
+        self.assertEqual(rendered.encode("utf-8").decode("utf-8"), rendered)
+        self.assertEqual(len(rendered.splitlines()), 1)
+
     def test_truncates_detail_to_512_utf8_bytes_without_splitting_codepoint(self):
         error = QtraceError("BROKEN", "test", "a" * 510 + "界界")
 
         self.assertEqual(error.detail, "a" * 510)
         self.assertLessEqual(len(error.detail.encode("utf-8")), 512)
         self.assertTrue(str(error).endswith("detail=" + "a" * 510))
+
+    def test_preserves_multibyte_codepoint_at_exact_512_byte_boundary(self):
+        error = QtraceError("BROKEN", "test", "a" * 509 + "界")
+
+        self.assertEqual(error.detail, "a" * 509 + "界")
+        self.assertEqual(len(error.detail.encode("utf-8")), 512)
 
     def test_config_error_uses_config_stage_and_plain_string_code(self):
         error = ConfigError("CONFIG_VALUE_INVALID", "bad value")

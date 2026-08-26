@@ -42,6 +42,11 @@ class ConfigTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
+    def write_raw(self, name: str, payload: str) -> Path:
+        path = Path(self.directory.name) / name
+        path.write_text(payload, encoding="utf-8")
+        return path
+
     @staticmethod
     def valid_payload() -> dict[str, object]:
         return {
@@ -89,6 +94,44 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.target.binary, base / "symbols/libexternal.so")
         self.assertEqual(config.tracer.library, base / "prebuilt/libqbdi_tracer.so")
         self.assertEqual(config.tracer.companion, base / "prebuilt/libshadowhook-companion.so")
+
+    def test_preserves_valid_unicode_strings_and_relative_paths(self):
+        payload = self.valid_payload()
+        payload["app"] = {"package": "com.example.external", "apk": "产物/app.apk"}
+        payload["target"] = {"module": "libexternal.so", "binary": "符号/libexternal.so"}
+        payload["scenes"] = [{"name": "验证", "symbol": "执行工作"}]
+        path = self.write_json("unicode.json", payload)
+
+        config = load_config(path)
+
+        self.assertEqual(config.scenes[0].name, "验证")
+        self.assertEqual(config.scenes[0].symbol, "执行工作")
+        self.assertEqual(config.app.apk, path.parent.resolve() / "产物/app.apk")
+        self.assertEqual(config.target.binary, path.parent.resolve() / "符号/libexternal.so")
+
+    def test_rejects_nul_in_resolved_paths_as_stable_config_errors(self):
+        cases = (
+            ("app", {"package": "com.example.external", "apk": "bad\0app.apk"}),
+            ("target", {"module": "libexternal.so", "binary": "bad\0module.so"}),
+            ("tracer", {"library": "bad\0tracer.so", "companion": "companion.so"}),
+            ("tracer", {"library": "tracer.so", "companion": "bad\0companion.so"}),
+        )
+        for index, (section, replacement) in enumerate(cases):
+            payload = self.valid_payload()
+            payload[section] = replacement
+            with self.subTest(index=index), self.assertRaisesRegex(
+                ConfigError, "CONFIG_VALUE_INVALID"
+            ):
+                load_config(self.write_json(f"nul-path-{index}.json", payload))
+
+    def test_rejects_path_resolution_failures_as_stable_config_errors(self):
+        loop = Path(self.directory.name) / "loop"
+        loop.symlink_to("loop")
+        payload = self.valid_payload()
+        payload["app"] = {"package": "com.example.external", "apk": "loop/app.apk"}
+
+        with self.assertRaisesRegex(ConfigError, "CONFIG_VALUE_INVALID"):
+            load_config(self.write_json("loop-path.json", payload))
 
     def test_loads_explicit_tracer_options_and_valid_flight_entry(self):
         payload = self.valid_payload()
@@ -200,6 +243,31 @@ class ConfigTests(unittest.TestCase):
             ):
                 load_config(self.write_json(f"type-{index}.json", payload))
 
+    def test_rejects_controls_and_invalid_unicode_in_user_strings(self):
+        cases = (
+            ("app", {"package": "com.example\0external"}, "CONFIG_VALUE_INVALID"),
+            ("target", {"module": "libexternal\n.so"}, "CONFIG_VALUE_INVALID"),
+            ("scenes", [{"name": "bad\tname", "symbol": "work"}], "SCENE_NAME_INVALID"),
+            ("scenes", [{"name": "one", "symbol": "bad\x1fsymbol"}], "CONFIG_VALUE_INVALID"),
+            ("app", {"package": "com.example.\ud800"}, "CONFIG_VALUE_INVALID"),
+            ("scenes", [{"name": "\ud800", "symbol": "work"}], "SCENE_NAME_INVALID"),
+        )
+        for index, (section, replacement, code) in enumerate(cases):
+            payload = self.valid_payload()
+            payload[section] = replacement
+            with self.subTest(index=index), self.assertRaisesRegex(ConfigError, code):
+                load_config(self.write_json(f"invalid-string-{index}.json", payload))
+
+    def test_rejects_control_characters_in_flight_entry_scene(self):
+        payload = self.valid_payload()
+        payload["tracer"] = {
+            "flightEnabled": True,
+            "flightEntryScene": "one\x7f",
+        }
+
+        with self.assertRaisesRegex(ConfigError, "FLIGHT_ENTRY_SCENE_INVALID"):
+            load_config(self.write_json("invalid-flight-entry.json", payload))
+
     def test_rejects_integer_non_hex_zero_unaligned_and_reversed_offsets(self):
         cases = (
             {"startOffset": 0x120, "endOffset": "0x180"},
@@ -288,6 +356,39 @@ class ConfigTests(unittest.TestCase):
                 ConfigError, "CONFIG_TYPE_INVALID"
             ):
                 load_config(self.write_json(f"section-{section}.json", payload))
+
+    def test_rejects_duplicate_keys_at_every_object_level(self):
+        documents = (
+            '{"schemaVersion":1,"schemaVersion":1,"app":{"package":"p"},'
+            '"target":{"module":"m"},"scenes":[{"name":"s","symbol":"f"}]}',
+            '{"schemaVersion":1,"app":{"package":"p","package":"q"},'
+            '"target":{"module":"m"},"scenes":[{"name":"s","symbol":"f"}]}',
+            '{"schemaVersion":1,"app":{"package":"p"},'
+            '"target":{"module":"m","module":"n"},'
+            '"scenes":[{"name":"s","symbol":"f"}]}',
+            '{"schemaVersion":1,"app":{"package":"p"},"target":{"module":"m"},'
+            '"tracer":{"profile":"fast","profile":"full"},'
+            '"scenes":[{"name":"s","symbol":"f"}]}',
+            '{"schemaVersion":1,"app":{"package":"p"},"target":{"module":"m"},'
+            '"scenes":[{"name":"s","name":"t","symbol":"f"}]}',
+        )
+        for index, document in enumerate(documents):
+            with self.subTest(index=index), self.assertRaisesRegex(
+                ConfigError, "CONFIG_JSON_INVALID"
+            ):
+                load_config(self.write_raw(f"duplicate-{index}.json", document))
+
+    def test_rejects_nonfinite_json_constants_before_schema_validation(self):
+        for index, constant in enumerate(("NaN", "Infinity", "-Infinity")):
+            document = (
+                f'{{"schemaVersion":{constant},"app":{{"package":"p"}},'
+                '"target":{"module":"m"},'
+                '"scenes":[{"name":"s","symbol":"f"}]}'
+            )
+            with self.subTest(constant=constant), self.assertRaisesRegex(
+                ConfigError, "CONFIG_JSON_INVALID"
+            ):
+                load_config(self.write_raw(f"constant-{index}.json", document))
 
 
 if __name__ == "__main__":

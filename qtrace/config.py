@@ -1,5 +1,6 @@
 import json
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,23 @@ _DURATION_FACTORS = {"ms": Decimal(1), "s": Decimal(1000), "m": Decimal(60_000)}
 _MIN_DURATION_MS = 100
 _MAX_DURATION_MS = 24 * 60 * 60 * 1000
 _PROFILES = frozenset(("fast", "balanced", "full"))
+
+
+class _StrictJsonError(ValueError):
+    pass
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _StrictJsonError(f"duplicate object key {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise _StrictJsonError(f"non-finite JSON constant {value}")
 
 
 def _fail(code: str, detail: str) -> None:
@@ -72,14 +90,27 @@ def _string(value: Any, location: str) -> str:
         _fail("CONFIG_TYPE_INVALID", f"{location} must be a string")
     if not value:
         _fail("CONFIG_VALUE_INVALID", f"{location} must not be empty")
+    _validate_unicode_text(value, location, "CONFIG_VALUE_INVALID")
     return value
+
+
+def _validate_unicode_text(value: str, location: str, code: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        _fail(code, f"{location} must contain valid Unicode")
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        _fail(code, f"{location} must not contain control characters")
 
 
 def _optional_path(value: dict[str, Any], key: str, location: str, base: Path) -> Path | None:
     if key not in value:
         return None
     raw = _string(value[key], f"{location}.{key}")
-    return (base / raw).resolve()
+    try:
+        return (base / raw).resolve()
+    except (OSError, RuntimeError, ValueError):
+        _fail("CONFIG_VALUE_INVALID", f"{location}.{key} cannot be resolved")
 
 
 def _boolean(value: dict[str, Any], key: str, default: bool) -> bool:
@@ -94,10 +125,8 @@ def _boolean(value: dict[str, Any], key: str, default: bool) -> bool:
 def _scene_name(value: Any) -> str:
     if type(value) is not str or not value:
         _fail("SCENE_NAME_INVALID", "scene name must be a nonempty string")
-    try:
-        byte_length = len(value.encode("utf-8"))
-    except UnicodeEncodeError:
-        _fail("SCENE_NAME_INVALID", "scene name must contain valid Unicode")
+    _validate_unicode_text(value, "scene name", "SCENE_NAME_INVALID")
+    byte_length = len(value.encode("utf-8"))
     if byte_length > 128:
         _fail("SCENE_NAME_INVALID", "scene name must be at most 128 UTF-8 bytes")
     return value
@@ -194,6 +223,13 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
         if not entry_present or type(tracer["flightEntryScene"]) is not str:
             _fail("FLIGHT_ENTRY_SCENE_INVALID", "Flight requires a named entry scene")
         flight_entry_scene = tracer["flightEntryScene"]
+        if not flight_entry_scene:
+            _fail("FLIGHT_ENTRY_SCENE_INVALID", "Flight requires a named entry scene")
+        _validate_unicode_text(
+            flight_entry_scene,
+            "tracer.flightEntryScene",
+            "FLIGHT_ENTRY_SCENE_INVALID",
+        )
         if flight_entry_scene not in scene_names:
             _fail("FLIGHT_ENTRY_SCENE_INVALID", "Flight entry scene does not name a configured scene")
     else:
@@ -212,10 +248,17 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
 
 
 def load_config(path: Path) -> UserConfig:
-    config_path = Path(path).resolve()
     try:
-        root_value = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        config_path = Path(path).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _fail("CONFIG_JSON_INVALID", "config path cannot be resolved")
+    try:
+        root_value = json.loads(
+            config_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, _StrictJsonError) as error:
         _fail("CONFIG_JSON_INVALID", f"cannot read strict JSON config: {error}")
     root = _expect_object(root_value, "root")
     _check_keys(

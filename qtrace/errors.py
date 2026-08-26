@@ -1,4 +1,5 @@
 from enum import Enum
+import unicodedata
 
 
 EXIT_OK = 0
@@ -30,12 +31,18 @@ class ErrorCode(str, Enum):
     ADB_PULL_FAILED = "ADB_PULL_FAILED"
 
 
-def _bounded_single_line(detail: str) -> str:
-    single_line = detail.replace("\r", " ").replace("\n", " ")
-    encoded = single_line.encode("utf-8", errors="replace")
-    if len(encoded) <= _MAX_DETAIL_BYTES:
-        return single_line
-    return encoded[:_MAX_DETAIL_BYTES].decode("utf-8", errors="ignore")
+def _single_line_utf8(value: object, *, max_bytes: int | None = None) -> str:
+    single_line = "".join(
+        " " if unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} else character
+        for character in str(value)
+    )
+    normalized = single_line.encode("utf-8", errors="replace").decode("utf-8")
+    if max_bytes is None:
+        return normalized
+    encoded = normalized.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return normalized
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 class QtraceError(RuntimeError):
@@ -47,9 +54,10 @@ class QtraceError(RuntimeError):
         *,
         exit_code: int = EXIT_ERROR,
     ) -> None:
-        self.code = code.value if isinstance(code, ErrorCode) else str(code)
-        self.stage = str(stage)
-        self.detail = _bounded_single_line(str(detail))
+        code_text = code.value if isinstance(code, ErrorCode) else code
+        self.code = _single_line_utf8(code_text)
+        self.stage = _single_line_utf8(stage)
+        self.detail = _single_line_utf8(detail, max_bytes=_MAX_DETAIL_BYTES)
         self.exit_code = exit_code
         super().__init__(self.detail)
 
