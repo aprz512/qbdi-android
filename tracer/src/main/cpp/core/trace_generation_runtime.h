@@ -192,7 +192,7 @@ private:
     SessionStatusSnapshot status_snapshot() const;
     bool record_status_issue(bool warning, std::string_view code,
                              std::string_view path, std::string_view message) noexcept;
-    void record_metadata_diagnostic_locked(StatusMetadataDiagnostic diagnostic) noexcept;
+    bool record_metadata_diagnostic_locked(StatusMetadataDiagnostic diagnostic) noexcept;
     void note_transition() noexcept;
 
     uint64_t generation_ = 0;

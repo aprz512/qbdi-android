@@ -54,6 +54,10 @@ enum class SessionStatusFaultPoint : uint8_t {
     MarkerCommitDirFsync,
     MarkerCleanupUnlink,
     MarkerCleanupDirFsync,
+    MarkerRecreateOpen,
+    MarkerRecreateFileFsync,
+    BackupPrepareDirFsync,
+    BackupCleanupDirFsync,
 };
 
 void session_status_test_inject_fault(SessionStatusFaultPoint point, int error) noexcept;
@@ -83,6 +87,7 @@ private:
     char output_directory_[kPathCapacity]{};
     char path_[kPathCapacity]{};
     char backup_path_[kPathCapacity]{};
+    char restore_path_[kPathCapacity]{};
     char rollback_path_[kPathCapacity]{};
     char commit_path_[kPathCapacity]{};
     char package_[513]{};

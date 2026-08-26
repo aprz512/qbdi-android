@@ -271,20 +271,20 @@ bool TraceGenerationRuntime::record_artifact(std::string_view artifact_basename)
     std::lock_guard<std::mutex> lock(status_metadata_mutex_);
     if (!session_status_artifact_basename_is_valid(artifact_basename) ||
         !session_status_string_is_valid_utf8(artifact_basename)) {
-        record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactInvalid);
-        note_transition();
+        if (record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactInvalid))
+            note_transition();
         return false;
     }
     for (const std::string &artifact : status_artifacts_) {
         if (artifact == artifact_basename) {
-            record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactDuplicate);
-            note_transition();
+            if (record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactDuplicate))
+                note_transition();
             return false;
         }
     }
     if (status_artifacts_.size() >= kMaxStatusArtifacts) {
-        record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactCapacity);
-        note_transition();
+        if (record_metadata_diagnostic_locked(StatusMetadataDiagnostic::ArtifactCapacity))
+            note_transition();
         return false;
     }
     status_artifacts_.emplace_back(artifact_basename);
@@ -302,11 +302,13 @@ bool TraceGenerationRuntime::record_status_error(
     return record_status_issue(false, code, path, message);
 }
 
-void TraceGenerationRuntime::record_metadata_diagnostic_locked(
+bool TraceGenerationRuntime::record_metadata_diagnostic_locked(
         StatusMetadataDiagnostic diagnostic) noexcept {
     const uint16_t bit = static_cast<uint16_t>(
             1U << static_cast<unsigned int>(diagnostic));
+    if ((status_metadata_diagnostics_ & bit) != 0) return false;
     status_metadata_diagnostics_ |= bit;
+    return true;
 }
 
 bool TraceGenerationRuntime::record_status_issue(
@@ -323,27 +325,23 @@ bool TraceGenerationRuntime::record_status_issue(
             : StatusMetadataDiagnostic::ErrorCapacity;
     if (code.empty() || path.empty() || !session_status_string_is_valid_utf8(code) ||
         !session_status_string_is_valid_utf8(path) || !session_status_string_is_valid_utf8(message)) {
-        record_metadata_diagnostic_locked(invalid);
-        note_transition();
+        if (record_metadata_diagnostic_locked(invalid)) note_transition();
         return false;
     }
     if (code.size() > kMaxStatusTextBytes || path.size() > kMaxStatusTextBytes ||
         message.size() > kMaxStatusTextBytes) {
-        record_metadata_diagnostic_locked(invalid);
-        note_transition();
+        if (record_metadata_diagnostic_locked(invalid)) note_transition();
         return false;
     }
     std::vector<ConfigurationIssue> &issues = warning ? status_warnings_ : status_errors_;
     for (const ConfigurationIssue &issue : issues) {
         if (issue.code == code && issue.path == path && issue.message == message) {
-            record_metadata_diagnostic_locked(duplicate);
-            note_transition();
+            if (record_metadata_diagnostic_locked(duplicate)) note_transition();
             return false;
         }
     }
     if (issues.size() >= kMaxStatusIssues) {
-        record_metadata_diagnostic_locked(capacity);
-        note_transition();
+        if (record_metadata_diagnostic_locked(capacity)) note_transition();
         return false;
     }
     issues.push_back(ConfigurationIssue{std::string(code), std::string(path), std::string(message)});

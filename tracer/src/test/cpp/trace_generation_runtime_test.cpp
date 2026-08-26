@@ -7,6 +7,7 @@
 #include <sched.h>
 #include <sys/wait.h>
 #include <thread>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -137,6 +138,12 @@ std::string read_text(const std::string &path) {
     }
     CHECK(::close(fd) == 0);
     return text;
+}
+
+ino_t inode_of(const std::string &path) {
+    struct stat status{};
+    CHECK(::stat(path.c_str(), &status) == 0);
+    return status.st_ino;
 }
 
 SessionOptions timed_session(uint64_t duration_ms) {
@@ -726,6 +733,90 @@ void status_metadata_producers_deduplicate_and_classify_each_rejection() {
     runtime.reset();
 }
 
+// Catches repeated rejected metadata bumping the transition sequence after its
+// stable diagnostic bit already exists. A changed sequence causes the status
+// worker to rename a freshly serialized file, which is observable as a new inode.
+void repeated_metadata_rejections_do_not_republish_unchanged_status() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    auto runtime = TraceGenerationRuntime::create(
+            37, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
+    CHECK(runtime != nullptr);
+    wait_for_count(poll.waits, 1);
+    const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
+    unsigned int next_wait = 2;
+    const auto publish_transition = [&] {
+        const ino_t before = inode_of(path);
+        poll.allow_one();
+        wait_for_count(poll.waits, next_wait++);
+        CHECK(inode_of(path) != before);
+    };
+    const auto poll_without_transition = [&] {
+        const ino_t before = inode_of(path);
+        poll.allow_one();
+        wait_for_count(poll.waits, next_wait++);
+        CHECK(inode_of(path) == before);
+    };
+
+    CHECK(runtime->record_artifact("one.trace"));
+    CHECK(!runtime->record_artifact("one.trace"));
+    publish_transition();
+    CHECK(!runtime->record_artifact("one.trace"));
+    poll_without_transition();
+    CHECK(!runtime->record_artifact("../invalid.trace"));
+    publish_transition();
+    CHECK(!runtime->record_artifact("../invalid.trace"));
+    poll_without_transition();
+    for (size_t index = 1; index != 64; ++index) {
+        if (!runtime->record_artifact("artifact-" + std::to_string(index) + ".trace")) break;
+    }
+    publish_transition();
+    CHECK(!runtime->record_artifact("artifact-overflow.trace"));
+    poll_without_transition();
+
+    CHECK(runtime->record_status_warning("WARN", "$.warning", "one"));
+    CHECK(!runtime->record_status_warning("WARN", "$.warning", "one"));
+    publish_transition();
+    CHECK(!runtime->record_status_warning("WARN", "$.warning", "one"));
+    poll_without_transition();
+    CHECK(!runtime->record_status_warning("", "$.warning", "invalid"));
+    publish_transition();
+    CHECK(!runtime->record_status_warning("", "$.warning", "invalid"));
+    poll_without_transition();
+    for (size_t index = 1; index != 64; ++index) {
+        if (!runtime->record_status_warning(
+                    "WARN", "$.warning", "warning-" + std::to_string(index))) break;
+    }
+    publish_transition();
+    CHECK(!runtime->record_status_warning("WARN", "$.warning", "warning-overflow"));
+    poll_without_transition();
+
+    CHECK(runtime->record_status_error("ERROR", "$.error", "one"));
+    CHECK(!runtime->record_status_error("ERROR", "$.error", "one"));
+    publish_transition();
+    CHECK(!runtime->record_status_error("ERROR", "$.error", "one"));
+    poll_without_transition();
+    CHECK(!runtime->record_status_error("ERROR", "$.error", std::string(129, 'x')));
+    publish_transition();
+    CHECK(!runtime->record_status_error("ERROR", "$.error", std::string(129, 'x')));
+    poll_without_transition();
+    for (size_t index = 1; index != 64; ++index) {
+        if (!runtime->record_status_error(
+                    "ERROR", "$.error", "error-" + std::to_string(index))) break;
+    }
+    publish_transition();
+    CHECK(!runtime->record_status_error("ERROR", "$.error", "error-overflow"));
+    poll_without_transition();
+    runtime.reset();
+}
+
 } // namespace
 
 int main() {
@@ -752,4 +843,5 @@ int main() {
     status_publication_failure_is_exposed_and_retried_without_a_runtime_event();
     status_metadata_producers_publish_artifacts_warnings_and_errors();
     status_metadata_producers_deduplicate_and_classify_each_rejection();
+    repeated_metadata_rejections_do_not_republish_unchanged_status();
 }

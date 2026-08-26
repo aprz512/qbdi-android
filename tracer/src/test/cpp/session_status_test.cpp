@@ -175,8 +175,16 @@ void directory_sync_failure_without_a_previous_status_leaves_no_status_file() {
     session_status_test_inject_fault(SessionStatusFaultPoint::DirectoryFsync, EIO);
     CHECK(!publisher.publish(sealed_snapshot()));
     CHECK(::access(std::string(publisher.path()).c_str(), F_OK) != 0);
-    CHECK(directory_is_empty(root.path()));
+    const std::string rollback_marker = std::string(publisher.path()) + ".rollback";
+    CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
     CHECK(publisher.error_code() == EIO);
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(::access(std::string(recovered.path()).c_str(), F_OK) != 0);
+    CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
+    CHECK(recovered.publish(sealed_snapshot()));
+    CHECK(::access(rollback_marker.c_str(), F_OK) != 0);
+    CHECK(::access((std::string(recovered.path()) + ".commit").c_str(), F_OK) == 0);
     session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
 }
 
@@ -197,36 +205,46 @@ void no_previous_rollback_directory_sync_retains_a_recoverable_marker() {
 
     SessionStatusPublisher recovered;
     CHECK(recovered.open(configured_trace(), 3, root.path()));
-    CHECK(directory_is_empty(root.path()));
+    CHECK(::access(std::string(recovered.path()).c_str(), F_OK) != 0);
+    CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
     CHECK(has_no_temporary_files(root.path()));
     session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
 }
 
-// Catches cleanup that drops the only committed marker before its directory
-// fsync; the next opener must retain the status and retry marker cleanup.
-void committed_marker_cleanup_directory_sync_retries_on_the_next_open() {
-    TemporaryDirectory root;
-    SessionStatusPublisher publisher;
-    CHECK(publisher.open(configured_trace(), 3, root.path()));
-    const std::string committed_marker = std::string(publisher.path()) + ".commit";
-    session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCleanupDirFsync, EIO);
-    CHECK(!publisher.publish(sealed_snapshot()));
-    CHECK(publisher.error_code() == EIO);
-    CHECK(publisher.recovery_error() == EIO);
-    CHECK(::access(std::string(publisher.path()).c_str(), F_OK) == 0);
-    CHECK(::access(committed_marker.c_str(), F_OK) == 0);
+// Catches a protocol that unlinks its only transaction state and then depends
+// on recreating that evidence after the cleanup directory fsync fails.
+void committed_state_does_not_depend_on_cleanup_recreation() {
+    for (const SessionStatusFaultPoint recreate_failure : {
+                 SessionStatusFaultPoint::MarkerRecreateOpen,
+                 SessionStatusFaultPoint::MarkerRecreateFileFsync,
+         }) {
+        TemporaryDirectory root;
+        SessionStatusPublisher publisher;
+        CHECK(publisher.open(configured_trace(), 3, root.path()));
+        const std::string committed_marker = std::string(publisher.path()) + ".commit";
+        session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCleanupDirFsync, EIO);
+        session_status_test_inject_followup_fault(recreate_failure, EPERM);
+        CHECK(publisher.publish(sealed_snapshot()));
+        CHECK(publisher.error_code() == 0);
+        CHECK(publisher.recovery_error() == 0);
+        CHECK(::access(committed_marker.c_str(), F_OK) == 0);
+        session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
 
-    SessionStatusPublisher recovered;
-    CHECK(recovered.open(configured_trace(), 3, root.path()));
-    CHECK(read_text(recovered.path()) == read_text(publisher.path()));
-    CHECK(::access(committed_marker.c_str(), F_OK) != 0);
-    CHECK(has_no_temporary_files(root.path()));
-    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+        SessionStatusPublisher recovered;
+        CHECK(recovered.open(configured_trace(), 3, root.path()));
+        CHECK(read_text(recovered.path()).find("\"state\":\"sealed\"") != std::string::npos);
+        SessionStatusSnapshot next = sealed_snapshot();
+        next.state = "running";
+        CHECK(recovered.publish(next));
+        CHECK(read_text(recovered.path()).find("\"state\":\"running\"") != std::string::npos);
+        CHECK(::access(committed_marker.c_str(), F_OK) == 0);
+        CHECK(has_no_temporary_files(root.path()));
+    }
 }
 
-// Catches a rollback-marker cleanup fsync that fails after the status is gone:
-// the marker is recreated and a later opener completes the cleanup.
-void rollback_marker_cleanup_directory_sync_retries_on_the_next_open() {
+// Catches recovery treating a durable rollback state as disposable cleanup.
+// Re-entry must keep it until a later first publication commits.
+void rollback_state_is_reentrant_until_a_publication_commits() {
     TemporaryDirectory root;
     SessionStatusPublisher publisher;
     CHECK(publisher.open(configured_trace(), 3, root.path()));
@@ -237,16 +255,128 @@ void rollback_marker_cleanup_directory_sync_retries_on_the_next_open() {
     CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
 
     SessionStatusPublisher cleanup_failed;
-    session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCleanupDirFsync, EBUSY);
-    CHECK(!cleanup_failed.open(configured_trace(), 3, root.path()));
-    CHECK(cleanup_failed.recovery_error() == EBUSY);
+    CHECK(cleanup_failed.open(configured_trace(), 3, root.path()));
     CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
+    CHECK(::access(std::string(cleanup_failed.path()).c_str(), F_OK) != 0);
 
     SessionStatusPublisher recovered;
     CHECK(recovered.open(configured_trace(), 3, root.path()));
-    CHECK(directory_is_empty(root.path()));
+    CHECK(::access(rollback_marker.c_str(), F_OK) == 0);
+    CHECK(recovered.publish(sealed_snapshot()));
+    CHECK(::access(rollback_marker.c_str(), F_OK) != 0);
+    CHECK(::access((std::string(recovered.path()) + ".commit").c_str(), F_OK) == 0);
     CHECK(has_no_temporary_files(root.path()));
     session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+}
+
+// Catches an update that creates an old-status hard link but performs the
+// dangerous replacement rename before that recovery evidence is durable.
+void old_status_backup_is_durable_before_replacement() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    CHECK(publisher.publish(sealed_snapshot()));
+    const std::string before = read_text(publisher.path());
+    SessionStatusSnapshot next = sealed_snapshot();
+    next.state = "running";
+    session_status_test_inject_fault(SessionStatusFaultPoint::BackupPrepareDirFsync, EBUSY);
+    CHECK(!publisher.publish(next));
+    CHECK(publisher.error_code() == EBUSY);
+    CHECK(read_text(publisher.path()) == before);
+    CHECK(::access(std::string(publisher.backup_path()).c_str(), F_OK) == 0);
+
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(read_text(recovered.path()) == before);
+    CHECK(::access(std::string(recovered.backup_path()).c_str(), F_OK) != 0);
+}
+
+// Catches backup cleanup ambiguity restoring the old JSON after the replacement
+// and committed transaction state are already durable.
+void committed_update_cleanup_failure_keeps_the_new_status_on_reentry() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    CHECK(publisher.publish(sealed_snapshot()));
+    SessionStatusSnapshot next = sealed_snapshot();
+    next.state = "running";
+    session_status_test_inject_fault(SessionStatusFaultPoint::BackupCleanupDirFsync, EBUSY);
+    CHECK(!publisher.publish(next));
+    CHECK(publisher.error_code() == EBUSY);
+    CHECK(publisher.recovery_error() == EBUSY);
+    CHECK(read_text(publisher.path()).find("\"state\":\"running\"") != std::string::npos);
+
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(read_text(recovered.path()).find("\"state\":\"running\"") != std::string::npos);
+    CHECK(::access(std::string(recovered.backup_path()).c_str(), F_OK) != 0);
+}
+
+// Catches a commit-state rename being treated as durable before its directory
+// fsync, or reporting that publication fault as a recovery failure. Re-entry may
+// observe the old or new durable name after a crash, but either state is complete.
+void commit_state_directory_sync_failure_is_reentrant() {
+    for (const bool had_previous : {false, true}) {
+        TemporaryDirectory root;
+        SessionStatusPublisher publisher;
+        CHECK(publisher.open(configured_trace(), 3, root.path()));
+        if (had_previous) CHECK(publisher.publish(sealed_snapshot()));
+        SessionStatusSnapshot next = sealed_snapshot();
+        next.state = "running";
+        session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCommitDirFsync, EIO);
+        CHECK(!publisher.publish(next));
+        CHECK(publisher.error_code() == EIO);
+        CHECK(publisher.recovery_error() == 0);
+
+        session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+        SessionStatusPublisher recovered;
+        CHECK(recovered.open(configured_trace(), 3, root.path()));
+        CHECK(read_text(recovered.path()).find("\"state\":\"running\"") != std::string::npos);
+        CHECK(::access((std::string(recovered.path()) + ".commit").c_str(), F_OK) == 0);
+        CHECK(::access(std::string(recovered.backup_path()).c_str(), F_OK) != 0);
+    }
+}
+
+// Catches recovery deleting rollback data based only on the live `.commit`
+// name after the commit-state rename directory fsync failed. A second fsync
+// failure must leave backup intact and report only through recovery_error().
+void commit_state_is_durable_before_backup_cleanup() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    CHECK(publisher.publish(sealed_snapshot()));
+    SessionStatusSnapshot next = sealed_snapshot();
+    next.state = "running";
+    session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCommitDirFsync, EIO);
+    session_status_test_inject_followup_fault(SessionStatusFaultPoint::MarkerCommitDirFsync, EPERM);
+    CHECK(!publisher.publish(next));
+    CHECK(publisher.error_code() == EIO);
+    CHECK(publisher.recovery_error() == EPERM);
+    CHECK(::access(std::string(publisher.backup_path()).c_str(), F_OK) == 0);
+
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(read_text(recovered.path()).find("\"state\":\"running\"") != std::string::npos);
+    CHECK(::access(std::string(recovered.backup_path()).c_str(), F_OK) != 0);
+
+    TemporaryDirectory cleanup_root;
+    SessionStatusPublisher cleanup_publisher;
+    CHECK(cleanup_publisher.open(configured_trace(), 3, cleanup_root.path()));
+    CHECK(cleanup_publisher.publish(sealed_snapshot()));
+    session_status_test_inject_fault(SessionStatusFaultPoint::MarkerCommitDirFsync, EIO);
+    session_status_test_inject_followup_fault(SessionStatusFaultPoint::BackupCleanupDirFsync,
+                                               EBUSY);
+    CHECK(!cleanup_publisher.publish(next));
+    CHECK(cleanup_publisher.error_code() == EIO);
+    CHECK(cleanup_publisher.recovery_error() == EBUSY);
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+    SessionStatusPublisher cleanup_recovered;
+    CHECK(cleanup_recovered.open(configured_trace(), 3, cleanup_root.path()));
+    CHECK(read_text(cleanup_recovered.path()).find("\"state\":\"running\"") !=
+          std::string::npos);
 }
 
 // Catches a failure path that replaces the last good JSON with a partial file,
@@ -342,7 +472,8 @@ void rollback_failures_are_recovered_by_the_next_open() {
     CHECK(publisher.recovery_error() == EPERM);
     SessionStatusPublisher recovered;
     CHECK(recovered.open(configured_trace(), 3, root.path()));
-    CHECK(directory_is_empty(root.path()));
+    CHECK(::access(std::string(recovered.path()).c_str(), F_OK) != 0);
+    CHECK(::access((std::string(recovered.path()) + ".rollback").c_str(), F_OK) == 0);
     CHECK(has_no_temporary_files(root.path()));
     session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
 }
@@ -446,8 +577,12 @@ int main() {
     writes_the_complete_session_status_schema_atomically();
     failed_publications_preserve_the_previous_status_and_latch_first_errno();
     no_previous_rollback_directory_sync_retains_a_recoverable_marker();
-    committed_marker_cleanup_directory_sync_retries_on_the_next_open();
-    rollback_marker_cleanup_directory_sync_retries_on_the_next_open();
+    committed_state_does_not_depend_on_cleanup_recreation();
+    rollback_state_is_reentrant_until_a_publication_commits();
+    old_status_backup_is_durable_before_replacement();
+    committed_update_cleanup_failure_keeps_the_new_status_on_reentry();
+    commit_state_directory_sync_failure_is_reentrant();
+    commit_state_is_durable_before_backup_cleanup();
     failed_rollback_retains_the_old_backup_until_the_next_open_recovers_it();
     rollback_failures_are_recovered_by_the_next_open();
     directory_sync_failure_without_a_previous_status_leaves_no_status_file();
