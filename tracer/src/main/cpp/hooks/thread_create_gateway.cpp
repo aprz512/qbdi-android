@@ -167,17 +167,17 @@ ThreadCreateGateway::ThreadCreateGateway(
 
 bool ThreadCreateGateway::install(
     const std::shared_ptr<CaptureCoordinator> &coordinator) noexcept {
+  std::lock_guard<std::mutex> install_guard(install_mutex_);
   if (coordinator == nullptr || !coordinator->started() ||
       coordinator->detached() ||
       child_detached_.load(std::memory_order_acquire)) {
     return false;
   }
-  {
+  if (installed_.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> guard(coordinator_mutex_);
     coordinator_ = coordinator;
-  }
-  if (installed_.load(std::memory_order_acquire))
     return true;
+  }
   if (hook_.residual_hook)
     return false;
   const uintptr_t target = reinterpret_cast<uintptr_t>(pthread_create);
@@ -194,6 +194,10 @@ bool ThreadCreateGateway::install(
     __atomic_store_n(&published_original_, hook_.retained_original,
                      __ATOMIC_RELEASE);
   }
+  {
+    std::lock_guard<std::mutex> guard(coordinator_mutex_);
+    coordinator_ = coordinator;
+  }
   installed_.store(true, std::memory_order_release);
   return true;
 }
@@ -201,6 +205,26 @@ bool ThreadCreateGateway::install(
 void ThreadCreateGateway::deactivate() noexcept {
   std::lock_guard<std::mutex> guard(coordinator_mutex_);
   coordinator_.reset();
+}
+
+void ThreadCreateGateway::deactivate_if(
+    const std::shared_ptr<CaptureCoordinator> &coordinator) noexcept {
+  std::lock_guard<std::mutex> guard(coordinator_mutex_);
+  if (coordinator_ == coordinator)
+    coordinator_.reset();
+}
+
+int ThreadCreateGateway::hook_error() const noexcept {
+  std::lock_guard<std::mutex> install_guard(install_mutex_);
+  return hook_.unhook_error != 0 ? hook_.unhook_error : hook_.hook_error;
+}
+
+void ThreadCreateGateway::prepare_for_fork() noexcept {
+  install_mutex_.lock();
+}
+
+void ThreadCreateGateway::resume_after_fork_parent() noexcept {
+  install_mutex_.unlock();
 }
 
 bool ThreadCreateGateway::should_capture(

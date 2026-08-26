@@ -50,6 +50,7 @@ bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
 void trace_proxy_test_set_registration_gate(RegistrationGate gate);
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate);
 void trace_proxy_test_set_installed_status_gate(RegistrationGate gate);
+void trace_proxy_test_set_hook_commit_gate(RegistrationGate gate);
 void trace_proxy_test_set_status_output_directory(const char *directory);
 size_t trace_proxy_test_generation(size_t scene_index);
 void trace_proxy_test_set_coordinator(
@@ -463,6 +464,8 @@ bool g_stub_entry_entered = false;
 bool g_release_stub_entry = false;
 bool g_installed_status_entered = false;
 bool g_release_installed_status = false;
+bool g_hook_commit_entered = false;
+bool g_release_hook_commit = false;
 bool g_use_runner_gate = false;
 bool g_runner_entered = false;
 bool g_release_runner = false;
@@ -551,6 +554,13 @@ void installed_status_gate() {
     g_gate_condition.wait(lock, [] { return g_release_installed_status; });
 }
 
+void hook_commit_gate() {
+    std::unique_lock<std::mutex> lock(g_gate_mutex);
+    g_hook_commit_entered = true;
+    g_gate_condition.notify_all();
+    g_gate_condition.wait(lock, [] { return g_release_hook_commit; });
+}
+
 void count_admission_completion(void *) noexcept {
     g_admission_completion_calls.fetch_add(1, std::memory_order_relaxed);
 }
@@ -615,6 +625,8 @@ void reset_fakes() {
         g_release_stub_entry = false;
         g_installed_status_entered = false;
         g_release_installed_status = false;
+        g_hook_commit_entered = false;
+        g_release_hook_commit = false;
         g_use_runner_gate = false;
         g_runner_entered = false;
         g_release_runner = false;
@@ -768,6 +780,47 @@ std::shared_ptr<CaptureCoordinator> start_flight_proxy_coordinator(
     CHECK(coordinator->start(config, module, 77));
     trace_proxy_test_set_coordinator(coordinator);
     return coordinator;
+}
+
+void flight_gateway_install_never_holds_the_registry_across_shadowhook() {
+    reset_fakes();
+    const SceneConfig scene = scene_named(
+            "flight-linker-lock-order", reinterpret_cast<uintptr_t>(new_target));
+    const TraceConfig config = flight_proxy_config(scene);
+    const ModuleRange target = module_named("/data/app/libflight-proxy.so");
+    trace_proxy_test_reset(config);
+    const std::shared_ptr<CaptureCoordinator> coordinator =
+            start_flight_proxy_coordinator(config, target);
+
+    std::unique_lock<std::mutex> linker_lock(g_fake_linker_mutex);
+    {
+        std::lock_guard<std::mutex> gate_lock(g_gate_mutex);
+        g_block_hook_on_linker = true;
+    }
+    ::alarm(3);
+    std::thread installer([&] {
+        trace_proxy_test_install_loading_module(target);
+    });
+    {
+        std::unique_lock<std::mutex> gate_lock(g_gate_mutex);
+        g_gate_condition.wait(gate_lock, [] {
+            return g_hook_waiting_for_linker;
+        });
+    }
+
+    trace_proxy_test_install_loading_module(
+            module_named("/data/app/libunrelated-flight-callback.so"));
+    linker_lock.unlock();
+    installer.join();
+    ::alarm(0);
+
+    CHECK(coordinator->started());
+    CHECK(process_thread_create_gateway().should_capture(
+            reinterpret_cast<PthreadStartRoutine>(old_target)));
+    const size_t generation = trace_proxy_test_generation(scene.index);
+    CHECK(generation != 4096);
+    CHECK(trace_proxy_test_generation_installed(generation));
+    CHECK(g_hook_calls == 2);
 }
 
 void accepted_nonflight_generation_deactivates_the_flight_gateway() {
@@ -1348,6 +1401,63 @@ void hook_install_never_waits_for_the_linker_while_holding_the_registry() {
     const size_t generation = trace_proxy_test_generation(scene.index);
     CHECK(generation != 4096);
     CHECK(trace_proxy_test_generation_installed(generation));
+}
+
+void module_fini_before_hook_commit_rolls_back_the_unpublished_gateway() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("hook-commit-retirement-reset"));
+    char offset[2 * sizeof(uintptr_t) + 3]{};
+    std::snprintf(offset, sizeof(offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(new_target)));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.hook.commit.retirement",
+            "libhook-commit-retirement.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", offset}}}},
+            })));
+    CHECK(accepted.at("ok") == true);
+    const uint64_t configuration_generation =
+            accepted.at("generation").get<uint64_t>();
+    const ModuleRange module =
+            module_named("/data/app/libhook-commit-retirement.so");
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    trace_proxy_test_set_hook_commit_gate(hook_commit_gate);
+
+    ::alarm(3);
+    std::thread installer([&] {
+        trace_proxy_test_install_loading_module(module);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_hook_commit_entered; });
+    }
+    const size_t proxy_generation = trace_proxy_test_generation(0);
+    CHECK(proxy_generation != 4096);
+
+    // Model the exact loader ordering: the DSO is retired after the physical
+    // ShadowHook succeeds but before the installer can commit that gateway to
+    // the authoritative registry/status snapshot.
+    trace_proxy_test_module_fini(module.start, module.path.c_str());
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_hook_commit = true;
+    }
+    g_gate_condition.notify_all();
+    installer.join();
+    trace_proxy_test_set_hook_commit_gate(nullptr);
+    ::alarm(0);
+
+    CHECK(call_json_status(configuration_generation).at("state") ==
+          "hook_failed");
+    CHECK(trace_proxy_test_generation_retired(proxy_generation));
+    CHECK(!trace_proxy_test_generation_installed(proxy_generation));
+    CHECK(g_hook_calls == 1);
+    CHECK(g_unhook_calls == 1);
+    uint64_t args[8]{23};
+    CHECK(trace_proxy_dispatch(proxy_generation, args, 0) == 0x117);
+    CHECK(g_runner_calls == 0);
 }
 
 void physical_rehook_keeps_its_original_capture_coordinator() {
@@ -3153,6 +3263,14 @@ int main(int argc, char **argv) {
             hook_install_never_waits_for_the_linker_while_holding_the_registry();
             return 0;
         }
+        if (selected == "flight-linker-lock-order") {
+            flight_gateway_install_never_holds_the_registry_across_shadowhook();
+            return 0;
+        }
+        if (selected == "hook-commit-retirement") {
+            module_fini_before_hook_commit_rolls_back_the_unpublished_gateway();
+            return 0;
+        }
         return 2;
     }
     json_configuration_abi_is_transactional_and_nul_terminated();
@@ -3163,6 +3281,7 @@ int main(int argc, char **argv) {
     configuration_abi_catches_publication_and_status_exceptions();
     invalid_target_module_observation_finishes_with_a_stable_code();
     callback_registration_failure_preserves_the_shadowhook_error();
+    flight_gateway_install_never_holds_the_registry_across_shadowhook();
     accepted_nonflight_generation_deactivates_the_flight_gateway();
     branch_before_registry_that_is_retired_never_enters_qbdi();
     entrant_registration_and_snapshot_are_atomic_with_install();
@@ -3177,6 +3296,7 @@ int main(int argc, char **argv) {
     rehook_failure_leaves_a_coherent_direct_execution_state();
     every_physical_rehook_gets_a_new_proxy_identity();
     hook_install_never_waits_for_the_linker_while_holding_the_registry();
+    module_fini_before_hook_commit_rolls_back_the_unpublished_gateway();
     physical_rehook_keeps_its_original_capture_coordinator();
     concurrent_unhook_failures_keep_the_original_bypass_alive();
     same_address_updates_replace_all_metadata_and_hook_generation();

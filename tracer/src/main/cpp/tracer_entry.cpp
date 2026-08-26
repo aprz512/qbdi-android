@@ -124,6 +124,7 @@ using RegistrationGate = void (*)();
 static RegistrationGate g_registration_gate = nullptr;
 static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
 static RegistrationGate g_installed_status_gate = nullptr;
+static RegistrationGate g_hook_commit_gate = nullptr;
 static std::atomic<bool> g_throw_during_configuration_apply{false};
 static std::string g_status_output_directory;
 #endif
@@ -135,6 +136,7 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                           uint64_t config_generation,
                                           const std::shared_ptr<CaptureCoordinator> &coordinator,
                                           const std::shared_ptr<TraceGenerationRuntime> &runtime,
+                                          DeferredRuntimeReleases *releases,
                                           std::unique_lock<std::mutex> *registry_lock);
 static void install_hooks_for_module(const ModuleRange &module,
                                      uint64_t expected_generation,
@@ -611,7 +613,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                         const bool installed = create_hook_generation_locked(
                                 pending_config, pending_scene, pending_module,
                                 pending_config_generation, pending_coordinator,
-                                pending_runtime, &registry_guard);
+                                pending_runtime, &releases, &registry_guard);
                         if (installed && pending_runtime != nullptr) {
                             (void)pending_runtime->publish_installed_status();
                             (void)pending_runtime->arm();
@@ -630,7 +632,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                         runtime->hook->config, runtime->hook->scene,
                         runtime->hook->module, runtime->hook->config_generation,
                         runtime->hook->coordinator, rehook_runtime,
-                        &registry_guard);
+                        &releases, &registry_guard);
                 retire_runtime_ownership_locked(runtime->hook.get(),
                                                 &releases);
             } else if (!runtime->hook->retired) {
@@ -661,6 +663,7 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                           uint64_t config_generation,
                                           const std::shared_ptr<CaptureCoordinator> &coordinator,
                                           const std::shared_ptr<TraceGenerationRuntime> &runtime,
+                                          DeferredRuntimeReleases *releases,
                                           std::unique_lock<std::mutex> *registry_lock) {
     if (g_next_proxy_generation >= kMaxProxyGenerations) {
         QTRACE_E("generation=%llu code=HOOK_INSTALL_FAILED proxy capacity exhausted=%zu",
@@ -720,8 +723,66 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                         : "hook install failed");
     }
     transition_lock.unlock();
+#if defined(QTRACE_HOST_TEST)
+    if (g_hook_commit_gate != nullptr) g_hook_commit_gate();
+#endif
     registry_lock->lock();
-    return hooked;
+    std::unique_lock<std::mutex> commit_lock(slot->transition_mutex);
+    bool module_unchanged =
+            slot->module.start == module.start &&
+            slot->module.end == module.end &&
+            slot->module.file_offset == module.file_offset &&
+            slot->module.permissions == module.permissions &&
+            slot->module.path == module.path &&
+            slot->module.readable_executable_range_count ==
+                    module.readable_executable_range_count;
+    for (size_t index = 0;
+         module_unchanged && index < module.readable_executable_range_count;
+         ++index) {
+        module_unchanged =
+                slot->module.readable_executable_ranges[index].start ==
+                        module.readable_executable_ranges[index].start &&
+                slot->module.readable_executable_ranges[index].end ==
+                        module.readable_executable_ranges[index].end;
+    }
+    const bool still_current =
+            g_configured &&
+            g_config_generation == config_generation &&
+            g_scene_hooks[scene.index] == slot &&
+            g_hook_generations[generation] == slot &&
+            !slot->retired && slot->installed &&
+            slot->config_generation == config_generation &&
+            module_unchanged;
+    if (still_current) return hooked;
+    if (!hooked && !slot->hook.residual_hook) return false;
+
+    // A module-fini or configuration replacement can retire this slot while
+    // ShadowHook is operating without the registry lock. Never commit that
+    // stale physical gateway. Keep its transition closed while rolling the
+    // hook back, but leave the registry unlocked because unhook may re-enter a
+    // loader callback too.
+    const bool needs_unhook = slot->hook.stub != nullptr;
+    bool unhooked = true;
+    if (needs_unhook) {
+        registry_lock->unlock();
+        unhooked = unhook_function(&slot->hook);
+        registry_lock->lock();
+    }
+    slot->pending_install = false;
+    slot->pending_batch_install = false;
+    slot->installed = !unhooked && needs_unhook;
+    slot->unhook_failed_window = false;
+    slot->retired = true;
+    if (!unhooked) slot->hook.residual_hook = true;
+    retire_runtime_ownership_locked(slot.get(), releases);
+    if (unhooked && g_scene_hooks[scene.index] == slot) {
+        g_scene_hooks[scene.index].reset();
+    }
+    QTRACE_E("generation=%llu code=%s scene=%s hook commit retired before publication",
+             static_cast<unsigned long long>(config_generation),
+             unhooked ? "HOOK_INSTALL_FAILED" : "HOOK_ROLLBACK_FAILED",
+             scene.name.c_str());
+    return false;
 }
 
 static bool install_scene_hook_locked(const TraceConfig &config, const SceneConfig &scene,
@@ -846,7 +907,8 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         retire_runtime_ownership_locked(previous.get(), releases);
     }
     return create_hook_generation_locked(config, scene, module, config_generation,
-                                         coordinator, runtime, registry_lock);
+                                         coordinator, runtime, releases,
+                                         registry_lock);
 }
 
 #if defined(QTRACE_HOST_TEST)
@@ -868,6 +930,7 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     g_registration_gate = nullptr;
     g_stub_entry_gate.store(nullptr, std::memory_order_release);
     g_installed_status_gate = nullptr;
+    g_hook_commit_gate = nullptr;
 }
 
 bool trace_proxy_test_current_configuration(uint64_t *generation,
@@ -944,6 +1007,11 @@ void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate) {
 void trace_proxy_test_set_installed_status_gate(RegistrationGate gate) {
     std::lock_guard<std::mutex> guard(g_lock);
     g_installed_status_gate = gate;
+}
+
+void trace_proxy_test_set_hook_commit_gate(RegistrationGate gate) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    g_hook_commit_gate = gate;
 }
 
 void trace_proxy_test_set_status_output_directory(const char *directory) {
@@ -1049,6 +1117,11 @@ void trace_proxy_test_throw_during_configuration_apply() {
 static void tracer_atfork_prepare() {
     if (trace_process_child_detached()) return;
     g_configuration_call_lock.lock();
+    // The gateway transition lock must precede the registry. Its installer may
+    // be inside ShadowHook waiting for bionic's linker lock while a loader
+    // callback needs g_lock; taking these in the reverse order recreates that
+    // three-party cycle during fork.
+    process_thread_create_gateway().prepare_for_fork();
     g_lock.lock();
     g_atfork_locked_generations = 0;
     for (size_t generation = 0; generation < g_next_proxy_generation; ++generation) {
@@ -1068,6 +1141,7 @@ static void tracer_atfork_parent() {
     }
     g_atfork_locked_generations = 0;
     g_lock.unlock();
+    process_thread_create_gateway().resume_after_fork_parent();
     g_configuration_call_lock.unlock();
 }
 
@@ -1319,7 +1393,9 @@ static void install_hooks_for_module(const ModuleRange &module,
     std::vector<SceneConfigurationStatus> statuses =
             installation_statuses(g_config, diagnostics);
     if (g_config.flight.enabled) {
-        if (g_capture_coordinator == nullptr || generation == 0 ||
+        const std::shared_ptr<CaptureCoordinator> flight_coordinator =
+                g_capture_coordinator;
+        if (flight_coordinator == nullptr || generation == 0 ||
             generation > UINT32_MAX) {
             constexpr const char *code = "COORDINATOR_UNAVAILABLE";
             QTRACE_E("generation=%llu code=%s flight coordinator unavailable",
@@ -1328,8 +1404,8 @@ static void install_hooks_for_module(const ModuleRange &module,
                                        &releases);
             return;
         }
-        if (!g_capture_coordinator->started() &&
-            !g_capture_coordinator->start(
+        if (!flight_coordinator->started() &&
+            !flight_coordinator->start(
                     g_config, module,
                     static_cast<uint32_t>(generation),
                     g_generation_runtime)) {
@@ -1340,19 +1416,37 @@ static void install_hooks_for_module(const ModuleRange &module,
                                        &releases);
             return;
         }
-        g_capture_coordinator->set_thread_start_resolver(
-                resolve_flight_thread_start, g_capture_coordinator.get());
-        if (!process_thread_create_gateway().install(
-                    g_capture_coordinator)) {
+        flight_coordinator->set_thread_start_resolver(
+                resolve_flight_thread_start, flight_coordinator.get());
+        // The persistent pthread gateway enters ShadowHook, which may acquire
+        // bionic's linker lock and synchronously invoke a module callback. Do
+        // not hold the registry anywhere across that external transition.
+        guard.unlock();
+        const bool gateway_installed =
+                process_thread_create_gateway().install(flight_coordinator);
+        const int gateway_hook_error = gateway_installed
+                                       ? 0
+                                       : process_thread_create_gateway().hook_error();
+        guard.lock();
+        const bool flight_still_current =
+                g_configured && g_config_generation == generation &&
+                g_config.flight.enabled &&
+                g_capture_coordinator == flight_coordinator;
+        if (!flight_still_current) {
+            if (gateway_installed) {
+                process_thread_create_gateway().deactivate_if(
+                        flight_coordinator);
+            }
+            return;
+        }
+        if (!gateway_installed) {
             constexpr const char *code = "CALLBACK_REGISTRATION_FAILED";
-            const int hook_error =
-                    process_thread_create_gateway().hook_error();
             QTRACE_E("generation=%llu code=%s hook_error=%d cannot install "
                      "persistent pthread_create gateway",
                      static_cast<unsigned long long>(generation), code,
-                     hook_error);
+                     gateway_hook_error);
             fail_installation_statuses(generation, &statuses, code,
-                                       hook_error, true, &releases);
+                                       gateway_hook_error, true, &releases);
             return;
         }
     }

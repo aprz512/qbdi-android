@@ -421,7 +421,7 @@ python3 scripts/benchmark_trace.py --package com.aprz.qbdiandroid \
   --compare docs/benchmarks/binary-trace-baseline.md
 ```
 
-带 `--compare` 才是验收模式：工具会额外预热，并检查设备/系统身份、SELinux、候选与 app-private tracer 哈希、事件数、返回值及首尾指令。没有 `--compare` 的运行仅用于诊断。
+带 `--compare` 才是验收模式，而且必须使用生成历史基线的同一 APK/target build。工具会在预热前从设备已安装的 `base.apk` 提取 `lib/arm64-v8a/libdemo_target.so`，核对历史 target SHA-256；预热完成后立即核对 complete footer、事件数、返回值及首尾指令，只有严格匹配才会进入五次 measured runs。APK 重建可能改变 scene offset、指令数或返回值，不能把这种漂移当作 tracer 性能变化，也不能据此改写历史基线。工具还会检查设备/系统身份、SELinux，以及本地候选与 app-private tracer 哈希。没有 `--compare` 的运行仅用于诊断。
 
 Flight Recorder 的多线程崩溃压力结果见 [Flight Recorder 验收报告](docs/benchmarks/flight-recorder-acceptance.md)。
 

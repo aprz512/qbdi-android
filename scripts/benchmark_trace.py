@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 from importlib.resources import files
 import json
 import os
@@ -15,6 +16,7 @@ import sys
 import threading
 import time
 import tempfile
+import zipfile
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
@@ -76,6 +78,23 @@ def require_binary_acceptance_candidate(run: dict[str, int | Decimal | str]) -> 
         raise ValueError("binary acceptance requires metrics_version=3")
     if not str(run.get("trace", "")).endswith(BINARY_TRACE_SUFFIX):
         raise ValueError("binary acceptance requires .trace.bin.lz4 artifacts")
+    if str(run.get("termination", "")) != "completed":
+        raise ValueError("binary acceptance requires a completed footer")
+    if int(run.get("return_valid", 0)) != 1:
+        raise ValueError("binary acceptance requires a valid footer return")
+
+
+def require_profile_warmup_oracle(
+    run: dict[str, int | Decimal | str], baseline: dict[str, int | str]
+) -> None:
+    """Reject a different APK/workload immediately after the warmup."""
+    require_binary_acceptance_candidate(run)
+    for key in (
+        "instructions", "return", "decoded_event_count",
+        "first_instruction", "last_instruction",
+    ):
+        if str(run.get(key, "")).lower() != str(baseline.get(key, "")).lower():
+            raise ValueError(f"format-2 oracle mismatch for {key} during warmup")
 
 
 def parse_legacy_trace(trace: bytes, file_bytes: int) -> dict[str, int | str]:
@@ -327,6 +346,7 @@ def parse_baseline_document(document: str) -> dict[str, str]:
         ("SELinux", "selinux"),
         ("Package", "package"),
         ("Candidate tracer SHA-256", "candidate_tracer_sha256"),
+        ("Target library SHA-256", "target_library_sha256"),
     ):
         match = re.search(rf"^\| {re.escape(label)} \|\s*(.*?)\s*\|$", document, re.MULTILINE)
         if match is None or not match.group(1).strip():
@@ -726,6 +746,50 @@ def verify_candidate_tracer(args: argparse.Namespace, baseline: dict[str, str]) 
     return local_sha
 
 
+def verify_installed_target_library(
+    args: argparse.Namespace, baseline: dict[str, str]
+) -> str:
+    """Hash the target ELF inside the exact base APK installed on the device."""
+    completed = adb(
+        args, "shell", "pm", "path", args.package, text=True
+    )
+    paths = [
+        line.removeprefix("package:").strip()
+        for line in completed.stdout.splitlines()
+        if line.startswith("package:")
+    ]
+    base_apks = [path for path in paths if path.endswith("/base.apk")]
+    if len(base_apks) != 1:
+        raise ValueError("installed package does not expose exactly one base.apk")
+    apk_path = base_apks[0]
+    if re.fullmatch(r"/[A-Za-z0-9._/+=~-]+/base\.apk", apk_path) is None:
+        raise ValueError("installed base.apk path is unsafe")
+    apk_bytes = capture_bounded(
+        [
+            args.adb, "-s", args.device, "exec-out", "su", "-c",
+            f"cat {apk_path}",
+        ],
+        maximum_bytes=512 * 1024 * 1024,
+        timeout=getattr(args, "adb_timeout", 30.0),
+    )
+    entry = f"lib/{baseline['abi']}/libdemo_target.so"
+    try:
+        with zipfile.ZipFile(io.BytesIO(apk_bytes)) as archive:
+            target = archive.read(entry)
+    except (KeyError, zipfile.BadZipFile) as error:
+        raise ValueError(
+            f"installed base.apk has no readable {entry}"
+        ) from error
+    installed_sha = hashlib.sha256(target).hexdigest()
+    expected_sha = baseline["target_library_sha256"].lower()
+    if installed_sha != expected_sha:
+        raise ValueError(
+            "installed target library SHA-256 does not match the historical "
+            f"benchmark build: expected={expected_sha} installed={installed_sha}"
+        )
+    return installed_sha
+
+
 def newest_legacy_trace(
     args: argparse.Namespace, previous_names: set[str]
 ) -> tuple[str, bytes]:
@@ -953,23 +1017,59 @@ def collect_and_validate_optimized_artifact(
         return result
 
 
-def _bounded_cleanup_call(
-    callback: Any, operation: str, timeout: float
+_frida_cleanup_lock = threading.Lock()
+_frida_cleanup_worker: threading.Thread | None = None
+
+
+def _bounded_frida_cleanup(
+    script: Any | None, session: Any | None, timeout: float
 ) -> BaseException | None:
+    """Release one Frida ownership chain without accumulating blocked workers."""
+    global _frida_cleanup_worker
+    if script is None and session is None:
+        return None
     completed = threading.Event()
+    abandoned = threading.Event()
     errors: list[BaseException] = []
 
     def run() -> None:
+        global _frida_cleanup_worker
         try:
-            callback()
-        except BaseException as error:
-            errors.append(error)
+            for callback in (
+                script.unload if script is not None else None,
+                session.detach if session is not None else None,
+            ):
+                if callback is None:
+                    continue
+                try:
+                    callback()
+                except BaseException as error:
+                    if not errors:
+                        errors.append(error)
+                if abandoned.is_set():
+                    break
         finally:
+            with _frida_cleanup_lock:
+                if _frida_cleanup_worker is threading.current_thread():
+                    _frida_cleanup_worker = None
             completed.set()
 
-    threading.Thread(target=run, daemon=True).start()
+    with _frida_cleanup_lock:
+        if (_frida_cleanup_worker is not None and
+                _frida_cleanup_worker.is_alive()):
+            return TimeoutError(
+                "a previous Frida cleanup is still blocked; "
+                "skipping concurrent session cleanup"
+            )
+        worker = threading.Thread(
+            target=run, name="qtrace-frida-cleanup", daemon=True
+        )
+        _frida_cleanup_worker = worker
+        worker.start()
     if not completed.wait(max(0.0, timeout)):
-        return TimeoutError(f"{operation} timed out after {timeout:g} seconds")
+        abandoned.set()
+        return TimeoutError(f"Frida cleanup timed out after {timeout:g} seconds")
+    worker.join()
     return errors[0] if errors else None
 
 
@@ -1025,21 +1125,10 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
     finally:
         active_exception = sys.exc_info()[1]
         cleanup_timeout = float(getattr(args, "frida_cleanup_timeout", 1.0))
-        if script is not None:
-            error = _bounded_cleanup_call(
-                script.unload, "Frida script unload", cleanup_timeout
-            )
-            cleanup_error = cleanup_error or error
-        if session is not None:
-            error = _bounded_cleanup_call(
-                session.detach, "Frida session detach", cleanup_timeout
-            )
-            cleanup_error = cleanup_error or error
-        if pid is not None and (result is None or cleanup_error is not None):
-            error = _bounded_cleanup_call(
-                lambda: device.kill(pid), "Frida process kill", cleanup_timeout
-            )
-            cleanup_error = cleanup_error or error
+        cleanup_error = _bounded_frida_cleanup(
+            script, session, cleanup_timeout
+        )
+        if pid is not None:
             try:
                 adb(args, "shell", "am", "force-stop", args.package)
             except BaseException as error:
@@ -1150,6 +1239,7 @@ def main() -> int:
     profile_baseline: dict[str, int | str] | None = None
     candidate_tracer_sha256: str | None = None
     baseline_candidate_tracer_sha256: str | None = None
+    target_library_sha256: str | None = None
     if args.compare:
         baseline_document = Path(args.compare).read_text(encoding="utf-8")
         identity = live_device_identity(args)
@@ -1161,13 +1251,16 @@ def main() -> int:
                 "candidate_tracer_sha256"
             ].lower()
             candidate_tracer_sha256 = verify_candidate_tracer(args, baseline_identity)
+            target_library_sha256 = verify_installed_target_library(
+                args, baseline_identity
+            )
         else:
             require_balanced_comparison(args.profile)
             baseline = parse_baseline_report(baseline_document)
             ensure_same_device(baseline, identity)
     warmup = run_once(args)
     if profile_baseline is not None:
-        require_binary_acceptance_candidate(warmup)
+        require_profile_warmup_oracle(warmup, profile_baseline)
     runs = [run_once(args) for _ in range(args.runs)]
     stable_return = ensure_stable_return([str(warmup["return"]), *[str(run["return"]) for run in runs]])
     report = median_report(runs)
@@ -1178,6 +1271,8 @@ def main() -> int:
         report["baseline_candidate_tracer_sha256"] = (
             baseline_candidate_tracer_sha256
         )
+    if target_library_sha256 is not None:
+        report["target_library_sha256"] = target_library_sha256
     report["runs"] = (
         [{**run, **throughput_metrics(run)} for run in runs] if args.legacy else runs
     )

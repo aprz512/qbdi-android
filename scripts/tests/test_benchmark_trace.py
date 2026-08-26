@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import zipfile
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -437,6 +439,10 @@ effective_buffer_bytes=67108864
         self.assertEqual("16", identity["android_version"])
         self.assertEqual("user", identity["android_build_type"])
         self.assertEqual("Debug", identity["app_build_type"])
+        self.assertEqual(
+            "5f1a970825ae8bacb17d8dd656e01bd1fe7172638ba3ddcacd82ffaaad6e62c0",
+            identity["target_library_sha256"],
+        )
         ensure_same_format_two_device(identity, {
             "model": "Pixel 6", "device": "oriole", "android": "16",
             "abi": "arm64-v8a", "android_build_type": "user", "app_build_type": "Debug",
@@ -520,6 +526,83 @@ effective_buffer_bytes=67108864
                     {"candidate_tracer_sha256": local_sha},
                 )
 
+    def test_installed_apk_target_library_must_match_the_historical_build(self):
+        target = b"historical benchmark target"
+        target_sha = hashlib.sha256(target).hexdigest()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as apk:
+            apk.writestr("lib/arm64-v8a/libdemo_target.so", target)
+        args = SimpleNamespace(
+            adb="adb", device="serial", package="com.example.app",
+            adb_timeout=3,
+        )
+        baseline = {"abi": "arm64-v8a", "target_library_sha256": target_sha}
+        package_path = subprocess.CompletedProcess(
+            ["adb", "pm", "path"], 0,
+            stdout="package:/data/app/example/base.apk\n", stderr="",
+        )
+
+        with patch.object(benchmark_trace, "adb", return_value=package_path), \
+             patch.object(
+                 benchmark_trace, "capture_bounded", return_value=archive.getvalue()
+             ) as capture:
+            verified = benchmark_trace.verify_installed_target_library(
+                args, baseline
+            )
+
+        self.assertEqual(target_sha, verified)
+        self.assertTrue(any(
+            "/data/app/example/base.apk" in item
+            for item in capture.call_args.args[0]
+        ))
+        with patch.object(benchmark_trace, "adb", return_value=package_path), \
+             patch.object(
+                 benchmark_trace, "capture_bounded", return_value=archive.getvalue()
+             ), self.assertRaisesRegex(ValueError, "installed target library SHA-256"):
+            benchmark_trace.verify_installed_target_library(
+                args, {**baseline, "target_library_sha256": "0" * 64}
+            )
+
+    def test_acceptance_rejects_warmup_oracle_drift_before_measured_runs(self):
+        baseline_run = {
+            **parse_metrics(self.METRICS_V3),
+            "profile": "balanced", "instructions": 21718,
+            "return": "0x5745c858653f5a7f",
+            "trace": "warmup.trace.bin.lz4",
+            "decoded_event_count": 21718,
+            "first_instruction": "1 libdemo_target.so+0x6e828 STPXpre",
+            "last_instruction": "21718 libdemo_target.so+0x6ea28 RET",
+        }
+        drifted_warmup = {
+            **baseline_run,
+            "first_instruction": "1 libdemo_target.so+0x70c6c STPXpre",
+        }
+        args = SimpleNamespace(
+            runs=5, test_fail_setup=False,
+            compare="docs/benchmarks/binary-trace-baseline.md",
+            profile="balanced", legacy=False,
+            candidate_tracer="candidate.so",
+        )
+        identity = {
+            "model": "Pixel 6", "device": "oriole", "android": "16",
+            "abi": "arm64-v8a", "android_build_type": "user",
+            "app_build_type": "Debug",
+            "build_fingerprint": (
+                "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys"
+            ), "selinux": "Enforcing", "package": "com.aprz.qbdiandroid",
+        }
+        with patch.object(benchmark_trace, "parse_args", return_value=args), \
+             patch.object(benchmark_trace, "live_device_identity", return_value=identity), \
+             patch.object(benchmark_trace, "verify_candidate_tracer", return_value="a" * 64), \
+             patch.object(benchmark_trace, "verify_installed_target_library",
+                          return_value="b" * 64), \
+             patch.object(benchmark_trace, "run_once",
+                          return_value=drifted_warmup) as run:
+            with self.assertRaisesRegex(ValueError, "oracle mismatch.*first_instruction"):
+                benchmark_trace.main()
+
+        self.assertEqual(1, run.call_count)
+
     def test_cli_returns_acceptance_miss_and_preserves_json_verdict(self):
         run = {**parse_metrics(self.METRICS_V3), "profile": "balanced",
                "instructions": 21718, "return": "0x5745c858653f5a7f",
@@ -544,6 +627,8 @@ effective_buffer_bytes=67108864
         with patch.object(benchmark_trace, "parse_args", return_value=args), \
              patch.object(benchmark_trace, "live_device_identity", return_value=identity), \
              patch.object(benchmark_trace, "verify_candidate_tracer", return_value="a" * 64), \
+             patch.object(benchmark_trace, "verify_installed_target_library",
+                          return_value="b" * 64), \
              patch.object(benchmark_trace, "run_once", side_effect=[run] * 6), \
              contextlib.redirect_stdout(output):
             status = benchmark_trace.main()
@@ -1314,13 +1399,13 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
             agent = Path(directory) / "agent.js"
             agent.write_text("agent", encoding="utf-8")
             for stage, expected in {
-                "attach": {"unload": 0, "detach": 0, "kill": 1},
-                "create": {"unload": 0, "detach": 1, "kill": 1},
-                "on": {"unload": 1, "detach": 1, "kill": 1},
-                "load": {"unload": 1, "detach": 1, "kill": 1},
-                "resume": {"unload": 1, "detach": 1, "kill": 1},
-                "agent": {"unload": 1, "detach": 1, "kill": 1},
-                "timeout": {"unload": 1, "detach": 1, "kill": 1},
+                "attach": {"unload": 0, "detach": 0, "kill": 0},
+                "create": {"unload": 0, "detach": 1, "kill": 0},
+                "on": {"unload": 1, "detach": 1, "kill": 0},
+                "load": {"unload": 1, "detach": 1, "kill": 0},
+                "resume": {"unload": 1, "detach": 1, "kill": 0},
+                "agent": {"unload": 1, "detach": 1, "kill": 0},
+                "timeout": {"unload": 1, "detach": 1, "kill": 0},
             }.items():
                 with self.subTest(stage=stage):
                     calls = {name: 0 for name in (
@@ -1335,7 +1420,7 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                         timeout=0.1 if stage == "agent" else 0,
                     )
                     with patch.dict(sys.modules, {"frida": FakeFrida(device)}), \
-                         patch.object(benchmark_trace, "adb"), \
+                         patch.object(benchmark_trace, "adb") as adb_call, \
                          patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
                          patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
                          patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
@@ -1343,6 +1428,13 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                             benchmark_trace.invoke_benchmark(args)
                     for name, count in expected.items():
                         self.assertEqual(count, calls[name], (stage, name, calls))
+                    force_stops = [
+                        call for call in adb_call.call_args_list
+                        if call.args[1:] == (
+                            "shell", "am", "force-stop", "com.example.app"
+                        )
+                    ]
+                    self.assertEqual(2, len(force_stops), stage)
 
             calls = {name: 0 for name in (
                 "spawn", "attach", "create", "on", "load", "resume",
@@ -1355,7 +1447,7 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                 test_buffer_bytes=None, test_fail_setup=False, timeout=0.1,
             )
             with patch.dict(sys.modules, {"frida": FakeFrida(device)}), \
-                 patch.object(benchmark_trace, "adb"), \
+                 patch.object(benchmark_trace, "adb") as adb_call, \
                  patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
                  patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
                  patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
@@ -1363,6 +1455,13 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
             self.assertEqual(1, calls["unload"])
             self.assertEqual(1, calls["detach"])
             self.assertEqual(0, calls["kill"])
+            force_stops = [
+                call for call in adb_call.call_args_list
+                if call.args[1:] == (
+                    "shell", "am", "force-stop", "com.example.app"
+                )
+            ]
+            self.assertEqual(2, len(force_stops))
 
     def test_invoke_benchmark_bounds_blocked_cleanup_and_preserves_timeout(self):
         blocker = threading.Event()
@@ -1405,7 +1504,6 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
         frida = SimpleNamespace(get_device_manager=lambda: SimpleNamespace(
             add_remote_device=lambda _endpoint: device
         ))
-        completed = threading.Event()
         caught: list[BaseException] = []
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1423,31 +1521,33 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                     benchmark_trace.invoke_benchmark(args)
                 except BaseException as error:
                     caught.append(error)
-                finally:
-                    completed.set()
 
             with patch.dict(sys.modules, {"frida": frida}), \
                  patch.object(benchmark_trace, "adb") as adb_call, \
                  patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
                  patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
                  patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
-                worker = threading.Thread(target=run, daemon=True)
-                worker.start()
-                finished_within_bound = completed.wait(0.3)
+                started = time.monotonic()
+                run()
+                run()
+                elapsed = time.monotonic() - started
                 blocker.set()
-                worker.join(1)
+                deadline = time.monotonic() + 1
+                while threading.active_count() > 1 and time.monotonic() < deadline:
+                    time.sleep(0.01)
 
-        self.assertTrue(finished_within_bound, "Frida cleanup exceeded its hard bound")
-        self.assertEqual(["unload", "detach", "kill"], cleanup_calls)
-        self.assertEqual(1, len(caught))
-        self.assertRegex(str(caught[0]), "benchmark agent timed out after 0 seconds")
+        self.assertLess(elapsed, 0.3, "Frida cleanup exceeded its hard bound")
+        self.assertEqual(["unload"], cleanup_calls)
+        self.assertEqual(2, len(caught))
+        for error in caught:
+            self.assertRegex(str(error), "benchmark agent timed out after 0 seconds")
         force_stops = [
             call for call in adb_call.call_args_list
             if call.args[1:] == (
                 "shell", "am", "force-stop", "com.example.app"
             )
         ]
-        self.assertEqual(2, len(force_stops))
+        self.assertEqual(4, len(force_stops))
 
 
 if __name__ == "__main__":

@@ -26,22 +26,25 @@ public:
 
   bool install(const std::shared_ptr<CaptureCoordinator> &coordinator) noexcept;
   void deactivate() noexcept;
+  void deactivate_if(
+      const std::shared_ptr<CaptureCoordinator> &coordinator) noexcept;
   bool should_capture(PthreadStartRoutine start_routine) const noexcept;
   int create(pthread_t *thread, const pthread_attr_t *attributes,
              PthreadStartRoutine start_routine, void *argument) noexcept;
+  void prepare_for_fork() noexcept;
+  void resume_after_fork_parent() noexcept;
   void detach_after_fork_child() noexcept;
 
   bool installed() const noexcept {
     return installed_.load(std::memory_order_acquire);
   }
 
-  int hook_error() const noexcept {
-    return hook_.unhook_error != 0 ? hook_.unhook_error : hook_.hook_error;
-  }
+  int hook_error() const noexcept;
 
 private:
   ThreadCreateHookInstaller installer_ = nullptr;
   HookHandle hook_{};
+  mutable std::mutex install_mutex_;
   mutable std::mutex coordinator_mutex_;
   std::shared_ptr<CaptureCoordinator> coordinator_;
   void *published_original_ = nullptr;

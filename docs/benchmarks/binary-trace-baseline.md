@@ -19,6 +19,14 @@ processes; the artifact named in the table is the run at the median elapsed time
 | Package | com.aprz.qbdiandroid |
 | Tracer library SHA-256 | cc8c3509f81647e3d6bced804fcfc58dd983c32a2d577ce03f004ad5d14dece1 |
 | Candidate tracer SHA-256 | f95c4e0b3267fa0403ae324db0f58edf6118e270f044651ae9b3e9ba759f7972 |
+| Target library SHA-256 | 5f1a970825ae8bacb17d8dd656e01bd1fe7172638ba3ddcacd82ffaaad6e62c0 |
+
+The target identity above is a reproducible historical-build identity, not a
+claim that the original APK was retained. It was rebuilt from commit
+`2d6b1022a14ae554804a57e267544c12dea29353` with
+`./gradlew :app:assembleDebug --no-daemon`. The stripped/merged
+`lib/arm64-v8a/libdemo_target.so` bytes hash to the value above and expose
+`demo_benchmark_case` at `0x6e828`, matching the immutable artifact oracle.
 
 ## Current format-2 artifact baselines
 
