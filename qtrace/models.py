@@ -47,3 +47,28 @@ class UserConfig:
     target: TargetConfig
     tracer: TracerConfig
     scenes: tuple[SceneSpec, ...]
+
+
+@dataclass(frozen=True)
+class ElfIdentity:
+    elf_class: str
+    machine: str
+    build_id: str
+    executable_ranges: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class ResolvedScene:
+    name: str
+    start_offset: int
+    end_offset: int
+
+
+@dataclass(frozen=True)
+class ResolvedTarget:
+    package: str
+    module: str
+    host_binary: Path
+    device_binary: str
+    identity: ElfIdentity
+    scenes: tuple[ResolvedScene, ...]
