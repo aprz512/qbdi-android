@@ -3,6 +3,8 @@ import contextlib
 import hashlib
 import io
 import json
+import multiprocessing
+import os
 import shutil
 import subprocess
 import sys
@@ -1313,6 +1315,26 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
         self.assertEqual(Decimal("209715200.000000"), diagnosis["encoded_bytes_per_second"])
 
     def test_invoke_benchmark_releases_every_owned_frida_resource_on_failures(self):
+        context = multiprocessing.get_context("fork")
+        active_children = {child.pid for child in multiprocessing.active_children()}
+        call_names = (
+            "spawn", "attach", "create", "on", "load", "resume",
+            "unload", "detach", "kill",
+        )
+
+        class SharedCalls:
+            def __init__(self):
+                self.values = context.RawArray("i", len(call_names))
+
+            def __getitem__(self, name):
+                return self.values[call_names.index(name)]
+
+            def __setitem__(self, name, value):
+                self.values[call_names.index(name)] = value
+
+            def snapshot(self):
+                return {name: self[name] for name in call_names}
+
         class FakeScript:
             def __init__(self, stage, calls):
                 self.stage = stage
@@ -1408,10 +1430,7 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                 "timeout": {"unload": 1, "detach": 1, "kill": 0},
             }.items():
                 with self.subTest(stage=stage):
-                    calls = {name: 0 for name in (
-                        "spawn", "attach", "create", "on", "load", "resume",
-                        "unload", "detach", "kill",
-                    )}
+                    calls = SharedCalls()
                     device = FakeDevice(stage, calls)
                     args = SimpleNamespace(
                         package="com.example.app", frida_port=27042, frida_device=None,
@@ -1427,7 +1446,9 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                         with self.assertRaises(RuntimeError):
                             benchmark_trace.invoke_benchmark(args)
                     for name, count in expected.items():
-                        self.assertEqual(count, calls[name], (stage, name, calls))
+                        self.assertEqual(
+                            count, calls[name], (stage, name, calls.snapshot())
+                        )
                     force_stops = [
                         call for call in adb_call.call_args_list
                         if call.args[1:] == (
@@ -1436,10 +1457,7 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                     ]
                     self.assertEqual(2, len(force_stops), stage)
 
-            calls = {name: 0 for name in (
-                "spawn", "attach", "create", "on", "load", "resume",
-                "unload", "detach", "kill",
-            )}
+            calls = SharedCalls()
             device = FakeDevice("result", calls)
             args = SimpleNamespace(
                 package="com.example.app", frida_port=27042, frida_device=None,
@@ -1462,10 +1480,21 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                 )
             ]
             self.assertEqual(2, len(force_stops))
+        self.assertEqual(
+            active_children,
+            {child.pid for child in multiprocessing.active_children()},
+        )
+        self.assertFalse(any(
+            thread.name == "qtrace-frida-cleanup"
+            for thread in threading.enumerate()
+        ))
 
     def test_invoke_benchmark_bounds_blocked_cleanup_and_preserves_timeout(self):
-        blocker = threading.Event()
-        cleanup_calls: list[str] = []
+        context = multiprocessing.get_context("fork")
+        release_read, release_write = os.pipe()
+        unload_calls = context.RawValue("i", 0)
+        detach_calls = context.RawValue("i", 0)
+        kill_calls = context.RawValue("i", 0)
 
         class BlockingScript:
             def on(self, _event, _callback):
@@ -1475,16 +1504,16 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                 pass
 
             def unload(self):
-                cleanup_calls.append("unload")
-                blocker.wait()
+                unload_calls.value += 1
+                os.read(release_read, 1)
 
         class BlockingSession:
             def create_script(self, _source):
                 return BlockingScript()
 
             def detach(self):
-                cleanup_calls.append("detach")
-                blocker.wait()
+                detach_calls.value += 1
+                os.read(release_read, 1)
 
         class BlockingDevice:
             def spawn(self, _argv):
@@ -1497,14 +1526,15 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                 pass
 
             def kill(self, _pid):
-                cleanup_calls.append("kill")
-                blocker.wait()
+                kill_calls.value += 1
+                os.read(release_read, 1)
 
         device = BlockingDevice()
         frida = SimpleNamespace(get_device_manager=lambda: SimpleNamespace(
             add_remote_device=lambda _endpoint: device
         ))
         caught: list[BaseException] = []
+        active_children = {child.pid for child in multiprocessing.active_children()}
 
         with tempfile.TemporaryDirectory() as directory:
             agent = Path(directory) / "agent.js"
@@ -1531,13 +1561,14 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
                 run()
                 run()
                 elapsed = time.monotonic() - started
-                blocker.set()
-                deadline = time.monotonic() + 1
-                while threading.active_count() > 1 and time.monotonic() < deadline:
-                    time.sleep(0.01)
+
+        os.close(release_read)
+        os.close(release_write)
 
         self.assertLess(elapsed, 0.3, "Frida cleanup exceeded its hard bound")
-        self.assertEqual(["unload"], cleanup_calls)
+        self.assertEqual(2, unload_calls.value)
+        self.assertEqual(0, detach_calls.value)
+        self.assertEqual(0, kill_calls.value)
         self.assertEqual(2, len(caught))
         for error in caught:
             self.assertRegex(str(error), "benchmark agent timed out after 0 seconds")
@@ -1548,6 +1579,124 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
             )
         ]
         self.assertEqual(4, len(force_stops))
+        self.assertEqual(
+            active_children,
+            {child.pid for child in multiprocessing.active_children()},
+        )
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_force_stop_waits_until_the_detach_owner_is_reaped(self):
+        context = multiprocessing.get_context("fork")
+        unload_completed = context.Event()
+        detach_entered = context.Event()
+        release_read, release_write = os.pipe()
+        owner_pid = context.RawValue("i", 0)
+        force_stop_calls = 0
+        force_stop_overlapped = False
+
+        class BoundaryScript:
+            def __init__(self):
+                self.callback = None
+
+            def on(self, _event, _callback):
+                self.callback = _callback
+
+            def load(self):
+                self.callback({
+                    "type": "send",
+                    "payload": {"type": "benchmark-result", "return": "0xBEEF"},
+                }, None)
+
+            def unload(self):
+                unload_completed.set()
+
+        class BoundarySession:
+            def create_script(self, _source):
+                return BoundaryScript()
+
+            def detach(self):
+                owner_pid.value = os.getpid()
+                detach_entered.set()
+                os.read(release_read, 1)
+
+        class BoundaryDevice:
+            def spawn(self, _argv):
+                return 4343
+
+            def attach(self, _pid):
+                return BoundarySession()
+
+            def resume(self, _pid):
+                pass
+
+        frida = SimpleNamespace(get_device_manager=lambda: SimpleNamespace(
+            add_remote_device=lambda _endpoint: BoundaryDevice()
+        ))
+
+        def fake_adb(_args, *command, **_kwargs):
+            nonlocal force_stop_calls, force_stop_overlapped
+            if command != (
+                "shell", "am", "force-stop", "com.example.app"
+            ):
+                return None
+            force_stop_calls += 1
+            if force_stop_calls != 2:
+                return None
+            try:
+                os.kill(owner_pid.value, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                force_stop_overlapped = True
+            os.write(release_write, b"x")
+            return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Path(directory) / "agent.js"
+            agent.write_text("agent", encoding="utf-8")
+            args = SimpleNamespace(
+                package="com.example.app", frida_port=27042,
+                frida_device=None, agent=str(agent), profile="fast",
+                legacy=False, test_buffer_bytes=None, test_fail_setup=False,
+                timeout=0.1, frida_cleanup_timeout=0.02,
+            )
+            active_children = {child.pid for child in multiprocessing.active_children()}
+            with patch.dict(sys.modules, {"frida": frida}), \
+                 patch.object(benchmark_trace, "adb", side_effect=fake_adb), \
+                 patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
+                 patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
+                 patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
+                with self.assertRaisesRegex(
+                    RuntimeError, "failed to release benchmark process:.*timed out"
+                ):
+                    benchmark_trace.invoke_benchmark(args)
+
+        os.close(release_read)
+        os.close(release_write)
+
+        self.assertTrue(unload_completed.is_set())
+        self.assertTrue(detach_entered.is_set())
+        self.assertNotEqual(os.getpid(), owner_pid.value)
+        self.assertFalse(
+            force_stop_overlapped,
+            "force-stop raced a Frida detach that could still execute",
+        )
+        self.assertEqual(2, force_stop_calls)
+        self.assertEqual(
+            active_children,
+            {child.pid for child in multiprocessing.active_children()},
+        )
+
+    def test_benchmark_refuses_non_posix_cleanup_before_touching_the_device(self):
+        args = SimpleNamespace(package="com.example.app")
+        with patch.object(
+            benchmark_trace.multiprocessing,
+            "get_all_start_methods",
+            return_value=["spawn"],
+        ), patch.object(benchmark_trace, "adb") as adb_call:
+            with self.assertRaisesRegex(RuntimeError, "requires POSIX fork"):
+                benchmark_trace.invoke_benchmark(args)
+        adb_call.assert_not_called()
 
 
 if __name__ == "__main__":

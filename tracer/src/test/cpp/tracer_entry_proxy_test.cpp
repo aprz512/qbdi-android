@@ -51,6 +51,7 @@ void trace_proxy_test_set_registration_gate(RegistrationGate gate);
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate);
 void trace_proxy_test_set_installed_status_gate(RegistrationGate gate);
 void trace_proxy_test_set_hook_commit_gate(RegistrationGate gate);
+void trace_proxy_test_set_registry_transition_gate(RegistrationGate gate);
 void trace_proxy_test_set_status_output_directory(const char *directory);
 size_t trace_proxy_test_generation(size_t scene_index);
 void trace_proxy_test_set_coordinator(
@@ -466,6 +467,11 @@ bool g_installed_status_entered = false;
 bool g_release_installed_status = false;
 bool g_hook_commit_entered = false;
 bool g_release_hook_commit = false;
+bool g_block_unhook_return = false;
+bool g_unhook_return_entered = false;
+bool g_release_unhook_return = false;
+bool g_registry_transition_entered = false;
+bool g_release_registry_transition = false;
 bool g_use_runner_gate = false;
 bool g_runner_entered = false;
 bool g_release_runner = false;
@@ -561,6 +567,13 @@ void hook_commit_gate() {
     g_gate_condition.wait(lock, [] { return g_release_hook_commit; });
 }
 
+void registry_transition_gate() {
+    std::unique_lock<std::mutex> lock(g_gate_mutex);
+    g_registry_transition_entered = true;
+    g_gate_condition.notify_all();
+    g_gate_condition.wait(lock, [] { return g_release_registry_transition; });
+}
+
 void count_admission_completion(void *) noexcept {
     g_admission_completion_calls.fetch_add(1, std::memory_order_relaxed);
 }
@@ -627,6 +640,11 @@ void reset_fakes() {
         g_release_installed_status = false;
         g_hook_commit_entered = false;
         g_release_hook_commit = false;
+        g_block_unhook_return = false;
+        g_unhook_return_entered = false;
+        g_release_unhook_return = false;
+        g_registry_transition_entered = false;
+        g_release_registry_transition = false;
         g_use_runner_gate = false;
         g_runner_entered = false;
         g_release_runner = false;
@@ -1458,6 +1476,91 @@ void module_fini_before_hook_commit_rolls_back_the_unpublished_gateway() {
     uint64_t args[8]{23};
     CHECK(trace_proxy_dispatch(proxy_generation, args, 0) == 0x117);
     CHECK(g_runner_calls == 0);
+}
+
+void stale_rollback_lock_order_child() {
+    ::alarm(3);
+    reset_fakes();
+    trace_proxy_test_reset(config_named("stale-rollback-lock-order-reset"));
+    char offset[2 * sizeof(uintptr_t) + 3]{};
+    std::snprintf(offset, sizeof(offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(new_target)));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.stale.rollback.lock.order",
+            "libstale-rollback-lock-order.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", offset}}}},
+            })));
+    CHECK(accepted.at("ok") == true);
+    const ModuleRange module =
+            module_named("/data/app/libstale-rollback-lock-order.so");
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    trace_proxy_test_set_hook_commit_gate(hook_commit_gate);
+
+    std::thread installer([&] {
+        trace_proxy_test_install_loading_module(module);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_hook_commit_entered; });
+    }
+    const size_t proxy_generation = trace_proxy_test_generation(0);
+    CHECK(proxy_generation != 4096);
+    trace_proxy_test_module_fini(module.start, module.path.c_str());
+    trace_proxy_test_set_registry_transition_gate(registry_transition_gate);
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_block_unhook_return = true;
+        g_release_hook_commit = true;
+    }
+    g_gate_condition.notify_all();
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_unhook_return_entered; });
+    }
+
+    // The callback owns g_lock before it waits for the stale slot's
+    // transition. Releasing both deterministic barriers recreates the old
+    // transition->g_lock / g_lock->transition cycle without sleeps.
+    std::thread callback([&] {
+        trace_proxy_test_module_fini(module.start, module.path.c_str());
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] {
+            return g_registry_transition_entered;
+        });
+        g_release_unhook_return = true;
+        g_release_registry_transition = true;
+    }
+    g_gate_condition.notify_all();
+    installer.join();
+    callback.join();
+    trace_proxy_test_set_registry_transition_gate(nullptr);
+    trace_proxy_test_set_hook_commit_gate(nullptr);
+    CHECK(g_unhook_calls == 1);
+    CHECK(trace_proxy_test_generation_retired(proxy_generation));
+    CHECK(!trace_proxy_test_generation_installed(proxy_generation));
+    uint64_t args[8]{29};
+    CHECK(trace_proxy_dispatch(proxy_generation, args, 0) == 0x11d);
+    CHECK(g_runner_calls == 0);
+    ::alarm(0);
+}
+
+void stale_rollback_never_inverts_registry_and_transition_locks() {
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        ::execl("/proc/self/exe", "tracer_entry_proxy_test",
+                "stale-rollback-lock-order-child", nullptr);
+        ::_exit(127);
+    }
+
+    int status = 0;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 void physical_rehook_keeps_its_original_capture_coordinator() {
@@ -3145,20 +3248,32 @@ bool hook_symbol_address(uintptr_t target, void *replacement,
 }
 
 bool unhook_function(HookHandle *handle) {
-    std::lock_guard<std::mutex> lock(g_fake_mutex);
-    ++g_unhook_calls;
-    handle->unhook_error = 0;
-    if (g_fail_unhook ||
-        (g_fail_unhook_call != 0 &&
-         g_unhook_calls == g_fail_unhook_call) ||
-        std::find(g_fail_unhook_calls.begin(), g_fail_unhook_calls.end(),
-                  g_unhook_calls) != g_fail_unhook_calls.end()) {
-        handle->unhook_error = g_unhook_failure_error;
-        return false;
+    bool succeeded = true;
+    {
+        std::lock_guard<std::mutex> lock(g_fake_mutex);
+        ++g_unhook_calls;
+        handle->unhook_error = 0;
+        if (g_fail_unhook ||
+            (g_fail_unhook_call != 0 &&
+             g_unhook_calls == g_fail_unhook_call) ||
+            std::find(g_fail_unhook_calls.begin(), g_fail_unhook_calls.end(),
+                      g_unhook_calls) != g_fail_unhook_calls.end()) {
+            handle->unhook_error = g_unhook_failure_error;
+            succeeded = false;
+        } else {
+            handle->stub = nullptr;
+            handle->original = reinterpret_cast<void *>(new_target);
+        }
     }
-    handle->stub = nullptr;
-    handle->original = reinterpret_cast<void *>(new_target);
-    return true;
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        if (g_block_unhook_return) {
+            g_unhook_return_entered = true;
+            g_gate_condition.notify_all();
+            g_gate_condition.wait(lock, [] { return g_release_unhook_return; });
+        }
+    }
+    return succeeded;
 }
 
 TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &invocation) {
@@ -3271,6 +3386,14 @@ int main(int argc, char **argv) {
             module_fini_before_hook_commit_rolls_back_the_unpublished_gateway();
             return 0;
         }
+        if (selected == "stale-rollback-lock-order") {
+            stale_rollback_never_inverts_registry_and_transition_locks();
+            return 0;
+        }
+        if (selected == "stale-rollback-lock-order-child") {
+            stale_rollback_lock_order_child();
+            return 0;
+        }
         return 2;
     }
     json_configuration_abi_is_transactional_and_nul_terminated();
@@ -3297,6 +3420,7 @@ int main(int argc, char **argv) {
     every_physical_rehook_gets_a_new_proxy_identity();
     hook_install_never_waits_for_the_linker_while_holding_the_registry();
     module_fini_before_hook_commit_rolls_back_the_unpublished_gateway();
+    stale_rollback_never_inverts_registry_and_transition_locks();
     physical_rehook_keeps_its_original_capture_coordinator();
     concurrent_unhook_failures_keep_the_original_bypass_alive();
     same_address_updates_replace_all_metadata_and_hook_generation();

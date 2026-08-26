@@ -8,12 +8,12 @@ import hashlib
 import io
 from importlib.resources import files
 import json
+import multiprocessing
 import os
 import re
 import statistics
 import subprocess
 import sys
-import threading
 import time
 import tempfile
 import zipfile
@@ -1017,124 +1017,207 @@ def collect_and_validate_optimized_artifact(
         return result
 
 
-_frida_cleanup_lock = threading.Lock()
-_frida_cleanup_worker: threading.Thread | None = None
+_FRIDA_WORKER_REAP_TIMEOUT_SECONDS = 1.0
 
 
-def _bounded_frida_cleanup(
-    script: Any | None, session: Any | None, timeout: float
-) -> BaseException | None:
-    """Release one Frida ownership chain without accumulating blocked workers."""
-    global _frida_cleanup_worker
-    if script is None and session is None:
-        return None
-    completed = threading.Event()
-    abandoned = threading.Event()
-    errors: list[BaseException] = []
-
-    def run() -> None:
-        global _frida_cleanup_worker
-        try:
-            for callback in (
-                script.unload if script is not None else None,
-                session.detach if session is not None else None,
-            ):
-                if callback is None:
-                    continue
-                try:
-                    callback()
-                except BaseException as error:
-                    if not errors:
-                        errors.append(error)
-                if abandoned.is_set():
-                    break
-        finally:
-            with _frida_cleanup_lock:
-                if _frida_cleanup_worker is threading.current_thread():
-                    _frida_cleanup_worker = None
-            completed.set()
-
-    with _frida_cleanup_lock:
-        if (_frida_cleanup_worker is not None and
-                _frida_cleanup_worker.is_alive()):
-            return TimeoutError(
-                "a previous Frida cleanup is still blocked; "
-                "skipping concurrent session cleanup"
-            )
-        worker = threading.Thread(
-            target=run, name="qtrace-frida-cleanup", daemon=True
-        )
-        _frida_cleanup_worker = worker
-        worker.start()
-    if not completed.wait(max(0.0, timeout)):
-        abandoned.set()
-        return TimeoutError(f"Frida cleanup timed out after {timeout:g} seconds")
-    worker.join()
-    return errors[0] if errors else None
-
-
-def invoke_benchmark(args: argparse.Namespace) -> str:
+def _send_frida_worker_event(channel: Any, *event: Any) -> None:
     try:
-        import frida  # type: ignore[import-not-found]
-    except ImportError as error:
-        raise RuntimeError("Frida Python bindings are required; install the matching 'frida' package") from error
+        channel.send(event)
+    except (BrokenPipeError, EOFError, OSError):
+        pass
 
-    source = inject_java_bridge(java_bridge_source(), configure_agent_source(
-        Path(args.agent).read_text(encoding="utf-8"), args.profile, args.legacy,
-        args.test_buffer_bytes, args.test_fail_setup,
-    ))
+
+def _invoke_benchmark_worker(
+    args: argparse.Namespace, source: str, channel: Any
+) -> None:
+    """Own every Frida reference in one disposable POSIX child process."""
     messages: list[dict[str, Any]] = []
+    session: Any | None = None
+    script: Any | None = None
+    primary_error: BaseException | None = None
+    result: str | None = None
 
     def on_message(message: dict[str, Any], _data: Any) -> None:
         messages.append(message)
 
-    adb(args, "shell", "am", "force-stop", args.package)
-    adb(args, "forward", f"tcp:{args.frida_port}", f"tcp:{args.frida_port}")
-    manager = frida.get_device_manager()
-    device = manager.add_remote_device(args.frida_device or frida_endpoint(args.frida_port))
-    pid: int | None = None
-    session: Any | None = None
-    script: Any | None = None
-    result: str | None = None
-    cleanup_error: BaseException | None = None
     try:
+        try:
+            import frida  # type: ignore[import-not-found]
+        except ImportError as error:
+            raise RuntimeError(
+                "Frida Python bindings are required; install the matching 'frida' package"
+            ) from error
+        manager = frida.get_device_manager()
+        device = manager.add_remote_device(
+            args.frida_device or frida_endpoint(args.frida_port)
+        )
         pid = device.spawn([args.package])
+        _send_frida_worker_event(channel, "pid", int(pid))
         session = device.attach(pid)
         script = session.create_script(source)
         script.on("message", on_message)
         script.load()
         device.resume(pid)
 
-        deadline = time.monotonic() + args.timeout
+        deadline = time.monotonic() + max(0.0, float(args.timeout))
         while time.monotonic() < deadline:
             for message in messages:
                 if message.get("type") != "send":
                     continue
                 payload = message.get("payload")
-                if isinstance(payload, dict) and payload.get("type") == "benchmark-result":
-                    result = str(payload["return"])
+                if (isinstance(payload, dict) and
+                        payload.get("type") == "benchmark-result"):
+                    result = str(payload["return"]).lower()
                     break
-                if isinstance(payload, dict) and payload.get("type") == "benchmark-error":
-                    raise RuntimeError(str(payload.get("error", "benchmark agent failed")))
+                if (isinstance(payload, dict) and
+                        payload.get("type") == "benchmark-error"):
+                    raise RuntimeError(str(payload.get(
+                        "error", "benchmark agent failed"
+                    )))
             if result is not None:
                 break
             time.sleep(0.05)
         if result is None:
-            raise RuntimeError(f"benchmark agent timed out after {args.timeout:g} seconds")
-        return result.lower()
+            raise RuntimeError(
+                f"benchmark agent timed out after {args.timeout:g} seconds"
+            )
+    except BaseException as error:
+        primary_error = primary_error or error
     finally:
-        active_exception = sys.exc_info()[1]
-        cleanup_timeout = float(getattr(args, "frida_cleanup_timeout", 1.0))
-        cleanup_error = _bounded_frida_cleanup(
-            script, session, cleanup_timeout
-        )
-        if pid is not None:
+        if primary_error is not None:
+            _send_frida_worker_event(channel, "error", str(primary_error))
+        else:
+            _send_frida_worker_event(channel, "result", result)
+
+        cleanup_error: BaseException | None = None
+        for callback in (
+            script.unload if script is not None else None,
+            session.detach if session is not None else None,
+        ):
+            if callback is None:
+                continue
             try:
-                adb(args, "shell", "am", "force-stop", args.package)
+                callback()
             except BaseException as error:
                 cleanup_error = cleanup_error or error
-        if cleanup_error is not None and active_exception is None:
-            raise RuntimeError(f"failed to release benchmark process: {cleanup_error}") from cleanup_error
+        _send_frida_worker_event(
+            channel, "complete",
+            None if cleanup_error is None else str(cleanup_error),
+        )
+        channel.close()
+
+
+def _kill_and_reap_frida_worker(worker: Any) -> None:
+    if not worker.is_alive():
+        worker.join()
+        return
+    worker.kill()
+    worker.join(_FRIDA_WORKER_REAP_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        worker.kill()
+        worker.join(_FRIDA_WORKER_REAP_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        raise RuntimeError("Frida worker could not be reaped after SIGKILL")
+
+
+def invoke_benchmark(args: argparse.Namespace) -> str:
+    if not hasattr(os, "fork") or "fork" not in multiprocessing.get_all_start_methods():
+        raise RuntimeError(
+            "benchmark Frida isolation requires POSIX fork; refusing unsafe cleanup"
+        )
+
+    source = inject_java_bridge(java_bridge_source(), configure_agent_source(
+        Path(args.agent).read_text(encoding="utf-8"), args.profile, args.legacy,
+        args.test_buffer_bytes, args.test_fail_setup,
+    ))
+    adb(args, "shell", "am", "force-stop", args.package)
+    adb(args, "forward", f"tcp:{args.frida_port}", f"tcp:{args.frida_port}")
+
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    worker = context.Process(
+        target=_invoke_benchmark_worker,
+        args=(args, source, sender),
+        name="qtrace-frida-owner",
+    )
+    worker_started = False
+    owned_pid: int | None = None
+    result: str | None = None
+    primary_error: str | None = None
+    cleanup_error: str | None = None
+    worker_complete = False
+    worker_reaped = False
+    monitor_error: BaseException | None = None
+    cleanup_timeout = max(
+        0.0, float(getattr(args, "frida_cleanup_timeout", 1.0))
+    )
+    deadline = time.monotonic() + max(0.0, float(args.timeout)) + cleanup_timeout
+
+    try:
+        worker.start()
+        worker_started = True
+        sender.close()
+        while not worker_complete:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not receiver.poll(remaining):
+                cleanup_error = (
+                    f"Frida worker timed out after "
+                    f"{max(0.0, float(args.timeout)) + cleanup_timeout:g} seconds"
+                )
+                break
+            try:
+                event = receiver.recv()
+            except EOFError:
+                break
+            kind = event[0]
+            if kind == "pid":
+                owned_pid = int(event[1])
+            elif kind == "result":
+                result = str(event[1])
+                deadline = time.monotonic() + cleanup_timeout
+            elif kind == "error":
+                primary_error = str(event[1])
+                deadline = time.monotonic() + cleanup_timeout
+            elif kind == "complete":
+                cleanup_error = event[1]
+                worker_complete = True
+    except BaseException as error:
+        monitor_error = error
+    finally:
+        try:
+            if worker_started:
+                _kill_and_reap_frida_worker(worker)
+                worker_reaped = True
+        except BaseException as error:
+            monitor_error = monitor_error or error
+        finally:
+            receiver.close()
+            sender.close()
+            if worker_started and not worker.is_alive():
+                worker.close()
+
+    # Ownership transfers back to the parent only after the process containing
+    # every Frida reference has exited and been reaped. The final package kill
+    # can therefore never overlap unload/detach, even when either blocks forever.
+    force_stop_error: BaseException | None = None
+    # Package-scoped force-stop is intentional even if spawn failed before a
+    # PID event: a partially successful remote spawn must not escape cleanup.
+    if worker_started and worker_reaped:
+        try:
+            adb(args, "shell", "am", "force-stop", args.package)
+        except BaseException as error:
+            force_stop_error = error
+
+    if primary_error is not None:
+        raise RuntimeError(primary_error)
+    terminal_error = monitor_error or cleanup_error or force_stop_error
+    if terminal_error is not None:
+        raise RuntimeError(f"failed to release benchmark process: {terminal_error}") from (
+            terminal_error if isinstance(terminal_error, BaseException) else None
+        )
+    if result is None:
+        raise RuntimeError("benchmark Frida worker exited without a result")
+    return result
 
 
 def run_once(args: argparse.Namespace) -> dict[str, int | Decimal | str]:

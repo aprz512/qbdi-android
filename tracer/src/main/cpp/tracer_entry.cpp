@@ -125,6 +125,7 @@ static RegistrationGate g_registration_gate = nullptr;
 static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
 static RegistrationGate g_installed_status_gate = nullptr;
 static RegistrationGate g_hook_commit_gate = nullptr;
+static RegistrationGate g_registry_transition_gate = nullptr;
 static std::atomic<bool> g_throw_during_configuration_apply{false};
 static std::string g_status_output_directory;
 #endif
@@ -228,6 +229,11 @@ static void retire_module_generation(uintptr_t module_base,
         const std::shared_ptr<InstalledSceneHook> &slot =
                 g_hook_generations[generation];
         if (slot == nullptr) continue;
+#if defined(QTRACE_HOST_TEST)
+        if (g_registry_transition_gate != nullptr) {
+            g_registry_transition_gate();
+        }
+#endif
         std::lock_guard<std::mutex> transition_guard(slot->transition_mutex);
         if (slot->retired || !slot->installed ||
             slot->module.start != module_base ||
@@ -757,24 +763,37 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     if (!hooked && !slot->hook.residual_hook) return false;
 
     // A module-fini or configuration replacement can retire this slot while
-    // ShadowHook is operating without the registry lock. Never commit that
-    // stale physical gateway. Keep its transition closed while rolling the
-    // hook back, but leave the registry unlocked because unhook may re-enter a
-    // loader callback too.
-    const bool needs_unhook = slot->hook.stub != nullptr;
-    bool unhooked = true;
-    if (needs_unhook) {
-        registry_lock->unlock();
-        unhooked = unhook_function(&slot->hook);
-        registry_lock->lock();
-    }
+    // ShadowHook is operating without the registry lock. Claim the stale stub
+    // under g_lock -> transition_mutex, then leave only the immutable retained
+    // bypass in the retired slot. A proxy or loader callback in the external
+    // unhook window therefore observes passthrough state and cannot unhook the
+    // same stub, publish Installed, or acquire an admission.
+    HookHandle rollback_hook = slot->hook;
+    const bool needs_unhook = rollback_hook.stub != nullptr;
+    slot->hook.stub = nullptr;
+    slot->hook.residual_hook = false;
     slot->pending_install = false;
     slot->pending_batch_install = false;
-    slot->installed = !unhooked && needs_unhook;
+    slot->installed = false;
     slot->unhook_failed_window = false;
     slot->retired = true;
-    if (!unhooked) slot->hook.residual_hook = true;
     retire_runtime_ownership_locked(slot.get(), releases);
+
+    // ShadowHook may synchronously re-enter a loader callback. It must run
+    // without either tracer mutex held. Re-enter the state machine strictly in
+    // registry -> transition order after the external ownership operation.
+    commit_lock.unlock();
+    registry_lock->unlock();
+    bool unhooked = true;
+    if (needs_unhook) {
+        unhooked = unhook_function(&rollback_hook);
+    }
+    registry_lock->lock();
+    commit_lock.lock();
+
+    slot->hook = rollback_hook;
+    slot->installed = !unhooked && needs_unhook;
+    slot->hook.residual_hook = !unhooked && needs_unhook;
     if (unhooked && g_scene_hooks[scene.index] == slot) {
         g_scene_hooks[scene.index].reset();
     }
@@ -931,6 +950,7 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     g_stub_entry_gate.store(nullptr, std::memory_order_release);
     g_installed_status_gate = nullptr;
     g_hook_commit_gate = nullptr;
+    g_registry_transition_gate = nullptr;
 }
 
 bool trace_proxy_test_current_configuration(uint64_t *generation,
@@ -1012,6 +1032,11 @@ void trace_proxy_test_set_installed_status_gate(RegistrationGate gate) {
 void trace_proxy_test_set_hook_commit_gate(RegistrationGate gate) {
     std::lock_guard<std::mutex> guard(g_lock);
     g_hook_commit_gate = gate;
+}
+
+void trace_proxy_test_set_registry_transition_gate(RegistrationGate gate) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    g_registry_transition_gate = gate;
 }
 
 void trace_proxy_test_set_status_output_directory(const char *directory) {
