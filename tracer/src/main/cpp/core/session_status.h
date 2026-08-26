@@ -45,10 +45,17 @@ enum class SessionStatusFaultPoint : uint8_t {
     FileFsync,
     Rename,
     DirectoryFsync,
+    RollbackRename,
+    RollbackUnlink,
+    RollbackDirFsync,
 };
 
 void session_status_test_inject_fault(SessionStatusFaultPoint point, int error) noexcept;
+void session_status_test_inject_followup_fault(SessionStatusFaultPoint point, int error) noexcept;
 #endif
+
+bool session_status_artifact_basename_is_valid(std::string_view value) noexcept;
+bool session_status_string_is_valid_utf8(std::string_view value) noexcept;
 
 class SessionStatusPublisher final {
 public:
@@ -57,19 +64,26 @@ public:
     bool publish(const SessionStatusSnapshot &) noexcept;
     std::string_view path() const noexcept;
     int error_code() const noexcept;
+    int recovery_error() const noexcept;
+    std::string_view backup_path() const noexcept;
 
 private:
     static constexpr size_t kPathCapacity = 4096;
 
     void record_error(int error) noexcept;
+    void record_recovery_error(int error) noexcept;
+    bool recover_pending_transaction() noexcept;
 
     char output_directory_[kPathCapacity]{};
     char path_[kPathCapacity]{};
     char backup_path_[kPathCapacity]{};
+    char rollback_path_[kPathCapacity]{};
     char package_[513]{};
     char session_id_[37]{};
     uint64_t generation_ = 0;
     size_t path_size_ = 0;
+    size_t backup_path_size_ = 0;
     int first_error_ = 0;
+    int recovery_error_ = 0;
     bool opened_ = false;
 };

@@ -12,6 +12,7 @@
 #include <mutex>
 #include <pthread.h>
 #include <string>
+#include <string_view>
 #include <sys/types.h>
 
 enum class TraceGenerationPhase : uint8_t {
@@ -118,6 +119,13 @@ public:
             uint64_t generation, size_t scene_index, uint32_t tid) noexcept;
     void finish_call(const TraceAdmission &admission, bool sealed) noexcept;
     void acknowledge_sealed(const TraceAdmission &admission) noexcept;
+    // Cold-path producer API for installation/sealing code. These calls may
+    // lock and copy metadata and are forbidden from instruction callbacks.
+    bool record_artifact(std::string_view artifact_basename) noexcept;
+    bool record_status_warning(std::string_view code, std::string_view path,
+                               std::string_view message) noexcept;
+    bool record_status_error(std::string_view code, std::string_view path,
+                             std::string_view message) noexcept;
     const TraceStopToken &stop_token() const noexcept;
     TraceGenerationSnapshot snapshot() const noexcept;
 
@@ -141,6 +149,10 @@ private:
         uint32_t tid = 0;
         uint64_t serial = 0;
     };
+    struct DeadlineWorkerContext;
+    struct StatusWorkerContext;
+    struct DeadlineThreadStart;
+    struct StatusThreadStart;
 
     // The planner bounds configuration at 256 scenes and 1024 flight threads.
     // Fixed storage keeps instruction callbacks allocation-free; active_capacity_
@@ -165,8 +177,12 @@ private:
     void join_deadline() noexcept;
     void start_status() noexcept;
     void join_status() noexcept;
-    void publish_status_loop() noexcept;
+    void publish_status_loop(StatusWorkerContext *context) noexcept;
     SessionStatusSnapshot status_snapshot() const;
+    bool record_status_issue(bool warning, std::string_view code,
+                             std::string_view path, std::string_view message) noexcept;
+    void record_metadata_error_locked(std::string_view code, std::string_view path,
+                                      std::string_view message) noexcept;
     void note_transition() noexcept;
 
     uint64_t generation_ = 0;
@@ -174,7 +190,6 @@ private:
     DeadlineWait wait_;
     std::atomic<TraceGenerationPhase> phase_{TraceGenerationPhase::Waiting};
     TraceStopToken stop_token_;
-    std::atomic<bool> deadline_stop_{false};
     std::atomic<bool> deadline_pending_{false};
     std::atomic<bool> stop_incomplete_{false};
     mutable std::mutex active_mutex_;
@@ -182,19 +197,30 @@ private:
     size_t active_size_ = 0;
     size_t active_capacity_ = 0;
     uint64_t next_admission_serial_ = 1;
+    // Bound producer-owned data so it cannot independently exhaust the
+    // publisher's fixed JSON serialization budget.
+    static constexpr size_t kMaxStatusArtifacts = 16;
+    static constexpr size_t kMaxStatusIssues = 8;
+    static constexpr size_t kMaxStatusTextBytes = 128;
+    mutable std::mutex status_metadata_mutex_;
+    std::vector<std::string> status_artifacts_;
+    std::vector<ConfigurationIssue> status_warnings_;
+    std::vector<ConfigurationIssue> status_errors_;
+    bool status_metadata_overflow_ = false;
     pthread_t deadline_thread_{};
     std::atomic<bool> deadline_thread_started_{false};
+    std::shared_ptr<DeadlineWorkerContext> deadline_context_;
     uint64_t deadline_monotonic_ns_ = 0;
     std::atomic<ArmState> arm_state_{ArmState::Unarmed};
     std::atomic<bool> detached_{false};
     TraceGenerationStatusOptions status_options_;
     SessionStatusPublisher status_publisher_;
     std::atomic<bool> status_enabled_{false};
-    std::atomic<bool> status_stop_{false};
     std::atomic<bool> status_thread_started_{false};
     std::atomic<uint64_t> transition_sequence_{1};
     std::atomic<int> status_error_{0};
     pthread_t status_thread_{};
+    std::shared_ptr<StatusWorkerContext> status_context_;
     pid_t owner_pid_ = 0;
 
 #if defined(QTRACE_HOST_TEST)

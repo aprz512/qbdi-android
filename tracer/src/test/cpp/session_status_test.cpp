@@ -209,6 +209,75 @@ void failed_publications_preserve_the_previous_status_and_latch_first_errno() {
     }
 }
 
+// Catches rollback silently deleting the only retained valid JSON when its
+// restore rename fails after the replacement itself was already renamed.
+void failed_rollback_retains_the_old_backup_until_the_next_open_recovers_it() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    CHECK(publisher.publish(sealed_snapshot()));
+    const std::string before = read_text(publisher.path());
+    SessionStatusSnapshot next = sealed_snapshot();
+    next.state = "running";
+    session_status_test_inject_fault(SessionStatusFaultPoint::DirectoryFsync, EIO);
+    session_status_test_inject_followup_fault(SessionStatusFaultPoint::RollbackRename, EPERM);
+    CHECK(!publisher.publish(next));
+    CHECK(publisher.error_code() == EIO);
+    CHECK(publisher.recovery_error() == EPERM);
+    CHECK(read_text(publisher.backup_path()) == before);
+    CHECK(has_no_temporary_files(root.path()));
+
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(read_text(recovered.path()) == before);
+    CHECK(::access(std::string(recovered.backup_path()).c_str(), F_OK) != 0);
+    CHECK(has_no_temporary_files(root.path()));
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+}
+
+// Catches rollback fsync/unlink failures that otherwise discard the recovery
+// marker or backup before a later publisher can restore the prior state.
+void rollback_failures_are_recovered_by_the_next_open() {
+    for (const SessionStatusFaultPoint rollback_failure : {
+                 SessionStatusFaultPoint::RollbackDirFsync,
+                 SessionStatusFaultPoint::RollbackUnlink,
+         }) {
+        TemporaryDirectory root;
+        SessionStatusPublisher publisher;
+        CHECK(publisher.open(configured_trace(), 3, root.path()));
+        CHECK(publisher.publish(sealed_snapshot()));
+        const std::string before = read_text(publisher.path());
+        SessionStatusSnapshot next = sealed_snapshot();
+        next.state = "running";
+        session_status_test_inject_fault(SessionStatusFaultPoint::DirectoryFsync, EIO);
+        session_status_test_inject_followup_fault(rollback_failure, EPERM);
+        CHECK(!publisher.publish(next));
+        CHECK(publisher.error_code() == EIO);
+        CHECK(publisher.recovery_error() == EPERM);
+        CHECK(read_text(publisher.backup_path()) == before);
+        SessionStatusPublisher recovered;
+        CHECK(recovered.open(configured_trace(), 3, root.path()));
+        CHECK(read_text(recovered.path()) == before);
+        CHECK(::access(std::string(recovered.backup_path()).c_str(), F_OK) != 0);
+        CHECK(has_no_temporary_files(root.path()));
+        session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+    }
+
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    session_status_test_inject_fault(SessionStatusFaultPoint::DirectoryFsync, EIO);
+    session_status_test_inject_followup_fault(SessionStatusFaultPoint::RollbackUnlink, EPERM);
+    CHECK(!publisher.publish(sealed_snapshot()));
+    CHECK(publisher.error_code() == EIO);
+    CHECK(publisher.recovery_error() == EPERM);
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    CHECK(directory_is_empty(root.path()));
+    CHECK(has_no_temporary_files(root.path()));
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+}
+
 // Catches validation gaps that would let status output escape the app-private
 // directory through a session id, package, or artifact path component.
 void rejects_unsafe_names_before_creating_a_status_file() {
@@ -234,11 +303,16 @@ void rejects_unsafe_names_before_creating_a_status_file() {
     CHECK(publisher.error_code() == EINVAL);
 
     CHECK(publisher.open(configured_trace(), 3, root.path()));
-    SessionStatusSnapshot snapshot = sealed_snapshot();
-    snapshot.artifacts = {"../trace.bin"};
-    CHECK(!publisher.publish(snapshot));
-    CHECK(publisher.error_code() == EINVAL);
-    CHECK(has_no_temporary_files(root.path()));
+    constexpr const char *unsafe_artifacts[] = {
+            ".", "..", "../trace.bin", "trace/part.bin", "trace\\part.bin", "trace\x1f.bin",
+    };
+    for (const char *artifact : unsafe_artifacts) {
+        SessionStatusSnapshot snapshot = sealed_snapshot();
+        snapshot.artifacts = {artifact};
+        CHECK(!publisher.publish(snapshot));
+        CHECK(publisher.error_code() == EINVAL);
+        CHECK(has_no_temporary_files(root.path()));
+    }
 }
 
 // Catches a different valid session identity being serialized into a status
@@ -302,6 +376,8 @@ void rejects_non_utf8_snapshot_strings_before_creating_a_status_file() {
 int main() {
     writes_the_complete_session_status_schema_atomically();
     failed_publications_preserve_the_previous_status_and_latch_first_errno();
+    failed_rollback_retains_the_old_backup_until_the_next_open_recovers_it();
+    rollback_failures_are_recovered_by_the_next_open();
     directory_sync_failure_without_a_previous_status_leaves_no_status_file();
     rejects_unsafe_names_before_creating_a_status_file();
     rejects_snapshots_that_do_not_match_the_opened_session();

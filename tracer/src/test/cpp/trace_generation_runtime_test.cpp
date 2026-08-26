@@ -48,6 +48,22 @@ struct CancellableDeadline {
     std::atomic<bool> exited{false};
 };
 
+struct SelfDestroyingDeadline {
+    static void wait_until(void *opaque, uint64_t, const std::atomic<bool> *stop) noexcept {
+        auto *deadline = static_cast<SelfDestroyingDeadline *>(opaque);
+        deadline->entered.store(true, std::memory_order_release);
+        while (!deadline->release.load(std::memory_order_acquire) &&
+               !stop->load(std::memory_order_acquire)) ::sched_yield();
+        deadline->owner->reset();
+        deadline->released_owner.store(true, std::memory_order_release);
+    }
+
+    std::shared_ptr<TraceGenerationRuntime> *owner = nullptr;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> released_owner{false};
+};
+
 struct TemporaryDirectory {
     TemporaryDirectory() {
         char template_path[] = "/tmp/qtrace-runtime-status-XXXXXX";
@@ -85,6 +101,22 @@ struct ControlledStatusPoll {
 
     std::atomic<unsigned int> waits{0};
     std::atomic<unsigned int> permits{0};
+};
+
+struct SelfDestroyingStatusPoll {
+    static void wait(void *opaque, const std::atomic<bool> *stop) noexcept {
+        auto *poll = static_cast<SelfDestroyingStatusPoll *>(opaque);
+        poll->entered.store(true, std::memory_order_release);
+        while (!poll->release.load(std::memory_order_acquire) &&
+               !stop->load(std::memory_order_acquire)) ::sched_yield();
+        poll->owner->reset();
+        poll->released_owner.store(true, std::memory_order_release);
+    }
+
+    std::shared_ptr<TraceGenerationRuntime> *owner = nullptr;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> released_owner{false};
 };
 
 void wait_for_count(const std::atomic<unsigned int> &value, unsigned int minimum) {
@@ -436,6 +468,43 @@ void destruction_cancels_a_24_hour_deadline_worker() {
     CHECK(deadline.exited.load(std::memory_order_acquire));
 }
 
+// Catches a deadline entry dereferencing raw runtime storage after its injected
+// wait releases the last shared owner from the worker thread itself.
+void deadline_worker_survives_releasing_the_last_runtime_owner() {
+    std::shared_ptr<TraceGenerationRuntime> runtime;
+    SelfDestroyingDeadline deadline{&runtime};
+    runtime = TraceGenerationRuntime::create(
+            34, timed_session(86400000), DeadlineWait{&deadline, &SelfDestroyingDeadline::wait_until});
+    CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
+    wait_for(deadline.entered);
+    deadline.release.store(true, std::memory_order_release);
+    wait_for(deadline.released_owner);
+    CHECK(runtime == nullptr);
+}
+
+// Catches a status poll callback releasing the final owner and leaving the
+// loop to dereference its former raw runtime pointer after that callback.
+void status_worker_survives_releasing_the_last_runtime_owner() {
+    TemporaryDirectory directory;
+    std::shared_ptr<TraceGenerationRuntime> runtime;
+    SelfDestroyingStatusPoll poll{&runtime};
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &SelfDestroyingStatusPoll::wait};
+    runtime = TraceGenerationRuntime::create(
+            35, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
+    CHECK(runtime != nullptr);
+    wait_for(poll.entered);
+    poll.release.store(true, std::memory_order_release);
+    wait_for(poll.released_owner);
+    CHECK(runtime == nullptr);
+}
+
 // Catches a child destructor trying to pthread_join a worker inherited through
 // fork, which has no joinable peer in that child process.
 void forked_child_detaches_the_inherited_deadline_worker() {
@@ -524,6 +593,42 @@ void status_publication_failure_is_exposed_and_retried_without_a_runtime_event()
     runtime.reset();
 }
 
+// Catches an empty status handoff: Task 5/6 cold-path producers must be able
+// to publish bounded artifacts and diagnostics without instruction callbacks.
+void status_metadata_producers_publish_artifacts_warnings_and_errors() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    auto runtime = TraceGenerationRuntime::create(
+            33, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
+    CHECK(runtime != nullptr);
+    wait_for_count(poll.waits, 1);
+    CHECK(runtime->record_artifact("flight.trace.bin.lz4"));
+    CHECK(runtime->record_status_warning("FLIGHT_DEGRADED", "$.flight", "ring wrapped"));
+    CHECK(runtime->record_status_error("SEAL_FAILED", "$.seal", "seal deferred"));
+    CHECK(!runtime->record_artifact("flight.trace.bin.lz4"));
+    for (unsigned int index = 0; index != 128; ++index) {
+        const std::string artifact = "artifact" + std::to_string(index) + ".bin";
+        if (!runtime->record_artifact(artifact)) break;
+    }
+    poll.allow_one();
+    wait_for_count(poll.waits, 2);
+    const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
+    const std::string published = read_text(path);
+    CHECK(published.find("\"flight.trace.bin.lz4\"") != std::string::npos);
+    CHECK(published.find("\"code\":\"FLIGHT_DEGRADED\"") != std::string::npos);
+    CHECK(published.find("\"code\":\"SEAL_FAILED\"") != std::string::npos);
+    CHECK(published.find("\"code\":\"STATUS_ARTIFACT_DUPLICATE\"") != std::string::npos);
+    CHECK(published.find("\"code\":\"STATUS_METADATA_OVERFLOW\"") != std::string::npos);
+    runtime.reset();
+}
+
 } // namespace
 
 int main() {
@@ -543,7 +648,10 @@ int main() {
     concurrent_deadline_and_unsealed_last_finish_select_stop_incomplete();
     destruction_joins_the_deadline_worker();
     destruction_cancels_a_24_hour_deadline_worker();
+    deadline_worker_survives_releasing_the_last_runtime_owner();
+    status_worker_survives_releasing_the_last_runtime_owner();
     forked_child_detaches_the_inherited_deadline_worker();
     status_worker_publishes_only_transition_snapshots_outside_runtime_transitions();
     status_publication_failure_is_exposed_and_retried_without_a_runtime_event();
+    status_metadata_producers_publish_artifacts_warnings_and_errors();
 }

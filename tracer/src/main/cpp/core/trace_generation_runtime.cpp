@@ -25,6 +25,27 @@ bool is_stopping(TraceGenerationPhase phase) noexcept {
 
 } // namespace
 
+struct TraceGenerationRuntime::DeadlineWorkerContext {
+    std::atomic<bool> stop{false};
+    std::atomic<TraceGenerationRuntime *> runtime{nullptr};
+    DeadlineWait wait{};
+    uint64_t deadline_monotonic_ns = 0;
+};
+
+struct TraceGenerationRuntime::StatusWorkerContext {
+    std::atomic<bool> stop{false};
+    std::atomic<TraceGenerationRuntime *> runtime{nullptr};
+    StatusPollWait wait{};
+};
+
+struct TraceGenerationRuntime::DeadlineThreadStart {
+    std::shared_ptr<DeadlineWorkerContext> context;
+};
+
+struct TraceGenerationRuntime::StatusThreadStart {
+    std::shared_ptr<StatusWorkerContext> context;
+};
+
 bool TraceStopToken::requested() const noexcept {
     return requested_.load(std::memory_order_acquire);
 }
@@ -113,16 +134,30 @@ bool TraceGenerationRuntime::arm() noexcept {
         }
         deadline_monotonic_ns_ = now + duration * kNanosecondsPerMillisecond;
         int error = 0;
+        deadline_context_ = std::shared_ptr<DeadlineWorkerContext>(
+                new (std::nothrow) DeadlineWorkerContext{});
+        if (deadline_context_ == nullptr) {
+            error = ENOMEM;
+        } else {
+            deadline_context_->runtime.store(this, std::memory_order_release);
+            deadline_context_->wait = wait_;
+            deadline_context_->deadline_monotonic_ns = deadline_monotonic_ns_;
+        }
+        DeadlineThreadStart *start = error == 0
+                ? new (std::nothrow) DeadlineThreadStart{deadline_context_}
+                : nullptr;
+        if (error == 0 && start == nullptr) error = ENOMEM;
 #if defined(QTRACE_HOST_TEST)
-        if (test_hooks_.fail_thread_create != nullptr &&
+        if (error == 0 && test_hooks_.fail_thread_create != nullptr &&
             test_hooks_.fail_thread_create(test_hooks_.opaque)) {
             error = EAGAIN;
-        } else
-#endif
-        {
-            error = ::pthread_create(&deadline_thread_, nullptr,
-                                     &TraceGenerationRuntime::deadline_entry, this);
         }
+#endif
+        if (error == 0) {
+            error = ::pthread_create(&deadline_thread_, nullptr,
+                                     &TraceGenerationRuntime::deadline_entry, start);
+        }
+        if (error != 0) delete start;
         if (error != 0) {
             std::lock_guard<std::mutex> lock(active_mutex_);
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
@@ -149,11 +184,15 @@ bool TraceGenerationRuntime::arm() noexcept {
 }
 
 void *TraceGenerationRuntime::deadline_entry(void *opaque) noexcept {
-    auto *runtime = static_cast<TraceGenerationRuntime *>(opaque);
-    DeadlineWait wait = runtime->wait_;
+    std::unique_ptr<DeadlineThreadStart> start(static_cast<DeadlineThreadStart *>(opaque));
+    std::shared_ptr<DeadlineWorkerContext> context = std::move(start->context);
+    DeadlineWait wait = context->wait;
     if (wait.wait_until == nullptr) wait = DeadlineWait{nullptr, &monotonic_wait_until};
-    wait.wait_until(wait.opaque, runtime->deadline_monotonic_ns_, &runtime->deadline_stop_);
-    if (!runtime->deadline_stop_.load(std::memory_order_acquire)) runtime->request_deadline_stop();
+    wait.wait_until(wait.opaque, context->deadline_monotonic_ns, &context->stop);
+    if (context->stop.load(std::memory_order_acquire)) return nullptr;
+    TraceGenerationRuntime *runtime = context->runtime.load(std::memory_order_acquire);
+    if (runtime != nullptr && !context->stop.load(std::memory_order_acquire))
+        runtime->request_deadline_stop();
     return nullptr;
 }
 
@@ -228,6 +267,79 @@ void TraceGenerationRuntime::acknowledge_sealed(const TraceAdmission &admission)
     complete_call_locked(admission, true);
 }
 
+bool TraceGenerationRuntime::record_artifact(std::string_view artifact_basename) noexcept {
+    std::lock_guard<std::mutex> lock(status_metadata_mutex_);
+    if (!session_status_artifact_basename_is_valid(artifact_basename) ||
+        !session_status_string_is_valid_utf8(artifact_basename)) {
+        record_metadata_error_locked("STATUS_ARTIFACT_INVALID", "$.artifacts",
+                                     "artifact must be a UTF-8 basename");
+        note_transition();
+        return false;
+    }
+    for (const std::string &artifact : status_artifacts_) {
+        if (artifact == artifact_basename) {
+            record_metadata_error_locked("STATUS_ARTIFACT_DUPLICATE", "$.artifacts",
+                                         "artifact was already recorded");
+            note_transition();
+            return false;
+        }
+    }
+    if (status_artifacts_.size() >= kMaxStatusArtifacts) {
+        status_metadata_overflow_ = true;
+        note_transition();
+        return false;
+    }
+    status_artifacts_.emplace_back(artifact_basename);
+    note_transition();
+    return true;
+}
+
+bool TraceGenerationRuntime::record_status_warning(
+        std::string_view code, std::string_view path, std::string_view message) noexcept {
+    return record_status_issue(true, code, path, message);
+}
+
+bool TraceGenerationRuntime::record_status_error(
+        std::string_view code, std::string_view path, std::string_view message) noexcept {
+    return record_status_issue(false, code, path, message);
+}
+
+void TraceGenerationRuntime::record_metadata_error_locked(
+        std::string_view code, std::string_view path, std::string_view message) noexcept {
+    if (status_errors_.size() >= kMaxStatusIssues) {
+        status_metadata_overflow_ = true;
+        return;
+    }
+    status_errors_.push_back(ConfigurationIssue{std::string(code), std::string(path),
+                                                std::string(message)});
+}
+
+bool TraceGenerationRuntime::record_status_issue(
+        bool warning, std::string_view code, std::string_view path, std::string_view message) noexcept {
+    std::lock_guard<std::mutex> lock(status_metadata_mutex_);
+    if (code.empty() || path.empty() || !session_status_string_is_valid_utf8(code) ||
+        !session_status_string_is_valid_utf8(path) || !session_status_string_is_valid_utf8(message)) {
+        status_metadata_overflow_ = true;
+        note_transition();
+        return false;
+    }
+    if (code.size() > kMaxStatusTextBytes || path.size() > kMaxStatusTextBytes ||
+        message.size() > kMaxStatusTextBytes) {
+        status_metadata_overflow_ = true;
+        note_transition();
+        return false;
+    }
+    std::vector<ConfigurationIssue> &issues = warning ? status_warnings_ : status_errors_;
+    if (issues.size() >= kMaxStatusIssues) {
+        status_metadata_overflow_ = true;
+        note_transition();
+        return false;
+    }
+    issues.push_back(ConfigurationIssue{std::string(code), std::string(path), std::string(message)});
+    note_transition();
+    return true;
+}
+
 void TraceGenerationRuntime::complete_call_locked(const TraceAdmission &admission, bool sealed) noexcept {
     publish_deadline_stop_locked();
     if (admission.generation != generation_ || admission.serial == 0) {
@@ -295,7 +407,11 @@ void TraceGenerationRuntime::note_transition() noexcept {
 }
 
 void *TraceGenerationRuntime::status_entry(void *opaque) noexcept {
-    static_cast<TraceGenerationRuntime *>(opaque)->publish_status_loop();
+    std::unique_ptr<StatusThreadStart> start(static_cast<StatusThreadStart *>(opaque));
+    std::shared_ptr<StatusWorkerContext> context = std::move(start->context);
+    TraceGenerationRuntime *runtime = context->runtime.load(std::memory_order_acquire);
+    if (runtime != nullptr && !context->stop.load(std::memory_order_acquire))
+        runtime->publish_status_loop(context.get());
     return nullptr;
 }
 
@@ -310,9 +426,24 @@ void TraceGenerationRuntime::status_poll_wait(void *, const std::atomic<bool> *)
 
 void TraceGenerationRuntime::start_status() noexcept {
     if (!status_enabled_.load(std::memory_order_acquire)) return;
+    status_context_ = std::shared_ptr<StatusWorkerContext>(new (std::nothrow) StatusWorkerContext{});
+    if (status_context_ == nullptr) {
+        status_enabled_.store(false, std::memory_order_release);
+        status_error_.store(ENOMEM, std::memory_order_release);
+        return;
+    }
+    status_context_->runtime.store(this, std::memory_order_release);
+    status_context_->wait = status_options_.poll_wait;
+    auto *start = new (std::nothrow) StatusThreadStart{status_context_};
+    if (start == nullptr) {
+        status_enabled_.store(false, std::memory_order_release);
+        status_error_.store(ENOMEM, std::memory_order_release);
+        return;
+    }
     const int error = ::pthread_create(&status_thread_, nullptr,
-                                       &TraceGenerationRuntime::status_entry, this);
+                                       &TraceGenerationRuntime::status_entry, start);
     if (error != 0) {
+        delete start;
         status_enabled_.store(false, std::memory_order_release);
         status_error_.store(error, std::memory_order_release);
         return;
@@ -322,10 +453,17 @@ void TraceGenerationRuntime::start_status() noexcept {
 
 void TraceGenerationRuntime::join_status() noexcept {
     if (detached_.load(std::memory_order_acquire) || ::getpid() != owner_pid_) return;
-    status_stop_.store(true, std::memory_order_release);
+    if (status_context_ != nullptr) {
+        status_context_->runtime.store(nullptr, std::memory_order_release);
+        status_context_->stop.store(true, std::memory_order_release);
+    }
     bool started = true;
     if (!status_thread_started_.compare_exchange_strong(started, false, std::memory_order_acq_rel,
                                                         std::memory_order_acquire)) return;
+    if (::pthread_equal(::pthread_self(), status_thread_)) {
+        (void)::pthread_detach(status_thread_);
+        return;
+    }
     (void)::pthread_join(status_thread_, nullptr);
 }
 
@@ -360,6 +498,16 @@ SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {
                     active_calls_[index].scene_index, active_calls_[index].tid, false});
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(status_metadata_mutex_);
+        snapshot.artifacts = status_artifacts_;
+        snapshot.warnings = status_warnings_;
+        snapshot.errors = status_errors_;
+        if (status_metadata_overflow_) {
+            snapshot.errors.push_back(ConfigurationIssue{
+                    "STATUS_METADATA_OVERFLOW", "$.status", "status metadata capacity exceeded"});
+        }
+    }
     const int error = status_error_.load(std::memory_order_acquire);
     if (error != 0) {
         snapshot.errors.push_back(ConfigurationIssue{
@@ -368,11 +516,11 @@ SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {
     return snapshot;
 }
 
-void TraceGenerationRuntime::publish_status_loop() noexcept {
+void TraceGenerationRuntime::publish_status_loop(StatusWorkerContext *context) noexcept {
     uint64_t published_sequence = 0;
-    StatusPollWait wait = status_options_.poll_wait;
+    StatusPollWait wait = context->wait;
     if (wait.wait == nullptr) wait = StatusPollWait{nullptr, &status_poll_wait};
-    while (!status_stop_.load(std::memory_order_acquire)) {
+    while (!context->stop.load(std::memory_order_acquire)) {
         const uint64_t transition = transition_sequence_.load(std::memory_order_acquire);
         if (transition != published_sequence) {
             const SessionStatusSnapshot snapshot = status_snapshot();
@@ -391,7 +539,9 @@ void TraceGenerationRuntime::publish_status_loop() noexcept {
             }
             published_sequence = transition;
         }
-        if (!status_stop_.load(std::memory_order_acquire)) wait.wait(wait.opaque, &status_stop_);
+        if (!context->stop.load(std::memory_order_acquire)) wait.wait(wait.opaque, &context->stop);
+        if (context->stop.load(std::memory_order_acquire) ||
+            context->runtime.load(std::memory_order_acquire) == nullptr) return;
     }
 }
 
@@ -404,9 +554,15 @@ void TraceGenerationRuntime::set_test_hooks(TraceGenerationTestHooks hooks) noex
 
 void TraceGenerationRuntime::detach_after_fork_child() noexcept {
     detached_.store(true, std::memory_order_release);
-    deadline_stop_.store(true, std::memory_order_release);
+    if (deadline_context_ != nullptr) {
+        deadline_context_->runtime.store(nullptr, std::memory_order_release);
+        deadline_context_->stop.store(true, std::memory_order_release);
+    }
     deadline_thread_started_.store(false, std::memory_order_release);
-    status_stop_.store(true, std::memory_order_release);
+    if (status_context_ != nullptr) {
+        status_context_->runtime.store(nullptr, std::memory_order_release);
+        status_context_->stop.store(true, std::memory_order_release);
+    }
     status_thread_started_.store(false, std::memory_order_release);
 }
 
@@ -420,10 +576,17 @@ void TraceGenerationRuntime::join_deadline_for_test() noexcept {
 
 void TraceGenerationRuntime::join_deadline() noexcept {
     if (detached_.load(std::memory_order_acquire) || ::getpid() != owner_pid_) return;
-    deadline_stop_.store(true, std::memory_order_release);
+    if (deadline_context_ != nullptr) {
+        deadline_context_->runtime.store(nullptr, std::memory_order_release);
+        deadline_context_->stop.store(true, std::memory_order_release);
+    }
     bool started = true;
     if (!deadline_thread_started_.compare_exchange_strong(started, false, std::memory_order_acq_rel,
                                                           std::memory_order_acquire)) {
+        return;
+    }
+    if (::pthread_equal(::pthread_self(), deadline_thread_)) {
+        (void)::pthread_detach(deadline_thread_);
         return;
     }
     (void)::pthread_join(deadline_thread_, nullptr);

@@ -21,11 +21,14 @@ struct StatusFault {
 };
 
 StatusFault g_status_fault;
+StatusFault g_followup_status_fault;
 
 bool take_fault(SessionStatusFaultPoint point, int *error) noexcept {
-    if (g_status_fault.point != point) return false;
-    *error = g_status_fault.error == 0 ? EIO : g_status_fault.error;
-    g_status_fault.point = SessionStatusFaultPoint::None;
+    StatusFault *fault = g_status_fault.point == point ? &g_status_fault
+                                                        : &g_followup_status_fault;
+    if (fault->point != point) return false;
+    *error = fault->error == 0 ? EIO : fault->error;
+    fault->point = SessionStatusFaultPoint::None;
     return true;
 }
 #endif
@@ -110,8 +113,9 @@ bool session_id_is_uuid(std::string_view value) noexcept {
 
 bool artifact_name_is_safe(std::string_view value) noexcept {
     if (value.empty() || value.size() > 255 || value == "." || value == "..") return false;
-    for (char character : value) {
-        if (character == '/' || character == '\\' || character == '\0') return false;
+    for (unsigned char character : value) {
+        if (character == '/' || character == '\\' || character < 0x20U || character == 0x7fU)
+            return false;
     }
     return true;
 }
@@ -211,6 +215,39 @@ bool sync_file(int fd, bool directory) noexcept {
     return ::fsync(fd) == 0;
 }
 
+bool rollback_rename(const char *from, const char *to) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::RollbackRename, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::rename(from, to) == 0;
+}
+
+bool rollback_unlink(const char *path) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::RollbackUnlink, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::unlink(path) == 0;
+}
+
+bool rollback_directory_sync(int directory_fd) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    int fault = 0;
+    if (take_fault(SessionStatusFaultPoint::RollbackDirFsync, &fault)) {
+        errno = fault;
+        return false;
+    }
+#endif
+    return ::fsync(directory_fd) == 0;
+}
+
 bool valid_state(std::string_view state) noexcept {
     return state == "installed" || state == "running" || state == "stop_requested" ||
            state == "stopping" || state == "sealed" || state == "stop_incomplete" ||
@@ -286,17 +323,122 @@ overflow:
 #if defined(QTRACE_HOST_TEST)
 void session_status_test_inject_fault(SessionStatusFaultPoint point, int error) noexcept {
     g_status_fault = StatusFault{point, error};
+    g_followup_status_fault = StatusFault{};
+}
+
+void session_status_test_inject_followup_fault(SessionStatusFaultPoint point, int error) noexcept {
+    g_followup_status_fault = StatusFault{point, error};
 }
 #endif
 
+bool session_status_artifact_basename_is_valid(std::string_view value) noexcept {
+    return artifact_name_is_safe(value);
+}
+
+bool session_status_string_is_valid_utf8(std::string_view value) noexcept {
+    return string_is_valid_utf8(value);
+}
+
 void SessionStatusPublisher::record_error(int error) noexcept {
     if (first_error_ == 0) first_error_ = error == 0 ? EIO : error;
+}
+
+void SessionStatusPublisher::record_recovery_error(int error) noexcept {
+    if (recovery_error_ == 0) recovery_error_ = error == 0 ? EIO : error;
+}
+
+bool SessionStatusPublisher::recover_pending_transaction() noexcept {
+    const int directory_fd = ::open(output_directory_, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory_fd < 0) {
+        record_recovery_error(errno);
+        return false;
+    }
+    const int backup_result = ::access(backup_path_, F_OK);
+    if (backup_result == 0) {
+        // A backup is always the old complete status. Restore it first and
+        // retain a hard-link copy until the restore directory fsync succeeds.
+        struct stat backup_status{};
+        struct stat main_status{};
+        const bool already_restored = ::stat(backup_path_, &backup_status) == 0 &&
+                                      ::stat(path_, &main_status) == 0 &&
+                                      backup_status.st_dev == main_status.st_dev &&
+                                      backup_status.st_ino == main_status.st_ino;
+        if (!already_restored) {
+            if (!rollback_rename(backup_path_, path_)) {
+                record_recovery_error(errno);
+                (void)::close(directory_fd);
+                return false;
+            }
+            if (::link(path_, backup_path_) != 0) {
+                record_recovery_error(errno);
+                (void)::close(directory_fd);
+                return false;
+            }
+        }
+        if (!rollback_directory_sync(directory_fd)) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
+        if (!rollback_unlink(backup_path_)) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
+        if (!rollback_directory_sync(directory_fd)) {
+            const int error = errno;
+            // The main path already contains old JSON. Recreate the retained
+            // copy before reporting the incomplete cleanup to a later open.
+            record_recovery_error(error);
+            if (::link(path_, backup_path_) != 0) record_recovery_error(errno);
+            if (!rollback_directory_sync(directory_fd)) record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        const int error = errno;
+        (void)::close(directory_fd);
+        record_recovery_error(error);
+        return false;
+    }
+
+    const int marker_result = ::access(rollback_path_, F_OK);
+    if (marker_result == 0) {
+        // This marker is written only when a no-previous-status rollback
+        // could not remove its newly renamed main path.
+        if (!rollback_unlink(path_) && errno != ENOENT) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
+        if (!rollback_unlink(rollback_path_)) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
+        if (!rollback_directory_sync(directory_fd)) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        const int error = errno;
+        (void)::close(directory_fd);
+        record_recovery_error(error);
+        return false;
+    }
+    if (::close(directory_fd) != 0) {
+        record_recovery_error(errno);
+        return false;
+    }
+    return true;
 }
 
 bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation,
                                   std::string_view output_directory) noexcept {
     opened_ = false;
     first_error_ = 0;
+    recovery_error_ = 0;
     if (!package_name_is_safe(config.package_name) || !session_id_is_uuid(config.session.id) ||
         generation == 0) {
         record_error(EINVAL);
@@ -322,11 +464,23 @@ bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation
         return false;
     }
     path_size_ = static_cast<size_t>(path_count);
+    const int backup_count = std::snprintf(backup_path_, sizeof(backup_path_), "%s.backup", path_);
+    const int rollback_count = std::snprintf(rollback_path_, sizeof(rollback_path_), "%s.rollback", path_);
+    if (backup_count <= 0 || static_cast<size_t>(backup_count) >= sizeof(backup_path_) ||
+        rollback_count <= 0 || static_cast<size_t>(rollback_count) >= sizeof(rollback_path_)) {
+        record_error(ENAMETOOLONG);
+        return false;
+    }
+    backup_path_size_ = static_cast<size_t>(backup_count);
     std::memcpy(package_, config.package_name.data(), config.package_name.size());
     package_[config.package_name.size()] = '\0';
     std::memcpy(session_id_, config.session.id.data(), config.session.id.size());
     session_id_[config.session.id.size()] = '\0';
     generation_ = generation;
+    if (!recover_pending_transaction()) {
+        record_error(recovery_error_);
+        return false;
+    }
     opened_ = true;
     return true;
 }
@@ -335,6 +489,10 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
     if (!opened_ || snapshot.generation != generation_ || snapshot.package != package_ ||
         snapshot.session_id != session_id_) {
         record_error(EINVAL);
+        return false;
+    }
+    if (!recover_pending_transaction()) {
+        record_error(recovery_error_);
         return false;
     }
     char json[kJsonCapacity];
@@ -387,10 +545,7 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
     }
     const bool had_previous = previous_result == 0;
     if (had_previous) {
-        const int backup_count = std::snprintf(backup_path_, sizeof(backup_path_), "%s.bak.%llu.%llu",
-                                                path_, pid, sequence);
-        if (backup_count <= 0 || static_cast<size_t>(backup_count) >= sizeof(backup_path_) ||
-            ::link(path_, backup_path_) != 0) {
+        if (::link(path_, backup_path_) != 0) {
             const int error = errno == 0 ? EIO : errno;
             (void)::close(directory_fd);
             (void)::unlink(temporary);
@@ -402,7 +557,7 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
     int rename_fault = 0;
     if (take_fault(SessionStatusFaultPoint::Rename, &rename_fault)) {
         errno = rename_fault;
-        if (had_previous) (void)::unlink(backup_path_);
+        if (had_previous && ::unlink(backup_path_) != 0) record_recovery_error(errno);
         (void)::close(directory_fd);
         (void)::unlink(temporary);
         record_error(rename_fault);
@@ -411,7 +566,7 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
 #endif
     if (::rename(temporary, path_) != 0) {
         const int error = errno;
-        if (had_previous) (void)::unlink(backup_path_);
+        if (had_previous && ::unlink(backup_path_) != 0) record_recovery_error(errno);
         (void)::close(directory_fd);
         (void)::unlink(temporary);
         record_error(error);
@@ -419,18 +574,47 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
     }
     if (!sync_file(directory_fd, true)) {
         const int error = errno;
+        record_error(error);
         if (had_previous) {
-            (void)::rename(backup_path_, path_);
-            (void)sync_file(directory_fd, true);
+            if (!rollback_rename(backup_path_, path_)) {
+                record_recovery_error(errno);
+            } else if (::link(path_, backup_path_) != 0) {
+                record_recovery_error(errno);
+            } else if (!rollback_directory_sync(directory_fd)) {
+                record_recovery_error(errno);
+            } else if (!rollback_unlink(backup_path_)) {
+                record_recovery_error(errno);
+            } else if (!rollback_directory_sync(directory_fd)) {
+                const int rollback_error = errno;
+                record_recovery_error(rollback_error);
+                if (::link(path_, backup_path_) != 0) record_recovery_error(errno);
+                if (!rollback_directory_sync(directory_fd)) record_recovery_error(errno);
+            }
         } else {
-            (void)::unlink(path_);
-            (void)sync_file(directory_fd, true);
+            if (!rollback_unlink(path_)) {
+                const int rollback_error = errno;
+                record_recovery_error(rollback_error);
+                const int marker_fd = ::open(rollback_path_, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+                if (marker_fd >= 0) {
+                    if (::close(marker_fd) != 0) record_recovery_error(errno);
+                } else if (errno != EEXIST) {
+                    record_recovery_error(errno);
+                }
+                if (!rollback_directory_sync(directory_fd)) record_recovery_error(errno);
+            } else if (!rollback_directory_sync(directory_fd)) {
+                record_recovery_error(errno);
+            }
         }
         (void)::close(directory_fd);
-        record_error(error);
         return false;
     }
-    if (had_previous) (void)::unlink(backup_path_);
+    if (had_previous && ::unlink(backup_path_) != 0) {
+        const int error = errno;
+        record_recovery_error(error);
+        record_error(error);
+        (void)::close(directory_fd);
+        return false;
+    }
     if (::close(directory_fd) != 0) {
         record_error(errno);
         return false;
@@ -444,4 +628,12 @@ std::string_view SessionStatusPublisher::path() const noexcept {
 
 int SessionStatusPublisher::error_code() const noexcept {
     return first_error_;
+}
+
+int SessionStatusPublisher::recovery_error() const noexcept {
+    return recovery_error_;
+}
+
+std::string_view SessionStatusPublisher::backup_path() const noexcept {
+    return std::string_view(backup_path_, backup_path_size_);
 }
