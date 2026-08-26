@@ -2,6 +2,7 @@
 
 #include "core/module_maps.h"
 #include "core/trace_config.h"
+#include "core/trace_generation_runtime.h"
 #include "flight/flight_format.h"
 
 #include <atomic>
@@ -59,7 +60,13 @@ public:
     CaptureCoordinator &operator=(const CaptureCoordinator &) = delete;
 
     bool start(TraceConfig config, ModuleRange module,
-               uint32_t module_generation);
+               uint32_t module_generation,
+               std::shared_ptr<TraceGenerationRuntime> runtime = {});
+    bool request_stop(TraceStopReason reason) noexcept;
+    // Called by the native timeout/status owner after its acknowledgement
+    // deadline. It retires only runtime admissions; live sessions and writers
+    // remain owned by their target threads and are never sealed here.
+    bool report_stop_incomplete() noexcept;
     QbdiThreadSession *enter(uint32_t tid, const SceneConfig &scene) noexcept;
     QbdiThreadSession *enter_thread(uint32_t tid, uintptr_t entry) noexcept;
     void leave(QbdiThreadSession *session) noexcept;
@@ -98,8 +105,11 @@ public:
 
 private:
     struct ThreadSlot {
+        CaptureCoordinator *owner = nullptr;
         uint32_t tid = 0;
         QbdiThreadSession *session = nullptr;
+        TraceAdmission admission{};
+        bool stop_finished = false;
     };
 
     void mark_coverage_gap_locked(uint32_t tid, uintptr_t pc,
@@ -109,6 +119,14 @@ private:
                                     uintptr_t pc) noexcept;
     static void report_session_gap(void *opaque, uint32_t tid,
                                    uintptr_t pc) noexcept;
+    static bool seal_flight_slot(void *opaque,
+                                 TraceStopReason reason) noexcept;
+    static void acknowledge_flight_slot(void *opaque, bool sealed) noexcept;
+    static void publish_flight_slot_committed(void *opaque) noexcept;
+    void acknowledge_flight_slot_locked(ThreadSlot *slot,
+                                        bool sealed) noexcept;
+    void publish_committed_artifact_locked(ThreadSlot *slot) noexcept;
+    bool stop_requested_locked() noexcept;
 
     CaptureCoordinatorFactories factories_{};
     mutable std::mutex mutex_;
@@ -116,7 +134,9 @@ private:
     ModuleRange module_{};
     ThreadSlot *slots_ = nullptr;
     void *artifact_ = nullptr;
+    std::shared_ptr<TraceGenerationRuntime> runtime_;
     size_t slot_count_ = 0;
+    uint64_t runtime_generation_ = 0;
     std::atomic<uint64_t> run_id_{0};
     std::atomic<uint32_t> module_generation_{0};
     std::atomic<bool> incomplete_{false};
@@ -125,6 +145,9 @@ private:
     std::atomic<CaptureThreadStartResolver> thread_start_resolver_{nullptr};
     std::atomic<void *> thread_start_resolver_opaque_{nullptr};
     uint64_t coverage_gap_count_ = 0;
+    bool stop_requested_ = false;
+    bool stop_incomplete_reported_ = false;
+    bool artifact_recorded_ = false;
     bool start_attempted_ = false;
     std::atomic<bool> started_{false};
 };

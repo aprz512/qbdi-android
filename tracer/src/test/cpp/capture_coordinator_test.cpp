@@ -1,12 +1,21 @@
 #include "core/capture_coordinator.h"
 #include "core/qbdi_thread_session.h"
+#include "core/trace_generation_runtime.h"
+#include "core/trace_process_lifecycle.h"
 
+#include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <memory>
+#include "third_party/nlohmann/json.hpp"
 #include <string>
 #include <string_view>
+#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -18,6 +27,27 @@ void check(bool condition, const char *expression, int line) {
 }
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
+
+template <typename Predicate>
+void wait_until(Predicate predicate) {
+    for (size_t attempt = 0; attempt < 5000000; ++attempt) {
+        if (predicate()) return;
+        if ((attempt & 1023U) == 0) std::this_thread::yield();
+    }
+    CHECK(false);
+}
+
+struct FakeFlightWriter {
+    TraceGenerationRuntime *runtime = nullptr;
+    uint32_t tid = 0;
+    std::atomic<bool> committed{true};
+    std::atomic<bool> sealed{false};
+    std::atomic<bool> fail_seal{false};
+    std::atomic<bool> block_seal{false};
+    std::atomic<bool> release_seal{false};
+    std::atomic<size_t> seal_calls{0};
+    std::atomic<pid_t> seal_tid{0};
+};
 
 struct FakeFactory {
     size_t artifact_creates = 0;
@@ -38,6 +68,11 @@ struct FakeFactory {
     std::string path;
     bool session_reports_gap = false;
     bool artifact_create_fails = false;
+    std::shared_ptr<TraceGenerationRuntime> runtime;
+    std::array<FakeFlightWriter, 4> flight_writers{};
+    std::atomic<bool> block_session_create{false};
+    std::atomic<bool> session_create_entered{false};
+    std::atomic<bool> release_session_create{false};
 };
 
 bool g_fail_on_child_artifact_mutation = false;
@@ -67,6 +102,51 @@ TraceRunResult no_op_execution(void *opaque, QbdiThreadSession *session, uintptr
     return {true, 7};
 }
 
+QbdiExecutionResult stop_aware_execution(
+        void *opaque, QbdiThreadSession *, uintptr_t, uintptr_t, size_t,
+        const uint64_t[8], uint64_t) noexcept {
+    auto *writer = static_cast<FakeFlightWriter *>(opaque);
+    if (trace_process_child_detached() || writer->runtime == nullptr ||
+        !writer->runtime->stop_token().requested()) {
+        return {{true, true, writer->tid}, false, {}};
+    }
+    return {{true, false, writer->tid}, true,
+            writer->runtime->stop_token().reason()};
+}
+
+TraceRunResult finish_control_only(void *opaque, QbdiThreadSession *) noexcept {
+    const auto *writer = static_cast<FakeFlightWriter *>(opaque);
+    return {true, true, writer->tid};
+}
+
+bool seal_fake_flight_writer(void *opaque, TraceStopReason) noexcept {
+    auto *writer = static_cast<FakeFlightWriter *>(opaque);
+    writer->seal_calls.fetch_add(1, std::memory_order_relaxed);
+    writer->seal_tid.store(static_cast<pid_t>(::syscall(SYS_gettid)),
+                           std::memory_order_release);
+    while (writer->block_seal.load(std::memory_order_acquire) &&
+           !writer->release_seal.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    const bool sealed = !writer->fail_seal.load(std::memory_order_acquire);
+    writer->sealed.store(sealed, std::memory_order_release);
+    return sealed;
+}
+
+bool fake_flight_committed(void *opaque) noexcept {
+    return static_cast<FakeFlightWriter *>(opaque)->committed.load(
+            std::memory_order_acquire);
+}
+
+bool fake_flight_sealed(void *opaque) noexcept {
+    return static_cast<FakeFlightWriter *>(opaque)->sealed.load(
+            std::memory_order_acquire);
+}
+
+std::string_view fake_flight_basename(void *) noexcept {
+    return "cooperative.flight.bin";
+}
+
 QbdiThreadSession *create_session(void *opaque, void *, const TraceConfig &,
                                   const ModuleRange &, const SceneConfig &scene, uint32_t tid,
                                   uint32_t module_generation) noexcept {
@@ -75,6 +155,27 @@ QbdiThreadSession *create_session(void *opaque, void *, const TraceConfig &,
     factory->session_module_generation = module_generation;
     factory->session_scene = scene.name;
     factory->session_scene_offset = scene.offset;
+    if (factory->block_session_create.load(std::memory_order_acquire)) {
+        factory->session_create_entered.store(true, std::memory_order_release);
+        while (!factory->release_session_create.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+    if (factory->runtime != nullptr) {
+        CHECK(factory->session_creates <= factory->flight_writers.size());
+        FakeFlightWriter *writer =
+                &factory->flight_writers[factory->session_creates - 1U];
+        writer->runtime = factory->runtime.get();
+        writer->tid = tid;
+        return QbdiThreadSession::create_for_test(
+                tid, module_generation, stop_aware_execution, writer,
+                nullptr, nullptr, nullptr, nullptr, finish_control_only,
+                {}, {}, {},
+                QbdiFlightWriterControl{
+                        writer, seal_fake_flight_writer,
+                        fake_flight_committed, fake_flight_sealed,
+                        fake_flight_basename});
+    }
     return QbdiThreadSession::create_for_test(tid, module_generation,
                                               no_op_execution, factory);
 }
@@ -123,6 +224,66 @@ ModuleRange retained_module() {
     module.readable_executable_ranges[0] = {module.start, module.end};
     module.readable_executable_range_count = 1;
     return module;
+}
+
+std::shared_ptr<TraceGenerationRuntime> running_runtime(uint64_t generation) {
+    SessionOptions session;
+    session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    auto runtime = TraceGenerationRuntime::create(generation, session);
+    CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
+    return runtime;
+}
+
+FakeFlightWriter *writer_for(FakeFactory *factory, uint32_t tid) {
+    for (FakeFlightWriter &writer : factory->flight_writers) {
+        if (writer.tid == tid) return &writer;
+    }
+    return nullptr;
+}
+
+bool status_lists_one_artifact(const std::string &path,
+                               std::string_view artifact) {
+    FILE *file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr) return false;
+    std::array<char, 65536> bytes{};
+    const size_t size = std::fread(bytes.data(), 1, bytes.size(), file);
+    const bool complete = std::feof(file) != 0;
+    (void)std::fclose(file);
+    if (!complete || size == 0 || size == bytes.size()) return false;
+    const nlohmann::json status = nlohmann::json::parse(
+            bytes.data(), bytes.data() + size, nullptr, false);
+    return !status.is_discarded() && status.value("state", "") == "sealed" &&
+           status.contains("artifacts") && status["artifacts"].is_array() &&
+           status["artifacts"].size() == 1 &&
+           status["artifacts"][0] == artifact;
+}
+
+struct WorkerCall {
+    CaptureCoordinator *coordinator = nullptr;
+    const SceneConfig *scene = nullptr;
+    uint32_t tid = 0;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> invoke{false};
+    std::atomic<bool> done{false};
+    std::atomic<pid_t> owner_tid{0};
+    QbdiThreadSession *session = nullptr;
+};
+
+void run_worker_call(WorkerCall *worker) {
+    worker->owner_tid.store(static_cast<pid_t>(::syscall(SYS_gettid)),
+                            std::memory_order_release);
+    worker->session = worker->coordinator->enter(worker->tid, *worker->scene);
+    CHECK(worker->session != nullptr);
+    worker->entered.store(true, std::memory_order_release);
+    while (!worker->invoke.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    const uint64_t args[8]{};
+    const TraceRunResult result = worker->session->call(0x71000100, args, 0);
+    CHECK(result.target_returned);
+    worker->coordinator->leave(worker->session);
+    worker->done.store(true, std::memory_order_release);
 }
 
 void creates_one_identified_artifact_and_keeps_module_generation_stable() {
@@ -277,6 +438,232 @@ void thread_entry_uses_the_explicit_flight_entry_scene() {
     coordinator.leave(session);
 }
 
+void cooperative_stop_rejects_new_entries_and_seals_on_each_owner() {
+    FakeFactory factory;
+    factory.runtime = running_runtime(47);
+    CaptureCoordinator coordinator(factories(&factory));
+    const TraceConfig config = flight_config();
+    CHECK(coordinator.start(config, retained_module(), 47, factory.runtime));
+
+    WorkerCall first{&coordinator, &config.scenes[0], 101};
+    WorkerCall second{&coordinator, &config.scenes[0], 202};
+    std::thread first_thread(run_worker_call, &first);
+    std::thread second_thread(run_worker_call, &second);
+    wait_until([&] {
+        return first.entered.load(std::memory_order_acquire) &&
+               second.entered.load(std::memory_order_acquire);
+    });
+    FakeFlightWriter *second_writer = writer_for(&factory, 202);
+    CHECK(second_writer != nullptr);
+    second_writer->block_seal.store(true, std::memory_order_release);
+
+    CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+    CHECK(coordinator.enter(303, config.scenes[0]) == nullptr);
+    first.invoke.store(true, std::memory_order_release);
+    second.invoke.store(true, std::memory_order_release);
+    wait_until([&] {
+        return first.done.load(std::memory_order_acquire) &&
+               second_writer->seal_calls.load(std::memory_order_acquire) == 1;
+    });
+    CHECK(factory.runtime->snapshot().phase == TraceGenerationPhase::Stopping);
+    CHECK(factory.runtime->snapshot().active_calls == 1);
+    CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+
+    second_writer->release_seal.store(true, std::memory_order_release);
+    first_thread.join();
+    second_thread.join();
+    CHECK(factory.runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+    CHECK(factory.runtime->snapshot().active_calls == 0);
+    FakeFlightWriter *first_writer = writer_for(&factory, 101);
+    CHECK(first_writer != nullptr);
+    CHECK(first_writer->seal_calls.load(std::memory_order_acquire) == 1);
+    CHECK(second_writer->seal_calls.load(std::memory_order_acquire) == 1);
+    CHECK(first_writer->seal_tid.load(std::memory_order_acquire) ==
+          first.owner_tid.load(std::memory_order_acquire));
+    CHECK(second_writer->seal_tid.load(std::memory_order_acquire) ==
+          second.owner_tid.load(std::memory_order_acquire));
+}
+
+void owning_thread_seal_failure_finishes_stop_incomplete() {
+    FakeFactory factory;
+    factory.runtime = running_runtime(51);
+    CaptureCoordinator coordinator(factories(&factory));
+    const TraceConfig config = flight_config();
+    CHECK(coordinator.start(config, retained_module(), 51, factory.runtime));
+
+    WorkerCall worker{&coordinator, &config.scenes[0], 202};
+    std::thread thread(run_worker_call, &worker);
+    wait_until([&] { return worker.entered.load(std::memory_order_acquire); });
+    FakeFlightWriter *writer = writer_for(&factory, 202);
+    CHECK(writer != nullptr);
+    writer->fail_seal.store(true, std::memory_order_release);
+    CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+    worker.invoke.store(true, std::memory_order_release);
+    thread.join();
+
+    CHECK(writer->seal_calls.load(std::memory_order_acquire) == 1);
+    CHECK(!writer->sealed.load(std::memory_order_acquire));
+    CHECK(factory.runtime->snapshot().phase ==
+          TraceGenerationPhase::StopIncomplete);
+    CHECK(coordinator.incomplete());
+}
+
+void missing_ack_is_reported_without_touching_the_live_writer() {
+    FakeFactory factory;
+    factory.runtime = running_runtime(52);
+    CaptureCoordinator coordinator(factories(&factory));
+    const TraceConfig config = flight_config();
+    CHECK(coordinator.start(config, retained_module(), 52, factory.runtime));
+
+    WorkerCall acknowledged{&coordinator, &config.scenes[0], 101};
+    WorkerCall missing{&coordinator, &config.scenes[0], 202};
+    std::thread acknowledged_thread(run_worker_call, &acknowledged);
+    std::thread missing_thread(run_worker_call, &missing);
+    wait_until([&] {
+        return acknowledged.entered.load(std::memory_order_acquire) &&
+               missing.entered.load(std::memory_order_acquire);
+    });
+    CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+    acknowledged.invoke.store(true, std::memory_order_release);
+    acknowledged_thread.join();
+    CHECK(factory.runtime->snapshot().phase == TraceGenerationPhase::Stopping);
+
+    FakeFlightWriter *live_writer = writer_for(&factory, 202);
+    CHECK(live_writer != nullptr);
+    CHECK(live_writer->committed.load(std::memory_order_acquire));
+    CHECK(live_writer->seal_calls.load(std::memory_order_acquire) == 0);
+    CHECK(coordinator.report_stop_incomplete());
+    CHECK(factory.runtime->snapshot().phase ==
+          TraceGenerationPhase::StopIncomplete);
+    CHECK(factory.runtime->snapshot().active_calls == 0);
+    CHECK(factory.session_destroys == 0);
+    CHECK(factory.artifact_destroys == 0);
+    CHECK(live_writer->seal_calls.load(std::memory_order_acquire) == 0);
+    CHECK(live_writer->committed.load(std::memory_order_acquire));
+
+    missing.invoke.store(true, std::memory_order_release);
+    missing_thread.join();
+    CHECK(live_writer->seal_calls.load(std::memory_order_acquire) == 1);
+    CHECK(factory.runtime->snapshot().phase ==
+          TraceGenerationPhase::StopIncomplete);
+    CHECK(!coordinator.report_stop_incomplete());
+}
+
+void stop_and_slot_creation_have_one_mutex_linearization_order() {
+    FakeFactory factory;
+    factory.runtime = running_runtime(53);
+    factory.block_session_create.store(true, std::memory_order_release);
+    CaptureCoordinator coordinator(factories(&factory));
+    const TraceConfig config = flight_config();
+    CHECK(coordinator.start(config, retained_module(), 53, factory.runtime));
+
+    WorkerCall worker{&coordinator, &config.scenes[0], 101};
+    std::thread owner(run_worker_call, &worker);
+    wait_until([&] {
+        return factory.session_create_entered.load(std::memory_order_acquire);
+    });
+    std::atomic<bool> stop_returned{false};
+    std::thread stopper([&] {
+        CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+        stop_returned.store(true, std::memory_order_release);
+    });
+    CHECK(!stop_returned.load(std::memory_order_acquire));
+    factory.release_session_create.store(true, std::memory_order_release);
+    wait_until([&] { return worker.entered.load(std::memory_order_acquire); });
+    stopper.join();
+    CHECK(stop_returned.load(std::memory_order_acquire));
+    CHECK(coordinator.enter(303, config.scenes[0]) == nullptr);
+    worker.invoke.store(true, std::memory_order_release);
+    owner.join();
+    CHECK(factory.runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+}
+
+void fork_child_never_seals_or_acknowledges_inherited_slots() {
+    CHECK(install_trace_process_lifecycle());
+    FakeFactory factory;
+    factory.runtime = running_runtime(54);
+    auto coordinator = std::make_shared<CaptureCoordinator>(factories(&factory));
+    const TraceConfig config = flight_config();
+    CHECK(coordinator->start(config, retained_module(), 54, factory.runtime));
+    QbdiThreadSession *session = coordinator->enter(101, config.scenes[0]);
+    CHECK(session != nullptr);
+    FakeFlightWriter *writer = writer_for(&factory, 101);
+    CHECK(writer != nullptr);
+    CHECK(coordinator->request_stop(TraceStopReason::DurationElapsed));
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        coordinator->detach_after_fork_child();
+        const uint64_t args[8]{};
+        (void)session->call(0x71000100, args, 0);
+        if (writer->seal_calls.load(std::memory_order_acquire) != 0) _exit(81);
+        if (factory.runtime->snapshot().active_calls != 1) _exit(82);
+        _exit(0);
+    }
+    int status = -1;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
+    CHECK(writer->seal_calls.load(std::memory_order_acquire) == 0);
+
+    const uint64_t args[8]{};
+    CHECK(session->call(0x71000100, args, 0).target_returned);
+    coordinator->leave(session);
+    CHECK(factory.runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+}
+
+void committed_flight_artifact_is_published_once_to_session_status() {
+    char directory_template[] = "/tmp/qtrace-flight-status-XXXXXX";
+    char *created = ::mkdtemp(directory_template);
+    CHECK(created != nullptr);
+    const std::string directory = created;
+    const std::string session_id =
+            "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    const std::string status_path = directory + "/session-" + session_id +
+                                    ".status.json";
+    {
+        TraceConfig config = flight_config();
+        config.session.id = session_id;
+        TraceGenerationStatusOptions status_options;
+        status_options.config = config;
+        status_options.output_directory = directory;
+        FakeFactory factory;
+        factory.runtime = TraceGenerationRuntime::create(
+                55, config.session,
+                TraceGenerationLimits{config.scenes.size(),
+                                      config.flight.max_threads},
+                {}, std::move(status_options));
+        CHECK(factory.runtime != nullptr);
+        CHECK(factory.runtime->arm());
+        CaptureCoordinator coordinator(factories(&factory));
+        CHECK(coordinator.start(config, retained_module(), 55,
+                                factory.runtime));
+
+        WorkerCall first{&coordinator, &config.scenes[0], 101};
+        WorkerCall second{&coordinator, &config.scenes[0], 202};
+        std::thread first_thread(run_worker_call, &first);
+        std::thread second_thread(run_worker_call, &second);
+        wait_until([&] {
+            return first.entered.load(std::memory_order_acquire) &&
+                   second.entered.load(std::memory_order_acquire);
+        });
+        CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+        first.invoke.store(true, std::memory_order_release);
+        second.invoke.store(true, std::memory_order_release);
+        first_thread.join();
+        second_thread.join();
+        wait_until([&] {
+            return status_lists_one_artifact(
+                    status_path, "cooperative.flight.bin");
+        });
+    }
+    CHECK(::unlink(status_path.c_str()) == 0);
+    const std::string commit_path = status_path + ".commit";
+    CHECK(::unlink(commit_path.c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -286,4 +673,10 @@ int main() {
     session_gap_latches_the_coordinator_incomplete();
     failed_artifact_start_is_permanent_and_not_retried();
     thread_entry_uses_the_explicit_flight_entry_scene();
+    cooperative_stop_rejects_new_entries_and_seals_on_each_owner();
+    owning_thread_seal_failure_finishes_stop_incomplete();
+    missing_ack_is_reported_without_touching_the_live_writer();
+    stop_and_slot_creation_have_one_mutex_linearization_order();
+    fork_child_never_seals_or_acknowledges_inherited_slots();
+    committed_flight_artifact_is_published_once_to_session_status();
 }

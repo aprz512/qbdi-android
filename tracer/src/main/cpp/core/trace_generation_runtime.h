@@ -127,6 +127,7 @@ public:
     TraceGenerationRuntime &operator=(const TraceGenerationRuntime &) = delete;
 
     bool arm() noexcept;
+    bool request_stop(TraceStopReason reason) noexcept;
     TraceAdmissionResult try_begin_call(
             uint64_t generation, size_t scene_index, uint32_t tid) noexcept;
     void finish_call(const TraceAdmission &admission, bool sealed) noexcept;

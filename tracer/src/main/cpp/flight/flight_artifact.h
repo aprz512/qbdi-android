@@ -3,10 +3,12 @@
 #include "core/trace_config.h"
 #include "flight/flight_format.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <pthread.h>
+#include <string_view>
 
 constexpr uint32_t kFlightEmergencyCommitted = 0x80000000U;
 constexpr uint32_t kFlightInvalidIndex = UINT32_MAX;
@@ -111,6 +113,9 @@ public:
     uint8_t *bytes() noexcept { return mapping_; }
     const uint8_t *bytes() const noexcept { return mapping_; }
     size_t size() const noexcept { return mapping_size_; }
+    std::string_view basename() const noexcept {
+        return {basename_.data(), basename_size_};
+    }
     uint32_t chunk_count() const noexcept { return chunk_count_; }
     uint32_t chunk_data_capacity() const noexcept;
 
@@ -138,6 +143,7 @@ public:
     __attribute__((no_stack_protector)) bool increment_dropped_coverage_gap(
             uint32_t slot_index) noexcept;
 #if defined(QTRACE_HOST_TEST)
+    void test_fail_seal(bool fail) noexcept { test_fail_seal_ = fail; }
     bool test_claim_emergency_slot(uint32_t slot_index) noexcept;
     void test_release_emergency_slot(uint32_t slot_index) noexcept;
     void test_interrupt_emergency_publication(
@@ -194,8 +200,12 @@ private:
     uint32_t chunk_count_ = 0;
     uint64_t allocation_epoch_ = 0;
     FlightSequenceAllocator sequence_allocator_{};
+    static constexpr size_t kBasenameCapacity = 255;
+    std::array<char, kBasenameCapacity + 1U> basename_{};
+    size_t basename_size_ = 0;
     pthread_mutex_t rotation_mutex_ = PTHREAD_MUTEX_INITIALIZER;
 #if defined(QTRACE_HOST_TEST)
+    bool test_fail_seal_ = false;
     uint32_t test_interrupt_emergency_type_ = 0;
     uint32_t test_interrupt_emergency_skip_ = 0;
     uint32_t test_interrupt_emergency_phase_ = 0;

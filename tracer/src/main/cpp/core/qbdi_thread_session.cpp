@@ -165,10 +165,11 @@ struct QbdiThreadSession::Impl {
 
     Impl(const TraceConfig &source_config, const ModuleRange &retained_module,
          const SceneConfig &entry_scene, uint32_t thread_id,
-         FlightArtifact *flight_artifact) noexcept
+         FlightArtifact *flight_artifact, QbdiStopControl control) noexcept
             : config(&source_config), module(&retained_module), scene(&entry_scene),
               context(&owned_context), sink(&flight_sink), gate(&owned_gate),
-              artifact(flight_artifact), trace_options(source_config.trace),
+              stop_control(control), artifact(flight_artifact),
+              trace_options(source_config.trace),
               flight(true) {
         trace_options.profile = TraceProfile::Full;
         owned_context.module_base = module->start;
@@ -203,7 +204,13 @@ struct QbdiThreadSession::Impl {
         delete collector;
         collector = nullptr;
         if (flight) {
-            (void)chunk_writer.seal();
+            // A requested generation stop may only seal on the target owner.
+            // Missing-ack teardown preserves the active committed chunk for
+            // recovery instead of sealing it from the coordinator thread.
+            if (stop_control.token == nullptr ||
+                !stop_control.token->requested()) {
+                (void)chunk_writer.seal();
+            }
             chunk_writer.detach();
         }
         if (fakestack != nullptr) QBDI::alignedFree(fakestack);
@@ -529,6 +536,10 @@ struct QbdiThreadSession::Impl {
                               flight_context, gpr)) {
             return fail_setup("flight trace sink initialization failed");
         }
+        if (flight && stop_control.committed != nullptr &&
+            chunk_writer.committed()) {
+            stop_control.committed(stop_control.opaque);
+        }
         if (flight &&
             needs_thread_begin_publication(thread_lifecycle_pending,
                                            thread_lifecycle_published) &&
@@ -802,6 +813,10 @@ bool QbdiThreadSession::publish_native_thread_begin() noexcept {
 
 bool QbdiThreadSession::end_thread() noexcept {
     if (!thread_begun_ || thread_ended_) return false;
+    if (stop_handled_) {
+        thread_ended_ = true;
+        return stop_sealed_;
+    }
 #if defined(QTRACE_HOST_TEST)
     const bool ended = lifecycle_reporter_ == nullptr ||
                        lifecycle_reporter_(lifecycle_opaque_, tid_, false,
@@ -829,6 +844,54 @@ bool QbdiThreadSession::seal_observed_stop(TraceStopReason reason) noexcept {
     }
     if (!stop_sealed_ || stop_control_.acknowledge == nullptr) incomplete_ = true;
     return stop_sealed_;
+}
+
+void QbdiThreadSession::set_stop_control(QbdiStopControl control) noexcept {
+    if (entered_ || vm_running_ || stop_handled_) return;
+    stop_control_ = control;
+#if !defined(QTRACE_HOST_TEST)
+    if (impl_ != nullptr) impl_->stop_control = control;
+#endif
+}
+
+bool QbdiThreadSession::seal_flight_writer(TraceStopReason reason) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    return test_flight_writer_.seal != nullptr &&
+           test_flight_writer_.seal(test_flight_writer_.opaque, reason);
+#else
+    (void)reason;
+    return impl_ != nullptr && impl_->flight && impl_->chunk_writer.seal();
+#endif
+}
+
+bool QbdiThreadSession::flight_writer_committed() const noexcept {
+#if defined(QTRACE_HOST_TEST)
+    return test_flight_writer_.committed != nullptr &&
+           test_flight_writer_.committed(test_flight_writer_.opaque);
+#else
+    return impl_ != nullptr && impl_->flight && impl_->chunk_writer.committed();
+#endif
+}
+
+bool QbdiThreadSession::flight_writer_sealed() const noexcept {
+#if defined(QTRACE_HOST_TEST)
+    return test_flight_writer_.sealed != nullptr &&
+           test_flight_writer_.sealed(test_flight_writer_.opaque);
+#else
+    return impl_ != nullptr && impl_->flight && impl_->chunk_writer.sealed();
+#endif
+}
+
+std::string_view QbdiThreadSession::flight_writer_basename() const noexcept {
+#if defined(QTRACE_HOST_TEST)
+    return test_flight_writer_.basename == nullptr
+                   ? std::string_view{}
+                   : test_flight_writer_.basename(test_flight_writer_.opaque);
+#else
+    return impl_ == nullptr || !impl_->flight
+                   ? std::string_view{}
+                   : impl_->chunk_writer.basename();
+#endif
 }
 
 void QbdiThreadSession::set_gap_reporter(
@@ -947,7 +1010,8 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
         QbdiThreadSessionTestContinuation continuation,
         QbdiControlExtentRegistration control_registration,
         QbdiVmExecutionLifecycle signal_execution,
-        QbdiStopControl stop_control) noexcept {
+        QbdiStopControl stop_control,
+        QbdiFlightWriterControl flight_writer) noexcept {
     if (tid == 0 || module_generation == 0 || executor == nullptr) return nullptr;
     auto *session = new (std::nothrow) QbdiThreadSession(tid, module_generation);
     if (session == nullptr) return nullptr;
@@ -962,6 +1026,7 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
     session->test_signal_execution_ = signal_execution;
     session->ready_ = true;
     session->stop_control_ = stop_control;
+    session->test_flight_writer_ = flight_writer;
     return session;
 }
 
@@ -974,7 +1039,8 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
         QbdiThreadSessionTestContinuation continuation,
         QbdiControlExtentRegistration control_registration,
         QbdiVmExecutionLifecycle signal_execution,
-        QbdiStopControl stop_control) noexcept {
+        QbdiStopControl stop_control,
+        QbdiFlightWriterControl flight_writer) noexcept {
     if (tid == 0 || module_generation == 0 || executor == nullptr) return nullptr;
     auto *session = new (std::nothrow) QbdiThreadSession(tid, module_generation);
     if (session == nullptr) return nullptr;
@@ -988,6 +1054,7 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
     session->test_control_registration_ = control_registration;
     session->test_signal_execution_ = signal_execution;
     session->stop_control_ = stop_control;
+    session->test_flight_writer_ = flight_writer;
     session->ready_ = true;
     return session;
 }
@@ -1032,7 +1099,7 @@ QbdiThreadSession *QbdiThreadSession::create_normal(
 
 QbdiThreadSession *QbdiThreadSession::create_flight(
         const TraceConfig &, const ModuleRange &, const SceneConfig &, uint32_t,
-        uint32_t, FlightArtifact *) noexcept {
+        uint32_t, FlightArtifact *, QbdiStopControl) noexcept {
     return nullptr;
 }
 
@@ -1064,13 +1131,14 @@ QbdiThreadSession *QbdiThreadSession::create_normal(
 QbdiThreadSession *QbdiThreadSession::create_flight(
         const TraceConfig &config, const ModuleRange &module,
         const SceneConfig &scene, uint32_t tid, uint32_t module_generation,
-        FlightArtifact *artifact) noexcept {
+        FlightArtifact *artifact, QbdiStopControl stop_control) noexcept {
     if (tid == 0 || module_generation == 0 || artifact == nullptr) return nullptr;
     auto *session = new (std::nothrow)
             QbdiThreadSession(tid, module_generation);
     if (session == nullptr) return nullptr;
+    session->stop_control_ = stop_control;
     session->impl_ = new (std::nothrow)
-            Impl(config, module, scene, tid, artifact);
+            Impl(config, module, scene, tid, artifact, stop_control);
     session->ready_ = session->impl_ != nullptr && session->impl_->ready;
     if (!session->ready_) {
         delete session;

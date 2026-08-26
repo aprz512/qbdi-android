@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 
 class BinaryTraceWriter;
 class CaptureCoordinator;
@@ -25,12 +26,28 @@ class QbdiThreadSession;
 
 using QbdiSealStopped = bool (*)(void *, TraceStopReason) noexcept;
 using QbdiStopAcknowledged = void (*)(void *, bool sealed) noexcept;
+using QbdiFlightCommitted = void (*)(void *) noexcept;
 
 struct QbdiStopControl {
     const TraceStopToken *token = nullptr;
     void *opaque = nullptr;
     QbdiSealStopped seal = nullptr;
     QbdiStopAcknowledged acknowledge = nullptr;
+    QbdiFlightCommitted committed = nullptr;
+};
+
+using QbdiFlightWriterSeal = bool (*)(void *, TraceStopReason) noexcept;
+using QbdiFlightWriterState = bool (*)(void *) noexcept;
+using QbdiFlightWriterBasename = std::string_view (*)(void *) noexcept;
+
+// Host tests replace only the mmap-backed Flight writer operations. Production
+// sessions read the same state from their owned FlightChunkWriter.
+struct QbdiFlightWriterControl {
+    void *opaque = nullptr;
+    QbdiFlightWriterSeal seal = nullptr;
+    QbdiFlightWriterState committed = nullptr;
+    QbdiFlightWriterState sealed = nullptr;
+    QbdiFlightWriterBasename basename = nullptr;
 };
 
 enum class QbdiTargetPreAction : uint8_t {
@@ -142,7 +159,8 @@ public:
     static QbdiThreadSession *create_flight(
             const TraceConfig &config, const ModuleRange &module,
             const SceneConfig &scene, uint32_t tid, uint32_t module_generation,
-            FlightArtifact *artifact) noexcept;
+            FlightArtifact *artifact,
+            QbdiStopControl stop_control = {}) noexcept;
 
 #if defined(QTRACE_HOST_TEST)
     static QbdiThreadSession *create_for_test(
@@ -155,7 +173,8 @@ public:
             QbdiThreadSessionTestContinuation continuation = nullptr,
             QbdiControlExtentRegistration control_registration = {},
             QbdiVmExecutionLifecycle signal_execution = {},
-            QbdiStopControl stop_control = {}) noexcept;
+            QbdiStopControl stop_control = {},
+            QbdiFlightWriterControl flight_writer = {}) noexcept;
     static QbdiThreadSession *create_for_test(
             uint32_t tid, uint32_t module_generation,
             QbdiThreadSessionStopTestExecutor executor, void *executor_opaque,
@@ -166,7 +185,8 @@ public:
             QbdiThreadSessionTestContinuation continuation = nullptr,
             QbdiControlExtentRegistration control_registration = {},
             QbdiVmExecutionLifecycle signal_execution = {},
-            QbdiStopControl stop_control = {}) noexcept;
+            QbdiStopControl stop_control = {},
+            QbdiFlightWriterControl flight_writer = {}) noexcept;
 #endif
 
     TraceRunResult call(uintptr_t entry, const uint64_t args[8],
@@ -213,6 +233,11 @@ private:
             uint64_t indirect_result) QTRACE_SESSION_CALL_NOEXCEPT;
     TraceRunResult continue_execution() QTRACE_SESSION_CALL_NOEXCEPT;
     bool seal_observed_stop(TraceStopReason reason) noexcept;
+    void set_stop_control(QbdiStopControl control) noexcept;
+    bool seal_flight_writer(TraceStopReason reason) noexcept;
+    bool flight_writer_committed() const noexcept;
+    bool flight_writer_sealed() const noexcept;
+    std::string_view flight_writer_basename() const noexcept;
     bool ensure_control_extent(uintptr_t execution_entry,
                                uintptr_t control_start,
                                size_t execution_bytes) noexcept;
@@ -236,6 +261,9 @@ private:
 #endif
     QbdiControlExtentSet control_extents_;
     QbdiStopControl stop_control_{};
+#if defined(QTRACE_HOST_TEST)
+    QbdiFlightWriterControl test_flight_writer_{};
+#endif
     uintptr_t thread_entry_ = 0;
     uint32_t creator_tid_ = 0;
     uint32_t tid_ = 0;

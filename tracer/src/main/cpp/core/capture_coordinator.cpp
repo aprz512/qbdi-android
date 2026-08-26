@@ -277,6 +277,12 @@ CaptureCoordinator::~CaptureCoordinator() {
     if (slots_ != nullptr) {
         for (size_t index = 0; index < slot_count_; ++index) {
             if (slots_[index].session != nullptr) {
+                if (runtime_ != nullptr &&
+                    slots_[index].admission.serial != 0 &&
+                    !slots_[index].stop_finished) {
+                    runtime_->finish_call(slots_[index].admission, false);
+                    slots_[index].stop_finished = true;
+                }
                 factories_.destroy_session(factories_.opaque,
                                            slots_[index].session);
             }
@@ -289,7 +295,8 @@ CaptureCoordinator::~CaptureCoordinator() {
 }
 
 bool CaptureCoordinator::start(TraceConfig config, ModuleRange module,
-                               uint32_t module_generation) {
+                               uint32_t module_generation,
+                               std::shared_ptr<TraceGenerationRuntime> runtime) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (started_.load(std::memory_order_relaxed) || start_attempted_ || detached() ||
         !factories_valid(factories_) ||
@@ -348,10 +355,62 @@ bool CaptureCoordinator::start(TraceConfig config, ModuleRange module,
     module_ = std::move(module);
     slots_ = slots;
     artifact_ = artifact;
+    runtime_ = std::move(runtime);
     slot_count_ = config_.flight.max_threads;
+    runtime_generation_ = runtime_ == nullptr
+                                  ? 0
+                                  : runtime_->snapshot().generation;
     run_id_.store(run_id, std::memory_order_relaxed);
     module_generation_.store(module_generation, std::memory_order_relaxed);
     started_.store(true, std::memory_order_release);
+    return true;
+}
+
+bool CaptureCoordinator::request_stop(TraceStopReason reason) noexcept {
+    if (detached()) return false;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!started_.load(std::memory_order_relaxed) || detached() ||
+        runtime_ == nullptr) {
+        return false;
+    }
+    if (stop_requested_) {
+        return runtime_->stop_token().requested() &&
+               runtime_->stop_token().reason() == reason;
+    }
+    if (!runtime_->request_stop(reason)) return false;
+    stop_requested_ = true;
+    for (size_t index = 0; index < slot_count_; ++index) {
+        publish_committed_artifact_locked(&slots_[index]);
+    }
+    return true;
+}
+
+bool CaptureCoordinator::report_stop_incomplete() noexcept {
+    if (detached()) return false;
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!started_.load(std::memory_order_relaxed) || detached() ||
+        runtime_ == nullptr || !stop_requested_ ||
+        stop_incomplete_reported_) {
+        return false;
+    }
+    bool missing = false;
+    for (size_t index = 0; index < slot_count_; ++index) {
+        ThreadSlot &slot = slots_[index];
+        if (slot.session == nullptr || slot.admission.serial == 0 ||
+            slot.stop_finished) {
+            continue;
+        }
+        publish_committed_artifact_locked(&slot);
+        runtime_->finish_call(slot.admission, false);
+        slot.stop_finished = true;
+        missing = true;
+    }
+    if (!missing) return false;
+    stop_incomplete_reported_ = true;
+    incomplete_.store(true, std::memory_order_release);
+    (void)runtime_->record_status_error(
+            "FLIGHT_STOP_INCOMPLETE", "$.activeScenes",
+            "one or more Flight owners did not acknowledge stop");
     return true;
 }
 
@@ -465,7 +524,8 @@ QbdiThreadSession *CaptureCoordinator::enter(uint32_t tid,
                                              const SceneConfig &scene) noexcept {
     if (detached()) return nullptr;
     std::lock_guard<std::mutex> guard(mutex_);
-    if (!started_.load(std::memory_order_relaxed) || detached() || tid == 0) {
+    if (!started_.load(std::memory_order_relaxed) || detached() || tid == 0 ||
+        stop_requested_locked()) {
         return nullptr;
     }
     uintptr_t pc = 0;
@@ -489,7 +549,7 @@ QbdiThreadSession *CaptureCoordinator::enter_thread(uint32_t tid,
     if (detached()) return nullptr;
     std::lock_guard<std::mutex> guard(mutex_);
     if (!started_.load(std::memory_order_relaxed) || detached() || tid == 0 ||
-        entry == 0) {
+        entry == 0 || stop_requested_locked()) {
         return nullptr;
     }
     const SceneConfig *entry_scene = nullptr;
@@ -520,6 +580,15 @@ QbdiThreadSession *CaptureCoordinator::enter_locked(
 
     for (size_t index = 0; index < slot_count_; ++index) {
         if (slots_[index].tid != 0) continue;
+        TraceAdmission admission{};
+        if (runtime_ != nullptr) {
+            const TraceAdmissionResult admitted = runtime_->try_begin_call(
+                    runtime_generation_, retained_scene.index, tid);
+            if (admitted.status != TraceAdmissionStatus::Admitted) {
+                return nullptr;
+            }
+            admission = admitted.admission;
+        }
         QbdiThreadSession *session = factories_.create_session(
                 factories_.opaque, artifact_, config_, module_, retained_scene, tid,
                 module_generation_.load(std::memory_order_relaxed));
@@ -527,14 +596,29 @@ QbdiThreadSession *CaptureCoordinator::enter_locked(
             if (session != nullptr) {
                 factories_.destroy_session(factories_.opaque, session);
             }
+            if (runtime_ != nullptr && admission.serial != 0) {
+                runtime_->finish_call(admission, false);
+            }
             mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
             return nullptr;
         }
         session->set_gap_reporter(report_session_gap, this);
         session->set_capture_owner(weak_from_this());
+        slots_[index].owner = this;
         slots_[index].tid = tid;
         slots_[index].session = session;
+        slots_[index].admission = admission;
+        slots_[index].stop_finished = false;
+        if (runtime_ != nullptr) {
+            session->set_stop_control(QbdiStopControl{
+                    &runtime_->stop_token(), &slots_[index], seal_flight_slot,
+                    acknowledge_flight_slot, publish_flight_slot_committed});
+        }
         if (!session->try_enter()) {
+            if (runtime_ != nullptr && admission.serial != 0) {
+                runtime_->finish_call(admission, false);
+                slots_[index].stop_finished = true;
+            }
             mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
             return nullptr;
         }
@@ -568,6 +652,16 @@ void CaptureCoordinator::finish_thread(QbdiThreadSession *session,
             if (slots_[index].session != session) continue;
             entry = session->thread_entry();
             ended = session->end_thread();
+            publish_committed_artifact_locked(&slots_[index]);
+            if (runtime_ != nullptr &&
+                slots_[index].admission.serial != 0 &&
+                !slots_[index].stop_finished) {
+                runtime_->finish_call(slots_[index].admission, ended);
+                slots_[index].stop_finished = true;
+                if (!ended && stop_requested_) {
+                    incomplete_.store(true, std::memory_order_release);
+                }
+            }
             if (retain_active_session) {
                 owned = session;
                 break;
@@ -597,4 +691,78 @@ void CaptureCoordinator::mark_coverage_gap(uint32_t tid, uintptr_t pc,
 
 void CaptureCoordinator::detach_after_fork_child() noexcept {
     detached_.store(true, std::memory_order_release);
+    if (runtime_ != nullptr) runtime_->detach_after_fork_child();
+}
+
+bool CaptureCoordinator::seal_flight_slot(
+        void *opaque, TraceStopReason reason) noexcept {
+    auto *slot = static_cast<ThreadSlot *>(opaque);
+    return slot != nullptr && slot->owner != nullptr &&
+           !slot->owner->detached() && slot->session != nullptr &&
+           slot->session->seal_flight_writer(reason);
+}
+
+void CaptureCoordinator::acknowledge_flight_slot(
+        void *opaque, bool sealed) noexcept {
+    auto *slot = static_cast<ThreadSlot *>(opaque);
+    if (slot == nullptr || slot->owner == nullptr || slot->owner->detached()) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(slot->owner->mutex_);
+    slot->owner->acknowledge_flight_slot_locked(slot, sealed);
+}
+
+void CaptureCoordinator::publish_flight_slot_committed(void *opaque) noexcept {
+    auto *slot = static_cast<ThreadSlot *>(opaque);
+    if (slot == nullptr || slot->owner == nullptr || slot->owner->detached()) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(slot->owner->mutex_);
+    slot->owner->publish_committed_artifact_locked(slot);
+}
+
+void CaptureCoordinator::acknowledge_flight_slot_locked(
+        ThreadSlot *slot, bool sealed) noexcept {
+    if (slot == nullptr || slot->owner != this || slot->session == nullptr ||
+        slot->stop_finished || runtime_ == nullptr ||
+        slot->admission.serial == 0) {
+        return;
+    }
+    publish_committed_artifact_locked(slot);
+    const bool writer_sealed = slot->session->flight_writer_sealed();
+    if (sealed && writer_sealed) {
+        runtime_->acknowledge_sealed(slot->admission);
+    } else {
+        runtime_->finish_call(slot->admission, false);
+        incomplete_.store(true, std::memory_order_release);
+        (void)runtime_->record_status_error(
+                "FLIGHT_SEAL_FAILED", "$.artifacts",
+                "Flight artifact could not be sealed by its owning thread");
+    }
+    slot->stop_finished = true;
+}
+
+void CaptureCoordinator::publish_committed_artifact_locked(
+        ThreadSlot *slot) noexcept {
+    if (artifact_recorded_ || runtime_ == nullptr || slot == nullptr ||
+        slot->session == nullptr ||
+        !slot->session->flight_writer_committed()) {
+        return;
+    }
+    const std::string_view basename = slot->session->flight_writer_basename();
+    if (!basename.empty() && runtime_->record_artifact(basename)) {
+        artifact_recorded_ = true;
+    }
+}
+
+bool CaptureCoordinator::stop_requested_locked() noexcept {
+    if (stop_requested_) return true;
+    if (runtime_ == nullptr || !runtime_->stop_token().requested()) {
+        return false;
+    }
+    stop_requested_ = true;
+    for (size_t index = 0; index < slot_count_; ++index) {
+        publish_committed_artifact_locked(&slots_[index]);
+    }
+    return true;
 }

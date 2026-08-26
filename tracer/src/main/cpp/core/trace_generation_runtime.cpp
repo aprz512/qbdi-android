@@ -223,6 +223,25 @@ void TraceGenerationRuntime::publish_deadline_stop_locked() noexcept {
     note_transition();
 }
 
+bool TraceGenerationRuntime::request_stop(TraceStopReason reason) noexcept {
+    if (detached_.load(std::memory_order_acquire) ||
+        reason != TraceStopReason::DurationElapsed) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(active_mutex_);
+    if (stop_token_.requested()) return stop_token_.reason() == reason;
+    if (phase_.load(std::memory_order_acquire) !=
+        TraceGenerationPhase::Running) {
+        return false;
+    }
+    stop_token_.request(reason);
+    phase_.store(TraceGenerationPhase::StopRequested,
+                 std::memory_order_release);
+    note_transition();
+    complete_stop_if_idle_locked();
+    return true;
+}
+
 TraceAdmissionResult TraceGenerationRuntime::try_begin_call(
         uint64_t generation, size_t scene_index, uint32_t tid) noexcept {
     std::lock_guard<std::mutex> lock(active_mutex_);

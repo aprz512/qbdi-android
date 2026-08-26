@@ -74,6 +74,22 @@ bool power_of_two(uint32_t value) noexcept {
     return value != 0 && (value & (value - 1U)) == 0;
 }
 
+bool artifact_basename_is_safe(const char *basename, size_t size) noexcept {
+    if (basename == nullptr || size == 0 || size > 255 ||
+        (size == 1 && basename[0] == '.') ||
+        (size == 2 && basename[0] == '.' && basename[1] == '.')) {
+        return false;
+    }
+    for (size_t index = 0; index < size; ++index) {
+        const unsigned char character = static_cast<unsigned char>(basename[index]);
+        if (character == '/' || character == '\\' || character < 0x20U ||
+            character == 0x7fU) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool valid_registration(const FlightThreadRegistration &registration,
                         uint32_t maximum) noexcept {
     return registration.tid != 0 && registration.directory_index < maximum;
@@ -297,6 +313,14 @@ bool FlightArtifact::create(const char *path, const FlightOptions &options,
         errno = EINVAL;
         return false;
     }
+    const char *basename = std::strrchr(path, '/');
+    basename = basename == nullptr ? path : basename + 1U;
+    const size_t basename_size = std::strlen(basename);
+    if (!artifact_basename_is_safe(basename, basename_size) ||
+        basename_size > kBasenameCapacity) {
+        errno = EINVAL;
+        return false;
+    }
 
     uint64_t directory_bytes = 0;
     uint64_t emergency_bytes = 0;
@@ -438,6 +462,9 @@ bool FlightArtifact::create(const char *path, const FlightOptions &options,
         return false;
     }
     flight_atomic_store_u32_le(mapping_, kFlightMagic, std::memory_order_release);
+    std::memcpy(basename_.data(), basename, basename_size);
+    basename_[basename_size] = '\0';
+    basename_size_ = basename_size;
     return true;
 }
 
@@ -1041,6 +1068,9 @@ bool FlightArtifact::publish_thread_sequence(const FlightThreadRegistration &reg
 bool FlightArtifact::seal_chunk(const FlightChunkLease &lease, uint64_t first_sequence,
                                 uint64_t last_sequence, uint32_t committed_bytes,
                                 uint32_t record_count, uint32_t checksum) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    if (test_fail_seal_) return false;
+#endif
     uint8_t *header = chunk(lease.chunk_index);
     if (header == nullptr || !lease || committed_bytes > chunk_data_capacity() ||
         flight_atomic_load_u32_le(header + kChunkStateOffset, std::memory_order_acquire) !=
@@ -1111,4 +1141,9 @@ void FlightArtifact::reset_state() noexcept {
     chunk_count_ = 0;
     allocation_epoch_ = 0;
     sequence_allocator_.reset();
+    basename_[0] = '\0';
+    basename_size_ = 0;
+#if defined(QTRACE_HOST_TEST)
+    test_fail_seal_ = false;
+#endif
 }

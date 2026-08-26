@@ -2,9 +2,12 @@
 
 #include "flight/flight_artifact.h"
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 struct FlightDecodedRecord {
     FlightRecordType type = FlightRecordType::ChunkBegin;
@@ -57,6 +60,15 @@ public:
     uint32_t generation() const noexcept { return lease_.generation; }
     uint32_t committed_bytes() const noexcept { return committed_extent_; }
     uint32_t record_count() const noexcept { return record_count_; }
+    bool committed() const noexcept {
+        return committed_.load(std::memory_order_acquire);
+    }
+    bool sealed() const noexcept {
+        return sealed_.load(std::memory_order_acquire);
+    }
+    std::string_view basename() const noexcept {
+        return {basename_.data(), basename_size_};
+    }
 
     const uint8_t *active_bytes() const noexcept { return interrupted_record_; }
     size_t active_size() const noexcept { return interrupted_record_size_; }
@@ -84,5 +96,8 @@ private:
     size_t previous_record_size_ = 0;
     uint8_t *interrupted_record_ = nullptr;
     size_t interrupted_record_size_ = 0;
-    bool sealed_ = false;
+    std::atomic<bool> committed_{false};
+    std::atomic<bool> sealed_{false};
+    std::array<char, 256> basename_{};
+    size_t basename_size_ = 0;
 };

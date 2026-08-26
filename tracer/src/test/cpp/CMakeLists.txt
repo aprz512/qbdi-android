@@ -260,9 +260,12 @@ add_trace_test(capture_coordinator_test
     ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
+    ../../main/cpp/core/session_status.cpp
     ../../main/cpp/core/trace_config.cpp
+    ../../main/cpp/core/trace_generation_runtime.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp)
 target_link_libraries(capture_coordinator_test PRIVATE Threads::Threads)
+target_compile_options(capture_coordinator_test PRIVATE -fno-exceptions -fno-rtti)
 
 add_trace_test(thread_create_gateway_test
     thread_create_gateway_test.cpp
@@ -271,7 +274,9 @@ add_trace_test(thread_create_gateway_test
     ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
+    ../../main/cpp/core/session_status.cpp
     ../../main/cpp/core/trace_config.cpp
+    ../../main/cpp/core/trace_generation_runtime.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp)
 target_link_libraries(thread_create_gateway_test PRIVATE Threads::Threads)
 target_link_options(thread_create_gateway_test PRIVATE
@@ -386,8 +391,10 @@ add_trace_test(tracer_entry_proxy_test
     ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/module_maps.cpp
+    ../../main/cpp/core/session_status.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/core/trace_config.cpp
+    ../../main/cpp/core/trace_generation_runtime.cpp
     ../../main/cpp/core/tracer_configuration.cpp)
 target_link_libraries(tracer_entry_proxy_test PRIVATE Threads::Threads)
 target_link_options(tracer_entry_proxy_test PRIVATE

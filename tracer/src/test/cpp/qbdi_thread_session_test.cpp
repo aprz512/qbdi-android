@@ -201,6 +201,8 @@ struct CooperativeStopExecution {
     size_t seal_calls = 0;
     size_t acknowledge_calls = 0;
     size_t collector_calls = 0;
+    size_t lifecycle_begins = 0;
+    size_t lifecycle_ends = 0;
     std::thread::id execution_thread{};
     std::thread::id seal_thread{};
     QbdiTargetPreDecision first_pre{};
@@ -213,6 +215,21 @@ struct CooperativeStopExecution {
     bool continuation_saw_seal_attempt = false;
     bool continuation_saw_sealed = false;
 };
+
+bool cooperative_stop_lifecycle(
+        void *opaque, uint32_t tid, bool begin, uint32_t creator_tid,
+        uintptr_t start_routine) noexcept {
+    auto *execution = static_cast<CooperativeStopExecution *>(opaque);
+    CHECK(tid == 771);
+    CHECK(creator_tid == 700);
+    CHECK(start_routine == 0x76000080);
+    if (begin) {
+        ++execution->lifecycle_begins;
+        return true;
+    }
+    ++execution->lifecycle_ends;
+    return false;
+}
 
 QbdiExecutionResult execute_cooperative_stop(
         void *opaque, QbdiThreadSession *, uintptr_t, uintptr_t, size_t,
@@ -365,6 +382,29 @@ void failed_stop_seal_marks_incomplete_without_restarting_the_target() {
     CHECK(execution.continuation_saw_seal_attempt);
     CHECK(!execution.continuation_saw_sealed);
     CHECK(session->incomplete());
+    delete session;
+}
+
+void stopped_flight_thread_does_not_append_lifecycle_after_seal() {
+    CooperativeStopExecution execution;
+    execution.token.request_for_test(TraceStopReason::DurationElapsed);
+    execution.control = QbdiStopControl{
+            &execution.token, &execution, seal_cooperative_stop,
+            acknowledge_cooperative_stop};
+    QbdiThreadSession *session = QbdiThreadSession::create_for_test(
+            771, 51, execute_cooperative_stop, &execution,
+            nullptr, nullptr, cooperative_stop_lifecycle, &execution,
+            continue_after_cooperative_stop, {}, {}, execution.control);
+    CHECK(session != nullptr);
+    CHECK(session->begin_thread(700, 0x76000080));
+    const uint64_t args[8]{};
+    CHECK(session->call(0x71005400, args, 0).target_returned);
+
+    CHECK(session->end_thread());
+    CHECK(execution.lifecycle_begins == 1);
+    CHECK(execution.lifecycle_ends == 0);
+    CHECK(execution.seal_calls == 1);
+    CHECK(execution.acknowledge_calls == 1);
     delete session;
 }
 
@@ -783,6 +823,7 @@ int main() {
     stop_before_first_collected_instruction_seals_before_continuation();
     repeated_stop_observation_never_reseals_or_reenters_the_target();
     failed_stop_seal_marks_incomplete_without_restarting_the_target();
+    stopped_flight_thread_does_not_append_lifecycle_after_seal();
     fork_child_ignores_an_inherited_stop_before_collector_dispatch();
     forwards_entry_arguments_and_return_with_scoped_tls();
     rejects_recursive_running_vm_and_reports_a_permanent_gap();

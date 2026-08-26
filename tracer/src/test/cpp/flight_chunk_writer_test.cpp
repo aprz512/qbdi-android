@@ -96,6 +96,90 @@ void distinguishes_written_no_space_and_writer_errors() {
     CHECK(fixture.writer.committed_bytes() == committed);
 }
 
+void reports_recoverable_artifact_state_across_writer_lifecycle() {
+    FlightChunkWriter inactive;
+    CHECK(!inactive.committed());
+    CHECK(!inactive.sealed());
+    CHECK(inactive.basename().empty());
+
+    Fixture fixture;
+    CHECK(!fixture.writer.committed());
+    CHECK(!fixture.writer.sealed());
+    CHECK(fixture.writer.basename() == "artifact.flight.bin");
+
+    const uint8_t payload[] = {0x41, 0x42};
+    CHECK(fixture.writer.append(FlightRecordType::Instruction,
+                                {payload, sizeof(payload)}) ==
+          FlightWriteResult::Written);
+    CHECK(fixture.writer.committed());
+    CHECK(!fixture.writer.sealed());
+    CHECK(fixture.writer.basename() == "artifact.flight.bin");
+
+    CHECK(fixture.writer.rotate());
+    CHECK(fixture.writer.committed());
+    CHECK(!fixture.writer.sealed());
+    CHECK(fixture.writer.basename() == "artifact.flight.bin");
+
+    CHECK(fixture.writer.seal());
+    CHECK(fixture.writer.committed());
+    CHECK(fixture.writer.sealed());
+
+    fixture.writer.detach();
+    CHECK(!fixture.writer.committed());
+    CHECK(!fixture.writer.sealed());
+    CHECK(fixture.writer.basename().empty());
+}
+
+void failed_initialization_and_seal_keep_truthful_recovery_state() {
+    FlightChunkWriter writer;
+    FlightArtifact invalid_artifact;
+    FlightThreadRegistration invalid_registration{0, 1234};
+    CHECK(!writer.initialize(&invalid_artifact, invalid_registration));
+    CHECK(!writer.committed());
+    CHECK(!writer.sealed());
+    CHECK(writer.basename().empty());
+
+    Fixture fixture;
+    const uint8_t payload = 0x7f;
+    CHECK(fixture.writer.append(FlightRecordType::Instruction, {&payload, 1}) ==
+          FlightWriteResult::Written);
+    CHECK(fixture.writer.committed());
+    fixture.artifact.test_fail_seal(true);
+    CHECK(!fixture.writer.seal());
+    CHECK(fixture.writer.committed());
+    CHECK(!fixture.writer.sealed());
+    CHECK(fixture.writer.basename() == "artifact.flight.bin");
+}
+
+void rejects_artifact_names_that_are_not_strict_basenames() {
+    char directory_template[] = "/tmp/qtrace-flight-name-XXXXXX";
+    char *created = ::mkdtemp(directory_template);
+    CHECK(created != nullptr);
+
+    FlightOptions options;
+    options.enabled = true;
+    options.capacity_bytes = 64ULL * 1024 * 1024;
+    options.chunk_bytes = 64U * 1024;
+    options.max_threads = 4;
+    options.protected_chunks = 2;
+    const std::array<const char *, 4> names = {".", "..", "bad\\name", "bad\nname"};
+    for (const char *name : names) {
+        const std::string path = std::string(created) + "/" + name;
+        FlightArtifact artifact;
+        errno = 0;
+        const bool initialized = artifact.create(path.c_str(), options, test_identity());
+        const int error = errno;
+        if (initialized) {
+            artifact.close();
+            CHECK(::unlink(path.c_str()) == 0);
+        }
+        CHECK(!initialized);
+        CHECK(error == EINVAL);
+        CHECK(artifact.basename().empty());
+    }
+    CHECK(::rmdir(created) == 0);
+}
+
 void pair_append_preflights_both_records_before_publishing_either() {
     Fixture fixture;
     const size_t capacity = fixture.artifact.chunk_data_capacity();
@@ -405,6 +489,9 @@ int main(int argc, char **argv) {
     }
     appends_explicit_little_endian_records_with_valid_commit_and_checksum();
     distinguishes_written_no_space_and_writer_errors();
+    reports_recoverable_artifact_state_across_writer_lifecycle();
+    failed_initialization_and_seal_keep_truthful_recovery_state();
+    rejects_artifact_names_that_are_not_strict_basenames();
     pair_append_preflights_both_records_before_publishing_either();
     rejects_bad_bounds_commit_checksum_and_generation();
     torn_final_record_does_not_hide_preceding_committed_record();
