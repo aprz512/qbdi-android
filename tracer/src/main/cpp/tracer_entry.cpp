@@ -36,10 +36,12 @@ struct InstalledSceneHook {
     HookHandle hook;
     ModuleRange module;
     std::shared_ptr<CaptureCoordinator> coordinator;
+    std::shared_ptr<TraceGenerationRuntime> runtime;
     TraceConfig pending_config;
     SceneConfig pending_scene;
     ModuleRange pending_module;
     std::shared_ptr<CaptureCoordinator> pending_coordinator;
+    std::shared_ptr<TraceGenerationRuntime> pending_runtime;
     size_t active_proxy_calls = 0;
     size_t proxy_generation = 0;
     uint64_t config_generation = 0;
@@ -63,6 +65,7 @@ static TraceConfig g_config = default_trace_config();
 static bool g_configured = false;
 static uint64_t g_config_generation = 0;
 static std::shared_ptr<CaptureCoordinator> g_capture_coordinator;
+static std::shared_ptr<TraceGenerationRuntime> g_generation_runtime;
 
 static constexpr size_t kMaxScenes = 256;
 static constexpr size_t kMaxProxyGenerations = 4096;
@@ -88,7 +91,8 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                           const SceneConfig &scene,
                                           const ModuleRange &module,
                                           uint64_t config_generation,
-                                          const std::shared_ptr<CaptureCoordinator> &coordinator);
+                                          const std::shared_ptr<CaptureCoordinator> &coordinator,
+                                          const std::shared_ptr<TraceGenerationRuntime> &runtime);
 static void install_hooks_for_module(const ModuleRange &module,
                                      uint64_t expected_generation,
                                      bool loading);
@@ -96,6 +100,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
                                       const ModuleRange &module,
                                       uint64_t config_generation,
                                       const std::shared_ptr<CaptureCoordinator> &coordinator,
+                                      const std::shared_ptr<TraceGenerationRuntime> &runtime,
                                       bool batch_install = false);
 static std::vector<SceneConfigurationStatus> installation_statuses(
         const TraceConfig &config,
@@ -113,6 +118,17 @@ extern "C" char trace_proxy_stubs[];
 static bool tracer_fork_lifecycle_ready() noexcept {
     return trace_process_lifecycle_ready() &&
            g_tracer_atfork_error.load(std::memory_order_acquire) == 0;
+}
+
+static std::shared_ptr<TraceGenerationRuntime> create_generation_runtime(
+        const TraceConfig &config, uint64_t generation) noexcept {
+    TraceGenerationLimits limits;
+    limits.max_scenes = kMaxScenes;
+    limits.flight_max_threads = config.flight.max_threads;
+    TraceGenerationStatusOptions status;
+    status.config = config;
+    return TraceGenerationRuntime::create(
+            generation, config.session, limits, {}, std::move(status));
 }
 
 static bool finish_module_observation_failure(uint64_t generation) {
@@ -316,6 +332,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     uintptr_t execution_target = 0;
     bool use_original_bypass = false;
     bool safe_to_dispatch = true;
+    bool proxy_registered = false;
     {
         std::lock_guard<std::mutex> registry_guard(g_lock);
         if (generation >= g_next_proxy_generation ||
@@ -337,6 +354,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
         std::memcpy(runtime->invocation.args.data(), args,
                     sizeof(runtime->invocation.args));
         runtime->invocation.indirect_result = indirect_result;
+        runtime->invocation.runtime = runtime->hook->runtime;
         execution_target = runtime->invocation.target_address;
         const bool persistent_flight = runtime->hook->config.flight.enabled &&
                                        runtime->hook->coordinator != nullptr;
@@ -357,34 +375,71 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                         "persistent hook has no retained original");
                 safe_to_dispatch = false;
             }
-        } else if (runtime->hook->installed) {
-            if (runtime->hook->unhook_failed_window) {
+        } else if (!persistent_flight) {
+            if (runtime->hook->hook.residual_hook) {
+                if (!unhook_function(&runtime->hook->hook)) {
+                    safe_to_dispatch = false;
+                } else {
+                    runtime->hook->installed = false;
+                    use_original_bypass = true;
+                }
+            } else if (runtime->hook->unhook_failed_window) {
                 execution_target = reinterpret_cast<uintptr_t>(
                         runtime->hook->hook.retained_original);
                 runtime->invocation.execution_address = execution_target;
                 use_original_bypass = true;
-            } else if (!unhook_function(&runtime->hook->hook)) {
-                if (runtime->hook->hook.retained_original == nullptr) {
-                    QTRACE_E("residual hook has no safe original bypass generation=%zu",
-                             generation);
-                    safe_to_dispatch = false;
-                } else {
+            } else {
+                const uint32_t tid = static_cast<uint32_t>(
+                        ::syscall(SYS_gettid));
+                const TraceAdmissionResult admitted =
+                        runtime->invocation.runtime == nullptr
+                                ? TraceAdmissionResult{
+                                          TraceAdmissionStatus::NotRunning, {}}
+                                : runtime->invocation.runtime->try_begin_call(
+                                          runtime->hook->config_generation,
+                                          runtime->hook->scene.index, tid);
+                if (admitted.status != TraceAdmissionStatus::Admitted) {
                     execution_target = reinterpret_cast<uintptr_t>(
                             runtime->hook->hook.retained_original);
                     runtime->invocation.execution_address = execution_target;
                     use_original_bypass = true;
-                    runtime->hook->unhook_failed_window = true;
-                    QTRACE_E("trace proxy using original bypass after unhook failure generation=%zu",
-                             generation);
+                    safe_to_dispatch = execution_target != 0;
+                } else {
+                    runtime->invocation.admission = admitted.admission;
+                    if (runtime->hook->installed &&
+                        !unhook_function(&runtime->hook->hook)) {
+                        if (runtime->hook->hook.retained_original == nullptr) {
+                            QTRACE_E("residual hook has no safe original bypass generation=%zu",
+                                     generation);
+                            safe_to_dispatch = false;
+                        } else {
+                            execution_target = reinterpret_cast<uintptr_t>(
+                                    runtime->hook->hook.retained_original);
+                            runtime->invocation.execution_address = execution_target;
+                            use_original_bypass = true;
+                            runtime->hook->unhook_failed_window = true;
+                            QTRACE_E("trace proxy using original bypass after unhook failure generation=%zu",
+                                     generation);
+                        }
+                    } else if (runtime->hook->installed) {
+                        runtime->hook->installed = false;
+                    }
                 }
-            } else {
-                runtime->hook->installed = false;
             }
         }
         // This transaction matches the installer's g_lock -> transition_mutex order.
-        if (safe_to_dispatch) ++runtime->hook->active_proxy_calls;
+        if (safe_to_dispatch &&
+            (persistent_flight || runtime->invocation.admission.serial != 0)) {
+            ++runtime->hook->active_proxy_calls;
+            proxy_registered = true;
+        }
     }
     if (!safe_to_dispatch) {
+        if (runtime->invocation.runtime != nullptr &&
+            runtime->invocation.admission.serial != 0) {
+            runtime->invocation.runtime->finish_call(
+                    runtime->invocation.admission, false);
+        }
         delete runtime;
         return 0;
     }
@@ -425,6 +480,15 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     // refcount-owning object in this one heap allocation and intentionally leak it in
     // the child; the inherited allocator and pthread state must remain untouched.
     if (trace_process_child_detached()) return result;
+    if (runtime->invocation.runtime != nullptr &&
+        runtime->invocation.admission.serial != 0) {
+        runtime->invocation.runtime->finish_call(
+                runtime->invocation.admission, false);
+    }
+    if (!proxy_registered) {
+        delete runtime;
+        return result;
+    }
     bool resume_pending_batch = false;
     ModuleRange pending_batch_module;
     uint64_t pending_batch_generation = 0;
@@ -459,6 +523,8 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                             std::move(runtime->hook->pending_module);
                     const std::shared_ptr<CaptureCoordinator> pending_coordinator =
                             std::move(runtime->hook->pending_coordinator);
+                    const std::shared_ptr<TraceGenerationRuntime> pending_runtime =
+                            std::move(runtime->hook->pending_runtime);
                     const uint64_t pending_config_generation =
                             runtime->hook->pending_config_generation;
                     runtime->hook->pending_install = false;
@@ -468,9 +534,13 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                         pending_batch_generation = pending_config_generation;
                         resume_pending_batch = true;
                     } else {
-                        (void)create_hook_generation_locked(
+                        const bool installed = create_hook_generation_locked(
                                 pending_config, pending_scene, pending_module,
-                                pending_config_generation, pending_coordinator);
+                                pending_config_generation, pending_coordinator,
+                                pending_runtime);
+                        if (installed && pending_runtime != nullptr) {
+                            (void)pending_runtime->arm();
+                        }
                     }
                 }
             } else if (!runtime->hook->retired && !runtime->hook->installed) {
@@ -480,7 +550,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                 (void)create_hook_generation_locked(
                         runtime->hook->config, runtime->hook->scene,
                         runtime->hook->module, runtime->hook->config_generation,
-                        runtime->hook->coordinator);
+                        runtime->hook->coordinator, runtime->hook->runtime);
             } else if (!runtime->hook->retired) {
                 runtime->hook->unhook_failed_window = false;
             }
@@ -507,7 +577,8 @@ static bool create_hook_generation_locked(const TraceConfig &config,
                                           const SceneConfig &scene,
                                           const ModuleRange &module,
                                           uint64_t config_generation,
-                                          const std::shared_ptr<CaptureCoordinator> &coordinator) {
+                                          const std::shared_ptr<CaptureCoordinator> &coordinator,
+                                          const std::shared_ptr<TraceGenerationRuntime> &runtime) {
     if (g_next_proxy_generation >= kMaxProxyGenerations) {
         QTRACE_E("generation=%llu code=HOOK_INSTALL_FAILED proxy capacity exhausted=%zu",
                  static_cast<unsigned long long>(config_generation),
@@ -534,6 +605,7 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     slot->scene = scene;
     slot->module = module;
     slot->coordinator = coordinator;
+    slot->runtime = runtime;
     slot->config_generation = config_generation;
     slot->proxy_generation = generation;
     g_hook_generations[generation] = slot;
@@ -565,6 +637,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
                                       const ModuleRange &module,
                                       uint64_t config_generation,
                                       const std::shared_ptr<CaptureCoordinator> &coordinator,
+                                      const std::shared_ptr<TraceGenerationRuntime> &runtime,
                                       bool batch_install) {
     if (config.flight.enabled && coordinator != nullptr &&
         coordinator->started() && !coordinator->matches_module(module)) {
@@ -638,6 +711,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
                     previous->scene = scene;
                     previous->module = module;
                     previous->coordinator = coordinator;
+                    previous->runtime = runtime;
                     previous->config_generation = config_generation;
                 }
                 return true;
@@ -658,6 +732,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
             previous->pending_scene = scene;
             previous->pending_module = module;
             previous->pending_coordinator = coordinator;
+            previous->pending_runtime = runtime;
             previous->pending_config_generation = config_generation;
             previous->pending_install = true;
             previous->pending_batch_install = batch_install;
@@ -677,7 +752,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         previous->retired = true;
     }
     return create_hook_generation_locked(config, scene, module, config_generation,
-                                         coordinator);
+                                         coordinator, runtime);
 }
 
 #if defined(QTRACE_HOST_TEST)
@@ -690,6 +765,11 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     g_config = config;
     g_capture_coordinator.reset();
     ++g_config_generation;
+    g_generation_runtime = create_generation_runtime(config,
+                                                     g_config_generation);
+    if (g_generation_runtime != nullptr) {
+        (void)g_generation_runtime->arm();
+    }
     g_configured = true;
     g_registration_gate = nullptr;
     g_stub_entry_gate.store(nullptr, std::memory_order_release);
@@ -716,16 +796,34 @@ bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene
     std::lock_guard<std::mutex> guard(g_lock);
     g_config = config;
     ++g_config_generation;
-    return install_scene_hook_locked(config, scene, module, g_config_generation,
-                                     g_capture_coordinator);
+    g_generation_runtime = create_generation_runtime(config,
+                                                     g_config_generation);
+    const bool installed = install_scene_hook_locked(
+            config, scene, module, g_config_generation,
+            g_capture_coordinator, g_generation_runtime);
+    if (installed && g_generation_runtime != nullptr &&
+        scene.index < g_scene_hooks.size() &&
+        g_scene_hooks[scene.index] != nullptr &&
+        !g_scene_hooks[scene.index]->pending_install) {
+        (void)g_generation_runtime->arm();
+    }
+    return installed;
 }
 
 bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
                                              const ModuleRange &module) {
     if (!tracer_fork_lifecycle_ready()) return false;
     std::lock_guard<std::mutex> guard(g_lock);
-    return install_scene_hook_locked(g_config, scene, module, g_config_generation,
-                                     g_capture_coordinator);
+    const bool installed = install_scene_hook_locked(
+            g_config, scene, module, g_config_generation,
+            g_capture_coordinator, g_generation_runtime);
+    if (installed && g_generation_runtime != nullptr &&
+        scene.index < g_scene_hooks.size() &&
+        g_scene_hooks[scene.index] != nullptr &&
+        !g_scene_hooks[scene.index]->pending_install) {
+        (void)g_generation_runtime->arm();
+    }
+    return installed;
 }
 
 void trace_proxy_test_set_registration_gate(RegistrationGate gate) {
@@ -762,6 +860,21 @@ CaptureCoordinator *trace_proxy_test_hook_coordinator(size_t generation) {
         return nullptr;
     }
     return g_hook_generations[generation]->coordinator.get();
+}
+
+std::shared_ptr<TraceGenerationRuntime> trace_proxy_test_current_runtime() {
+    std::lock_guard<std::mutex> guard(g_lock);
+    return g_generation_runtime;
+}
+
+std::shared_ptr<TraceGenerationRuntime> trace_proxy_test_hook_runtime(
+        size_t generation) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    if (generation >= g_next_proxy_generation ||
+        g_hook_generations[generation] == nullptr) {
+        return {};
+    }
+    return g_hook_generations[generation]->runtime;
 }
 
 void trace_proxy_test_install_loading_module(const ModuleRange &module) {
@@ -825,12 +938,18 @@ static void tracer_atfork_parent() {
 static void tracer_atfork_child() {
     trace_process_mark_child_detached();
     process_thread_create_gateway().detach_after_fork_child();
+    if (g_generation_runtime != nullptr) {
+        g_generation_runtime->detach_after_fork_child();
+    }
     if (g_capture_coordinator != nullptr) {
         g_capture_coordinator->detach_after_fork_child();
     }
     for (size_t generation = 0; generation < g_next_proxy_generation;
          ++generation) {
         InstalledSceneHook *const hook = g_hook_generation_raw[generation];
+        if (hook != nullptr && hook->runtime != nullptr) {
+            hook->runtime->detach_after_fork_child();
+        }
         if (hook != nullptr && hook->coordinator != nullptr) {
             hook->coordinator->detach_after_fork_child();
         }
@@ -918,6 +1037,7 @@ struct BatchInstalledScene {
     SceneConfig previous_scene;
     ModuleRange previous_module;
     std::shared_ptr<CaptureCoordinator> previous_coordinator;
+    std::shared_ptr<TraceGenerationRuntime> previous_runtime;
     uint64_t previous_config_generation = 0;
 };
 
@@ -1046,7 +1166,8 @@ static void install_hooks_for_module(const ModuleRange &module,
         if (!g_capture_coordinator->started() &&
             !g_capture_coordinator->start(
                     g_config, module,
-                    static_cast<uint32_t>(generation))) {
+                    static_cast<uint32_t>(generation),
+                    g_generation_runtime)) {
             constexpr const char *code = "COORDINATOR_START_FAILED";
             QTRACE_E("generation=%llu code=%s cannot start flight capture artifact",
                      static_cast<unsigned long long>(generation), code);
@@ -1090,15 +1211,18 @@ static void install_hooks_for_module(const ModuleRange &module,
         SceneConfig previous_scene;
         ModuleRange previous_module;
         std::shared_ptr<CaptureCoordinator> previous_coordinator;
+        std::shared_ptr<TraceGenerationRuntime> previous_runtime;
         if (previous != nullptr) {
             previous_config = previous->config;
             previous_scene = previous->scene;
             previous_module = previous->module;
             previous_coordinator = previous->coordinator;
+            previous_runtime = previous->runtime;
         }
 
         if (!install_scene_hook_locked(g_config, scene, module, generation,
-                                       g_capture_coordinator, true)) {
+                                       g_capture_coordinator,
+                                       g_generation_runtime, true)) {
             failed_index = index;
             SceneConfigurationStatus &status = statuses[index];
             status.state = SceneConfigurationState::HookFailed;
@@ -1148,6 +1272,7 @@ static void install_hooks_for_module(const ModuleRange &module,
         member.previous_scene = std::move(previous_scene);
         member.previous_module = std::move(previous_module);
         member.previous_coordinator = std::move(previous_coordinator);
+        member.previous_runtime = std::move(previous_runtime);
         member.previous_config_generation = previous_generation;
         if (current == previous && current != nullptr &&
             current->pending_install &&
@@ -1170,8 +1295,15 @@ static void install_hooks_for_module(const ModuleRange &module,
     if (failed_index == g_config.scenes.size() &&
         retire_superseded_hooks(generation, &statuses, false,
                                 &reported_residual_generations)) {
-        g_tracer_configuration.finish_install(
+        const bool installed_published = g_tracer_configuration.finish_install(
                 generation, ConfigurationState::Installed, std::move(statuses));
+        if (installed_published && g_generation_runtime != nullptr &&
+            g_generation_runtime->snapshot().generation == generation &&
+            !g_generation_runtime->arm()) {
+            (void)g_generation_runtime->record_status_error(
+                    "RUNTIME_ARM_FAILED", "$.session",
+                    "generation runtime could not be armed");
+        }
         QTRACE_I("generation=%llu hooks installed scenes=%zu",
                  static_cast<unsigned long long>(generation),
                  g_config.scenes.size());
@@ -1212,6 +1344,7 @@ static void install_hooks_for_module(const ModuleRange &module,
             member.hook->scene = std::move(member.previous_scene);
             member.hook->module = std::move(member.previous_module);
             member.hook->coordinator = std::move(member.previous_coordinator);
+            member.hook->runtime = std::move(member.previous_runtime);
             member.hook->config_generation = member.previous_config_generation;
             status.state = SceneConfigurationState::RolledBack;
             continue;
@@ -1261,6 +1394,8 @@ static void apply_accepted_configuration(TraceConfig config,
     try {
         if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;
         process_thread_create_gateway().deactivate();
+        std::shared_ptr<TraceGenerationRuntime> runtime =
+                create_generation_runtime(config, generation);
         std::shared_ptr<CaptureCoordinator> coordinator;
         if (config.flight.enabled) {
             CaptureCoordinator *const allocated =
@@ -1273,11 +1408,13 @@ static void apply_accepted_configuration(TraceConfig config,
                 }
             }
         }
+        const bool runtime_ready = runtime != nullptr;
         const bool coordinator_ready = !config.flight.enabled || coordinator != nullptr;
         {
             std::lock_guard<std::mutex> guard(g_lock);
             g_config = std::move(active_config);
             g_capture_coordinator = std::move(coordinator);
+            g_generation_runtime = std::move(runtime);
             g_configured = true;
             g_config_generation = generation;
         }
@@ -1290,6 +1427,15 @@ static void apply_accepted_configuration(TraceConfig config,
         QTRACE_I("generation=%llu configure tracer package=%s target=%s",
                  static_cast<unsigned long long>(generation),
                  config.package_name.c_str(), config.target_so.c_str());
+        if (!runtime_ready) {
+            constexpr const char *code = "RUNTIME_ALLOCATION_FAILED";
+            QTRACE_E("generation=%llu code=%s cannot allocate generation runtime",
+                     static_cast<unsigned long long>(generation), code);
+            std::vector<SceneConfigurationStatus> statuses =
+                    installation_statuses(config, {});
+            fail_installation_statuses(generation, &statuses, code, 0);
+            return;
+        }
         if (!coordinator_ready) {
             constexpr const char *code = "COORDINATOR_ALLOCATION_FAILED";
             QTRACE_E("generation=%llu code=%s cannot allocate flight capture coordinator",

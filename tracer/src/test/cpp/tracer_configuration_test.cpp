@@ -231,11 +231,19 @@ static void terminal_generations_ignore_late_install_callbacks() {
                 configuration.configure(request, 64U * 1024U));
         const uint64_t generation = accepted.at("generation").get<uint64_t>();
         configuration.mark_installing(generation, module, {diagnostics});
-        configuration.finish_install(generation, test_case.state, {scene});
+        CHECK(configuration.finish_install(generation, test_case.state,
+                                           {scene}));
+
+        SceneConfigurationStatus late_scene = scene;
+        late_scene.name = "late-terminal-overwrite";
+        CHECK(!configuration.finish_install(generation, test_case.state,
+                                            {late_scene}));
+        CHECK(parse_payload(configuration.status(generation, 64U * 1024U))
+                      .at("scenes").at(0).at("name") == "terminal");
 
         configuration.mark_installing(generation, module, {diagnostics});
-        configuration.finish_install(
-                generation, ConfigurationState::Installed, {scene});
+        CHECK(!configuration.finish_install(
+                generation, ConfigurationState::Installed, {scene}));
         CHECK(parse_payload(configuration.status(generation, 64U * 1024U))
                       .at("state") == test_case.name);
 

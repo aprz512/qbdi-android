@@ -849,20 +849,18 @@ void TracerConfiguration::mark_installing(
     }
 }
 
-void TracerConfiguration::finish_install(
+bool TracerConfiguration::finish_install(
         uint64_t generation, ConfigurationState state,
         std::vector<SceneConfigurationStatus> scenes) {
     std::lock_guard<std::mutex> guard(mutex_);
     for (GenerationSnapshot &snapshot: generations_) {
         if (snapshot.generation != generation) continue;
         if (configuration_state_terminal(snapshot.state)) {
-            if (snapshot.state == state) {
-                snapshot.scenes = std::move(scenes);
-            }
-            return;
+            return false;
         }
         snapshot.state = state;
         snapshot.scenes = std::move(scenes);
-        return;
+        return true;
     }
+    return false;
 }

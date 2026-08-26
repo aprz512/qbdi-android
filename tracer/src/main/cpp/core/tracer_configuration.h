@@ -89,7 +89,10 @@ public:
     void mark_installing(uint64_t generation,
                          const ModuleRange &module,
                          const std::vector<SceneAddressDiagnostics> &diagnostics);
-    void finish_install(uint64_t generation,
+    // Returns true only for the first terminal transition of this generation.
+    // Installers use this acknowledgement to arm generation-owned timers only
+    // after the Installed snapshot is committed.
+    bool finish_install(uint64_t generation,
                         ConfigurationState state,
                         std::vector<SceneConfigurationStatus> scenes);
 
