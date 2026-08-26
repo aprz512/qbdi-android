@@ -2,6 +2,7 @@
 #include "events/binary_trace_format.h"
 #include "events/binary_trace_writer.h"
 #include "lz4frame.h"
+#include "third_party/nlohmann/json.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -209,6 +210,88 @@ bool contains_record(const std::string &stream, BinaryRecordType expected) {
         offset += kBinaryRecordHeaderBytes + payload;
     }
     return false;
+}
+
+std::string basename_of(std::string_view path) {
+    const size_t slash = path.find_last_of('/');
+    return std::string(path.substr(slash == std::string_view::npos ? 0 : slash + 1));
+}
+
+void normal_writer_publishes_created_artifact_and_stable_error_to_status() {
+    char directory_template[] = "/tmp/qtrace-runner-status-XXXXXX";
+    char *directory = ::mkdtemp(directory_template);
+    CHECK(directory != nullptr);
+
+    TraceConfig config{};
+    config.package_name = "com.example.runner";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    TraceGenerationStatusOptions status_options{};
+    status_options.config = config;
+    status_options.output_directory = directory;
+    auto runtime = TraceGenerationRuntime::create(
+            73, config.session, TraceGenerationLimits{}, DeadlineWait{},
+            std::move(status_options));
+    CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
+
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    TraceContext context{};
+    context.scene_name = "status";
+    context.target_so = "libtarget.so";
+    context.module_base = 0x1000;
+    context.target_address = 0x1010;
+    context.target_offset = 0x10;
+    context.pid = ::getpid();
+    context.tid = ::getpid();
+    context.output_directory = directory;
+    BinaryTraceWriter writer(options, &metrics);
+    CHECK(writer.prepare(context));
+    CHECK(writer.open_prepared());
+    CHECK(writer.begin(context));
+    const std::string artifact_path(writer.path());
+    CHECK(record_qbdi_normal_artifact(runtime, artifact_path));
+    record_qbdi_normal_error(runtime, QbdiNormalError::SessionCreate);
+    record_qbdi_normal_error(runtime, QbdiNormalError::SessionCreate);
+
+    const std::string status_path = std::string(directory) + "/session-" +
+                                    config.session.id + ".status.json";
+    nlohmann::json published;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const std::vector<char> bytes = read_file(status_path);
+        if (!bytes.empty()) {
+            published = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr,
+                                               false);
+            if (!published.is_discarded() &&
+                published.at("artifacts").size() == 1 &&
+                published.at("errors").size() == 1) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(!published.is_discarded());
+    CHECK(published.at("errors").size() == 1);
+    CHECK(published.at("artifacts").at(0) == basename_of(artifact_path));
+    CHECK(published.at("errors").at(0).at("code") ==
+          "QBDI_SESSION_CREATE_FAILED");
+
+    CHECK(writer.end(0, true, 1));
+    CHECK(writer.close());
+    runtime.reset();
+    CHECK(::unlink(artifact_path.c_str()) == 0);
+    CHECK(::unlink((artifact_path + ".metrics").c_str()) == 0);
+    CHECK(::unlink(status_path.c_str()) == 0);
+    (void)::unlink((status_path + ".backup").c_str());
+    (void)::unlink((status_path + ".restore").c_str());
+    (void)::unlink((status_path + ".rollback").c_str());
+    (void)::unlink((status_path + ".commit").c_str());
+    CHECK(::rmdir(directory) == 0);
 }
 
 void stopped_writer_closes_without_a_completed_terminal() {
@@ -527,6 +610,7 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
 } // namespace
 
 int main() {
+    normal_writer_publishes_created_artifact_and_stable_error_to_status();
     stopped_writer_closes_without_a_completed_terminal();
     normal_stop_lifecycle_seals_and_acknowledges_the_exact_admission_once();
     normal_stop_lifecycle_reports_a_failed_seal_once();

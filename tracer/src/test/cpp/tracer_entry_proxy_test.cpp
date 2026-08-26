@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <chrono>
+#include <fstream>
 #include <mutex>
 #include <new>
 #include <memory>
@@ -48,6 +49,7 @@ bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
                                              const ModuleRange &module);
 void trace_proxy_test_set_registration_gate(RegistrationGate gate);
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate);
+void trace_proxy_test_set_status_output_directory(const char *directory);
 size_t trace_proxy_test_generation(size_t scene_index);
 void trace_proxy_test_set_coordinator(
         const std::shared_ptr<CaptureCoordinator> &coordinator);
@@ -845,7 +847,7 @@ void callback_registration_failure_preserves_the_shadowhook_error() {
     CHECK(status.at("scenes").at(0).at("error").at("hookError") == 87);
 }
 
-void branch_before_dispatch_keeps_its_generation_snapshot_and_bypass() {
+void branch_before_registry_that_is_retired_never_enters_qbdi() {
     reset_fakes();
     const TraceConfig old_config = config_named("old-generation");
     const SceneConfig old_scene = scene_named("old-generation",
@@ -853,6 +855,9 @@ void branch_before_dispatch_keeps_its_generation_snapshot_and_bypass() {
     trace_proxy_test_reset(old_config);
     CHECK(trace_proxy_test_update(old_config, old_scene, module_named("old-module")));
     const size_t old_generation = trace_proxy_test_generation(old_scene.index);
+    const std::shared_ptr<TraceGenerationRuntime> old_runtime =
+            trace_proxy_test_hook_runtime(old_generation);
+    CHECK(old_runtime != nullptr);
     trace_proxy_test_set_stub_entry_gate(stub_entry_gate);
 
     uint64_t args[8]{5};
@@ -872,6 +877,8 @@ void branch_before_dispatch_keeps_its_generation_snapshot_and_bypass() {
     CHECK(trace_proxy_test_update(new_config, new_scene, module_named("new-module")));
     const size_t new_generation = trace_proxy_test_generation(new_scene.index);
     CHECK(new_generation != old_generation);
+    CHECK(trace_proxy_test_hook_runtime(old_generation) == nullptr);
+    CHECK(old_runtime->request_stop(TraceStopReason::DurationElapsed));
 
     {
         std::lock_guard<std::mutex> lock(g_gate_mutex);
@@ -882,10 +889,11 @@ void branch_before_dispatch_keeps_its_generation_snapshot_and_bypass() {
     trace_proxy_test_set_stub_entry_gate(nullptr);
 
     CHECK(old_result == 0x105);
-    CHECK(g_seen_config.package_name == "old-generation");
-    CHECK(g_seen_invocation.scene->name == "old-generation");
-    CHECK(g_seen_invocation.module->path == "old-module");
+    CHECK(g_runner_calls == 0);
+    CHECK(old_runtime->snapshot().active_calls == 0);
+    CHECK(old_runtime->snapshot().phase == TraceGenerationPhase::Sealed);
     CHECK(trace_proxy_dispatch(new_generation, args, 0x77) == 0x105);
+    CHECK(g_runner_calls == 1);
     CHECK(g_seen_config.package_name == "new-generation");
     CHECK(g_seen_invocation.scene->name == "new-generation");
     CHECK(g_seen_invocation.module->path == "new-module");
@@ -1240,11 +1248,16 @@ void every_physical_rehook_gets_a_new_proxy_identity() {
     trace_proxy_test_reset(config);
     CHECK(trace_proxy_test_update(config, scene, module_named("module")));
     const size_t first_generation = trace_proxy_test_generation(scene.index);
+    const std::shared_ptr<TraceGenerationRuntime> runtime =
+            trace_proxy_test_hook_runtime(first_generation);
+    CHECK(runtime != nullptr);
     uint64_t args[8]{19};
     CHECK(trace_proxy_dispatch(first_generation, args, 0) == 0x113);
     const size_t second_generation = trace_proxy_test_generation(scene.index);
     CHECK(second_generation != first_generation);
     CHECK(g_hook_calls == 2);
+    CHECK(trace_proxy_test_hook_runtime(first_generation) == nullptr);
+    CHECK(trace_proxy_test_hook_runtime(second_generation) == runtime);
 
     // A delayed call already carrying the first identity remains valid and cannot
     // resolve the second generation.
@@ -1273,6 +1286,7 @@ void physical_rehook_keeps_its_original_capture_coordinator() {
     const size_t second_generation = trace_proxy_test_generation(scene.index);
 
     CHECK(second_generation != first_generation);
+    CHECK(trace_proxy_test_hook_coordinator(first_generation) == nullptr);
     CHECK(trace_proxy_test_hook_coordinator(second_generation) == original.get());
 }
 
@@ -1423,6 +1437,8 @@ void batch_reconfiguration_stays_installing_until_pending_rehook_succeeds() {
     trace_proxy_test_reset(old_config);
     CHECK(trace_proxy_test_update(old_config, old_scene, module));
     const size_t old_generation = trace_proxy_test_generation(old_scene.index);
+    const std::shared_ptr<TraceGenerationRuntime> old_runtime =
+            trace_proxy_test_hook_runtime(old_generation);
     {
         std::lock_guard<std::mutex> lock(g_gate_mutex);
         g_use_runner_gate = true;
@@ -1450,7 +1466,12 @@ void batch_reconfiguration_stays_installing_until_pending_rehook_succeeds() {
             })));
     const uint64_t config_generation =
             accepted.at("generation").get<uint64_t>();
+    const std::shared_ptr<TraceGenerationRuntime> pending_runtime =
+            trace_proxy_test_current_runtime();
+    CHECK(pending_runtime != nullptr);
+    CHECK(pending_runtime != old_runtime);
     trace_proxy_test_install_loading_module(module);
+
     CHECK(call_json_status(config_generation).at("state") == "installing");
 
     {
@@ -1462,6 +1483,10 @@ void batch_reconfiguration_stays_installing_until_pending_rehook_succeeds() {
 
     CHECK(result == 0x11d);
     CHECK(call_json_status(config_generation).at("state") == "installed");
+    CHECK(trace_proxy_test_hook_runtime(old_generation) == nullptr);
+    CHECK(trace_proxy_test_hook_runtime(
+                  trace_proxy_test_generation(old_scene.index)) ==
+          pending_runtime);
     CHECK(g_hook_calls == 2);
     CHECK(g_unhook_calls == 1);
 }
@@ -1614,13 +1639,24 @@ void constructor_phdr_range_rejects_invalid_or_unrepresentable_loads() {
 void outside_scene_warning_does_not_block_hook_installation() {
     reset_fakes();
     trace_proxy_test_reset(config_named("outside-warning-reset"));
-    const nlohmann::json accepted = call_json_configure(json_abi_request(
-            "com.example.outside-warning", "liboutside-warning.so", false, {},
+    char directory_template[] = "/tmp/qtrace-install-warning-XXXXXX";
+    char *directory = ::mkdtemp(directory_template);
+    CHECK(directory != nullptr);
+    trace_proxy_test_set_status_output_directory(directory);
+    nlohmann::json request = nlohmann::json::parse(json_abi_request(
+            "com.example.outsidewarning", "liboutside-warning.so", false, {},
             nlohmann::json::array({
                     {{"name", "outside"},
                      {"location", {{"offset", "0x200"}}}},
             })));
+    request["session"] = {
+            {"id", "7d5807cf-cf09-4f21-92de-1ad92802610a"},
+            {"durationMs", 60000},
+    };
+    const nlohmann::json accepted = call_json_configure(request.dump());
     CHECK(accepted.at("ok") == true);
+    CHECK(accepted.at("session").at("id") ==
+          "7d5807cf-cf09-4f21-92de-1ad92802610a");
     const uint64_t generation = accepted.at("generation").get<uint64_t>();
     ModuleRange module;
     module.start = 0x71000000;
@@ -1629,6 +1665,11 @@ void outside_scene_warning_does_not_block_hook_installation() {
     module.path = "/data/app/liboutside-warning.so";
 
     trace_proxy_test_install_loading_module(module);
+    const std::shared_ptr<TraceGenerationRuntime> runtime =
+            trace_proxy_test_current_runtime();
+    CHECK(runtime != nullptr);
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::Running);
+    CHECK(runtime->snapshot().status_error == 0);
 
     const nlohmann::json snapshot = call_json_status(generation);
     CHECK(g_hook_calls == 1);
@@ -1643,6 +1684,40 @@ void outside_scene_warning_does_not_block_hook_installation() {
         }
     }
     CHECK(found_outside_warning);
+
+    const std::string status_path =
+            std::string(directory) +
+            "/session-7d5807cf-cf09-4f21-92de-1ad92802610a.status.json";
+    nlohmann::json authoritative;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::ifstream input(status_path);
+        if (input) {
+            const std::string text{std::istreambuf_iterator<char>(input),
+                                   std::istreambuf_iterator<char>()};
+            authoritative = nlohmann::json::parse(text, nullptr, false);
+            if (authoritative.is_object() &&
+                !authoritative.at("warnings").empty()) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(authoritative.is_object());
+    CHECK(authoritative.at("warnings").at(0).at("code") ==
+          "ADDRESS_OUTSIDE_TARGET_MODULE");
+    CHECK(authoritative.at("warnings").at(0).at("path") ==
+          "$.scenes[0].location");
+
+    trace_proxy_test_set_status_output_directory(nullptr);
+    trace_proxy_test_reset(config_named("outside-warning-cleanup"));
+    CHECK(::unlink(status_path.c_str()) == 0);
+    (void)::unlink((status_path + ".backup").c_str());
+    (void)::unlink((status_path + ".restore").c_str());
+    (void)::unlink((status_path + ".rollback").c_str());
+    (void)::unlink((status_path + ".commit").c_str());
+    CHECK(::rmdir(directory) == 0);
 }
 
 void second_hook_failure_rolls_back_the_batch_in_reverse() {
@@ -2614,6 +2689,8 @@ void fini_retires_only_the_exact_loading_generation_and_marks_a_gap() {
 
     trace_proxy_test_install_loading_module(module);
     const size_t generation = trace_proxy_test_generation(scene.index);
+    const std::shared_ptr<TraceGenerationRuntime> runtime =
+            trace_proxy_test_hook_runtime(generation);
     CHECK(generation != 4096);
     CHECK(coordinator->started());
     CHECK(!trace_proxy_test_generation_retired(generation));
@@ -2625,6 +2702,10 @@ void fini_retires_only_the_exact_loading_generation_and_marks_a_gap() {
 
     trace_proxy_test_module_fini(module.start, module.path.c_str());
     CHECK(trace_proxy_test_generation_retired(generation));
+    CHECK(trace_proxy_test_hook_runtime(generation) == nullptr);
+    CHECK(trace_proxy_test_hook_coordinator(generation) == nullptr);
+    CHECK(trace_proxy_test_current_runtime() == runtime);
+    CHECK(trace_proxy_test_current_coordinator() == coordinator.get());
     CHECK(coordinator->incomplete());
     CHECK(g_flight_factory.coverage_gaps.load(std::memory_order_relaxed) == 1);
     CHECK(g_flight_factory.last_gap_pc.load(std::memory_order_relaxed) ==
@@ -2799,7 +2880,7 @@ int main(int argc, char **argv) {
     invalid_target_module_observation_finishes_with_a_stable_code();
     callback_registration_failure_preserves_the_shadowhook_error();
     accepted_nonflight_generation_deactivates_the_flight_gateway();
-    branch_before_dispatch_keeps_its_generation_snapshot_and_bypass();
+    branch_before_registry_that_is_retired_never_enters_qbdi();
     entrant_registration_and_snapshot_are_atomic_with_install();
     stopped_generation_proxy_bypasses_qbdi_before_allocation();
     failed_hook_batch_never_arms_its_generation_deadline();

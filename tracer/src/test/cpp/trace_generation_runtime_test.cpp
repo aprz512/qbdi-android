@@ -507,6 +507,7 @@ void status_worker_survives_releasing_the_last_runtime_owner() {
     runtime = TraceGenerationRuntime::create(
             35, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
     CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
     wait_for(poll.entered);
     poll.release.store(true, std::memory_order_release);
     wait_for(poll.released_owner);
@@ -540,7 +541,7 @@ void forked_child_detaches_the_inherited_deadline_worker() {
 // Catches status I/O occurring from the deadline/callback transition itself,
 // publishing unchanged data, or abandoning the dedicated status pthread at
 // destruction. The controlled wait is a deterministic 25 ms poll substitute.
-void status_worker_publishes_only_transition_snapshots_outside_runtime_transitions() {
+void status_worker_starts_only_after_installation_arm() {
     TemporaryDirectory directory;
     ControlledStatusPoll poll;
     TraceConfig config{};
@@ -554,14 +555,18 @@ void status_worker_publishes_only_transition_snapshots_outside_runtime_transitio
     auto runtime = TraceGenerationRuntime::create(
             31, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
     CHECK(runtime != nullptr);
-    wait_for_count(poll.waits, 1);
     const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
-    CHECK(read_text(path).find("\"state\":\"installed\"") != std::string::npos);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(poll.waits.load(std::memory_order_acquire) == 0);
+    CHECK(::access(path.c_str(), F_OK) != 0);
     CHECK(runtime->arm());
-    poll.allow_one();
-    wait_for_count(poll.waits, 2);
+    wait_for_count(poll.waits, 1);
     CHECK(read_text(path).find("\"state\":\"running\"") != std::string::npos);
+    CHECK(runtime->record_status_warning(
+            "FINAL_WARNING", "$.warnings", "published during retirement"));
     runtime.reset();
+    CHECK(read_text(path).find("\"code\":\"FINAL_WARNING\"") !=
+          std::string::npos);
 }
 
 // Catches a failed status publication being marked published forever. Every
@@ -581,6 +586,7 @@ void status_publication_failure_is_exposed_and_retried_without_a_runtime_event()
     auto runtime = TraceGenerationRuntime::create(
             32, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
     CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
     CHECK(runtime->snapshot().status_error == EIO);
     const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
@@ -616,6 +622,7 @@ void status_metadata_producers_publish_artifacts_warnings_and_errors() {
     auto runtime = TraceGenerationRuntime::create(
             33, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
     CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
     CHECK(runtime->record_artifact("flight.trace.bin.lz4"));
     CHECK(runtime->record_status_warning("FLIGHT_DEGRADED", "$.flight", "ring wrapped"));
@@ -652,6 +659,7 @@ void status_metadata_producers_deduplicate_and_classify_each_rejection() {
     auto runtime = TraceGenerationRuntime::create(
             36, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
     CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
 
     CHECK(runtime->record_artifact("one.trace"));
@@ -749,6 +757,7 @@ void repeated_metadata_rejections_do_not_republish_unchanged_status() {
     auto runtime = TraceGenerationRuntime::create(
             37, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
     CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
     const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
     unsigned int next_wait = 2;
@@ -839,7 +848,7 @@ int main() {
     deadline_worker_survives_releasing_the_last_runtime_owner();
     status_worker_survives_releasing_the_last_runtime_owner();
     forked_child_detaches_the_inherited_deadline_worker();
-    status_worker_publishes_only_transition_snapshots_outside_runtime_transitions();
+    status_worker_starts_only_after_installation_arm();
     status_publication_failure_is_exposed_and_retried_without_a_runtime_event();
     status_metadata_producers_publish_artifacts_warnings_and_errors();
     status_metadata_producers_deduplicate_and_classify_each_rejection();

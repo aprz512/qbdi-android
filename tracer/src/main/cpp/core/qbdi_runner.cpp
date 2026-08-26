@@ -74,27 +74,39 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     if (config.test_fail_setup) {
         trace_setup_ok = false;
         state->session.observe_trace_setup(false);
+        record_qbdi_normal_error(invocation.runtime,
+                                 QbdiNormalError::TracePrepare);
         QTRACE_E("test-injected trace setup failure");
     } else
 #endif
     if (!state->writer.prepare(state->context)) {
         trace_setup_ok = false;
         state->session.observe_trace_setup(false);
+        record_qbdi_normal_error(invocation.runtime,
+                                 QbdiNormalError::TracePrepare);
         QTRACE_E("prepare trace artifact failed");
     } else if (!state->crash_marker.open(state->writer.path())) {
         trace_setup_ok = false;
         state->session.observe_trace_setup(false);
+        record_qbdi_normal_error(invocation.runtime,
+                                 QbdiNormalError::CrashMarkerOpen);
         QTRACE_E("open crash marker failed");
     } else if (!state->writer.open_prepared()) {
         trace_setup_ok = false;
         state->session.observe_trace_setup(false);
+        record_qbdi_normal_error(invocation.runtime,
+                                 QbdiNormalError::TraceOpen);
         QTRACE_E("open trace file failed");
     } else if (!state->writer.begin(state->context)) {
         trace_setup_ok = false;
         state->session.observe_trace_setup(false);
+        record_qbdi_normal_error(invocation.runtime,
+                                 QbdiNormalError::TraceBegin);
         QTRACE_E("begin trace failed");
     } else {
         state->session.observe_trace_setup(true);
+        (void)record_qbdi_normal_artifact(invocation.runtime,
+                                          state->writer.path());
     }
 
     state->started = std::chrono::steady_clock::now();
@@ -108,6 +120,8 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     const bool execution_setup_ok = qbdi != nullptr && qbdi->ready();
     if (!execution_setup_ok && trace_setup_ok) {
         (void)state->writer.error("create QBDI thread session failed");
+        record_qbdi_normal_error(invocation.runtime,
+                                 QbdiNormalError::SessionCreate);
     }
     state->session.observe_execution_setup(execution_setup_ok);
 
@@ -137,13 +151,29 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         finalization.target_ran = target.ran;
         finalization.outward_return_value = target.ran ? target.return_value : 0;
         const bool writer_closed = state->writer.close();
+        if (!state->stop.sealed()) {
+            record_qbdi_normal_error(invocation.runtime,
+                                     QbdiNormalError::TraceSeal);
+        }
+        if (!writer_closed) {
+            record_qbdi_normal_error(invocation.runtime,
+                                     QbdiNormalError::TraceClose);
+        }
         finalization.completion_success = state->stop.sealed() && writer_closed;
         finalization.should_log_success = finalization.completion_success;
     } else {
         finalization = state->session.finalize(
                 state->writer, elapsed_ms_since(state->started));
+        if (!finalization.completion_success) {
+            record_qbdi_normal_error(invocation.runtime,
+                                     QbdiNormalError::TraceFinalize);
+        }
     }
     const bool crash_marker_finished = state->crash_marker.finish();
+    if (!crash_marker_finished) {
+        record_qbdi_normal_error(invocation.runtime,
+                                 QbdiNormalError::CrashMarkerFinish);
+    }
     if (finalization.should_log_success && crash_marker_finished) {
         QTRACE_I("trace %s %s path=%.*s", invocation.scene->name.c_str(),
                  state->stop.stop_observed() ? "stopped" : "complete",

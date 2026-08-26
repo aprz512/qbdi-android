@@ -87,7 +87,6 @@ std::shared_ptr<TraceGenerationRuntime> TraceGenerationRuntime::create(
     // portable control-block OOM return path. tracer_entry uses the same fatal
     // policy, so this first-object allocation check is intentionally not a
     // claim that every shared_ptr allocation failure is recoverable.
-    runtime->start_status();
     return std::shared_ptr<TraceGenerationRuntime>(runtime);
 }
 
@@ -117,6 +116,7 @@ bool TraceGenerationRuntime::arm() noexcept {
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
             note_transition();
             arm_state_.store(ArmState::Failed, std::memory_order_release);
+            start_status();
             return false;
         }
         deadline_monotonic_ns_ = now + duration * kNanosecondsPerMillisecond;
@@ -150,6 +150,7 @@ bool TraceGenerationRuntime::arm() noexcept {
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
             note_transition();
             arm_state_.store(ArmState::Failed, std::memory_order_release);
+            start_status();
             return false;
         }
         deadline_thread_started_.store(true, std::memory_order_release);
@@ -167,6 +168,7 @@ bool TraceGenerationRuntime::arm() noexcept {
         complete_stop_if_idle_locked();
     }
     arm_state_.store(ArmState::Armed, std::memory_order_release);
+    start_status();
     return true;
 }
 
@@ -308,6 +310,12 @@ bool TraceGenerationRuntime::record_status_error(
     return record_status_issue(false, code, path, message);
 }
 
+bool TraceGenerationRuntime::record_status_error_once(
+        std::string_view code, std::string_view path,
+        std::string_view message) noexcept {
+    return record_status_issue(false, code, path, message, false);
+}
+
 bool TraceGenerationRuntime::record_metadata_diagnostic_locked(
         StatusMetadataDiagnostic diagnostic) noexcept {
     const uint16_t bit = static_cast<uint16_t>(
@@ -318,7 +326,8 @@ bool TraceGenerationRuntime::record_metadata_diagnostic_locked(
 }
 
 bool TraceGenerationRuntime::record_status_issue(
-        bool warning, std::string_view code, std::string_view path, std::string_view message) noexcept {
+        bool warning, std::string_view code, std::string_view path,
+        std::string_view message, bool diagnose_duplicate) noexcept {
     std::lock_guard<std::mutex> lock(status_metadata_mutex_);
     const StatusMetadataDiagnostic invalid = warning
             ? StatusMetadataDiagnostic::WarningInvalid
@@ -342,7 +351,10 @@ bool TraceGenerationRuntime::record_status_issue(
     std::vector<ConfigurationIssue> &issues = warning ? status_warnings_ : status_errors_;
     for (const ConfigurationIssue &issue : issues) {
         if (issue.code == code && issue.path == path && issue.message == message) {
-            if (record_metadata_diagnostic_locked(duplicate)) note_transition();
+            if (diagnose_duplicate &&
+                record_metadata_diagnostic_locked(duplicate)) {
+                note_transition();
+            }
             return false;
         }
     }
@@ -477,9 +489,15 @@ void TraceGenerationRuntime::join_status() noexcept {
                                                         std::memory_order_acquire)) return;
     if (::pthread_equal(::pthread_self(), status_thread_)) {
         (void)::pthread_detach(status_thread_);
-        return;
+    } else {
+        (void)::pthread_join(status_thread_, nullptr);
     }
-    (void)::pthread_join(status_thread_, nullptr);
+    // Retirement may follow immediately after a cold-path metadata update.
+    // Persist one final snapshot after the worker is quiescent so joining the
+    // polling pthread cannot discard that last authoritative transition.
+    if (status_enabled_.load(std::memory_order_acquire)) {
+        (void)status_publisher_.publish(status_snapshot());
+    }
 }
 
 SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {

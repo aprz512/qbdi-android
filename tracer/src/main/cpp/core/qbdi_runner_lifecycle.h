@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 
 class BinaryTraceWriter;
 
@@ -33,6 +34,28 @@ bool register_qbdi_callbacks(const QbdiCallbackRegistration &) noexcept;
 
 QbdiTargetCallResult run_qbdi_target_call(QbdiTargetCall call, void *opaque,
                                           BinaryTraceWriter *writer) noexcept;
+
+enum class QbdiNormalError : uint8_t {
+    TracePrepare,
+    CrashMarkerOpen,
+    TraceOpen,
+    TraceBegin,
+    SessionCreate,
+    TraceFinalize,
+    TraceSeal,
+    TraceClose,
+    CrashMarkerFinish,
+};
+
+// Normal-runner cold-path metadata handoff. The artifact is published only
+// after BinaryTraceWriter::begin succeeds; callers pass its completed path and
+// this seam strips directories before handing it to the authoritative status.
+bool record_qbdi_normal_artifact(
+        const std::shared_ptr<TraceGenerationRuntime> &runtime,
+        std::string_view artifact_path) noexcept;
+void record_qbdi_normal_error(
+        const std::shared_ptr<TraceGenerationRuntime> &runtime,
+        QbdiNormalError error) noexcept;
 
 using QbdiElapsedMillis = long (*)(void *opaque) noexcept;
 

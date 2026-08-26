@@ -55,8 +55,48 @@ struct InstalledSceneHook {
 
 struct ProxyCallRuntime {
     std::shared_ptr<InstalledSceneHook> hook;
+    std::shared_ptr<CaptureCoordinator> coordinator;
     TraceInvocation invocation;
 };
+
+struct DeferredRuntimeReleases {
+    void reserve(size_t capacity) {
+        runtimes.reserve(capacity);
+        coordinators.reserve(capacity);
+    }
+    void push_back(std::shared_ptr<TraceGenerationRuntime> runtime) {
+        if (runtime != nullptr) runtimes.push_back(std::move(runtime));
+    }
+    void push_back(std::shared_ptr<CaptureCoordinator> coordinator) {
+        if (coordinator != nullptr) {
+            coordinators.push_back(std::move(coordinator));
+        }
+    }
+
+    std::vector<std::shared_ptr<TraceGenerationRuntime>> runtimes;
+    std::vector<std::shared_ptr<CaptureCoordinator>> coordinators;
+};
+
+// Called only while the registry and hook transition mutexes are held. Moving
+// ownership into a caller-declared collector makes the potentially joining
+// runtime destructor run after those locks have been released.
+static void retire_runtime_ownership_locked(
+        InstalledSceneHook *hook,
+        DeferredRuntimeReleases *releases) {
+    if (hook == nullptr || releases == nullptr) return;
+    if (hook->runtime != nullptr) {
+        releases->push_back(std::move(hook->runtime));
+    }
+    if (hook->pending_runtime != nullptr) {
+        releases->push_back(std::move(hook->pending_runtime));
+    }
+    if (hook->coordinator != nullptr) {
+        releases->push_back(std::move(hook->coordinator));
+    }
+    if (hook->pending_coordinator != nullptr) {
+        releases->push_back(std::move(hook->pending_coordinator));
+    }
+}
 
 static std::mutex g_lock;
 static std::mutex g_configuration_call_lock;
@@ -84,6 +124,7 @@ using RegistrationGate = void (*)();
 static RegistrationGate g_registration_gate = nullptr;
 static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
 static std::atomic<bool> g_throw_during_configuration_apply{false};
+static std::string g_status_output_directory;
 #endif
 
 static void *proxy_for_generation(size_t generation);
@@ -101,18 +142,21 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
                                       uint64_t config_generation,
                                       const std::shared_ptr<CaptureCoordinator> &coordinator,
                                       const std::shared_ptr<TraceGenerationRuntime> &runtime,
-                                      bool batch_install = false);
+                                      bool batch_install,
+                                      DeferredRuntimeReleases *releases);
 static std::vector<SceneConfigurationStatus> installation_statuses(
         const TraceConfig &config,
         const std::vector<SceneAddressDiagnostics> &diagnostics);
 static void fail_installation_statuses(
         uint64_t generation, std::vector<SceneConfigurationStatus> *statuses,
-        const char *code, int hook_error, bool registry_locked = false);
+        const char *code, int hook_error, bool registry_locked = false,
+        DeferredRuntimeReleases *releases = nullptr);
 static bool retire_superseded_hooks(
         uint64_t generation,
         std::vector<SceneConfigurationStatus> *statuses,
         bool append_residual_status = false,
-        std::vector<size_t> *reported_residual_generations = nullptr);
+        std::vector<size_t> *reported_residual_generations = nullptr,
+        DeferredRuntimeReleases *releases = nullptr);
 extern "C" char trace_proxy_stubs[];
 
 static bool tracer_fork_lifecycle_ready() noexcept {
@@ -127,6 +171,9 @@ static std::shared_ptr<TraceGenerationRuntime> create_generation_runtime(
     limits.flight_max_threads = config.flight.max_threads;
     TraceGenerationStatusOptions status;
     status.config = config;
+#if defined(QTRACE_HOST_TEST)
+    status.output_directory = g_status_output_directory;
+#endif
     return TraceGenerationRuntime::create(
             generation, config.session, limits, {}, std::move(status));
 }
@@ -168,6 +215,8 @@ static void install_nonflight_hooks_when_ready(
 static void retire_module_generation(uintptr_t module_base,
                                      const char *module_path) noexcept {
     if (module_path == nullptr || module_path[0] == '\0') return;
+    DeferredRuntimeReleases releases;
+    releases.reserve(kMaxScenes * 2U);
     std::lock_guard<std::mutex> registry_guard(g_lock);
     for (size_t generation = 0; generation < g_next_proxy_generation;
          ++generation) {
@@ -194,6 +243,7 @@ static void retire_module_generation(uintptr_t module_base,
                     static_cast<uint32_t>(::syscall(SYS_gettid)),
                     module_base, CoverageGapReason::ModuleGeneration);
         }
+        retire_runtime_ownership_locked(slot.get(), &releases);
     }
 }
 
@@ -355,13 +405,16 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                     sizeof(runtime->invocation.args));
         runtime->invocation.indirect_result = indirect_result;
         runtime->invocation.runtime = runtime->hook->runtime;
+        runtime->coordinator = runtime->hook->coordinator;
         execution_target = runtime->invocation.target_address;
         const bool persistent_flight = runtime->hook->config.flight.enabled &&
-                                       runtime->hook->coordinator != nullptr;
+                                       runtime->coordinator != nullptr;
         if (runtime->hook->retired) {
             execution_target = reinterpret_cast<uintptr_t>(
                     runtime->hook->hook.retained_original);
             runtime->invocation.execution_address = execution_target;
+            use_original_bypass = true;
+            safe_to_dispatch = execution_target != 0;
         } else if (persistent_flight) {
             execution_target = reinterpret_cast<uintptr_t>(
                     runtime->hook->hook.retained_original);
@@ -447,9 +500,8 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     TraceRunResult traced{};
     if (execution_target != 0 && !use_original_bypass) {
         if (runtime->hook->config.flight.enabled &&
-            runtime->hook->coordinator != nullptr) {
-            CaptureCoordinator *const coordinator =
-                    runtime->hook->coordinator.get();
+            runtime->coordinator != nullptr) {
+            CaptureCoordinator *const coordinator = runtime->coordinator.get();
             const uint32_t tid = static_cast<uint32_t>(::syscall(SYS_gettid));
             QbdiThreadSession *const session =
                     coordinator->enter(tid, *runtime->invocation.scene);
@@ -492,6 +544,8 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     bool resume_pending_batch = false;
     ModuleRange pending_batch_module;
     uint64_t pending_batch_generation = 0;
+    DeferredRuntimeReleases releases;
+    releases.reserve(2);
     {
         std::lock_guard<std::mutex> registry_guard(g_lock);
         std::lock_guard<std::mutex> transition_guard(runtime->hook->transition_mutex);
@@ -529,6 +583,8 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                             runtime->hook->pending_config_generation;
                     runtime->hook->pending_install = false;
                     runtime->hook->pending_batch_install = false;
+                    retire_runtime_ownership_locked(runtime->hook.get(),
+                                                    &releases);
                     if (pending_batch) {
                         pending_batch_module = pending_module;
                         pending_batch_generation = pending_config_generation;
@@ -546,11 +602,15 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
             } else if (!runtime->hook->retired && !runtime->hook->installed) {
                 // Every physical hook installation gets a distinct proxy identity.
                 // A thread may still be paused in this generation's old stub.
+                const std::shared_ptr<TraceGenerationRuntime> rehook_runtime =
+                        runtime->hook->runtime;
                 runtime->hook->retired = true;
                 (void)create_hook_generation_locked(
                         runtime->hook->config, runtime->hook->scene,
                         runtime->hook->module, runtime->hook->config_generation,
-                        runtime->hook->coordinator, runtime->hook->runtime);
+                        runtime->hook->coordinator, rehook_runtime);
+                retire_runtime_ownership_locked(runtime->hook.get(),
+                                                &releases);
             } else if (!runtime->hook->retired) {
                 runtime->hook->unhook_failed_window = false;
             }
@@ -638,7 +698,8 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
                                       uint64_t config_generation,
                                       const std::shared_ptr<CaptureCoordinator> &coordinator,
                                       const std::shared_ptr<TraceGenerationRuntime> &runtime,
-                                      bool batch_install) {
+                                      bool batch_install,
+                                      DeferredRuntimeReleases *releases) {
     if (config.flight.enabled && coordinator != nullptr &&
         coordinator->started() && !coordinator->matches_module(module)) {
         mark_flight_gateway_gap(config, coordinator, module, scene,
@@ -750,6 +811,7 @@ static bool install_scene_hook_locked(const TraceConfig &config, const SceneConf
         previous->installed = false;
         previous->unhook_failed_window = false;
         previous->retired = true;
+        retire_runtime_ownership_locked(previous.get(), releases);
     }
     return create_hook_generation_locked(config, scene, module, config_generation,
                                          coordinator, runtime);
@@ -793,14 +855,19 @@ CaptureCoordinator *trace_proxy_test_current_coordinator() {
 bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene,
                              const ModuleRange &module) {
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return false;
+    DeferredRuntimeReleases releases;
+    releases.reserve(3);
     std::lock_guard<std::mutex> guard(g_lock);
     g_config = config;
     ++g_config_generation;
+    if (g_generation_runtime != nullptr) {
+        releases.push_back(std::move(g_generation_runtime));
+    }
     g_generation_runtime = create_generation_runtime(config,
                                                      g_config_generation);
     const bool installed = install_scene_hook_locked(
             config, scene, module, g_config_generation,
-            g_capture_coordinator, g_generation_runtime);
+            g_capture_coordinator, g_generation_runtime, false, &releases);
     if (installed && g_generation_runtime != nullptr &&
         scene.index < g_scene_hooks.size() &&
         g_scene_hooks[scene.index] != nullptr &&
@@ -813,10 +880,12 @@ bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene
 bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
                                              const ModuleRange &module) {
     if (!tracer_fork_lifecycle_ready()) return false;
+    DeferredRuntimeReleases releases;
+    releases.reserve(2);
     std::lock_guard<std::mutex> guard(g_lock);
     const bool installed = install_scene_hook_locked(
             g_config, scene, module, g_config_generation,
-            g_capture_coordinator, g_generation_runtime);
+            g_capture_coordinator, g_generation_runtime, false, &releases);
     if (installed && g_generation_runtime != nullptr &&
         scene.index < g_scene_hooks.size() &&
         g_scene_hooks[scene.index] != nullptr &&
@@ -835,6 +904,11 @@ void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate) {
     g_stub_entry_gate.store(gate, std::memory_order_release);
 }
 
+void trace_proxy_test_set_status_output_directory(const char *directory) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    g_status_output_directory = directory == nullptr ? "" : directory;
+}
+
 size_t trace_proxy_test_generation(size_t scene_index) {
     std::lock_guard<std::mutex> guard(g_lock);
     if (scene_index >= kMaxScenes || g_scene_hooks[scene_index] == nullptr) {
@@ -845,11 +919,15 @@ size_t trace_proxy_test_generation(size_t scene_index) {
 
 void trace_proxy_test_set_coordinator(
         const std::shared_ptr<CaptureCoordinator> &coordinator) {
-    std::lock_guard<std::mutex> guard(g_lock);
-    g_capture_coordinator = coordinator;
-    if (coordinator != nullptr) {
-        coordinator->set_thread_start_resolver(resolve_flight_thread_start,
-                                               coordinator.get());
+    std::shared_ptr<CaptureCoordinator> previous;
+    {
+        std::lock_guard<std::mutex> guard(g_lock);
+        previous = std::move(g_capture_coordinator);
+        g_capture_coordinator = coordinator;
+        if (coordinator != nullptr) {
+            coordinator->set_thread_start_resolver(
+                    resolve_flight_thread_start, coordinator.get());
+        }
     }
 }
 
@@ -983,6 +1061,18 @@ static std::vector<SceneConfigurationStatus> installation_statuses(
     return statuses;
 }
 
+static void record_installation_warnings(
+        const std::shared_ptr<TraceGenerationRuntime> &runtime,
+        const std::vector<SceneConfigurationStatus> &statuses) {
+    if (runtime == nullptr) return;
+    for (const SceneConfigurationStatus &status : statuses) {
+        for (const ConfigurationIssue &warning : status.warnings) {
+            (void)runtime->record_status_warning(
+                    warning.code, warning.path, warning.message);
+        }
+    }
+}
+
 static void deactivate_flight_gateway_if_current(
         uint64_t generation, bool registry_locked) {
     bool deactivate = false;
@@ -999,8 +1089,14 @@ static void deactivate_flight_gateway_if_current(
 
 static void fail_installation_statuses(
         uint64_t generation, std::vector<SceneConfigurationStatus> *statuses,
-        const char *code, int hook_error, bool registry_locked) {
+        const char *code, int hook_error, bool registry_locked,
+        DeferredRuntimeReleases *releases) {
     if (statuses == nullptr) return;
+    DeferredRuntimeReleases local_releases;
+    if (releases == nullptr) {
+        local_releases.reserve(kMaxScenes * 2U);
+        releases = &local_releases;
+    }
     for (SceneConfigurationStatus &status : *statuses) {
         status.state = SceneConfigurationState::HookFailed;
         status.error_code = code;
@@ -1009,11 +1105,11 @@ static void fail_installation_statuses(
     bool cleanup_succeeded = false;
     if (registry_locked) {
         cleanup_succeeded = retire_superseded_hooks(
-                generation, statuses, true);
+                generation, statuses, true, nullptr, releases);
     } else {
         std::lock_guard<std::mutex> guard(g_lock);
         cleanup_succeeded = retire_superseded_hooks(
-                generation, statuses, true);
+                generation, statuses, true, nullptr, releases);
     }
     deactivate_flight_gateway_if_current(generation, registry_locked);
     g_tracer_configuration.finish_install(
@@ -1062,7 +1158,8 @@ static bool retire_superseded_hooks(
         uint64_t generation,
         std::vector<SceneConfigurationStatus> *statuses,
         bool append_residual_status,
-        std::vector<size_t> *reported_residual_generations) {
+        std::vector<size_t> *reported_residual_generations,
+        DeferredRuntimeReleases *releases) {
     bool cleanup_failed = false;
     for (size_t scene_index = g_scene_hooks.size(); scene_index-- > 0;) {
         const std::shared_ptr<InstalledSceneHook> hook =
@@ -1091,6 +1188,7 @@ static bool retire_superseded_hooks(
             hook->pending_batch_install = false;
             hook->unhook_failed_window = false;
             hook->retired = true;
+            retire_runtime_ownership_locked(hook.get(), releases);
             if (g_scene_hooks[scene_index] == hook) {
                 g_scene_hooks[scene_index].reset();
             }
@@ -1099,6 +1197,11 @@ static bool retire_superseded_hooks(
         if (hook->active_proxy_calls != 0 ||
             !unhook_function(&hook->hook)) {
             hook->hook.residual_hook = true;
+            // A reachable residual proxy has a retained native gateway. Retire
+            // its tracing identity so future entrants bypass QBDI without
+            // keeping the superseded runtime/status workers alive.
+            hook->retired = true;
+            retire_runtime_ownership_locked(hook.get(), releases);
             cleanup_failed = true;
             if (reported_residual_generations != nullptr) {
                 reported_residual_generations->push_back(
@@ -1128,6 +1231,7 @@ static bool retire_superseded_hooks(
         hook->installed = false;
         hook->unhook_failed_window = false;
         hook->retired = true;
+        retire_runtime_ownership_locked(hook.get(), releases);
         if (g_scene_hooks[scene_index] == hook) {
             g_scene_hooks[scene_index].reset();
         }
@@ -1139,6 +1243,8 @@ static void install_hooks_for_module(const ModuleRange &module,
                                      uint64_t expected_generation,
                                      bool loading) {
     if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return;
+    DeferredRuntimeReleases releases;
+    releases.reserve(kMaxScenes * 2U);
     std::lock_guard<std::mutex> guard(g_lock);
     if (!g_configured || trace_process_child_detached()) return;
     if (expected_generation != 0 && expected_generation != g_config_generation) return;
@@ -1160,7 +1266,8 @@ static void install_hooks_for_module(const ModuleRange &module,
             constexpr const char *code = "COORDINATOR_UNAVAILABLE";
             QTRACE_E("generation=%llu code=%s flight coordinator unavailable",
                      static_cast<unsigned long long>(generation), code);
-            fail_installation_statuses(generation, &statuses, code, 0, true);
+            fail_installation_statuses(generation, &statuses, code, 0, true,
+                                       &releases);
             return;
         }
         if (!g_capture_coordinator->started() &&
@@ -1171,7 +1278,8 @@ static void install_hooks_for_module(const ModuleRange &module,
             constexpr const char *code = "COORDINATOR_START_FAILED";
             QTRACE_E("generation=%llu code=%s cannot start flight capture artifact",
                      static_cast<unsigned long long>(generation), code);
-            fail_installation_statuses(generation, &statuses, code, 0, true);
+            fail_installation_statuses(generation, &statuses, code, 0, true,
+                                       &releases);
             return;
         }
         g_capture_coordinator->set_thread_start_resolver(
@@ -1186,7 +1294,7 @@ static void install_hooks_for_module(const ModuleRange &module,
                      static_cast<unsigned long long>(generation), code,
                      hook_error);
             fail_installation_statuses(generation, &statuses, code,
-                                       hook_error, true);
+                                       hook_error, true, &releases);
             return;
         }
     }
@@ -1222,7 +1330,7 @@ static void install_hooks_for_module(const ModuleRange &module,
 
         if (!install_scene_hook_locked(g_config, scene, module, generation,
                                        g_capture_coordinator,
-                                       g_generation_runtime, true)) {
+                                       g_generation_runtime, true, &releases)) {
             failed_index = index;
             SceneConfigurationStatus &status = statuses[index];
             status.state = SceneConfigurationState::HookFailed;
@@ -1294,7 +1402,16 @@ static void install_hooks_for_module(const ModuleRange &module,
 
     if (failed_index == g_config.scenes.size() &&
         retire_superseded_hooks(generation, &statuses, false,
-                                &reported_residual_generations)) {
+                                &reported_residual_generations,
+                                &releases)) {
+        for (BatchInstalledScene &member : installed) {
+            if (member.rollback_kind != BatchRollbackKind::MetadataUpdate) {
+                continue;
+            }
+            releases.push_back(std::move(member.previous_runtime));
+            releases.push_back(std::move(member.previous_coordinator));
+        }
+        record_installation_warnings(g_generation_runtime, statuses);
         const bool installed_published = g_tracer_configuration.finish_install(
                 generation, ConfigurationState::Installed, std::move(statuses));
         if (installed_published && g_generation_runtime != nullptr &&
@@ -1336,10 +1453,24 @@ static void install_hooks_for_module(const ModuleRange &module,
         if (member.rollback_kind == BatchRollbackKind::PendingUpdate) {
             member.hook->pending_install = false;
             member.hook->pending_batch_install = false;
+            if (member.hook->pending_runtime != nullptr) {
+                releases.push_back(
+                        std::move(member.hook->pending_runtime));
+            }
+            if (member.hook->pending_coordinator != nullptr) {
+                releases.push_back(
+                        std::move(member.hook->pending_coordinator));
+            }
             status.state = SceneConfigurationState::RolledBack;
             continue;
         }
         if (member.rollback_kind == BatchRollbackKind::MetadataUpdate) {
+            if (member.hook->runtime != nullptr) {
+                releases.push_back(std::move(member.hook->runtime));
+            }
+            if (member.hook->coordinator != nullptr) {
+                releases.push_back(std::move(member.hook->coordinator));
+            }
             member.hook->config = std::move(member.previous_config);
             member.hook->scene = std::move(member.previous_scene);
             member.hook->module = std::move(member.previous_module);
@@ -1353,6 +1484,8 @@ static void install_hooks_for_module(const ModuleRange &module,
             (member.hook->installed &&
              !unhook_function(&member.hook->hook))) {
             member.hook->hook.residual_hook = true;
+            member.hook->retired = true;
+            retire_runtime_ownership_locked(member.hook.get(), &releases);
             status.state = SceneConfigurationState::RollbackFailed;
             status.error_code = "HOOK_ROLLBACK_FAILED";
             status.hook_error = member.hook->hook.unhook_error;
@@ -1368,6 +1501,7 @@ static void install_hooks_for_module(const ModuleRange &module,
         member.hook->installed = false;
         member.hook->unhook_failed_window = false;
         member.hook->retired = true;
+        retire_runtime_ownership_locked(member.hook.get(), &releases);
         if (member.hook->scene.index < g_scene_hooks.size() &&
             g_scene_hooks[member.hook->scene.index] == member.hook) {
             g_scene_hooks[member.hook->scene.index].reset();
@@ -1375,7 +1509,8 @@ static void install_hooks_for_module(const ModuleRange &module,
         status.state = SceneConfigurationState::RolledBack;
     }
     if (!retire_superseded_hooks(generation, &statuses, false,
-                                 &reported_residual_generations)) {
+                                 &reported_residual_generations,
+                                 &releases)) {
         rollback_failed = true;
     }
     const ConfigurationState terminal = rollback_failed
@@ -1410,10 +1545,14 @@ static void apply_accepted_configuration(TraceConfig config,
         }
         const bool runtime_ready = runtime != nullptr;
         const bool coordinator_ready = !config.flight.enabled || coordinator != nullptr;
+        std::shared_ptr<TraceGenerationRuntime> superseded_runtime;
+        std::shared_ptr<CaptureCoordinator> superseded_coordinator;
         {
             std::lock_guard<std::mutex> guard(g_lock);
             g_config = std::move(active_config);
+            superseded_coordinator = std::move(g_capture_coordinator);
             g_capture_coordinator = std::move(coordinator);
+            superseded_runtime = std::move(g_generation_runtime);
             g_generation_runtime = std::move(runtime);
             g_configured = true;
             g_config_generation = generation;

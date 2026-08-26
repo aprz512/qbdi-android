@@ -5,6 +5,69 @@
 
 #include <utility>
 
+namespace {
+
+struct NormalErrorMetadata {
+    const char *code;
+    const char *path;
+    const char *message;
+};
+
+NormalErrorMetadata normal_error_metadata(QbdiNormalError error) noexcept {
+    switch (error) {
+        case QbdiNormalError::TracePrepare:
+            return {"TRACE_PREPARE_FAILED", "$.artifacts",
+                    "prepare trace artifact failed"};
+        case QbdiNormalError::CrashMarkerOpen:
+            return {"CRASH_MARKER_OPEN_FAILED", "$.artifacts",
+                    "open crash marker failed"};
+        case QbdiNormalError::TraceOpen:
+            return {"TRACE_OPEN_FAILED", "$.artifacts",
+                    "open trace artifact failed"};
+        case QbdiNormalError::TraceBegin:
+            return {"TRACE_BEGIN_FAILED", "$.artifacts",
+                    "begin trace artifact failed"};
+        case QbdiNormalError::SessionCreate:
+            return {"QBDI_SESSION_CREATE_FAILED", "$.activeScenes",
+                    "create QBDI thread session failed"};
+        case QbdiNormalError::TraceFinalize:
+            return {"TRACE_FINALIZATION_FAILED", "$.artifacts",
+                    "finalize trace artifact failed"};
+        case QbdiNormalError::TraceSeal:
+            return {"TRACE_SEAL_FAILED", "$.artifacts",
+                    "seal stopped trace artifact failed"};
+        case QbdiNormalError::TraceClose:
+            return {"TRACE_CLOSE_FAILED", "$.artifacts",
+                    "close trace artifact failed"};
+        case QbdiNormalError::CrashMarkerFinish:
+            return {"CRASH_MARKER_FINISH_FAILED", "$.artifacts",
+                    "finish crash marker failed"};
+    }
+    return {"TRACE_FINALIZATION_FAILED", "$.artifacts",
+            "finalize trace artifact failed"};
+}
+
+} // namespace
+
+bool record_qbdi_normal_artifact(
+        const std::shared_ptr<TraceGenerationRuntime> &runtime,
+        std::string_view artifact_path) noexcept {
+    if (runtime == nullptr || artifact_path.empty()) return false;
+    const size_t slash = artifact_path.find_last_of('/');
+    const std::string_view basename = artifact_path.substr(
+            slash == std::string_view::npos ? 0 : slash + 1);
+    return runtime->record_artifact(basename);
+}
+
+void record_qbdi_normal_error(
+        const std::shared_ptr<TraceGenerationRuntime> &runtime,
+        QbdiNormalError error) noexcept {
+    if (runtime == nullptr) return;
+    const NormalErrorMetadata metadata = normal_error_metadata(error);
+    (void)runtime->record_status_error_once(metadata.code, metadata.path,
+                                            metadata.message);
+}
+
 bool register_qbdi_callbacks(const QbdiCallbackRegistration &registration) noexcept {
     bool succeeded = registration.add_pre != nullptr &&
                      registration.add_pre(registration.opaque) !=

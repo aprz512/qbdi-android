@@ -139,6 +139,11 @@ public:
                                std::string_view message) noexcept;
     bool record_status_error(std::string_view code, std::string_view path,
                              std::string_view message) noexcept;
+    // Stable lifecycle producers may encounter the same generation-wide
+    // failure in more than one invocation. Suppress an exact repeat without
+    // manufacturing a STATUS_ERROR_DUPLICATE diagnostic.
+    bool record_status_error_once(std::string_view code, std::string_view path,
+                                  std::string_view message) noexcept;
     const TraceStopToken &stop_token() const noexcept;
     TraceGenerationSnapshot snapshot() const noexcept;
 
@@ -204,7 +209,8 @@ private:
     void publish_status_loop(StatusWorkerContext *context) noexcept;
     SessionStatusSnapshot status_snapshot() const;
     bool record_status_issue(bool warning, std::string_view code,
-                             std::string_view path, std::string_view message) noexcept;
+                             std::string_view path, std::string_view message,
+                             bool diagnose_duplicate = true) noexcept;
     bool record_metadata_diagnostic_locked(StatusMetadataDiagnostic diagnostic) noexcept;
     void note_transition() noexcept;
 
