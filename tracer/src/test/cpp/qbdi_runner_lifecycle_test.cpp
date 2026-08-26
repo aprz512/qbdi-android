@@ -182,6 +182,43 @@ bool contains_record(const std::string &stream, BinaryRecordType expected) {
     return false;
 }
 
+void stopped_writer_closes_without_a_completed_terminal() {
+    char directory_template[] = "/tmp/qtrace-runner-stop-XXXXXX";
+    char *directory = ::mkdtemp(directory_template);
+    CHECK(directory != nullptr);
+
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    TraceContext context{};
+    context.scene_name = "stopped";
+    context.target_so = "libtarget.so";
+    context.module_base = 0x1000;
+    context.target_address = 0x1010;
+    context.target_offset = 0x10;
+    context.pid = ::getpid();
+    context.tid = ::getpid();
+    context.output_directory = directory;
+
+    BinaryTraceWriter writer(options, &metrics);
+    CHECK(writer.open(context));
+    const std::string path(writer.path());
+    CHECK(writer.begin(context));
+    CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
+    CHECK(!writer.end(0x44, true, 18));
+    CHECK(writer.close());
+
+    const std::vector<char> bytes = read_file(path);
+    const std::string trace(bytes.begin(), bytes.end());
+    CHECK(contains_record(trace, BinaryRecordType::TraceStop));
+    CHECK(!contains_record(trace, BinaryRecordType::TraceEnd));
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::unlink((path + ".metrics").c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
 void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
     char directory_template[] = "/tmp/qtrace-runner-fork-XXXXXX";
     char *directory = ::mkdtemp(directory_template);
@@ -300,5 +337,6 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
 } // namespace
 
 int main() {
+    stopped_writer_closes_without_a_completed_terminal();
     traced_fork_child_detaches_writer_and_parent_completes_artifact();
 }

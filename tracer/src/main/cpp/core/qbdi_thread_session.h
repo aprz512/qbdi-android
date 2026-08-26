@@ -23,6 +23,36 @@ struct TraceMetrics;
 
 class QbdiThreadSession;
 
+using QbdiSealStopped = bool (*)(void *, TraceStopReason) noexcept;
+using QbdiStopAcknowledged = void (*)(void *, bool sealed) noexcept;
+
+struct QbdiStopControl {
+    const TraceStopToken *token = nullptr;
+    void *opaque = nullptr;
+    QbdiSealStopped seal = nullptr;
+    QbdiStopAcknowledged acknowledge = nullptr;
+};
+
+struct QbdiExecutionResult {
+    TraceRunResult run{};
+    bool stop_observed = false;
+    TraceStopReason stop_reason{};
+
+    constexpr QbdiExecutionResult() noexcept = default;
+    constexpr QbdiExecutionResult(TraceRunResult value, bool observed = false,
+                                  TraceStopReason reason = {}) noexcept
+            : run(value), stop_observed(observed), stop_reason(reason) {}
+    constexpr QbdiExecutionResult(bool executed, uint64_t result) noexcept
+            : run(executed, result) {}
+    constexpr QbdiExecutionResult(bool executed, bool returned,
+                                  uint64_t result) noexcept
+            : run(executed, returned, result) {}
+    constexpr QbdiExecutionResult(bool executed, bool returned,
+                                  bool requested_exit,
+                                  uint64_t result) noexcept
+            : run(executed, returned, requested_exit, result) {}
+};
+
 using QbdiThreadSessionGapReporter = void (*)(void *opaque, uint32_t tid,
                                               uintptr_t pc) noexcept;
 using QbdiThreadSessionLifecycleReporter =
@@ -66,6 +96,10 @@ using QbdiThreadSessionTestExecutor = TraceRunResult (*)(
         void *opaque, QbdiThreadSession *session, uintptr_t entry,
         uintptr_t control_start, size_t execution_bytes,
         const uint64_t args[8], uint64_t indirect_result);
+using QbdiThreadSessionStopTestExecutor = QbdiExecutionResult (*)(
+        void *opaque, QbdiThreadSession *session, uintptr_t entry,
+        uintptr_t control_start, size_t execution_bytes,
+        const uint64_t args[8], uint64_t indirect_result);
 using QbdiThreadSessionTestContinuation = TraceRunResult (*)(
         void *opaque, QbdiThreadSession *session) noexcept;
 #define QTRACE_SESSION_CALL_NOEXCEPT
@@ -83,7 +117,8 @@ public:
     static QbdiThreadSession *create_normal(
             const TraceConfig &config, const TraceInvocation &invocation,
             TraceContext *context, TraceSink *sink, TraceCallbackGate *callback_gate,
-            BinaryTraceWriter *normal_writer) noexcept;
+            BinaryTraceWriter *normal_writer,
+            QbdiStopControl stop_control = {}) noexcept;
     static QbdiThreadSession *create_flight(
             const TraceConfig &config, const ModuleRange &module,
             const SceneConfig &scene, uint32_t tid, uint32_t module_generation,
@@ -99,7 +134,19 @@ public:
             void *lifecycle_opaque = nullptr,
             QbdiThreadSessionTestContinuation continuation = nullptr,
             QbdiControlExtentRegistration control_registration = {},
-            QbdiVmExecutionLifecycle signal_execution = {}) noexcept;
+            QbdiVmExecutionLifecycle signal_execution = {},
+            QbdiStopControl stop_control = {}) noexcept;
+    static QbdiThreadSession *create_for_test(
+            uint32_t tid, uint32_t module_generation,
+            QbdiThreadSessionStopTestExecutor executor, void *executor_opaque,
+            QbdiThreadSessionGapReporter gap_reporter = nullptr,
+            void *gap_opaque = nullptr,
+            QbdiThreadSessionLifecycleReporter lifecycle_reporter = nullptr,
+            void *lifecycle_opaque = nullptr,
+            QbdiThreadSessionTestContinuation continuation = nullptr,
+            QbdiControlExtentRegistration control_registration = {},
+            QbdiVmExecutionLifecycle signal_execution = {},
+            QbdiStopControl stop_control = {}) noexcept;
 #endif
 
     TraceRunResult call(uintptr_t entry, const uint64_t args[8],
@@ -139,12 +186,13 @@ private:
                           void *gap_opaque) noexcept;
     void set_capture_owner(
             const std::weak_ptr<CaptureCoordinator> &owner) noexcept;
-    TraceRunResult execute(uintptr_t logical_entry, uintptr_t execution_entry,
-                           uintptr_t control_start,
-                           size_t execution_bytes,
-                           const uint64_t args[8],
-                           uint64_t indirect_result) QTRACE_SESSION_CALL_NOEXCEPT;
+    QbdiExecutionResult execute(
+            uintptr_t logical_entry, uintptr_t execution_entry,
+            uintptr_t control_start, size_t execution_bytes,
+            const uint64_t args[8],
+            uint64_t indirect_result) QTRACE_SESSION_CALL_NOEXCEPT;
     TraceRunResult continue_execution() QTRACE_SESSION_CALL_NOEXCEPT;
+    bool seal_observed_stop(TraceStopReason reason) noexcept;
     bool ensure_control_extent(uintptr_t execution_entry,
                                uintptr_t control_start,
                                size_t execution_bytes) noexcept;
@@ -158,6 +206,7 @@ private:
     bool capture_owner_required_ = false;
 #if defined(QTRACE_HOST_TEST)
     QbdiThreadSessionTestExecutor test_executor_ = nullptr;
+    QbdiThreadSessionStopTestExecutor test_stop_executor_ = nullptr;
     void *test_executor_opaque_ = nullptr;
     QbdiThreadSessionLifecycleReporter lifecycle_reporter_ = nullptr;
     void *lifecycle_opaque_ = nullptr;
@@ -166,6 +215,7 @@ private:
     QbdiControlExtentRegistration test_control_registration_{};
 #endif
     QbdiControlExtentSet control_extents_;
+    QbdiStopControl stop_control_{};
     uintptr_t thread_entry_ = 0;
     uint32_t creator_tid_ = 0;
     uint32_t tid_ = 0;
@@ -174,6 +224,8 @@ private:
     bool entered_ = false;
     bool vm_running_ = false;
     bool incomplete_ = false;
+    bool stop_handled_ = false;
+    bool stop_sealed_ = false;
     bool thread_begun_ = false;
     bool thread_ended_ = false;
 };

@@ -11,9 +11,12 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+static long elapsed_ms_since(std::chrono::steady_clock::time_point started);
+
 struct RunnerState {
     RunnerState(const TraceConfig &config, const TraceInvocation &invocation)
-        : writer(config.trace, &metrics) {
+        : writer(config.trace, &metrics), runtime(invocation.runtime),
+          admission(invocation.admission) {
         context.package_name = config.package_name;
         context.scene_name = invocation.scene->name;
         context.target_so = config.target_so;
@@ -24,11 +27,42 @@ struct RunnerState {
         context.tid = static_cast<int>(syscall(SYS_gettid));
     }
 
+    static bool seal_stopped(void *opaque, TraceStopReason reason) noexcept {
+        auto *state = static_cast<RunnerState *>(opaque);
+        state->stop_observed = true;
+        state->stop_sealed = state->writer.stop(
+                reason, elapsed_ms_since(state->started));
+        return state->stop_sealed;
+    }
+
+    static void acknowledge_stopped(void *opaque, bool sealed) noexcept {
+        auto *state = static_cast<RunnerState *>(opaque);
+        state->stop_acknowledged = true;
+        if (state->runtime == nullptr || state->admission.serial == 0) return;
+        if (sealed) {
+            state->runtime->acknowledge_sealed(state->admission);
+        } else {
+            state->runtime->finish_call(state->admission, false);
+        }
+    }
+
+    QbdiStopControl stop_control() noexcept {
+        if (runtime == nullptr || admission.serial == 0) return {};
+        return {&runtime->stop_token(), this, seal_stopped,
+                acknowledge_stopped};
+    }
+
     TraceContext context;
     TraceMetrics metrics;
     BinaryTraceWriter writer;
     TraceRunSessionOutcome session;
     CrashMarkerSession crash_marker;
+    std::shared_ptr<TraceGenerationRuntime> runtime;
+    TraceAdmission admission{};
+    std::chrono::steady_clock::time_point started{};
+    bool stop_observed = false;
+    bool stop_sealed = false;
+    bool stop_acknowledged = false;
 };
 
 static long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
@@ -70,12 +104,13 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         state->session.observe_trace_setup(true);
     }
 
-    auto started = std::chrono::steady_clock::now();
+    state->started = std::chrono::steady_clock::now();
     std::unique_ptr<QbdiThreadSession> qbdi;
     if (trace_setup_ok) {
         qbdi.reset(QbdiThreadSession::create_normal(
                 config, invocation, &state->context, &state->writer,
-                state->session.callback_gate(), &state->writer));
+                state->session.callback_gate(), &state->writer,
+                state->stop_control()));
     }
     const bool execution_setup_ok = qbdi != nullptr && qbdi->ready();
     if (!execution_setup_ok && trace_setup_ok) {
@@ -104,12 +139,23 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     if (qbdi != nullptr) qbdi->copy_cache_metrics(&state->metrics);
 
     state->session.observe_target_call(target, state->writer.failed());
-    const TraceRunFinalization finalization =
-            state->session.finalize(state->writer, elapsed_ms_since(started));
+    TraceRunFinalization finalization{};
+    if (state->stop_observed) {
+        finalization.target_ran = target.ran;
+        finalization.outward_return_value = target.ran ? target.return_value : 0;
+        const bool writer_closed = state->writer.close();
+        finalization.completion_success = state->stop_sealed && writer_closed;
+        finalization.should_log_success = finalization.completion_success;
+    } else {
+        finalization = state->session.finalize(
+                state->writer, elapsed_ms_since(state->started));
+    }
     const bool crash_marker_finished = state->crash_marker.finish();
     if (finalization.should_log_success && crash_marker_finished) {
-        QTRACE_I("trace %s complete path=%.*s", invocation.scene->name.c_str(),
-                 static_cast<int>(state->writer.path().size()), state->writer.path().data());
+        QTRACE_I("trace %s %s path=%.*s", invocation.scene->name.c_str(),
+                 state->stop_observed ? "stopped" : "complete",
+                 static_cast<int>(state->writer.path().size()),
+                 state->writer.path().data());
     } else {
         QTRACE_E("trace %s write failed path=%.*s", invocation.scene->name.c_str(),
                  static_cast<int>(state->writer.path().size()), state->writer.path().data());

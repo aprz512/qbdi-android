@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <thread>
 
 namespace {
 
@@ -154,18 +155,19 @@ struct MultiSceneExecution {
     size_t calls = 0;
 };
 
-TraceRunResult execute_two_scenes(void *opaque, QbdiThreadSession *, uintptr_t,
-                                  uintptr_t, size_t, const uint64_t[8],
-                                  uint64_t) noexcept {
+TraceRunResult execute_two_scenes(
+        void *opaque, QbdiThreadSession *, uintptr_t, uintptr_t, size_t,
+        const uint64_t[8], uint64_t) noexcept {
     auto *execution = static_cast<MultiSceneExecution *>(opaque);
     ++execution->calls;
     if (execution->calls == 1) return {true, true, 0x44};
     return {true, false, true, 0x1234};
 }
 
-TraceRunResult execute(void *opaque, QbdiThreadSession *session, uintptr_t entry,
-                       uintptr_t control_start, size_t execution_bytes,
-                       const uint64_t args[8], uint64_t indirect_result) noexcept {
+TraceRunResult execute(void *opaque, QbdiThreadSession *session,
+                       uintptr_t entry, uintptr_t control_start,
+                       size_t execution_bytes, const uint64_t args[8],
+                       uint64_t indirect_result) noexcept {
     auto *execution = static_cast<FakeExecution *>(opaque);
     ++execution->calls;
     execution->session = session;
@@ -185,6 +187,151 @@ TraceRunResult execute(void *opaque, QbdiThreadSession *session, uintptr_t entry
         CHECK(current_qbdi_thread_session() == session);
     }
     return {execution->target_executed, execution->return_value};
+}
+
+struct CooperativeStopExecution {
+    size_t execution_calls = 0;
+    size_t continuation_calls = 0;
+    size_t seal_calls = 0;
+    size_t acknowledge_calls = 0;
+    std::thread::id execution_thread{};
+    std::thread::id seal_thread{};
+    bool observe_stop = true;
+    bool seal_success = true;
+    bool seal_attempted = false;
+    bool sealed = false;
+    bool acknowledged_sealed = false;
+    bool continuation_saw_seal_attempt = false;
+    bool continuation_saw_sealed = false;
+};
+
+QbdiExecutionResult execute_cooperative_stop(
+        void *opaque, QbdiThreadSession *, uintptr_t, uintptr_t, size_t,
+        const uint64_t[8], uint64_t) noexcept {
+    auto *execution = static_cast<CooperativeStopExecution *>(opaque);
+    ++execution->execution_calls;
+    execution->execution_thread = std::this_thread::get_id();
+    if (!execution->observe_stop) return {true, true, 0x31};
+    return {TraceRunResult{true, false, 0x17}, true,
+            TraceStopReason::DurationElapsed};
+}
+
+TraceRunResult continue_after_cooperative_stop(
+        void *opaque, QbdiThreadSession *) noexcept {
+    auto *execution = static_cast<CooperativeStopExecution *>(opaque);
+    ++execution->continuation_calls;
+    execution->continuation_saw_seal_attempt = execution->seal_attempted;
+    execution->continuation_saw_sealed = execution->sealed;
+    return {true, true, 0x44};
+}
+
+bool seal_cooperative_stop(void *opaque, TraceStopReason reason) noexcept {
+    auto *execution = static_cast<CooperativeStopExecution *>(opaque);
+    CHECK(reason == TraceStopReason::DurationElapsed);
+    ++execution->seal_calls;
+    execution->seal_thread = std::this_thread::get_id();
+    execution->seal_attempted = true;
+    execution->sealed = execution->seal_success;
+    return execution->seal_success;
+}
+
+void acknowledge_cooperative_stop(void *opaque, bool sealed) noexcept {
+    auto *execution = static_cast<CooperativeStopExecution *>(opaque);
+    ++execution->acknowledge_calls;
+    execution->acknowledged_sealed = sealed;
+}
+
+QbdiThreadSession *cooperative_stop_session(CooperativeStopExecution *execution) {
+    const QbdiStopControl stop_control{
+            nullptr, execution, seal_cooperative_stop,
+            acknowledge_cooperative_stop};
+    return QbdiThreadSession::create_for_test(
+            771, 51, execute_cooperative_stop, execution,
+            nullptr, nullptr, nullptr, nullptr,
+            continue_after_cooperative_stop, {}, {}, stop_control);
+}
+
+void no_stop_preserves_the_direct_target_return_path() {
+    CooperativeStopExecution execution;
+    execution.observe_stop = false;
+    QbdiThreadSession *session = cooperative_stop_session(&execution);
+    CHECK(session != nullptr);
+    const uint64_t args[8]{};
+
+    const TraceRunResult result = session->call(0x71005000, args, 0);
+
+    CHECK(result.target_executed);
+    CHECK(result.target_returned);
+    CHECK(result.value == 0x31);
+    CHECK(execution.execution_calls == 1);
+    CHECK(execution.seal_calls == 0);
+    CHECK(execution.acknowledge_calls == 0);
+    CHECK(execution.continuation_calls == 0);
+    CHECK(!session->incomplete());
+    delete session;
+}
+
+void stop_before_first_collected_instruction_seals_before_continuation() {
+    CooperativeStopExecution execution;
+    QbdiThreadSession *session = cooperative_stop_session(&execution);
+    CHECK(session != nullptr);
+    const uint64_t args[8]{};
+
+    const TraceRunResult result = session->call(0x71005100, args, 0);
+
+    CHECK(result.target_executed);
+    CHECK(result.target_returned);
+    CHECK(result.value == 0x44);
+    CHECK(execution.execution_calls == 1);
+    CHECK(execution.seal_calls == 1);
+    CHECK(execution.acknowledge_calls == 1);
+    CHECK(execution.execution_thread == execution.seal_thread);
+    CHECK(execution.acknowledged_sealed);
+    CHECK(execution.continuation_calls == 1);
+    CHECK(execution.continuation_saw_seal_attempt);
+    CHECK(execution.continuation_saw_sealed);
+    CHECK(!session->incomplete());
+    delete session;
+}
+
+void repeated_stop_observation_never_reseals_or_reenters_the_target() {
+    CooperativeStopExecution execution;
+    QbdiThreadSession *session = cooperative_stop_session(&execution);
+    CHECK(session != nullptr);
+    const uint64_t args[8]{};
+
+    CHECK(session->call(0x71005200, args, 0).target_returned);
+    const TraceRunResult repeated = session->call(0x71005200, args, 0);
+
+    CHECK(!repeated.target_executed);
+    CHECK(execution.execution_calls == 1);
+    CHECK(execution.seal_calls == 1);
+    CHECK(execution.acknowledge_calls == 1);
+    CHECK(execution.continuation_calls == 1);
+    delete session;
+}
+
+void failed_stop_seal_marks_incomplete_without_restarting_the_target() {
+    CooperativeStopExecution execution;
+    execution.seal_success = false;
+    QbdiThreadSession *session = cooperative_stop_session(&execution);
+    CHECK(session != nullptr);
+    const uint64_t args[8]{};
+
+    const TraceRunResult result = session->call(0x71005300, args, 0);
+
+    CHECK(result.target_executed);
+    CHECK(result.target_returned);
+    CHECK(result.value == 0x44);
+    CHECK(execution.execution_calls == 1);
+    CHECK(execution.seal_calls == 1);
+    CHECK(execution.acknowledge_calls == 1);
+    CHECK(!execution.acknowledged_sealed);
+    CHECK(execution.continuation_calls == 1);
+    CHECK(execution.continuation_saw_seal_attempt);
+    CHECK(!execution.continuation_saw_sealed);
+    CHECK(session->incomplete());
+    delete session;
 }
 
 void mark_gap(void *opaque, uint32_t tid, uintptr_t pc) noexcept {
@@ -574,6 +721,10 @@ void continuation_reactivates_fresh_and_clears_at_target_postinst() {
 } // namespace
 
 int main() {
+    no_stop_preserves_the_direct_target_return_path();
+    stop_before_first_collected_instruction_seals_before_continuation();
+    repeated_stop_observation_never_reseals_or_reenters_the_target();
+    failed_stop_seal_marks_incomplete_without_restarting_the_target();
     forwards_entry_arguments_and_return_with_scoped_tls();
     rejects_recursive_running_vm_and_reports_a_permanent_gap();
     failed_execution_reports_a_permanent_gap();

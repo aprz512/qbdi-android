@@ -2,10 +2,12 @@
 
 #include "core/module_maps.h"
 #include "core/trace_config.h"
+#include "core/trace_generation_runtime.h"
 #include "events/binary_trace_writer.h"
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 using GenericTargetFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                                      uint64_t, uint64_t);
@@ -21,6 +23,11 @@ struct TraceInvocation {
     uintptr_t execution_address = 0;
     std::array<uint64_t, 8> args{};
     uint64_t indirect_result = 0;
+    // Filled by the proxy admission gate. Keeping the generation alive here
+    // makes its stop token and acknowledgement target valid for the complete
+    // synchronous QBDI call.
+    std::shared_ptr<TraceGenerationRuntime> runtime;
+    TraceAdmission admission{};
 };
 
 struct TraceRunResult {

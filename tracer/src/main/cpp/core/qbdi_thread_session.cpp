@@ -132,12 +132,16 @@ void observe_signal_target_post(void *opaque, const QBDI::GPRState *gpr,
 }  // namespace
 
 struct QbdiThreadSession::Impl {
-    Impl(const TraceConfig &source_config, const TraceInvocation &invocation,
+    Impl(QbdiThreadSession *session, const TraceConfig &source_config,
+         const TraceInvocation &invocation,
          TraceContext *external_context, TraceSink *external_sink,
-         TraceCallbackGate *external_gate, BinaryTraceWriter *writer) noexcept
-            : config(&source_config), module(invocation.module), scene(invocation.scene),
+         TraceCallbackGate *external_gate, BinaryTraceWriter *writer,
+         QbdiStopControl control) noexcept
+            : owner(session), config(&source_config), module(invocation.module),
+              scene(invocation.scene),
               context(external_context), sink(external_sink), gate(external_gate),
-              normal_writer(writer), trace_options(source_config.trace) {
+              normal_writer(writer), stop_control(control),
+              trace_options(source_config.trace) {
         initialize_collector();
     }
 
@@ -334,16 +338,14 @@ struct QbdiThreadSession::Impl {
         auto *self = static_cast<Impl *>(opaque);
         if (self->flight) return self->add_target_code_callbacks(QBDI::PREINST);
         return self->vm.addCodeCB(QBDI::PREINST,
-                                  InstructionCollector::pre_callback,
-                                  self->collector);
+                                  on_target_pre, self);
     }
 
     static uint32_t add_post(void *opaque) noexcept {
         auto *self = static_cast<Impl *>(opaque);
         if (self->flight) return self->add_target_code_callbacks(QBDI::POSTINST);
         return self->vm.addCodeCB(QBDI::POSTINST,
-                                  InstructionCollector::post_callback,
-                                  self->collector);
+                                  on_target_post, self);
     }
 
     static QBDI::VMAction on_target_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
@@ -354,7 +356,23 @@ struct QbdiThreadSession::Impl {
             self->last_target_pc = self->control_only ? 0 : gpr->pc;
         }
         if (self->control_only) return QBDI::CONTINUE;
+        if (self->stop_control.token != nullptr &&
+            self->stop_control.token->requested()) {
+            if (!self->stop_observed) {
+                self->stop_observed = true;
+                self->stop_reason = self->stop_control.token->reason();
+            }
+            return QBDI::STOP;
+        }
         return InstructionCollector::pre_callback(vm, gpr, fpr, self->collector);
+    }
+
+    static QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr,
+                                    QBDI::FPRState *fpr, void *opaque) {
+        auto *self = static_cast<Impl *>(opaque);
+        if (self->control_only) return QBDI::CONTINUE;
+        return InstructionCollector::memory_callback(
+                vm, gpr, fpr, self->collector);
     }
 
     static QBDI::VMAction on_control_pre(QBDI::VM *, QBDI::GPRState *,
@@ -514,8 +532,7 @@ struct QbdiThreadSession::Impl {
                     recording
                             ? vm.addMemAccessCB(
                                       QBDI::MEMORY_READ_WRITE,
-                                      InstructionCollector::memory_callback,
-                                      collector)
+                                      on_memory, this)
                             : QBDI::INVALID_EVENTID;
             if (!recording || callback == QBDI::INVALID_EVENTID) {
                 return fail_setup("QBDI memory instrumentation unavailable");
@@ -541,6 +558,8 @@ struct QbdiThreadSession::Impl {
         thread_exit_requested = false;
         thread_exit_value = 0;
         target_execution_observed = false;
+        stop_observed = false;
+        stop_reason = {};
         control_only = false;
         if (!signal_execution.activate(gpr)) return {};
         const bool executed = vm.run(execution_entry, kReturnAddress);
@@ -552,6 +571,9 @@ struct QbdiThreadSession::Impl {
             return {target_executed, returned, value};
         }
         if (target_executed || thread_exit_requested) collector->finish_last(*gpr);
+        if (stop_observed && owner != nullptr) {
+            (void)owner->seal_observed_stop(stop_reason);
+        }
         if (thread_exit_requested) {
             return {true, false, true, thread_exit_value};
         }
@@ -627,6 +649,7 @@ struct QbdiThreadSession::Impl {
         return emitted && sealed;
     }
 
+    QbdiThreadSession *owner = nullptr;
     const TraceConfig *config = nullptr;
     const ModuleRange *module = nullptr;
     const SceneConfig *scene = nullptr;
@@ -636,6 +659,7 @@ struct QbdiThreadSession::Impl {
     TraceCallbackGate owned_gate;
     TraceCallbackGate *gate = nullptr;
     BinaryTraceWriter *normal_writer = nullptr;
+    QbdiStopControl stop_control{};
     FlightArtifact *artifact = nullptr;
     SignalBroker *signal_broker = nullptr;
     SignalBrokerThreadState signal_thread{};
@@ -669,6 +693,8 @@ struct QbdiThreadSession::Impl {
     uint64_t thread_exit_value = 0;
     static constexpr QBDI::rword kReturnAddress = 42;
     bool target_execution_observed = false;
+    bool stop_observed = false;
+    TraceStopReason stop_reason{};
     bool control_only = false;
 };
 #endif
@@ -777,6 +803,18 @@ void QbdiThreadSession::mark_coverage_gap(uintptr_t pc) noexcept {
     if (gap_reporter_ != nullptr) gap_reporter_(gap_opaque_, tid_, pc);
 }
 
+bool QbdiThreadSession::seal_observed_stop(TraceStopReason reason) noexcept {
+    if (stop_handled_ || trace_process_child_detached()) return stop_sealed_;
+    stop_handled_ = true;
+    stop_sealed_ = stop_control_.seal != nullptr &&
+                   stop_control_.seal(stop_control_.opaque, reason);
+    if (stop_control_.acknowledge != nullptr) {
+        stop_control_.acknowledge(stop_control_.opaque, stop_sealed_);
+    }
+    if (!stop_sealed_ || stop_control_.acknowledge == nullptr) incomplete_ = true;
+    return stop_sealed_;
+}
+
 void QbdiThreadSession::set_gap_reporter(
         QbdiThreadSessionGapReporter gap_reporter, void *gap_opaque) noexcept {
     gap_reporter_ = gap_reporter;
@@ -812,6 +850,7 @@ TraceRunResult QbdiThreadSession::call_gateway(
         uintptr_t control_start, size_t execution_bytes,
         const uint64_t args[8], uint64_t indirect_result)
         QTRACE_SESSION_CALL_NOEXCEPT {
+    if (stop_handled_) return {};
     if (!ready_ || logical_entry == 0 || execution_entry == 0 ||
         args == nullptr || vm_running_) {
         mark_coverage_gap(logical_entry);
@@ -831,10 +870,15 @@ TraceRunResult QbdiThreadSession::call_gateway(
     }
 
     vm_running_ = true;
-    TraceRunResult result = execute(logical_entry, execution_entry,
-                                    control_start, execution_bytes, args,
-                                    indirect_result);
+    const QbdiExecutionResult execution = execute(
+            logical_entry, execution_entry, control_start,
+            execution_bytes, args, indirect_result);
+    TraceRunResult result = execution.run;
+    if (execution.stop_observed) {
+        (void)seal_observed_stop(execution.stop_reason);
+    }
     if (trace_process_child_detached()) return result;
+    const bool cooperative_stop = execution.stop_observed;
     bool execution_observed = result.target_executed;
     QbdiNoProgressTracker no_progress;
     QbdiExecutionState execution_state{};
@@ -847,7 +891,7 @@ TraceRunResult QbdiThreadSession::call_gateway(
     // yields periodically until QBDI can reach the real return/deferred exit.
     while (execution_observed &&
            !result.target_returned && !result.exit_requested) {
-        if (!incomplete_) mark_coverage_gap(logical_entry);
+        if (!cooperative_stop && !incomplete_) mark_coverage_gap(logical_entry);
         result = continue_execution();
         result.target_executed = result.target_executed || execution_observed;
         execution_observed = result.target_executed;
@@ -868,7 +912,8 @@ TraceRunResult QbdiThreadSession::call_gateway(
         }
     }
     vm_running_ = false;
-    if (!result.target_returned && !result.exit_requested && !incomplete_) {
+    if (!cooperative_stop && !result.target_returned &&
+        !result.exit_requested && !incomplete_) {
         mark_coverage_gap(logical_entry);
     }
     if (entered_here) leave();
@@ -885,7 +930,8 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
         void *lifecycle_opaque,
         QbdiThreadSessionTestContinuation continuation,
         QbdiControlExtentRegistration control_registration,
-        QbdiVmExecutionLifecycle signal_execution) noexcept {
+        QbdiVmExecutionLifecycle signal_execution,
+        QbdiStopControl stop_control) noexcept {
     if (tid == 0 || module_generation == 0 || executor == nullptr) return nullptr;
     auto *session = new (std::nothrow) QbdiThreadSession(tid, module_generation);
     if (session == nullptr) return nullptr;
@@ -898,6 +944,34 @@ QbdiThreadSession *QbdiThreadSession::create_for_test(
     session->test_continuation_ = continuation;
     session->test_control_registration_ = control_registration;
     session->test_signal_execution_ = signal_execution;
+    session->ready_ = true;
+    session->stop_control_ = stop_control;
+    return session;
+}
+
+QbdiThreadSession *QbdiThreadSession::create_for_test(
+        uint32_t tid, uint32_t module_generation,
+        QbdiThreadSessionStopTestExecutor executor, void *executor_opaque,
+        QbdiThreadSessionGapReporter gap_reporter, void *gap_opaque,
+        QbdiThreadSessionLifecycleReporter lifecycle_reporter,
+        void *lifecycle_opaque,
+        QbdiThreadSessionTestContinuation continuation,
+        QbdiControlExtentRegistration control_registration,
+        QbdiVmExecutionLifecycle signal_execution,
+        QbdiStopControl stop_control) noexcept {
+    if (tid == 0 || module_generation == 0 || executor == nullptr) return nullptr;
+    auto *session = new (std::nothrow) QbdiThreadSession(tid, module_generation);
+    if (session == nullptr) return nullptr;
+    session->test_stop_executor_ = executor;
+    session->test_executor_opaque_ = executor_opaque;
+    session->gap_reporter_ = gap_reporter;
+    session->gap_opaque_ = gap_opaque;
+    session->lifecycle_reporter_ = lifecycle_reporter;
+    session->lifecycle_opaque_ = lifecycle_opaque;
+    session->test_continuation_ = continuation;
+    session->test_control_registration_ = control_registration;
+    session->test_signal_execution_ = signal_execution;
+    session->stop_control_ = stop_control;
     session->ready_ = true;
     return session;
 }
@@ -912,27 +986,31 @@ TraceRunResult QbdiThreadSession::continue_execution()
     return result;
 }
 
-TraceRunResult QbdiThreadSession::execute(uintptr_t, uintptr_t execution_entry,
-                                          uintptr_t control_start,
-                                          size_t execution_bytes,
-                                          const uint64_t args[8],
-                                          uint64_t indirect_result)
+QbdiExecutionResult QbdiThreadSession::execute(
+        uintptr_t, uintptr_t execution_entry, uintptr_t control_start,
+        size_t execution_bytes, const uint64_t args[8],
+        uint64_t indirect_result)
         QTRACE_SESSION_CALL_NOEXCEPT {
-    if (test_executor_ == nullptr ||
+    if ((test_executor_ == nullptr && test_stop_executor_ == nullptr) ||
         !ensure_control_extent(execution_entry, control_start, execution_bytes)) {
         return {};
     }
     if (!test_signal_execution_.activate(nullptr)) return {};
-    const TraceRunResult result = test_executor_(
-            test_executor_opaque_, this, execution_entry, control_start,
-            execution_bytes, args, indirect_result);
+    const QbdiExecutionResult result = test_stop_executor_ != nullptr
+            ? test_stop_executor_(test_executor_opaque_, this,
+                                  execution_entry, control_start,
+                                  execution_bytes, args, indirect_result)
+            : QbdiExecutionResult{test_executor_(
+                      test_executor_opaque_, this, execution_entry,
+                      control_start, execution_bytes, args,
+                      indirect_result)};
     test_signal_execution_.clear();
     return result;
 }
 
 QbdiThreadSession *QbdiThreadSession::create_normal(
         const TraceConfig &, const TraceInvocation &, TraceContext *, TraceSink *,
-        TraceCallbackGate *, BinaryTraceWriter *) noexcept {
+        TraceCallbackGate *, BinaryTraceWriter *, QbdiStopControl) noexcept {
     return nullptr;
 }
 
@@ -947,7 +1025,7 @@ QbdiThreadSession *QbdiThreadSession::create_flight(
 QbdiThreadSession *QbdiThreadSession::create_normal(
         const TraceConfig &config, const TraceInvocation &invocation,
         TraceContext *context, TraceSink *sink, TraceCallbackGate *callback_gate,
-        BinaryTraceWriter *normal_writer) noexcept {
+        BinaryTraceWriter *normal_writer, QbdiStopControl stop_control) noexcept {
     if (invocation.scene == nullptr || invocation.module == nullptr ||
         context == nullptr || sink == nullptr || callback_gate == nullptr) {
         return nullptr;
@@ -955,8 +1033,10 @@ QbdiThreadSession *QbdiThreadSession::create_normal(
     const uint32_t tid = static_cast<uint32_t>(context->tid);
     auto *session = new (std::nothrow) QbdiThreadSession(tid, 1);
     if (session == nullptr) return nullptr;
+    session->stop_control_ = stop_control;
     session->impl_ = new (std::nothrow) Impl(
-            config, invocation, context, sink, callback_gate, normal_writer);
+            session, config, invocation, context, sink, callback_gate,
+            normal_writer, stop_control);
     session->ready_ = session->impl_ != nullptr && session->impl_->ready;
     if (!session->ready_) {
         delete session;
@@ -983,20 +1063,20 @@ QbdiThreadSession *QbdiThreadSession::create_flight(
     return session;
 }
 
-TraceRunResult QbdiThreadSession::execute(uintptr_t logical_entry,
-                                          uintptr_t execution_entry,
-                                          uintptr_t control_start,
-                                          size_t execution_bytes,
-                                          const uint64_t args[8],
-                                          uint64_t indirect_result)
+QbdiExecutionResult QbdiThreadSession::execute(
+        uintptr_t logical_entry, uintptr_t execution_entry,
+        uintptr_t control_start, size_t execution_bytes,
+        const uint64_t args[8], uint64_t indirect_result)
         QTRACE_SESSION_CALL_NOEXCEPT {
     if (impl_ == nullptr ||
         !ensure_control_extent(execution_entry, control_start, execution_bytes)) {
         return {};
     }
-    const TraceRunResult result = impl_->call(logical_entry, execution_entry,
-                                              args, indirect_result);
-    if (result.target_executed && !trace_process_child_detached() &&
+    const QbdiExecutionResult result{
+            impl_->call(logical_entry, execution_entry, args,
+                        indirect_result),
+            impl_->stop_observed, impl_->stop_reason};
+    if (result.run.target_executed && !trace_process_child_detached() &&
         (impl_->sink->failed() || !impl_->gate->enabled())) {
         mark_coverage_gap(logical_entry);
     }
