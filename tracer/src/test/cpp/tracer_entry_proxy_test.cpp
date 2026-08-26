@@ -1478,6 +1478,138 @@ void module_fini_before_hook_commit_rolls_back_the_unpublished_gateway() {
     CHECK(g_runner_calls == 0);
 }
 
+void stale_rollback_failure_stays_authoritative_until_cleanup_succeeds() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("stale-residual-reset"));
+    char offset[2 * sizeof(uintptr_t) + 3]{};
+    std::snprintf(offset, sizeof(offset), "0x%lx",
+                  static_cast<unsigned long>(
+                          reinterpret_cast<uintptr_t>(new_target)));
+    const nlohmann::json accepted = call_json_configure(json_abi_request(
+            "com.example.stale.residual", "libstale-residual.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", offset}}}},
+            })));
+    const uint64_t failed_configuration =
+            accepted.at("generation").get<uint64_t>();
+    const ModuleRange module =
+            module_named("/data/app/libstale-residual.so");
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    trace_proxy_test_set_hook_commit_gate(hook_commit_gate);
+
+    std::thread installer([&] {
+        trace_proxy_test_install_loading_module(module);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_hook_commit_entered; });
+    }
+    const size_t residual_generation = trace_proxy_test_generation(0);
+    CHECK(residual_generation != 4096);
+    trace_proxy_test_module_fini(module.start, module.path.c_str());
+    g_fail_unhook = true;
+    g_unhook_failure_error = 91;
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_block_unhook_return = true;
+        g_release_hook_commit = true;
+    }
+    g_gate_condition.notify_all();
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_unhook_return_entered; });
+    }
+
+    // The stale slot remains the sole physical owner while ShadowHook is
+    // unlocked. A loader retry must neither install nor publish a terminal.
+    std::thread reentrant_loader([&] {
+        trace_proxy_test_install_loading_module(module);
+    });
+    reentrant_loader.join();
+    CHECK(g_hook_calls == 1);
+    CHECK(call_json_status(failed_configuration).at("state") == "installing");
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_unhook_return = true;
+    }
+    g_gate_condition.notify_all();
+    installer.join();
+    trace_proxy_test_set_hook_commit_gate(nullptr);
+
+    const nlohmann::json failed = call_json_status(failed_configuration);
+    CHECK(failed.at("state") == "rollback_failed");
+    CHECK(failed.at("scenes").at(0).at("state") == "rollback_failed");
+    CHECK(failed.at("scenes").at(0).at("error").at("code") ==
+          "HOOK_ROLLBACK_FAILED");
+    CHECK(failed.at("scenes").at(0).at("error").at("hookError") == 91);
+    CHECK(trace_proxy_test_generation_retired(residual_generation));
+    CHECK(trace_proxy_test_generation_installed(residual_generation));
+    uint64_t args[8]{31};
+    CHECK(trace_proxy_dispatch(residual_generation, args, 0) == 0x11f);
+    CHECK(g_runner_calls == 0);
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        const uint64_t child_result =
+                trace_proxy_dispatch(residual_generation, args, 0);
+        ::_exit(child_result == 0x11f ? 0 : 1);
+    }
+    int child_status = 0;
+    CHECK(::waitpid(child, &child_status, 0) == child);
+    CHECK(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+
+    // A loader retry must retry residual cleanup, never install a second
+    // physical gateway while the first handle is still owned.
+    trace_proxy_test_install_loading_module(module);
+    CHECK(g_unhook_calls == 2);
+    CHECK(g_hook_calls == 1);
+    CHECK(trace_proxy_test_generation_installed(residual_generation));
+
+    g_fail_inline_hook_init = true;
+    const nlohmann::json replacement = call_json_configure(json_abi_request(
+            "com.example.stale.residual.replacement", "libstale-residual.so",
+            false, {}, nlohmann::json::array({
+                    {{"name", "replacement"},
+                     {"location", {{"offset", offset}}}},
+            })));
+    const uint64_t replacement_generation =
+            replacement.at("generation").get<uint64_t>();
+    const nlohmann::json replacement_status =
+            call_json_status(replacement_generation);
+    CHECK(replacement_status.at("state") == "rollback_failed");
+    CHECK(replacement_status.at("scenes").at(0).at("state") ==
+          "rollback_failed");
+    CHECK(replacement_status.at("scenes").at(0).at("error").at("code") ==
+          "HOOK_ROLLBACK_FAILED");
+    CHECK(g_unhook_calls == 3);
+    CHECK(g_hook_calls == 1);
+
+    g_fail_unhook = false;
+    trace_proxy_test_install_loading_module(module);
+    CHECK(call_json_status(replacement_generation).at("state") ==
+          "rollback_failed");
+    CHECK(g_unhook_calls == 4);
+    CHECK(g_hook_calls == 1);
+
+    const nlohmann::json recovered = call_json_configure(json_abi_request(
+            "com.example.stale.residual.recovered", "libstale-residual.so",
+            false, {}, nlohmann::json::array({
+                    {{"name", "recovered"},
+                     {"location", {{"offset", offset}}}},
+            })));
+    const uint64_t recovered_generation =
+            recovered.at("generation").get<uint64_t>();
+    trace_proxy_test_install_loading_module(module);
+    CHECK(call_json_status(recovered_generation).at("state") == "installed");
+    CHECK(g_unhook_calls == 4);
+    CHECK(g_hook_calls == 2);
+    CHECK(!trace_proxy_test_generation_installed(residual_generation));
+    CHECK(trace_proxy_test_generation_installed(
+            trace_proxy_test_generation(0)));
+}
+
 void stale_rollback_lock_order_child() {
     ::alarm(3);
     reset_fakes();
@@ -3386,6 +3518,10 @@ int main(int argc, char **argv) {
             module_fini_before_hook_commit_rolls_back_the_unpublished_gateway();
             return 0;
         }
+        if (selected == "stale-rollback-residual") {
+            stale_rollback_failure_stays_authoritative_until_cleanup_succeeds();
+            return 0;
+        }
         if (selected == "stale-rollback-lock-order") {
             stale_rollback_never_inverts_registry_and_transition_locks();
             return 0;
@@ -3420,6 +3556,7 @@ int main(int argc, char **argv) {
     every_physical_rehook_gets_a_new_proxy_identity();
     hook_install_never_waits_for_the_linker_while_holding_the_registry();
     module_fini_before_hook_commit_rolls_back_the_unpublished_gateway();
+    stale_rollback_failure_stays_authoritative_until_cleanup_succeeds();
     stale_rollback_never_inverts_registry_and_transition_locks();
     physical_rehook_keeps_its_original_capture_coordinator();
     concurrent_unhook_failures_keep_the_original_bypass_alive();

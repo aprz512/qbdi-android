@@ -1107,10 +1107,13 @@ def _invoke_benchmark_worker(
         channel.close()
 
 
-def _kill_and_reap_frida_worker(worker: Any) -> None:
+def _kill_and_reap_frida_worker(
+    worker: Any, graceful_timeout: float = 0.0
+) -> bool:
+    """Reap the Frida owner within a bound; return whether SIGKILL was needed."""
+    worker.join(max(0.0, graceful_timeout))
     if not worker.is_alive():
-        worker.join()
-        return
+        return False
     worker.kill()
     worker.join(_FRIDA_WORKER_REAP_TIMEOUT_SECONDS)
     if worker.is_alive():
@@ -1118,9 +1121,11 @@ def _kill_and_reap_frida_worker(worker: Any) -> None:
         worker.join(_FRIDA_WORKER_REAP_TIMEOUT_SECONDS)
     if worker.is_alive():
         raise RuntimeError("Frida worker could not be reaped after SIGKILL")
+    return True
 
 
 def invoke_benchmark(args: argparse.Namespace) -> str:
+    """Run one benchmark in a child and accept only its complete clean outcome."""
     if not hasattr(os, "fork") or "fork" not in multiprocessing.get_all_start_methods():
         raise RuntimeError(
             "benchmark Frida isolation requires POSIX fork; refusing unsafe cleanup"
@@ -1147,7 +1152,10 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
     cleanup_error: str | None = None
     worker_complete = False
     worker_reaped = False
+    worker_forced = False
+    worker_exitcode: int | None = None
     monitor_error: BaseException | None = None
+    cleanup_issues: list[str] = []
     cleanup_timeout = max(
         0.0, float(getattr(args, "frida_cleanup_timeout", 1.0))
     )
@@ -1157,10 +1165,10 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
         worker.start()
         worker_started = True
         sender.close()
-        while not worker_complete:
+        while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not receiver.poll(remaining):
-                cleanup_error = (
+                cleanup_issues.append(
                     f"Frida worker timed out after "
                     f"{max(0.0, float(args.timeout)) + cleanup_timeout:g} seconds"
                 )
@@ -1168,26 +1176,80 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
             try:
                 event = receiver.recv()
             except EOFError:
+                if result is None and primary_error is None:
+                    cleanup_issues.append(
+                        "Frida worker IPC closed before an outcome"
+                    )
+                elif not worker_complete:
+                    cleanup_issues.append(
+                        "Frida worker exited without complete"
+                    )
                 break
-            kind = event[0]
+            if not isinstance(event, tuple) or len(event) != 2:
+                cleanup_issues.append("malformed Frida worker IPC event")
+                break
+            if worker_complete:
+                cleanup_issues.append("Frida worker IPC event after complete")
+                break
+            kind, payload = event
             if kind == "pid":
-                owned_pid = int(event[1])
+                if owned_pid is not None:
+                    cleanup_issues.append("duplicate pid from Frida worker")
+                    break
+                if result is not None or primary_error is not None:
+                    cleanup_issues.append("out-of-order pid from Frida worker")
+                    break
+                if type(payload) is not int or payload <= 0:
+                    cleanup_issues.append("malformed pid from Frida worker")
+                    break
+                owned_pid = payload
             elif kind == "result":
-                result = str(event[1])
+                if result is not None or primary_error is not None:
+                    cleanup_issues.append("duplicate benchmark outcome")
+                    break
+                if owned_pid is None:
+                    cleanup_issues.append("result before pid from Frida worker")
+                    break
+                if not isinstance(payload, str) or not payload:
+                    cleanup_issues.append("malformed result from Frida worker")
+                    break
+                result = payload
                 deadline = time.monotonic() + cleanup_timeout
             elif kind == "error":
-                primary_error = str(event[1])
+                if result is not None or primary_error is not None:
+                    cleanup_issues.append("duplicate benchmark outcome")
+                    break
+                if not isinstance(payload, str) or not payload:
+                    cleanup_issues.append("malformed error from Frida worker")
+                    break
+                primary_error = payload
                 deadline = time.monotonic() + cleanup_timeout
             elif kind == "complete":
-                cleanup_error = event[1]
+                if result is None and primary_error is None:
+                    cleanup_issues.append("complete before benchmark outcome")
+                    break
+                if payload is not None and not isinstance(payload, str):
+                    cleanup_issues.append("malformed complete from Frida worker")
+                    break
+                cleanup_error = payload
                 worker_complete = True
+            else:
+                cleanup_issues.append("unknown Frida worker IPC event")
+                break
     except BaseException as error:
         monitor_error = error
     finally:
         try:
             if worker_started:
-                _kill_and_reap_frida_worker(worker)
+                graceful_timeout = (
+                    max(0.0, deadline - time.monotonic())
+                    if worker_complete else 0.0
+                )
+                worker_forced = _kill_and_reap_frida_worker(
+                    worker, graceful_timeout
+                )
                 worker_reaped = True
+                worker_exitcode = worker.exitcode
         except BaseException as error:
             monitor_error = monitor_error or error
         finally:
@@ -1195,6 +1257,24 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
             sender.close()
             if worker_started and not worker.is_alive():
                 worker.close()
+
+    if worker_reaped:
+        if worker_forced:
+            cleanup_issues.append(
+                "Frida worker did not exit before the cleanup deadline"
+            )
+        if worker_exitcode is None:
+            cleanup_issues.append("Frida worker exit status is unavailable")
+        elif worker_exitcode < 0:
+            cleanup_issues.append(
+                f"Frida worker exited on signal {-worker_exitcode}"
+            )
+        elif worker_exitcode > 0:
+            cleanup_issues.append(
+                f"Frida worker exited with status {worker_exitcode}"
+            )
+        if not worker_complete and not cleanup_issues:
+            cleanup_issues.append("Frida worker exited without complete")
 
     # Ownership transfers back to the parent only after the process containing
     # every Frida reference has exited and been reaped. The final package kill
@@ -1210,7 +1290,11 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
 
     if primary_error is not None:
         raise RuntimeError(primary_error)
-    terminal_error = monitor_error or cleanup_error or force_stop_error
+    if cleanup_error is not None:
+        cleanup_issues.append(cleanup_error)
+    terminal_error = monitor_error or (
+        "; ".join(cleanup_issues) if cleanup_issues else None
+    ) or force_stop_error
     if terminal_error is not None:
         raise RuntimeError(f"failed to release benchmark process: {terminal_error}") from (
             terminal_error if isinstance(terminal_error, BaseException) else None

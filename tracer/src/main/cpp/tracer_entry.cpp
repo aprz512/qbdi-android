@@ -49,6 +49,8 @@ struct InstalledSceneHook {
     bool pending_install = false;
     bool pending_batch_install = false;
     bool unhook_failed_window = false;
+    bool residual_cleanup_in_progress = false;
+    bool rollback_residual = false;
     bool installed = false;
     bool retired = false;
 };
@@ -104,6 +106,7 @@ static TracerConfiguration g_tracer_configuration;
 static TraceConfig g_config = default_trace_config();
 static bool g_configured = false;
 static uint64_t g_config_generation = 0;
+static uint64_t g_failed_install_generation = 0;
 static std::shared_ptr<CaptureCoordinator> g_capture_coordinator;
 static std::shared_ptr<TraceGenerationRuntime> g_generation_runtime;
 
@@ -163,6 +166,12 @@ static bool retire_superseded_hooks(
         bool append_residual_status = false,
         std::vector<size_t> *reported_residual_generations = nullptr,
         DeferredRuntimeReleases *releases = nullptr);
+static bool cleanup_authoritative_residuals_locked(
+        uint64_t generation,
+        std::vector<SceneConfigurationStatus> *statuses,
+        bool *cleaned_current_generation,
+        DeferredRuntimeReleases *releases,
+        std::unique_lock<std::mutex> *registry_lock);
 extern "C" char trace_proxy_stubs[];
 
 static bool tracer_fork_lifecycle_ready() noexcept {
@@ -776,6 +785,8 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     slot->pending_batch_install = false;
     slot->installed = false;
     slot->unhook_failed_window = false;
+    slot->residual_cleanup_in_progress = needs_unhook;
+    slot->rollback_residual = false;
     slot->retired = true;
     retire_runtime_ownership_locked(slot.get(), releases);
 
@@ -792,8 +803,10 @@ static bool create_hook_generation_locked(const TraceConfig &config,
     commit_lock.lock();
 
     slot->hook = rollback_hook;
+    slot->residual_cleanup_in_progress = false;
     slot->installed = !unhooked && needs_unhook;
     slot->hook.residual_hook = !unhooked && needs_unhook;
+    slot->rollback_residual = !unhooked && needs_unhook;
     if (unhooked && g_scene_hooks[scene.index] == slot) {
         g_scene_hooks[scene.index].reset();
     }
@@ -940,6 +953,7 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     g_config = config;
     g_capture_coordinator.reset();
     ++g_config_generation;
+    g_failed_install_generation = 0;
     g_generation_runtime = create_generation_runtime(config,
                                                      g_config_generation);
     if (g_generation_runtime != nullptr) {
@@ -1264,16 +1278,33 @@ static void fail_installation_statuses(
         cleanup_succeeded = retire_superseded_hooks(
                 generation, statuses, true, nullptr, releases);
     } else {
-        std::lock_guard<std::mutex> guard(g_lock);
-        cleanup_succeeded = retire_superseded_hooks(
+        std::unique_lock<std::mutex> guard(g_lock);
+        bool cleaned_current_generation = false;
+        const bool residuals_cleaned =
+                cleanup_authoritative_residuals_locked(
+                        generation, statuses, &cleaned_current_generation,
+                        releases, &guard);
+        const bool superseded_cleaned = retire_superseded_hooks(
                 generation, statuses, true, nullptr, releases);
+        cleanup_succeeded = residuals_cleaned && superseded_cleaned;
     }
     deactivate_flight_gateway_if_current(generation, registry_locked);
-    g_tracer_configuration.finish_install(
+    const bool terminal_published = g_tracer_configuration.finish_install(
             generation,
             cleanup_succeeded ? ConfigurationState::HookFailed
                               : ConfigurationState::RollbackFailed,
             std::move(*statuses));
+    if (!terminal_published) return;
+    if (registry_locked) {
+        if (g_config_generation == generation) {
+            g_failed_install_generation = generation;
+        }
+    } else {
+        std::lock_guard<std::mutex> guard(g_lock);
+        if (g_config_generation == generation) {
+            g_failed_install_generation = generation;
+        }
+    }
 }
 
 enum class BatchRollbackKind {
@@ -1309,6 +1340,135 @@ static void set_status_hook_ownership(
         (void)checked_offset_address(hook.module.start, hook.scene.end_offset,
                                      &status->runtime_end);
     }
+}
+
+// Generation slots, rather than the active scene table, are the authoritative
+// owners of residual physical hooks. This keeps a retired proxy's immutable
+// bypass alive while preventing that residual from being admitted as active.
+static void record_residual_cleanup_failure(
+        uint64_t generation, const InstalledSceneHook &hook, int hook_error,
+        std::vector<SceneConfigurationStatus> *statuses) {
+    if (statuses == nullptr) return;
+    SceneConfigurationStatus residual_status;
+    set_status_hook_ownership(&residual_status, hook);
+    residual_status.state = SceneConfigurationState::RollbackFailed;
+    residual_status.error_code = "HOOK_ROLLBACK_FAILED";
+    residual_status.hook_error = hook_error;
+    const size_t scene_index = hook.scene.index;
+    if (scene_index < statuses->size() &&
+        statuses->at(scene_index).state !=
+                SceneConfigurationState::RollbackFailed) {
+        statuses->at(scene_index) = std::move(residual_status);
+    } else {
+        statuses->push_back(std::move(residual_status));
+    }
+    QTRACE_E("generation=%llu code=HOOK_ROLLBACK_FAILED scene=%s hook_error=%d",
+             static_cast<unsigned long long>(generation),
+             hook.scene.name.c_str(), hook_error);
+}
+
+// Claim each residual while holding g_lock -> transition_mutex, publish only
+// retired passthrough state, then call ShadowHook with both locks released.
+// Failed cleanup restores the same strongly-owned generation slot; successful
+// cleanup clears physical ownership but never reuses the proxy identity.
+static bool cleanup_authoritative_residuals_locked(
+        uint64_t generation,
+        std::vector<SceneConfigurationStatus> *statuses,
+        bool *cleaned_current_generation,
+        DeferredRuntimeReleases *releases,
+        std::unique_lock<std::mutex> *registry_lock) {
+    if (registry_lock == nullptr || !registry_lock->owns_lock()) return false;
+    bool cleanup_succeeded = true;
+    for (size_t proxy_generation = 0;
+         proxy_generation < g_next_proxy_generation; ++proxy_generation) {
+        const std::shared_ptr<InstalledSceneHook> slot =
+                g_hook_generations[proxy_generation];
+        if (slot == nullptr) continue;
+
+        HookHandle claimed_hook;
+        bool claimed = false;
+        bool failed = false;
+        int hook_error = 0;
+        {
+            std::unique_lock<std::mutex> transition_lock(
+                    slot->transition_mutex);
+            const bool residual = slot->residual_cleanup_in_progress ||
+                                  (slot->installed &&
+                                   slot->hook.residual_hook);
+            if (!residual) continue;
+            if (cleaned_current_generation != nullptr &&
+                slot->config_generation == generation) {
+                *cleaned_current_generation = true;
+            }
+            if (slot->residual_cleanup_in_progress) {
+                failed = true;
+                hook_error = slot->hook.unhook_error != 0
+                                     ? slot->hook.unhook_error
+                                     : EBUSY;
+            } else if (slot->active_proxy_calls != 0) {
+                slot->retired = true;
+                slot->rollback_residual = true;
+                failed = true;
+                hook_error = EBUSY;
+            } else {
+                claimed_hook = slot->hook;
+                slot->hook.stub = nullptr;
+                slot->hook.residual_hook = false;
+                slot->installed = false;
+                slot->retired = true;
+                slot->residual_cleanup_in_progress = true;
+                if (slot->scene.index < g_scene_hooks.size() &&
+                    g_scene_hooks[slot->scene.index] == slot) {
+                    g_scene_hooks[slot->scene.index].reset();
+                }
+                retire_runtime_ownership_locked(slot.get(), releases);
+                claimed = true;
+            }
+        }
+
+        if (claimed) {
+            registry_lock->unlock();
+            const bool unhooked = claimed_hook.stub == nullptr ||
+                                  unhook_function(&claimed_hook);
+            registry_lock->lock();
+            std::lock_guard<std::mutex> transition_lock(
+                    slot->transition_mutex);
+            slot->hook = claimed_hook;
+            slot->residual_cleanup_in_progress = false;
+            slot->installed = !unhooked;
+            slot->hook.residual_hook = !unhooked;
+            slot->rollback_residual = !unhooked;
+            failed = !unhooked;
+            hook_error = claimed_hook.unhook_error;
+        }
+        if (failed) {
+            cleanup_succeeded = false;
+            record_residual_cleanup_failure(
+                    generation, *slot, hook_error, statuses);
+        }
+    }
+    return cleanup_succeeded;
+}
+
+static std::shared_ptr<InstalledSceneHook>
+find_failed_scene_residual_locked(uint64_t generation,
+                                  const SceneConfig &scene,
+                                  const ModuleRange &module) {
+    for (size_t proxy_generation = g_next_proxy_generation;
+         proxy_generation-- > 0;) {
+        const std::shared_ptr<InstalledSceneHook> slot =
+                g_hook_generations[proxy_generation];
+        if (slot == nullptr) continue;
+        std::lock_guard<std::mutex> transition_lock(slot->transition_mutex);
+        if (slot->config_generation == generation &&
+            slot->scene.index == scene.index &&
+            slot->module.start == module.start &&
+            slot->module.path == module.path &&
+            slot->installed && slot->hook.residual_hook) {
+            return slot;
+        }
+    }
+    return {};
 }
 
 static bool retire_superseded_hooks(
@@ -1354,6 +1514,7 @@ static bool retire_superseded_hooks(
         if (hook->active_proxy_calls != 0 ||
             !unhook_function(&hook->hook)) {
             hook->hook.residual_hook = true;
+            hook->rollback_residual = true;
             // A reachable residual proxy has a retained native gateway. Retire
             // its tracing identity so future entrants bypass QBDI without
             // keeping the superseded runtime/status workers alive.
@@ -1417,6 +1578,28 @@ static void install_hooks_for_module(const ModuleRange &module,
     g_tracer_configuration.mark_installing(generation, module, diagnostics);
     std::vector<SceneConfigurationStatus> statuses =
             installation_statuses(g_config, diagnostics);
+    bool cleaned_current_generation = false;
+    if (!cleanup_authoritative_residuals_locked(
+                generation, &statuses, &cleaned_current_generation,
+                &releases, &guard)) {
+        // The owner of a cleanup already in flight for this generation will
+        // publish its terminal result. A reentrant loader must not race it or
+        // replace its diagnostics with a provisional EBUSY failure.
+        if (cleaned_current_generation) return;
+        deactivate_flight_gateway_if_current(generation, true);
+        const bool terminal_published = g_tracer_configuration.finish_install(
+                generation, ConfigurationState::RollbackFailed,
+                std::move(statuses));
+        if (terminal_published) g_failed_install_generation = generation;
+        return;
+    }
+    // A residual owned by this generation implies its first terminal install
+    // already failed. Cleanup may make later generations safe, but must not
+    // re-admit or rewrite the failed generation itself.
+    if (cleaned_current_generation ||
+        g_failed_install_generation == generation) {
+        return;
+    }
     if (g_config.flight.enabled) {
         const std::shared_ptr<CaptureCoordinator> flight_coordinator =
                 g_capture_coordinator;
@@ -1516,17 +1699,22 @@ static void install_hooks_for_module(const ModuleRange &module,
                     scene.index < g_scene_hooks.size()
                             ? g_scene_hooks[scene.index]
                             : nullptr;
+            const std::shared_ptr<InstalledSceneHook> residual =
+                    find_failed_scene_residual_locked(
+                            generation, scene, module);
             if (scene.offset == 0) {
                 status.error_code = "ZERO_SCENE_OFFSET";
             } else if (!diagnostics[index].valid) {
                 status.error_code = diagnostics[index].error.code;
-            } else if (failed != nullptr && failed->hook.residual_hook) {
-                set_status_hook_ownership(&status, *failed);
+            } else if (residual != nullptr) {
+                set_status_hook_ownership(&status, *residual);
                 status.state = SceneConfigurationState::RollbackFailed;
-                status.error_code = "HOOK_INSTALL_RESIDUAL";
-                status.hook_error = failed->hook.unhook_error != 0
-                                    ? failed->hook.unhook_error
-                                    : failed->hook.hook_error;
+                status.error_code = residual->rollback_residual
+                                            ? "HOOK_ROLLBACK_FAILED"
+                                            : "HOOK_INSTALL_RESIDUAL";
+                status.hook_error = residual->hook.unhook_error != 0
+                                            ? residual->hook.unhook_error
+                                            : residual->hook.hook_error;
                 failed_scene_residual = true;
             } else if (failed != nullptr && failed == previous &&
                        failed->installed && failed->hook.unhook_error != 0) {
@@ -1669,6 +1857,7 @@ static void install_hooks_for_module(const ModuleRange &module,
             (member.hook->installed &&
              !unhook_function(&member.hook->hook))) {
             member.hook->hook.residual_hook = true;
+            member.hook->rollback_residual = true;
             member.hook->retired = true;
             retire_runtime_ownership_locked(member.hook.get(), &releases);
             status.state = SceneConfigurationState::RollbackFailed;
@@ -1702,8 +1891,9 @@ static void install_hooks_for_module(const ModuleRange &module,
                                         ? ConfigurationState::RollbackFailed
                                         : ConfigurationState::HookFailed;
     deactivate_flight_gateway_if_current(generation, true);
-    g_tracer_configuration.finish_install(generation, terminal,
-                                           std::move(statuses));
+    const bool terminal_published = g_tracer_configuration.finish_install(
+            generation, terminal, std::move(statuses));
+    if (terminal_published) g_failed_install_generation = generation;
 }
 
 static void apply_accepted_configuration(TraceConfig config,
@@ -1741,6 +1931,7 @@ static void apply_accepted_configuration(TraceConfig config,
             g_generation_runtime = std::move(runtime);
             g_configured = true;
             g_config_generation = generation;
+            g_failed_install_generation = 0;
         }
 #if defined(QTRACE_HOST_TEST)
         if (g_throw_during_configuration_apply.exchange(

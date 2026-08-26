@@ -5,6 +5,7 @@ import io
 import json
 import multiprocessing
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -1313,6 +1314,141 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
 
         self.assertEqual("undetermined", diagnosis["dominant_cost"])
         self.assertEqual(Decimal("209715200.000000"), diagnosis["encoded_bytes_per_second"])
+
+    def invoke_with_fake_frida_worker(self, worker):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Path(directory) / "agent.js"
+            agent.write_text("agent", encoding="utf-8")
+            args = SimpleNamespace(
+                package="com.example.app", frida_port=27042,
+                frida_device=None, agent=str(agent), profile="fast",
+                legacy=False, test_buffer_bytes=None, test_fail_setup=False,
+                timeout=0.05, frida_cleanup_timeout=0.05,
+            )
+            with patch.object(benchmark_trace, "_invoke_benchmark_worker", worker), \
+                 patch.object(benchmark_trace, "adb"), \
+                 patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
+                 patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
+                 patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
+                return benchmark_trace.invoke_benchmark(args)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_result_requires_complete_and_a_zero_worker_exit(self):
+        def worker(_args, _source, channel):
+            channel.send(("pid", 4242))
+            channel.send(("result", "0xbeef"))
+            os._exit(7)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "failed to release benchmark process:.*without complete"
+        ):
+            self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_result_followed_by_a_worker_signal_is_a_cleanup_failure(self):
+        def worker(_args, _source, channel):
+            channel.send(("pid", 4242))
+            channel.send(("result", "0xbeef"))
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "failed to release benchmark process:.*signal"
+        ):
+            self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_complete_does_not_reconcile_a_nonzero_worker_exit(self):
+        def worker(_args, _source, channel):
+            channel.send(("pid", 4242))
+            channel.send(("result", "0xbeef"))
+            channel.send(("complete", None))
+            channel.close()
+            os._exit(7)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "failed to release benchmark process:.*status 7"
+        ):
+            self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_primary_benchmark_error_wins_when_the_worker_then_crashes(self):
+        def worker(_args, _source, channel):
+            channel.send(("pid", 4242))
+            channel.send(("error", "agent failed first"))
+            os._exit(7)
+
+        with self.assertRaisesRegex(RuntimeError, "^agent failed first$"):
+            self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_eof_before_any_outcome_is_a_cleanup_failure(self):
+        def worker(_args, _source, channel):
+            channel.close()
+
+        with self.assertRaisesRegex(
+            RuntimeError, "failed to release benchmark process:.*before an outcome"
+        ):
+            self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_duplicate_pid_message_fails_closed(self):
+        def worker(_args, _source, channel):
+            channel.send(("pid", 4242))
+            channel.send(("pid", 4242))
+            channel.send(("result", "0xbeef"))
+            channel.send(("complete", None))
+            channel.close()
+
+        with self.assertRaisesRegex(RuntimeError, "duplicate pid"):
+            self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_result_before_pid_message_fails_closed(self):
+        def worker(_args, _source, channel):
+            channel.send(("result", "0xbeef"))
+            channel.send(("pid", 4242))
+            channel.send(("complete", None))
+            channel.close()
+
+        with self.assertRaisesRegex(RuntimeError, "result before pid"):
+            self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_malformed_pid_message_fails_closed(self):
+        for malformed in (0, -1, True, "4242"):
+            with self.subTest(pid=malformed):
+                def worker(_args, _source, channel):
+                    channel.send(("pid", malformed))
+                    channel.send(("result", "0xbeef"))
+                    channel.send(("complete", None))
+                    channel.close()
+
+                with self.assertRaisesRegex(RuntimeError, "malformed pid"):
+                    self.invoke_with_fake_frida_worker(worker)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_messages_after_complete_fail_closed(self):
+        trailing_events = (
+            ("result", "0xfeed"),
+            ("pid", 4242),
+            ("complete", None),
+            ("unknown", None),
+            "malformed",
+        )
+        for trailing_event in trailing_events:
+            with self.subTest(event=trailing_event):
+                def worker(_args, _source, channel):
+                    channel.send(("pid", 4242))
+                    channel.send(("result", "0xbeef"))
+                    channel.send(("complete", None))
+                    channel.send(trailing_event)
+                    channel.close()
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "event after complete|malformed Frida worker IPC event",
+                ):
+                    self.invoke_with_fake_frida_worker(worker)
 
     def test_invoke_benchmark_releases_every_owned_frida_resource_on_failures(self):
         context = multiprocessing.get_context("fork")
