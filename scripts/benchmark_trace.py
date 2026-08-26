@@ -12,6 +12,7 @@ import re
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import tempfile
 from decimal import Decimal
@@ -952,6 +953,26 @@ def collect_and_validate_optimized_artifact(
         return result
 
 
+def _bounded_cleanup_call(
+    callback: Any, operation: str, timeout: float
+) -> BaseException | None:
+    completed = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            callback()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            completed.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    if not completed.wait(max(0.0, timeout)):
+        return TimeoutError(f"{operation} timed out after {timeout:g} seconds")
+    return errors[0] if errors else None
+
+
 def invoke_benchmark(args: argparse.Namespace) -> str:
     try:
         import frida  # type: ignore[import-not-found]
@@ -1002,23 +1023,28 @@ def invoke_benchmark(args: argparse.Namespace) -> str:
             raise RuntimeError(f"benchmark agent timed out after {args.timeout:g} seconds")
         return result.lower()
     finally:
-        active_exception = sys.exc_info()[0] is not None
+        active_exception = sys.exc_info()[1]
+        cleanup_timeout = float(getattr(args, "frida_cleanup_timeout", 1.0))
         if script is not None:
-            try:
-                script.unload()
-            except BaseException as error:  # cleanup must not prevent later owners releasing
-                cleanup_error = cleanup_error or error
+            error = _bounded_cleanup_call(
+                script.unload, "Frida script unload", cleanup_timeout
+            )
+            cleanup_error = cleanup_error or error
         if session is not None:
-            try:
-                session.detach()
-            except BaseException as error:
-                cleanup_error = cleanup_error or error
+            error = _bounded_cleanup_call(
+                session.detach, "Frida session detach", cleanup_timeout
+            )
+            cleanup_error = cleanup_error or error
         if pid is not None and (result is None or cleanup_error is not None):
+            error = _bounded_cleanup_call(
+                lambda: device.kill(pid), "Frida process kill", cleanup_timeout
+            )
+            cleanup_error = cleanup_error or error
             try:
-                device.kill(pid)
+                adb(args, "shell", "am", "force-stop", args.package)
             except BaseException as error:
                 cleanup_error = cleanup_error or error
-        if cleanup_error is not None and not active_exception:
+        if cleanup_error is not None and active_exception is None:
             raise RuntimeError(f"failed to release benchmark process: {cleanup_error}") from cleanup_error
 
 

@@ -454,6 +454,9 @@ std::vector<ModuleRange> g_fake_maps;
 
 std::mutex g_gate_mutex;
 std::condition_variable g_gate_condition;
+std::mutex g_fake_linker_mutex;
+bool g_block_hook_on_linker = false;
+bool g_hook_waiting_for_linker = false;
 bool g_registration_entered = false;
 bool g_release_registration = false;
 bool g_stub_entry_entered = false;
@@ -618,6 +621,8 @@ void reset_fakes() {
         g_use_bridge_gate = false;
         g_bridge_gate_entries = 0;
         g_release_bridge = false;
+        g_block_hook_on_linker = false;
+        g_hook_waiting_for_linker = false;
     }
 }
 
@@ -1301,6 +1306,48 @@ void every_physical_rehook_gets_a_new_proxy_identity() {
     // resolve the second generation.
     CHECK(trace_proxy_dispatch(first_generation, args, 0) == 0x113);
     CHECK(g_seen_config.package_name == "physical-rehook-generation");
+}
+
+void hook_install_never_waits_for_the_linker_while_holding_the_registry() {
+    reset_fakes();
+    TraceConfig config = config_named("linker-lock-order");
+    config.target_so = "liblinker-lock-order.so";
+    const SceneConfig scene = scene_named(
+            "linker-lock-order", reinterpret_cast<uintptr_t>(old_target));
+    config.scenes.push_back(scene);
+    trace_proxy_test_reset(config);
+    const ModuleRange target = module_named(
+            "/data/app/liblinker-lock-order.so");
+
+    std::unique_lock<std::mutex> linker_lock(g_fake_linker_mutex);
+    {
+        std::lock_guard<std::mutex> gate_lock(g_gate_mutex);
+        g_block_hook_on_linker = true;
+    }
+    ::alarm(3);
+    std::thread installer([&] {
+        trace_proxy_test_install_loading_module(target);
+    });
+    {
+        std::unique_lock<std::mutex> gate_lock(g_gate_mutex);
+        g_gate_condition.wait(gate_lock, [] {
+            return g_hook_waiting_for_linker;
+        });
+    }
+
+    // Model a constructor callback running under bionic's linker lock. It must
+    // be able to inspect an unrelated module so the hook installer can finish
+    // its linker operation; waiting for the registry here creates AB-BA.
+    trace_proxy_test_install_loading_module(
+            module_named("/data/app/libunrelated.so"));
+    linker_lock.unlock();
+    installer.join();
+    ::alarm(0);
+
+    CHECK(g_hook_calls == 1);
+    const size_t generation = trace_proxy_test_generation(scene.index);
+    CHECK(generation != 4096);
+    CHECK(trace_proxy_test_generation_installed(generation));
 }
 
 void physical_rehook_keeps_its_original_capture_coordinator() {
@@ -2943,6 +2990,15 @@ bool register_inline_hook_dl_fini_callback(InlineHookDlInitCallback,
 }
 
 bool hook_function_address(uintptr_t target, void *, HookHandle *handle) {
+    {
+        std::unique_lock<std::mutex> gate_lock(g_gate_mutex);
+        if (g_block_hook_on_linker) {
+            g_hook_waiting_for_linker = true;
+            g_gate_condition.notify_all();
+            gate_lock.unlock();
+            std::lock_guard<std::mutex> linker_lock(g_fake_linker_mutex);
+        }
+    }
     std::lock_guard<std::mutex> lock(g_fake_mutex);
     ++g_hook_calls;
     g_hook_targets.push_back(target);
@@ -3093,6 +3149,10 @@ int main(int argc, char **argv) {
             active_proxy_acknowledges_the_exact_generation_admission();
             return 0;
         }
+        if (selected == "linker-lock-order") {
+            hook_install_never_waits_for_the_linker_while_holding_the_registry();
+            return 0;
+        }
         return 2;
     }
     json_configuration_abi_is_transactional_and_nul_terminated();
@@ -3116,6 +3176,7 @@ int main(int argc, char **argv) {
     unhook_failure_uses_the_saved_original_exactly_once();
     rehook_failure_leaves_a_coherent_direct_execution_state();
     every_physical_rehook_gets_a_new_proxy_identity();
+    hook_install_never_waits_for_the_linker_while_holding_the_registry();
     physical_rehook_keeps_its_original_capture_coordinator();
     concurrent_unhook_failures_keep_the_original_bypass_alive();
     same_address_updates_replace_all_metadata_and_hook_generation();

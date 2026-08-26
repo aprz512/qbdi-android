@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1362,6 +1363,91 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
             self.assertEqual(1, calls["unload"])
             self.assertEqual(1, calls["detach"])
             self.assertEqual(0, calls["kill"])
+
+    def test_invoke_benchmark_bounds_blocked_cleanup_and_preserves_timeout(self):
+        blocker = threading.Event()
+        cleanup_calls: list[str] = []
+
+        class BlockingScript:
+            def on(self, _event, _callback):
+                pass
+
+            def load(self):
+                pass
+
+            def unload(self):
+                cleanup_calls.append("unload")
+                blocker.wait()
+
+        class BlockingSession:
+            def create_script(self, _source):
+                return BlockingScript()
+
+            def detach(self):
+                cleanup_calls.append("detach")
+                blocker.wait()
+
+        class BlockingDevice:
+            def spawn(self, _argv):
+                return 4242
+
+            def attach(self, _pid):
+                return BlockingSession()
+
+            def resume(self, _pid):
+                pass
+
+            def kill(self, _pid):
+                cleanup_calls.append("kill")
+                blocker.wait()
+
+        device = BlockingDevice()
+        frida = SimpleNamespace(get_device_manager=lambda: SimpleNamespace(
+            add_remote_device=lambda _endpoint: device
+        ))
+        completed = threading.Event()
+        caught: list[BaseException] = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Path(directory) / "agent.js"
+            agent.write_text("agent", encoding="utf-8")
+            args = SimpleNamespace(
+                package="com.example.app", frida_port=27042, frida_device=None,
+                agent=str(agent), profile="fast", legacy=False,
+                test_buffer_bytes=None, test_fail_setup=False, timeout=0,
+                frida_cleanup_timeout=0.01,
+            )
+
+            def run() -> None:
+                try:
+                    benchmark_trace.invoke_benchmark(args)
+                except BaseException as error:
+                    caught.append(error)
+                finally:
+                    completed.set()
+
+            with patch.dict(sys.modules, {"frida": frida}), \
+                 patch.object(benchmark_trace, "adb") as adb_call, \
+                 patch.object(benchmark_trace, "java_bridge_source", return_value=""), \
+                 patch.object(benchmark_trace, "configure_agent_source", return_value=""), \
+                 patch.object(benchmark_trace, "inject_java_bridge", return_value=""):
+                worker = threading.Thread(target=run, daemon=True)
+                worker.start()
+                finished_within_bound = completed.wait(0.3)
+                blocker.set()
+                worker.join(1)
+
+        self.assertTrue(finished_within_bound, "Frida cleanup exceeded its hard bound")
+        self.assertEqual(["unload", "detach", "kill"], cleanup_calls)
+        self.assertEqual(1, len(caught))
+        self.assertRegex(str(caught[0]), "benchmark agent timed out after 0 seconds")
+        force_stops = [
+            call for call in adb_call.call_args_list
+            if call.args[1:] == (
+                "shell", "am", "force-stop", "com.example.app"
+            )
+        ]
+        self.assertEqual(2, len(force_stops))
 
 
 if __name__ == "__main__":
