@@ -300,15 +300,16 @@ add_trace_test(trace_callback_gate_test
 add_trace_test(trace_generation_runtime_test
     trace_generation_runtime_test.cpp
     ../../main/cpp/core/trace_generation_runtime.cpp
-    ../../main/cpp/core/session_status.cpp)
+    ../../main/cpp/core/session_status.cpp
+    ../../main/cpp/core/trace_config.cpp)
 target_link_libraries(trace_generation_runtime_test PRIVATE Threads::Threads)
 target_compile_options(trace_generation_runtime_test PRIVATE -fno-exceptions -fno-rtti)
 
 add_trace_test(session_status_test
     session_status_test.cpp
-    ../../main/cpp/core/session_status.cpp)
+    ../../main/cpp/core/session_status.cpp
+    ../../main/cpp/core/trace_config.cpp)
 target_link_libraries(session_status_test PRIVATE Threads::Threads)
-target_compile_options(session_status_test PRIVATE -fno-exceptions -fno-rtti)
 
 add_trace_test(trace_number_formatter_test
     trace_number_formatter_test.cpp)

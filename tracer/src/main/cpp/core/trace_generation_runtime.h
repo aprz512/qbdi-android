@@ -72,7 +72,8 @@ private:
 
 struct DeadlineWait {
     void *opaque = nullptr;
-    void (*wait_until)(void *opaque, uint64_t deadline_monotonic_ns) noexcept = nullptr;
+    void (*wait_until)(void *opaque, uint64_t deadline_monotonic_ns,
+                       const std::atomic<bool> *stop) noexcept = nullptr;
 };
 
 struct StatusPollWait {
@@ -154,7 +155,8 @@ private:
 
     static void *deadline_entry(void *opaque) noexcept;
     static void *status_entry(void *opaque) noexcept;
-    static void monotonic_wait_until(void *opaque, uint64_t deadline_monotonic_ns) noexcept;
+    static void monotonic_wait_until(void *opaque, uint64_t deadline_monotonic_ns,
+                                     const std::atomic<bool> *stop) noexcept;
     static void status_poll_wait(void *opaque, const std::atomic<bool> *stop) noexcept;
     void request_deadline_stop() noexcept;
     void publish_deadline_stop_locked() noexcept;
@@ -172,6 +174,7 @@ private:
     DeadlineWait wait_;
     std::atomic<TraceGenerationPhase> phase_{TraceGenerationPhase::Waiting};
     TraceStopToken stop_token_;
+    std::atomic<bool> deadline_stop_{false};
     std::atomic<bool> deadline_pending_{false};
     std::atomic<bool> stop_incomplete_{false};
     mutable std::mutex active_mutex_;

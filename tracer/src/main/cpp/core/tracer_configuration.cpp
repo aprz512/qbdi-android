@@ -282,26 +282,6 @@ bool unsigned_member(const json &object, std::string_view name, uint64_t *value,
     return true;
 }
 
-bool valid_uuid_v4(const std::string &value) noexcept {
-    if (value.size() != 36 || value[8] != '-' || value[13] != '-' ||
-        value[18] != '-' || value[23] != '-' || value[14] != '4' ||
-        (value[19] != '8' && value[19] != '9' && value[19] != 'a' && value[19] != 'b')) {
-        return false;
-    }
-
-    bool all_zero = true;
-    for (size_t index = 0; index != value.size(); ++index) {
-        if (index == 8 || index == 13 || index == 18 || index == 23) continue;
-        const char character = value[index];
-        if (!((character >= '0' && character <= '9') ||
-              (character >= 'a' && character <= 'f'))) {
-            return false;
-        }
-        all_zero = all_zero && character == '0';
-    }
-    return !all_zero;
-}
-
 bool parse_session(const json &session, SessionOptions *options,
                    ConfigurationIssue *issue) {
     if (!session.is_object()) {
@@ -317,7 +297,7 @@ bool parse_session(const json &session, SessionOptions *options,
         return false;
     }
     options->id = id->get<std::string>();
-    if (!valid_uuid_v4(options->id)) {
+    if (!trace_session_id_is_uuid_v4(options->id)) {
         *issue = {"INVALID_SESSION_ID", "$.session.id",
                   "session id must be a lowercase non-nil UUIDv4"};
         return false;

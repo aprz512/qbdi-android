@@ -152,20 +152,30 @@ void *TraceGenerationRuntime::deadline_entry(void *opaque) noexcept {
     auto *runtime = static_cast<TraceGenerationRuntime *>(opaque);
     DeadlineWait wait = runtime->wait_;
     if (wait.wait_until == nullptr) wait = DeadlineWait{nullptr, &monotonic_wait_until};
-    wait.wait_until(wait.opaque, runtime->deadline_monotonic_ns_);
-    runtime->request_deadline_stop();
+    wait.wait_until(wait.opaque, runtime->deadline_monotonic_ns_, &runtime->deadline_stop_);
+    if (!runtime->deadline_stop_.load(std::memory_order_acquire)) runtime->request_deadline_stop();
     return nullptr;
 }
 
-void TraceGenerationRuntime::monotonic_wait_until(void *, uint64_t deadline_monotonic_ns) noexcept {
-    timespec deadline{
-            static_cast<time_t>(deadline_monotonic_ns / kNanosecondsPerSecond),
-            static_cast<long>(deadline_monotonic_ns % kNanosecondsPerSecond),
-    };
-    int error = 0;
-    do {
-        error = ::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, nullptr);
-    } while (error == EINTR);
+void TraceGenerationRuntime::monotonic_wait_until(
+        void *, uint64_t deadline_monotonic_ns, const std::atomic<bool> *stop) noexcept {
+    while (!stop->load(std::memory_order_acquire)) {
+        const uint64_t now = monotonic_now_ns();
+        if (now == 0 || now >= deadline_monotonic_ns) return;
+        constexpr uint64_t kCancellationPollNanoseconds = 25ULL * kNanosecondsPerMillisecond;
+        const uint64_t wakeup = deadline_monotonic_ns - now > kCancellationPollNanoseconds
+                                        ? now + kCancellationPollNanoseconds
+                                        : deadline_monotonic_ns;
+        const timespec absolute_wakeup{
+                static_cast<time_t>(wakeup / kNanosecondsPerSecond),
+                static_cast<long>(wakeup % kNanosecondsPerSecond),
+        };
+        int error = 0;
+        do {
+            error = ::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &absolute_wakeup, nullptr);
+        } while (error == EINTR && !stop->load(std::memory_order_acquire));
+        if (error != 0 && error != EINTR) return;
+    }
 }
 
 void TraceGenerationRuntime::request_deadline_stop() noexcept {
@@ -367,7 +377,17 @@ void TraceGenerationRuntime::publish_status_loop() noexcept {
         if (transition != published_sequence) {
             const SessionStatusSnapshot snapshot = status_snapshot();
             if (!status_publisher_.publish(snapshot)) {
-                status_error_.store(status_publisher_.error_code(), std::memory_order_release);
+                int expected = 0;
+                const int error = status_publisher_.error_code() == 0
+                                      ? EIO
+                                      : status_publisher_.error_code();
+                (void)status_error_.compare_exchange_strong(
+                        expected, error, std::memory_order_acq_rel, std::memory_order_acquire);
+                // Do not lose the failure behind published_sequence. Scheduling one
+                // successor keeps retries bounded by the 25 ms poll wait and lets a
+                // recovered publication serialize the latched error without a new
+                // callback-side transition.
+                note_transition();
             }
             published_sequence = transition;
         }
@@ -384,17 +404,23 @@ void TraceGenerationRuntime::set_test_hooks(TraceGenerationTestHooks hooks) noex
 
 void TraceGenerationRuntime::detach_after_fork_child() noexcept {
     detached_.store(true, std::memory_order_release);
+    deadline_stop_.store(true, std::memory_order_release);
     deadline_thread_started_.store(false, std::memory_order_release);
     status_stop_.store(true, std::memory_order_release);
     status_thread_started_.store(false, std::memory_order_release);
 }
 
 void TraceGenerationRuntime::join_deadline_for_test() noexcept {
-    join_deadline();
+    if (detached_.load(std::memory_order_acquire) || ::getpid() != owner_pid_) return;
+    bool started = true;
+    if (!deadline_thread_started_.compare_exchange_strong(started, false, std::memory_order_acq_rel,
+                                                          std::memory_order_acquire)) return;
+    (void)::pthread_join(deadline_thread_, nullptr);
 }
 
 void TraceGenerationRuntime::join_deadline() noexcept {
     if (detached_.load(std::memory_order_acquire) || ::getpid() != owner_pid_) return;
+    deadline_stop_.store(true, std::memory_order_release);
     bool started = true;
     if (!deadline_thread_started_.compare_exchange_strong(started, false, std::memory_order_acq_rel,
                                                           std::memory_order_acquire)) {

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct SceneConfig {
@@ -58,5 +59,10 @@ struct TraceConfig {
 };
 
 TraceConfig default_trace_config();
+
+// The session-id rule is shared by the JSON configuration parser and status
+// publisher; the package rule is for app-private status path components.
+bool trace_session_id_is_uuid_v4(std::string_view value) noexcept;
+bool trace_package_name_is_valid(std::string_view value) noexcept;
 
 const char *trace_profile_name(TraceProfile profile);

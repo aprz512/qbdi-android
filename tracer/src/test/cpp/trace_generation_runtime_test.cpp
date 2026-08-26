@@ -21,11 +21,12 @@ void check(bool condition, const char *expression, int line) {
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
 struct FakeDeadline {
-    static void wait_until(void *opaque, uint64_t) noexcept {
+    static void wait_until(void *opaque, uint64_t, const std::atomic<bool> *stop) noexcept {
         auto *deadline = static_cast<FakeDeadline *>(opaque);
         deadline->entries.fetch_add(1, std::memory_order_relaxed);
         deadline->entered.store(true, std::memory_order_release);
-        while (!deadline->release.load(std::memory_order_acquire)) ::sched_yield();
+        while (!deadline->release.load(std::memory_order_acquire) &&
+               !stop->load(std::memory_order_acquire)) ::sched_yield();
         deadline->exited.store(true, std::memory_order_release);
     }
 
@@ -33,6 +34,18 @@ struct FakeDeadline {
     std::atomic<bool> release{false};
     std::atomic<bool> exited{false};
     std::atomic<unsigned int> entries{0};
+};
+
+struct CancellableDeadline {
+    static void wait_until(void *opaque, uint64_t, const std::atomic<bool> *stop) noexcept {
+        auto *deadline = static_cast<CancellableDeadline *>(opaque);
+        deadline->entered.store(true, std::memory_order_release);
+        while (!stop->load(std::memory_order_acquire)) ::sched_yield();
+        deadline->exited.store(true, std::memory_order_release);
+    }
+
+    std::atomic<bool> entered{false};
+    std::atomic<bool> exited{false};
 };
 
 struct TemporaryDirectory {
@@ -409,6 +422,20 @@ void destruction_joins_the_deadline_worker() {
     CHECK(deadline.exited.load(std::memory_order_acquire));
 }
 
+// Catches destruction joining a 24-hour deadline sleep before signalling it
+// to stop. The injected wait has no release other than the runtime stop token.
+void destruction_cancels_a_24_hour_deadline_worker() {
+    CancellableDeadline deadline;
+    {
+        auto runtime = TraceGenerationRuntime::create(
+                30, timed_session(86400000), DeadlineWait{&deadline, &CancellableDeadline::wait_until});
+        CHECK(runtime != nullptr);
+        CHECK(runtime->arm());
+        wait_for(deadline.entered);
+    }
+    CHECK(deadline.exited.load(std::memory_order_acquire));
+}
+
 // Catches a child destructor trying to pthread_join a worker inherited through
 // fork, which has no joinable peer in that child process.
 void forked_child_detaches_the_inherited_deadline_worker() {
@@ -460,6 +487,43 @@ void status_worker_publishes_only_transition_snapshots_outside_runtime_transitio
     runtime.reset();
 }
 
+// Catches a failed status publication being marked published forever. Every
+// retry is gated by the 25 ms poll wait; after the fault clears, the first
+// retry must include the latched diagnostic without a new runtime transition.
+void status_publication_failure_is_exposed_and_retried_without_a_runtime_event() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    session_status_test_inject_fault(SessionStatusFaultPoint::FileFsync, EIO);
+    auto runtime = TraceGenerationRuntime::create(
+            32, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
+    CHECK(runtime != nullptr);
+    wait_for_count(poll.waits, 1);
+    CHECK(runtime->snapshot().status_error == EIO);
+    const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
+    CHECK(::access(path.c_str(), F_OK) != 0);
+
+    // A permanent error consumes at most one retry per controlled poll.
+    session_status_test_inject_fault(SessionStatusFaultPoint::FileFsync, EIO);
+    poll.allow_one();
+    wait_for_count(poll.waits, 2);
+    CHECK(::access(path.c_str(), F_OK) != 0);
+    session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
+    poll.allow_one();
+    wait_for_count(poll.waits, 3);
+    const std::string recovered = read_text(path);
+    CHECK(recovered.find("\"errors\":[{\"code\":\"STATUS_PUBLICATION_FAILED\"") !=
+          std::string::npos);
+    CHECK(runtime->snapshot().status_error == EIO);
+    runtime.reset();
+}
+
 } // namespace
 
 int main() {
@@ -478,6 +542,8 @@ int main() {
     failed_arm_is_never_reported_as_successful();
     concurrent_deadline_and_unsealed_last_finish_select_stop_incomplete();
     destruction_joins_the_deadline_worker();
+    destruction_cancels_a_24_hour_deadline_worker();
     forked_child_detaches_the_inherited_deadline_worker();
     status_worker_publishes_only_transition_snapshots_outside_runtime_transitions();
+    status_publication_failure_is_exposed_and_retried_without_a_runtime_event();
 }

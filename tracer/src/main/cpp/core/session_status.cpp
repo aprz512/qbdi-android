@@ -12,7 +12,6 @@ namespace {
 
 constexpr size_t kJsonCapacity = 65536;
 constexpr size_t kPackageCapacity = 512;
-constexpr size_t kSessionIdSize = 36;
 std::atomic<uint64_t> g_status_publish_sequence{1};
 
 #if defined(QTRACE_HOST_TEST)
@@ -102,28 +101,11 @@ bool append_issue_array(char *buffer, size_t capacity, size_t *used,
 }
 
 bool package_name_is_safe(std::string_view value) noexcept {
-    if (value.empty() || value.size() > kPackageCapacity) return false;
-    for (char character : value) {
-        const bool alphanumeric = (character >= 'a' && character <= 'z') ||
-                                  (character >= 'A' && character <= 'Z') ||
-                                  (character >= '0' && character <= '9');
-        if (!alphanumeric && character != '.' && character != '_') return false;
-    }
-    return true;
+    return value.size() <= kPackageCapacity && trace_package_name_is_valid(value);
 }
 
 bool session_id_is_uuid(std::string_view value) noexcept {
-    if (value.size() != kSessionIdSize) return false;
-    for (size_t index = 0; index < value.size(); ++index) {
-        if (index == 8 || index == 13 || index == 18 || index == 23) {
-            if (value[index] != '-') return false;
-            continue;
-        }
-        const char character = value[index];
-        if (!((character >= '0' && character <= '9') ||
-              (character >= 'a' && character <= 'f'))) return false;
-    }
-    return true;
+    return trace_session_id_is_uuid_v4(value);
 }
 
 bool artifact_name_is_safe(std::string_view value) noexcept {
@@ -132,6 +114,60 @@ bool artifact_name_is_safe(std::string_view value) noexcept {
         if (character == '/' || character == '\\' || character == '\0') return false;
     }
     return true;
+}
+
+bool string_is_valid_utf8(std::string_view value) noexcept {
+    size_t index = 0;
+    while (index < value.size()) {
+        const unsigned char first = static_cast<unsigned char>(value[index++]);
+        if (first <= 0x7fU) continue;
+        size_t continuation_count = 0;
+        uint32_t code_point = 0;
+        uint32_t minimum = 0;
+        if (first >= 0xc2U && first <= 0xdfU) {
+            continuation_count = 1;
+            code_point = first & 0x1fU;
+            minimum = 0x80U;
+        } else if (first >= 0xe0U && first <= 0xefU) {
+            continuation_count = 2;
+            code_point = first & 0x0fU;
+            minimum = 0x800U;
+        } else if (first >= 0xf0U && first <= 0xf4U) {
+            continuation_count = 3;
+            code_point = first & 0x07U;
+            minimum = 0x10000U;
+        } else {
+            return false;
+        }
+        if (continuation_count > value.size() - index) return false;
+        for (size_t count = 0; count < continuation_count; ++count) {
+            const unsigned char continuation = static_cast<unsigned char>(value[index++]);
+            if ((continuation & 0xc0U) != 0x80U) return false;
+            code_point = (code_point << 6U) | (continuation & 0x3fU);
+        }
+        if (code_point < minimum || code_point > 0x10ffffU ||
+            (code_point >= 0xd800U && code_point <= 0xdfffU)) return false;
+    }
+    return true;
+}
+
+bool snapshot_strings_are_utf8(const SessionStatusSnapshot &snapshot) noexcept {
+    if (!string_is_valid_utf8(snapshot.session_id) || !string_is_valid_utf8(snapshot.package) ||
+        !string_is_valid_utf8(snapshot.state) || !string_is_valid_utf8(snapshot.reason)) return false;
+    for (const ResolvedSceneStatus &scene : snapshot.normalized_scenes) {
+        if (!string_is_valid_utf8(scene.name)) return false;
+    }
+    for (const std::string &artifact : snapshot.artifacts) {
+        if (!string_is_valid_utf8(artifact)) return false;
+    }
+    const auto issues_are_utf8 = [](const std::vector<ConfigurationIssue> &issues) noexcept {
+        for (const ConfigurationIssue &issue : issues) {
+            if (!string_is_valid_utf8(issue.code) || !string_is_valid_utf8(issue.path) ||
+                !string_is_valid_utf8(issue.message)) return false;
+        }
+        return true;
+    };
+    return issues_are_utf8(snapshot.warnings) && issues_are_utf8(snapshot.errors);
 }
 
 bool write_all(int fd, const char *data, size_t size) noexcept {
@@ -193,6 +229,10 @@ bool serialize_status(char *buffer, size_t capacity, size_t *used,
             errno = EINVAL;
             return false;
         }
+    }
+    if (!snapshot_strings_are_utf8(snapshot)) {
+        errno = EINVAL;
+        return false;
     }
     *used = 0;
     const auto comma = [&] { return append_char(buffer, capacity, used, ','); };
@@ -337,7 +377,15 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
         record_error(error);
         return false;
     }
-    const bool had_previous = ::access(path_, F_OK) == 0;
+    const int previous_result = ::access(path_, F_OK);
+    if (previous_result != 0 && errno != ENOENT) {
+        const int error = errno;
+        (void)::close(directory_fd);
+        (void)::unlink(temporary);
+        record_error(error);
+        return false;
+    }
+    const bool had_previous = previous_result == 0;
     if (had_previous) {
         const int backup_count = std::snprintf(backup_path_, sizeof(backup_path_), "%s.bak.%llu.%llu",
                                                 path_, pid, sequence);
@@ -373,6 +421,9 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
         const int error = errno;
         if (had_previous) {
             (void)::rename(backup_path_, path_);
+            (void)sync_file(directory_fd, true);
+        } else {
+            (void)::unlink(path_);
             (void)sync_file(directory_fd, true);
         }
         (void)::close(directory_fd);
