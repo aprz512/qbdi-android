@@ -1,5 +1,6 @@
 import unittest
 import contextlib
+import hashlib
 import io
 import json
 import shutil
@@ -43,6 +44,7 @@ from scripts.benchmark_trace import (
     select_exact_new_optimized_metrics,
     select_newest_benchmark_trace,
     throughput_metrics,
+    verify_candidate_tracer,
     verify_setup_failure_smoke,
 )
 
@@ -475,6 +477,48 @@ effective_buffer_bytes=67108864
         self.assertEqual("user", live["android_build_type"])
         self.assertEqual("Debug", live["app_build_type"])
 
+    def test_candidate_verification_accepts_new_build_when_staged_sha_matches(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            candidate = Path(temporary_directory) / "candidate.so"
+            candidate.write_bytes(b"new candidate build")
+            local_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            historical_sha = hashlib.sha256(b"historical candidate").hexdigest()
+            self.assertNotEqual(historical_sha, local_sha)
+
+            completed = subprocess.CompletedProcess(
+                ["adb", "sha256sum"], 0,
+                stdout=f"{local_sha}  files/libqbdi_tracer.so\n", stderr="",
+            )
+            with patch.object(benchmark_trace, "adb", return_value=completed):
+                verified = verify_candidate_tracer(
+                    SimpleNamespace(
+                        candidate_tracer=str(candidate), package="com.aprz.qbdiandroid"
+                    ),
+                    {"candidate_tracer_sha256": historical_sha},
+                )
+
+        self.assertEqual(local_sha, verified)
+
+    def test_candidate_verification_rejects_a_different_staged_sha(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            candidate = Path(temporary_directory) / "candidate.so"
+            candidate.write_bytes(b"local candidate build")
+            local_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            staged_sha = hashlib.sha256(b"different staged build").hexdigest()
+            completed = subprocess.CompletedProcess(
+                ["adb", "sha256sum"], 0,
+                stdout=f"{staged_sha}  files/libqbdi_tracer.so\n", stderr="",
+            )
+
+            with patch.object(benchmark_trace, "adb", return_value=completed), \
+                 self.assertRaisesRegex(ValueError, "app-private candidate"):
+                verify_candidate_tracer(
+                    SimpleNamespace(
+                        candidate_tracer=str(candidate), package="com.aprz.qbdiandroid"
+                    ),
+                    {"candidate_tracer_sha256": local_sha},
+                )
+
     def test_cli_returns_acceptance_miss_and_preserves_json_verdict(self):
         run = {**parse_metrics(self.METRICS_V3), "profile": "balanced",
                "instructions": 21718, "return": "0x5745c858653f5a7f",
@@ -505,6 +549,15 @@ effective_buffer_bytes=67108864
 
         self.assertEqual(2, status)
         report = benchmark_trace.json.loads(output.getvalue())
+        baseline_identity = parse_baseline_document(
+            Path(args.compare).read_text(encoding="utf-8")
+        )
+        self.assertNotEqual("a" * 64, baseline_identity["candidate_tracer_sha256"])
+        self.assertEqual("a" * 64, report["candidate_tracer_sha256"])
+        self.assertEqual(
+            baseline_identity["candidate_tracer_sha256"],
+            report["baseline_candidate_tracer_sha256"],
+        )
         self.assertFalse(report["comparison"]["meets_rate_target"])
         self.assertFalse(report["comparison"]["meets_size_target"])
 

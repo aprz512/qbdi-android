@@ -374,21 +374,30 @@ void proxy_admission_precedes_qbdi_and_stop_completes_control_only() {
           std::string::npos);
 }
 
-void deadline_worker_only_requests_stop_and_runtime_stop_has_no_rpc() {
+void deadline_worker_only_requests_stop_and_runtime_has_no_writer_dependency() {
     const std::filesystem::path root(QTRACE_CPP_SOURCE_DIR);
     const std::filesystem::path repo(QTRACE_REPO_DIR);
     const std::string runtime =
             read_file(root / "core" / "trace_generation_runtime.cpp");
+    const std::string runtime_header =
+            read_file(root / "core" / "trace_generation_runtime.h");
     const std::string tracer_entry = read_file(root / "tracer_entry.cpp");
     const std::string spawn_agent = read_file(repo / "scripts" / "spawn_trace.js");
     const std::string_view deadline = function_source(
             runtime, "void *TraceGenerationRuntime::deadline_entry(");
 
     CHECK(deadline.find("request_deadline_stop()") != std::string_view::npos);
-    for (std::string_view forbidden : {
-                 "BinaryTraceWriter", "writer_", ".stop(", ".close(",
-                 "seal_observed_stop"}) {
-        CHECK(deadline.find(forbidden) == std::string_view::npos);
+    for (std::string_view forbidden_dependency : {
+                 "events/binary_trace_writer.h", "events/trace_sink.h",
+                 "BinaryTraceWriter", "TraceSink"}) {
+        CHECK(runtime.find(forbidden_dependency) == std::string_view::npos);
+        CHECK(runtime_header.find(forbidden_dependency) == std::string_view::npos);
+    }
+    for (std::string_view forbidden_operation : {
+                 "writer_", ".stop(", "->stop(", ".close(", "->close(",
+                 "seal_observed_stop("}) {
+        CHECK(runtime.find(forbidden_operation) == std::string_view::npos);
+        CHECK(runtime_header.find(forbidden_operation) == std::string_view::npos);
     }
     CHECK(tracer_entry.find("qbdi_tracer_stop_json") == std::string::npos);
     CHECK(tracer_entry.find("qbdi_tracer_stop") == std::string::npos);
@@ -410,5 +419,5 @@ int main() {
     final_sentinel_postinst_clears_before_vm_run_returns();
     accepted_generation_owns_one_runtime_and_private_status_publisher();
     proxy_admission_precedes_qbdi_and_stop_completes_control_only();
-    deadline_worker_only_requests_stop_and_runtime_stop_has_no_rpc();
+    deadline_worker_only_requests_stop_and_runtime_has_no_writer_dependency();
 }
