@@ -59,13 +59,25 @@ struct TraceAdmissionResult {
 
 class TraceStopToken final {
 public:
-    bool requested() const noexcept;
-    TraceStopReason reason() const noexcept;
+    bool requested() const noexcept {
+        return requested_.load(std::memory_order_acquire);
+    }
+    TraceStopReason reason() const noexcept {
+        return static_cast<TraceStopReason>(
+                reason_.load(std::memory_order_acquire));
+    }
+
+#if defined(QTRACE_HOST_TEST)
+    void request_for_test(TraceStopReason reason) noexcept { request(reason); }
+#endif
 
 private:
     friend class TraceGenerationRuntime;
 
-    void request(TraceStopReason reason) noexcept;
+    void request(TraceStopReason reason) noexcept {
+        reason_.store(static_cast<uint8_t>(reason), std::memory_order_relaxed);
+        requested_.store(true, std::memory_order_release);
+    }
 
     std::atomic<bool> requested_{false};
     std::atomic<uint8_t> reason_{0};

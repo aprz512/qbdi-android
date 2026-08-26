@@ -1,5 +1,6 @@
 #include "core/qbdi_thread_session.h"
 #include "core/qbdi_execution_control.h"
+#include "core/trace_process_lifecycle.h"
 
 #include <QBDI/Callback.h>
 #include <QBDI/State.h>
@@ -8,7 +9,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 
@@ -190,13 +193,19 @@ TraceRunResult execute(void *opaque, QbdiThreadSession *session,
 }
 
 struct CooperativeStopExecution {
+    TraceStopToken token;
+    QbdiStopControl control{};
+    QbdiStopObservation observation{};
     size_t execution_calls = 0;
     size_t continuation_calls = 0;
     size_t seal_calls = 0;
     size_t acknowledge_calls = 0;
+    size_t collector_calls = 0;
     std::thread::id execution_thread{};
     std::thread::id seal_thread{};
-    bool observe_stop = true;
+    QbdiTargetPreDecision first_pre{};
+    QbdiTargetPreDecision repeated_pre{};
+    bool repeat_pre = false;
     bool seal_success = true;
     bool seal_attempted = false;
     bool sealed = false;
@@ -211,9 +220,20 @@ QbdiExecutionResult execute_cooperative_stop(
     auto *execution = static_cast<CooperativeStopExecution *>(opaque);
     ++execution->execution_calls;
     execution->execution_thread = std::this_thread::get_id();
-    if (!execution->observe_stop) return {true, true, 0x31};
-    return {TraceRunResult{true, false, 0x17}, true,
-            TraceStopReason::DurationElapsed};
+    execution->first_pre = decide_qbdi_target_pre(
+            execution->control, false, &execution->observation);
+    if (execution->repeat_pre) {
+        execution->repeated_pre = decide_qbdi_target_pre(
+                execution->control, false, &execution->observation);
+    }
+    if (execution->first_pre.action == QbdiTargetPreAction::Collect) {
+        ++execution->collector_calls;
+        return {true, true, 0x31};
+    }
+    CHECK(execution->first_pre.action == QbdiTargetPreAction::Stop);
+    return {TraceRunResult{true, false, 0x17},
+            execution->observation.observed,
+            execution->observation.reason};
 }
 
 TraceRunResult continue_after_cooperative_stop(
@@ -242,18 +262,18 @@ void acknowledge_cooperative_stop(void *opaque, bool sealed) noexcept {
 }
 
 QbdiThreadSession *cooperative_stop_session(CooperativeStopExecution *execution) {
-    const QbdiStopControl stop_control{
+    execution->control = QbdiStopControl{
             nullptr, execution, seal_cooperative_stop,
             acknowledge_cooperative_stop};
+    execution->control.token = &execution->token;
     return QbdiThreadSession::create_for_test(
             771, 51, execute_cooperative_stop, execution,
             nullptr, nullptr, nullptr, nullptr,
-            continue_after_cooperative_stop, {}, {}, stop_control);
+            continue_after_cooperative_stop, {}, {}, execution->control);
 }
 
 void no_stop_preserves_the_direct_target_return_path() {
     CooperativeStopExecution execution;
-    execution.observe_stop = false;
     QbdiThreadSession *session = cooperative_stop_session(&execution);
     CHECK(session != nullptr);
     const uint64_t args[8]{};
@@ -264,6 +284,8 @@ void no_stop_preserves_the_direct_target_return_path() {
     CHECK(result.target_returned);
     CHECK(result.value == 0x31);
     CHECK(execution.execution_calls == 1);
+    CHECK(execution.first_pre.action == QbdiTargetPreAction::Collect);
+    CHECK(execution.collector_calls == 1);
     CHECK(execution.seal_calls == 0);
     CHECK(execution.acknowledge_calls == 0);
     CHECK(execution.continuation_calls == 0);
@@ -273,6 +295,7 @@ void no_stop_preserves_the_direct_target_return_path() {
 
 void stop_before_first_collected_instruction_seals_before_continuation() {
     CooperativeStopExecution execution;
+    execution.token.request_for_test(TraceStopReason::DurationElapsed);
     QbdiThreadSession *session = cooperative_stop_session(&execution);
     CHECK(session != nullptr);
     const uint64_t args[8]{};
@@ -283,6 +306,9 @@ void stop_before_first_collected_instruction_seals_before_continuation() {
     CHECK(result.target_returned);
     CHECK(result.value == 0x44);
     CHECK(execution.execution_calls == 1);
+    CHECK(execution.first_pre.action == QbdiTargetPreAction::Stop);
+    CHECK(execution.first_pre.stop_latched);
+    CHECK(execution.collector_calls == 0);
     CHECK(execution.seal_calls == 1);
     CHECK(execution.acknowledge_calls == 1);
     CHECK(execution.execution_thread == execution.seal_thread);
@@ -296,6 +322,8 @@ void stop_before_first_collected_instruction_seals_before_continuation() {
 
 void repeated_stop_observation_never_reseals_or_reenters_the_target() {
     CooperativeStopExecution execution;
+    execution.token.request_for_test(TraceStopReason::DurationElapsed);
+    execution.repeat_pre = true;
     QbdiThreadSession *session = cooperative_stop_session(&execution);
     CHECK(session != nullptr);
     const uint64_t args[8]{};
@@ -305,6 +333,11 @@ void repeated_stop_observation_never_reseals_or_reenters_the_target() {
 
     CHECK(!repeated.target_executed);
     CHECK(execution.execution_calls == 1);
+    CHECK(execution.first_pre.action == QbdiTargetPreAction::Stop);
+    CHECK(execution.first_pre.stop_latched);
+    CHECK(execution.repeated_pre.action == QbdiTargetPreAction::Stop);
+    CHECK(!execution.repeated_pre.stop_latched);
+    CHECK(execution.collector_calls == 0);
     CHECK(execution.seal_calls == 1);
     CHECK(execution.acknowledge_calls == 1);
     CHECK(execution.continuation_calls == 1);
@@ -313,6 +346,7 @@ void repeated_stop_observation_never_reseals_or_reenters_the_target() {
 
 void failed_stop_seal_marks_incomplete_without_restarting_the_target() {
     CooperativeStopExecution execution;
+    execution.token.request_for_test(TraceStopReason::DurationElapsed);
     execution.seal_success = false;
     QbdiThreadSession *session = cooperative_stop_session(&execution);
     CHECK(session != nullptr);
@@ -332,6 +366,30 @@ void failed_stop_seal_marks_incomplete_without_restarting_the_target() {
     CHECK(!execution.continuation_saw_sealed);
     CHECK(session->incomplete());
     delete session;
+}
+
+void fork_child_ignores_an_inherited_stop_before_collector_dispatch() {
+    CHECK(install_trace_process_lifecycle());
+    TraceStopToken token;
+    token.request_for_test(TraceStopReason::DurationElapsed);
+    const QbdiStopControl control{&token, nullptr, nullptr, nullptr};
+
+    const pid_t child = ::fork();
+    CHECK(child >= 0);
+    if (child == 0) {
+        QbdiStopObservation observation{};
+        const QbdiTargetPreDecision decision =
+                decide_qbdi_target_pre(control, false, &observation);
+        const bool safe = trace_process_child_detached() &&
+                          decision.action ==
+                                  QbdiTargetPreAction::ContinueWithoutCollection &&
+                          !decision.stop_latched && !observation.observed;
+        _exit(safe ? 0 : 71);
+    }
+    int status = -1;
+    CHECK(::waitpid(child, &status, 0) == child);
+    CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 0);
 }
 
 void mark_gap(void *opaque, uint32_t tid, uintptr_t pc) noexcept {
@@ -725,6 +783,7 @@ int main() {
     stop_before_first_collected_instruction_seals_before_continuation();
     repeated_stop_observation_never_reseals_or_reenters_the_target();
     failed_stop_seal_marks_incomplete_without_restarting_the_target();
+    fork_child_ignores_an_inherited_stop_before_collector_dispatch();
     forwards_entry_arguments_and_return_with_scoped_tls();
     rejects_recursive_running_vm_and_reports_a_permanent_gap();
     failed_execution_reports_a_permanent_gap();

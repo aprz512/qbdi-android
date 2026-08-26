@@ -46,19 +46,6 @@ struct TraceGenerationRuntime::StatusThreadStart {
     std::shared_ptr<StatusWorkerContext> context;
 };
 
-bool TraceStopToken::requested() const noexcept {
-    return requested_.load(std::memory_order_acquire);
-}
-
-TraceStopReason TraceStopToken::reason() const noexcept {
-    return static_cast<TraceStopReason>(reason_.load(std::memory_order_acquire));
-}
-
-void TraceStopToken::request(TraceStopReason reason) noexcept {
-    reason_.store(static_cast<uint8_t>(reason), std::memory_order_relaxed);
-    requested_.store(true, std::memory_order_release);
-}
-
 TraceGenerationRuntime::TraceGenerationRuntime(uint64_t generation, SessionOptions session,
                                                TraceGenerationLimits limits,
                                                DeadlineWait wait,

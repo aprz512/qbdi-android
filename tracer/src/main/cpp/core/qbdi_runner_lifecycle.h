@@ -1,6 +1,10 @@
 #pragma once
 
+#include "core/trace_generation_runtime.h"
+
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 
 class BinaryTraceWriter;
 
@@ -29,3 +33,41 @@ bool register_qbdi_callbacks(const QbdiCallbackRegistration &) noexcept;
 
 QbdiTargetCallResult run_qbdi_target_call(QbdiTargetCall call, void *opaque,
                                           BinaryTraceWriter *writer) noexcept;
+
+using QbdiElapsedMillis = long (*)(void *opaque) noexcept;
+
+// Owns the normal-runner half of cooperative stop. QBDI only observes the token;
+// the runner thread seals the writer after vm.run() unwinds, then acknowledges
+// the exact admission. Both operations are idempotent.
+class QbdiNormalStopLifecycle final {
+public:
+    QbdiNormalStopLifecycle(BinaryTraceWriter *writer,
+                            std::shared_ptr<TraceGenerationRuntime> runtime,
+                            TraceAdmission admission, void *elapsed_opaque,
+                            QbdiElapsedMillis elapsed) noexcept;
+
+    bool enabled() const noexcept;
+    const TraceStopToken *token() const noexcept;
+    bool seal(TraceStopReason reason) noexcept;
+    void acknowledge(bool sealed) noexcept;
+    bool stop_observed() const noexcept;
+    bool sealed() const noexcept;
+
+#if defined(QTRACE_HOST_TEST)
+    size_t seal_calls() const noexcept;
+    size_t acknowledge_calls() const noexcept;
+#endif
+
+private:
+    BinaryTraceWriter *writer_ = nullptr;
+    std::shared_ptr<TraceGenerationRuntime> runtime_;
+    TraceAdmission admission_{};
+    void *elapsed_opaque_ = nullptr;
+    QbdiElapsedMillis elapsed_ = nullptr;
+    bool seal_called_ = false;
+    bool acknowledge_called_ = false;
+    bool stop_observed_ = false;
+    bool sealed_ = false;
+    size_t seal_calls_ = 0;
+    size_t acknowledge_calls_ = 0;
+};

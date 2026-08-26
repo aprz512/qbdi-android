@@ -33,6 +33,26 @@ struct QbdiStopControl {
     QbdiStopAcknowledged acknowledge = nullptr;
 };
 
+enum class QbdiTargetPreAction : uint8_t {
+    Collect,
+    ContinueWithoutCollection,
+    Stop,
+};
+
+struct QbdiStopObservation {
+    bool observed = false;
+    TraceStopReason reason{};
+};
+
+struct QbdiTargetPreDecision {
+    QbdiTargetPreAction action = QbdiTargetPreAction::Collect;
+    bool stop_latched = false;
+};
+
+QbdiTargetPreDecision decide_qbdi_target_pre(
+        const QbdiStopControl &control, bool control_only,
+        QbdiStopObservation *observation) noexcept;
+
 struct QbdiExecutionResult {
     TraceRunResult run{};
     bool stop_observed = false;

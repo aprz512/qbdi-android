@@ -231,18 +231,23 @@ target_link_libraries(async_trace_writer_test PRIVATE lz4_static Threads::Thread
 add_trace_test(qbdi_runner_lifecycle_test
     qbdi_runner_lifecycle_test.cpp
     ../../main/cpp/core/qbdi_runner_lifecycle.cpp
+    ../../main/cpp/core/trace_generation_runtime.cpp
+    ../../main/cpp/core/session_status.cpp
+    ../../main/cpp/core/trace_config.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/events/binary_trace_writer.cpp
     ../../main/cpp/events/binary_trace_encoder.cpp
     ../../main/cpp/events/trace_dictionary.cpp
     ../../main/cpp/events/async_trace_writer.cpp)
 target_link_libraries(qbdi_runner_lifecycle_test PRIVATE lz4_static Threads::Threads)
+target_compile_options(qbdi_runner_lifecycle_test PRIVATE -fno-exceptions -fno-rtti)
 
 add_trace_test(qbdi_thread_session_test
     qbdi_thread_session_test.cpp
     ../../main/cpp/core/qbdi_execution_control.cpp
     ../../main/cpp/core/qbdi_thread_session.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp)
+target_compile_options(qbdi_thread_session_test PRIVATE -fno-exceptions -fno-rtti)
 add_dependencies(production_trace_contract_test qbdi_thread_session_test)
 
 add_trace_test(flight_transfer_event_test
@@ -276,6 +281,9 @@ target_link_options(thread_create_gateway_test PRIVATE
 add_trace_test(trace_run_session_test
     trace_run_session_test.cpp
     ../../main/cpp/core/qbdi_runner_lifecycle.cpp
+    ../../main/cpp/core/trace_generation_runtime.cpp
+    ../../main/cpp/core/session_status.cpp
+    ../../main/cpp/core/trace_config.cpp
     ../../main/cpp/core/trace_run_session.cpp
     ../../main/cpp/core/trace_process_lifecycle.cpp
     ../../main/cpp/events/binary_trace_writer.cpp

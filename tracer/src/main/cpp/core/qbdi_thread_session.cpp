@@ -107,6 +107,24 @@ void observe_qbdi_vm_target_post(
     signal_execution.observe_target_post(gpr, return_address);
 }
 
+QbdiTargetPreDecision decide_qbdi_target_pre(
+        const QbdiStopControl &control, bool control_only,
+        QbdiStopObservation *observation) noexcept {
+    if (trace_process_child_detached() || control_only) {
+        return {QbdiTargetPreAction::ContinueWithoutCollection, false};
+    }
+    if (control.token == nullptr || !control.token->requested()) {
+        return {QbdiTargetPreAction::Collect, false};
+    }
+    bool latched = false;
+    if (observation != nullptr && !observation->observed) {
+        observation->reason = control.token->reason();
+        observation->observed = true;
+        latched = true;
+    }
+    return {QbdiTargetPreAction::Stop, latched};
+}
+
 #if defined(QTRACE_HOST_TEST)
 struct QbdiThreadSession::Impl {};
 #else
@@ -355,13 +373,13 @@ struct QbdiThreadSession::Impl {
             self->target_execution_observed = true;
             self->last_target_pc = self->control_only ? 0 : gpr->pc;
         }
-        if (self->control_only) return QBDI::CONTINUE;
-        if (self->stop_control.token != nullptr &&
-            self->stop_control.token->requested()) {
-            if (!self->stop_observed) {
-                self->stop_observed = true;
-                self->stop_reason = self->stop_control.token->reason();
-            }
+        const QbdiTargetPreDecision decision = decide_qbdi_target_pre(
+                self->stop_control, self->control_only,
+                &self->stop_observation);
+        if (decision.action == QbdiTargetPreAction::ContinueWithoutCollection) {
+            return QBDI::CONTINUE;
+        }
+        if (decision.action == QbdiTargetPreAction::Stop) {
             return QBDI::STOP;
         }
         return InstructionCollector::pre_callback(vm, gpr, fpr, self->collector);
@@ -558,8 +576,7 @@ struct QbdiThreadSession::Impl {
         thread_exit_requested = false;
         thread_exit_value = 0;
         target_execution_observed = false;
-        stop_observed = false;
-        stop_reason = {};
+        stop_observation = {};
         control_only = false;
         if (!signal_execution.activate(gpr)) return {};
         const bool executed = vm.run(execution_entry, kReturnAddress);
@@ -571,8 +588,8 @@ struct QbdiThreadSession::Impl {
             return {target_executed, returned, value};
         }
         if (target_executed || thread_exit_requested) collector->finish_last(*gpr);
-        if (stop_observed && owner != nullptr) {
-            (void)owner->seal_observed_stop(stop_reason);
+        if (stop_observation.observed && owner != nullptr) {
+            (void)owner->seal_observed_stop(stop_observation.reason);
         }
         if (thread_exit_requested) {
             return {true, false, true, thread_exit_value};
@@ -693,8 +710,7 @@ struct QbdiThreadSession::Impl {
     uint64_t thread_exit_value = 0;
     static constexpr QBDI::rword kReturnAddress = 42;
     bool target_execution_observed = false;
-    bool stop_observed = false;
-    TraceStopReason stop_reason{};
+    QbdiStopObservation stop_observation{};
     bool control_only = false;
 };
 #endif
@@ -1075,7 +1091,8 @@ QbdiExecutionResult QbdiThreadSession::execute(
     const QbdiExecutionResult result{
             impl_->call(logical_entry, execution_entry, args,
                         indirect_result),
-            impl_->stop_observed, impl_->stop_reason};
+            impl_->stop_observation.observed,
+            impl_->stop_observation.reason};
     if (result.run.target_executed && !trace_process_child_detached() &&
         (impl_->sink->failed() || !impl_->gate->enabled())) {
         mark_coverage_gap(logical_entry);

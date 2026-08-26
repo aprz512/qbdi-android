@@ -168,6 +168,35 @@ uint32_t read_u32(const std::string &bytes, size_t offset) {
            static_cast<uint32_t>(static_cast<uint8_t>(bytes[offset + 3])) << 24U;
 }
 
+uint64_t read_u64(const std::string &bytes, size_t offset) {
+    CHECK(offset + 8 <= bytes.size());
+    uint64_t value = 0;
+    for (size_t byte = 0; byte < 8; ++byte) {
+        value |= static_cast<uint64_t>(
+                         static_cast<uint8_t>(bytes[offset + byte]))
+                 << (byte * 8U);
+    }
+    return value;
+}
+
+size_t find_record(const std::string &stream, BinaryRecordType expected) {
+    if (stream.size() < kBinaryStreamHeaderBytes ||
+        stream.compare(0, 4, "QTRB") != 0) {
+        return std::string::npos;
+    }
+    size_t offset = kBinaryStreamHeaderBytes;
+    while (offset + kBinaryRecordHeaderBytes <= stream.size()) {
+        const auto type = static_cast<BinaryRecordType>(read_u16(stream, offset));
+        const size_t payload = read_u32(stream, offset + 4);
+        if (payload > stream.size() - offset - kBinaryRecordHeaderBytes) {
+            return std::string::npos;
+        }
+        if (type == expected) return offset;
+        offset += kBinaryRecordHeaderBytes + payload;
+    }
+    return std::string::npos;
+}
+
 bool contains_record(const std::string &stream, BinaryRecordType expected) {
     if (stream.size() < kBinaryStreamHeaderBytes || stream.compare(0, 4, "QTRB") != 0)
         return false;
@@ -216,6 +245,167 @@ void stopped_writer_closes_without_a_completed_terminal() {
     CHECK(!contains_record(trace, BinaryRecordType::TraceEnd));
     CHECK(::unlink(path.c_str()) == 0);
     CHECK(::unlink((path + ".metrics").c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
+struct RunnerDeadline {
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+
+    static void wait_until(void *opaque, uint64_t,
+                           const std::atomic<bool> *stop) noexcept {
+        auto *deadline = static_cast<RunnerDeadline *>(opaque);
+        deadline->entered.store(true, std::memory_order_release);
+        while (!deadline->release.load(std::memory_order_acquire) &&
+               !stop->load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    }
+
+    void request_stop(const std::shared_ptr<TraceGenerationRuntime> &runtime) {
+        while (!entered.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        release.store(true, std::memory_order_release);
+        runtime->join_deadline_for_test();
+        CHECK(runtime->stop_token().requested());
+    }
+};
+
+long fixed_elapsed(void *opaque) noexcept {
+    return *static_cast<long *>(opaque);
+}
+
+SessionOptions runner_timed_session() {
+    SessionOptions session{};
+    session.id = "runner-stop";
+    session.duration_ms = 60000;
+    return session;
+}
+
+TraceAdmission admit_runner(
+        const std::shared_ptr<TraceGenerationRuntime> &runtime,
+        uint64_t generation, size_t scene_index, uint32_t tid) {
+    const TraceAdmissionResult result = runtime->try_begin_call(
+            generation, scene_index, tid);
+    CHECK(result.status == TraceAdmissionStatus::Admitted);
+    return result.admission;
+}
+
+void normal_stop_lifecycle_seals_and_acknowledges_the_exact_admission_once() {
+    RunnerDeadline deadline;
+    auto runtime = TraceGenerationRuntime::create(
+            71, runner_timed_session(),
+            DeadlineWait{&deadline, &RunnerDeadline::wait_until});
+    CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
+    const TraceAdmission admission = admit_runner(runtime, 71, 4, 101);
+    CHECK(admission.generation == 71);
+    CHECK(admission.scene_index == 4);
+    CHECK(admission.tid == 101);
+    CHECK(admission.serial != 0);
+    deadline.request_stop(runtime);
+
+    char directory_template[] = "/tmp/qtrace-runner-runtime-stop-XXXXXX";
+    char *directory = ::mkdtemp(directory_template);
+    CHECK(directory != nullptr);
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    TraceContext context{};
+    context.scene_name = "runtime-stop";
+    context.target_so = "libtarget.so";
+    context.module_base = 0x1000;
+    context.target_address = 0x1010;
+    context.target_offset = 0x10;
+    context.pid = ::getpid();
+    context.tid = ::getpid();
+    context.output_directory = directory;
+    BinaryTraceWriter writer(options, &metrics);
+    CHECK(writer.open(context));
+    const std::string path(writer.path());
+    CHECK(writer.begin(context));
+    long elapsed_ms = 37;
+    QbdiNormalStopLifecycle lifecycle(
+            &writer, runtime, admission, &elapsed_ms, fixed_elapsed);
+    CHECK(lifecycle.enabled());
+    CHECK(lifecycle.token() == &runtime->stop_token());
+
+    CHECK(lifecycle.seal(TraceStopReason::DurationElapsed));
+    CHECK(lifecycle.seal(TraceStopReason::DurationElapsed));
+    lifecycle.acknowledge(true);
+    lifecycle.acknowledge(true);
+
+    CHECK(lifecycle.stop_observed());
+    CHECK(lifecycle.sealed());
+    CHECK(lifecycle.seal_calls() == 1);
+    CHECK(lifecycle.acknowledge_calls() == 1);
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+    CHECK(!writer.end(0x44, true, 38));
+    CHECK(writer.close());
+    const std::vector<char> bytes = read_file(path);
+    const std::string trace(bytes.begin(), bytes.end());
+    const size_t stop = find_record(trace, BinaryRecordType::TraceStop);
+    CHECK(stop != std::string::npos);
+    CHECK(static_cast<uint8_t>(trace[stop + kBinaryRecordHeaderBytes]) ==
+          static_cast<uint8_t>(TraceStopReason::DurationElapsed));
+    CHECK(read_u64(trace, stop + kBinaryRecordHeaderBytes + 8) == 37);
+    CHECK(!contains_record(trace, BinaryRecordType::TraceEnd));
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::unlink((path + ".metrics").c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
+void normal_stop_lifecycle_reports_a_failed_seal_once() {
+    RunnerDeadline deadline;
+    auto runtime = TraceGenerationRuntime::create(
+            72, runner_timed_session(),
+            DeadlineWait{&deadline, &RunnerDeadline::wait_until});
+    CHECK(runtime != nullptr);
+    CHECK(runtime->arm());
+    const TraceAdmission admission = admit_runner(runtime, 72, 5, 202);
+    deadline.request_stop(runtime);
+
+    char directory_template[] = "/tmp/qtrace-runner-runtime-fail-XXXXXX";
+    char *directory = ::mkdtemp(directory_template);
+    CHECK(directory != nullptr);
+    TraceOptions options{};
+    options.compression_enabled = false;
+    options.auto_buffer_size = false;
+    options.buffer_bytes = 4096;
+    TraceMetrics metrics{};
+    TraceContext context{};
+    context.scene_name = "runtime-fail";
+    context.target_so = "libtarget.so";
+    context.module_base = 0x1000;
+    context.target_address = 0x1010;
+    context.target_offset = 0x10;
+    context.pid = ::getpid();
+    context.tid = ::getpid();
+    context.output_directory = directory;
+    BinaryTraceWriter writer(options, &metrics);
+    CHECK(writer.open(context));
+    const std::string path(writer.path());
+    CHECK(writer.begin(context));
+    CHECK(!writer.end(0, false, 1));
+    long elapsed_ms = 41;
+    QbdiNormalStopLifecycle lifecycle(
+            &writer, runtime, admission, &elapsed_ms, fixed_elapsed);
+
+    CHECK(!lifecycle.seal(TraceStopReason::DurationElapsed));
+    CHECK(!lifecycle.seal(TraceStopReason::DurationElapsed));
+    lifecycle.acknowledge(false);
+    lifecycle.acknowledge(false);
+
+    CHECK(lifecycle.stop_observed());
+    CHECK(!lifecycle.sealed());
+    CHECK(lifecycle.seal_calls() == 1);
+    CHECK(lifecycle.acknowledge_calls() == 1);
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopIncomplete);
+    CHECK(!writer.close());
+    CHECK(::unlink(path.c_str()) == 0);
     CHECK(::rmdir(directory) == 0);
 }
 
@@ -338,5 +528,7 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
 
 int main() {
     stopped_writer_closes_without_a_completed_terminal();
+    normal_stop_lifecycle_seals_and_acknowledges_the_exact_admission_once();
+    normal_stop_lifecycle_reports_a_failed_seal_once();
     traced_fork_child_detaches_writer_and_parent_completes_artifact();
 }

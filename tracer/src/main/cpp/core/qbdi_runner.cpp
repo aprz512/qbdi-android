@@ -1,6 +1,7 @@
 #include "core/qbdi_runner.h"
 #include "core/crash_marker.h"
 #include "core/logging.h"
+#include "core/qbdi_runner_lifecycle.h"
 #include "core/qbdi_thread_session.h"
 #include "core/trace_process_lifecycle.h"
 #include "core/trace_run_session.h"
@@ -15,8 +16,9 @@ static long elapsed_ms_since(std::chrono::steady_clock::time_point started);
 
 struct RunnerState {
     RunnerState(const TraceConfig &config, const TraceInvocation &invocation)
-        : writer(config.trace, &metrics), runtime(invocation.runtime),
-          admission(invocation.admission) {
+        : writer(config.trace, &metrics),
+          stop(&writer, invocation.runtime, invocation.admission, this,
+               elapsed_stopped) {
         context.package_name = config.package_name;
         context.scene_name = invocation.scene->name;
         context.target_so = config.target_so;
@@ -29,27 +31,22 @@ struct RunnerState {
 
     static bool seal_stopped(void *opaque, TraceStopReason reason) noexcept {
         auto *state = static_cast<RunnerState *>(opaque);
-        state->stop_observed = true;
-        state->stop_sealed = state->writer.stop(
-                reason, elapsed_ms_since(state->started));
-        return state->stop_sealed;
+        return state->stop.seal(reason);
     }
 
     static void acknowledge_stopped(void *opaque, bool sealed) noexcept {
         auto *state = static_cast<RunnerState *>(opaque);
-        state->stop_acknowledged = true;
-        if (state->runtime == nullptr || state->admission.serial == 0) return;
-        if (sealed) {
-            state->runtime->acknowledge_sealed(state->admission);
-        } else {
-            state->runtime->finish_call(state->admission, false);
-        }
+        state->stop.acknowledge(sealed);
+    }
+
+    static long elapsed_stopped(void *opaque) noexcept {
+        const auto *state = static_cast<const RunnerState *>(opaque);
+        return elapsed_ms_since(state->started);
     }
 
     QbdiStopControl stop_control() noexcept {
-        if (runtime == nullptr || admission.serial == 0) return {};
-        return {&runtime->stop_token(), this, seal_stopped,
-                acknowledge_stopped};
+        if (!stop.enabled()) return {};
+        return {stop.token(), this, seal_stopped, acknowledge_stopped};
     }
 
     TraceContext context;
@@ -57,12 +54,8 @@ struct RunnerState {
     BinaryTraceWriter writer;
     TraceRunSessionOutcome session;
     CrashMarkerSession crash_marker;
-    std::shared_ptr<TraceGenerationRuntime> runtime;
-    TraceAdmission admission{};
+    QbdiNormalStopLifecycle stop;
     std::chrono::steady_clock::time_point started{};
-    bool stop_observed = false;
-    bool stop_sealed = false;
-    bool stop_acknowledged = false;
 };
 
 static long elapsed_ms_since(std::chrono::steady_clock::time_point started) {
@@ -140,11 +133,11 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
 
     state->session.observe_target_call(target, state->writer.failed());
     TraceRunFinalization finalization{};
-    if (state->stop_observed) {
+    if (state->stop.stop_observed()) {
         finalization.target_ran = target.ran;
         finalization.outward_return_value = target.ran ? target.return_value : 0;
         const bool writer_closed = state->writer.close();
-        finalization.completion_success = state->stop_sealed && writer_closed;
+        finalization.completion_success = state->stop.sealed() && writer_closed;
         finalization.should_log_success = finalization.completion_success;
     } else {
         finalization = state->session.finalize(
@@ -153,7 +146,7 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     const bool crash_marker_finished = state->crash_marker.finish();
     if (finalization.should_log_success && crash_marker_finished) {
         QTRACE_I("trace %s %s path=%.*s", invocation.scene->name.c_str(),
-                 state->stop_observed ? "stopped" : "complete",
+                 state->stop.stop_observed() ? "stopped" : "complete",
                  static_cast<int>(state->writer.path().size()),
                  state->writer.path().data());
     } else {
