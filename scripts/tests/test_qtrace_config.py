@@ -97,16 +97,16 @@ class ConfigTests(unittest.TestCase):
 
     def test_preserves_valid_unicode_strings_and_relative_paths(self):
         payload = self.valid_payload()
-        payload["app"] = {"package": "com.example.external", "apk": "产物/app.apk"}
+        payload["app"] = {"package": "com.example.external", "apk": "产物\ue000/app.apk"}
         payload["target"] = {"module": "libexternal.so", "binary": "符号/libexternal.so"}
-        payload["scenes"] = [{"name": "验证", "symbol": "执行工作"}]
+        payload["scenes"] = [{"name": "验证e\u0301", "symbol": "执行\ue000工作"}]
         path = self.write_json("unicode.json", payload)
 
         config = load_config(path)
 
-        self.assertEqual(config.scenes[0].name, "验证")
-        self.assertEqual(config.scenes[0].symbol, "执行工作")
-        self.assertEqual(config.app.apk, path.parent.resolve() / "产物/app.apk")
+        self.assertEqual(config.scenes[0].name, "验证e\u0301")
+        self.assertEqual(config.scenes[0].symbol, "执行\ue000工作")
+        self.assertEqual(config.app.apk, path.parent.resolve() / "产物\ue000/app.apk")
         self.assertEqual(config.target.binary, path.parent.resolve() / "符号/libexternal.so")
 
     def test_rejects_nul_in_resolved_paths_as_stable_config_errors(self):
@@ -257,6 +257,24 @@ class ConfigTests(unittest.TestCase):
             payload[section] = replacement
             with self.subTest(index=index), self.assertRaisesRegex(ConfigError, code):
                 load_config(self.write_json(f"invalid-string-{index}.json", payload))
+
+    def test_rejects_unicode_format_and_line_separator_categories(self):
+        cases = (
+            ("app", {"package": "com.example\u2028external"}, "CONFIG_VALUE_INVALID"),
+            ("scenes", [{"name": "one", "symbol": "work\u2029next"}], "CONFIG_VALUE_INVALID"),
+            (
+                "app",
+                {"package": "com.example.external", "apk": "artifacts/\u200bapp.apk"},
+                "CONFIG_VALUE_INVALID",
+            ),
+            ("target", {"module": "lib\u202eexternal.so"}, "CONFIG_VALUE_INVALID"),
+            ("scenes", [{"name": "one\ufeff", "symbol": "work"}], "SCENE_NAME_INVALID"),
+        )
+        for index, (section, replacement, code) in enumerate(cases):
+            payload = self.valid_payload()
+            payload[section] = replacement
+            with self.subTest(index=index), self.assertRaisesRegex(ConfigError, code):
+                load_config(self.write_json(f"unicode-category-{index}.json", payload))
 
     def test_rejects_control_characters_in_flight_entry_scene(self):
         payload = self.valid_payload()

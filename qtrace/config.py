@@ -23,6 +23,7 @@ _DURATION_FACTORS = {"ms": Decimal(1), "s": Decimal(1000), "m": Decimal(60_000)}
 _MIN_DURATION_MS = 100
 _MAX_DURATION_MS = 24 * 60 * 60 * 1000
 _PROFILES = frozenset(("fast", "balanced", "full"))
+_FORBIDDEN_TEXT_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
 
 
 class _StrictJsonError(ValueError):
@@ -99,8 +100,11 @@ def _validate_unicode_text(value: str, location: str, code: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError:
         _fail(code, f"{location} must contain valid Unicode")
-    if any(unicodedata.category(character) == "Cc" for character in value):
-        _fail(code, f"{location} must not contain control characters")
+    if any(
+        unicodedata.category(character) in _FORBIDDEN_TEXT_CATEGORIES
+        for character in value
+    ):
+        _fail(code, f"{location} must not contain control or formatting characters")
 
 
 def _optional_path(value: dict[str, Any], key: str, location: str, base: Path) -> Path | None:
