@@ -7,6 +7,8 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <dirent.h>
+#include <fcntl.h>
 
 namespace {
 
@@ -32,6 +34,64 @@ struct FakeDeadline {
     std::atomic<bool> exited{false};
     std::atomic<unsigned int> entries{0};
 };
+
+struct TemporaryDirectory {
+    TemporaryDirectory() {
+        char template_path[] = "/tmp/qtrace-runtime-status-XXXXXX";
+        CHECK(::mkdtemp(template_path) != nullptr);
+        path = template_path;
+    }
+
+    ~TemporaryDirectory() {
+        DIR *directory = ::opendir(path.c_str());
+        if (directory != nullptr) {
+            while (dirent *entry = ::readdir(directory)) {
+                if (entry->d_name[0] == '.') continue;
+                const std::string child = path + "/" + entry->d_name;
+                (void)::unlink(child.c_str());
+            }
+            (void)::closedir(directory);
+        }
+        (void)::rmdir(path.c_str());
+    }
+
+    std::string path;
+};
+
+struct ControlledStatusPoll {
+    static void wait(void *opaque, const std::atomic<bool> *stop) noexcept {
+        auto *poll = static_cast<ControlledStatusPoll *>(opaque);
+        poll->waits.fetch_add(1, std::memory_order_release);
+        while (poll->permits.load(std::memory_order_acquire) == 0 &&
+               !stop->load(std::memory_order_acquire)) ::sched_yield();
+        if (poll->permits.load(std::memory_order_acquire) != 0)
+            poll->permits.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    void allow_one() noexcept { permits.fetch_add(1, std::memory_order_release); }
+
+    std::atomic<unsigned int> waits{0};
+    std::atomic<unsigned int> permits{0};
+};
+
+void wait_for_count(const std::atomic<unsigned int> &value, unsigned int minimum) {
+    while (value.load(std::memory_order_acquire) < minimum) ::sched_yield();
+}
+
+std::string read_text(const std::string &path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    CHECK(fd >= 0);
+    std::string text;
+    char buffer[512];
+    for (;;) {
+        const ssize_t count = ::read(fd, buffer, sizeof(buffer));
+        CHECK(count >= 0);
+        if (count == 0) break;
+        text.append(buffer, static_cast<size_t>(count));
+    }
+    CHECK(::close(fd) == 0);
+    return text;
+}
 
 SessionOptions timed_session(uint64_t duration_ms) {
     SessionOptions session{};
@@ -373,6 +433,33 @@ void forked_child_detaches_the_inherited_deadline_worker() {
     CHECK(WEXITSTATUS(status) == 0);
 }
 
+// Catches status I/O occurring from the deadline/callback transition itself,
+// publishing unchanged data, or abandoning the dedicated status pthread at
+// destruction. The controlled wait is a deterministic 25 ms poll substitute.
+void status_worker_publishes_only_transition_snapshots_outside_runtime_transitions() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    config.scenes = {{0, "entry", 16, 32}};
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    auto runtime = TraceGenerationRuntime::create(
+            31, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
+    CHECK(runtime != nullptr);
+    wait_for_count(poll.waits, 1);
+    const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
+    CHECK(read_text(path).find("\"state\":\"installed\"") != std::string::npos);
+    CHECK(runtime->arm());
+    poll.allow_one();
+    wait_for_count(poll.waits, 2);
+    CHECK(read_text(path).find("\"state\":\"running\"") != std::string::npos);
+    runtime.reset();
+}
+
 } // namespace
 
 int main() {
@@ -392,4 +479,5 @@ int main() {
     concurrent_deadline_and_unsealed_last_finish_select_stop_incomplete();
     destruction_joins_the_deadline_worker();
     forked_child_detaches_the_inherited_deadline_worker();
+    status_worker_publishes_only_transition_snapshots_outside_runtime_transitions();
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/session_status.h"
 #include "core/trace_config.h"
 #include "events/binary_trace_format.h"
 
@@ -10,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <pthread.h>
+#include <string>
 #include <sys/types.h>
 
 enum class TraceGenerationPhase : uint8_t {
@@ -26,6 +28,7 @@ struct TraceGenerationSnapshot {
     TraceGenerationPhase phase = TraceGenerationPhase::Waiting;
     size_t active_calls = 0;
     bool detached = false;
+    int status_error = 0;
 };
 
 struct TraceGenerationLimits {
@@ -72,6 +75,19 @@ struct DeadlineWait {
     void (*wait_until)(void *opaque, uint64_t deadline_monotonic_ns) noexcept = nullptr;
 };
 
+struct StatusPollWait {
+    void *opaque = nullptr;
+    void (*wait)(void *opaque, const std::atomic<bool> *stop) noexcept = nullptr;
+};
+
+struct TraceGenerationStatusOptions {
+    TraceConfig config;
+    std::string output_directory;
+    StatusPollWait poll_wait{};
+
+    bool enabled() const noexcept { return config.session.enabled(); }
+};
+
 #if defined(QTRACE_HOST_TEST)
 struct TraceGenerationTestHooks {
     void *opaque = nullptr;
@@ -89,7 +105,7 @@ public:
             uint64_t generation, SessionOptions session, DeadlineWait wait = {}) noexcept;
     static std::shared_ptr<TraceGenerationRuntime> create(
             uint64_t generation, SessionOptions session, TraceGenerationLimits limits,
-            DeadlineWait wait = {}) noexcept;
+            DeadlineWait wait = {}, TraceGenerationStatusOptions status = {}) noexcept;
 
     ~TraceGenerationRuntime();
 
@@ -133,15 +149,23 @@ private:
     static constexpr size_t kMaxActiveCalls = kMaxScenes + kMaxFlightThreads;
 
     TraceGenerationRuntime(uint64_t generation, SessionOptions session,
-                           TraceGenerationLimits limits, DeadlineWait wait) noexcept;
+                           TraceGenerationLimits limits, DeadlineWait wait,
+                           TraceGenerationStatusOptions status) noexcept;
 
     static void *deadline_entry(void *opaque) noexcept;
+    static void *status_entry(void *opaque) noexcept;
     static void monotonic_wait_until(void *opaque, uint64_t deadline_monotonic_ns) noexcept;
+    static void status_poll_wait(void *opaque, const std::atomic<bool> *stop) noexcept;
     void request_deadline_stop() noexcept;
     void publish_deadline_stop_locked() noexcept;
     void complete_stop_if_idle_locked() noexcept;
     void complete_call_locked(const TraceAdmission &admission, bool sealed) noexcept;
     void join_deadline() noexcept;
+    void start_status() noexcept;
+    void join_status() noexcept;
+    void publish_status_loop() noexcept;
+    SessionStatusSnapshot status_snapshot() const;
+    void note_transition() noexcept;
 
     uint64_t generation_ = 0;
     SessionOptions session_;
@@ -160,6 +184,14 @@ private:
     uint64_t deadline_monotonic_ns_ = 0;
     std::atomic<ArmState> arm_state_{ArmState::Unarmed};
     std::atomic<bool> detached_{false};
+    TraceGenerationStatusOptions status_options_;
+    SessionStatusPublisher status_publisher_;
+    std::atomic<bool> status_enabled_{false};
+    std::atomic<bool> status_stop_{false};
+    std::atomic<bool> status_thread_started_{false};
+    std::atomic<uint64_t> transition_sequence_{1};
+    std::atomic<int> status_error_{0};
+    pthread_t status_thread_{};
     pid_t owner_pid_ = 0;
 
 #if defined(QTRACE_HOST_TEST)

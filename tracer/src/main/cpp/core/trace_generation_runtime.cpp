@@ -40,33 +40,46 @@ void TraceStopToken::request(TraceStopReason reason) noexcept {
 
 TraceGenerationRuntime::TraceGenerationRuntime(uint64_t generation, SessionOptions session,
                                                TraceGenerationLimits limits,
-                                               DeadlineWait wait) noexcept
+                                               DeadlineWait wait,
+                                               TraceGenerationStatusOptions status) noexcept
         : generation_(generation), session_(std::move(session)), wait_(wait),
-          active_capacity_(limits.max_scenes + limits.flight_max_threads), owner_pid_(::getpid()) {}
+          active_capacity_(limits.max_scenes + limits.flight_max_threads),
+          status_options_(std::move(status)), owner_pid_(::getpid()) {
+    if (!status_options_.enabled()) return;
+    if (status_options_.config.session.id != session_.id ||
+        !status_publisher_.open(status_options_.config, generation_, status_options_.output_directory)) {
+        status_error_.store(status_publisher_.error_code() == 0 ? EINVAL : status_publisher_.error_code(),
+                            std::memory_order_release);
+        return;
+    }
+    status_enabled_.store(true, std::memory_order_release);
+}
 
 TraceGenerationRuntime::~TraceGenerationRuntime() {
     join_deadline();
+    join_status();
 }
 
 std::shared_ptr<TraceGenerationRuntime> TraceGenerationRuntime::create(
         uint64_t generation, SessionOptions session, DeadlineWait wait) noexcept {
-    return create(generation, std::move(session), TraceGenerationLimits{}, wait);
+    return create(generation, std::move(session), TraceGenerationLimits{}, wait, {});
 }
 
 std::shared_ptr<TraceGenerationRuntime> TraceGenerationRuntime::create(
         uint64_t generation, SessionOptions session, TraceGenerationLimits limits,
-        DeadlineWait wait) noexcept {
+        DeadlineWait wait, TraceGenerationStatusOptions status) noexcept {
     if (limits.max_scenes > kMaxScenes || limits.flight_max_threads > kMaxFlightThreads ||
         limits.max_scenes + limits.flight_max_threads == 0) {
         return {};
     }
     TraceGenerationRuntime *runtime = new (std::nothrow)
-            TraceGenerationRuntime(generation, std::move(session), limits, wait);
+            TraceGenerationRuntime(generation, std::move(session), limits, wait, std::move(status));
     if (runtime == nullptr) return {};
     // Under the project-wide -fno-exceptions policy std::shared_ptr has no
     // portable control-block OOM return path. tracer_entry uses the same fatal
     // policy, so this first-object allocation check is intentionally not a
     // claim that every shared_ptr allocation failure is recoverable.
+    runtime->start_status();
     return std::shared_ptr<TraceGenerationRuntime>(runtime);
 }
 
@@ -94,6 +107,7 @@ bool TraceGenerationRuntime::arm() noexcept {
             now > std::numeric_limits<uint64_t>::max() - duration * kNanosecondsPerMillisecond) {
             std::lock_guard<std::mutex> lock(active_mutex_);
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
+            note_transition();
             arm_state_.store(ArmState::Failed, std::memory_order_release);
             return false;
         }
@@ -112,6 +126,7 @@ bool TraceGenerationRuntime::arm() noexcept {
         if (error != 0) {
             std::lock_guard<std::mutex> lock(active_mutex_);
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
+            note_transition();
             arm_state_.store(ArmState::Failed, std::memory_order_release);
             return false;
         }
@@ -125,6 +140,7 @@ bool TraceGenerationRuntime::arm() noexcept {
                                             std::memory_order_acquire)) {
             return false;
         }
+        note_transition();
         publish_deadline_stop_locked();
         complete_stop_if_idle_locked();
     }
@@ -168,6 +184,7 @@ void TraceGenerationRuntime::publish_deadline_stop_locked() noexcept {
     if (phase_.load(std::memory_order_acquire) != TraceGenerationPhase::Running) return;
     stop_token_.request(TraceStopReason::DurationElapsed);
     phase_.store(TraceGenerationPhase::StopRequested, std::memory_order_release);
+    note_transition();
 }
 
 TraceAdmissionResult TraceGenerationRuntime::try_begin_call(
@@ -187,6 +204,7 @@ TraceAdmissionResult TraceGenerationRuntime::try_begin_call(
         return {TraceAdmissionStatus::ActiveSessionLimit, {}};
     const TraceAdmission admission{generation_, scene_index, tid, next_admission_serial_++};
     active_calls_[active_size_++] = ActiveCall{scene_index, tid, admission.serial};
+    note_transition();
     return {TraceAdmissionStatus::Admitted, admission};
 }
 
@@ -217,6 +235,7 @@ void TraceGenerationRuntime::complete_call_locked(const TraceAdmission &admissio
     if (index == active_size_) return;
     active_calls_[index] = active_calls_[active_size_ - 1];
     --active_size_;
+    note_transition();
 #if defined(QTRACE_HOST_TEST)
     if (test_hooks_.after_active_removal != nullptr)
         test_hooks_.after_active_removal(test_hooks_.opaque);
@@ -227,8 +246,10 @@ void TraceGenerationRuntime::complete_call_locked(const TraceAdmission &admissio
     const TraceGenerationPhase phase = phase_.load(std::memory_order_acquire);
     if (is_stopping(phase)) {
         if (!sealed) stop_incomplete_.store(true, std::memory_order_release);
-        if (phase == TraceGenerationPhase::StopRequested)
+        if (phase == TraceGenerationPhase::StopRequested) {
             phase_.store(TraceGenerationPhase::Stopping, std::memory_order_release);
+            note_transition();
+        }
         complete_stop_if_idle_locked();
     }
 }
@@ -241,6 +262,7 @@ void TraceGenerationRuntime::complete_stop_if_idle_locked() noexcept {
                          ? TraceGenerationPhase::StopIncomplete
                          : TraceGenerationPhase::Sealed,
                  std::memory_order_release);
+    note_transition();
 }
 
 const TraceStopToken &TraceGenerationRuntime::stop_token() const noexcept {
@@ -254,7 +276,103 @@ TraceGenerationSnapshot TraceGenerationRuntime::snapshot() const noexcept {
             phase_.load(std::memory_order_acquire),
             active_size_,
             detached_.load(std::memory_order_acquire),
+            status_error_.load(std::memory_order_acquire),
     };
+}
+
+void TraceGenerationRuntime::note_transition() noexcept {
+    transition_sequence_.fetch_add(1, std::memory_order_release);
+}
+
+void *TraceGenerationRuntime::status_entry(void *opaque) noexcept {
+    static_cast<TraceGenerationRuntime *>(opaque)->publish_status_loop();
+    return nullptr;
+}
+
+void TraceGenerationRuntime::status_poll_wait(void *, const std::atomic<bool> *) noexcept {
+    constexpr long kStatusPollNanoseconds = 25L * 1000L * 1000L;
+    const timespec interval{0, kStatusPollNanoseconds};
+    int error = 0;
+    do {
+        error = ::clock_nanosleep(CLOCK_MONOTONIC, 0, &interval, nullptr);
+    } while (error == EINTR);
+}
+
+void TraceGenerationRuntime::start_status() noexcept {
+    if (!status_enabled_.load(std::memory_order_acquire)) return;
+    const int error = ::pthread_create(&status_thread_, nullptr,
+                                       &TraceGenerationRuntime::status_entry, this);
+    if (error != 0) {
+        status_enabled_.store(false, std::memory_order_release);
+        status_error_.store(error, std::memory_order_release);
+        return;
+    }
+    status_thread_started_.store(true, std::memory_order_release);
+}
+
+void TraceGenerationRuntime::join_status() noexcept {
+    if (detached_.load(std::memory_order_acquire) || ::getpid() != owner_pid_) return;
+    status_stop_.store(true, std::memory_order_release);
+    bool started = true;
+    if (!status_thread_started_.compare_exchange_strong(started, false, std::memory_order_acq_rel,
+                                                        std::memory_order_acquire)) return;
+    (void)::pthread_join(status_thread_, nullptr);
+}
+
+SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {
+    SessionStatusSnapshot snapshot{};
+    snapshot.session_id = status_options_.config.session.id;
+    snapshot.generation = generation_;
+    snapshot.package = status_options_.config.package_name;
+    snapshot.pid = static_cast<uint32_t>(::getpid());
+    snapshot.transition_monotonic_ns = monotonic_now_ns();
+    const TraceGenerationPhase phase = phase_.load(std::memory_order_acquire);
+    switch (phase) {
+        case TraceGenerationPhase::Waiting: snapshot.state = "installed"; break;
+        case TraceGenerationPhase::Running: snapshot.state = "running"; break;
+        case TraceGenerationPhase::StopRequested: snapshot.state = "stop_requested"; break;
+        case TraceGenerationPhase::Stopping: snapshot.state = "stopping"; break;
+        case TraceGenerationPhase::Sealed: snapshot.state = "sealed"; break;
+        case TraceGenerationPhase::StopIncomplete: snapshot.state = "stop_incomplete"; break;
+    }
+    if (stop_token_.requested() && stop_token_.reason() == TraceStopReason::DurationElapsed)
+        snapshot.reason = "duration_elapsed";
+    snapshot.stop_acknowledged = phase == TraceGenerationPhase::Sealed ||
+                                 phase == TraceGenerationPhase::StopIncomplete;
+    for (const SceneConfig &scene : status_options_.config.scenes) {
+        snapshot.normalized_scenes.push_back(ResolvedSceneStatus{
+                scene.name, static_cast<uint64_t>(scene.offset), static_cast<uint64_t>(scene.end_offset)});
+    }
+    {
+        std::lock_guard<std::mutex> lock(active_mutex_);
+        for (size_t index = 0; index < active_size_; ++index) {
+            snapshot.active_scenes.push_back(SessionActiveScene{
+                    active_calls_[index].scene_index, active_calls_[index].tid, false});
+        }
+    }
+    const int error = status_error_.load(std::memory_order_acquire);
+    if (error != 0) {
+        snapshot.errors.push_back(ConfigurationIssue{
+                "STATUS_PUBLICATION_FAILED", "$.status", "status publication error"});
+    }
+    return snapshot;
+}
+
+void TraceGenerationRuntime::publish_status_loop() noexcept {
+    uint64_t published_sequence = 0;
+    StatusPollWait wait = status_options_.poll_wait;
+    if (wait.wait == nullptr) wait = StatusPollWait{nullptr, &status_poll_wait};
+    while (!status_stop_.load(std::memory_order_acquire)) {
+        const uint64_t transition = transition_sequence_.load(std::memory_order_acquire);
+        if (transition != published_sequence) {
+            const SessionStatusSnapshot snapshot = status_snapshot();
+            if (!status_publisher_.publish(snapshot)) {
+                status_error_.store(status_publisher_.error_code(), std::memory_order_release);
+            }
+            published_sequence = transition;
+        }
+        if (!status_stop_.load(std::memory_order_acquire)) wait.wait(wait.opaque, &status_stop_);
+    }
 }
 
 #if defined(QTRACE_HOST_TEST)
@@ -267,6 +385,8 @@ void TraceGenerationRuntime::set_test_hooks(TraceGenerationTestHooks hooks) noex
 void TraceGenerationRuntime::detach_after_fork_child() noexcept {
     detached_.store(true, std::memory_order_release);
     deadline_thread_started_.store(false, std::memory_order_release);
+    status_stop_.store(true, std::memory_order_release);
+    status_thread_started_.store(false, std::memory_order_release);
 }
 
 void TraceGenerationRuntime::join_deadline_for_test() noexcept {

@@ -77,6 +77,7 @@ add_library(qbdi_tracer SHARED
         core/memory_trace_policy.cpp
         core/trace_run_session.cpp
         core/trace_generation_runtime.cpp
+        core/session_status.cpp
         core/trace_process_lifecycle.cpp
         core/qbdi_runner_lifecycle.cpp
         core/qbdi_execution_control.cpp
@@ -124,6 +125,7 @@ set_source_files_properties(
 
 set_source_files_properties(
         core/trace_generation_runtime.cpp
+        core/session_status.cpp
         PROPERTIES
         COMPILE_OPTIONS "-fno-exceptions;-fno-rtti")
 
