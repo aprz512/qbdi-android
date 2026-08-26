@@ -59,6 +59,9 @@ public:
     CaptureCoordinator(const CaptureCoordinator &) = delete;
     CaptureCoordinator &operator=(const CaptureCoordinator &) = delete;
 
+    // With a runtime, the coordinator is the sole admission owner for each
+    // persistent Flight slot. Task 6's proxy gate must skip Flight calls;
+    // normal captures continue to own their proxy admission there.
     bool start(TraceConfig config, ModuleRange module,
                uint32_t module_generation,
                std::shared_ptr<TraceGenerationRuntime> runtime = {});
@@ -108,6 +111,7 @@ private:
         CaptureCoordinator *owner = nullptr;
         uint32_t tid = 0;
         QbdiThreadSession *session = nullptr;
+        // Exact generation/scene/TID/serial admission owned by this slot.
         TraceAdmission admission{};
         bool stop_finished = false;
     };

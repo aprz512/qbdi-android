@@ -500,8 +500,7 @@ SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {
     }
     if (stop_token_.requested() && stop_token_.reason() == TraceStopReason::DurationElapsed)
         snapshot.reason = "duration_elapsed";
-    snapshot.stop_acknowledged = phase == TraceGenerationPhase::Sealed ||
-                                 phase == TraceGenerationPhase::StopIncomplete;
+    snapshot.stop_acknowledged = phase == TraceGenerationPhase::Sealed;
     for (const SceneConfig &scene : status_options_.config.scenes) {
         snapshot.normalized_scenes.push_back(ResolvedSceneStatus{
                 scene.name, static_cast<uint64_t>(scene.offset), static_cast<uint64_t>(scene.end_offset)});

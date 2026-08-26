@@ -242,8 +242,8 @@ FakeFlightWriter *writer_for(FakeFactory *factory, uint32_t tid) {
     return nullptr;
 }
 
-bool status_lists_one_artifact(const std::string &path,
-                               std::string_view artifact) {
+bool read_status_json(const std::string &path, nlohmann::json *status) {
+    if (status == nullptr) return false;
     FILE *file = std::fopen(path.c_str(), "rb");
     if (file == nullptr) return false;
     std::array<char, 65536> bytes{};
@@ -251,12 +251,38 @@ bool status_lists_one_artifact(const std::string &path,
     const bool complete = std::feof(file) != 0;
     (void)std::fclose(file);
     if (!complete || size == 0 || size == bytes.size()) return false;
-    const nlohmann::json status = nlohmann::json::parse(
+    *status = nlohmann::json::parse(
             bytes.data(), bytes.data() + size, nullptr, false);
-    return !status.is_discarded() && status.value("state", "") == "sealed" &&
+    return !status->is_discarded();
+}
+
+bool status_lists_one_artifact(const std::string &path,
+                               std::string_view artifact) {
+    nlohmann::json status;
+    return read_status_json(path, &status) &&
+           status.value("state", "") == "sealed" &&
            status.contains("artifacts") && status["artifacts"].is_array() &&
            status["artifacts"].size() == 1 &&
-           status["artifacts"][0] == artifact;
+           status["artifacts"][0] == artifact &&
+           status.contains("stopAcknowledged") &&
+           status["stopAcknowledged"].is_boolean() &&
+           status["stopAcknowledged"] == true;
+}
+
+bool status_reports_stop_acknowledged(const std::string &path,
+                                      std::string_view state,
+                                      bool acknowledged) {
+    nlohmann::json status;
+    return read_status_json(path, &status) &&
+           status.value("state", "") == state &&
+           status.contains("stopAcknowledged") &&
+           status["stopAcknowledged"].is_boolean() &&
+           status["stopAcknowledged"] == acknowledged;
+}
+
+bool status_has_state(const std::string &path, std::string_view state) {
+    nlohmann::json status;
+    return read_status_json(path, &status) && status.value("state", "") == state;
 }
 
 struct WorkerCall {
@@ -549,6 +575,45 @@ void missing_ack_is_reported_without_touching_the_live_writer() {
     CHECK(!coordinator.report_stop_incomplete());
 }
 
+// Catches a failed first enter leaving a persistent slot whose generation
+// admission was already retired. Reusing that slot would let stop become
+// Sealed before the live owner acknowledges it.
+void first_enter_tls_conflict_rolls_back_slot_and_exact_admission() {
+    FakeFactory factory;
+    factory.runtime = running_runtime(56);
+    CaptureCoordinator coordinator(factories(&factory));
+    const TraceConfig config = flight_config();
+    CHECK(coordinator.start(config, retained_module(), 56, factory.runtime));
+
+    QbdiThreadSession *old_generation = QbdiThreadSession::create_for_test(
+            101, 55, no_op_execution, &factory);
+    CHECK(old_generation != nullptr);
+    CHECK(old_generation->try_enter());
+
+    CHECK(coordinator.enter(101, config.scenes[0]) == nullptr);
+    CHECK(factory.session_creates == 1);
+    CHECK(factory.session_destroys == 1);
+    CHECK(factory.coverage_gaps == 1);
+    CHECK(factory.runtime->snapshot().active_calls == 0);
+
+    old_generation->leave();
+    delete old_generation;
+    QbdiThreadSession *replacement = coordinator.enter(101, config.scenes[0]);
+    CHECK(replacement != nullptr);
+    CHECK(factory.session_creates == 2);
+    CHECK(factory.session_destroys == 1);
+    CHECK(factory.runtime->snapshot().active_calls == 1);
+
+    CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+    CHECK(factory.runtime->snapshot().phase ==
+          TraceGenerationPhase::StopRequested);
+    const uint64_t args[8]{};
+    CHECK(replacement->call(0x71000100, args, 0).target_returned);
+    CHECK(factory.runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+    CHECK(factory.runtime->snapshot().active_calls == 0);
+    coordinator.leave(replacement);
+}
+
 void stop_and_slot_creation_have_one_mutex_linearization_order() {
     FakeFactory factory;
     factory.runtime = running_runtime(53);
@@ -664,6 +729,59 @@ void committed_flight_artifact_is_published_once_to_session_status() {
     CHECK(::rmdir(directory.c_str()) == 0);
 }
 
+// Catches StopIncomplete being serialized as if every target owner had sealed
+// and acknowledged its current Flight chunk.
+void missing_ack_status_json_reports_stop_not_acknowledged() {
+    char directory_template[] = "/tmp/qtrace-flight-incomplete-status-XXXXXX";
+    char *created = ::mkdtemp(directory_template);
+    CHECK(created != nullptr);
+    const std::string directory = created;
+    const std::string session_id =
+            "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    const std::string status_path = directory + "/session-" + session_id +
+                                    ".status.json";
+    {
+        TraceConfig config = flight_config();
+        config.session.id = session_id;
+        TraceGenerationStatusOptions status_options;
+        status_options.config = config;
+        status_options.output_directory = directory;
+        FakeFactory factory;
+        factory.runtime = TraceGenerationRuntime::create(
+                57, config.session,
+                TraceGenerationLimits{config.scenes.size(),
+                                      config.flight.max_threads},
+                {}, std::move(status_options));
+        CHECK(factory.runtime != nullptr);
+        CHECK(factory.runtime->arm());
+        CaptureCoordinator coordinator(factories(&factory));
+        CHECK(coordinator.start(config, retained_module(), 57,
+                                factory.runtime));
+
+        WorkerCall missing{&coordinator, &config.scenes[0], 202};
+        std::thread missing_thread(run_worker_call, &missing);
+        wait_until([&] { return missing.entered.load(std::memory_order_acquire); });
+        CHECK(coordinator.request_stop(TraceStopReason::DurationElapsed));
+        CHECK(coordinator.report_stop_incomplete());
+        CHECK(factory.runtime->snapshot().phase ==
+              TraceGenerationPhase::StopIncomplete);
+        wait_until([&] {
+            return status_has_state(status_path, "stop_incomplete");
+        });
+        CHECK(status_reports_stop_acknowledged(
+                status_path, "stop_incomplete", false));
+
+        missing.invoke.store(true, std::memory_order_release);
+        missing_thread.join();
+        CHECK(factory.runtime->snapshot().phase ==
+              TraceGenerationPhase::StopIncomplete);
+    }
+    CHECK(::unlink(status_path.c_str()) == 0);
+    const std::string commit_path = status_path + ".commit";
+    CHECK(::unlink(commit_path.c_str()) == 0);
+    CHECK(::rmdir(directory.c_str()) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -676,6 +794,8 @@ int main() {
     cooperative_stop_rejects_new_entries_and_seals_on_each_owner();
     owning_thread_seal_failure_finishes_stop_incomplete();
     missing_ack_is_reported_without_touching_the_live_writer();
+    missing_ack_status_json_reports_stop_not_acknowledged();
+    first_enter_tls_conflict_rolls_back_slot_and_exact_admission();
     stop_and_slot_creation_have_one_mutex_linearization_order();
     fork_child_never_seals_or_acknowledges_inherited_slots();
     committed_flight_artifact_is_published_once_to_session_status();

@@ -617,8 +617,12 @@ QbdiThreadSession *CaptureCoordinator::enter_locked(
         if (!session->try_enter()) {
             if (runtime_ != nullptr && admission.serial != 0) {
                 runtime_->finish_call(admission, false);
-                slots_[index].stop_finished = true;
             }
+            // try_enter has no session callbacks. Roll the unpublished owner
+            // back while the coordinator mutex still excludes stop/entry,
+            // then destroy it on the thread which attempted to become owner.
+            slots_[index] = {};
+            factories_.destroy_session(factories_.opaque, session);
             mark_coverage_gap_locked(tid, pc, CoverageGapReason::SessionFailure);
             return nullptr;
         }
