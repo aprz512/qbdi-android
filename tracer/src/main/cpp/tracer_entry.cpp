@@ -123,6 +123,7 @@ static std::atomic<int> g_module_callback_state{0};
 using RegistrationGate = void (*)();
 static RegistrationGate g_registration_gate = nullptr;
 static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
+static RegistrationGate g_installed_status_gate = nullptr;
 static std::atomic<bool> g_throw_during_configuration_apply{false};
 static std::string g_status_output_directory;
 #endif
@@ -533,7 +534,8 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     // the child; the inherited allocator and pthread state must remain untouched.
     if (trace_process_child_detached()) return result;
     if (runtime->invocation.runtime != nullptr &&
-        runtime->invocation.admission.serial != 0) {
+        runtime->invocation.admission.serial != 0 &&
+        !traced.admission_finished) {
         runtime->invocation.runtime->finish_call(
                 runtime->invocation.admission, false);
     }
@@ -545,7 +547,7 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     ModuleRange pending_batch_module;
     uint64_t pending_batch_generation = 0;
     DeferredRuntimeReleases releases;
-    releases.reserve(2);
+    releases.reserve(4);
     {
         std::lock_guard<std::mutex> registry_guard(g_lock);
         std::lock_guard<std::mutex> transition_guard(runtime->hook->transition_mutex);
@@ -557,14 +559,24 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                 if (runtime->hook->installed &&
                     !unhook_function(&runtime->hook->hook)) {
                     runtime->hook->unhook_failed_window = false;
-                    if (pending_batch) {
+                    const bool pending_is_current =
+                            runtime->hook->pending_config_generation ==
+                                    g_config_generation &&
+                            runtime->hook->pending_runtime != nullptr &&
+                            runtime->hook->pending_runtime ==
+                                    g_generation_runtime;
+                    if (pending_batch && pending_is_current) {
                         pending_batch_module = runtime->hook->pending_module;
                         pending_batch_generation =
                                 runtime->hook->pending_config_generation;
-                        runtime->hook->pending_install = false;
-                        runtime->hook->pending_batch_install = false;
                         resume_pending_batch = true;
                     }
+                    runtime->hook->pending_install = false;
+                    runtime->hook->pending_batch_install = false;
+                    releases.push_back(std::move(
+                            runtime->hook->pending_runtime));
+                    releases.push_back(std::move(
+                            runtime->hook->pending_coordinator));
                 } else {
                     runtime->hook->installed = false;
                     runtime->hook->unhook_failed_window = false;
@@ -575,29 +587,36 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                             std::move(runtime->hook->pending_scene);
                     const ModuleRange pending_module =
                             std::move(runtime->hook->pending_module);
-                    const std::shared_ptr<CaptureCoordinator> pending_coordinator =
+                    std::shared_ptr<CaptureCoordinator> pending_coordinator =
                             std::move(runtime->hook->pending_coordinator);
-                    const std::shared_ptr<TraceGenerationRuntime> pending_runtime =
+                    std::shared_ptr<TraceGenerationRuntime> pending_runtime =
                             std::move(runtime->hook->pending_runtime);
                     const uint64_t pending_config_generation =
                             runtime->hook->pending_config_generation;
+                    const bool pending_is_current =
+                            pending_config_generation == g_config_generation &&
+                            pending_runtime != nullptr &&
+                            pending_runtime == g_generation_runtime;
                     runtime->hook->pending_install = false;
                     runtime->hook->pending_batch_install = false;
                     retire_runtime_ownership_locked(runtime->hook.get(),
                                                     &releases);
-                    if (pending_batch) {
+                    if (pending_batch && pending_is_current) {
                         pending_batch_module = pending_module;
                         pending_batch_generation = pending_config_generation;
                         resume_pending_batch = true;
-                    } else {
+                    } else if (pending_is_current) {
                         const bool installed = create_hook_generation_locked(
                                 pending_config, pending_scene, pending_module,
                                 pending_config_generation, pending_coordinator,
                                 pending_runtime);
                         if (installed && pending_runtime != nullptr) {
+                            (void)pending_runtime->publish_installed_status();
                             (void)pending_runtime->arm();
                         }
                     }
+                    releases.push_back(std::move(pending_runtime));
+                    releases.push_back(std::move(pending_coordinator));
                 }
             } else if (!runtime->hook->retired && !runtime->hook->installed) {
                 // Every physical hook installation gets a distinct proxy identity.
@@ -835,6 +854,7 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     g_configured = true;
     g_registration_gate = nullptr;
     g_stub_entry_gate.store(nullptr, std::memory_order_release);
+    g_installed_status_gate = nullptr;
 }
 
 bool trace_proxy_test_current_configuration(uint64_t *generation,
@@ -872,6 +892,7 @@ bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene
         scene.index < g_scene_hooks.size() &&
         g_scene_hooks[scene.index] != nullptr &&
         !g_scene_hooks[scene.index]->pending_install) {
+        (void)g_generation_runtime->publish_installed_status();
         (void)g_generation_runtime->arm();
     }
     return installed;
@@ -890,6 +911,7 @@ bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
         scene.index < g_scene_hooks.size() &&
         g_scene_hooks[scene.index] != nullptr &&
         !g_scene_hooks[scene.index]->pending_install) {
+        (void)g_generation_runtime->publish_installed_status();
         (void)g_generation_runtime->arm();
     }
     return installed;
@@ -902,6 +924,11 @@ void trace_proxy_test_set_registration_gate(RegistrationGate gate) {
 
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate) {
     g_stub_entry_gate.store(gate, std::memory_order_release);
+}
+
+void trace_proxy_test_set_installed_status_gate(RegistrationGate gate) {
+    std::lock_guard<std::mutex> guard(g_lock);
+    g_installed_status_gate = gate;
 }
 
 void trace_proxy_test_set_status_output_directory(const char *directory) {
@@ -976,6 +1003,22 @@ bool trace_proxy_test_generation_installed(size_t generation) {
     return generation < g_next_proxy_generation &&
            g_hook_generations[generation] != nullptr &&
            g_hook_generations[generation]->installed;
+}
+
+bool trace_proxy_test_generation_locks_available(size_t generation) {
+    if (!g_lock.try_lock()) return false;
+    const std::shared_ptr<InstalledSceneHook> hook =
+            generation < g_hook_generations.size()
+                    ? g_hook_generations[generation]
+                    : nullptr;
+    if (hook == nullptr) {
+        g_lock.unlock();
+        return false;
+    }
+    const bool transition_available = hook->transition_mutex.try_lock();
+    if (transition_available) hook->transition_mutex.unlock();
+    g_lock.unlock();
+    return transition_available;
 }
 
 bool trace_proxy_test_finish_module_observation_failure(uint64_t generation) {
@@ -1415,11 +1458,18 @@ static void install_hooks_for_module(const ModuleRange &module,
         const bool installed_published = g_tracer_configuration.finish_install(
                 generation, ConfigurationState::Installed, std::move(statuses));
         if (installed_published && g_generation_runtime != nullptr &&
-            g_generation_runtime->snapshot().generation == generation &&
-            !g_generation_runtime->arm()) {
-            (void)g_generation_runtime->record_status_error(
-                    "RUNTIME_ARM_FAILED", "$.session",
-                    "generation runtime could not be armed");
+            g_generation_runtime->snapshot().generation == generation) {
+            (void)g_generation_runtime->publish_installed_status();
+#if defined(QTRACE_HOST_TEST)
+            if (g_installed_status_gate != nullptr) {
+                g_installed_status_gate();
+            }
+#endif
+            if (!g_generation_runtime->arm()) {
+                (void)g_generation_runtime->record_status_error(
+                        "RUNTIME_ARM_FAILED", "$.session",
+                        "generation runtime could not be armed");
+            }
         }
         QTRACE_I("generation=%llu hooks installed scenes=%zu",
                  static_cast<unsigned long long>(generation),

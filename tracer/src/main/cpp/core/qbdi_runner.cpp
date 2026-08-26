@@ -183,5 +183,8 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         QTRACE_E("trace %s write failed path=%.*s", invocation.scene->name.c_str(),
                  static_cast<int>(state->writer.path().size()), state->writer.path().data());
     }
-    return {finalization.target_ran, finalization.outward_return_value};
+    TraceRunResult result{
+            finalization.target_ran, finalization.outward_return_value};
+    result.admission_finished = state->stop.admission_finished();
+    return result;
 }

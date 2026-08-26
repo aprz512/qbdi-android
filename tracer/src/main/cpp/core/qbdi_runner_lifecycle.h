@@ -75,6 +75,7 @@ public:
     void acknowledge(bool sealed) noexcept;
     bool stop_observed() const noexcept;
     bool sealed() const noexcept;
+    bool admission_finished() const noexcept;
 
 #if defined(QTRACE_HOST_TEST)
     size_t seal_calls() const noexcept;

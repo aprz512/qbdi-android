@@ -138,6 +138,10 @@ bool QbdiNormalStopLifecycle::stop_observed() const noexcept {
 
 bool QbdiNormalStopLifecycle::sealed() const noexcept { return sealed_; }
 
+bool QbdiNormalStopLifecycle::admission_finished() const noexcept {
+    return acknowledge_called_;
+}
+
 #if defined(QTRACE_HOST_TEST)
 size_t QbdiNormalStopLifecycle::seal_calls() const noexcept {
     return seal_calls_;

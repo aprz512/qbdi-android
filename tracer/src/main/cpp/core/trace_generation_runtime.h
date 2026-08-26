@@ -108,8 +108,12 @@ struct TraceGenerationTestHooks {
     void (*after_active_removal)(void *opaque) noexcept = nullptr;
     void (*before_deadline_stop_lock)(void *opaque) noexcept = nullptr;
     void (*after_arm_enters_arming)(void *opaque) noexcept = nullptr;
+    void (*before_worker_join)(void *opaque) noexcept = nullptr;
+    void (*before_admission_completion)(void *opaque) noexcept = nullptr;
     bool (*fail_clock_read)(void *opaque) noexcept = nullptr;
     bool (*fail_thread_create)(void *opaque) noexcept = nullptr;
+    bool (*fail_status_context_allocation)(void *opaque) noexcept = nullptr;
+    bool (*fail_status_thread_create)(void *opaque) noexcept = nullptr;
 };
 #endif
 
@@ -127,6 +131,10 @@ public:
     TraceGenerationRuntime &operator=(const TraceGenerationRuntime &) = delete;
 
     bool arm() noexcept;
+    // Publish the first authoritative snapshot only after the complete hook
+    // batch has reached Installed. The polling worker is deliberately not
+    // involved so Installed is observable before arm transitions to Running.
+    bool publish_installed_status() noexcept;
     bool request_stop(TraceStopReason reason) noexcept;
     TraceAdmissionResult try_begin_call(
             uint64_t generation, size_t scene_index, uint32_t tid) noexcept;
@@ -245,6 +253,7 @@ private:
     TraceGenerationStatusOptions status_options_;
     SessionStatusPublisher status_publisher_;
     std::atomic<bool> status_enabled_{false};
+    std::atomic<bool> status_publication_started_{false};
     std::atomic<bool> status_thread_started_{false};
     std::atomic<uint64_t> transition_sequence_{1};
     std::atomic<int> status_error_{0};

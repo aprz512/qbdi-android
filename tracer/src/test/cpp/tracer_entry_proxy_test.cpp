@@ -49,6 +49,7 @@ bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
                                              const ModuleRange &module);
 void trace_proxy_test_set_registration_gate(RegistrationGate gate);
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate);
+void trace_proxy_test_set_installed_status_gate(RegistrationGate gate);
 void trace_proxy_test_set_status_output_directory(const char *directory);
 size_t trace_proxy_test_generation(size_t scene_index);
 void trace_proxy_test_set_coordinator(
@@ -67,6 +68,7 @@ bool trace_proxy_test_current_configuration(uint64_t *generation,
                                             TraceConfig *config);
 CaptureCoordinator *trace_proxy_test_current_coordinator();
 void trace_proxy_test_throw_during_configuration_apply();
+bool trace_proxy_test_generation_locks_available(size_t generation);
 
 void check(bool condition, const char *expression, int line) {
     if (condition) return;
@@ -443,6 +445,7 @@ uintptr_t g_original_override = 0;
 std::vector<uintptr_t> g_hook_targets;
 std::atomic<size_t> g_old_calls{0};
 std::atomic<size_t> g_new_calls{0};
+std::atomic<size_t> g_admission_completion_calls{0};
 int g_nested_fork_status = -1;
 bool g_runner_forks = false;
 pid_t g_runner_fork_child = -1;
@@ -455,12 +458,29 @@ bool g_registration_entered = false;
 bool g_release_registration = false;
 bool g_stub_entry_entered = false;
 bool g_release_stub_entry = false;
+bool g_installed_status_entered = false;
+bool g_release_installed_status = false;
 bool g_use_runner_gate = false;
 bool g_runner_entered = false;
 bool g_release_runner = false;
 bool g_use_bridge_gate = false;
 size_t g_bridge_gate_entries = 0;
 bool g_release_bridge = false;
+
+struct RuntimeReleaseLockProbe {
+    static void before_worker_join(void *opaque) noexcept {
+        auto *probe = static_cast<RuntimeReleaseLockProbe *>(opaque);
+        probe->requested.store(true, std::memory_order_release);
+        while (!probe->checked.load(std::memory_order_acquire)) {
+            ::sched_yield();
+        }
+    }
+
+    size_t hook_generation = 0;
+    std::atomic<bool> requested{false};
+    std::atomic<bool> checked{false};
+    std::atomic<bool> locks_available{false};
+};
 
 struct FlightProxyFactory {
     std::atomic<size_t> artifact_creates{0};
@@ -521,6 +541,17 @@ void stub_entry_gate() {
     g_gate_condition.wait(lock, [] { return g_release_stub_entry; });
 }
 
+void installed_status_gate() {
+    std::unique_lock<std::mutex> lock(g_gate_mutex);
+    g_installed_status_entered = true;
+    g_gate_condition.notify_all();
+    g_gate_condition.wait(lock, [] { return g_release_installed_status; });
+}
+
+void count_admission_completion(void *) noexcept {
+    g_admission_completion_calls.fetch_add(1, std::memory_order_relaxed);
+}
+
 void reset_fakes() {
     std::lock_guard<std::mutex> lock(g_fake_mutex);
     g_seen_invocation = {};
@@ -548,6 +579,7 @@ void reset_fakes() {
     g_throwing_allocation_calls.store(0, std::memory_order_relaxed);
     g_old_calls = 0;
     g_new_calls = 0;
+    g_admission_completion_calls.store(0, std::memory_order_relaxed);
     g_fake_maps.clear();
     g_flight_factory.artifact_creates.store(0, std::memory_order_relaxed);
     g_flight_factory.session_creates.store(0, std::memory_order_relaxed);
@@ -578,6 +610,8 @@ void reset_fakes() {
         g_release_registration = false;
         g_stub_entry_entered = false;
         g_release_stub_entry = false;
+        g_installed_status_entered = false;
+        g_release_installed_status = false;
         g_use_runner_gate = false;
         g_runner_entered = false;
         g_release_runner = false;
@@ -1120,6 +1154,9 @@ void active_proxy_acknowledges_the_exact_generation_admission() {
     const std::shared_ptr<TraceGenerationRuntime> runtime =
             trace_proxy_test_hook_runtime(generation);
     CHECK(runtime != nullptr);
+    runtime->set_test_hooks(TraceGenerationTestHooks{
+            .before_admission_completion = &count_admission_completion,
+    });
     {
         std::lock_guard<std::mutex> lock(g_gate_mutex);
         g_use_runner_gate = true;
@@ -1147,6 +1184,7 @@ void active_proxy_acknowledges_the_exact_generation_admission() {
     CHECK(result == 0x20D);
     CHECK(runtime->snapshot().active_calls == 0);
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+    CHECK(g_admission_completion_calls.load(std::memory_order_relaxed) == 1);
 }
 
 void stopped_dormant_hook_never_attempts_a_failing_unhook() {
@@ -1491,6 +1529,102 @@ void batch_reconfiguration_stays_installing_until_pending_rehook_succeeds() {
     CHECK(g_unhook_calls == 1);
 }
 
+void superseded_pending_runtime_is_destroyed_outside_generation_locks() {
+    reset_fakes();
+    TraceConfig old_config = config_named("pending-release-old");
+    old_config.target_so = "libpending-release-old.so";
+    const SceneConfig old_scene = scene_named(
+            "entry", reinterpret_cast<uintptr_t>(old_target));
+    const ModuleRange old_module = module_named(
+            "/data/app/libpending-release-old.so");
+    trace_proxy_test_reset(old_config);
+    CHECK(trace_proxy_test_update(old_config, old_scene, old_module));
+    const size_t old_generation = trace_proxy_test_generation(old_scene.index);
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_use_runner_gate = true;
+    }
+    uint64_t args[8]{31};
+    std::thread active([&] {
+        CHECK(trace_proxy_dispatch(old_generation, args, 0) == 0x11f);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_runner_entered; });
+    }
+
+    nlohmann::json request_a = nlohmann::json::parse(json_abi_request(
+            "com.example.pending-a", "libpending-release-a.so", false, {},
+            nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", "0x40"}}}},
+            })));
+    request_a["session"] = {
+            {"id", "7d5807cf-cf09-4f21-92de-1ad92802610a"},
+            {"durationMs", 60000},
+    };
+    const uint64_t generation_a = call_json_configure(request_a.dump())
+                                          .at("generation")
+                                          .get<uint64_t>();
+    trace_proxy_test_install_loading_module(module_named(
+            "/data/app/libpending-release-a.so"));
+    CHECK(call_json_status(generation_a).at("state") == "installing");
+    std::shared_ptr<TraceGenerationRuntime> runtime_a =
+            trace_proxy_test_current_runtime();
+    CHECK(runtime_a != nullptr);
+    CHECK(runtime_a->snapshot().phase == TraceGenerationPhase::Waiting);
+    RuntimeReleaseLockProbe probe{};
+    probe.hook_generation = old_generation;
+    runtime_a->set_test_hooks(TraceGenerationTestHooks{
+            .opaque = &probe,
+            .before_worker_join = &RuntimeReleaseLockProbe::before_worker_join,
+    });
+    CHECK(runtime_a->arm());
+    std::weak_ptr<TraceGenerationRuntime> weak_runtime_a = runtime_a;
+
+    const nlohmann::json accepted_b = call_json_configure(json_abi_request(
+            "com.example.pending-b", "libpending-release-b-never-loaded.so",
+            false, {}, nlohmann::json::array({
+                    {{"name", "entry"},
+                     {"location", {{"offset", "0x80"}}}},
+            })));
+    const uint64_t generation_b =
+            accepted_b.at("generation").get<uint64_t>();
+    runtime_a.reset();
+    uint64_t current_generation = 0;
+    TraceConfig current_config;
+    CHECK(trace_proxy_test_current_configuration(&current_generation,
+                                                 &current_config));
+    CHECK(current_generation == generation_b);
+
+    std::thread lock_checker([&] {
+        while (!probe.requested.load(std::memory_order_acquire)) {
+            ::sched_yield();
+        }
+        probe.locks_available.store(
+                trace_proxy_test_generation_locks_available(
+                        probe.hook_generation),
+                std::memory_order_release);
+        probe.checked.store(true, std::memory_order_release);
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_runner = true;
+    }
+    g_gate_condition.notify_all();
+    active.join();
+    lock_checker.join();
+
+    CHECK(probe.locks_available.load(std::memory_order_acquire));
+    CHECK(weak_runtime_a.expired());
+    CHECK(g_hook_calls == 1);
+    CHECK(trace_proxy_test_current_configuration(&current_generation,
+                                                 &current_config));
+    CHECK(current_generation == generation_b);
+    CHECK(call_json_status(generation_b).at("state") ==
+          "waiting_for_module");
+}
+
 void observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map() {
     reset_fakes();
     ModuleRange read_only;
@@ -1665,7 +1799,7 @@ void outside_scene_warning_does_not_block_hook_installation() {
     module.path = "/data/app/liboutside-warning.so";
 
     trace_proxy_test_install_loading_module(module);
-    const std::shared_ptr<TraceGenerationRuntime> runtime =
+    std::shared_ptr<TraceGenerationRuntime> runtime =
             trace_proxy_test_current_runtime();
     CHECK(runtime != nullptr);
     CHECK(runtime->snapshot().phase == TraceGenerationPhase::Running);
@@ -1712,11 +1846,85 @@ void outside_scene_warning_does_not_block_hook_installation() {
 
     trace_proxy_test_set_status_output_directory(nullptr);
     trace_proxy_test_reset(config_named("outside-warning-cleanup"));
+    runtime.reset();
     CHECK(::unlink(status_path.c_str()) == 0);
     (void)::unlink((status_path + ".backup").c_str());
     (void)::unlink((status_path + ".restore").c_str());
     (void)::unlink((status_path + ".rollback").c_str());
     (void)::unlink((status_path + ".commit").c_str());
+    CHECK(::rmdir(directory) == 0);
+}
+
+void authoritative_status_observes_installed_before_running() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("installed-status-order-reset"));
+    char directory_template[] = "/tmp/qtrace-installed-order-XXXXXX";
+    char *directory = ::mkdtemp(directory_template);
+    CHECK(directory != nullptr);
+    trace_proxy_test_set_status_output_directory(directory);
+    trace_proxy_test_set_installed_status_gate(installed_status_gate);
+    nlohmann::json request = nlohmann::json::parse(json_abi_request(
+            "com.example.installedorder", "libinstalled-order.so", false,
+            {}, nlohmann::json::array({
+                        {{"name", "entry"},
+                         {"location", {{"offset", "0x40"}}}},
+                })));
+    request["session"] = {
+            {"id", "6f238851-b45e-4b89-9167-38cc7ef707f3"},
+            {"durationMs", 60000},
+    };
+    const uint64_t generation = call_json_configure(request.dump())
+                                        .at("generation")
+                                        .get<uint64_t>();
+    const ModuleRange module = module_named(
+            "/data/app/libinstalled-order.so");
+    std::thread installer([&] {
+        trace_proxy_test_install_loading_module(module);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_installed_status_entered; });
+    }
+    const std::string path = std::string(directory) +
+            "/session-6f238851-b45e-4b89-9167-38cc7ef707f3.status.json";
+    {
+        std::ifstream input(path);
+        CHECK(input.good());
+        const nlohmann::json installed = nlohmann::json::parse(input);
+        CHECK(installed.at("generation") == generation);
+        CHECK(installed.at("state") == "installed");
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_installed_status = true;
+    }
+    g_gate_condition.notify_all();
+    installer.join();
+
+    nlohmann::json running;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::ifstream input(path);
+        if (input) {
+            running = nlohmann::json::parse(input, nullptr, false);
+            if (running.is_object() && running.at("state") == "running") {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(running.is_object());
+    CHECK(running.at("state") == "running");
+
+    trace_proxy_test_set_installed_status_gate(nullptr);
+    trace_proxy_test_set_status_output_directory(nullptr);
+    trace_proxy_test_reset(config_named("installed-status-order-cleanup"));
+    CHECK(::unlink(path.c_str()) == 0);
+    (void)::unlink((path + ".backup").c_str());
+    (void)::unlink((path + ".restore").c_str());
+    (void)::unlink((path + ".rollback").c_str());
+    (void)::unlink((path + ".commit").c_str());
     CHECK(::rmdir(directory) == 0);
 }
 
@@ -2813,11 +3021,15 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         g_gate_condition.wait(gate_lock, [] { return g_release_runner; });
         g_use_runner_gate = false;
     }
+    bool admission_finished = false;
     if (g_runner_acknowledges_stop && invocation.runtime != nullptr &&
         invocation.runtime->stop_token().requested()) {
         invocation.runtime->acknowledge_sealed(invocation.admission);
+        admission_finished = true;
     }
-    return {false, 0};
+    TraceRunResult result{false, 0};
+    result.admission_finished = admission_finished;
+    return result;
 }
 
 extern "C" uint64_t call_target_arm64(uintptr_t target, const uint64_t args[8], uint64_t) {
@@ -2869,6 +3081,18 @@ int main(int argc, char **argv) {
             configuration_abi_catches_publication_and_status_exceptions();
             return 0;
         }
+        if (selected == "pending-runtime-release") {
+            superseded_pending_runtime_is_destroyed_outside_generation_locks();
+            return 0;
+        }
+        if (selected == "installed-status-order") {
+            authoritative_status_observes_installed_before_running();
+            return 0;
+        }
+        if (selected == "admission-exact-once") {
+            active_proxy_acknowledges_the_exact_generation_admission();
+            return 0;
+        }
         return 2;
     }
     json_configuration_abi_is_transactional_and_nul_terminated();
@@ -2899,10 +3123,12 @@ int main(int argc, char **argv) {
     failed_same_generation_install_is_retried();
     duplicate_during_an_active_call_schedules_only_the_required_rehook();
     batch_reconfiguration_stays_installing_until_pending_rehook_succeeds();
+    superseded_pending_runtime_is_destroyed_outside_generation_locks();
     observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map();
     constructor_phdr_range_uses_load_bias_and_preserves_executable_segments();
     constructor_phdr_range_rejects_invalid_or_unrepresentable_loads();
     outside_scene_warning_does_not_block_hook_installation();
+    authoritative_status_observes_installed_before_running();
     second_hook_failure_rolls_back_the_batch_in_reverse();
     rollback_failure_reports_and_retains_the_residual_hook();
     failed_replacement_batch_removes_unattempted_prior_generation_hooks();

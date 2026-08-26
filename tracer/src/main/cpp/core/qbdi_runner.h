@@ -34,6 +34,7 @@ struct TraceRunResult {
     bool target_executed = false;
     bool target_returned = false;
     bool exit_requested = false;
+    bool admission_finished = false;
     uint64_t value = 0;
 
     constexpr TraceRunResult() noexcept = default;

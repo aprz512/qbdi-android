@@ -121,6 +121,19 @@ struct SelfDestroyingStatusPoll {
     std::atomic<bool> released_owner{false};
 };
 
+struct StatusWorkerFailure {
+    static bool fail_context_allocation(void *opaque) noexcept {
+        return static_cast<StatusWorkerFailure *>(opaque)->fail_context;
+    }
+
+    static bool fail_thread_create(void *opaque) noexcept {
+        return static_cast<StatusWorkerFailure *>(opaque)->fail_thread;
+    }
+
+    bool fail_context = false;
+    bool fail_thread = false;
+};
+
 void wait_for_count(const std::atomic<unsigned int> &value, unsigned int minimum) {
     while (value.load(std::memory_order_acquire) < minimum) ::sched_yield();
 }
@@ -541,7 +554,7 @@ void forked_child_detaches_the_inherited_deadline_worker() {
 // Catches status I/O occurring from the deadline/callback transition itself,
 // publishing unchanged data, or abandoning the dedicated status pthread at
 // destruction. The controlled wait is a deterministic 25 ms poll substitute.
-void status_worker_starts_only_after_installation_arm() {
+void installed_status_is_published_before_running_worker_state() {
     TemporaryDirectory directory;
     ControlledStatusPoll poll;
     TraceConfig config{};
@@ -559,6 +572,10 @@ void status_worker_starts_only_after_installation_arm() {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     CHECK(poll.waits.load(std::memory_order_acquire) == 0);
     CHECK(::access(path.c_str(), F_OK) != 0);
+    CHECK(runtime->publish_installed_status());
+    CHECK(read_text(path).find("\"state\":\"installed\"") !=
+          std::string::npos);
+    CHECK(poll.waits.load(std::memory_order_acquire) == 0);
     CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
     CHECK(read_text(path).find("\"state\":\"running\"") != std::string::npos);
@@ -567,6 +584,80 @@ void status_worker_starts_only_after_installation_arm() {
     runtime.reset();
     CHECK(read_text(path).find("\"code\":\"FINAL_WARNING\"") !=
           std::string::npos);
+}
+
+void status_worker_failure_preserves_initial_and_final_publication() {
+    const auto run_case = [](const char *session_id, uint64_t generation,
+                             bool fail_context, bool fail_thread,
+                             int expected_error) {
+        TemporaryDirectory directory;
+        TraceConfig config{};
+        config.package_name = "com.example.runtime";
+        config.session.id = session_id;
+        TraceGenerationStatusOptions status{};
+        status.config = config;
+        status.output_directory = directory.path;
+        auto runtime = TraceGenerationRuntime::create(
+                generation, config.session, TraceGenerationLimits{},
+                DeadlineWait{}, std::move(status));
+        CHECK(runtime != nullptr);
+        StatusWorkerFailure failure{};
+        failure.fail_context = fail_context;
+        failure.fail_thread = fail_thread;
+        runtime->set_test_hooks(TraceGenerationTestHooks{
+                .opaque = &failure,
+                .fail_status_context_allocation =
+                        &StatusWorkerFailure::fail_context_allocation,
+                .fail_status_thread_create =
+                        &StatusWorkerFailure::fail_thread_create,
+        });
+        const std::string path = directory.path + "/session-" +
+                                 config.session.id + ".status.json";
+        CHECK(runtime->publish_installed_status());
+        CHECK(read_text(path).find("\"state\":\"installed\"") !=
+              std::string::npos);
+        CHECK(runtime->arm());
+        CHECK(runtime->snapshot().phase == TraceGenerationPhase::Running);
+        CHECK(runtime->snapshot().status_error == expected_error);
+        runtime.reset();
+        const nlohmann::json final = nlohmann::json::parse(read_text(path));
+        CHECK(final.at("state") == "running");
+        CHECK(final.at("errors").at(0).at("code") ==
+              "STATUS_PUBLICATION_FAILED");
+    };
+    run_case("7d5807cf-cf09-4f21-92de-1ad92802610a", 38, false, true,
+             EAGAIN);
+    run_case("a850590f-cc92-4b19-ad3f-6de57df0e7c1", 39, true, false,
+             ENOMEM);
+}
+
+void final_status_failure_retries_once_with_a_stable_diagnostic() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "5ae884fd-c3cc-4ae5-be8f-c7219b13c59d";
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    auto runtime = TraceGenerationRuntime::create(
+            40, config.session, TraceGenerationLimits{}, DeadlineWait{},
+            std::move(status));
+    CHECK(runtime != nullptr);
+    const std::string path = directory.path + "/session-" +
+                             config.session.id + ".status.json";
+    CHECK(runtime->publish_installed_status());
+    CHECK(runtime->arm());
+    wait_for_count(poll.waits, 1);
+    CHECK(read_text(path).find("\"state\":\"running\"") !=
+          std::string::npos);
+    session_status_test_inject_fault(SessionStatusFaultPoint::FileFsync, EIO);
+    runtime.reset();
+    const nlohmann::json final = nlohmann::json::parse(read_text(path));
+    CHECK(final.at("state") == "running");
+    CHECK(final.at("errors").at(0).at("code") ==
+          "STATUS_PUBLICATION_FAILED");
 }
 
 // Catches a failed status publication being marked published forever. Every
@@ -586,6 +677,9 @@ void status_publication_failure_is_exposed_and_retried_without_a_runtime_event()
     auto runtime = TraceGenerationRuntime::create(
             32, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
     CHECK(runtime != nullptr);
+    CHECK(!runtime->publish_installed_status());
+    CHECK(runtime->snapshot().status_error == EIO);
+    session_status_test_inject_fault(SessionStatusFaultPoint::FileFsync, EIO);
     CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
     CHECK(runtime->snapshot().status_error == EIO);
@@ -848,7 +942,9 @@ int main() {
     deadline_worker_survives_releasing_the_last_runtime_owner();
     status_worker_survives_releasing_the_last_runtime_owner();
     forked_child_detaches_the_inherited_deadline_worker();
-    status_worker_starts_only_after_installation_arm();
+    installed_status_is_published_before_running_worker_state();
+    status_worker_failure_preserves_initial_and_final_publication();
+    final_status_failure_retries_once_with_a_stable_diagnostic();
     status_publication_failure_is_exposed_and_retried_without_a_runtime_event();
     status_metadata_producers_publish_artifacts_warnings_and_errors();
     status_metadata_producers_deduplicate_and_classify_each_rejection();

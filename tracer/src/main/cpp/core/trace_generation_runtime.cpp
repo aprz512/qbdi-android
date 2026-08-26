@@ -64,6 +64,11 @@ TraceGenerationRuntime::TraceGenerationRuntime(uint64_t generation, SessionOptio
 }
 
 TraceGenerationRuntime::~TraceGenerationRuntime() {
+#if defined(QTRACE_HOST_TEST)
+    if (test_hooks_.before_worker_join != nullptr) {
+        test_hooks_.before_worker_join(test_hooks_.opaque);
+    }
+#endif
     join_deadline();
     join_status();
 }
@@ -88,6 +93,29 @@ std::shared_ptr<TraceGenerationRuntime> TraceGenerationRuntime::create(
     // policy, so this first-object allocation check is intentionally not a
     // claim that every shared_ptr allocation failure is recoverable.
     return std::shared_ptr<TraceGenerationRuntime>(runtime);
+}
+
+bool TraceGenerationRuntime::publish_installed_status() noexcept {
+    if (detached_.load(std::memory_order_acquire) || ::getpid() != owner_pid_ ||
+        !status_enabled_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (phase_.load(std::memory_order_acquire) !=
+        TraceGenerationPhase::Waiting) {
+        return false;
+    }
+    status_publication_started_.store(true, std::memory_order_release);
+    if (status_publisher_.publish(status_snapshot())) return true;
+
+    int expected = 0;
+    const int error = status_publisher_.error_code() == 0
+                              ? EIO
+                              : status_publisher_.error_code();
+    (void)status_error_.compare_exchange_strong(
+            expected, error, std::memory_order_acq_rel,
+            std::memory_order_acquire);
+    note_transition();
+    return false;
 }
 
 bool TraceGenerationRuntime::arm() noexcept {
@@ -266,11 +294,21 @@ TraceAdmissionResult TraceGenerationRuntime::try_begin_call(
 }
 
 void TraceGenerationRuntime::finish_call(const TraceAdmission &admission, bool sealed) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    if (test_hooks_.before_admission_completion != nullptr) {
+        test_hooks_.before_admission_completion(test_hooks_.opaque);
+    }
+#endif
     std::lock_guard<std::mutex> lock(active_mutex_);
     complete_call_locked(admission, sealed);
 }
 
 void TraceGenerationRuntime::acknowledge_sealed(const TraceAdmission &admission) noexcept {
+#if defined(QTRACE_HOST_TEST)
+    if (test_hooks_.before_admission_completion != nullptr) {
+        test_hooks_.before_admission_completion(test_hooks_.opaque);
+    }
+#endif
     std::lock_guard<std::mutex> lock(active_mutex_);
     complete_call_locked(admission, true);
 }
@@ -453,26 +491,44 @@ void TraceGenerationRuntime::status_poll_wait(void *, const std::atomic<bool> *)
 
 void TraceGenerationRuntime::start_status() noexcept {
     if (!status_enabled_.load(std::memory_order_acquire)) return;
+    status_publication_started_.store(true, std::memory_order_release);
+#if defined(QTRACE_HOST_TEST)
+    if (test_hooks_.fail_status_context_allocation != nullptr &&
+        test_hooks_.fail_status_context_allocation(test_hooks_.opaque)) {
+        status_error_.store(ENOMEM, std::memory_order_release);
+        note_transition();
+        return;
+    }
+#endif
     status_context_ = std::shared_ptr<StatusWorkerContext>(new (std::nothrow) StatusWorkerContext{});
     if (status_context_ == nullptr) {
-        status_enabled_.store(false, std::memory_order_release);
         status_error_.store(ENOMEM, std::memory_order_release);
+        note_transition();
         return;
     }
     status_context_->runtime.store(this, std::memory_order_release);
     status_context_->wait = status_options_.poll_wait;
     auto *start = new (std::nothrow) StatusThreadStart{status_context_};
     if (start == nullptr) {
-        status_enabled_.store(false, std::memory_order_release);
         status_error_.store(ENOMEM, std::memory_order_release);
+        note_transition();
         return;
     }
-    const int error = ::pthread_create(&status_thread_, nullptr,
-                                       &TraceGenerationRuntime::status_entry, start);
+    int error = 0;
+#if defined(QTRACE_HOST_TEST)
+    if (test_hooks_.fail_status_thread_create != nullptr &&
+        test_hooks_.fail_status_thread_create(test_hooks_.opaque)) {
+        error = EAGAIN;
+    }
+#endif
+    if (error == 0) {
+        error = ::pthread_create(&status_thread_, nullptr,
+                                 &TraceGenerationRuntime::status_entry, start);
+    }
     if (error != 0) {
         delete start;
-        status_enabled_.store(false, std::memory_order_release);
         status_error_.store(error, std::memory_order_release);
+        note_transition();
         return;
     }
     status_thread_started_.store(true, std::memory_order_release);
@@ -485,18 +541,34 @@ void TraceGenerationRuntime::join_status() noexcept {
         status_context_->stop.store(true, std::memory_order_release);
     }
     bool started = true;
-    if (!status_thread_started_.compare_exchange_strong(started, false, std::memory_order_acq_rel,
-                                                        std::memory_order_acquire)) return;
-    if (::pthread_equal(::pthread_self(), status_thread_)) {
-        (void)::pthread_detach(status_thread_);
-    } else {
-        (void)::pthread_join(status_thread_, nullptr);
+    if (status_thread_started_.compare_exchange_strong(
+                started, false, std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+        if (::pthread_equal(::pthread_self(), status_thread_)) {
+            (void)::pthread_detach(status_thread_);
+        } else {
+            (void)::pthread_join(status_thread_, nullptr);
+        }
     }
     // Retirement may follow immediately after a cold-path metadata update.
     // Persist one final snapshot after the worker is quiescent so joining the
     // polling pthread cannot discard that last authoritative transition.
-    if (status_enabled_.load(std::memory_order_acquire)) {
-        (void)status_publisher_.publish(status_snapshot());
+    if (status_enabled_.load(std::memory_order_acquire) &&
+        status_publication_started_.load(std::memory_order_acquire)) {
+        if (!status_publisher_.publish(status_snapshot())) {
+            int expected = 0;
+            const int error = status_publisher_.error_code() == 0
+                                      ? EIO
+                                      : status_publisher_.error_code();
+            (void)status_error_.compare_exchange_strong(
+                    expected, error, std::memory_order_acq_rel,
+                    std::memory_order_acquire);
+            note_transition();
+            // One bounded retry makes a transient final-write failure
+            // observable in the last authoritative snapshot without
+            // introducing another worker or an unbounded destructor loop.
+            (void)status_publisher_.publish(status_snapshot());
+        }
     }
 }
 
