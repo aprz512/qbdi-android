@@ -190,6 +190,14 @@ class ProviderBoundaryFake:
         return self.pull_result
 
 
+class RaisingPath:
+    def __init__(self, error):
+        self.error = error
+
+    def __fspath__(self):
+        raise self.error
+
+
 def config_with_scene(scene, *, binary=None, apk=None):
     return UserConfig(
         schema_version=1,
@@ -711,6 +719,42 @@ class TargetResolverTests(unittest.TestCase):
                         config_with_scene(OffsetScene("range", 0x100, 0x120))
                     ),
                 )
+
+    def test_programmer_and_fatal_package_query_errors_are_not_remapped(self):
+        for error in (AssertionError("unexpected query"), MemoryError("out of memory")):
+            with self.subTest(error=type(error).__name__):
+                resolver, _runner, _device = self.resolver(
+                    FakeRunner(), ProviderBoundaryFake(package_error=error)
+                )
+                with self.assertRaises(type(error)) as caught:
+                    resolver.resolve(
+                        config_with_scene(OffsetScene("range", 0x100, 0x120))
+                    )
+                self.assertIs(error, caught.exception)
+
+    def test_programmer_and_fatal_member_errors_are_not_remapped(self):
+        for error in (AssertionError("unexpected pull"), MemoryError("out of memory")):
+            with self.subTest(boundary="pull", error=type(error).__name__):
+                resolver, _runner, _device = self.resolver(
+                    FakeRunner(), ProviderBoundaryFake(pull_error=error)
+                )
+                with self.assertRaises(type(error)) as caught:
+                    resolver.resolve(
+                        config_with_scene(OffsetScene("range", 0x100, 0x120))
+                    )
+                self.assertIs(error, caught.exception)
+
+            conversion_error = type(error)(str(error))
+            with self.subTest(boundary="path", error=type(error).__name__):
+                resolver, _runner, _device = self.resolver(
+                    FakeRunner(),
+                    ProviderBoundaryFake(pull_result=RaisingPath(conversion_error)),
+                )
+                with self.assertRaises(type(conversion_error)) as caught:
+                    resolver.resolve(
+                        config_with_scene(OffsetScene("range", 0x100, 0x120))
+                    )
+                self.assertIs(conversion_error, caught.exception)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ _HEX = re.compile(r"0x[0-9a-fA-F]+\Z")
 _NM_HEX = re.compile(r"[0-9a-fA-F]+\Z")
 _SAFE_MODULE = re.compile(r"[A-Za-z0-9._+-]+\Z")
 _BUILD_ID_LINE = re.compile(r"\s*Build ID:\s*([0-9a-fA-F]+)\s*\Z")
+_DEVICE_QUERY_ERRORS = (QtraceError, OSError, TimeoutError, ValueError, TypeError)
+_DEVICE_MEMBER_ERRORS = _DEVICE_QUERY_ERRORS + (zipfile.BadZipFile,)
 
 
 class CommandRunner(Protocol):
@@ -403,7 +405,7 @@ class TargetResolver:
     def _installed_member(self, package: str, member: str) -> tuple[Path, str]:
         try:
             paths = self._device.package_apk_paths(package)
-        except Exception as error:
+        except _DEVICE_QUERY_ERRORS as error:
             _fail(
                 "target.device_query_failed",
                 "target.resolve",
@@ -424,7 +426,7 @@ class TargetResolver:
                 pulled = self._device.pull_member(apk_path, member, destination)
             except FileNotFoundError:
                 continue
-            except Exception as error:
+            except _DEVICE_MEMBER_ERRORS as error:
                 _fail(
                     "target.device_member_invalid",
                     "target.resolve",
@@ -437,7 +439,7 @@ class TargetResolver:
                     and not pulled_path.is_symlink()
                     and pulled_path.is_file()
                 )
-            except Exception as error:
+            except _DEVICE_MEMBER_ERRORS as error:
                 _fail(
                     "target.device_member_invalid",
                     "target.resolve",
