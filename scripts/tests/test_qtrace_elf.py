@@ -54,6 +54,24 @@ Program Headers:
   LOAD           0x000100 0x0000000000010100 0x0000000000010100 0x000300 0x000300 R E 0x1000
 """
 
+NDK28_READELF = """\
+ELF Header:
+  Class:                             ELF64
+  Machine:                           AArch64
+
+Displaying notes found in: .note.gnu.build-id
+  Owner                Data size  Description
+  GNU                  0x00000014 NT_GNU_BUILD_ID (unique build ID bitstring)
+    Build ID: AABBCCDDEEFF00112233445566778899AABBCCDD
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x000400 0x000400 R   0x1000
+  LOAD           0x001000 0x0000000000001000 0x0000000000001000 0x000400 0x000400 R E 0x1000
+  LOAD           0x002000 0x0000000000006000 0x0000000000006000 0x000200 0x000300 RW  0x1000
+  LOAD           0x003000 0x000000000000b000 0x000000000000b000 0x000100 0x000180 RW  0x1000
+"""
+
 
 @dataclass(frozen=True)
 class RunnerCall:
@@ -147,6 +165,31 @@ class FakeDevice:
         return destination
 
 
+class ProviderBoundaryFake:
+    def __init__(
+        self,
+        *,
+        package_result=("/data/app/base.apk",),
+        package_error=None,
+        pull_result=None,
+        pull_error=None,
+    ):
+        self.package_result = package_result
+        self.package_error = package_error
+        self.pull_result = pull_result
+        self.pull_error = pull_error
+
+    def package_apk_paths(self, _package):
+        if self.package_error is not None:
+            raise self.package_error
+        return self.package_result
+
+    def pull_member(self, _apk_path, _member, _destination):
+        if self.pull_error is not None:
+            raise self.pull_error
+        return self.pull_result
+
+
 def config_with_scene(scene, *, binary=None, apk=None):
     return UserConfig(
         schema_version=1,
@@ -217,6 +260,15 @@ class ElfInspectorTests(unittest.TestCase):
 
         self.assertEqual(((0x100, 0x400),), inspector.inspect(self.binary).executable_ranges)
         self.assertEqual((0x120, 0x160), inspector.symbol_range(self.binary, "biased"))
+
+    def test_ndk28_nonexecuting_segment_biases_do_not_change_scene_offsets(self):
+        inspector, _runner = self.inspector(
+            readelf=[NDK28_READELF, NDK28_READELF],
+            nm="work T 1120 40\n",
+        )
+
+        self.assertEqual(((0x1000, 0x1400),), inspector.inspect(self.binary).executable_ranges)
+        self.assertEqual((0x1120, 0x1160), inspector.symbol_range(self.binary, "work"))
 
     def test_symbol_types_t_and_weak_text_are_accepted(self):
         for symbol_type in ("T", "t", "W", "w"):
@@ -308,9 +360,9 @@ class ElfInspectorTests(unittest.TestCase):
             "  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x000100 0x000100 R   0x1000\n"
             "  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x000100 0x000100 R   0x1000",
         )
-        inconsistent_bias = ARM64_READELF.replace(
+        ambiguous_executable_bias = ARM64_READELF.replace(
             "0x0000000000000400 0x0000000000000400 0x000100 0x000180 RW",
-            "0x0000000000001400 0x0000000000001400 0x000100 0x000180 RW",
+            "0x0000000000001400 0x0000000000001400 0x000100 0x000180 R E",
         )
         cases = (
             (b"\xff\xfe", "target.tool_output_invalid"),
@@ -318,7 +370,7 @@ class ElfInspectorTests(unittest.TestCase):
             (repeated_note, "target.build_id_ambiguous"),
             (malformed_load, "target.program_header_malformed"),
             (repeated_load, "target.program_header_ambiguous"),
-            (inconsistent_bias, "target.load_bias_ambiguous"),
+            (ambiguous_executable_bias, "target.load_bias_ambiguous"),
         )
         for output, code in cases:
             with self.subTest(code=code):
@@ -603,11 +655,62 @@ class TargetResolverTests(unittest.TestCase):
         invalid_path = FakeDevice(paths=("/data/app/base.apk\nmalicious",))
         resolver, _runner, _device = self.resolver(FakeRunner(), invalid_path)
         self.assert_error(
-            "target.device_path_invalid",
+            "target.device_query_failed",
             lambda: resolver.resolve(
                 config_with_scene(OffsetScene("range", 0x100, 0x120))
             ),
         )
+
+    def test_device_package_query_exceptions_and_invalid_returns_are_stable(self):
+        invalid_results = (None, "/data/app/base.apk", 7, ["/data/app/base.apk"], (None,))
+        for package_result in invalid_results:
+            with self.subTest(package_result=package_result):
+                resolver, _runner, _device = self.resolver(
+                    FakeRunner(), ProviderBoundaryFake(package_result=package_result)
+                )
+                self.assert_error(
+                    "target.device_query_failed",
+                    lambda: resolver.resolve(
+                        config_with_scene(OffsetScene("range", 0x100, 0x120))
+                    ),
+                )
+
+        for package_error in (ValueError("bad paths"), TypeError("bad paths")):
+            with self.subTest(package_error=type(package_error).__name__):
+                resolver, _runner, _device = self.resolver(
+                    FakeRunner(), ProviderBoundaryFake(package_error=package_error)
+                )
+                self.assert_error(
+                    "target.device_query_failed",
+                    lambda: resolver.resolve(
+                        config_with_scene(OffsetScene("range", 0x100, 0x120))
+                    ),
+                )
+
+    def test_device_member_exceptions_and_invalid_returns_are_stable(self):
+        for pull_error in (ValueError("bad member"), TypeError("bad member")):
+            with self.subTest(pull_error=type(pull_error).__name__):
+                resolver, _runner, _device = self.resolver(
+                    FakeRunner(), ProviderBoundaryFake(pull_error=pull_error)
+                )
+                self.assert_error(
+                    "target.device_member_invalid",
+                    lambda: resolver.resolve(
+                        config_with_scene(OffsetScene("range", 0x100, 0x120))
+                    ),
+                )
+
+        for pull_result in (None, object()):
+            with self.subTest(pull_result=type(pull_result).__name__):
+                resolver, _runner, _device = self.resolver(
+                    FakeRunner(), ProviderBoundaryFake(pull_result=pull_result)
+                )
+                self.assert_error(
+                    "target.device_member_invalid",
+                    lambda: resolver.resolve(
+                        config_with_scene(OffsetScene("range", 0x100, 0x120))
+                    ),
+                )
 
 
 if __name__ == "__main__":

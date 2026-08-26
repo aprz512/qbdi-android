@@ -231,18 +231,28 @@ class ElfInspector:
 
         if not loads:
             _fail("target.program_header_missing", "target.inspect", "ELF has no PT_LOAD records")
-        biases = {vaddr - offset for offset, vaddr, _file, _mem, _flags, _align in loads}
+        executable_loads = [
+            load for load in loads if "E" in load[4] and load[3] != 0
+        ]
+        if not executable_loads:
+            _fail(
+                "target.executable_range_missing",
+                "target.inspect",
+                "ELF has no executable PT_LOAD range",
+            )
+        biases = {
+            vaddr - offset
+            for offset, vaddr, _file, _mem, _flags, _align in executable_loads
+        }
         if len(biases) != 1:
             _fail(
                 "target.load_bias_ambiguous",
                 "target.inspect",
-                "PT_LOAD records do not share one ELF load bias",
+                "executable PT_LOAD records do not share one ELF load bias",
             )
         load_bias = next(iter(biases))
         executable: list[tuple[int, int]] = []
-        for _offset, vaddr, _file_size, mem_size, flags, _align in loads:
-            if "E" not in flags or mem_size == 0:
-                continue
+        for _offset, vaddr, _file_size, mem_size, _flags, _align in executable_loads:
             start = vaddr - load_bias
             end = vaddr + mem_size - load_bias
             if start >= end:
@@ -252,12 +262,6 @@ class ElfInspector:
                     "executable PT_LOAD range is empty",
                 )
             executable.append((start, end))
-        if not executable:
-            _fail(
-                "target.executable_range_missing",
-                "target.inspect",
-                "ELF has no executable PT_LOAD range",
-            )
         executable.sort()
         for previous, current in zip(executable, executable[1:]):
             if current[0] < previous[1]:
@@ -368,11 +372,9 @@ class TargetResolver:
     def __init__(self, inspector: ElfInspector, device: DeviceFileProvider):
         self._inspector = inspector
         self._device = device
-        self._staging_directories: list[Path] = []
 
     def _new_staging(self) -> Path:
         directory = Path(tempfile.mkdtemp(prefix="qtrace-target-"))
-        self._staging_directories.append(directory)
         atexit.register(shutil.rmtree, directory, True)
         return directory
 
@@ -392,7 +394,7 @@ class TargetResolver:
             ord(character) < 32 or ord(character) == 127 for character in path
         ):
             _fail(
-                "target.device_path_invalid",
+                "target.device_query_failed",
                 "target.resolve",
                 "installed APK path is invalid",
             )
@@ -401,9 +403,7 @@ class TargetResolver:
     def _installed_member(self, package: str, member: str) -> tuple[Path, str]:
         try:
             paths = self._device.package_apk_paths(package)
-        except QtraceError:
-            raise
-        except (OSError, TimeoutError) as error:
+        except Exception as error:
             _fail(
                 "target.device_query_failed",
                 "target.resolve",
@@ -411,7 +411,7 @@ class TargetResolver:
             )
         if not isinstance(paths, tuple):
             _fail(
-                "target.device_path_invalid",
+                "target.device_query_failed",
                 "target.resolve",
                 "package APK paths must be a tuple",
             )
@@ -424,16 +424,26 @@ class TargetResolver:
                 pulled = self._device.pull_member(apk_path, member, destination)
             except FileNotFoundError:
                 continue
-            except QtraceError:
-                raise
-            except (OSError, TimeoutError, zipfile.BadZipFile) as error:
+            except Exception as error:
                 _fail(
                     "target.device_member_invalid",
                     "target.resolve",
                     f"cannot pull installed target member: {error}",
                 )
-            pulled_path = Path(pulled)
-            if pulled_path != destination or pulled_path.is_symlink() or not pulled_path.is_file():
+            try:
+                pulled_path = Path(pulled)
+                valid = (
+                    pulled_path == destination
+                    and not pulled_path.is_symlink()
+                    and pulled_path.is_file()
+                )
+            except Exception as error:
+                _fail(
+                    "target.device_member_invalid",
+                    "target.resolve",
+                    f"device provider returned an invalid target member: {error}",
+                )
+            if not valid:
                 _fail(
                     "target.device_member_invalid",
                     "target.resolve",
