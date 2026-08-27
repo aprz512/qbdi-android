@@ -8,31 +8,60 @@ import java.util.concurrent.Executors
 class QtraceAcceptanceTest {
     @Test fun parses_only_explicit_supported_fixture_intents() {
         assertEquals(
-            QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L, "session", "nonce"),
+            QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L),
             QtraceAcceptance.parse(mapOf(
                 "qtrace_acceptance" to true,
                 "qtrace_acceptance_mode" to "timed",
                 "qtrace_acceptance_seed" to 5855319310239641971L,
                 "qtrace_acceptance_iterations" to 30L,
-                "qtrace_acceptance_session_id" to "session",
-                "qtrace_acceptance_nonce" to "nonce",
             )),
         )
         assertNull(QtraceAcceptance.parse(mapOf("qtrace_acceptance" to true, "qtrace_acceptance_mode" to "unknown", "qtrace_acceptance_seed" to 1L, "qtrace_acceptance_iterations" to 1L)))
         assertNull(QtraceAcceptance.parse(mapOf("qtrace_acceptance_mode" to "timed", "qtrace_acceptance_seed" to 1L, "qtrace_acceptance_iterations" to 1L)))
     }
 
+    @Test fun parses_exit_and_crash_requests_without_timed_entry_evidence() {
+        for (mode in listOf("exit", "flight-crash")) {
+            assertEquals(
+                QtraceAcceptanceRequest(mode, 1L, 1L),
+                QtraceAcceptance.parse(mapOf(
+                    "qtrace_acceptance" to true,
+                    "qtrace_acceptance_mode" to mode,
+                    "qtrace_acceptance_seed" to 1L,
+                    "qtrace_acceptance_iterations" to 1L,
+                )),
+            )
+        }
+    }
+
+    @Test fun traced_worker_requires_bounded_session_and_nonce_evidence() {
+        val session = "123e4567-e89b-42d3-a456-426614174000"
+        val nonce = "223e4567-e89b-42d3-a456-426614174001"
+        val evidence = mapOf(
+            "qtrace_acceptance_worker" to 0,
+            "qtrace_acceptance_session_id" to session,
+            "qtrace_acceptance_nonce" to nonce,
+        )
+        assertEquals(
+            QtraceAcceptanceEvidence(session, nonce),
+            QtraceAcceptance.parseTracedEvidence(evidence),
+        )
+        assertNull(QtraceAcceptance.parseTracedEvidence(evidence - "qtrace_acceptance_session_id"))
+        assertNull(QtraceAcceptance.parseTracedEvidence(evidence - "qtrace_acceptance_nonce"))
+        assertNull(QtraceAcceptance.parseTracedEvidence(evidence - "qtrace_acceptance_worker"))
+    }
+
     @Test fun serializes_fixture_results_as_strict_stable_json() {
         assertEquals(
             "{\"iterations\":30,\"seed\":5855319310239641971,\"result\":\"0x42\"}",
-            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L, "session", "nonce"), 0x42L),
+            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L), 0x42L),
         )
     }
 
     @Test fun serializes_high_bit_native_return_as_unsigned_hex() {
         assertEquals(
             "{\"iterations\":1,\"seed\":1,\"result\":\"0x8000000000000000\"}",
-            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 1L, 1L, "session", "nonce"), Long.MIN_VALUE),
+            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 1L, 1L), Long.MIN_VALUE),
         )
     }
 

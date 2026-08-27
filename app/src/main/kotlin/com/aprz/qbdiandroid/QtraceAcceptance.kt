@@ -10,17 +10,19 @@ import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
 /** Fixture-only protocol used by the manually invoked qtrace device gate. */
-data class QtraceAcceptanceRequest(val mode: String, val seed: Long, val iterations: Long,
-                                   val sessionId: String, val nonce: String)
+data class QtraceAcceptanceRequest(val mode: String, val seed: Long, val iterations: Long)
+data class QtraceAcceptanceEvidence(val sessionId: String, val nonce: String)
 
 object QtraceAcceptance {
     private const val enabled = "qtrace_acceptance"
     private const val mode = "qtrace_acceptance_mode"
     private const val seed = "qtrace_acceptance_seed"
     private const val iterations = "qtrace_acceptance_iterations"
+    private const val worker = "qtrace_acceptance_worker"
     private const val sessionId = "qtrace_acceptance_session_id"
     private const val nonce = "qtrace_acceptance_nonce"
     private const val maximumIterations = 300L
+    private val uuid4 = Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
     private val started = AtomicBoolean(false)
 
     fun claimStartForTest(): Boolean = started.compareAndSet(false, true)
@@ -38,20 +40,33 @@ object QtraceAcceptance {
         val selectedMode = extras[mode] as? String ?: return null
         val selectedSeed = extras[seed] as? Long ?: return null
         val selectedIterations = extras[iterations] as? Long ?: return null
+        if (selectedMode !in setOf("timed", "exit", "flight-crash") || selectedSeed < 0L ||
+            selectedIterations !in 1..maximumIterations) return null
+        return QtraceAcceptanceRequest(selectedMode, selectedSeed, selectedIterations)
+    }
+
+    fun parseTracedEvidence(extras: Map<String, Any?>): QtraceAcceptanceEvidence? {
+        val selectedWorker = extras[worker] as? Int ?: return null
         val selectedSessionId = extras[sessionId] as? String ?: return null
         val selectedNonce = extras[nonce] as? String ?: return null
-        if (selectedMode !in setOf("timed", "exit", "flight-crash") || selectedSeed < 0L ||
-            selectedIterations !in 1..maximumIterations || selectedSessionId.length !in 1..64 ||
-            selectedNonce.length !in 1..64) return null
-        return QtraceAcceptanceRequest(selectedMode, selectedSeed, selectedIterations, selectedSessionId, selectedNonce)
+        if (selectedWorker < 0 || !uuid4.matches(selectedSessionId) ||
+            !uuid4.matches(selectedNonce)) return null
+        return QtraceAcceptanceEvidence(selectedSessionId, selectedNonce)
     }
 
     fun resultJson(request: QtraceAcceptanceRequest, result: Long): String =
         "{\"iterations\":${request.iterations},\"seed\":${request.seed},\"result\":\"0x${java.lang.Long.toUnsignedString(result, 16)}\"}"
 
     fun start(activity: MainActivity, request: QtraceAcceptanceRequest) {
+        val traced = activity.intent.hasExtra(worker)
+        val evidence = if (request.mode == "timed" && traced) {
+            parseTracedEvidence(mapOf(
+                worker to activity.intent.getIntExtra(worker, -1),
+                sessionId to activity.intent.getStringExtra(sessionId),
+                nonce to activity.intent.getStringExtra(nonce),
+            )) ?: return
+        } else null
         if (!started.compareAndSet(false, true)) return
-        val traced = activity.intent.hasExtra("qtrace_acceptance_worker")
         if (request.mode == "timed" && !traced) {
             clearStaleTimedResults { name ->
                 val stale = File(activity.filesDir, name)
@@ -61,9 +76,11 @@ object QtraceAcceptance {
         thread(name = "qtrace-acceptance-${request.mode}", isDaemon = false) {
             when (request.mode) {
                 "timed" -> {
-                    val entryElapsedMs = SystemClock.elapsedRealtime()
-                    writeAtomic(activity.filesDir, "qtrace-acceptance-receipt.json",
-                        "{\"sessionId\":\"${request.sessionId}\",\"nonce\":\"${request.nonce}\",\"entryElapsedMs\":$entryElapsedMs,\"deadlineElapsedMs\":${entryElapsedMs + 2000}}")
+                    if (evidence != null) {
+                        val entryElapsedMs = SystemClock.elapsedRealtime()
+                        writeAtomic(activity.filesDir, "qtrace-acceptance-receipt.json",
+                            "{\"sessionId\":\"${evidence.sessionId}\",\"nonce\":\"${evidence.nonce}\",\"entryElapsedMs\":$entryElapsedMs,\"deadlineElapsedMs\":${entryElapsedMs + 2000}}")
+                    }
                     val result = NativeDemo.runTimedAcceptance(request.iterations, request.seed)
                     val name = if (traced) "qtrace-acceptance-timed.json" else "qtrace-acceptance-baseline.json"
                     writeAtomic(activity.filesDir, name, resultJson(request, result))
