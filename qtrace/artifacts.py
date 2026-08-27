@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from qtrace.errors import EXIT_PARTIAL, QtraceError
 from qtrace.report import conditional_replace_at
@@ -67,6 +67,35 @@ class ArtifactResult:
     exit_code: int
 
 
+def _close_descriptor(descriptor: int) -> None:
+    if descriptor >= 0:
+        os.close(descriptor)
+
+
+def _unlink_if_present(directory: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=directory)
+    except FileNotFoundError:
+        pass
+
+
+def _cleanup_exhaustively(actions: Sequence[tuple[str, Callable[[], None]]],
+                          primary: BaseException | None = None) -> None:
+    """Run every already-transferred cleanup action without masking a body failure."""
+    failures: list[tuple[str, BaseException]] = []
+    for label, action in actions:
+        try:
+            action()
+        except BaseException as error:
+            failures.append((label, error))
+    if primary is not None:
+        for label, error in failures:
+            primary.add_note(f"artifact cleanup failed for {label}: {error}")
+        return
+    if failures:
+        raise failures[0][1]
+
+
 @dataclass
 class _PublicationToken:
     """Opaque, fd-backed claim to one collector-created report inode."""
@@ -78,18 +107,14 @@ class _PublicationToken:
     report_identity: tuple[int, int]
 
     def close(self) -> None:
-        failure: OSError | None = None
+        actions: list[tuple[str, Callable[[], None]]] = []
         for attribute in ("directory", "parent"):
             descriptor = getattr(self, attribute)
+            setattr(self, attribute, -1)
             if descriptor >= 0:
-                setattr(self, attribute, -1)
-                try:
-                    os.close(descriptor)
-                except OSError as error:
-                    if failure is None:
-                        failure = error
-        if failure is not None:
-            raise failure
+                actions.append((f"publication token {attribute}",
+                                lambda descriptor=descriptor: _close_descriptor(descriptor)))
+        _cleanup_exhaustively(actions)
 
     def __del__(self) -> None:
         try:
@@ -122,10 +147,15 @@ def _collector_token(parent: int, session_id: str, output: _OutputDirectory,
         return _PublicationToken(session_id, output.path, held_parent, directory,
                                  (parent_info.st_dev, parent_info.st_ino),
                                  expected_report_identity)
-    except BaseException:
-        if directory >= 0:
-            os.close(directory)
-        os.close(held_parent)
+    except BaseException as primary:
+        held_directory, directory = directory, -1
+        parent_to_close, held_parent = held_parent, -1
+        actions: list[tuple[str, Callable[[], None]]] = []
+        if held_directory >= 0:
+            actions.append(("collector token directory", lambda: _close_descriptor(held_directory)))
+        if parent_to_close >= 0:
+            actions.append(("collector token parent", lambda: _close_descriptor(parent_to_close)))
+        _cleanup_exhaustively(actions, primary)
         raise
 
 
@@ -134,45 +164,54 @@ def publish_collector_report(token: object, writer: Any, report: object) -> tupl
     if not isinstance(token, _PublicationToken):
         raise ValueError("collector token is invalid")
     descriptor = -1
+    primary: BaseException | None = None
     try:
-        descriptor = os.open("report.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                             dir_fd=token.directory)
-        current = os.fstat(descriptor)
-        if (current.st_dev, current.st_ino) != token.report_identity:
+        try:
+            descriptor = os.open("report.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                                 dir_fd=token.directory)
+            current = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino) != token.report_identity:
+                raise FileExistsError("collector report was replaced concurrently")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(64 * 1024, 1024 * 1024 + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > 1024 * 1024:
+                    raise _error("artifact.report_too_large", "collector report exceeds size bound")
+            fragment = json.loads(b"".join(chunks).decode("utf-8"))
+            records = fragment.get("artifacts", []) if type(fragment) is dict else []
+            errors = fragment.get("errors", []) if type(fragment) is dict else []
+            merged = list(getattr(report, "artifacts"))
+            for item in (*records, *errors):
+                if isinstance(item, dict) and item not in merged:
+                    merged.append(item)
+            if merged:
+                report = dataclasses.replace(report, artifacts=tuple(merged))
+            if writer.write_atomic_at(token.directory, "report.json", report,
+                                      expected_identity=token.report_identity):
+                return report, token.visible_path(f"{token.session_id}/report.json"), True
             raise FileExistsError("collector report was replaced concurrently")
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(64 * 1024, 1024 * 1024 + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > 1024 * 1024:
-                raise _error("artifact.report_too_large", "collector report exceeds size bound")
-        fragment = json.loads(b"".join(chunks).decode("utf-8"))
-        records = fragment.get("artifacts", []) if type(fragment) is dict else []
-        errors = fragment.get("errors", []) if type(fragment) is dict else []
-        merged = list(getattr(report, "artifacts"))
-        for item in (*records, *errors):
-            if isinstance(item, dict) and item not in merged:
-                merged.append(item)
-        if merged:
-            report = dataclasses.replace(report, artifacts=tuple(merged))
-        if writer.write_atomic_at(token.directory, "report.json", report,
-                                  expected_identity=token.report_identity):
-            return report, token.visible_path(f"{token.session_id}/report.json"), True
-        raise FileExistsError("collector report was replaced concurrently")
-    except FileExistsError:
-        marker = {"code": "artifact.concurrent_report", "detail": "collector report changed concurrently"}
-        report = dataclasses.replace(report, artifacts=tuple((*getattr(report, "artifacts"), marker)))
-        name = f"{token.session_id}.error.{uuid.uuid4()}.report.json"
-        writer.write_atomic_at(token.parent, name, report, no_replace=True)
-        return report, token.visible_path(name), False
+        except FileExistsError:
+            marker = {"code": "artifact.concurrent_report", "detail": "collector report changed concurrently"}
+            report = dataclasses.replace(report, artifacts=tuple((*getattr(report, "artifacts"), marker)))
+            name = f"{token.session_id}.error.{uuid.uuid4()}.report.json"
+            writer.write_atomic_at(token.parent, name, report, no_replace=True)
+            return report, token.visible_path(name), False
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        token.close()
+        held_descriptor, descriptor = descriptor, -1
+        actions: list[tuple[str, Callable[[], None]]] = []
+        if held_descriptor >= 0:
+            actions.append(("collector report descriptor",
+                            lambda: _close_descriptor(held_descriptor)))
+        actions.append(("collector publication token", token.close))
+        _cleanup_exhaustively(actions, primary)
 
 
 @dataclass
@@ -197,8 +236,7 @@ class _OutputDirectory:
 
     def close(self) -> None:
         descriptor, self.descriptor = self.descriptor, -1
-        if descriptor >= 0:
-            os.close(descriptor)
+        _cleanup_exhaustively([("output directory", lambda: _close_descriptor(descriptor))])
 
 
 class PullMode(str, Enum):
@@ -547,7 +585,9 @@ def _rewrite_published_report(parent: int, session_id: str,
                         getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
     descriptor = -1
     temporary = ".report-" + uuid.uuid4().hex + ".tmp"
+    primary: BaseException | None = None
     try:
+        write_primary: BaseException | None = None
         try:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                  getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -559,9 +599,16 @@ def _rewrite_published_report(parent: int, session_id: str,
                     raise OSError("short report refresh write")
                 offset += written
             os.fsync(descriptor)
+        except BaseException as error:
+            write_primary = error
+            raise
         finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+            held_descriptor, descriptor = descriptor, -1
+            actions: list[tuple[str, Callable[[], None]]] = []
+            if held_descriptor >= 0:
+                actions.append(("report refresh descriptor",
+                                lambda: _close_descriptor(held_descriptor)))
+            _cleanup_exhaustively(actions, write_primary)
         replacement = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
         if not stat.S_ISREG(replacement.st_mode):
             raise _error("artifact.report_invalid", "refresh replacement is not a regular file")
@@ -572,13 +619,18 @@ def _rewrite_published_report(parent: int, session_id: str,
             raise FileExistsError("collector report changed during refresh")
         os.fsync(directory)
         return replacement_identity
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        if temporary:
-            try:
-                os.unlink(temporary, dir_fd=directory)
-            except FileNotFoundError:
-                pass
-        os.close(directory)
+        owned_temporary, temporary = temporary, ""
+        held_directory, directory = directory, -1
+        actions = []
+        if owned_temporary:
+            actions.append(("report refresh temporary",
+                            lambda: _unlink_if_present(held_directory, owned_temporary)))
+        actions.append(("report refresh directory", lambda: _close_descriptor(held_directory)))
+        _cleanup_exhaustively(actions, primary)
 
 
 def _write_refresh_error_report(parent: int, session_id: str,
@@ -591,6 +643,7 @@ def _write_refresh_error_report(parent: int, session_id: str,
     descriptor = -1
     name = ""
     committed = False
+    primary: BaseException | None = None
     try:
         for _ in range(32):
             candidate = "report.error." + uuid.uuid4().hex + ".json"
@@ -614,20 +667,24 @@ def _write_refresh_error_report(parent: int, session_id: str,
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
             raise _error("artifact.report_invalid", "refresh error report is unsafe")
-        os.close(descriptor)
-        descriptor = -1
         os.fsync(directory)
         committed = True
         return name
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        held_descriptor, descriptor = descriptor, -1
+        held_directory, directory = directory, -1
+        actions = []
+        if held_descriptor >= 0:
+            actions.append(("refresh error report descriptor",
+                            lambda: _close_descriptor(held_descriptor)))
         if name and not committed:
-            try:
-                os.unlink(name, dir_fd=directory)
-            except FileNotFoundError:
-                pass
-        os.close(directory)
+            actions.append(("refresh error report temporary",
+                            lambda: _unlink_if_present(held_directory, name)))
+        actions.append(("refresh error report directory", lambda: _close_descriptor(held_directory)))
+        _cleanup_exhaustively(actions, primary)
 
 
 def _safe_output(path: Path) -> Path:
@@ -867,12 +924,14 @@ class ArtifactProcessor:
         output_handle = _open_output(Path(output))
         try:
             stage_root, parent_fd, stage_fd, stage_name = _new_stage(output_handle)
-        except BaseException:
-            output_handle.close()
+        except BaseException as primary:
+            held_output, output_handle = output_handle, None
+            _cleanup_exhaustively([("collector output directory", held_output.close)], primary)
             raise
         stage_artifacts = stage_root / "artifacts"
         published = False
         token: _PublicationToken | None = None
+        primary: BaseException | None = None
         try:
             active = (status is not None and status.get("_native_present", True)
                       and status.get("state") not in {"sealed", "stop_incomplete"})
@@ -1121,21 +1180,35 @@ class ArtifactProcessor:
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
             if token is not None:
-                object.__setattr__(result, "_publication_token", token)
+                returned_token, token = token, None
+                object.__setattr__(result, "_publication_token", returned_token)
             return result
-        except QtraceError:
+        except QtraceError as error:
+            primary = error
             raise
         except Exception as error:
-            raise _error("artifact.collect_failed", str(error), partial=True) from error
+            primary = _error("artifact.collect_failed", str(error), partial=True)
+            raise primary from error
+        except BaseException as error:
+            primary = error
+            raise
         finally:
+            held_stage, stage_fd = stage_fd, -1
+            held_parent, parent_fd = parent_fd, -1
+            held_output, output_handle = output_handle, None
+            actions = []
             if not published:
-                try:
-                    _remove_tree_at(parent_fd, stage_name)
-                except BaseException:
-                    pass
-            os.close(stage_fd)
-            os.close(parent_fd)
-            output_handle.close()
+                actions.append(("collector staging tree",
+                                lambda: _remove_tree_at(held_parent, stage_name)))
+            if held_stage >= 0:
+                actions.append(("collector stage descriptor", lambda: _close_descriptor(held_stage)))
+            if held_parent >= 0:
+                actions.append(("collector parent descriptor", lambda: _close_descriptor(held_parent)))
+            if held_output is not None:
+                actions.append(("collector output directory", held_output.close))
+            if token is not None:
+                actions.append(("collector unreturned token", token.close))
+            _cleanup_exhaustively(actions, primary)
 
     def collect_session(self, device: object, package: str, session_id: str, status: Mapping[str, object] | None,
                         output: Path, timeout: float) -> ArtifactResult:

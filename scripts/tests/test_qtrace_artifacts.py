@@ -804,6 +804,100 @@ class ArtifactTests(unittest.TestCase):
         self.assertTrue(merged.artifacts)
         temporary.cleanup()
 
+    def test_token_close_transfers_every_descriptor_before_close_failures(self):
+        """Removing ownership transfer would retry or leak the second token descriptor."""
+        from qtrace.artifacts import _PublicationToken
+        import os
+
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            session = "11111111-1111-4111-8111-111111111111"
+            (output / session).mkdir()
+            parent = os.open(output, os.O_RDONLY)
+            directory = os.open(session, os.O_RDONLY, dir_fd=parent)
+            token = _PublicationToken(session, output, parent, directory,
+                                      (output.stat().st_dev, output.stat().st_ino), (0, 0))
+            real_close = os.close
+            closed: list[int] = []
+
+            def close_after_real_close(descriptor: int) -> None:
+                closed.append(descriptor)
+                real_close(descriptor)
+                raise OSError("injected close failure")
+
+            with patch("qtrace.artifacts.os.close", side_effect=close_after_real_close):
+                with self.assertRaisesRegex(OSError, "injected close failure"):
+                    token.close()
+
+            self.assertEqual([directory, parent], closed)
+            self.assertEqual((-1, -1), (token.directory, token.parent))
+            for descriptor in closed:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+            token.close()
+            self.assertEqual([directory, parent], closed)
+
+    def test_collector_publication_keeps_body_error_while_closing_every_fd(self):
+        """A close failure must add a note, not replace the report-read failure."""
+        from qtrace.artifacts import publish_collector_report
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        status = self._status(session, artifacts=["run.trace.txt"])
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL})).collect_session(
+                "d", "com.example.app", session, status, Path(root), 1)
+            token = getattr(result, "_publication_token")
+            descriptors = (token.directory, token.parent)
+            real_close = os.close
+
+            def close_after_real_close(descriptor: int) -> None:
+                real_close(descriptor)
+                raise OSError("injected collector close failure")
+
+            with patch("qtrace.artifacts.os.read", side_effect=ValueError("body primary")), patch(
+                    "qtrace.artifacts.os.close", side_effect=close_after_real_close):
+                with self.assertRaisesRegex(ValueError, "body primary") as raised:
+                    publish_collector_report(token, object(), self._report(session, "sealed"))
+
+            self.assertTrue(any("injected collector close failure" in note
+                                for note in raised.exception.__notes__))
+            self.assertEqual((-1, -1), (token.directory, token.parent))
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_collector_publication_propagates_first_close_failure_after_success(self):
+        """A successful merge must still expose the first exhaustive cleanup failure."""
+        from qtrace.artifacts import publish_collector_report
+        import os
+
+        class Writer:
+            def write_atomic_at(self, _directory, _name, _report, **_kwargs):
+                return True
+
+        session = "11111111-1111-4111-8111-111111111111"
+        status = self._status(session, artifacts=["run.trace.txt"])
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL})).collect_session(
+                "d", "com.example.app", session, status, Path(root), 1)
+            token = getattr(result, "_publication_token")
+            descriptors = (token.directory, token.parent)
+            real_close = os.close
+
+            def close_after_real_close(descriptor: int) -> None:
+                real_close(descriptor)
+                raise OSError("first cleanup failure")
+
+            with patch("qtrace.artifacts.os.close", side_effect=close_after_real_close):
+                with self.assertRaisesRegex(OSError, "first cleanup failure"):
+                    publish_collector_report(token, Writer(), self._report(session, "sealed"))
+
+            self.assertEqual((-1, -1), (token.directory, token.parent))
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
     def test_conditional_report_exchange_rolls_back_last_moment_replacement(self):
         from qtrace import report as report_module
         session = "11111111-1111-4111-8111-111111111111"
