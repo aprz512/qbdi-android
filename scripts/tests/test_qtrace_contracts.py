@@ -2126,6 +2126,51 @@ class AcceptanceHarnessTests(unittest.TestCase):
             self.assertTrue(retained[0].is_dir())
             self.assertEqual(workspace / "qtrace-acceptance-failures", captured["dir"])
 
+    def test_app_private_tracer_pair_is_staged_through_unique_temporary_paths(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        runner = FakeRunner()
+        _stage_app_private_binaries("SERIAL", runner, token="a" * 32)
+
+        tracer_stage = "/data/local/tmp/qtrace-acceptance-" + "a" * 32 + "-libqbdi_tracer.so"
+        companion_stage = (
+            "/data/local/tmp/qtrace-acceptance-" + "a" * 32 + "-libshadowhook_nothing.so"
+        )
+        self.assertEqual([
+            ("adb", "-s", "SERIAL", "push", "out/arm64-v8a/libqbdi_tracer.so", tracer_stage),
+            ("adb", "-s", "SERIAL", "push", "out/arm64-v8a/libshadowhook_nothing.so", companion_stage),
+            ("adb", "-s", "SERIAL", "shell", "run-as", "com.aprz.qbdiandroid", "cp",
+             tracer_stage, "files/libqbdi_tracer.so"),
+            ("adb", "-s", "SERIAL", "shell", "run-as", "com.aprz.qbdiandroid", "cp",
+             companion_stage, "files/libshadowhook_nothing.so"),
+            ("adb", "-s", "SERIAL", "shell", "run-as", "com.aprz.qbdiandroid", "chmod", "700",
+             "files/libqbdi_tracer.so", "files/libshadowhook_nothing.so"),
+            ("adb", "-s", "SERIAL", "shell", "rm", "-f", tracer_stage, companion_stage),
+        ], runner.commands)
+
+    def test_app_private_staging_aborts_and_cleans_up_when_companion_push_fails(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        class FailingCompanionRunner(FakeRunner):
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                if command[:4] == ("adb", "-s", "SERIAL", "push"):
+                    self.commands.append(tuple(command))
+                    if command[4].endswith("libshadowhook_nothing.so"):
+                        raise RuntimeError("injected companion push failure")
+                    return __import__(
+                        "scripts.qtrace_device_acceptance", fromlist=["CommandResult"],
+                    ).CommandResult("", "", 0)
+                return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+
+        runner = FailingCompanionRunner()
+        with self.assertRaisesRegex(RuntimeError, "companion push failure"):
+            _stage_app_private_binaries("SERIAL", runner, token="b" * 32)
+
+        self.assertEqual("push", runner.commands[0][3])
+        self.assertEqual("push", runner.commands[1][3])
+        self.assertEqual(("adb", "-s", "SERIAL", "shell", "rm", "-f"), runner.commands[2][:6])
+        self.assertFalse(any("run-as" in command for command in runner.commands))
+
     def test_acceptance_runs_bounded_workflow_and_retries_one_read(self):
         from scripts.qtrace_device_acceptance import run_acceptance
 
@@ -2160,22 +2205,37 @@ class AcceptanceHarnessTests(unittest.TestCase):
         commands = runner.commands
         self.assertEqual(("./gradlew", "nativeHostTest", "--no-daemon"), commands[0])
         self.assertEqual(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), commands[1])
-        self.assertEqual(("./gradlew", ":app:assembleDebug", "--no-daemon"), commands[2])
+        self.assertEqual(
+            ("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"),
+            commands[2],
+        )
         self.assertEqual(("adb", "-s", "SERIAL", "install", "-r", "app/build/outputs/apk/debug/app-debug.apk"), commands[3])
-        self.assertEqual(("adb", "-s", "SERIAL", "shell", "am", "force-stop", "com.aprz.qbdiandroid"), commands[4])
+        self.assertEqual(
+            {"out/arm64-v8a/libqbdi_tracer.so", "out/arm64-v8a/libshadowhook_nothing.so"},
+            {commands[4][4], commands[5][4]},
+        )
+        self.assertTrue(all(command[:4] == ("adb", "-s", "SERIAL", "push")
+                            for command in commands[4:6]))
+        self.assertTrue(all(command[:7] ==
+                            ("adb", "-s", "SERIAL", "shell", "run-as",
+                             "com.aprz.qbdiandroid", "cp")
+                            for command in commands[6:8]))
+        self.assertEqual("chmod", commands[8][6])
+        self.assertEqual(("adb", "-s", "SERIAL", "shell", "rm", "-f"), commands[9][:6])
+        self.assertEqual(("adb", "-s", "SERIAL", "shell", "am", "force-stop", "com.aprz.qbdiandroid"), commands[10])
         self.assertEqual(
             ("adb", "-s", "SERIAL", "shell", "am", "start", "-n", "com.aprz.qbdiandroid/.MainActivity",
              "--ez", "qtrace_acceptance", "true", "--es", "qtrace_acceptance_mode", "timed",
              "--el", "qtrace_acceptance_seed", "5855319310239641971", "--el", "qtrace_acceptance_iterations", "30"),
-            commands[5],
+            commands[11],
         )
-        self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[6])
-        self.assertEqual(16, len(commands))
+        self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[12])
+        self.assertEqual(22, len(commands))
         self.assertEqual(15, runner.reads)  # baseline retry, per-run entry evidence, reports, oracle, pulls
-        self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[11])
-        self.assertIn("--name", commands[13])
-        self.assertIn("fixture.trace.bin.lz4", commands[13])
-        self.assertEqual("--compressed-only", commands[15][-5])
+        self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[17])
+        self.assertIn("--name", commands[19])
+        self.assertIn("fixture.trace.bin.lz4", commands[19])
+        self.assertEqual("--compressed-only", commands[21][-5])
 
 
 if __name__ == "__main__":

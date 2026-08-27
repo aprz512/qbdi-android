@@ -35,6 +35,12 @@ from qtrace.status import load_strict_json, validate_status_shape
 
 PACKAGE = "com.aprz.qbdiandroid"
 ACTIVITY = "com.aprz.qbdiandroid/.MainActivity"
+TRACER_PATH = Path("out/arm64-v8a/libqbdi_tracer.so")
+COMPANION_PATH = Path("out/arm64-v8a/libshadowhook_nothing.so")
+_APP_PRIVATE_BINARIES = (
+    (TRACER_PATH, "files/libqbdi_tracer.so"),
+    (COMPANION_PATH, "files/libshadowhook_nothing.so"),
+)
 SEED = 5855319310239641971
 ITERATIONS = 30
 BASELINE_PATH = f"/data/data/{PACKAGE}/files/qtrace-acceptance-baseline.json"
@@ -178,6 +184,49 @@ class Runner(Protocol):
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
     def read_text(self, path: Path, *, timeout: float) -> str: ...
     def read_text_beneath(self, root: Path | RootedReader, relative: Path, *, timeout: float) -> str: ...
+
+
+def _stage_app_private_binaries(
+    device: str,
+    runner: Runner,
+    *,
+    token: str,
+    package: str = PACKAGE,
+) -> None:
+    """Install the freshly built tracer pair without trusting persistent app data."""
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise ValueError("acceptance staging token must be 32 lowercase hex characters")
+    staged = tuple(
+        f"/data/local/tmp/qtrace-acceptance-{token}-{Path(destination).name}"
+        for _source, destination in _APP_PRIVATE_BINARIES
+    )
+    staged_successfully = False
+    try:
+        for (source, _destination), remote in zip(_APP_PRIVATE_BINARIES, staged):
+            runner.run(
+                ("adb", "-s", device, "push", str(source), remote),
+                timeout=120.0,
+            )
+        for (_source, destination), remote in zip(_APP_PRIVATE_BINARIES, staged):
+            runner.run(
+                ("adb", "-s", device, "shell", "run-as", package, "cp", remote, destination),
+                timeout=30.0,
+            )
+        runner.run(
+            ("adb", "-s", device, "shell", "run-as", package, "chmod", "700",
+             *(_destination for _source, _destination in _APP_PRIVATE_BINARIES)),
+            timeout=30.0,
+        )
+        staged_successfully = True
+    finally:
+        try:
+            runner.run(
+                ("adb", "-s", device, "shell", "rm", "-f", *staged),
+                timeout=30.0,
+            )
+        except Exception:
+            if staged_successfully:
+                raise
 
 
 class RootedReader:
@@ -887,15 +936,18 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     directory.mkdir(parents=True, exist_ok=True)
     runner.run(("./gradlew", "nativeHostTest", "--no-daemon"), timeout=900.0)
     runner.run(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), timeout=300.0)
-    runner.run(("./gradlew", ":app:assembleDebug", "--no-daemon"), timeout=900.0)
+    runner.run(("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"), timeout=900.0)
     runner.run(("adb", "-s", device, "install", "-r", "app/build/outputs/apk/debug/app-debug.apk"), timeout=120.0)
+    _stage_app_private_binaries(
+        device, runner, token=uuid.uuid4().hex, package=PACKAGE,
+    )
     runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)
     runner.run(("adb", "-s", device, "shell", "am", "start", "-n", ACTIVITY,
                 "--ez", "qtrace_acceptance", "true", "--es", "qtrace_acceptance_mode", "timed",
                 "--el", "qtrace_acceptance_seed", str(SEED), "--el", "qtrace_acceptance_iterations", str(ITERATIONS)), timeout=30.0)
     baseline = _wait_for_baseline(runner)
     runner.run(("python3", "scripts/benchmark_trace.py", "--device", device, "--profile", "fast", "--runs", "5",
-                "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), timeout=900.0)
+                "--candidate-tracer", str(TRACER_PATH), "--compare", "docs/benchmarks/binary-trace-baseline.md"), timeout=900.0)
     with ExitStack() as held_roots:
         reports: dict[str, tuple[RootedReader, Path]] = {}
         timed_reports: dict[str, tuple[dict[str, object], str]] = {}
