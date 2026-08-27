@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
+import math
 import os
 import re
 import stat
@@ -45,6 +47,12 @@ class CommandResult:
     returncode: int
 
 
+@dataclass(frozen=True)
+class RegularFileStat:
+    size: int
+    identity: tuple[int, int]
+
+
 class Runner(Protocol):
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
@@ -57,11 +65,21 @@ class RootedReader:
 
     def __init__(self, root: Path) -> None:
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = -1
         try:
-            self._descriptor = os.open(root, flags)
-            details = os.fstat(self._descriptor)
+            descriptor = os.open(root, flags)
+            details = os.fstat(descriptor)
+            if not stat.S_ISDIR(details.st_mode):
+                raise OSError("trusted output root is not a directory")
         except OSError as error:
+            if descriptor >= 0:
+                os.close(descriptor)
             raise RuntimeError("trusted output root is not a directory") from error
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
+        self._descriptor = descriptor
         self.path = root
         self._identity = (details.st_dev, details.st_ino)
 
@@ -76,12 +94,13 @@ class RootedReader:
             os.close(self._descriptor)
             self._descriptor = -1
 
-    def read_bytes(self, relative: Path | str, maximum_bytes: int = 1_048_576,
-                   *, deadline: float | None = None) -> bytes:
+    def _open_regular(self, relative: Path | str) -> tuple[int, os.stat_result]:
         candidate = Path(relative)
         if (self._descriptor < 0 or candidate.is_absolute() or not candidate.parts or
                 ".." in candidate.parts):
             raise RuntimeError("reported output path is unsafe")
+        directory = -1
+        descriptor = -1
         try:
             root_details = os.fstat(self._descriptor)
             if (root_details.st_dev, root_details.st_ino) != self._identity:
@@ -92,30 +111,50 @@ class RootedReader:
                                 getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
                 os.close(directory)
                 directory = child
-            descriptor = os.open(candidate.parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                                 dir_fd=directory)
-            try:
-                details = os.fstat(descriptor)
-                if not stat.S_ISREG(details.st_mode) or details.st_size > maximum_bytes:
-                    raise RuntimeError("reported output is not a bounded regular file")
-                data = bytearray()
-                while len(data) < details.st_size:
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise RuntimeError("reported output read exceeded deadline")
-                    block = os.read(descriptor, min(64 * 1024, details.st_size - len(data)))
-                    if not block:
-                        raise RuntimeError("reported output changed while being read")
-                    data.extend(block)
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise RuntimeError("reported output read exceeded deadline")
-                return bytes(data)
-            finally:
-                os.close(descriptor)
+            descriptor = os.open(
+                candidate.parts[-1],
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory,
+            )
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode):
+                raise RuntimeError("reported output is not a regular file")
+            result, descriptor = descriptor, -1
+            return result, details
         except OSError as error:
             raise RuntimeError("reported output is outside the trusted directory") from error
         finally:
-            if "directory" in locals():
+            if descriptor >= 0:
+                os.close(descriptor)
+            if directory >= 0:
                 os.close(directory)
+
+    def stat_regular(self, relative: Path | str) -> RegularFileStat:
+        descriptor, details = self._open_regular(relative)
+        try:
+            return RegularFileStat(details.st_size, (details.st_dev, details.st_ino))
+        finally:
+            os.close(descriptor)
+
+    def read_bytes(self, relative: Path | str, maximum_bytes: int = 1_048_576,
+                   *, deadline: float | None = None) -> bytes:
+        descriptor, details = self._open_regular(relative)
+        try:
+            if details.st_size > maximum_bytes:
+                raise RuntimeError("reported output is not a bounded regular file")
+            data = bytearray()
+            while len(data) < details.st_size:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError("reported output read exceeded deadline")
+                block = os.read(descriptor, min(64 * 1024, details.st_size - len(data)))
+                if not block:
+                    raise RuntimeError("reported output changed while being read")
+                data.extend(block)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError("reported output read exceeded deadline")
+            return bytes(data)
+        finally:
+            os.close(descriptor)
 
 
 class SubprocessRunner:
@@ -273,6 +312,7 @@ _PULL_ARTIFACT_KEYS = frozenset((
     "termination", "stop_reason", "metrics_schema", "producer_waits", "producer_wait_ns",
     "conversion_ms", "native_stop_acknowledged", "host_observed_ack_ms",
 ))
+_PULL_FLIGHT_ARTIFACT_KEYS = _PULL_ARTIFACT_KEYS | {"recovery_status"}
 
 
 def _strict_session_report(runner: Runner, root: Path, relative: Path) -> dict[str, object]:
@@ -406,6 +446,8 @@ def _validated_timed_report(runner: Runner, root: Path | RootedReader, relative:
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or
             value.get("stage") != "completed" or value.get("package") != PACKAGE):
         raise RuntimeError("timed qtrace report is incomplete")
+    if relative != Path(value["session_id"]) / "report.json":
+        raise RuntimeError("session report is not in its session directory")
     native = value.get("native")
     status = native.get("status") if isinstance(native, dict) else None
     if (not isinstance(status, dict) or status.get("state") != "sealed" or
@@ -450,6 +492,8 @@ def _validated_monitor_report(runner: Runner, root: Path | RootedReader, relativ
     report = _strict_session_report(runner, root, relative)
     if report.get("schema") != 1 or report.get("package") != PACKAGE or report.get("status") != status:
         raise RuntimeError("monitor report has an invalid classification")
+    if relative != Path(report["session_id"]) / "report.json":
+        raise RuntimeError("session report is not in its session directory")
     return report
 
 
@@ -606,6 +650,10 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
                            compressed_only: bool = False) -> dict[str, object]:
     relative = _published_report_path(stdout, root)
     report = _strict_pull_report(runner, root, relative)
+    session_id = report["sessionId"]
+    if (_UUID4.fullmatch(session_id) is None or
+            relative != Path(session_id) / "report.json"):
+        raise RuntimeError("pull report is not in its session directory")
     if report["errors"] != []:
         raise RuntimeError("manual pull report contains errors")
     records = report.get("artifacts")
@@ -613,7 +661,8 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
         raise RuntimeError("manual pull report has no artifact records")
     names: set[str] = set()
     for item in records:
-        if not isinstance(item, dict) or set(item) != _PULL_ARTIFACT_KEYS:
+        if not isinstance(item, dict) or set(item) not in {
+                _PULL_ARTIFACT_KEYS, _PULL_FLIGHT_ARTIFACT_KEYS}:
             raise RuntimeError("manual pull report has an invalid artifact record")
         name, local = item["remote_name"], item["local_path"]
         local_parts = Path(local).parts if isinstance(local, str) else ()
@@ -621,26 +670,55 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
                 local_parts != ("artifacts", name)):
             raise RuntimeError("manual pull report has an unsafe artifact path")
         if (type(item["source_size"]) not in {int, type(None)} or
-                type(item["destination_size"]) not in {int, type(None)} or
+                type(item["destination_size"]) is not int or
                 any(value is not None and value < 0 for value in
                     (item["source_size"], item["destination_size"])) or
                 not isinstance(item["sha256"], str) or len(item["sha256"]) != 64 or
                 any(character not in "0123456789abcdef" for character in item["sha256"])):
             raise RuntimeError("manual pull report has invalid artifact metadata")
-        if any(value is not None and not isinstance(value, str) for value in
-               (item["decoder"], item["termination"], item["stop_reason"])):
+        decoder = item["decoder"]
+        if decoder not in {None, "qtrb", "flight", "lz4-text", "legacy", "sidecar"}:
+            raise RuntimeError("manual pull report has invalid artifact status")
+        if item["stop_reason"] is not None and type(item["stop_reason"]) is not str:
             raise RuntimeError("manual pull report has invalid artifact status")
         if any(value is not None and type(value) is not int for value in (
                 item["metrics_schema"], item["producer_waits"], item["producer_wait_ns"])) or \
-                any(value is not None and type(value) is not float for value in (
+                any(value is not None and (type(value) not in {int, float} or
+                                           not math.isfinite(value) or value < 0) for value in (
                     item["conversion_ms"], item["host_observed_ack_ms"])):
+            raise RuntimeError("manual pull report has invalid artifact counters")
+        if any(value is not None and value < 0 for value in (
+                item["metrics_schema"], item["producer_waits"], item["producer_wait_ns"])):
             raise RuntimeError("manual pull report has invalid artifact counters")
         if item["native_stop_acknowledged"] is not None and type(item["native_stop_acknowledged"]) is not bool:
             raise RuntimeError("manual pull report has invalid stop acknowledgement")
+        termination = item["termination"]
+        if decoder == "flight":
+            recovery = item.get("recovery_status")
+            if (set(item) != _PULL_FLIGHT_ARTIFACT_KEYS or recovery != "complete" or
+                    type(termination) is not dict or
+                    set(termination) != {"cause", "initiator_tid"} or
+                    termination.get("cause") not in {"unknown", "termination_intent"} or
+                    (termination["cause"] == "unknown" and
+                     termination.get("initiator_tid") is not None) or
+                    (termination["cause"] == "termination_intent" and
+                     (type(termination.get("initiator_tid")) is not int or
+                      termination["initiator_tid"] <= 0))):
+                raise RuntimeError("manual pull report has invalid flight recovery status")
+        elif (set(item) != _PULL_ARTIFACT_KEYS or
+              (decoder == "qtrb" and termination not in {"completed", "stopped"}) or
+              (decoder == "lz4-text" and termination != "completed") or
+              (decoder in {None, "legacy", "sidecar"} and termination is not None)):
+            raise RuntimeError("manual pull report has invalid decoder status")
         if isinstance(root, RootedReader):
-            _read_root(root, str(relative.parent / local))
+            details = root.stat_regular(relative.parent / local)
         else:
-            _trusted_output(root / relative.parent / local, root)
+            with RootedReader(root) as held:
+                details = held.stat_regular(relative.parent / local)
+        if details.size != item["destination_size"]:
+            raise RuntimeError("manual pull artifact destination size does not match report")
+        if name in names:
+            raise RuntimeError("manual pull report repeats an artifact name")
         names.add(name)
     if named is not None and named not in names:
         raise RuntimeError("named pull report omitted the trusted artifact")
@@ -665,21 +743,22 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     baseline = _wait_for_baseline(runner)
     runner.run(("python3", "scripts/benchmark_trace.py", "--device", device, "--profile", "fast", "--runs", "5",
                 "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), timeout=900.0)
-    reports: dict[str, tuple[RootedReader, Path]] = {}
-    timed_evidence: dict[str, tuple[str, str]] = {}
-    for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
-        output = directory / name
-        published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
-                               allowed=(0, 2) if scenario == "flight-crash" else (0,))
-        reports[name] = (RootedReader(output), _published_report_path(published.stdout, output))
-        if scenario == "timed":
-            timed_evidence[name] = (
-                _read_retry(runner, Path(RECEIPT_PATH), timeout=5.0),
-                _read_retry(runner, Path(ENTRY_STATUS_PATH), timeout=5.0),
-            )
-        if scenario == "flight-crash" and published.returncode != 2:
-            raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
-    try:
+    with ExitStack() as held_roots:
+        reports: dict[str, tuple[RootedReader, Path]] = {}
+        timed_evidence: dict[str, tuple[str, str]] = {}
+        for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
+            output = directory / name
+            published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
+                                   allowed=(0, 2) if scenario == "flight-crash" else (0,))
+            held = held_roots.enter_context(RootedReader(output))
+            reports[name] = (held, _published_report_path(published.stdout, held))
+            if scenario == "timed":
+                timed_evidence[name] = (
+                    _read_retry(runner, Path(RECEIPT_PATH), timeout=5.0),
+                    _read_retry(runner, Path(ENTRY_STATUS_PATH), timeout=5.0),
+                )
+            if scenario == "flight-crash" and published.returncode != 2:
+                raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
         timed, artifact = _validated_timed_report(runner, *reports["offset"])
         _validate_timed_fixture_receipt(timed, *timed_evidence["offset"])
         symbol, _ = _validated_timed_report(runner, *reports["symbol"])
@@ -697,9 +776,6 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             raise RuntimeError("offset and symbol timed scenes did not normalize identically")
         _validated_monitor_report(runner, *reports["exit"], status="process_exited")
         _validated_monitor_report(runner, *reports["crash"], status="crash_recovered")
-    finally:
-        for held, _relative in reports.values():
-            held.close()
     runner.run(("adb", "-s", device, "shell", "kill", "-0", str(timed["pid"])), timeout=10.0)
     timed_oracle = json.loads(_read_retry(runner, Path(
         f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"), timeout=5.0))

@@ -15,11 +15,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from qtrace.config import load_config
+from qtrace.artifacts import ArtifactProcessor, PullMode, PullSelection
 from qtrace.errors import ConfigError, QtraceError
 from qtrace.models import ResolvedScene
 from qtrace.session import parse_status
 from qtrace.status import STATUS_KEYS, validate_status_shape
 from scripts.tests.test_pull_trace import stopped_binary_stream
+from scripts.tests.test_qtrace_artifacts import COMPLETE_TERMINAL, FakeClient
+from scripts.tests.test_trace_convert import fake_lz4_executable
+from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
+from scripts.tests.test_pull_trace import recoverable_flight_artifact
 from scripts.tests.test_trace_convert import metrics_sidecar
 
 
@@ -689,16 +694,16 @@ class FakeRunner:
                     {
                         "remote_name": "fixture.trace.bin.lz4",
                         "local_path": "artifacts/fixture.trace.bin.lz4",
-                        "source_size": 17,
-                        "destination_size": 17,
+                        "source_size": len(b"pulled artifact"),
+                        "destination_size": len(b"pulled artifact"),
                         "sha256": "0" * 64,
-                        "decoder": "copy",
-                        "termination": None,
+                        "decoder": "qtrb",
+                        "termination": "completed",
                         "stop_reason": None,
                         "metrics_schema": None,
                         "producer_waits": None,
                         "producer_wait_ns": None,
-                        "conversion_ms": None,
+                        "conversion_ms": 0.0,
                         "native_stop_acknowledged": None,
                         "host_observed_ack_ms": None,
                     }], "errors": []})
@@ -1152,7 +1157,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         ])
         runner.read_text = lambda _path, *, timeout: json.dumps(document)  # type: ignore[method-assign]
         report, artifact = _validated_timed_report(
-            runner, Path("output"), Path("report.json"),
+            runner, Path("output"), Path(SESSION) / "report.json",
         )
         self.assertEqual(document, report)
         self.assertEqual("fixture.trace.bin.lz4", artifact)
@@ -1172,11 +1177,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
     def test_pull_report_requires_clean_production_records_and_local_artifacts(self):
         from scripts.qtrace_device_acceptance import _validated_pull_report
 
+        artifact_bytes = b"pulled artifact"
         record = {
             "remote_name": "fixture.trace.bin.lz4",
             "local_path": "artifacts/fixture.trace.bin.lz4",
-            "source_size": 17,
-            "destination_size": 17,
+            "source_size": len(artifact_bytes),
+            "destination_size": len(artifact_bytes),
             "sha256": "0" * 64,
             "decoder": "qtrb",
             "termination": "completed",
@@ -1200,7 +1206,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
             root = Path(temporary) / "pull"
             artifact = root / SESSION / "artifacts" / record["remote_name"]
             artifact.parent.mkdir(parents=True)
-            artifact.write_bytes(b"pulled artifact")
+            artifact.write_bytes(artifact_bytes)
             good = {"schema": 1, "sessionId": SESSION, "artifacts": [record], "errors": []}
             _validated_pull_report(PullRunner(good), str(root / SESSION / "report.json"), root)
             invalid_cases = (
@@ -1216,6 +1222,241 @@ class AcceptanceHarnessTests(unittest.TestCase):
             artifact.unlink()
             with self.assertRaisesRegex(RuntimeError, "outside the trusted directory"):
                 _validated_pull_report(PullRunner(good), str(root / SESSION / "report.json"), root)
+
+    def test_pull_validator_accepts_reports_written_by_every_production_pull_mode(self):
+        from scripts.qtrace_device_acceptance import (
+            RootedReader,
+            SubprocessRunner,
+            _validated_pull_report,
+        )
+
+        package = "com.example.app"
+        status_document = {
+            "schemaVersion": 1,
+            "sessionId": SESSION,
+            "generation": 1,
+            "packageName": package,
+            "pid": 123,
+            "state": "sealed",
+            "reason": "duration_elapsed",
+            "transitionMonotonicNs": 1,
+            "normalizedScenes": [],
+            "activeScenes": [],
+            "artifacts": ["run.trace.txt"],
+            "stopAcknowledged": True,
+            "warnings": [],
+            "errors": [],
+        }
+        status_name = f"session-{SESSION}.status.json"
+        runner = SubprocessRunner("SERIAL", inject_first_read_failure=False)
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            selections = (
+                ("latest", PullSelection(PullMode.LATEST), None, False),
+                ("name", PullSelection(PullMode.NAME, "run.trace.txt"),
+                 "run.trace.txt", False),
+                ("all", PullSelection(PullMode.ALL), None, False),
+            )
+            for label, selection, named, compressed_only in selections:
+                client = FakeClient({
+                    status_name: json.dumps(status_document).encode(),
+                    "run.trace.txt": COMPLETE_TERMINAL,
+                })
+                output = parent / label
+                result = ArtifactProcessor(client_factory=lambda _d, _p, c=client: c).pull_manual(
+                    "SERIAL", package, selection, output, 1.0,
+                )
+                self.assertEqual(0, result.exit_code)
+                with RootedReader(output) as held:
+                    _validated_pull_report(
+                        runner,
+                        str(result.output_dir / "report.json"),
+                        held,
+                        named=named,
+                        compressed_only=compressed_only,
+                    )
+
+            lz4 = fake_lz4_executable(parent)
+            compressed_status = {
+                **status_document,
+                "artifacts": ["run.trace.txt.lz4"],
+            }
+            compressed_client = FakeClient({
+                status_name: json.dumps(compressed_status).encode(),
+                "run.trace.txt.lz4": uncompressed_lz4_frame(COMPLETE_TERMINAL),
+            })
+            output = parent / "compressed"
+            with patch("qtrace.artifacts.shutil.which", return_value=str(lz4)):
+                result = ArtifactProcessor(
+                    client_factory=lambda _d, _p: compressed_client,
+                ).pull_manual(
+                    "SERIAL", package,
+                    PullSelection(PullMode.ALL, compressed_only=True),
+                    output, 1.0,
+                )
+            self.assertEqual(0, result.exit_code)
+            with RootedReader(output) as held:
+                _validated_pull_report(
+                    runner,
+                    str(result.output_dir / "report.json"),
+                    held,
+                    compressed_only=True,
+                )
+
+    def test_pull_validator_accepts_real_complete_flight_union_record(self):
+        from scripts.qtrace_device_acceptance import (
+            RootedReader,
+            SubprocessRunner,
+            _validated_pull_report,
+        )
+
+        client = FakeClient({"run.flight.bin": recoverable_flight_artifact()})
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "flight"
+            result = ArtifactProcessor(client_factory=lambda _d, _p: client).pull_manual(
+                "SERIAL", "com.example.app",
+                PullSelection(PullMode.NAME, "run.flight.bin"), output, 1.0,
+            )
+            self.assertEqual(0, result.exit_code)
+            with RootedReader(output) as held:
+                _validated_pull_report(
+                    SubprocessRunner("SERIAL", inject_first_read_failure=False),
+                    str(result.output_dir / "report.json"),
+                    held,
+                    named="run.flight.bin",
+                )
+
+    def test_pull_validator_stats_large_artifacts_without_reading_them(self):
+        from scripts.qtrace_device_acceptance import RootedReader, _validated_pull_report
+
+        record = {
+            "remote_name": "large.trace.bin",
+            "local_path": "artifacts/large.trace.bin",
+            "source_size": 2 * 1024 * 1024,
+            "destination_size": 2 * 1024 * 1024,
+            "sha256": "0" * 64,
+            "decoder": "qtrb",
+            "termination": "completed",
+            "stop_reason": None,
+            "metrics_schema": None,
+            "producer_waits": None,
+            "producer_wait_ns": None,
+            "conversion_ms": 0.0,
+            "native_stop_acknowledged": None,
+            "host_observed_ack_ms": None,
+        }
+
+        class PullRunner:
+            def read_text_beneath(self, _root, _relative, *, timeout):
+                return json.dumps({
+                    "schema": 1,
+                    "sessionId": SESSION,
+                    "artifacts": [record],
+                    "errors": [],
+                })
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / SESSION / "artifacts" / record["remote_name"]
+            artifact.parent.mkdir(parents=True)
+            with artifact.open("wb") as output:
+                output.truncate(record["destination_size"])
+            with RootedReader(root) as held:
+                _validated_pull_report(
+                    PullRunner(), str(root / SESSION / "report.json"), held,
+                )
+                record["destination_size"] += 1
+                with self.assertRaisesRegex(RuntimeError, "destination size"):
+                    _validated_pull_report(
+                        PullRunner(), str(root / SESSION / "report.json"), held,
+                    )
+
+    def test_report_parent_is_bound_to_the_report_session_id(self):
+        from scripts.qtrace_device_acceptance import (
+            _validated_pull_report,
+            _validated_timed_report,
+        )
+
+        pull_record = {
+            "remote_name": "fixture.trace.bin",
+            "local_path": "artifacts/fixture.trace.bin",
+            "source_size": 1,
+            "destination_size": 1,
+            "sha256": "0" * 64,
+            "decoder": "qtrb",
+            "termination": "completed",
+            "stop_reason": None,
+            "metrics_schema": None,
+            "producer_waits": None,
+            "producer_wait_ns": None,
+            "conversion_ms": 0.0,
+            "native_stop_acknowledged": None,
+            "host_observed_ack_ms": None,
+        }
+
+        class PullRunner:
+            def read_text_beneath(self, _root, _relative, *, timeout):
+                return json.dumps({
+                    "schema": 1, "sessionId": SESSION,
+                    "artifacts": [pull_record], "errors": [],
+                })
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wrong = "223e4567-e89b-42d3-a456-426614174001"
+            artifact = root / wrong / "artifacts" / pull_record["remote_name"]
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"x")
+            with self.assertRaisesRegex(RuntimeError, "session directory"):
+                _validated_pull_report(
+                    PullRunner(), str(root / wrong / "report.json"), root,
+                )
+
+        runner = FakeRunner()
+        with self.assertRaisesRegex(RuntimeError, "session directory"):
+            _validated_timed_report(
+                runner, Path("output"),
+                Path("223e4567-e89b-42d3-a456-426614174001") / "report.json",
+            )
+
+    def test_acceptance_closes_each_held_root_after_mid_setup_failure(self):
+        from scripts.qtrace_device_acceptance import CommandResult, run_acceptance
+
+        class FailureRunner(FakeRunner):
+            def __init__(self, failure):
+                super().__init__()
+                self.failure = failure
+                self.demo_count = 0
+
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                if "qtrace" in command and "demo" in command:
+                    self.demo_count += 1
+                    if self.failure == "command" and self.demo_count == 2:
+                        raise RuntimeError("second demo failed")
+                    result = super().run(
+                        command, timeout=timeout, cwd=cwd, allowed=allowed,
+                    )
+                    if self.failure == "path" and self.demo_count == 1:
+                        return CommandResult("not-a-report\n", "", 0)
+                    return result
+                return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+
+            def read_text(self, path, *, timeout):
+                if self.failure == "evidence" and path.name == "qtrace-acceptance-receipt.json":
+                    raise RuntimeError("receipt read failed")
+                return super().read_text(path, timeout=timeout)
+
+        def descriptor_count():
+            return len(list(Path("/proc/self/fd").iterdir()))
+
+        for failure in ("command", "path", "evidence"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                before = descriptor_count()
+                with self.assertRaises(RuntimeError):
+                    run_acceptance(
+                        "SERIAL", Path(temporary), runner=FailureRunner(failure),
+                    )
+                self.assertEqual(before, descriptor_count())
 
     def test_requires_an_explicit_device(self):
         from scripts.qtrace_device_acceptance import main
