@@ -314,8 +314,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = run_acceptance(arguments.device, root, runner=SubprocessRunner(arguments.device))
     except BaseException as error:
-        retained = Path(tempfile.gettempdir()) / f"qtrace-device-acceptance-failed-{uuid.uuid4().hex}"
-        shutil.copytree(root, retained)
+        parent = Path.cwd() / "qtrace-acceptance-failures"
+        parent.mkdir(mode=0o700, exist_ok=True)
+        if parent.is_symlink() or not parent.is_dir():
+            raise RuntimeError("acceptance failure parent is unsafe")
+        retained = parent / uuid.uuid4().hex
+        root.rename(retained)
         temporary.cleanup()
         print(f"qtrace acceptance failed; generated reports remain at: {retained}", file=sys.stderr)
         print(str(error), file=sys.stderr)
