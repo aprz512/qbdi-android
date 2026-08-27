@@ -2,6 +2,7 @@ import contextlib
 import builtins
 import io
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -9,7 +10,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from qtrace.artifacts import ArtifactResult, PullMode
-from qtrace.demo import _TARGET_MEMBER, _extract_target, make_demo_action
+from qtrace.demo import (DemoFixture, _TARGET_MEMBER, _extract_target,
+                         make_demo_action, make_demo_config)
 from qtrace.errors import QtraceError
 from qtrace.models import AppConfig, OffsetScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.session import SessionResult
@@ -72,8 +74,25 @@ class QtraceCliTests(unittest.TestCase):
     def test_pull_is_config_and_frida_independent_and_defaults_to_latest(self):
         from qtrace import cli
 
-        selected = Mock()
-        selected.serial = "serial"
+        class SelectedDevice:
+            serial = "serial"
+
+            def __init__(self):
+                self.forbidden_calls = []
+
+            def install(self, *args, **kwargs):
+                self.forbidden_calls.append("install")
+                raise AssertionError("pull must not install an app")
+
+            def shell(self, *args, **kwargs):
+                self.forbidden_calls.append("shell")
+                raise AssertionError("pull must not start an app")
+
+            def target_shell(self, *args, **kwargs):
+                self.forbidden_calls.append("target_shell")
+                raise AssertionError("pull must not start an app")
+
+        selected = SelectedDevice()
         result = ArtifactResult(Path("out/session"), (Path("out/session/artifacts/run.trace.bin"),), (), 0)
         real_import = builtins.__import__
 
@@ -103,6 +122,7 @@ class QtraceCliTests(unittest.TestCase):
         fixture.assert_not_called()
         demo_config.assert_not_called()
         demo_action.assert_not_called()
+        self.assertEqual([], selected.forbidden_calls)
 
     def test_pull_selection_is_exclusive_but_compressed_only_is_orthogonal(self):
         from qtrace import cli
@@ -208,6 +228,18 @@ class QtraceCliTests(unittest.TestCase):
 
         self.assertEqual(17.0, device.shell.call_args.kwargs["timeout"])
 
+    def test_demo_monitor_actions_use_distinct_fixture_intent_modes(self):
+        for scenario, expected_mode in (("monitor-exit", "exit"),
+                                        ("flight-crash", "flight-crash")):
+            with self.subTest(scenario=scenario):
+                device = Mock()
+
+                make_demo_action(scenario, 7)(device, 42)
+
+                arguments = device.shell.call_args.args
+                mode_index = arguments.index("qtrace_acceptance_mode")
+                self.assertEqual(expected_mode, arguments[mode_index + 1])
+
     def test_demo_target_extraction_rejects_symlink_parent_without_writing_escape_target(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
             root = Path(directory)
@@ -222,6 +254,34 @@ class QtraceCliTests(unittest.TestCase):
                 _extract_target(apk, destination)
 
             self.assertFalse(escaped.exists())
+
+    def test_demo_fixture_rejects_parent_replacement_after_held_fd_publication(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            apk = root / "fixture.apk"
+            with zipfile.ZipFile(apk, "w") as archive:
+                archive.writestr(_TARGET_MEMBER, b"fixture-target")
+            destination = root / "build/qtrace-demo/arm64-v8a/libdemo_target.so"
+            outside_target = Path(outside) / "qtrace-demo/arm64-v8a/libdemo_target.so"
+            outside_target.parent.mkdir(parents=True)
+            outside_target.write_bytes(b"external-target")
+            real_replace = os.replace
+
+            def publish_then_swap(source, target, *args, **kwargs):
+                result = real_replace(source, target, *args, **kwargs)
+                real_replace(root / "build", root / "build-held")
+                (root / "build").symlink_to(outside, target_is_directory=True)
+                return result
+
+            with patch("qtrace.demo.os.replace", side_effect=publish_then_swap):
+                extracted = _extract_target(apk, destination)
+
+            inspector = Mock()
+            fixture = DemoFixture(apk, extracted.path, extracted.parent_identity,
+                                  extracted.target_identity)
+            with self.assertRaisesRegex(QtraceError, "identity"):
+                make_demo_config(fixture, inspector, "offset", "timed")
+            inspector.symbol_range.assert_not_called()
 
 
 if __name__ == "__main__":

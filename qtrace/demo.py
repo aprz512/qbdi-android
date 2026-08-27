@@ -36,6 +36,25 @@ _BUILD_OUTPUT_BYTES = 4 * 1024 * 1024
 class DemoFixture:
     apk: Path
     target_binary: Path
+    target_parent_identity: "_PathIdentity | None" = None
+    target_identity: "_PathIdentity | None" = None
+
+
+@dataclass(frozen=True)
+class _PathIdentity:
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class _ExtractedTarget:
+    path: Path
+    parent_identity: _PathIdentity
+    target_identity: _PathIdentity
+
+
+def _identity(metadata: os.stat_result) -> _PathIdentity:
+    return _PathIdentity(metadata.st_dev, metadata.st_ino)
 
 
 def _regular(path: Path, stage: str) -> Path:
@@ -48,7 +67,7 @@ def _regular(path: Path, stage: str) -> Path:
     return path
 
 
-def _open_safe_directory(path: Path) -> int:
+def _open_safe_directory(path: Path, *, create: bool) -> int:
     """Open/create an absolute directory path without ever following a symlink."""
     candidate = Path(path)
     if not candidate.is_absolute() or not hasattr(os, "O_NOFOLLOW"):
@@ -58,10 +77,11 @@ def _open_safe_directory(path: Path) -> int:
     descriptor = os.open(candidate.anchor, flags)
     try:
         for part in candidate.parts[1:]:
-            try:
-                os.mkdir(part, 0o700, dir_fd=descriptor)
-            except FileExistsError:
-                pass
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
             try:
                 next_descriptor = os.open(part, flags, dir_fd=descriptor)
             except OSError as error:
@@ -75,10 +95,11 @@ def _open_safe_directory(path: Path) -> int:
     return descriptor
 
 
-def _extract_target(apk: Path, destination: Path) -> Path:
-    directory = _open_safe_directory(destination.parent)
+def _extract_target(apk: Path, destination: Path) -> _ExtractedTarget:
+    directory = _open_safe_directory(destination.parent, create=True)
     temporary = f".qtrace-demo-{uuid.uuid4().hex}.so"
     descriptor = -1
+    target_descriptor = -1
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=directory)
@@ -108,6 +129,14 @@ def _extract_target(apk: Path, destination: Path) -> Path:
             os.fsync(target.fileno())
         os.replace(temporary, destination.name, src_dir_fd=directory, dst_dir_fd=directory)
         os.fsync(directory)
+        target_descriptor = os.open(destination.name, os.O_RDONLY | os.O_NOFOLLOW,
+                                    dir_fd=directory)
+        target_metadata = os.fstat(target_descriptor)
+        if not stat.S_ISREG(target_metadata.st_mode):
+            raise QtraceError("demo.target_invalid", "demo.extract",
+                              "published fixture target is not a regular file")
+        parent_identity = _identity(os.fstat(directory))
+        target_identity = _identity(target_metadata)
     except (OSError, zipfile.BadZipFile) as error:
         raise QtraceError("demo.extract_failed", "demo.extract", f"cannot extract fixture target: {error}") from error
     finally:
@@ -117,8 +146,10 @@ def _extract_target(apk: Path, destination: Path) -> Path:
             pass
         if descriptor >= 0:
             os.close(descriptor)
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
         os.close(directory)
-    return _regular(destination, "demo.extract")
+    return _ExtractedTarget(destination, parent_identity, target_identity)
 
 
 def build_demo_fixture(repo_root: Path, runner: BoundedRunner, timeout: float) -> DemoFixture:
@@ -133,7 +164,10 @@ def build_demo_fixture(repo_root: Path, runner: BoundedRunner, timeout: float) -
     except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
         raise QtraceError("demo.build_failed", "demo.build", f"fixture build failed: {error}") from error
     apk = _regular(root / _APK_RELATIVE, "demo.build")
-    return DemoFixture(apk=apk, target_binary=_extract_target(apk, root / _TARGET_OUTPUT))
+    extracted = _extract_target(apk, root / _TARGET_OUTPUT)
+    return DemoFixture(apk=apk, target_binary=extracted.path,
+                       target_parent_identity=extracted.parent_identity,
+                       target_identity=extracted.target_identity)
 
 
 def _scene_symbol(scenario: str) -> str:
@@ -150,7 +184,7 @@ def make_demo_config(fixture: DemoFixture, inspector: ElfInspector, scene_form: 
     if type(fixture) is not DemoFixture:
         raise QtraceError("demo.fixture_invalid", "demo.config", "fixture has an invalid shape")
     apk = _regular(fixture.apk, "demo.config")
-    target = _regular(fixture.target_binary, "demo.config")
+    target = _fixture_target(fixture)
     symbol = _scene_symbol(scenario)
     if scene_form == "offset":
         start, end = inspector.symbol_range(target, symbol)
@@ -159,6 +193,7 @@ def make_demo_config(fixture: DemoFixture, inspector: ElfInspector, scene_form: 
         scene = SymbolScene("fixture-entry", symbol)
     else:
         raise QtraceError("demo.scene_form_invalid", "demo.config", "scene form must be offset or symbol")
+    _fixture_target(fixture)
     flight = scenario == "flight-crash"
     return UserConfig(
         schema_version=1,
@@ -168,6 +203,35 @@ def make_demo_config(fixture: DemoFixture, inspector: ElfInspector, scene_form: 
                             "fixture-entry" if flight else None, None, None),
         scenes=(scene,),
     )
+
+
+def _fixture_target(fixture: DemoFixture) -> Path:
+    """Re-bind built fixture paths before another component can inspect them."""
+    target = Path(fixture.target_binary)
+    expected_parent, expected_target = fixture.target_parent_identity, fixture.target_identity
+    if expected_parent is None and expected_target is None:
+        return _regular(target, "demo.config")
+    if type(expected_parent) is not _PathIdentity or type(expected_target) is not _PathIdentity:
+        raise QtraceError("demo.fixture_identity", "demo.config", "fixture target identity is malformed")
+    try:
+        directory = _open_safe_directory(target.parent, create=False)
+    except QtraceError as error:
+        raise QtraceError("demo.fixture_identity", "demo.config", "fixture target identity changed") from error
+    descriptor = -1
+    try:
+        if _identity(os.fstat(directory)) != expected_parent:
+            raise QtraceError("demo.fixture_identity", "demo.config", "fixture target parent identity changed")
+        descriptor = os.open(target.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or _identity(metadata) != expected_target:
+            raise QtraceError("demo.fixture_identity", "demo.config", "fixture target identity changed")
+    except OSError as error:
+        raise QtraceError("demo.fixture_identity", "demo.config", "fixture target identity changed") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+    return target
 
 
 def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0,
