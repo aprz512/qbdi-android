@@ -59,21 +59,32 @@ class RegularFileStat:
 
 
 _LOCAL_READ_TIMEOUT_SECONDS = 15.0
+_WORKER_CLEANUP_SECONDS = 0.05
 
 
-def _kill_and_reap(pid: int) -> None:
+def _kill_and_reap(pid: int, *, cleanup_deadline: float | None = None) -> None:
+    if cleanup_deadline is None:
+        cleanup_deadline = time.monotonic() + _WORKER_CLEANUP_SECONDS
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
     while True:
         try:
-            os.waitpid(pid, 0)
-            return
+            finished, _status = os.waitpid(pid, os.WNOHANG)
         except InterruptedError:
-            continue
+            finished = 0
         except ChildProcessError:
             return
+        if finished == pid:
+            return
+        remaining = cleanup_deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"output reader worker PID {pid} cleanup deadline "
+                f"{cleanup_deadline:.6f} elapsed; unreaped"
+            )
+        time.sleep(min(0.01, remaining))
 
 
 def _read_regular_in_worker(
@@ -86,10 +97,17 @@ def _read_regular_in_worker(
     """Read in a killable child which inherits the held file capability.
 
     The acceptance host calls this from its single-threaded control path. The
-    fork child performs only low-level descriptor operations and is always reaped.
+    fork child performs only low-level descriptor operations. Cleanup is bounded;
+    an uninterruptible child is reported explicitly so the host can exit.
     """
-    if time.monotonic() >= deadline:
+    started = time.monotonic()
+    if started >= deadline:
         raise RuntimeError("reported output read exceeded deadline")
+    cleanup_budget = min(
+        _WORKER_CLEANUP_SECONDS,
+        (deadline - started) / 2.0,
+    )
+    worker_deadline = deadline - cleanup_budget
     scratch = tempfile.TemporaryFile()
     source = os.dup(descriptor)
     pid = -1
@@ -122,11 +140,11 @@ def _read_regular_in_worker(
             try:
                 finished, status = os.waitpid(pid, os.WNOHANG)
             except InterruptedError:
-                continue
+                finished, status = 0, 0
             if finished == pid:
                 pid = -1
                 break
-            remaining = deadline - time.monotonic()
+            remaining = worker_deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError("reported output read exceeded deadline")
             time.sleep(min(0.01, remaining))
@@ -141,7 +159,7 @@ def _read_regular_in_worker(
         return data
     finally:
         if pid > 0:
-            _kill_and_reap(pid)
+            _kill_and_reap(pid, cleanup_deadline=deadline)
         if source >= 0:
             os.close(source)
         scratch.close()

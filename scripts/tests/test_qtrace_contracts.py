@@ -1714,11 +1714,49 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
                 try:
-                    os.waitpid(child_pid, 0)
+                    cleanup_deadline = time.monotonic() + 1.0
+                    while time.monotonic() < cleanup_deadline:
+                        finished, _status = os.waitpid(child_pid, os.WNOHANG)
+                        if finished == child_pid:
+                            break
+                        time.sleep(0.01)
                 except ChildProcessError:
                     pass
             for descriptor in (blocked_read, blocked_write, pid_read, pid_write):
                 os.close(descriptor)
+
+    def test_worker_cleanup_reports_unreaped_pid_without_blocking_past_deadline(self):
+        import scripts.qtrace_device_acceptance as acceptance
+
+        now = [100.0]
+        wait_options = []
+
+        def monotonic():
+            return now[0]
+
+        def pause(seconds):
+            now[0] += seconds
+
+        def never_reaped(_pid, options):
+            wait_options.append(options)
+            if len(wait_options) % 2 == 0:
+                raise InterruptedError("injected signal interruption")
+            return 0, 0
+
+        started = time.monotonic()
+        with patch.object(acceptance.os, "kill"), \
+                patch.object(acceptance.os, "waitpid", side_effect=never_reaped), \
+                patch.object(acceptance.time, "monotonic", side_effect=monotonic), \
+                patch.object(acceptance.time, "sleep", side_effect=pause), \
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    r"worker PID 4242.*cleanup deadline 100\.050000.*unreaped",
+                ):
+            acceptance._kill_and_reap(4242)
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(wait_options)
+        self.assertEqual({os.WNOHANG}, set(wait_options))
 
     def test_strict_report_rejects_duplicate_keys_and_nonfinite_numbers(self):
         from scripts.qtrace_device_acceptance import _strict_json
