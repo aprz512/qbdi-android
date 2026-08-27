@@ -155,7 +155,7 @@ class FakeInjector:
     def install(self, request):
         self.requests.append(request)
         from qtrace.injector import InjectionResult
-        return InjectionResult(4242, SESSION_ID, 7, SCENES)
+        return InjectionResult(4242, SESSION_ID, 7, SCENES, cleanup_detached=True)
 
 
 class FakeCollector:
@@ -344,7 +344,7 @@ class SessionTests(unittest.TestCase):
         device = FakeDevice([status("running", transition=1)], [4242])
         clock = ManualClock()
         runner, injector = orchestrator(device, clock)
-        injector.install = lambda _request: InjectionResult(4242, SESSION_ID, 7, SCENES, False)
+        injector.install = lambda _request: InjectionResult(4242, SESSION_ID, 7, SCENES)
         action_calls = []
         request = dataclasses.replace(self.run_request(), installed_action=lambda *_args: action_calls.append(True))
         with self.assertRaisesRegex(QtraceError, "cleanup/detach"):
@@ -665,7 +665,11 @@ class SessionTests(unittest.TestCase):
         runner, _ = orchestrator(device, ManualClock())
         from qtrace.injector import InjectionResult
         request = self.run_request()
-        runner._read_status(device, request, InjectionResult(4242, SESSION_ID, 7, SCENES), SESSION_ID, None, 0.125)
+        runner._read_status(
+            device, request,
+            InjectionResult(4242, SESSION_ID, 7, SCENES, cleanup_detached=True),
+            SESSION_ID, None, 0.125,
+        )
         self.assertEqual(("cat", 0.125), device.shell_timeouts[-1])
 
     def test_monitor_outage_sleep_does_not_overshoot_deadline(self) -> None:

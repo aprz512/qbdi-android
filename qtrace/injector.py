@@ -55,7 +55,7 @@ class InjectionResult:
     session_id: str
     generation: int
     normalized_scenes: tuple[ResolvedScene, ...]
-    cleanup_detached: bool = True
+    cleanup_detached: bool = False
 
 
 class FridaProvider:
@@ -697,26 +697,36 @@ def _run_injection_worker(
             session_id=request.session_id,
             generation=mailbox.generation,
             normalized_scenes=mailbox.normalized_scenes,
+            cleanup_detached=False,
         )
     except BaseException as error:
         primary = error
     finally:
         cleanup_error: BaseException | None = None
-        for callback in (
-            getattr(script, "unload", None) if script is not None else None,
-            getattr(session, "detach", None) if session is not None else None,
-        ):
+        detach_succeeded = False
+        callbacks = (
+            ("unload", getattr(script, "unload", None) if script is not None else None),
+            ("detach", getattr(session, "detach", None) if session is not None else None),
+        )
+        for name, callback in callbacks:
             if callback is None:
                 continue
             try:
+                if not callable(callback):
+                    raise TypeError(f"Frida {name} cleanup callback is not callable")
                 callback()
+                if name == "detach":
+                    detach_succeeded = True
             except BaseException as error:
                 cleanup_error = cleanup_error or error
         if primary is not None:
             _send_worker_event(channel, "error", _serialize_worker_error(primary))
         else:
             assert result is not None
-            result = dataclasses.replace(result, cleanup_detached=cleanup_error is None)
+            result = dataclasses.replace(
+                result,
+                cleanup_detached=detach_succeeded and cleanup_error is None,
+            )
             _send_worker_event(channel, "result", result)
         _send_worker_event(
             channel,

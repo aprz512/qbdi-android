@@ -431,7 +431,16 @@ class FridaInjectorTests(unittest.TestCase):
             result.normalized_scenes,
         )
         self.assertEqual((4242, SESSION_ID, 7), (result.pid, result.session_id, result.generation))
+        self.assertTrue(result.cleanup_detached)
         self.assertEqual([], harness.adb.kill_calls)
+
+    def test_missing_session_detach_cannot_publish_cleanup_receipt(self):
+        harness = InjectorHarness()
+        harness.provider.device.session.detach = None
+
+        result = harness.install()
+
+        self.assertFalse(result.cleanup_detached)
 
     def test_rejects_invalid_request_fields_before_any_side_effect(self):
         cases = []
