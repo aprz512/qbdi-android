@@ -30,6 +30,7 @@ struct SessionStatusSnapshot {
     std::string state;
     std::string reason;
     uint64_t transition_monotonic_ns = 0;
+    uint64_t deadline_monotonic_ns = 0;
     std::vector<ResolvedSceneStatus> normalized_scenes;
     std::vector<SessionActiveScene> active_scenes;
     std::vector<std::string> artifacts;

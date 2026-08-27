@@ -349,6 +349,7 @@ def status(state: str) -> dict[str, object]:
         "state": state,
         "reason": "duration_elapsed" if terminal or stopping else "",
         "transitionMonotonicNs": 100,
+        "deadlineMonotonicNs": 2_000_000_000,
         "normalizedScenes": [{"name": "fixture-entry", "startOffset": 16, "endOffset": 32}],
         "activeScenes": [],
         "artifacts": [f"{SESSION}.trace.bin.lz4"],
@@ -434,6 +435,7 @@ class SchemaContractsTests(unittest.TestCase):
         self.assertEqual(1, properties["generation"]["minimum"])
         self.assertEqual(1, properties["pid"]["minimum"])
         self.assertEqual(0, properties["transitionMonotonicNs"]["minimum"])
+        self.assertEqual(0, properties["deadlineMonotonicNs"]["minimum"])
         self.assertEqual(
             ["installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"],
             properties["state"]["enum"],
@@ -556,6 +558,8 @@ class SchemaContractsTests(unittest.TestCase):
         mutated("pid-bool", lambda value: value.update(pid=True))
         mutated("timestamp-negative", lambda value: value.update(transitionMonotonicNs=-1))
         mutated("timestamp-bool", lambda value: value.update(transitionMonotonicNs=True))
+        mutated("deadline-negative", lambda value: value.update(deadlineMonotonicNs=-1))
+        mutated("deadline-bool", lambda value: value.update(deadlineMonotonicNs=True))
         mutated("scene-start-negative", lambda value: value["normalizedScenes"][0].update(startOffset=-1))
         mutated("scene-empty-range", lambda value: value["normalizedScenes"][0].update(endOffset=16))
         mutated("scene-reversed", lambda value: value["normalizedScenes"][0].update(startOffset=32))
@@ -1240,6 +1244,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
             "state": "sealed",
             "reason": "duration_elapsed",
             "transitionMonotonicNs": 1,
+            "deadlineMonotonicNs": 2,
             "normalizedScenes": [],
             "activeScenes": [],
             "artifacts": ["run.trace.txt"],

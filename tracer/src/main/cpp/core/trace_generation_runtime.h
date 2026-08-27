@@ -208,6 +208,7 @@ private:
                                      const std::atomic<bool> *stop) noexcept;
     static void status_poll_wait(void *opaque, const std::atomic<bool> *stop) noexcept;
     void request_deadline_stop() noexcept;
+    bool prepare_deadline() noexcept;
     void publish_deadline_stop_locked() noexcept;
     void complete_stop_if_idle_locked() noexcept;
     void complete_call_locked(const TraceAdmission &admission, bool sealed) noexcept;
@@ -247,7 +248,7 @@ private:
     pthread_t deadline_thread_{};
     std::atomic<bool> deadline_thread_started_{false};
     std::shared_ptr<DeadlineWorkerContext> deadline_context_;
-    uint64_t deadline_monotonic_ns_ = 0;
+    std::atomic<uint64_t> deadline_monotonic_ns_{0};
     std::atomic<ArmState> arm_state_{ArmState::Unarmed};
     std::atomic<bool> detached_{false};
     TraceGenerationStatusOptions status_options_;

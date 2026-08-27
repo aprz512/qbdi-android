@@ -8,7 +8,7 @@ import unicodedata
 
 STATUS_KEYS = frozenset({
     "schemaVersion", "sessionId", "generation", "packageName", "pid", "state", "reason",
-    "transitionMonotonicNs", "normalizedScenes", "activeScenes", "artifacts",
+    "transitionMonotonicNs", "deadlineMonotonicNs", "normalizedScenes", "activeScenes", "artifacts",
     "stopAcknowledged", "warnings", "errors",
 })
 STATE_ORDER = {
@@ -100,7 +100,9 @@ def validate_status_shape(value: object) -> dict[str, object]:
     if (type(value["generation"]) is not int or value["generation"] <= 0
             or type(value["pid"]) is not int or value["pid"] <= 0
             or type(value["transitionMonotonicNs"]) is not int
-            or value["transitionMonotonicNs"] < 0):
+            or value["transitionMonotonicNs"] < 0
+            or type(value["deadlineMonotonicNs"]) is not int
+            or value["deadlineMonotonicNs"] < 0):
         raise _invalid("status numeric fields are invalid")
     if (not _safe_text(value["sessionId"], 64) or not _safe_text(value["packageName"], 256)
             or not _safe_text(value["state"], 64) or not _safe_text(value["reason"], 256)):

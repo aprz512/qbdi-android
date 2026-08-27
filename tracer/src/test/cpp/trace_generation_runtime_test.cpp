@@ -23,8 +23,11 @@ void check(bool condition, const char *expression, int line) {
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
 struct FakeDeadline {
-    static void wait_until(void *opaque, uint64_t, const std::atomic<bool> *stop) noexcept {
+    static void wait_until(void *opaque, uint64_t deadline_monotonic_ns,
+                           const std::atomic<bool> *stop) noexcept {
         auto *deadline = static_cast<FakeDeadline *>(opaque);
+        deadline->deadline_monotonic_ns.store(deadline_monotonic_ns,
+                                              std::memory_order_release);
         deadline->entries.fetch_add(1, std::memory_order_relaxed);
         deadline->entered.store(true, std::memory_order_release);
         while (!deadline->release.load(std::memory_order_acquire) &&
@@ -36,6 +39,7 @@ struct FakeDeadline {
     std::atomic<bool> release{false};
     std::atomic<bool> exited{false};
     std::atomic<unsigned int> entries{0};
+    std::atomic<uint64_t> deadline_monotonic_ns{0};
 };
 
 struct CancellableDeadline {
@@ -573,8 +577,9 @@ void installed_status_is_published_before_running_worker_state() {
     CHECK(poll.waits.load(std::memory_order_acquire) == 0);
     CHECK(::access(path.c_str(), F_OK) != 0);
     CHECK(runtime->publish_installed_status());
-    CHECK(read_text(path).find("\"state\":\"installed\"") !=
-          std::string::npos);
+    const nlohmann::json installed = nlohmann::json::parse(read_text(path));
+    CHECK(installed.at("state") == "installed");
+    CHECK(installed.at("deadlineMonotonicNs") == 0);
     CHECK(poll.waits.load(std::memory_order_acquire) == 0);
     CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
@@ -584,6 +589,42 @@ void installed_status_is_published_before_running_worker_state() {
     runtime.reset();
     CHECK(read_text(path).find("\"code\":\"FINAL_WARNING\"") !=
           std::string::npos);
+}
+
+// Catches a timed status publishing a synthetic or zero deadline that differs
+// from the absolute CLOCK_MONOTONIC deadline consumed by its native worker.
+void timed_status_publishes_the_actual_native_deadline() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    FakeDeadline deadline;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    config.session.duration_ms = 60000;
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    auto runtime = TraceGenerationRuntime::create(
+            38, config.session, TraceGenerationLimits{},
+            DeadlineWait{&deadline, &FakeDeadline::wait_until}, std::move(status));
+    CHECK(runtime != nullptr);
+    const std::string path = directory.path + "/session-" +
+                             config.session.id + ".status.json";
+    CHECK(runtime->publish_installed_status());
+    const nlohmann::json installed = nlohmann::json::parse(read_text(path));
+    CHECK(installed.at("state") == "installed");
+    CHECK(installed.at("deadlineMonotonicNs").is_number_unsigned());
+    const uint64_t native_deadline = installed.at("deadlineMonotonicNs");
+    CHECK(native_deadline > installed.at("transitionMonotonicNs").get<uint64_t>());
+    CHECK(runtime->arm());
+    wait_for(deadline.entered);
+    wait_for_count(poll.waits, 1);
+    const nlohmann::json running = nlohmann::json::parse(read_text(path));
+    CHECK(running.at("state") == "running");
+    CHECK(running.at("deadlineMonotonicNs") == native_deadline);
+    CHECK(deadline.deadline_monotonic_ns.load(std::memory_order_acquire) ==
+          native_deadline);
 }
 
 void status_worker_failure_preserves_initial_and_final_publication() {
@@ -943,6 +984,7 @@ int main() {
     status_worker_survives_releasing_the_last_runtime_owner();
     forked_child_detaches_the_inherited_deadline_worker();
     installed_status_is_published_before_running_worker_state();
+    timed_status_publishes_the_actual_native_deadline();
     status_worker_failure_preserves_initial_and_final_publication();
     final_status_failure_retries_once_with_a_stable_diagnostic();
     status_publication_failure_is_exposed_and_retried_without_a_runtime_event();

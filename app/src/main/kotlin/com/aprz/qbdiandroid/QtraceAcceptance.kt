@@ -124,7 +124,8 @@ object QtraceAcceptance {
         if (!snapshot.startsWith('{') || !snapshot.endsWith('}')) return false
         val requiredFields = setOf(
             "schemaVersion", "sessionId", "generation", "packageName", "pid", "state",
-            "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes",
+            "reason", "transitionMonotonicNs", "deadlineMonotonicNs",
+            "normalizedScenes", "activeScenes",
             "artifacts", "stopAcknowledged", "warnings", "errors",
         )
         if (requiredFields.any { field ->

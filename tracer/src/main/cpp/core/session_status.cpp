@@ -379,6 +379,7 @@ bool serialize_status(char *buffer, size_t capacity, size_t *used,
         !append_key(buffer, capacity, used, "state") || !append_json_string(buffer, capacity, used, snapshot.state) || !comma() ||
         !append_key(buffer, capacity, used, "reason") || !append_json_string(buffer, capacity, used, snapshot.reason) || !comma() ||
         !append_key(buffer, capacity, used, "transitionMonotonicNs") || !append_unsigned(buffer, capacity, used, snapshot.transition_monotonic_ns) || !comma() ||
+        !append_key(buffer, capacity, used, "deadlineMonotonicNs") || !append_unsigned(buffer, capacity, used, snapshot.deadline_monotonic_ns) || !comma() ||
         !append_key(buffer, capacity, used, "normalizedScenes") || !append_char(buffer, capacity, used, '[')) goto overflow;
     for (size_t index = 0; index < snapshot.normalized_scenes.size(); ++index) {
         const ResolvedSceneStatus &scene = snapshot.normalized_scenes[index];

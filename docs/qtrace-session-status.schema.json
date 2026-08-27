@@ -86,7 +86,7 @@
   "additionalProperties": false,
   "required": [
     "schemaVersion", "sessionId", "generation", "packageName", "pid", "state",
-    "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes", "artifacts",
+    "reason", "transitionMonotonicNs", "deadlineMonotonicNs", "normalizedScenes", "activeScenes", "artifacts",
     "stopAcknowledged", "warnings", "errors"
   ],
   "properties": {
@@ -104,6 +104,7 @@
     "state": {"type": "string", "enum": ["installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"]},
     "reason": {"type": "string", "maxLength": 256},
     "transitionMonotonicNs": {"type": "integer", "minimum": 0},
+    "deadlineMonotonicNs": {"type": "integer", "minimum": 0},
     "normalizedScenes": {
       "type": "array",
       "maxItems": 256,

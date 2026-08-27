@@ -85,6 +85,7 @@ class ArtifactTests(unittest.TestCase):
         status = {"schemaVersion": 1, "sessionId": "11111111-1111-4111-8111-111111111111",
                   "packageName": "com.example.app", "generation": 1, "pid": 123,
                   "state": "sealed", "reason": "duration_elapsed", "transitionMonotonicNs": 1,
+                  "deadlineMonotonicNs": 2,
                   "normalizedScenes": [], "activeScenes": [], "artifacts": ["run.trace.bin.lz4"],
                   "stopAcknowledged": True, "warnings": [], "errors": []}
         client = FakeClient({
@@ -128,7 +129,8 @@ class ArtifactTests(unittest.TestCase):
     def _status(self, session="11111111-1111-4111-8111-111111111111", **extra):
         value = {"schemaVersion": 1, "sessionId": session, "packageName": "com.example.app",
                  "generation": 1, "pid": 123, "state": "sealed", "reason": "duration_elapsed",
-                 "transitionMonotonicNs": 1, "normalizedScenes": [], "activeScenes": [],
+                 "transitionMonotonicNs": 1, "deadlineMonotonicNs": 2,
+                 "normalizedScenes": [], "activeScenes": [],
                  "artifacts": ["run.trace.txt"], "stopAcknowledged": True, "warnings": [], "errors": []}
         value.update(extra)
         return value

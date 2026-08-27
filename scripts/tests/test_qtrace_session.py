@@ -45,6 +45,7 @@ def status(state: str, *, transition: int, pid: int = 4242, reason: str = "",
     return {
         "schemaVersion": 1, "sessionId": SESSION_ID, "generation": 7, "packageName": PACKAGE,
         "pid": pid, "state": state, "reason": reason, "transitionMonotonicNs": transition,
+        "deadlineMonotonicNs": 2_000_000_000,
         "normalizedScenes": [{"name": "work", "startOffset": 0x120, "endOffset": 0x180}],
         "activeScenes": [], "artifacts": artifacts or ["run.trace.bin.lz4"],
         "stopAcknowledged": acknowledged, "warnings": [], "errors": [],
@@ -249,7 +250,11 @@ class StatusTests(unittest.TestCase):
 
     def test_rejects_state_regression_and_changed_same_transition(self) -> None:
         previous = parse_status(status("stopping", transition=3), SESSION_ID, PACKAGE, 7, 4242, SCENES, None)
-        for later in (status("running", transition=4), status("sealed", transition=3)):
+        changed_deadline = status("sealed", transition=4, reason="duration_elapsed",
+                                  acknowledged=True)
+        changed_deadline["deadlineMonotonicNs"] += 1
+        for later in (status("running", transition=4), status("sealed", transition=3),
+                      changed_deadline):
             with self.subTest(later=later), self.assertRaises(QtraceError):
                 parse_status(later, SESSION_ID, PACKAGE, 7, 4242, SCENES, previous)
 

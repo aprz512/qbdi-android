@@ -141,7 +141,8 @@ def parse_status(value: object, session_id: str, package: str, generation: int, 
         old_state, old_transition = previous["state"], previous["transitionMonotonicNs"]
         if ((old_state in {"sealed", "stop_incomplete"} and state != old_state) or
                 STATE_ORDER[state] < STATE_ORDER[old_state] or transition < old_transition or
-                (state != old_state and transition <= old_transition)):
+                (state != old_state and transition <= old_transition) or
+                status["deadlineMonotonicNs"] != previous["deadlineMonotonicNs"]):
             raise QtraceError("session.status_regression", "session.status", "native status regressed")
     return status
 

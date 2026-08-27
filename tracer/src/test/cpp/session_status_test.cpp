@@ -105,6 +105,7 @@ SessionStatusSnapshot sealed_snapshot() {
     snapshot.state = "sealed";
     snapshot.reason = "duration_elapsed";
     snapshot.transition_monotonic_ns = 17;
+    snapshot.deadline_monotonic_ns = 99;
     snapshot.normalized_scenes = {{"entry", 16, 32}};
     snapshot.active_scenes = {{0, 77, true}};
     snapshot.artifacts = {"run.trace.bin.lz4"};
@@ -141,6 +142,8 @@ void writes_the_complete_session_status_schema_atomically() {
     CHECK(status.at("reason") == "duration_elapsed");
     CHECK(status.at("transitionMonotonicNs").is_number_unsigned());
     CHECK(status.at("transitionMonotonicNs") == 17);
+    CHECK(status.at("deadlineMonotonicNs").is_number_unsigned());
+    CHECK(status.at("deadlineMonotonicNs") == 99);
     CHECK(status.at("normalizedScenes").is_array());
     CHECK(status.at("normalizedScenes").size() == 1);
     CHECK(status.at("normalizedScenes").at(0).at("name") == "entry");

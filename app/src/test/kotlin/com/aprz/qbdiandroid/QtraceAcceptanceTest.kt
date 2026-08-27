@@ -11,7 +11,8 @@ class QtraceAcceptanceTest {
     private fun runningStatus(session: String, state: String = "running"): String =
         "{\"schemaVersion\":1,\"sessionId\":\"$session\",\"generation\":1," +
             "\"packageName\":\"com.aprz.qbdiandroid\",\"pid\":4242,\"state\":\"$state\"," +
-            "\"reason\":\"\",\"transitionMonotonicNs\":100,\"normalizedScenes\":[]," +
+            "\"reason\":\"\",\"transitionMonotonicNs\":100," +
+            "\"deadlineMonotonicNs\":2000000000,\"normalizedScenes\":[]," +
             "\"activeScenes\":[],\"artifacts\":[],\"stopAcknowledged\":false," +
             "\"warnings\":[],\"errors\":[]}"
 

@@ -104,6 +104,7 @@ bool TraceGenerationRuntime::publish_installed_status() noexcept {
         TraceGenerationPhase::Waiting) {
         return false;
     }
+    if (!prepare_deadline()) return false;
     status_publication_started_.store(true, std::memory_order_release);
     if (status_publisher_.publish(status_snapshot())) return true;
 
@@ -118,6 +119,34 @@ bool TraceGenerationRuntime::publish_installed_status() noexcept {
     return false;
 }
 
+bool TraceGenerationRuntime::prepare_deadline() noexcept {
+    if (!session_.timed() ||
+        deadline_monotonic_ns_.load(std::memory_order_acquire) != 0) {
+        return true;
+    }
+    uint64_t now = monotonic_now_ns();
+#if defined(QTRACE_HOST_TEST)
+    if (test_hooks_.fail_clock_read != nullptr &&
+        test_hooks_.fail_clock_read(test_hooks_.opaque)) {
+        now = 0;
+    }
+#endif
+    const uint64_t duration = session_.duration_ms;
+    if (now == 0 ||
+        duration > std::numeric_limits<uint64_t>::max() /
+                           kNanosecondsPerMillisecond ||
+        now > std::numeric_limits<uint64_t>::max() -
+                      duration * kNanosecondsPerMillisecond) {
+        return false;
+    }
+    const uint64_t deadline = now + duration * kNanosecondsPerMillisecond;
+    uint64_t empty = 0;
+    (void)deadline_monotonic_ns_.compare_exchange_strong(
+            empty, deadline, std::memory_order_acq_rel,
+            std::memory_order_acquire);
+    return deadline_monotonic_ns_.load(std::memory_order_acquire) != 0;
+}
+
 bool TraceGenerationRuntime::arm() noexcept {
     ArmState expected = ArmState::Unarmed;
     if (!arm_state_.compare_exchange_strong(expected, ArmState::Arming, std::memory_order_acq_rel,
@@ -130,16 +159,7 @@ bool TraceGenerationRuntime::arm() noexcept {
 #endif
 
     if (session_.timed()) {
-        uint64_t now = monotonic_now_ns();
-#if defined(QTRACE_HOST_TEST)
-        if (test_hooks_.fail_clock_read != nullptr &&
-            test_hooks_.fail_clock_read(test_hooks_.opaque)) {
-            now = 0;
-        }
-#endif
-        const uint64_t duration = session_.duration_ms;
-        if (now == 0 || duration > std::numeric_limits<uint64_t>::max() / kNanosecondsPerMillisecond ||
-            now > std::numeric_limits<uint64_t>::max() - duration * kNanosecondsPerMillisecond) {
+        if (!prepare_deadline()) {
             std::lock_guard<std::mutex> lock(active_mutex_);
             phase_.store(TraceGenerationPhase::StopIncomplete, std::memory_order_release);
             note_transition();
@@ -147,7 +167,8 @@ bool TraceGenerationRuntime::arm() noexcept {
             start_status();
             return false;
         }
-        deadline_monotonic_ns_ = now + duration * kNanosecondsPerMillisecond;
+        const uint64_t deadline_monotonic_ns =
+                deadline_monotonic_ns_.load(std::memory_order_acquire);
         int error = 0;
         deadline_context_ = std::shared_ptr<DeadlineWorkerContext>(
                 new (std::nothrow) DeadlineWorkerContext{});
@@ -156,7 +177,7 @@ bool TraceGenerationRuntime::arm() noexcept {
         } else {
             deadline_context_->runtime.store(this, std::memory_order_release);
             deadline_context_->wait = wait_;
-            deadline_context_->deadline_monotonic_ns = deadline_monotonic_ns_;
+            deadline_context_->deadline_monotonic_ns = deadline_monotonic_ns;
         }
         DeadlineThreadStart *start = error == 0
                 ? new (std::nothrow) DeadlineThreadStart{deadline_context_}
@@ -579,6 +600,8 @@ SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {
     snapshot.package = status_options_.config.package_name;
     snapshot.pid = static_cast<uint32_t>(::getpid());
     snapshot.transition_monotonic_ns = monotonic_now_ns();
+    snapshot.deadline_monotonic_ns =
+            deadline_monotonic_ns_.load(std::memory_order_acquire);
     const TraceGenerationPhase phase = phase_.load(std::memory_order_acquire);
     switch (phase) {
         case TraceGenerationPhase::Waiting: snapshot.state = "installed"; break;
