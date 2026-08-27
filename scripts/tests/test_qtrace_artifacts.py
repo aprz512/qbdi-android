@@ -57,6 +57,26 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(b"payload", item.local_path.read_bytes())
             self.assertTrue(all(call[-1] == 1.5 for call in client.calls))
 
+    def test_named_pull_rejects_output_directory_replacement_during_stream(self):
+        class ReplacingClient(FakeClient):
+            def stream_file(self, name, output, timeout=None):
+                output_root.rename(saved)
+                output_root.mkdir()
+                (output_root / name).write_bytes(b"attacker")
+                output.write(b"real")
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output_root = root_path / "output"
+            saved = root_path / "saved"
+            output_root.mkdir()
+            with self.assertRaises(QtraceError) as raised:
+                pull_named_artifacts(ReplacingClient({"trace.trace.bin": b"real"}),
+                                     "com.example.app", ["trace.trace.bin"], output_root, timeout=1)
+            self.assertEqual("artifact.destination_replaced", raised.exception.code)
+            self.assertEqual(b"attacker", (output_root / "trace.trace.bin").read_bytes())
+            self.assertEqual([], list(saved.iterdir()))
+
     def test_public_shapes_and_selection(self):
         self.assertEqual(PullMode.LATEST, PullSelection().mode)
         self.assertEqual((Path("x"),), ArtifactResult(Path("."), (Path("x"),), (), 0).files)

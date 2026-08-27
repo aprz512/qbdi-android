@@ -339,9 +339,11 @@ def pull_named_artifacts(client: object, package: str, names: Sequence[str], des
         raise _error("artifact.name_invalid", "artifact names must be unique")
     if len(set(names)) != len(names):
         raise _error("artifact.name_invalid", "artifact names must be unique")
-    destination = _safe_output(Path(destination))
+    output = _open_output(Path(destination))
+    destination = Path(f"/proc/self/fd/{output.descriptor}")
     result: list[PulledArtifact] = []
-    for raw_name in names:
+    try:
+      for raw_name in names:
         name = _name(raw_name)
         temporary = destination / ("." + name + ".qtrace-pull")
         final = destination / name
@@ -374,7 +376,8 @@ def pull_named_artifacts(client: object, package: str, names: Sequence[str], des
                 for block in iter(lambda: input_file.read(1024 * 1024), b""):
                     size += len(block)
                     digest.update(block)
-            result.append(PulledArtifact(name, final, digest.hexdigest(), size))
+            output.assert_identity()
+            result.append(PulledArtifact(name, Path(output.path / name), digest.hexdigest(), size))
         except QtraceError:
             _unlink_quiet(temporary)
             if published:
@@ -384,13 +387,20 @@ def pull_named_artifacts(client: object, package: str, names: Sequence[str], des
             _unlink_quiet(temporary)
             if published:
                 _unlink_quiet(final)
+            try:
+                output.assert_identity()
+            except QtraceError:
+                raise
             raise _error("artifact.pull_failed", str(error), partial=True) from error
         except BaseException:
             _unlink_quiet(temporary)
             if published:
                 _unlink_quiet(final)
             raise
-    return tuple(result)
+      output.assert_identity()
+      return tuple(result)
+    finally:
+      output.close()
 
 
 def _status_name(name: str) -> str | None:
