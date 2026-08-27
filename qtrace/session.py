@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import errno
+import subprocess
 import re
 import sys
 import unicodedata
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceError
+from scripts.bounded_process import BoundedProcessError
 from qtrace.injector import InjectionRequest, InjectionResult
 from qtrace.lock import TargetLock
 from qtrace.models import ResolvedScene, ResolvedTarget, UserConfig
@@ -28,6 +30,7 @@ _STATE_ORDER = {"installed": 0, "running": 1, "stop_requested": 2, "stopping": 3
                 "sealed": 4, "stop_incomplete": 4}
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _ANY_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_TRACER_ARTIFACT_SUFFIXES = (".trace.bin", ".trace.bin.lz4", ".flight.bin")
 
 
 class Clock(Protocol):
@@ -98,27 +101,31 @@ def _artifact_basename(value: object) -> bool:
         return False
 
 
-def _missing_remote(error: BaseException) -> bool:
+def _process_failure(error: BaseException) -> BoundedProcessError | None:
+    if isinstance(error, QtraceError) and error.code == "process.failed" and isinstance(error.__cause__, BoundedProcessError):
+        return error.__cause__
+    return None
+
+
+def _missing_remote(error: BaseException, path: str) -> bool:
     """Only the bound-device ENOENT wrapper represents an empty trace directory/file."""
-    if isinstance(error, FileNotFoundError):
-        return True
-    if not isinstance(error, QtraceError) or error.code != "device.command_failed":
-        return False
-    cause = error.__cause__
-    if isinstance(cause, OSError) and cause.errno == errno.ENOENT:
-        return True
-    return "[Errno 2]" in error.detail or "No such file or directory" in error.detail
+    failure = _process_failure(error)
+    if failure is None:
+        return isinstance(error, FileNotFoundError)
+    stderr = failure.stderr.decode("utf-8", errors="replace")
+    return failure.returncode != 0 and path in stderr and "No such file or directory" in stderr
 
 
 def _transient_adb(error: BaseException) -> bool:
     if isinstance(error, QtraceError) and error.code == ErrorCode.ADB_UNAVAILABLE.value:
         return True
-    if not isinstance(error, QtraceError) or error.code != "device.command_failed":
+    if isinstance(error, QtraceError) and error.code == "process.timeout" and isinstance(error.__cause__, subprocess.TimeoutExpired):
+        return True
+    failure = _process_failure(error)
+    if failure is None:
         return False
-    cause = error.__cause__
-    return isinstance(cause, TimeoutError) or (
-        isinstance(cause, OSError) and cause.errno in {errno.ECONNABORTED, errno.ECONNRESET,
-                                                        errno.ENETDOWN, errno.ENETUNREACH, errno.EPIPE})
+    stderr = failure.stderr.decode("utf-8", errors="replace").lower()
+    return any(token in stderr for token in ("device offline", "device not found", "transport closed", "transport error"))
 
 
 def _issues(value: object, field: str) -> None:
@@ -170,12 +177,21 @@ def parse_status(value: object, session_id: str, package: str, generation: int, 
         active_identity.add(identity)
     artifacts = value.get("artifacts")
     if type(artifacts) is not list or len(artifacts) > 256 or len(set(artifacts)) != len(artifacts) or any(
-        not _artifact_basename(name) or
+        not _artifact_basename(name) or not name.endswith(_TRACER_ARTIFACT_SUFFIXES) or
         any(found.group(0) != session_id for found in _ANY_UUID.finditer(name)) for name in artifacts
     ):
         raise QtraceError("session.status_invalid", "session.status", "artifacts are not safe unique basenames")
     if type(value.get("stopAcknowledged")) is not bool:
         raise QtraceError("session.status_invalid", "session.status", "stop acknowledgement is invalid")
+    reason, acknowledged = value["reason"], value["stopAcknowledged"]
+    if state in {"installed", "running"}:
+        valid_terminal = reason == "" and acknowledged is False
+    elif state in {"stop_requested", "stopping", "stop_incomplete"}:
+        valid_terminal = reason == "duration_elapsed" and acknowledged is False
+    else:
+        valid_terminal = reason == "duration_elapsed" and acknowledged is True
+    if not valid_terminal:
+        raise QtraceError("session.status_invalid", "session.status", "status reason/acknowledgement does not match state")
     _issues(value.get("warnings"), "warnings")
     _issues(value.get("errors"), "errors")
     if previous is not None:
@@ -391,7 +407,7 @@ class SessionOrchestrator:
                 raw = target_shell("ls", "-1", directory, maximum_bytes=1_048_576,
                                    timeout=request.adb_timeout)
             except BaseException as error:
-                if _missing_remote(error):
+                if _missing_remote(error, directory):
                     return ()
                 raise
             try:
@@ -410,7 +426,13 @@ class SessionOrchestrator:
         target_shell = getattr(device, "target_shell", None)
         if target_shell is None:
             return device.pid(package)
-        raw = target_shell("pidof", package, maximum_bytes=4096, timeout=timeout)
+        try:
+            raw = target_shell("pidof", package, maximum_bytes=4096, timeout=timeout)
+        except BaseException as error:
+            failure = _process_failure(error)
+            if failure is not None and failure.returncode == 1 and failure.stderr == b"":
+                return None
+            raise
         try:
             text = raw.decode("ascii").strip()
         except (AttributeError, UnicodeDecodeError) as error:
@@ -422,12 +444,13 @@ class SessionOrchestrator:
         return int(text)
 
     def _read_status(self, device: object, request: RunRequest | MonitorRequest, result: InjectionResult,
-                     session_id: str, previous: Mapping[str, object] | None) -> dict[str, object]:
+                     session_id: str, previous: Mapping[str, object] | None, timeout: float | None = None) -> dict[str, object]:
         path = self._status_path(request.config.app.package, session_id)
         target_shell = getattr(device, "target_shell", None)
+        timeout = request.adb_timeout if timeout is None else timeout
         raw = (target_shell("cat", path, maximum_bytes=1_048_576, timeout=request.adb_timeout)
                if target_shell is not None else
-               device.read_file(path, 1_048_576, timeout=request.adb_timeout))
+               device.read_file(path, 1_048_576, timeout=timeout))
         decoded = _strict_json(raw)
         return parse_status(decoded, session_id, request.config.app.package, result.generation, result.pid,
                             result.normalized_scenes, previous)
@@ -435,9 +458,10 @@ class SessionOrchestrator:
     def _read_final_status(self, device: object, request: MonitorRequest, result: InjectionResult,
                            session_id: str) -> Mapping[str, object] | None:
         try:
+            path = self._status_path(request.config.app.package, session_id)
             return self._read_status(device, request, result, session_id, None)
         except BaseException as error:
-            if _missing_remote(error):
+            if _missing_remote(error, path):
                 return None
             raise
 
@@ -449,12 +473,16 @@ class SessionOrchestrator:
         transient_count = 0
         while self._clock.monotonic() < deadline:
             try:
-                current_pid = self._current_pid(device, request.config.app.package, request.adb_timeout)
+                remaining = deadline - self._clock.monotonic()
+                timeout = min(request.adb_timeout, remaining)
+                if timeout <= 0:
+                    break
+                current_pid = self._current_pid(device, request.config.app.package, timeout)
                 if current_pid is None:
                     raise QtraceError("session.process_exited", "session.running", "injected process exited before seal")
                 if current_pid != result.pid:
                     raise QtraceError("session.pid_replaced", "session.running", "package PID changed after injection")
-                current = self._read_status(device, request, result, session_id, previous)
+                current = self._read_status(device, request, result, session_id, previous, timeout)
                 previous, transient_count = current, 0
                 if current["state"] in {"stop_requested", "stopping", "stop_incomplete", "sealed"}:
                     saw_stop = True
@@ -484,7 +512,10 @@ class SessionOrchestrator:
         transient_count = 0
         while True:
             try:
-                current = self._current_pid(device, request.config.app.package, request.adb_timeout)
+                remaining = request.adb_timeout if outage_deadline is None else outage_deadline - self._clock.monotonic()
+                if remaining <= 0:
+                    raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.monitor", "ADB process polling deadline exhausted")
+                current = self._current_pid(device, request.config.app.package, min(request.adb_timeout, remaining))
                 transient_count, outage_deadline = 0, None
                 if current is None:
                     return

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from qtrace.session import (
     MonitorRequest, RunRequest, SessionOrchestrator, _strict_json, build_native_request, parse_status,
 )
 from qtrace.lock import TargetLock
+from scripts.bounded_process import BoundedProcessError
 
 
 SESSION_ID = "123e4567-e89b-42d3-a456-426614174000"
@@ -33,6 +35,8 @@ def target() -> ResolvedTarget:
 
 def status(state: str, *, transition: int, pid: int = 4242, reason: str = "",
            acknowledged: bool = False, artifacts: list[str] | None = None) -> dict[str, object]:
+    if state in {"stop_requested", "stopping", "stop_incomplete"} and reason == "":
+        reason = "duration_elapsed"
     return {
         "schemaVersion": 1, "sessionId": SESSION_ID, "generation": 7, "packageName": PACKAGE,
         "pid": pid, "state": state, "reason": reason, "transitionMonotonicNs": transition,
@@ -40,6 +44,12 @@ def status(state: str, *, transition: int, pid: int = 4242, reason: str = "",
         "activeScenes": [], "artifacts": artifacts or ["run.trace.bin.lz4"],
         "stopAcknowledged": acknowledged, "warnings": [], "errors": [],
     }
+
+
+def process_failed(returncode: int, stderr: bytes) -> QtraceError:
+    error = QtraceError("process.failed", "process", "command failed")
+    error.__cause__ = BoundedProcessError("command failed", returncode=returncode, stderr=stderr)
+    return error
 
 
 class ManualClock:
@@ -392,16 +402,26 @@ class SessionTests(unittest.TestCase):
             parse_status(malformed, SESSION_ID, PACKAGE, 7, 4242, SCENES, None)
 
     def test_wrapped_enoent_snapshot_and_final_status_are_absent_only(self) -> None:
-        missing = QtraceError("device.command_failed", "device.shell", "ADB command failed: [Errno 2] No such file or directory")
         device = FakeDevice([], [4242, None])
         original_shell = device.target_shell
         def shell(*args, **kwargs):
             if args[0] == "ls" or args[0] == "cat":
-                raise missing
+                raise process_failed(1, f"{args[-1]}: No such file or directory".encode())
             return original_shell(*args, **kwargs)
         device.target_shell = shell  # type: ignore[method-assign]
         runner, _ = orchestrator(device, ManualClock())
         self.assertEqual(0, runner.monitor(MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)).exit_code)
+
+    def test_pidof_exact_empty_rc1_means_process_exited(self) -> None:
+        device = FakeDevice([], [])
+        original_shell = device.target_shell
+        def shell(*args, **kwargs):
+            if args[0] == "pidof":
+                raise process_failed(1, b"")
+            return original_shell(*args, **kwargs)
+        device.target_shell = shell  # type: ignore[method-assign]
+        runner, _ = orchestrator(device, ManualClock())
+        self.assertIsNone(runner._current_pid(device, PACKAGE, 0.5))
 
     def test_error_and_interrupt_reports_are_published_before_unlock_and_never_mask_primary(self) -> None:
         for primary in (QtraceError("session.boom", "test", "boom"), KeyboardInterrupt(), ValueError("raw")):
