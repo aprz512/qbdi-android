@@ -535,8 +535,10 @@ class ArtifactTests(unittest.TestCase):
         import os
         session = "11111111-1111-4111-8111-111111111111"
         status = self._status(session, artifacts=["run.trace.txt"])
+        temporary = tempfile.TemporaryDirectory()
+        root = temporary.name
         result = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL})).collect_session(
-            "d", "com.example.app", session, status, Path(tempfile.mkdtemp()), 1)
+            "d", "com.example.app", session, status, Path(root), 1)
         token = getattr(result, "_publication_token")
         real_open, real_read = os.open, os.read
         verified: list[int] = []
@@ -563,6 +565,7 @@ class ArtifactTests(unittest.TestCase):
             merged, _path, applied = publish_collector_report(token, Writer(), self._report(session, "sealed"))
         self.assertTrue(applied)
         self.assertTrue(merged.artifacts)
+        temporary.cleanup()
 
     def test_conditional_report_exchange_rolls_back_last_moment_replacement(self):
         from qtrace import report as report_module

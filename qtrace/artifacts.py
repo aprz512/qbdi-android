@@ -79,14 +79,24 @@ class _PublicationToken:
     report_identity: tuple[int, int]
 
     def close(self) -> None:
+        failure: OSError | None = None
         for attribute in ("directory", "parent"):
             descriptor = getattr(self, attribute)
             if descriptor >= 0:
-                os.close(descriptor)
                 setattr(self, attribute, -1)
+                try:
+                    os.close(descriptor)
+                except OSError as error:
+                    if failure is None:
+                        failure = error
+        if failure is not None:
+            raise failure
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except OSError:
+            pass
 
     def visible_path(self, name: str) -> Path:
         try:
@@ -185,7 +195,9 @@ class _OutputDirectory:
         return self.path / child
 
     def close(self) -> None:
-        os.close(self.descriptor)
+        descriptor, self.descriptor = self.descriptor, -1
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 class PullMode(str, Enum):
@@ -813,7 +825,8 @@ class ArtifactProcessor:
 
     def _collect(self, device: object, package: str, session_id: str, names: list[str],
                  output: Path, timeout: float, status: Mapping[str, object] | None,
-                 *, initial_errors: Sequence[Mapping[str, str]] = (), compressed_only: bool = False) -> ArtifactResult:
+                 *, initial_errors: Sequence[Mapping[str, str]] = (), compressed_only: bool = False,
+                 create_token: bool = False) -> ArtifactResult:
         client = _client_for(device, package, self._client_factory)
         errors: list[Mapping[str, str]] = list(initial_errors)
         records: list[Mapping[str, object]] = []
@@ -1040,7 +1053,8 @@ class ArtifactProcessor:
             result = ArtifactResult(final, tuple(final / path for path in relative_files), tuple(errors),
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
-            object.__setattr__(result, "_publication_token", _collector_token(parent_fd, session_id, output_handle))
+            if create_token:
+                object.__setattr__(result, "_publication_token", _collector_token(parent_fd, session_id, output_handle))
             return result
         except QtraceError:
             raise
@@ -1112,7 +1126,7 @@ class ArtifactProcessor:
                 if side in available and side not in snapshot_set:
                     selected.append(side)
         return self._collect(device, package, session_id, selected, output, timeout, status,
-                             initial_errors=initial_errors)
+                             initial_errors=initial_errors, create_token=True)
 
     def pull_manual(self, device: object, package: str, selection: PullSelection, output: Path,
                     timeout: float) -> ArtifactResult:
