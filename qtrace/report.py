@@ -83,10 +83,22 @@ class ReportWriter:
             raise ValueError("report destination has no filename")
         _safe_directory(output.parent)
         _regular_or_missing(output)
-        encoded = json.dumps(
-            dataclasses.asdict(report), sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False, allow_nan=False,
-        ).encode("utf-8")
+        def normalize(value: object) -> object:
+            if dataclasses.is_dataclass(value):
+                return {field.name: normalize(getattr(value, field.name)) for field in dataclasses.fields(value)}
+            if isinstance(value, Enum):
+                return normalize(value.value)
+            if isinstance(value, Path):
+                return str(value)
+            if isinstance(value, Mapping):
+                return {str(key): normalize(member) for key, member in value.items()}
+            if isinstance(value, (tuple, list)):
+                return [normalize(member) for member in value]
+            if value is None or type(value) in {str, int, bool}:
+                return value
+            return str(value)[:1024]
+        encoded = json.dumps(normalize(report), sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False, allow_nan=False).encode("utf-8")
         if not encoded or len(encoded) > _MAX_REPORT_BYTES:
             raise ValueError("report exceeds the 1 MiB publication limit")
         descriptor = -1

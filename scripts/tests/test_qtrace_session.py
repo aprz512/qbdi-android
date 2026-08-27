@@ -75,6 +75,16 @@ class FakeDevice:
     def pid(self, package: str) -> int | None:
         return self.pids.pop(0) if self.pids else 4242
 
+    def target_shell(self, *args: str, timeout: float, maximum_bytes: int) -> bytes:
+        if args[:2] == ("ls", "-1"):
+            return b"old.trace.bin.lz4\n"
+        if args[0] == "cat":
+            return self.read_file(args[1], maximum_bytes, timeout=timeout)
+        if args[0] == "pidof":
+            current = self.pid(args[1])
+            return b"" if current is None else str(current).encode("ascii")
+        raise AssertionError(args)
+
     def kill(self, pid: int) -> None:
         self.killed.append(pid)
 
@@ -128,8 +138,8 @@ class FakeCollector:
         self.exit_code = exit_code
         self.calls = []
 
-    def collect_session(self, device, package, session_id, initial_artifacts, status, output, timeout):
-        self.calls.append((initial_artifacts, status))
+    def collect_session(self, device, package, session_id, status, output, timeout):
+        self.calls.append(status)
         return self.exit_code, ()
 
 
