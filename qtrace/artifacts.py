@@ -628,7 +628,7 @@ def _rewrite_published_report(parent: int, session_id: str,
 def _write_refresh_error_report_at(directory: int, session_id: str,
                                    records: Sequence[Mapping[str, object]],
                                    errors: Sequence[Mapping[str, str]], *,
-                                   parent_sibling: bool) -> str:
+                                   parent_sibling: bool) -> tuple[str, tuple[int, int]]:
     """Write one bounded, no-replace refresh diagnostic through an owned directory fd."""
     payload = _refresh_payload(session_id, records, errors)
     descriptor = -1
@@ -663,7 +663,7 @@ def _write_refresh_error_report_at(directory: int, session_id: str,
             raise _error("artifact.report_invalid", "refresh error report is unsafe")
         os.fsync(directory)
         committed = True
-        return name
+        return name, (info.st_dev, info.st_ino)
     except BaseException as error:
         primary = error
         raise
@@ -687,8 +687,9 @@ def _write_refresh_error_report(parent: int, session_id: str,
                         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
     primary: BaseException | None = None
     try:
-        return _write_refresh_error_report_at(directory, session_id, records, errors,
-                                              parent_sibling=False)
+        name, _identity = _write_refresh_error_report_at(
+            directory, session_id, records, errors, parent_sibling=False)
+        return name
     except BaseException as error:
         primary = error
         raise
@@ -700,7 +701,7 @@ def _write_refresh_error_report(parent: int, session_id: str,
 
 def _write_parent_refresh_error_report(parent: int, session_id: str,
                                        records: Sequence[Mapping[str, object]],
-                                       errors: Sequence[Mapping[str, str]]) -> str:
+                                       errors: Sequence[Mapping[str, str]]) -> tuple[str, tuple[int, int]]:
     """Persist a last-resort refresh diagnostic beside the committed session."""
     return _write_refresh_error_report_at(parent, session_id, records, errors,
                                           parent_sibling=True)
@@ -811,16 +812,70 @@ def _remove_tree_at(parent: int, name: str,
     os.rmdir(name, dir_fd=parent)
 
 
-def _restore_untrusted_quarantine(parent: int, quarantine: str, session_id: str,
+def _restore_untrusted_quarantine(parent: int, quarantine: str, original_name: str,
                                   primary: BaseException) -> OSError:
     """Return a diagnostic after a no-replace attempt to restore unknown data."""
     try:
-        _rename_noreplace(parent, quarantine, session_id)
+        _rename_noreplace(parent, quarantine, original_name)
     except BaseException as rollback:
         return OSError(
-            f"{primary}; recovery directory {quarantine} retained after safe rollback failed: {rollback}")
+            f"{primary}; recovery entry {quarantine} retained after safe rollback failed: {rollback}")
     return OSError(
-        f"{primary}; recovery directory {quarantine} was safely restored to {session_id}")
+        f"{primary}; recovery entry {quarantine} was safely restored to {original_name}")
+
+
+def _reclaim_parent_fallback_sibling(parent: int, name: str,
+                                     expected_identity: tuple[int, int]) -> None:
+    """Remove a parent fallback only after an atomic handoff to a private name."""
+    quarantine = ""
+    for _ in range(32):
+        candidate = ".qtrace-reclaim-sibling-" + uuid.uuid4().hex
+        try:
+            _rename_noreplace(parent, name, candidate)
+        except QtraceError as error:
+            if error.code == "artifact.destination_exists":
+                continue
+            raise OSError(f"parent fallback identity changed before quarantine rename: {error}") from error
+        except OSError as error:
+            raise OSError(f"parent fallback identity changed before quarantine rename: {error}") from error
+        quarantine = candidate
+        break
+    if not quarantine:
+        raise OSError("parent fallback quarantine allocation exhausted")
+
+    probe = -1
+    try:
+        probe = os.open(quarantine, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                        getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
+        quarantined = os.fstat(probe)
+    except BaseException as error:
+        raise _restore_untrusted_quarantine(
+            parent, quarantine, name,
+            OSError(f"parent fallback identity changed after quarantine rename: {error}")) from error
+    finally:
+        _close_descriptor(probe)
+    if (not stat.S_ISREG(quarantined.st_mode)
+            or (quarantined.st_dev, quarantined.st_ino) != expected_identity):
+        raise _restore_untrusted_quarantine(
+            parent, quarantine, name,
+            OSError("parent fallback identity changed after quarantine rename"))
+    try:
+        os.unlink(quarantine, dir_fd=parent)
+        os.fsync(parent)
+    except BaseException as error:
+        raise _restore_untrusted_quarantine(parent, quarantine, name, OSError(str(error))) from error
+
+
+def _note_parent_fallback_cleanup_failure(primary: BaseException,
+                                          failure: BaseException) -> None:
+    detail = f"parent fallback sibling cleanup failed: {failure}"
+    if isinstance(primary, QtraceError):
+        normalized = QtraceError(primary.code, primary.stage,
+                                 f"{primary.detail}; {detail}", exit_code=primary.exit_code)
+        primary.detail = normalized.detail
+        primary.args = (primary.detail,)
+    if hasattr(primary, "add_note"):
+        primary.add_note(detail)
 
 
 def _reclaim_committed_session(parent: int, directory: int, session_id: str) -> None:
@@ -1014,7 +1069,25 @@ class ArtifactProcessor:
         stage_artifacts = stage_root / "artifacts"
         published = False
         token: _PublicationToken | None = None
+        parent_fallback: tuple[str, tuple[int, int]] | None = None
         primary: BaseException | None = None
+
+        def reclaim_published_resources(error: BaseException) -> None:
+            nonlocal token, parent_fallback
+            if not published:
+                return
+            held_token, token = token, None
+            try:
+                _close_token_and_reclaim(parent_fd, stage_fd, session_id, held_token, error)
+            except BaseException as cleanup:
+                _note_committed_cleanup_failure(error, cleanup)
+            if parent_fallback is not None:
+                held_fallback, parent_fallback = parent_fallback, None
+                try:
+                    _reclaim_parent_fallback_sibling(parent_fd, *held_fallback)
+                except BaseException as cleanup:
+                    _note_parent_fallback_cleanup_failure(error, cleanup)
+
         try:
             active = (status is not None and status.get("_native_present", True)
                       and status.get("state") not in {"sealed", "stop_incomplete"})
@@ -1245,7 +1318,7 @@ class ArtifactProcessor:
                         errors.append(persistence_failure)
                         records.append(persistence_failure)
                         try:
-                            sibling_name = _write_parent_refresh_error_report(
+                            parent_fallback = _write_parent_refresh_error_report(
                                 parent_fd, session_id, records, errors)
                         except BaseException as sibling_error:
                             if not isinstance(error, Exception):
@@ -1263,35 +1336,36 @@ class ArtifactProcessor:
                             terminal.add_note(
                                 f"session refresh diagnostic failed: {persistence_error}")
                             raise terminal from sibling_error
-                        refresh_error_path = output_handle.path / sibling_name
                     if not isinstance(error, Exception):
                         raise
             if create_token and not refresh_failed:
                 token = _collector_token(parent_fd, session_id, output_handle,
                                          canonical_report_identity)
-            try:
-                output_handle.assert_identity()
-            except QtraceError as error:
-                _close_token_and_reclaim(parent_fd, stage_fd, session_id, token, error)
-                raise
+            output_handle.assert_identity()
             result_files = tuple(final / path for path in relative_files)
             if refresh_error_path is not None:
                 result_files += (refresh_error_path,)
+            if parent_fallback is not None:
+                result_files += (output_handle.result_path(parent_fallback[0]),)
             result = ArtifactResult(final, result_files, tuple(errors),
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
             if token is not None:
                 returned_token, token = token, None
                 object.__setattr__(result, "_publication_token", returned_token)
+            parent_fallback = None
             return result
         except QtraceError as error:
             primary = error
+            reclaim_published_resources(error)
             raise
         except Exception as error:
             primary = _error("artifact.collect_failed", str(error), partial=True)
+            reclaim_published_resources(primary)
             raise primary from error
         except BaseException as error:
             primary = error
+            reclaim_published_resources(error)
             raise
         finally:
             held_stage, stage_fd = stage_fd, -1

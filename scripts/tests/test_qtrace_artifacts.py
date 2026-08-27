@@ -733,6 +733,96 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("refresh failed", raised.exception.detail)
         self.assertIn("session persist failed", raised.exception.detail)
 
+    def test_output_swap_after_parent_fallback_reclaims_held_sibling(self):
+        """Leaving fallback ownership behind would orphan this sibling in the old output root."""
+        session = "11111111-1111-4111-8111-111111111111"
+        processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+        original_publish = processor._publish
+
+        def publish_with_late_error(*args, **kwargs):
+            args[4].append({"name": "", "code": "artifact.late", "detail": "late diagnostic"})
+            return original_publish(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "output"
+            saved = root_path / "saved"
+            output.mkdir()
+            fallback_names: list[str] = []
+            original_fallback = __import__("qtrace.artifacts", fromlist=["_"])._write_parent_refresh_error_report
+
+            def fallback_then_swap(*args, **kwargs):
+                written = original_fallback(*args, **kwargs)
+                name = written[0] if type(written) is tuple else written
+                fallback_names.append(name)
+                output.rename(saved)
+                output.mkdir()
+                (output / session).mkdir()
+                (output / session / "replacement.txt").write_text("replacement", encoding="utf-8")
+                (output / name).write_text("replacement sibling", encoding="utf-8")
+                return written
+
+            with patch.object(processor, "_publish", side_effect=publish_with_late_error), patch(
+                    "qtrace.artifacts._rewrite_published_report", side_effect=OSError("refresh failed")), patch(
+                    "qtrace.artifacts._write_refresh_error_report", side_effect=OSError("session persist failed")), patch(
+                    "qtrace.artifacts._write_parent_refresh_error_report", side_effect=fallback_then_swap):
+                with self.assertRaises(QtraceError) as raised:
+                    processor.collect_session("d", "com.example.app", session,
+                                              self._status(session), output, 1)
+
+            self.assertEqual("artifact.destination_replaced", raised.exception.code)
+            self.assertFalse((saved / session).exists())
+            self.assertFalse((saved / fallback_names[0]).exists())
+            self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
+            self.assertEqual("replacement sibling", (output / fallback_names[0]).read_text())
+
+    def test_parent_fallback_reclaim_preserves_a_concurrently_replaced_sibling(self):
+        """Deleting by the old sibling name would remove this concurrent replacement."""
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+        original_publish = processor._publish
+
+        def publish_with_late_error(*args, **kwargs):
+            args[4].append({"name": "", "code": "artifact.late", "detail": "late diagnostic"})
+            return original_publish(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "output"
+            saved = root_path / "saved"
+            output.mkdir()
+            fallback_names: list[str] = []
+            original_fallback = __import__("qtrace.artifacts", fromlist=["_"])._write_parent_refresh_error_report
+
+            def replace_sibling_then_swap(*args, **kwargs):
+                written = original_fallback(*args, **kwargs)
+                name = written[0] if type(written) is tuple else written
+                fallback_names.append(name)
+                racer = output / ".sibling-racer"
+                racer.write_text("RACER", encoding="utf-8")
+                os.replace(racer, output / name)
+                output.rename(saved)
+                output.mkdir()
+                (output / "replacement").mkdir()
+                return written
+
+            with patch.object(processor, "_publish", side_effect=publish_with_late_error), patch(
+                    "qtrace.artifacts._rewrite_published_report", side_effect=OSError("refresh failed")), patch(
+                    "qtrace.artifacts._write_refresh_error_report", side_effect=OSError("session persist failed")), patch(
+                    "qtrace.artifacts._write_parent_refresh_error_report", side_effect=replace_sibling_then_swap):
+                with self.assertRaises(QtraceError) as raised:
+                    processor.collect_session("d", "com.example.app", session,
+                                              self._status(session), output, 1)
+
+            self.assertEqual("artifact.destination_replaced", raised.exception.code)
+            self.assertFalse((saved / session).exists())
+            self.assertEqual("RACER", (saved / fallback_names[0]).read_text())
+            self.assertIn("parent fallback sibling cleanup failed", raised.exception.detail)
+            self.assertIn("recovery", raised.exception.detail)
+            self.assertFalse(list(saved.glob(".qtrace-reclaim-*")))
+
     def test_final_output_swap_reclaims_manual_and_session_publications(self):
         """Removing the final identity check would return paths in a swapped output root."""
         for session_collection in (False, True):
