@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from collections.abc import Mapping
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -77,7 +78,7 @@ TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX, FLI
 TRACE_SUFFIX = TEXT_TRACE_SUFFIX
 TRACE_DIRECTORY = "files/qbdi-traces"
 PACKAGE_NAME = re.compile(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\Z")
-ARTIFACT_NAME = re.compile(r"[A-Za-z0-9_.-]+\Z")
+ARTIFACT_NAME = re.compile(r"[^/\\\x00-\x1f\x7f]+\Z")
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_PARTIAL = 2
@@ -254,7 +255,14 @@ def _temporary_path(directory: Path) -> Path:
 
 
 def _validate_artifact_name(name: str) -> None:
-    if ARTIFACT_NAME.fullmatch(name) is None or name in (".", ".."):
+    try:
+        valid = (type(name) is str and ARTIFACT_NAME.fullmatch(name) is not None and
+                 name not in (".", "..") and len(name.encode("utf-8")) <= 255 and
+                 all(character.isalnum() or character in "._-" or
+                     unicodedata.category(character).startswith("M") for character in name))
+    except UnicodeEncodeError:
+        valid = False
+    if not valid:
         raise PullTraceError(f"unsafe artifact name: {name!r}")
 
 
@@ -311,10 +319,14 @@ def pull_artifact_set(
             ) as staging_name:
                 staging = Path(staging_name)
                 source = staging / name
-                with source.open("wb") as output:
-                    client.stream_file(name, output)
-                    output.flush()
-                    os.fsync(output.fileno())
+                # Keep the legacy CLI's publication semantics, but share the
+                # bounded/hash-checked named pull primitive with qtrace sessions.
+                from qtrace.artifacts import pull_named_artifacts
+                try:
+                    pull_named_artifacts(client, getattr(client, "package", "com.example.app"), [name], staging,
+                                         timeout=getattr(client, "timeout", 120.0))
+                except Exception as error:
+                    raise PullTraceError(str(error)) from error
                 if compressed_only:
                     with source.open("rb") as binary:
                         status = recovery_status(recover_flight(binary).summary)
@@ -383,10 +395,12 @@ def pull_artifact_set(
                 prefix=".pull-trace-", dir=output_directory) as staging_name:
             staging = Path(staging_name)
             staged_source = staging / name
-            with staged_source.open("wb") as output:
-                client.stream_file(name, output)
-                output.flush()
-                os.fsync(output.fileno())
+            from qtrace.artifacts import pull_named_artifacts
+            try:
+                pull_named_artifacts(client, getattr(client, "package", "com.example.app"), [name], staging,
+                                     timeout=getattr(client, "timeout", 120.0))
+            except Exception as error:
+                raise PullTraceError(str(error)) from error
             staged_sidecars = []
             for sidecar_name, data in sidecars.items():
                 staged_sidecar = staging / sidecar_name

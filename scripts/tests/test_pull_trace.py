@@ -12,6 +12,7 @@ from unittest.mock import patch
 import scripts.flight_convert as flight_convert
 from scripts.pull_trace import (
     AdbArtifactClient,
+    argument_parser,
     EXIT_PARTIAL,
     PullTraceError,
     classify_artifacts,
@@ -1046,6 +1047,12 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(1, exit_code)
         self.assertIn("local filesystem", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_new_artifact_module_keeps_legacy_cli_surface_separate(self):
+        from qtrace.artifacts import PullMode, PullSelection
+
+        self.assertEqual(PullMode.LATEST, PullSelection().mode)
+        self.assertIn("package", {action.dest for action in argument_parser()._actions})
 
 
 if __name__ == "__main__":

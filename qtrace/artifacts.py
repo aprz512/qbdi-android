@@ -1,0 +1,720 @@
+"""Bounded, ownership-aware qtrace artifact collection and publication."""
+
+from __future__ import annotations
+
+import hashlib
+import ctypes
+import errno
+import inspect
+import json
+import math
+import os
+import re
+import shutil
+import stat
+import tempfile
+import time
+import unicodedata
+import uuid
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from qtrace.errors import EXIT_PARTIAL, QtraceError
+
+_UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
+_TRACE_SUFFIXES = (".trace.bin.lz4", ".trace.bin", ".trace.txt.lz4", ".trace.txt", ".flight.bin")
+_SIDE_SUFFIXES = (".metrics", ".crash")
+_STATUS_KEYS = {"schemaVersion", "sessionId", "generation", "packageName", "pid", "state",
+                "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes",
+                "artifacts", "stopAcknowledged", "warnings", "errors"}
+_MAX_NAME_BYTES = 255
+_MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class PulledArtifact:
+    remote_name: str
+    local_path: Path
+    sha256: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ArtifactResult:
+    output_dir: Path
+    files: tuple[Path, ...]
+    errors: tuple[Mapping[str, str], ...]
+    exit_code: int
+
+
+class PullMode(str, Enum):
+    LATEST = "latest"
+    NAME = "name"
+    ALL = "all"
+
+
+@dataclass(frozen=True)
+class PullSelection:
+    mode: PullMode = PullMode.LATEST
+    name: str | None = None
+    compressed_only: bool = False
+
+
+def _error(code: str, detail: str, *, partial: bool = False) -> QtraceError:
+    return QtraceError(code, "artifacts", detail, exit_code=EXIT_PARTIAL if partial else 1)
+
+
+def _valid_name(value: object, *, trace: bool = False) -> bool:
+    if type(value) is not str or not value or value in {".", ".."}:
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    if len(encoded) > _MAX_NAME_BYTES or "/" in value or "\\" in value:
+        return False
+    if any(unicodedata.category(ch).startswith("C") for ch in value):
+        return False
+    return (not trace) or value.endswith(_TRACE_SUFFIXES)
+
+
+def _package(value: object) -> str:
+    if type(value) is not str or _PACKAGE.fullmatch(value) is None:
+        raise _error("artifact.package_invalid", "package name is invalid")
+    return value
+
+
+def _name(value: object, *, trace: bool = False) -> str:
+    if not _valid_name(value, trace=trace):
+        raise _error("artifact.name_invalid", "artifact name is not a safe basename")
+    return value
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except BaseException:
+        pass
+
+
+def _call(method: Any, *args: Any, timeout: float | None = None, **kwargs: Any) -> Any:
+    """Call an adapter once, selecting its timeout capability before invocation."""
+    if timeout is None:
+        return method(*args, **kwargs)
+    try:
+        parameters = inspect.signature(method).parameters.values()
+        supports_timeout = any(parameter.name == "timeout" or
+                               parameter.kind is parameter.VAR_KEYWORD
+                               for parameter in parameters)
+    except (TypeError, ValueError):
+        supports_timeout = True
+    if supports_timeout:
+        return method(*args, timeout=timeout, **kwargs)
+    return method(*args, **kwargs)
+
+
+def _client_for(device: object, package: str, factory: Any | None) -> object:
+    if factory is not None:
+        if not callable(factory):
+            raise _error("artifact.client_invalid", "artifact client factory is not callable")
+        client = factory(device, package)
+        if not hasattr(client, "list_names") or not (hasattr(client, "stream_file") or hasattr(client, "read_file")):
+            raise _error("artifact.client_invalid", "artifact client lacks bounded capabilities")
+        return client
+    if hasattr(device, "artifact_client"):
+        return device.artifact_client(package)
+    if all(hasattr(device, name) for name in ("list_names", "read_file", "stream_file")):
+        return device
+    if hasattr(device, "target_shell"):
+        return _BoundDeviceClient(device, package)
+    raise _error("artifact.client_invalid", "device has no bound artifact client")
+
+
+class _BoundDeviceClient:
+    """Adapter that retains the AdbDevice's already-bound run-as/root identity."""
+
+    def __init__(self, device: object, package: str) -> None:
+        self.device = device
+        self.directory = f"/data/data/{package}/files/qbdi-traces"
+
+    def list_names(self, *, timeout: float) -> list[str]:
+        raw = self.device.target_shell("ls", "-1t", self.directory,
+                                       timeout=timeout, maximum_bytes=1024 * 1024)
+        try:
+            return raw.decode("utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise _error("artifact.list_invalid", "artifact listing is not UTF-8") from error
+
+    def read_file(self, name: str, *, timeout: float) -> bytes:
+        _name(name)
+        return self.device.target_shell("head", "-c", str(64 * 1024 + 1),
+                                        f"{self.directory}/{name}", timeout=timeout,
+                                        maximum_bytes=64 * 1024 + 1)
+
+    def size(self, name: str, *, timeout: float) -> int:
+        _name(name)
+        raw = self.device.target_shell("wc", "-c", f"{self.directory}/{name}",
+                                       timeout=timeout, maximum_bytes=128)
+        try:
+            value = int(raw.decode("ascii").split()[0])
+        except (UnicodeDecodeError, ValueError, IndexError) as error:
+            raise _error("artifact.size_invalid", "remote size is malformed") from error
+        if value < 0:
+            raise _error("artifact.size_invalid", "remote size is negative")
+        return value
+
+    def stream_file(self, name: str, output: Any, *, timeout: float) -> None:
+        _name(name)
+        data = self.device.target_shell("cat", f"{self.directory}/{name}", timeout=timeout,
+                                        maximum_bytes=_MAX_ARTIFACT_BYTES + 1)
+        if len(data) > _MAX_ARTIFACT_BYTES:
+            raise _error("artifact.truncated", "artifact exceeds maximum size", partial=True)
+        output.write(data)
+
+
+def pull_named_artifacts(client: object, package: str, names: Sequence[str], destination: Path,
+                         *, timeout: float) -> tuple[PulledArtifact, ...]:
+    _package(package)
+    if type(timeout) not in {int, float} or not math.isfinite(float(timeout)) or timeout <= 0:
+        raise _error("artifact.timeout_invalid", "timeout must be finite and positive")
+    if type(names) not in {list, tuple} or any(type(item) is not str for item in names):
+        raise _error("artifact.name_invalid", "artifact names must be unique")
+    if len(set(names)) != len(names):
+        raise _error("artifact.name_invalid", "artifact names must be unique")
+    destination = _safe_output(Path(destination))
+    result: list[PulledArtifact] = []
+    for raw_name in names:
+        name = _name(raw_name)
+        temporary = destination / ("." + name + ".qtrace-pull")
+        final = destination / name
+        published = False
+        try:
+            with temporary.open("xb") as stream:
+                method = getattr(client, "stream_file", None)
+                if method is not None:
+                    _call(method, name, stream, timeout=float(timeout))
+                else:
+                    reader = getattr(client, "read_file", None)
+                    if reader is None:
+                        raise _error("artifact.client_invalid", "artifact client cannot read artifacts")
+                    data = _call(reader, name, timeout=float(timeout))
+                    if not isinstance(data, bytes) or len(data) > _MAX_ARTIFACT_BYTES:
+                        raise _error("artifact.truncated", "artifact bytes exceed bound", partial=True)
+                    stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if temporary.stat().st_size > _MAX_ARTIFACT_BYTES:
+                raise _error("artifact.truncated", "artifact exceeds maximum size", partial=True)
+            if final.exists() or final.is_symlink():
+                raise _error("artifact.destination_exists", f"destination exists: {final}")
+            os.link(temporary, final)
+            published = True
+            temporary.unlink()
+            digest = hashlib.sha256()
+            size = 0
+            with final.open("rb") as input_file:
+                for block in iter(lambda: input_file.read(1024 * 1024), b""):
+                    size += len(block)
+                    digest.update(block)
+            result.append(PulledArtifact(name, final, digest.hexdigest(), size))
+        except QtraceError:
+            _unlink_quiet(temporary)
+            if published:
+                _unlink_quiet(final)
+            raise
+        except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
+            _unlink_quiet(temporary)
+            if published:
+                _unlink_quiet(final)
+            raise _error("artifact.pull_failed", str(error), partial=True) from error
+        except BaseException:
+            _unlink_quiet(temporary)
+            if published:
+                _unlink_quiet(final)
+            raise
+    return tuple(result)
+
+
+def _status_name(name: str) -> str | None:
+    if not name.startswith("session-") or not name.endswith(".status.json"):
+        return None
+    value = name[len("session-"):-len(".status.json")]
+    return value if _UUID4.fullmatch(value) else None
+
+
+def _temporary_name(name: str) -> bool:
+    return (name.startswith(".") or name.endswith((".tmp", ".partial", ".current", ".writing"))
+            or ".qtrace-stage-" in name)
+
+
+def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[str, object]:
+    def reject_constant(value: str) -> object:
+        raise ValueError("non-finite JSON number")
+
+    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        document: dict[str, object] = {}
+        for key, value in pairs:
+            if key in document:
+                raise ValueError("duplicate JSON key")
+            document[key] = value
+        return document
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
+                           object_pairs_hook=reject_duplicate)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        raise _error("artifact.status_invalid", "native status is not strict JSON") from error
+    if type(value) is not dict or set(value) != _STATUS_KEYS:
+        raise _error("artifact.status_invalid", "native status schema is not exact")
+    if (value.get("schemaVersion") != 1 or value.get("sessionId") != session_id or
+            (package is not None and value.get("packageName") != package)):
+        raise _error("artifact.status_identity", "native status identity does not match")
+    if (type(value.get("generation")) is not int or value["generation"] <= 0 or
+            type(value.get("pid")) is not int or value["pid"] <= 0 or
+            type(value.get("transitionMonotonicNs")) is not int or value["transitionMonotonicNs"] < 0):
+        raise _error("artifact.status_invalid", "native status numeric fields are invalid")
+    state = value.get("state")
+    if type(state) is not str or state not in {"installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"}:
+        raise _error("artifact.status_invalid", "native status state is invalid")
+    if type(value.get("reason")) is not str or type(value.get("stopAcknowledged")) is not bool:
+        raise _error("artifact.status_invalid", "native status terminal fields are invalid")
+    if state in {"installed", "running"} and (value["reason"] != "" or value["stopAcknowledged"]):
+        raise _error("artifact.status_invalid", "active native status has terminal fields")
+    if state in {"stop_requested", "stopping", "stop_incomplete"} and value["reason"] != "duration_elapsed":
+        raise _error("artifact.status_invalid", "stopping native status has invalid reason")
+    if state == "sealed" and (value["reason"] != "duration_elapsed" or not value["stopAcknowledged"]):
+        raise _error("artifact.status_invalid", "sealed native status has invalid acknowledgement")
+    if type(value.get("normalizedScenes")) is not list or type(value.get("activeScenes")) is not list:
+        raise _error("artifact.status_invalid", "native status scene fields are invalid")
+    if type(value.get("warnings")) is not list or type(value.get("errors")) is not list:
+        raise _error("artifact.status_invalid", "native status issue fields are invalid")
+    scenes = value["normalizedScenes"]
+    if len(scenes) > 256 or any(
+            type(scene) is not dict or set(scene) != {"name", "startOffset", "endOffset"}
+            or type(scene["name"]) is not str or type(scene["startOffset"]) is not int
+            or type(scene["endOffset"]) is not int
+            for scene in scenes):
+        raise _error("artifact.status_invalid", "native normalized scenes are invalid")
+    active = value["activeScenes"]
+    if len(active) > 256 or any(
+            type(scene) is not dict or set(scene) != {"sceneIndex", "tid", "sealed"}
+            or type(scene["sceneIndex"]) is not int or scene["sceneIndex"] < 0
+            or type(scene["tid"]) is not int or scene["tid"] <= 0
+            or type(scene["sealed"]) is not bool
+            for scene in active):
+        raise _error("artifact.status_invalid", "native active scenes are invalid")
+    for issue_list in (value["warnings"], value["errors"]):
+        if len(issue_list) > 256 or any(
+                type(issue) is not dict or set(issue) != {"code", "path", "message"}
+                or any(type(issue[key]) is not str for key in issue)
+                for issue in issue_list):
+            raise _error("artifact.status_invalid", "native status issues are invalid")
+    artifacts = value.get("artifacts")
+    if (type(artifacts) is not list or any(type(item) is not str for item in artifacts)
+            or len(set(artifacts)) != len(artifacts)):
+        raise _error("artifact.status_invalid", "native status artifacts are invalid")
+    for item in artifacts:
+        _name(item, trace=True)
+        uuids = re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", item,
+                           flags=re.IGNORECASE)
+        if any(found != session_id for found in uuids):
+            raise _error("artifact.status_identity", "foreign artifact UUID")
+    return value
+
+
+def _trace_roots(names: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    roots: list[str] = []
+    for raw in names:
+        name = _name(raw)
+        if name in seen:
+            raise _error("artifact.duplicate", f"duplicate artifact listing: {name}")
+        seen.add(name)
+        if name.endswith(_TRACE_SUFFIXES):
+            roots.append(name)
+        elif not name.endswith(_SIDE_SUFFIXES) and not name.endswith(".status.json"):
+            raise _error("artifact.name_invalid", f"unexpected artifact suffix: {name}")
+    return roots
+
+
+def _validate_listing(names: Sequence[str]) -> list[str]:
+    validated: list[str] = []
+    for raw in names:
+        name = _name(raw)
+        if not (name.endswith(_TRACE_SUFFIXES) or name.endswith(_SIDE_SUFFIXES)
+                or name.endswith(".status.json")):
+            raise _error("artifact.name_invalid", f"unexpected artifact suffix: {name}")
+        if name.endswith(".status.json") and _status_name(name) is None:
+            raise _error("artifact.status_invalid", f"invalid native status name: {name}")
+        validated.append(name)
+    return validated
+
+
+def _remote_size(client: object, name: str, timeout: float) -> int | None:
+    for method_name in ("stat_file", "file_size", "size"):
+        method = getattr(client, method_name, None)
+        if method is None:
+            continue
+        value = _call(method, name, timeout=timeout)
+        if type(value) is not int or value < 0:
+            raise _error("artifact.size_invalid", "remote size is invalid")
+        return value
+    return None
+
+
+def _text_complete(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return b"TRACE_END status=completed" in data or b"TRACE_END status=crashed" in data
+
+
+def _write_json(path: Path, value: object) -> None:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                         allow_nan=False).encode("utf-8")
+    if len(encoded) > 1024 * 1024:
+        raise _error("artifact.report_too_large", "report exceeds size bound")
+    with path.open("xb") as output:
+        output.write(encoded)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _safe_output(path: Path) -> Path:
+    path = Path(path)
+    current = Path(path.anchor) if path.is_absolute() else Path(".")
+    for component in path.parts[1:] if path.is_absolute() else path.parts:
+        if component == "..":
+            raise _error("artifact.destination_invalid", "output contains parent traversal")
+        current /= component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise _error("artifact.destination_invalid", "output contains a symlink or non-directory")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or not path.is_dir():
+        raise _error("artifact.destination_invalid", "output must be a real directory")
+    return path
+
+
+def _rename_noreplace(stage: Path, output: Path, final_name: str) -> None:
+    """Atomically publish a complete staging directory without replacing anything."""
+    if os.name != "posix":
+        raise _error("artifact.atomic_unsupported", "atomic no-replace publication is unavailable")
+    parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise _error("artifact.atomic_unsupported", "Linux renameat2 is unavailable")
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(parent, stage.name.encode(), parent, final_name.encode(), 1)
+        if result != 0:
+            failure = ctypes.get_errno()
+            if failure == errno.EEXIST:
+                raise _error("artifact.destination_exists", "session destination already exists")
+            raise OSError(failure, os.strerror(failure))
+    finally:
+        os.close(parent)
+
+
+class ArtifactProcessor:
+    def __init__(self, *, client_factory: Any | None = None) -> None:
+        self._client_factory = client_factory
+
+    def _publish(self, stage: Path, output: Path, session_id: str, files: list[Path],
+                 errors: list[Mapping[str, str]], records: list[Mapping[str, object]]) -> Path:
+        _safe_output(output)
+        if output.is_symlink() or not output.is_dir():
+            raise _error("artifact.destination_invalid", "output must be a real directory")
+        try:
+            for directory in (stage, stage / "artifacts"):
+                descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                     getattr(os, "O_NOFOLLOW", 0))
+                os.fsync(descriptor)
+                os.close(descriptor)
+            _rename_noreplace(stage, output, session_id)
+            final = output / session_id
+            descriptor = os.open(final, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                 getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            parent_descriptor = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+        except Exception:
+            raise
+        return final
+
+    def _collect(self, device: object, package: str, session_id: str, names: list[str],
+                 output: Path, timeout: float, status: Mapping[str, object] | None,
+                 *, initial_errors: Sequence[Mapping[str, str]] = (), compressed_only: bool = False) -> ArtifactResult:
+        client = _client_for(device, package, self._client_factory)
+        errors: list[Mapping[str, str]] = list(initial_errors)
+        records: list[Mapping[str, object]] = []
+        files: list[Path] = []
+        output = _safe_output(Path(output))
+        stage_root = Path(tempfile.mkdtemp(prefix=".qtrace-stage-", dir=str(output)))
+        stage_artifacts = stage_root / "artifacts"
+        stage_artifacts.mkdir()
+        try:
+            active = status is not None and status.get("state") not in {"sealed", "stop_incomplete"}
+            if active:
+                errors.append({"code": "artifact.incomplete", "name": "", "detail": "native trace is still active"})
+                pulled = ()
+            else:
+                pulled_list: list[PulledArtifact] = []
+                for name in names:
+                    try:
+                        remote_before = _remote_size(client, name, timeout)
+                        pulled_list.extend(pull_named_artifacts(client, package, [name], stage_artifacts,
+                                                                 timeout=timeout))
+                        remote_after = _remote_size(client, name, timeout)
+                        if remote_before is not None and (remote_before != remote_after or
+                                                          remote_before != pulled_list[-1].size):
+                            raise _error("artifact.truncated", "remote artifact changed during pull", partial=True)
+                    except QtraceError as error:
+                        if error.code in {"artifact.pull_failed", "artifact.truncated", "artifact.size_invalid"}:
+                            raise
+                        failure = {"name": name, "code": error.code, "detail": error.detail}
+                        errors.append(failure)
+                        records.append(failure)
+                pulled = tuple(pulled_list)
+            for artifact in pulled:
+                local = artifact.local_path
+                remote_size = _remote_size(client, artifact.remote_name, timeout)
+                record: dict[str, object] = {"remote_name": artifact.remote_name, "local_path": "artifacts/" + artifact.remote_name,
+                    "source_size": remote_size, "destination_size": None, "sha256": artifact.sha256,
+                    "decoder": None, "termination": None,
+                    "stop_reason": status.get("reason") if status is not None else None,
+                    "metrics_schema": None,
+                    "producer_waits": None, "producer_wait_ns": None, "conversion_ms": None,
+                    "host_observed_ack": status.get("stopAcknowledged") if status is not None else None}
+                if local.name.endswith(".metrics") or local.name.endswith(".crash"):
+                    record["destination_size"] = local.stat().st_size
+                    record["decoder"] = "sidecar"
+                    records.append(record)
+                    continue
+                try:
+                    if compressed_only and not local.name.endswith((".trace.bin.lz4", ".trace.txt.lz4")):
+                        raise ValueError("compressed-only selection contains an uncompressed artifact")
+                    if local.name.endswith((".trace.bin", ".trace.bin.lz4")):
+                        from scripts.trace_convert import convert_binary_file
+                        from scripts.trace_metrics import parse_metrics
+                        from scripts.pull_trace import parse_crash_marker
+                        text = stage_artifacts / (local.name.removesuffix(".trace.bin.lz4").removesuffix(".trace.bin") + ".trace.txt")
+                        lz4 = shutil.which("lz4") if local.name.endswith(".lz4") else None
+                        crash_sidecar = local.with_name(local.name + ".crash")
+                        crash_marked = False
+                        if crash_sidecar.exists():
+                            crash_marked = parse_crash_marker(crash_sidecar.read_bytes()) is not None
+                        started = time.monotonic()
+                        stats = convert_binary_file(local, text, lz4=lz4, crash_marked=crash_marked)
+                        record.update(decoder="qtrb", termination=stats.termination,
+                                     conversion_ms=round((time.monotonic() - started) * 1000, 3))
+                        if not compressed_only:
+                            files.append(text)
+                        else:
+                            text.unlink(missing_ok=True)
+                        metrics = local.with_name(local.name + ".metrics")
+                        if metrics.exists():
+                            values = parse_metrics(metrics.read_bytes(), local.name)
+                            record["metrics_schema"] = values.get("metrics_version", 1)
+                            record["producer_waits"] = values.get("producer_waits")
+                            record["producer_wait_ns"] = values.get("producer_wait_ns")
+                    elif local.name.endswith(".flight.bin"):
+                        from scripts.flight_convert import publish_flight_outputs
+                        derived = publish_flight_outputs(local, stage_artifacts, force=False)
+                        record.update(decoder="flight", termination="recovered")
+                        files.extend(derived)
+                    elif local.name.endswith(".trace.txt.lz4"):
+                        from scripts.lz4_frames import decode_lz4_file
+                        lz4 = shutil.which("lz4")
+                        if lz4 is None:
+                            raise ValueError("host lz4 CLI is required for compressed text traces")
+                        text = stage_artifacts / local.name.removesuffix(".lz4")
+                        truncated = decode_lz4_file(local, text, lz4)
+                        if truncated:
+                            raise ValueError("compressed text trace is incomplete")
+                        record.update(decoder="lz4-text", termination="completed")
+                        if not compressed_only:
+                            files.append(text)
+                        else:
+                            text.unlink(missing_ok=True)
+                    else:
+                        if not _text_complete(local):
+                            raise ValueError("legacy text trace has no terminal marker")
+                        record["decoder"] = "legacy"
+                    files.append(local)
+                    record["destination_size"] = local.stat().st_size
+                    records.append(record)
+                except Exception as error:
+                    if isinstance(error, QtraceError) and error.code in {
+                            "artifact.pull_failed", "artifact.truncated", "artifact.size_invalid"}:
+                        raise
+                    failure = {"name": artifact.remote_name, "code": "artifact.invalid", "detail": str(error)[:256]}
+                    errors.append(failure)
+                    records.append(failure)
+            # Sidecars are part of the published set, but never trace roots.
+            files.extend(item.local_path for item in pulled if item.remote_name.endswith(_SIDE_SUFFIXES))
+            recorded_paths = {record.get("local_path") for record in records if isinstance(record, Mapping)}
+            for path in files:
+                relative = "artifacts/" + path.name if path.parent == stage_artifacts else path.name
+                if relative in recorded_paths:
+                    continue
+                data = path.read_bytes()
+                records.append({"remote_name": path.name, "local_path": relative,
+                                "source_size": None, "destination_size": len(data),
+                                "sha256": hashlib.sha256(data).hexdigest(), "decoder": None,
+                                "termination": None, "stop_reason": None, "metrics_schema": None,
+                                "producer_waits": None, "producer_wait_ns": None,
+                                "conversion_ms": None, "host_observed_ack": None})
+            _write_json(stage_root / "session.json", {"schema": 1, "sessionId": session_id, "packageName": package,
+                                                        "status": status or None})
+            effective = status.get("effectiveConfig") if status is not None else None
+            if effective is None:
+                effective = None
+            _write_json(stage_root / "effective-config.json", effective)
+            device_metadata = {
+                "serial": getattr(device, "serial", None),
+                "package": package,
+                "access_mode": getattr(device, "access_mode", None),
+                "root_strategy": getattr(device, "root_strategy", None),
+                "target_strategy": getattr(device, "target_strategy", None),
+                "package_uid": getattr(device, "package_uid", None),
+            }
+            if status is not None and isinstance(status.get("device"), Mapping):
+                device_metadata.update(status["device"])
+            _write_json(stage_root / "device.json", device_metadata)
+            _write_json(stage_root / "report.json", {"schema": 1, "sessionId": session_id, "artifacts": records, "errors": errors})
+            relative_files = tuple(path.relative_to(stage_root) for path in files)
+            final = self._publish(stage_root, output, session_id, files, errors, records)
+            result = ArtifactResult(final, tuple(final / path for path in relative_files), tuple(errors),
+                                   EXIT_PARTIAL if errors else 0)
+            object.__setattr__(result, "_records", tuple(records))
+            return result
+        except QtraceError:
+            raise
+        except Exception as error:
+            raise _error("artifact.collect_failed", str(error), partial=True) from error
+        finally:
+            shutil.rmtree(stage_root, ignore_errors=True)
+
+    def collect_session(self, device: object, package: str, session_id: str, status: Mapping[str, object] | None,
+                        output: Path, timeout: float) -> ArtifactResult:
+        _package(package)
+        if type(session_id) is not str or not _UUID4.fullmatch(session_id):
+            raise _error("artifact.session_invalid", "session ID is not lowercase UUIDv4")
+        if status is None or type(status) is not dict:
+            raise _error("artifact.status_missing", "session collection requires native status")
+        if status.get("sessionId") != session_id or status.get("packageName") != package:
+            raise _error("artifact.status_identity", "native status identity does not match")
+        if status.get("state") not in {"sealed", "stop_incomplete"}:
+            raise _error("artifact.incomplete", "native status is not terminal")
+        declared = status.get("artifacts")
+        if (type(declared) is not list or any(type(item) is not str for item in declared)
+                or len(set(declared)) != len(declared)):
+            raise _error("artifact.status_invalid", "native status has no artifact list")
+        names = [_name(name, trace=True) for name in declared]
+        client = _client_for(device, package, self._client_factory)
+        raw_listing = list(_call(getattr(client, "list_names"), timeout=timeout))
+        if any(type(item) is not str for item in raw_listing) or len(set(raw_listing)) != len(raw_listing):
+            raise _error("artifact.duplicate", "device listing contains duplicate or invalid names")
+        listing = _validate_listing([_name(item) for item in raw_listing if not _temporary_name(_name(item))])
+        available = set(listing)
+        snapshot = status.get("snapshot", ())
+        if type(snapshot) not in {list, tuple} or any(type(item) is not str for item in snapshot):
+            raise _error("artifact.snapshot_invalid", "snapshot ownership context is invalid")
+        snapshot_set = set(snapshot)
+        selected: list[str] = []
+        initial_errors: list[Mapping[str, str]] = []
+        for name in names:
+            if name in snapshot_set:
+                initial_errors.append({"name": name, "code": "artifact.ownership", "detail": "artifact predates this session"})
+                continue
+            if name not in available:
+                initial_errors.append({"name": name, "code": "artifact.missing", "detail": "declared artifact is absent"})
+                continue
+            selected.append(name)
+            for side in (name + ".metrics", name + ".crash"):
+                if side in available and side not in snapshot_set:
+                    selected.append(side)
+        return self._collect(device, package, session_id, selected, output, timeout, status,
+                             initial_errors=initial_errors)
+
+    def pull_manual(self, device: object, package: str, selection: PullSelection, output: Path,
+                    timeout: float) -> ArtifactResult:
+        _package(package)
+        if type(selection) is not PullSelection or type(selection.mode) is not PullMode:
+            raise _error("artifact.selection_invalid", "selection is invalid")
+        if type(selection.compressed_only) is not bool:
+            raise _error("artifact.selection_invalid", "compressed_only must be boolean")
+        client = _client_for(device, package, self._client_factory)
+        listing = list(_call(getattr(client, "list_names"), timeout=timeout))
+        if any(type(item) is not str for item in listing):
+            raise _error("artifact.list_invalid", "device listing contains a non-string name")
+        if len(set(listing)) != len(listing):
+            raise _error("artifact.duplicate", "device listing contains duplicate names")
+        listing = _validate_listing([_name(item) for item in listing if not _temporary_name(_name(item))])
+        status: Mapping[str, object] | None = None
+        session_id: str | None = None
+        if selection.mode is PullMode.LATEST:
+            for candidate in listing:
+                sid = _status_name(candidate)
+                if sid is None:
+                    continue
+                try:
+                    candidate_status = _json_status(
+                        _call(getattr(client, "read_file"), candidate, timeout=timeout), sid, None)
+                except QtraceError as error:
+                    if error.code not in {"artifact.status_invalid", "artifact.status_identity"}:
+                        raise
+                    continue
+                except (OSError, RuntimeError, TimeoutError, TypeError) as error:
+                    raise _error("artifact.pull_failed", str(error), partial=True) from error
+                if candidate_status.get("packageName") != package:
+                    continue
+                status = candidate_status
+                session_id = sid
+                break
+            if status is not None:
+                roots = [name for name in status["artifacts"] if _valid_name(name, trace=True)]
+            else:
+                raise _error("artifact.status_missing", "latest requires a valid native status")
+        elif selection.mode is PullMode.NAME:
+            if selection.name is None:
+                raise _error("artifact.selection_invalid", "name mode requires a name")
+            root = _name(selection.name, trace=True)
+            if root not in listing:
+                raise _error("artifact.not_found", f"remote trace does not exist: {root}")
+            if selection.compressed_only and not root.endswith(".lz4"):
+                raise _error("artifact.selection_invalid", "compressed-only rejects uncompressed artifact")
+            roots = [root]
+        else:
+            if selection.name is not None:
+                raise _error("artifact.selection_invalid", "all mode does not accept a name")
+            roots = _trace_roots(listing)
+        roots = [name for name in roots if name in listing]
+        if selection.compressed_only:
+            roots = [name for name in roots if name.endswith(".lz4")]
+        if not roots:
+            raise _error("artifact.not_found", "no eligible trace artifacts were found")
+        if session_id is None:
+            session_id = str(uuid.uuid4())
+        selected = list(roots)
+        for root in roots:
+            for side in (root + ".metrics", root + ".crash"):
+                if side in listing:
+                    selected.append(side)
+        return self._collect(device, package, session_id, selected, Path(output), timeout, status,
+                             compressed_only=selection.compressed_only)
