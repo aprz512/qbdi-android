@@ -131,9 +131,14 @@ class FakeRunner:
         self.commands: list[tuple[str, ...]] = []
         self.fail_first_read = fail_first_read
         self.reads = 0
+        self.offset_root: Path | None = None
 
     def run(self, command, *, timeout, cwd=None, allowed=(0,)):
         self.commands.append(tuple(command))
+        if "--output" in command and "qtrace" in command and "demo" in command:
+            output = Path(command[command.index("--output") + 1])
+            if output.name == "offset":
+                self.offset_root = output
         if "flight-crash" in command:
             return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult("", "", 2)
         return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult("", "", 0)
@@ -158,7 +163,7 @@ class FakeRunner:
                 "schema": 1, "session_id": SESSION, "status": report_status, "stage": "completed",
                 "package": "com.aprz.qbdiandroid", "pid": 4242,
                 "native": {"status": status("sealed")},
-                "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", "/tmp/fixture.trace.txt"],
+                "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", str((self.offset_root or Path("/tmp")) / "fixture.trace.txt")],
                 "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
             })
         return ""
