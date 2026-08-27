@@ -593,6 +593,48 @@ class ArtifactTests(unittest.TestCase):
                 __import__("os").close(fd)
             self.assertEqual("concurrent", target.read_text(encoding="utf-8"))
 
+    def test_report_writer_preserves_old_report_when_stat_and_rollback_fail(self):
+        from qtrace import report as report_module
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        writer = ReportWriter()
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            target = directory / "report.json"
+            writer.write_atomic(target, self._report(session, "original"))
+            identity = (target.stat().st_dev, target.stat().st_ino)
+            real_exchange = report_module._exchange
+            real_stat = report_module.os.stat
+            exchange_calls = 0
+
+            def exchange(fd, left, right):
+                nonlocal exchange_calls
+                exchange_calls += 1
+                if exchange_calls == 2:
+                    raise OSError("injected rollback failure")
+                real_exchange(fd, left, right)
+
+            def stat_after_exchange(name, *args, **kwargs):
+                if exchange_calls == 1 and name != "report.json":
+                    raise OSError("injected old-inode stat failure")
+                return real_stat(name, *args, **kwargs)
+
+            fd = os.open(directory, os.O_RDONLY)
+            try:
+                with patch("qtrace.report._exchange", side_effect=exchange), patch(
+                        "qtrace.report.os.stat", side_effect=stat_after_exchange):
+                    with self.assertRaisesRegex(OSError, "old-inode stat failure"):
+                        writer.write_atomic_at(
+                            fd, "report.json", self._report(session, "new"),
+                            expected_identity=identity)
+            finally:
+                os.close(fd)
+
+            documents = [json.loads(path.read_text(encoding="utf-8"))
+                         for path in directory.iterdir() if path.is_file()]
+            self.assertEqual(2, len(documents))
+            self.assertEqual({"new", "original"}, {item["status"] for item in documents})
+
     def test_refresh_rejects_preexisting_or_last_exchange_concurrent_report(self):
         from qtrace.artifacts import _rewrite_published_report
         from qtrace import report as report_module
@@ -629,6 +671,50 @@ class ArtifactTests(unittest.TestCase):
                 finally:
                     os.close(fd)
                 self.assertEqual("CONCURRENT", target.read_text(encoding="utf-8"))
+
+    def test_refresh_preserves_old_report_when_stat_and_rollback_fail(self):
+        from qtrace.artifacts import _rewrite_published_report
+        from qtrace import artifacts as artifacts_module
+        from qtrace import report as report_module
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            parent = Path(root)
+            directory = parent / session
+            directory.mkdir()
+            target = directory / "report.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            expected = (target.stat().st_dev, target.stat().st_ino)
+            real_exchange = report_module._exchange
+            real_stat = artifacts_module.os.stat
+            exchange_calls = 0
+
+            def exchange(fd, left, right):
+                nonlocal exchange_calls
+                exchange_calls += 1
+                if exchange_calls == 2:
+                    raise OSError("injected refresh rollback failure")
+                real_exchange(fd, left, right)
+
+            def stat_after_exchange(name, *args, **kwargs):
+                if exchange_calls == 1 and name != "report.json":
+                    raise OSError("injected refresh old-inode stat failure")
+                return real_stat(name, *args, **kwargs)
+
+            fd = os.open(parent, os.O_RDONLY)
+            try:
+                with patch("qtrace.report._exchange", side_effect=exchange), patch(
+                        "qtrace.artifacts.os.stat", side_effect=stat_after_exchange):
+                    with self.assertRaisesRegex(OSError, "refresh old-inode stat failure"):
+                        _rewrite_published_report(
+                            fd, session, (), (), expected_identity=expected)
+            finally:
+                os.close(fd)
+
+            contents = {path.read_text(encoding="utf-8")
+                        for path in directory.iterdir() if path.is_file()}
+            self.assertIn("ORIGINAL", contents)
+            self.assertEqual(2, len(contents))
 
     def test_statusless_session_json_uses_null_native_status(self):
         client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
