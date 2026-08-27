@@ -26,6 +26,9 @@ _PUBLISH_IDENTITY_SOURCE = (
     " peer.close()\n"
 )
 
+_IDENTITY_CONTAINMENT_TIMEOUT = 2.0
+_IDENTITY_CONTAINMENT_WALL_LIMIT = 3.0
+
 
 class FakeSelector:
     def __init__(self, *, fail_register=0, select_error=None, close_error=None):
@@ -550,8 +553,16 @@ class BoundedProcessTests(unittest.TestCase):
                 ]
                 identity: tuple[int, str] | None = None
                 try:
+                    started = time.monotonic()
                     with self.assertRaises(subprocess.TimeoutExpired):
-                        capture_bounded(command, maximum_bytes=1024, timeout=0.1)
+                        capture_bounded(
+                            command, maximum_bytes=1024,
+                            timeout=_IDENTITY_CONTAINMENT_TIMEOUT,
+                        )
+                    self.assertLess(
+                        time.monotonic() - started,
+                        _IDENTITY_CONTAINMENT_WALL_LIMIT,
+                    )
                     identity = identities.wait()["child"]
                     self._wait_identity_dead(identity)
                 finally:
@@ -584,8 +595,16 @@ class BoundedProcessTests(unittest.TestCase):
                 ]
                 identity: tuple[int, str] | None = None
                 try:
+                    started = time.monotonic()
                     with self.assertRaises(subprocess.TimeoutExpired):
-                        capture_bounded(command, maximum_bytes=1024, timeout=0.2)
+                        capture_bounded(
+                            command, maximum_bytes=1024,
+                            timeout=_IDENTITY_CONTAINMENT_TIMEOUT,
+                        )
+                    self.assertLess(
+                        time.monotonic() - started,
+                        _IDENTITY_CONTAINMENT_WALL_LIMIT,
+                    )
                     identity = identities.wait()["escaped"]
                     self._wait_identity_dead(identity)
                 finally:
@@ -623,8 +642,16 @@ class BoundedProcessTests(unittest.TestCase):
                 ]
                 identity: tuple[int, str] | None = None
                 try:
+                    started = time.monotonic()
                     with self.assertRaises(subprocess.TimeoutExpired):
-                        capture_bounded(command, maximum_bytes=1024, timeout=0.2)
+                        capture_bounded(
+                            command, maximum_bytes=1024,
+                            timeout=_IDENTITY_CONTAINMENT_TIMEOUT,
+                        )
+                    self.assertLess(
+                        time.monotonic() - started,
+                        _IDENTITY_CONTAINMENT_WALL_LIMIT,
+                    )
                     identity = identities.wait()["daemon"]
                     self._wait_identity_dead(identity)
                 finally:
@@ -669,8 +696,16 @@ class BoundedProcessTests(unittest.TestCase):
                 ]
                 identities: list[tuple[int, str]] = []
                 try:
+                    started = time.monotonic()
                     with self.assertRaises(subprocess.TimeoutExpired):
-                        capture_bounded(command, maximum_bytes=1024, timeout=0.5)
+                        capture_bounded(
+                            command, maximum_bytes=1024,
+                            timeout=_IDENTITY_CONTAINMENT_TIMEOUT,
+                        )
+                    self.assertLess(
+                        time.monotonic() - started,
+                        _IDENTITY_CONTAINMENT_WALL_LIMIT,
+                    )
                     identities = list(identity_server.wait().values())
                     for identity in identities:
                         self._wait_identity_dead(identity)
@@ -743,6 +778,7 @@ class BoundedProcessTests(unittest.TestCase):
 
             watcher = threading.Thread(target=stop_helper, daemon=True)
             watcher.start()
+            started = time.monotonic()
             try:
                 with patch.object(
                     bounded_process.subprocess, "Popen", side_effect=recording_popen
@@ -755,7 +791,14 @@ class BoundedProcessTests(unittest.TestCase):
                         BoundedProcessError,
                         r"pid-namespace.*emergency.*PID \d+ starttime \d+",
                     ):
-                        capture_bounded(command, maximum_bytes=1024, timeout=0.5)
+                        capture_bounded(
+                            command, maximum_bytes=1024,
+                            timeout=_IDENTITY_CONTAINMENT_TIMEOUT,
+                        )
+                self.assertLess(
+                    time.monotonic() - started,
+                    _IDENTITY_CONTAINMENT_WALL_LIMIT,
+                )
                 self.assertTrue(helper_stopped.wait(1), "helper was not SIGSTOPed")
                 if watcher_error:
                     raise watcher_error[0]
@@ -825,6 +868,7 @@ class BoundedProcessTests(unittest.TestCase):
 
             watcher = threading.Thread(target=stop_helper, daemon=True)
             watcher.start()
+            started = time.monotonic()
             try:
                 with patch.object(
                     bounded_process.subprocess, "Popen", side_effect=recording_popen
@@ -834,7 +878,14 @@ class BoundedProcessTests(unittest.TestCase):
                     BoundedProcessError,
                     r"pid-namespace.*emergency.*PID \d+ starttime \d+",
                 ):
-                    capture_bounded(command, maximum_bytes=1024, timeout=0.5)
+                    capture_bounded(
+                        command, maximum_bytes=1024,
+                        timeout=_IDENTITY_CONTAINMENT_TIMEOUT,
+                    )
+                self.assertLess(
+                    time.monotonic() - started,
+                    _IDENTITY_CONTAINMENT_WALL_LIMIT,
+                )
                 if watcher_error:
                     raise watcher_error[0]
                 assert target_identity is not None
@@ -1000,8 +1051,16 @@ class BoundedProcessTests(unittest.TestCase):
                 ]
                 identity: tuple[int, str] | None = None
                 try:
+                    started = time.monotonic()
                     with self.assertRaises(BoundedProcessError) as caught:
-                        capture_bounded(command, maximum_bytes=1024, timeout=0.2)
+                        capture_bounded(
+                            command, maximum_bytes=1024,
+                            timeout=_IDENTITY_CONTAINMENT_TIMEOUT,
+                        )
+                    self.assertLess(
+                        time.monotonic() - started,
+                        _IDENTITY_CONTAINMENT_WALL_LIMIT,
+                    )
                     identity = identities.wait()["stubborn"]
                     self.assertEqual(7, caught.exception.returncode)
                     self.assertEqual(b"root-seven", caught.exception.stdout)
