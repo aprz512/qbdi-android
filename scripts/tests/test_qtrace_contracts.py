@@ -117,6 +117,15 @@ class SchemaContractsTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_status_shape(document)
 
+    def test_status_invariant_corpus_matches_runtime(self):
+        documents = []
+        end = status("running"); end["normalizedScenes"] = [{"name": "x", "startOffset": 4, "endOffset": 4}]; documents.append(end)
+        duplicate = status("running"); duplicate["activeScenes"] = [{"sceneIndex": 0, "tid": 1, "sealed": False}, {"sceneIndex": 0, "tid": 1, "sealed": False}]; documents.append(duplicate)
+        outside = status("running"); outside["activeScenes"] = [{"sceneIndex": 1, "tid": 1, "sealed": False}]; documents.append(outside)
+        for document in documents:
+            with self.assertRaises(ValueError):
+                validate_status_shape(document)
+
     def test_runtime_corpus_rejects_offset_zero_misalignment_and_reversed_ranges(self):
         for start, end in (("0x0", "0x4"), ("0x2", "0x4"), ("0x8", "0x4")):
             with self.subTest(start=start, end=end), tempfile.TemporaryDirectory() as temporary:
