@@ -380,10 +380,13 @@ orchestrator 在启动前仍记录设备产物清单，并将“session 文件�
 - 提供 `app.apk`：安装该现成 APK，并使用其 ELF 做解析/identity 检查。
 - tracer 默认由当前仓库构建；用户可显式指定预构建 tracer/companion。
 
-部署策略为 `auto`：优先选择已验证可由目标进程加载且可由主机拉取的 app-private 路径，失败
-时再使用明确配置的远端目录。预检必须在 spawn 前验证实际映射权限、可用空间、ABI、Frida
-握手、run-as/root 能力和 host lz4。不能把 SELinux/linker namespace 问题延迟成模糊的
-`Module.load failed`。
+部署策略为 `auto`：优先选择已验证可写、可由目标身份读取且可由主机拉取的 app-private 路径，
+失败时再使用明确配置的远端目录。预检必须在 spawn 前验证实际映射权限、可用空间、ABI、
+Frida 握手、run-as/root 能力和 host lz4。`run-as` 可提供补充性的 spawn 前 linker probe；
+仅有 root + `su-uid` 时，数字 UID 不证明目标进程的 SELinux/linker namespace，因此部署将
+load probe 明确记录为 `deferred`，不执行 Magisk 上下文的 linker probe。Task 4 在已 spawn
+且挂起的 App 内执行的 `Module.load` 对所有 route 都是权威验证；任何失败（尤其 deferred
+部署）都归一化为 `TRACER_LOAD_FAILED`，而不是暴露模糊的底层异常。
 
 所有外部进程通过现有 bounded-process 风格执行，具备独立 timeout、输出大小上限和参数数组，
 不把 package、文件名或用户输入拼入 shell 程序文本。

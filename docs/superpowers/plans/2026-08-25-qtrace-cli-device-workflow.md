@@ -374,8 +374,8 @@ Test without a physical device by injecting command results. Assert:
 - Preflight performs a bounded Frida host/server version handshake; exact normalized semantic-version equality passes (`16.3.3 == 16.3.3`) and any major/minor/patch mismatch fails with `FRIDA_VERSION_MISMATCH` before spawn.
 - Package absence is an error when `app.apk` is absent; when `app.apk` exists, `adb install -r` installs that prebuilt APK before package/build-ID verification. No external APK build command is issued.
 - User-supplied `tracer.library` and `tracer.companion` are reused only when both are regular arm64 files; otherwise the repository Gradle native configuration/build tasks run with a bounded timeout.
-- Deployment first probes a package-private directory for write, load, and later root/read access. It falls back to a validated tracer-owned `/data/local/tmp/qtrace/<session-id>/` directory only when the private route fails its explicit probe.
-- Deploy pushes only tracer-owned files, applies mode `0755`, verifies device SHA-256, checks SELinux/linker-namespace loadability with the companion probe, and removes only its temporary probe file on failure.
+- Deployment first probes a package-private directory for write and bounded target-identity read access. It falls back to a validated tracer-owned `/data/local/tmp/qtrace/<session-id>/` directory only when that explicit private capability probe fails.
+- Deploy pushes only tracer-owned files, applies mode `0755`, and verifies device SHA-256. A `run-as` target may run a supplemental pre-spawn linker probe; root-only `su-uid` access must instead record `load_probe.status=deferred` because numeric UID switching does not prove the target process SELinux/linker namespace. Remove only the task-owned temporary probe file on failure.
 
 Freeze command construction with assertions such as:
 
@@ -518,6 +518,7 @@ force-stop -> spawn -> attach -> create/load agent -> set companion path -> qbdi
 
 Also cover:
 
+- `Module.load` failure inside the suspended spawned app for every deployment route, including `load_probe.status=deferred`, maps to `TRACER_LOAD_FAILED`; this in-process load is authoritative even when Task 3 recorded a successful supplemental probe.
 - `qbdi_tracer_configure_json` returns a nonzero transport code or an `ok=false` response.
 - The agent reports malformed JSON or an initialization/final generation/session-ID mismatch.
 - Initialization is accepted but the setup deadline expires before final `installed` after resume.
@@ -537,7 +538,7 @@ Expected: FAIL because `qtrace.injector` does not exist.
 
 - [ ] **Step 3: Implement a fixed startup agent**
 
-`qtrace/agent.js` must contain no user-generated JavaScript. It receives one JSON request from Python, loads the deployed tracer `.so`, calls `qbdi_tracer_set_shadowhook_helper_path(const char *)` with the deployed companion before configuration, resolves the existing `qbdi_tracer_configure_json(const char *, uint64_t, char *, uint64_t, uint64_t *)` ABI, passes the exact UTF-8 byte length, validates the transport code and bounded 64 KiB JSON response, and emits an accepted initialization result. After Python resumes the process, the same fixed agent polls `qbdi_tracer_get_status_json(uint64_t, char *, uint64_t, uint64_t *)` until the generation reaches `installed` or a setup terminal. Messages are limited to:
+`qtrace/agent.js` must contain no user-generated JavaScript. It receives one JSON request from Python and performs the authoritative `Module.load` of the deployed tracer `.so` inside the suspended spawned app; any failure maps to `TRACER_LOAD_FAILED`, especially when Task 3 recorded a deferred root-only load probe. It calls `qbdi_tracer_set_shadowhook_helper_path(const char *)` with the deployed companion before configuration, resolves the existing `qbdi_tracer_configure_json(const char *, uint64_t, char *, uint64_t, uint64_t *)` ABI, passes the exact UTF-8 byte length, validates the transport code and bounded 64 KiB JSON response, and emits an accepted initialization result. After Python resumes the process, the same fixed agent polls `qbdi_tracer_get_status_json(uint64_t, char *, uint64_t, uint64_t *)` until the generation reaches `installed` or a setup terminal. Messages are limited to:
 
 ```javascript
 send({type: "initialized", sessionId, generation, status});

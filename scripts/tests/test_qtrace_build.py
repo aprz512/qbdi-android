@@ -326,6 +326,50 @@ class DeployerTests(unittest.TestCase):
             sum(call[0] == "root" and call[1][0] == "cp" for call in device.calls),
         )
 
+    def test_su_uid_defers_loadability_without_running_linker_in_magisk_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(
+                root_strategy="su",
+                target_strategy="su-uid",
+                package_uid=10905,
+            )
+            deployment = Deployer().deploy(
+                device,
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+
+        self.assertEqual("app-private", deployment.route)
+        self.assertEqual(
+            {
+                "status": "deferred",
+                "reason": "target_process_namespace_required",
+                "uid": "10905",
+            },
+            deployment.load_probe,
+        )
+        self.assertFalse(any(call[1][0] == "env" for call in device.calls if call[0] == "target"))
+
+    def test_su_uid_private_capability_fallback_keeps_loadability_deferred(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(
+                private_probe=False,
+                root_strategy="su",
+                target_strategy="su-uid",
+                package_uid=10905,
+            )
+            deployment = Deployer().deploy(
+                device,
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+
+        self.assertEqual("local-tmp", deployment.route)
+        self.assertEqual("deferred", deployment.load_probe["status"])
+        self.assertEqual("10905", deployment.load_probe["uid"])
+        self.assertIn("privateFailure", deployment.load_probe)
+        self.assertFalse(any(call[1][0] == "env" for call in device.calls if call[0] == "target"))
+
     def test_private_linker_capability_failure_may_fall_back(self):
         with tempfile.TemporaryDirectory() as directory:
             deployment = Deployer().deploy(

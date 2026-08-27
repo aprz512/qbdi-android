@@ -416,17 +416,27 @@ class Deployer:
                     )
                 hashes[remote] = host_digest
 
-            load_output = self._probe_load(
-                target_shell=target_shell,
-                route=route,
-                remote_dir=remote_dir,
-                tracer_remote=tracer_remote,
-                companion_remote=companion_remote,
-            )
-            load_probe = {
-                "status": "ok",
-                "diagnostic": _diagnostic(load_output),
-            }
+            if device.target_strategy == "su-uid":
+                # Numeric UID switching proves bounded file access only. Magisk's
+                # SELinux domain/linker namespace is not the spawned app's, so the
+                # in-process Module.load performed during injection is authoritative.
+                load_probe = {
+                    "status": "deferred",
+                    "reason": "target_process_namespace_required",
+                    "uid": str(device.package_uid),
+                }
+            else:
+                load_output = self._probe_load(
+                    target_shell=target_shell,
+                    route=route,
+                    remote_dir=remote_dir,
+                    tracer_remote=tracer_remote,
+                    companion_remote=companion_remote,
+                )
+                load_probe = {
+                    "status": "ok",
+                    "diagnostic": _diagnostic(load_output),
+                }
             return Deployment(
                 route=route,
                 remote_dir=remote_dir,
