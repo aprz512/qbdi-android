@@ -593,6 +593,43 @@ class ArtifactTests(unittest.TestCase):
                 __import__("os").close(fd)
             self.assertEqual("concurrent", target.read_text(encoding="utf-8"))
 
+    def test_refresh_rejects_preexisting_or_last_exchange_concurrent_report(self):
+        from qtrace.artifacts import _rewrite_published_report
+        from qtrace import report as report_module
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        for at_exchange in (False, True):
+            with self.subTest(at_exchange=at_exchange), tempfile.TemporaryDirectory() as root:
+                parent = Path(root)
+                directory = parent / session
+                directory.mkdir()
+                target = directory / "report.json"
+                target.write_text("original", encoding="utf-8")
+                expected = (target.stat().st_dev, target.stat().st_ino)
+                if not at_exchange:
+                    racer = directory / "racer"
+                    racer.write_text("CONCURRENT", encoding="utf-8")
+                    os.replace(racer, target)
+                fd = os.open(parent, os.O_RDONLY)
+                real_exchange = report_module._exchange
+                first = True
+                def exchange(dirfd, left, right):
+                    nonlocal first
+                    if at_exchange and first:
+                        first = False
+                        replacement = os.open("racer", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dirfd)
+                        os.write(replacement, b"CONCURRENT")
+                        os.close(replacement)
+                        os.replace("racer", right, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+                    real_exchange(dirfd, left, right)
+                try:
+                    with patch("qtrace.report._exchange", side_effect=exchange):
+                        with self.assertRaises((FileExistsError, OSError)):
+                            _rewrite_published_report(fd, session, (), (), expected_identity=expected)
+                finally:
+                    os.close(fd)
+                self.assertEqual("CONCURRENT", target.read_text(encoding="utf-8"))
+
     def test_statusless_session_json_uses_null_native_status(self):
         client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
