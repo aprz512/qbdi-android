@@ -1,6 +1,7 @@
 package com.aprz.qbdiandroid
 
 import android.graphics.Color
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -38,8 +39,9 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        startQtraceAcceptance(intent)
         val acceptanceMode = intent.getIntExtra("flight_acceptance_mode", -1)
-        if (acceptanceMode >= 0) {
+        if (acceptanceMode >= 0 && QtraceAcceptance.parse(intent.extrasMap()) == null) {
             val seed = intent.getLongExtra("flight_acceptance_seed", 0)
             val worker = intent.getIntExtra("flight_acceptance_worker", 0)
             Thread({
@@ -50,6 +52,22 @@ class MainActivity : ComponentActivity() {
         setContent {
             QbdiDemoApp()
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        startQtraceAcceptance(intent)
+    }
+
+    private fun startQtraceAcceptance(intent: Intent) {
+        QtraceAcceptance.parse(intent.extrasMap())?.let { QtraceAcceptance.start(this, it) }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.extrasMap(): Map<String, Any?> {
+        val values = extras ?: return emptyMap()
+        return values.keySet().associateWith { values.get(it) }
     }
 }
 

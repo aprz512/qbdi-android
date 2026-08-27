@@ -616,6 +616,21 @@ extern "C" uint64_t demo_benchmark_case(uint64_t iterations, uint64_t seed) {
     return state ^ working_set[static_cast<size_t>(state & (working_set.size() - 1))];
 }
 
+extern "C" __attribute__((noinline, visibility("default"))) uint64_t
+demo_timed_acceptance_case(uint64_t iterations, uint64_t seed) noexcept {
+    uint64_t state = seed ^ 0x9e3779b97f4a7c15ULL;
+    for (uint64_t index = 0; index < iterations; ++index) {
+        // Keep precisely one deterministic mixing block per iteration; sleep makes
+        // the 30-iteration fixture span the native two-second stop deadline.
+        state ^= index + 0xd1b54a32d192ed03ULL;
+        state = (state << 27U) | (state >> 37U);
+        state *= 0x94d049bb133111ebULL;
+        state ^= state >> 31U;
+        usleep(100000);
+    }
+    return state;
+}
+
 extern "C" uint64_t demo_signal_probe(uint64_t cookie) {
     g_probe_handler_called = 0;
     g_probe_pc_original = 0;

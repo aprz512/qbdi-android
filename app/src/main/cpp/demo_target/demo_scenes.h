@@ -23,6 +23,8 @@ __attribute__((visibility("hidden"))) std::string demo_integrity_case();
 __attribute__((noinline, visibility("default"))) uint64_t demo_benchmark_case(uint64_t iterations,
                                                                                  uint64_t seed);
 __attribute__((noinline, visibility("default"))) uint64_t
+demo_timed_acceptance_case(uint64_t iterations, uint64_t seed) noexcept;
+__attribute__((noinline, visibility("default"))) uint64_t
 demo_signal_probe(uint64_t cookie);
 __attribute__((visibility("hidden"))) void demo_flight_acceptance_init();
 __attribute__((visibility("default"))) uint64_t

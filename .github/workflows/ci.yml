@@ -1,0 +1,21 @@
+name: host-ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned Android tools
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'cmake;3.22.1' 'ndk;26.1.10909125'
+      - name: Python tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      - name: Native, fixture, and tracer tests/builds
+        run: ./gradlew nativeHostTest :app:testDebugUnitTest :app:assembleDebug :tracer:assembleDebug :tracer:copyTracerDebug --no-daemon

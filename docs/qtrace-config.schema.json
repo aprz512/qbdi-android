@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qbdi-android.local/schema/qtrace-config.schema.json",
+  "title": "qtrace strict configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "app", "target", "scenes"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "app": {"$ref": "#/$defs/app"},
+    "target": {"$ref": "#/$defs/target"},
+    "tracer": {"$ref": "#/$defs/tracer"},
+    "scenes": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/scene"}}
+  },
+  "$defs": {
+    "text": {"type": "string", "minLength": 1},
+    "app": {
+      "type": "object", "additionalProperties": false, "required": ["package"],
+      "properties": {"package": {"$ref": "#/$defs/text"}, "apk": {"$ref": "#/$defs/text"}}
+    },
+    "target": {
+      "type": "object", "additionalProperties": false, "required": ["module"],
+      "properties": {"module": {"$ref": "#/$defs/text"}, "binary": {"$ref": "#/$defs/text"}}
+    },
+    "tracer": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "profile": {"enum": ["fast", "balanced", "full"]},
+        "compression": {"type": "boolean"},
+        "flightEnabled": {"type": "boolean"},
+        "flightEntryScene": {"$ref": "#/$defs/text"},
+        "library": {"$ref": "#/$defs/text"},
+        "companion": {"$ref": "#/$defs/text"}
+      }
+    },
+    "scene": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["name", "symbol"], "properties": {"name": {"$ref": "#/$defs/text"}, "symbol": {"$ref": "#/$defs/text"}}},
+        {"type": "object", "additionalProperties": false, "required": ["name", "startOffset", "endOffset"], "properties": {"name": {"$ref": "#/$defs/text"}, "startOffset": {"type": "string", "pattern": "^0x[0-9a-fA-F]+$"}, "endOffset": {"type": "string", "pattern": "^0x[0-9a-fA-F]+$"}}}
+      ]
+    }
+  }
+}

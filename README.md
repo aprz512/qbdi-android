@@ -153,6 +153,20 @@ out/arm64-v8a/libshadowhook_nothing.so
 python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
+## 手动设备发布门禁
+
+下列验收是发布前的手动门禁，**不会**在普通 host CI 中自动运行。它需要明确
+指定一台 rooted arm64 设备，以及可用的 ADB、匹配的 Frida host/server、NDK 和 host
+`lz4`；脚本拒绝选择默认设备，并以有界的子进程和读操作执行。
+
+```bash
+python3 scripts/qtrace_device_acceptance.py --device SERIAL
+```
+
+该门禁会构建、安装 fixture，等待最多 15 秒的无追踪 timed oracle，再运行 binary
+baseline、timed offset/symbol、monitor-exit、flight-crash 和四种手动 pull。失败时会打印
+生成的 qtrace report 路径，以便保留设备/主机证据进行复查。
+
 Frida/GumJS adapter 的 host 测试是显式 opt-in；它要求可用的 Frida Python package 和
 本机 attach 能力，不属于默认 Python 套件：
 

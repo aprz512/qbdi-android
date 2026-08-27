@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qbdi-android.local/schema/qtrace-session-status.schema.json",
+  "title": "qtrace native session status",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sessionId", "generation", "packageName", "pid", "state", "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes", "artifacts", "stopAcknowledged", "warnings", "errors"],
+  "properties": {
+    "schemaVersion": {"const": 1}, "sessionId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "maxLength": 64},
+    "generation": {"type": "integer", "minimum": 1}, "packageName": {"type": "string", "minLength": 1, "maxLength": 256},
+    "pid": {"type": "integer", "minimum": 1},
+    "state": {"enum": ["installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"]},
+    "reason": {"type": "string", "maxLength": 256}, "transitionMonotonicNs": {"type": "integer", "minimum": 0},
+    "normalizedScenes": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["name", "startOffset", "endOffset"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}, "startOffset": {"type": "integer", "minimum": 0}, "endOffset": {"type": "integer", "minimum": 1}}}},
+    "activeScenes": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["sceneIndex", "tid", "sealed"], "properties": {"sceneIndex": {"type": "integer", "minimum": 0}, "tid": {"type": "integer", "minimum": 1}, "sealed": {"type": "boolean"}}}},
+    "artifacts": {"type": "array", "maxItems": 256, "items": {"type": "string", "minLength": 1, "maxLength": 255}, "uniqueItems": true},
+    "stopAcknowledged": {"type": "boolean"},
+    "warnings": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/issue"}},
+    "errors": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/issue"}}
+  },
+  "$defs": {"issue": {"type": "object", "additionalProperties": false, "required": ["code", "path", "message"], "properties": {"code": {"type": "string", "maxLength": 1024}, "path": {"type": "string", "maxLength": 1024}, "message": {"type": "string", "maxLength": 1024}}}}
+}
