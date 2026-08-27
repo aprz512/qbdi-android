@@ -661,6 +661,90 @@ class ArtifactTests(unittest.TestCase):
             canonical = json.loads((result.output_dir / "report.json").read_text(encoding="utf-8"))
             self.assertNotIn("artifact.report_refresh", {error["code"] for error in canonical["errors"]})
 
+    def test_final_output_swap_reclaims_manual_and_session_publications(self):
+        """Removing the final identity check would return paths in a swapped output root."""
+        for session_collection in (False, True):
+            with self.subTest(session_collection=session_collection), tempfile.TemporaryDirectory() as root:
+                root_path = Path(root)
+                output = root_path / "output"
+                saved = root_path / "saved"
+                output.mkdir()
+                session = "11111111-1111-4111-8111-111111111111"
+                processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+                captured: list[object] = []
+
+                if session_collection:
+                    from qtrace.artifacts import _collector_token
+
+                    def token_then_swap(*args, **kwargs):
+                        token = _collector_token(*args, **kwargs)
+                        captured.append(token)
+                        output.rename(saved)
+                        output.mkdir()
+                        (output / "attacker").mkdir()
+                        return token
+
+                    context = patch("qtrace.artifacts._collector_token", side_effect=token_then_swap)
+                else:
+                    original_publish = processor._publish
+
+                    def publish_then_swap(*args, **kwargs):
+                        final = original_publish(*args, **kwargs)
+                        captured.append(args[2])
+                        output.rename(saved)
+                        output.mkdir()
+                        (output / "attacker").mkdir()
+                        return final
+
+                    context = patch.object(processor, "_publish", side_effect=publish_then_swap)
+
+                with context, self.assertRaises(QtraceError) as raised:
+                    if session_collection:
+                        processor.collect_session("d", "com.example.app", session,
+                                                  self._status(session), output, 1)
+                    else:
+                        processor.pull_manual("d", "com.example.app",
+                                              PullSelection(PullMode.NAME, "run.trace.txt"), output, 1)
+
+                self.assertEqual("artifact.destination_replaced", raised.exception.code)
+                session_id = session if session_collection else captured[0]
+                self.assertFalse((saved / session_id).exists())
+                self.assertTrue((output / "attacker").is_dir())
+                if session_collection:
+                    token = captured[0]
+                    self.assertEqual(-1, token.parent)
+                    self.assertEqual(-1, token.directory)
+
+    def test_final_output_swap_reports_committed_cleanup_failure(self):
+        """A reclaim failure must not turn an orphaned committed session into a silent result."""
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "output"
+            saved = root_path / "saved"
+            output.mkdir()
+            processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+            original_publish = processor._publish
+            published: list[str] = []
+
+            def publish_then_swap(*args, **kwargs):
+                final = original_publish(*args, **kwargs)
+                published.append(args[2])
+                output.rename(saved)
+                output.mkdir()
+                return final
+
+            with patch.object(processor, "_publish", side_effect=publish_then_swap), patch(
+                    "qtrace.artifacts._remove_tree_at", side_effect=OSError("reclaim refused")):
+                with self.assertRaises(QtraceError) as raised:
+                    processor.pull_manual("d", "com.example.app",
+                                          PullSelection(PullMode.NAME, "run.trace.txt"), output, 1)
+
+            self.assertEqual("artifact.destination_replaced", raised.exception.code)
+            self.assertIn("committed session cleanup failed: reclaim refused", raised.exception.detail)
+            self.assertTrue(any("committed session cleanup failed: reclaim refused" in note
+                                for note in raised.exception.__notes__))
+            self.assertTrue((saved / published[0]).is_dir())
+
     def test_collector_token_never_overwrites_a_concurrent_report_inode(self):
         from qtrace.artifacts import publish_collector_report
         session = "11111111-1111-4111-8111-111111111111"

@@ -777,6 +777,51 @@ def _remove_tree_at(parent: int, name: str) -> None:
     os.rmdir(name, dir_fd=parent)
 
 
+def _reclaim_committed_session(parent: int, directory: int, session_id: str) -> None:
+    """Remove one committed session only if its held inode still owns that name."""
+    expected = os.fstat(directory)
+    current = os.stat(session_id, dir_fd=parent, follow_symlinks=False)
+    if (not stat.S_ISDIR(expected.st_mode) or not stat.S_ISDIR(current.st_mode)
+            or (expected.st_dev, expected.st_ino) != (current.st_dev, current.st_ino)):
+        raise OSError("committed session identity changed before reclaim")
+    _remove_tree_at(parent, session_id)
+    os.fsync(parent)
+
+
+def _note_committed_cleanup_failure(primary: BaseException, failure: BaseException) -> None:
+    """Keep a destination replacement primary while making any orphan risk explicit."""
+    detail = f"committed session cleanup failed: {failure}"
+    if isinstance(primary, QtraceError):
+        normalized = QtraceError(primary.code, primary.stage,
+                                 f"{primary.detail}; {detail}", exit_code=primary.exit_code)
+        primary.detail = normalized.detail
+        primary.args = (primary.detail,)
+    if hasattr(primary, "add_note"):
+        primary.add_note(detail)
+
+
+def _close_token_and_reclaim(parent: int, directory: int, session_id: str,
+                             token: _PublicationToken | None,
+                             primary: BaseException | None = None) -> None:
+    """Close result capabilities, then reclaim the held committed directory if still ours."""
+    failures: list[BaseException] = []
+    if token is not None:
+        try:
+            token.close()
+        except BaseException as error:
+            failures.append(error)
+    try:
+        _reclaim_committed_session(parent, directory, session_id)
+    except BaseException as error:
+        failures.append(error)
+    if primary is None:
+        if failures:
+            raise failures[0]
+        return
+    for failure in failures:
+        _note_committed_cleanup_failure(primary, failure)
+
+
 def _new_stage(output: _OutputDirectory) -> tuple[Path, int, int, str]:
     """Create stage and artifacts using one trusted output directory descriptor."""
     parent = os.dup(output.descriptor)
@@ -851,14 +896,8 @@ class ArtifactProcessor:
             os.fsync(parent)
         except BaseException as error:
             if committed and isinstance(error, QtraceError) and error.code == "artifact.destination_replaced":
-                try:
-                    expected = os.fstat(stage_fd) if stage_fd is not None else None
-                    current = os.stat(session_id, dir_fd=parent, follow_symlinks=False)
-                    if expected is not None and (expected.st_dev, expected.st_ino) == (current.st_dev, current.st_ino):
-                        _remove_tree_at(parent, session_id)
-                        os.fsync(parent)
-                except OSError:
-                    pass
+                if stage_fd is not None:
+                    _close_token_and_reclaim(parent, stage_fd, session_id, None, error)
                 raise
             if committed:
                 failure = {"name": "", "code": "artifact.commit_durable",
@@ -891,6 +930,7 @@ class ArtifactProcessor:
             raise
         stage_artifacts = stage_root / "artifacts"
         published = False
+        token: _PublicationToken | None = None
         try:
             active = (status is not None and status.get("_native_present", True)
                       and status.get("state") not in {"sealed", "stop_incomplete"})
@@ -1124,15 +1164,22 @@ class ArtifactProcessor:
                             error.add_note(f"refresh diagnostic publication failed: {persistence_error}")
                     if not isinstance(error, Exception):
                         raise
+            if create_token and not refresh_failed:
+                token = _collector_token(parent_fd, session_id, output_handle,
+                                         canonical_report_identity)
+            try:
+                output_handle.assert_identity()
+            except QtraceError as error:
+                _close_token_and_reclaim(parent_fd, stage_fd, session_id, token, error)
+                raise
             result_files = tuple(final / path for path in relative_files)
             if refresh_error_path is not None:
                 result_files += (refresh_error_path,)
             result = ArtifactResult(final, result_files, tuple(errors),
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
-            if create_token and not refresh_failed:
-                object.__setattr__(result, "_publication_token", _collector_token(
-                    parent_fd, session_id, output_handle, canonical_report_identity))
+            if token is not None:
+                object.__setattr__(result, "_publication_token", token)
             return result
         except QtraceError:
             raise
