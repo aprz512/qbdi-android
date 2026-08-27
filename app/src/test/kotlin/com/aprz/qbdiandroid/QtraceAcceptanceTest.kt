@@ -47,4 +47,20 @@ class QtraceAcceptanceTest {
         }
     }
 
+    @Test fun rejects_baseline_launch_when_stale_fixture_result_cannot_be_removed() {
+        val deleted = mutableListOf<String>()
+        val failure = runCatching {
+            QtraceAcceptance.clearStaleTimedResults { name ->
+                deleted += name
+                name != "qtrace-acceptance-timed.json"
+            }
+        }.exceptionOrNull()
+
+        assertEquals(
+            listOf("qtrace-acceptance-baseline.json", "qtrace-acceptance-timed.json"),
+            deleted,
+        )
+        assertEquals(IllegalStateException::class, failure!!::class)
+    }
+
 }

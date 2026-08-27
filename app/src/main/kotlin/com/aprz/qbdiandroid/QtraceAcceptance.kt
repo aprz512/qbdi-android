@@ -21,6 +21,14 @@ object QtraceAcceptance {
 
     fun claimStartForTest(): Boolean = started.compareAndSet(false, true)
 
+    internal fun clearStaleTimedResults(removeIfPresent: (String) -> Boolean) {
+        for (name in listOf("qtrace-acceptance-baseline.json", "qtrace-acceptance-timed.json")) {
+            if (!removeIfPresent(name)) {
+                throw IllegalStateException("cannot remove stale $name")
+            }
+        }
+    }
+
     fun parse(extras: Map<String, Any?>): QtraceAcceptanceRequest? {
         if ((extras[enabled] as? Boolean) != true) return null
         val selectedMode = extras[mode] as? String ?: return null
@@ -38,8 +46,10 @@ object QtraceAcceptance {
         if (!started.compareAndSet(false, true)) return
         val traced = activity.intent.hasExtra("qtrace_acceptance_worker")
         if (request.mode == "timed" && !traced) {
-            File(activity.filesDir, "qtrace-acceptance-baseline.json").delete()
-            File(activity.filesDir, "qtrace-acceptance-timed.json").delete()
+            clearStaleTimedResults { name ->
+                val stale = File(activity.filesDir, name)
+                !stale.exists() || stale.delete()
+            }
         }
         thread(name = "qtrace-acceptance-${request.mode}", isDaemon = false) {
             when (request.mode) {
