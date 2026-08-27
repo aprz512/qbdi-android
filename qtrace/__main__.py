@@ -1,3 +1,5 @@
+"""``python -m qtrace`` entry point."""
+
 from qtrace.cli import main
 
 

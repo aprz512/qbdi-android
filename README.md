@@ -64,6 +64,62 @@ git lfs pull
 `tracer/src/main/cpp/third_party/nlohmann/json.hpp` 和
 `tracer/src/main/cpp/third_party/nlohmann/LICENSE.MIT`。
 
+## qtrace 命令行
+
+`python3 -m qtrace` 是一次性 app tracing 工作流。它需要 rooted（或对目标
+app 可用 `run-as`）的 `arm64-v8a`、API 24+ 设备，ADB、匹配版本的 Frida
+host/server、Android NDK（设置 `ANDROID_NDK_HOME` 或 `ANDROID_NDK_ROOT`）和
+host `lz4`。外部应用的 APK 构建不在 qtrace 范围内；配置可选的 `app.apk`
+只会安装那个已存在的 APK，绝不会构建它。
+
+对任意外部包，先写严格 JSON 配置，再运行带时长的 session 或无限期 monitor：
+
+```bash
+python3 -m qtrace run --config target.json --duration 30s --device SERIAL --output results
+python3 -m qtrace monitor --config target.json --device SERIAL --output results
+```
+
+配置中的 offset 是模块相对、半开区间 `[startOffset,endOffset)`；不接受 base
+address。offset 与 symbol 两种严格形式如下（它们不能混用，也不能附加 `base`）：
+
+```json
+{"schemaVersion":1,"app":{"package":"com.example.app"},"target":{"module":"libtarget.so"},"tracer":{},"scenes":[{"name":"target","startOffset":"0x120","endOffset":"0x180"}]}
+```
+
+```json
+{"schemaVersion":1,"app":{"package":"com.example.app"},"target":{"module":"libtarget.so"},"tracer":{},"scenes":[{"name":"target","symbol":"target_function"}]}
+```
+
+手动拉取不读取目标配置、不构建 tracer，也不加载 Frida；选择器默认是
+`latest`，`compressed-only` 是正交过滤器：
+
+```bash
+python3 -m qtrace pull --package com.example.app --latest --device SERIAL
+python3 -m qtrace pull --package com.example.app --name run.trace.bin.lz4 --device SERIAL
+python3 -m qtrace pull --package com.example.app --all --device SERIAL
+python3 -m qtrace pull --package com.example.app --all --compressed-only --device SERIAL
+```
+
+`demo` 仅是本仓库的设备验收 fixture，不是外部应用的模板；它构建 fixture APK，
+再走完全相同的 orchestrator：
+
+```bash
+python3 -m qtrace demo --scenario timed --duration 10s --scene-form offset --device SERIAL
+```
+
+所有命令默认将报告和产物写入 `qtrace-output`；`--json` 只在 stdout 输出一个
+机器结果对象，进度写 stderr。默认 setup/stop/单个 ADB/pull timeout 分别为
+90/10/30/60 秒；每个 timeout 必须为有限正数，`run --duration` 必须介于
+100 ms 和 24 h。
+
+| Exit code | Meaning |
+| ---: | --- |
+| 0 | 完整成功 |
+| 1 | 配置、设备、注入或命令错误 |
+| 2 | 已发布部分可恢复产物 |
+| 3 | 原生 stop 未完整封存 |
+| 130 | 用户中断；orchestrator 已写 interrupted report |
+
 ## 构建
 
 构建演示 APK，并把 standalone tracer 与 ShadowHook companion 复制到 `out/arm64-v8a/`：
