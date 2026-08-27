@@ -131,22 +131,34 @@ def _trusted_parent(path: Path) -> int:
 
 
 class ReportWriter:
-    def write_atomic(self, output: Path, report: SessionReport, *, no_replace: bool = False) -> None:
-        output = Path(output)
-        if output.name in {"", ".", ".."}:
-            raise ValueError("report destination has no filename")
+    @staticmethod
+    def _encode(report: SessionReport) -> bytes:
         encoded = json.dumps(_normalize(report), sort_keys=True, separators=(",", ":"),
                              ensure_ascii=False, allow_nan=False).encode("utf-8")
         if not encoded or len(encoded) > _MAX_REPORT_BYTES:
             raise ValueError("report exceeds the 1 MiB publication limit")
-        directory = _trusted_parent(output.parent)
-        temporary = f".{output.name}.{secrets.token_hex(16)}"
+        return encoded
+
+    def write_atomic_at(self, directory: int, name: str, report: SessionReport, *,
+                        no_replace: bool = False,
+                        expected_identity: tuple[int, int] | None = None) -> bool:
+        """Publish through a held directory fd; False means a concurrent replacement won."""
+        if name in {"", ".", ".."} or "/" in name:
+            raise ValueError("report destination has no filename")
+        encoded = self._encode(report)
+        directory = os.dup(directory)
+        temporary = f".{name}.{secrets.token_hex(16)}"
         descriptor = -1
         try:
+            _check_directory(directory)
             try:
-                existing = os.stat(output.name, dir_fd=directory, follow_symlinks=False)
+                existing = os.stat(name, dir_fd=directory, follow_symlinks=False)
             except FileNotFoundError:
                 existing = None
+            if expected_identity is not None:
+                if (existing is None or not stat.S_ISREG(existing.st_mode)
+                        or (existing.st_dev, existing.st_ino) != expected_identity):
+                    return False
             if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
                 raise ValueError("report destination must be a regular non-symlink file")
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -167,15 +179,16 @@ class ReportWriter:
                 descriptor = -1
             if no_replace:
                 try:
-                    os.link(temporary, output.name, src_dir_fd=directory, dst_dir_fd=directory,
+                    os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory,
                             follow_symlinks=False)
                 except FileExistsError:
                     raise ValueError("report destination already exists")
                 os.unlink(temporary, dir_fd=directory)
             else:
-                os.replace(temporary, output.name, src_dir_fd=directory, dst_dir_fd=directory)
+                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
             temporary = ""
             os.fsync(directory)
+            return True
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
@@ -184,4 +197,14 @@ class ReportWriter:
                     os.unlink(temporary, dir_fd=directory)
                 except FileNotFoundError:
                     pass
+            os.close(directory)
+
+    def write_atomic(self, output: Path, report: SessionReport, *, no_replace: bool = False) -> None:
+        output = Path(output)
+        if output.name in {"", ".", ".."}:
+            raise ValueError("report destination has no filename")
+        directory = _trusted_parent(output.parent)
+        try:
+            self.write_atomic_at(directory, output.name, report, no_replace=no_replace)
+        finally:
             os.close(directory)

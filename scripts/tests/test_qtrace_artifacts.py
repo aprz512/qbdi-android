@@ -10,6 +10,7 @@ from qtrace.artifacts import (ArtifactProcessor, ArtifactResult, PullMode,
                               PullSelection, PulledArtifact,
                               pull_named_artifacts)
 from qtrace.errors import QtraceError
+from qtrace.report import ReportWriter, SessionReport
 
 
 COMPLETE_TERMINAL = (
@@ -39,6 +40,11 @@ class FakeClient:
 
 
 class ArtifactTests(unittest.TestCase):
+    @staticmethod
+    def _report(session: str, status: str) -> SessionReport:
+        return SessionReport(1, session, "run", status, "completed", "com.example.app", "d", None,
+                             "start", "finish", (), {}, {}, {}, {}, {}, (), (), None, ())
+
     def test_named_pull_hashes_and_is_durable(self):
         client = FakeClient({"trace.trace.bin": b"payload"})
         with tempfile.TemporaryDirectory() as root:
@@ -201,6 +207,33 @@ class ArtifactTests(unittest.TestCase):
                 self._processor(TimeoutClient({"run.trace.txt": b"x"})).pull_manual(
                     "d", "com.example.app", PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
             self.assertEqual([], list(Path(root).iterdir()))
+
+    def test_output_directory_replacement_never_returns_attacker_path(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        status = self._status(session, artifacts=["run.trace.txt"])
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            output = root_path / "output"
+            attacker = root_path / "attacker"
+            original = root_path / "original"
+            output.mkdir()
+            attacker.mkdir()
+            real_new_stage = __import__("qtrace.artifacts", fromlist=["_new_stage"])._new_stage
+
+            def replace_output(path):
+                stage = real_new_stage(path)
+                output.rename(original)
+                attacker.rename(output)
+                return stage
+
+            with patch("qtrace.artifacts._new_stage", side_effect=replace_output):
+                with self.assertRaises(QtraceError) as raised:
+                    self._processor(client).collect_session(
+                        "d", "com.example.app", session, status, output, 1)
+            self.assertEqual("artifact.destination_replaced", raised.exception.code)
+            self.assertFalse((output / session).exists())
+            self.assertTrue((original / session).is_dir())
 
     def test_artifact_report_uses_actual_device_metadata(self):
         class Device:
@@ -388,6 +421,55 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(2, result.exit_code)
             self.assertTrue(final.is_dir())
             self.assertIn("artifact.commit_durable", {error["code"] for error in result.errors})
+
+    def test_report_refresh_preserves_committed_report_and_propagates_interrupt(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        status = self._status(session, artifacts=["run.trace.txt"])
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
+        processor = self._processor(client)
+        original_publish = processor._publish
+
+        def publish_with_late_error(*args, **kwargs):
+            args[4].append({"name": "", "code": "artifact.late", "detail": "late diagnostic"})
+            return original_publish(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                processor, "_publish", side_effect=publish_with_late_error), patch(
+                "qtrace.artifacts._rewrite_published_report", side_effect=OSError("refresh failed")):
+            result = processor.collect_session("d", "com.example.app", session, status, Path(root), 1)
+            report = json.loads((result.output_dir / "report.json").read_text())
+            self.assertIn("artifact.report_refresh", {error["code"] for error in result.errors})
+            self.assertNotIn("artifact.report_refresh", {error["code"] for error in report["errors"]})
+
+        processor = self._processor(client)
+        original_publish = processor._publish
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                processor, "_publish", side_effect=publish_with_late_error), patch(
+                "qtrace.artifacts._rewrite_published_report", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                processor.collect_session("d", "com.example.app", session, status, Path(root), 1)
+
+    def test_collector_token_never_overwrites_a_concurrent_report_inode(self):
+        from qtrace.artifacts import publish_collector_report
+        session = "11111111-1111-4111-8111-111111111111"
+        status = self._status(session, artifacts=["run.trace.txt"])
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).collect_session(
+                "d", "com.example.app", session, status, Path(root), 1)
+            token = getattr(result, "_publication_token")
+            writer = ReportWriter()
+            writer.write_atomic(result.output_dir / "report.json", self._report(session, "concurrent"))
+
+            _report, error_path, merged = publish_collector_report(
+                token, writer, self._report(session, "sealed"))
+
+            self.assertFalse(merged)
+            self.assertEqual("concurrent", json.loads(
+                (result.output_dir / "report.json").read_text())["status"])
+            self.assertTrue(error_path.is_file())
+            self.assertIn("artifact.concurrent_report", json.loads(
+                error_path.read_text())["artifacts"][-1]["code"])
 
     def test_statusless_session_json_uses_null_native_status(self):
         client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceError
+from qtrace.artifacts import publish_collector_report
 from scripts.bounded_process import BoundedProcessError
 from qtrace.injector import InjectionRequest, InjectionResult
 from qtrace.lock import TargetLock
@@ -395,22 +396,19 @@ class SessionOrchestrator:
                                    {"request": native, "status": {key: value for key, value in dict(status or {}).items() if not key.startswith("_")}}, artifact_records, (),
                                    None if error is None else {"code": error.code, "stage": error.stage, "detail": error.detail},
                                    tuple(str(item) for item in outputs))
-            # ArtifactProcessor publishes a durable fragment first.  Merge it into the
-            # final Task 5 report before the atomic replacement so collection metadata
-            # (including per-file failures) cannot be lost.
-            try:
-                if collector_token == (session_id, str(report_path)) and report_path.is_file() and not report_path.is_symlink():
-                    fragment = json.loads(report_path.read_text(encoding="utf-8"))
-                    fragment_records = fragment.get("artifacts", []) if type(fragment) is dict else []
-                    fragment_errors = fragment.get("errors", []) if type(fragment) is dict else []
-                    merged = list(report.artifacts)
-                    for item in (*fragment_records, *fragment_errors):
-                        if isinstance(item, dict) and item not in merged:
-                            merged.append(item)
-                    if merged:
-                        report = dataclasses.replace(report, artifacts=tuple(merged))
-            except (OSError, UnicodeError, ValueError, TypeError):
-                pass
+            # A real collector token owns a held directory fd and the exact fragment
+            # inode.  It may replace only that inode; a concurrent report gets an
+            # independent no-replace error report instead of being overwritten.
+            if collector_token is not None:
+                try:
+                    report, target_report, _merged = publish_collector_report(
+                        collector_token, self._report_writer, report)
+                except ValueError:
+                    # Tuple-shaped collectors from the Task 5 seam have no inode claim.
+                    if type(collector_token) is not tuple:
+                        raise
+                else:
+                    return SessionResult(session_id, exit_code, target_report, outputs)
             target_report = report_path
             no_replace = False
             if error is not None or (collector_token is None and report_path.exists()):

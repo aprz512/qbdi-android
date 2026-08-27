@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
+import dataclasses
 import errno
 import inspect
 import json
@@ -65,6 +66,119 @@ class ArtifactResult:
     files: tuple[Path, ...]
     errors: tuple[Mapping[str, str], ...]
     exit_code: int
+
+
+@dataclass
+class _PublicationToken:
+    """Opaque, fd-backed claim to one collector-created report inode."""
+    session_id: str
+    output_path: Path
+    parent: int
+    directory: int
+    parent_identity: tuple[int, int]
+    report_identity: tuple[int, int]
+
+    def close(self) -> None:
+        for attribute in ("directory", "parent"):
+            descriptor = getattr(self, attribute)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, attribute, -1)
+
+    def __del__(self) -> None:
+        self.close()
+
+    def visible_path(self, name: str) -> Path:
+        try:
+            current = os.stat(self.output_path, follow_symlinks=False)
+        except OSError:
+            current = None
+        if current is not None and (current.st_dev, current.st_ino) == self.parent_identity:
+            return self.output_path / name
+        return Path(f"/proc/self/fd/{self.parent}/{name}")
+
+
+def _collector_token(parent: int, session_id: str, output: _OutputDirectory) -> _PublicationToken:
+    held_parent = os.dup(parent)
+    directory = -1
+    try:
+        directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                            getattr(os, "O_NOFOLLOW", 0), dir_fd=held_parent)
+        report = os.stat("report.json", dir_fd=directory, follow_symlinks=False)
+        if not stat.S_ISREG(report.st_mode):
+            raise _error("artifact.report_invalid", "collector report is not a regular file")
+        parent_info = os.fstat(held_parent)
+        return _PublicationToken(session_id, output.path, held_parent, directory,
+                                 (parent_info.st_dev, parent_info.st_ino),
+                                 (report.st_dev, report.st_ino))
+    except BaseException:
+        if directory >= 0:
+            os.close(directory)
+        os.close(held_parent)
+        raise
+
+
+def publish_collector_report(token: object, writer: Any, report: object) -> tuple[object, Path, bool]:
+    """Conditionally replace only the fragment inode issued by this collector."""
+    if not isinstance(token, _PublicationToken):
+        raise ValueError("collector token is invalid")
+    try:
+        descriptor = os.open("report.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                             dir_fd=token.directory)
+        try:
+            current = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (current.st_dev, current.st_ino) != token.report_identity:
+            raise FileExistsError("collector report was replaced concurrently")
+        descriptor = os.open("report.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                             dir_fd=token.directory)
+        try:
+            fragment = json.loads(os.read(descriptor, 1024 * 1024 + 1).decode("utf-8"))
+        finally:
+            os.close(descriptor)
+        records = fragment.get("artifacts", []) if type(fragment) is dict else []
+        errors = fragment.get("errors", []) if type(fragment) is dict else []
+        merged = list(getattr(report, "artifacts"))
+        for item in (*records, *errors):
+            if isinstance(item, dict) and item not in merged:
+                merged.append(item)
+        if merged:
+            report = dataclasses.replace(report, artifacts=tuple(merged))
+        if writer.write_atomic_at(token.directory, "report.json", report,
+                                  expected_identity=token.report_identity):
+            return report, token.visible_path(f"{token.session_id}/report.json"), True
+        raise FileExistsError("collector report was replaced concurrently")
+    except FileExistsError:
+        marker = {"code": "artifact.concurrent_report", "detail": "collector report changed concurrently"}
+        report = dataclasses.replace(report, artifacts=tuple((*getattr(report, "artifacts"), marker)))
+        name = f"{token.session_id}.error.{uuid.uuid4()}.report.json"
+        writer.write_atomic_at(token.parent, name, report, no_replace=True)
+        return report, token.visible_path(name), False
+    finally:
+        token.close()
+
+
+@dataclass
+class _OutputDirectory:
+    """A held output-directory identity, not a path that can be swapped mid-pull."""
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+
+    def result_path(self, child: str) -> Path:
+        try:
+            current = os.stat(self.path, follow_symlinks=False)
+        except OSError as error:
+            raise _error("artifact.destination_replaced", "output directory is no longer available") from error
+        if (not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != (self.device, self.inode)):
+            raise _error("artifact.destination_replaced", "output directory identity changed during pull")
+        return self.path / child
+
+    def close(self) -> None:
+        os.close(self.descriptor)
 
 
 class PullMode(str, Enum):
@@ -447,50 +561,88 @@ def _rewrite_published_report(parent: int, session_id: str,
                          sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                          allow_nan=False).encode("utf-8")
     if len(payload) > 1024 * 1024:
-        return
+        raise _error("artifact.report_too_large", "report refresh exceeds size bound")
     directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                         getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
     descriptor = -1
+    temporary = ".report-" + uuid.uuid4().hex + ".tmp"
     try:
-        descriptor = os.open("report.json", os.O_WRONLY | os.O_TRUNC |
-                             getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-                             dir_fd=directory)
-        offset = 0
-        while offset < len(payload):
-            written = os.write(descriptor, payload[offset:])
-            if written <= 0:
-                return
-            offset += written
-        os.ftruncate(descriptor, len(payload))
-        os.fsync(descriptor)
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | 0o600 |
+                                 getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                                 dir_fd=directory)
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("short report refresh write")
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        os.replace(temporary, "report.json", src_dir_fd=directory, dst_dir_fd=directory)
+        temporary = ""
         os.fsync(directory)
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
         os.close(directory)
 
 
 def _safe_output(path: Path) -> Path:
+    output = _open_output(path)
+    try:
+        return output.path
+    finally:
+        output.close()
+
+
+def _open_output(path: Path) -> _OutputDirectory:
+    """Create/open output components once with openat no-follow semantics."""
     path = Path(path)
-    if path.is_absolute() and path.parts[:4] == ("/", "proc", "self", "fd"):
-        if not path.is_dir() or path.is_symlink():
-            raise _error("artifact.destination_invalid", "output must be a real directory")
-        return path
-    current = Path(path.anchor) if path.is_absolute() else Path(".")
-    for component in path.parts[1:] if path.is_absolute() else path.parts:
-        if component == "..":
-            raise _error("artifact.destination_invalid", "output contains parent traversal")
-        current /= component
+    internal_fd = path.is_absolute() and path.parts[:4] == ("/", "proc", "self", "fd")
+    if internal_fd:
         try:
-            info = current.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise _error("artifact.destination_invalid", "output contains a symlink or non-directory")
-    path.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink() or not path.is_dir():
-        raise _error("artifact.destination_invalid", "output must be a real directory")
-    return path
+            source = int(path.parts[4])
+        except (IndexError, ValueError) as error:
+            raise _error("artifact.destination_invalid", "output descriptor path is invalid") from error
+        parts = path.parts[5:]
+    else:
+        parts = path.parts[1:] if path.is_absolute() else path.parts
+    if any(component in {"", ".", ".."} for component in parts):
+        raise _error("artifact.destination_invalid", "output contains an unsafe component")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        descriptor = os.dup(source) if internal_fd else os.open(
+            path.anchor if path.is_absolute() else ".", flags)
+        for component in parts:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise _error("artifact.destination_invalid", "output must be a directory")
+        return _OutputDirectory(path, descriptor, info.st_dev, info.st_ino)
+    except QtraceError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise _error("artifact.destination_invalid", "output contains a symlink or non-directory") from error
 
 
 def _rename_noreplace(parent: int, stage_name: str, final_name: str) -> None:
@@ -530,10 +682,9 @@ def _remove_tree_at(parent: int, name: str) -> None:
     os.rmdir(name, dir_fd=parent)
 
 
-def _new_stage(output: Path) -> tuple[Path, int, int, str]:
+def _new_stage(output: _OutputDirectory) -> tuple[Path, int, int, str]:
     """Create stage and artifacts using one trusted output directory descriptor."""
-    parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                     getattr(os, "O_NOFOLLOW", 0))
+    parent = os.dup(output.descriptor)
     try:
         for _ in range(32):
             name = ".qtrace-stage-" + uuid.uuid4().hex
@@ -566,15 +717,13 @@ class ArtifactProcessor:
     def __init__(self, *, client_factory: Any | None = None) -> None:
         self._client_factory = client_factory
 
-    def _publish(self, stage: Path, output: Path, session_id: str, files: list[Path],
+    def _publish(self, stage: Path, output: _OutputDirectory, session_id: str, files: list[Path],
                  errors: list[Mapping[str, str]], records: list[Mapping[str, object]],
                  *, parent: int | None = None, stage_fd: int | None = None,
                  stage_name: str | None = None) -> Path:
-        _safe_output(output)
         owned_parent = parent is None
         if parent is None:
-            parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                             getattr(os, "O_NOFOLLOW", 0))
+            parent = os.dup(output.descriptor)
         if stage_name is None:
             stage_name = stage.name
         committed = False
@@ -596,7 +745,7 @@ class ArtifactProcessor:
                         os.close(descriptor)
             _rename_noreplace(parent, stage_name, session_id)
             committed = True
-            final = output / session_id
+            final = output.result_path(session_id)
             descriptor = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                                  getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
             try:
@@ -608,7 +757,7 @@ class ArtifactProcessor:
             if committed:
                 errors.append({"name": "", "code": "artifact.commit_durable",
                                "detail": f"published session durability is uncertain: {error}"[:256]})
-                return output / session_id
+                return output.result_path(session_id)
             raise
         finally:
             if owned_parent and parent is not None:
@@ -622,8 +771,12 @@ class ArtifactProcessor:
         errors: list[Mapping[str, str]] = list(initial_errors)
         records: list[Mapping[str, object]] = []
         files: list[Path] = []
-        output = _safe_output(Path(output))
-        stage_root, parent_fd, stage_fd, stage_name = _new_stage(output)
+        output_handle = _open_output(Path(output))
+        try:
+            stage_root, parent_fd, stage_fd, stage_name = _new_stage(output_handle)
+        except BaseException:
+            output_handle.close()
+            raise
         stage_artifacts = stage_root / "artifacts"
         published = False
         try:
@@ -800,18 +953,21 @@ class ArtifactProcessor:
             _write_json(stage_root / "report.json", {"schema": 1, "sessionId": session_id, "artifacts": records, "errors": errors})
             relative_files = tuple(path.relative_to(stage_root) for path in files)
             error_count = len(errors)
-            final = self._publish(stage_root, output, session_id, files, errors, records,
+            final = self._publish(stage_root, output_handle, session_id, files, errors, records,
                                   parent=parent_fd, stage_fd=stage_fd, stage_name=stage_name)
             published = True
             if len(errors) != error_count:
                 try:
                     _rewrite_published_report(parent_fd, session_id, records, errors)
-                except BaseException:
-                    pass
+                except KeyboardInterrupt:
+                    raise
+                except Exception as error:
+                    errors.append({"name": "", "code": "artifact.report_refresh",
+                                   "detail": f"committed report refresh failed: {error}"[:256]})
             result = ArtifactResult(final, tuple(final / path for path in relative_files), tuple(errors),
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
-            object.__setattr__(result, "_publication_token", (session_id, str(final / "report.json")))
+            object.__setattr__(result, "_publication_token", _collector_token(parent_fd, session_id, output_handle))
             return result
         except QtraceError:
             raise
@@ -825,6 +981,7 @@ class ArtifactProcessor:
                     pass
             os.close(stage_fd)
             os.close(parent_fd)
+            output_handle.close()
 
     def collect_session(self, device: object, package: str, session_id: str, status: Mapping[str, object] | None,
                         output: Path, timeout: float) -> ArtifactResult:
