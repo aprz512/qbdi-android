@@ -722,7 +722,8 @@ class FakeRunner:
                 "device": {}, "effective_config": {}, "error": None, "finished_at": 1,
                 "mode": "run", "serial": "SERIAL", "started_at": 0, "target": {},
                 "tracer": {}, "warnings": [],
-                "timeline": [{"stage": "installing_hooks", "cleanup_detached": True}, {"stage": "running"}],
+                "timeline": [{"stage": "installing_hooks", "cleanup_detached": True,
+                              "action_nonce": SESSION}, {"stage": "running"}],
                 "native": {"status": status("sealed")},
                 "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", str((self.offset_root or Path("/tmp")) / "fixture.trace.txt")],
                 "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "local_path": "artifacts/fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
@@ -754,8 +755,10 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         report = {
             "session_id": SESSION,
+            "package": "com.aprz.qbdiandroid",
             "pid": 4242,
-            "timeline": [{"stage": "installing_hooks", "cleanup_detached": True}],
+            "timeline": [{"stage": "installing_hooks", "cleanup_detached": True,
+                          "action_nonce": "123e4567-e89b-42d3-a456-426614174000"}],
             "native": {"status": status("sealed")},
         }
         receipt = {
@@ -774,10 +777,68 @@ class AcceptanceHarnessTests(unittest.TestCase):
             "non-running": json.dumps(status("installed")),
             "session-mismatch": json.dumps({**entry, "sessionId": "223e4567-e89b-42d3-a456-426614174001"}),
             "transition-after-entry": json.dumps({**entry, "transitionMonotonicNs": 102}),
+            "entry-after-deadline": json.dumps({**entry, "deadlineMonotonicNs": 100}),
+            "wrong-package": json.dumps({**entry, "packageName": "com.other.app"}),
         }
         for name, raw in invalid.items():
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 _validate_timed_fixture_receipt(report, json.dumps(receipt), raw)
+
+        for name, changed_report in {
+            "wrong-action-nonce": {
+                **report,
+                "timeline": [{"stage": "installing_hooks", "cleanup_detached": True,
+                              "action_nonce": "223e4567-e89b-42d3-a456-426614174001"}],
+            },
+            "wrong-report-package": {**report, "package": "com.other.app"},
+        }.items():
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                _validate_timed_fixture_receipt(
+                    changed_report, json.dumps(receipt), json.dumps(entry),
+                )
+
+    def test_timed_entry_evidence_polls_past_stale_receipt_from_prior_action(self):
+        from scripts.qtrace_device_acceptance import _wait_for_timed_fixture_evidence
+
+        expected_nonce = "123e4567-e89b-42d3-a456-426614174000"
+        report = {
+            "session_id": SESSION,
+            "package": "com.aprz.qbdiandroid",
+            "pid": 4242,
+            "timeline": [{"stage": "installing_hooks", "cleanup_detached": True,
+                          "action_nonce": expected_nonce}],
+            "native": {"status": status("sealed")},
+        }
+
+        class DelayedRunner:
+            def __init__(self):
+                self.receipt_reads = 0
+
+            def read_text(self, path, *, timeout):
+                self.assert_positive(timeout)
+                if path.name == "qtrace-acceptance-receipt.json":
+                    self.receipt_reads += 1
+                    nonce = ("223e4567-e89b-42d3-a456-426614174001"
+                             if self.receipt_reads == 1 else expected_nonce)
+                    return json.dumps({
+                        "sessionId": SESSION, "nonce": nonce,
+                        "entryMonotonicNs": 101,
+                    })
+                return json.dumps(status("running"))
+
+            @staticmethod
+            def assert_positive(timeout):
+                if timeout <= 0:
+                    raise AssertionError("poll read received an expired timeout")
+
+        runner = DelayedRunner()
+        receipt, entry = _wait_for_timed_fixture_evidence(
+            runner, report, timeout=1.0,
+        )
+
+        self.assertEqual(2, runner.receipt_reads)
+        self.assertEqual(expected_nonce, json.loads(receipt)["nonce"])
+        self.assertEqual("running", json.loads(entry)["state"])
 
     def test_report_path_returns_only_a_lexical_token(self):
         from scripts.qtrace_device_acceptance import _published_report_path, _report_path

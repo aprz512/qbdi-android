@@ -224,9 +224,12 @@ class QtraceCliTests(unittest.TestCase):
         device = Mock()
 
         action = make_demo_action("timed", 7, adb_timeout=17.0)
-        action(device, 42, "123e4567-e89b-42d3-a456-426614174000")
+        receipt = action(device, 42, "123e4567-e89b-42d3-a456-426614174000")
 
         self.assertEqual(17.0, device.shell.call_args.kwargs["timeout"])
+        arguments = device.shell.call_args.args
+        nonce_index = arguments.index("qtrace_acceptance_nonce")
+        self.assertEqual(receipt.nonce, arguments[nonce_index + 1])
 
     def test_demo_monitor_actions_use_distinct_fixture_intent_modes(self):
         for scenario, expected_mode in (("monitor-exit", "exit"),

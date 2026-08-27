@@ -31,6 +31,10 @@ ITERATIONS = 30
 BASELINE_PATH = f"/data/data/{PACKAGE}/files/qtrace-acceptance-baseline.json"
 RECEIPT_PATH = f"/data/data/{PACKAGE}/files/qtrace-acceptance-receipt.json"
 ENTRY_STATUS_PATH = f"/data/data/{PACKAGE}/files/qtrace-acceptance-entry-status.json"
+TIMED_RESULT_PATH = f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"
+_POLLABLE_FIXTURE_PATHS = frozenset((
+    BASELINE_PATH, RECEIPT_PATH, ENTRY_STATUS_PATH, TIMED_RESULT_PATH,
+))
 _UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -190,8 +194,8 @@ class SubprocessRunner:
                     timeout=timeout,
                 ).stdout
             except RuntimeError as error:
-                if str(path) == BASELINE_PATH:
-                    raise AcceptanceNotReadyError("timed baseline is not published") from error
+                if str(path) in _POLLABLE_FIXTURE_PATHS:
+                    raise AcceptanceNotReadyError("timed fixture evidence is not published") from error
                 raise
         deadline = time.monotonic() + timeout
         if timeout <= 0:
@@ -510,24 +514,91 @@ def _validate_timed_fixture_receipt(
     if (set(receipt) != {"sessionId", "nonce", "entryMonotonicNs"} or
             receipt.get("sessionId") != report.get("session_id") or
             type(receipt.get("nonce")) is not str or _UUID4.fullmatch(receipt["nonce"]) is None or
-            type(receipt.get("entryMonotonicNs")) is not int or receipt["entryMonotonicNs"] < 0):
+            type(receipt.get("entryMonotonicNs")) is not int or receipt["entryMonotonicNs"] <= 0):
         raise RuntimeError("timed fixture receipt does not identify native entry")
     final_native = report.get("native")
     final_status = final_native.get("status") if isinstance(final_native, dict) else None
     if (not isinstance(final_status, dict) or
+            report.get("package") != PACKAGE or
             entry_status["sessionId"] != report.get("session_id") or
+            entry_status["packageName"] != report.get("package") or
+            final_status.get("sessionId") != report.get("session_id") or
+            final_status.get("packageName") != report.get("package") or
+            final_status.get("pid") != report.get("pid") or
             entry_status["pid"] != report.get("pid") or
             entry_status["generation"] != final_status.get("generation") or
             entry_status["normalizedScenes"] != final_status.get("normalizedScenes") or
             entry_status["state"] != "running" or entry_status["reason"] != "" or
             entry_status["stopAcknowledged"] is not False or
-            entry_status["transitionMonotonicNs"] > receipt["entryMonotonicNs"]):
+            type(entry_status["deadlineMonotonicNs"]) is not int or
+            entry_status["deadlineMonotonicNs"] <= 0 or
+            entry_status["deadlineMonotonicNs"] != final_status.get("deadlineMonotonicNs") or
+            entry_status["transitionMonotonicNs"] > receipt["entryMonotonicNs"] or
+            receipt["entryMonotonicNs"] >= entry_status["deadlineMonotonicNs"]):
         raise RuntimeError("timed fixture entry status does not prove armed native entry")
     timeline = report.get("timeline")
-    if not isinstance(timeline, list) or not any(
-            isinstance(item, dict) and item.get("stage") == "installing_hooks" and
-            item.get("cleanup_detached") is True for item in timeline):
+    installing = [item for item in timeline if isinstance(item, dict) and
+                  item.get("stage") == "installing_hooks"] if isinstance(timeline, list) else []
+    if (len(installing) != 1 or installing[0].get("cleanup_detached") is not True or
+            installing[0].get("action_nonce") != receipt["nonce"]):
         raise RuntimeError("timed report lacks injector cleanup/detach receipt")
+
+
+def _wait_for_timed_fixture_evidence(
+    runner: Runner, report: dict[str, object], *, timeout: float = 5.0,
+) -> tuple[str, str]:
+    """Poll atomic fixture evidence until it belongs to this installed action."""
+    if timeout <= 0:
+        raise ValueError("fixture evidence timeout must be positive")
+    deadline = time.monotonic() + timeout
+    last_error: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            remaining = deadline - time.monotonic()
+            receipt = _read_retry(
+                runner, Path(RECEIPT_PATH), timeout=min(1.0, remaining),
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            entry_status = _read_retry(
+                runner, Path(ENTRY_STATUS_PATH), timeout=min(1.0, remaining),
+            )
+            _validate_timed_fixture_receipt(report, receipt, entry_status)
+            return receipt, entry_status
+        except (AcceptanceNotReadyError, ConnectionError, OSError, RuntimeError,
+                UnicodeError, ValueError, json.JSONDecodeError) as error:
+            last_error = error
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.1, remaining))
+    raise RuntimeError(
+        f"timed native entry evidence was not available within {timeout:g} seconds: {last_error}"
+    )
+
+
+def _wait_for_timed_result(runner: Runner, *, timeout: float = 5.0) -> dict[str, object]:
+    if timeout <= 0:
+        raise ValueError("timed result timeout must be positive")
+    deadline = time.monotonic() + timeout
+    last_error: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            remaining = deadline - time.monotonic()
+            value = _strict_json(_read_retry(
+                runner, Path(TIMED_RESULT_PATH), timeout=min(1.0, remaining),
+            ))
+            if (value.get("iterations") == ITERATIONS and value.get("seed") == SEED and
+                    isinstance(value.get("result"), str)):
+                return value
+            raise ValueError("timed result has an invalid fixture result")
+        except (AcceptanceNotReadyError, ConnectionError, OSError, RuntimeError,
+                UnicodeError, ValueError, json.JSONDecodeError) as error:
+            last_error = error
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.1, remaining))
+    raise RuntimeError(f"timed result was not available within {timeout:g} seconds: {last_error}")
 
 
 def _convert_snapshot_bounded(snapshot: Path, destination: Path, *, lz4: str | None,
@@ -745,6 +816,7 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
                 "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), timeout=900.0)
     with ExitStack() as held_roots:
         reports: dict[str, tuple[RootedReader, Path]] = {}
+        timed_reports: dict[str, tuple[dict[str, object], str]] = {}
         timed_evidence: dict[str, tuple[str, str]] = {}
         for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
             output = directory / name
@@ -753,15 +825,16 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             held = held_roots.enter_context(RootedReader(output))
             reports[name] = (held, _published_report_path(published.stdout, held))
             if scenario == "timed":
-                timed_evidence[name] = (
-                    _read_retry(runner, Path(RECEIPT_PATH), timeout=5.0),
-                    _read_retry(runner, Path(ENTRY_STATUS_PATH), timeout=5.0),
+                preview, preview_artifact = _validated_timed_report(runner, *reports[name])
+                timed_reports[name] = preview, preview_artifact
+                timed_evidence[name] = _wait_for_timed_fixture_evidence(
+                    runner, preview, timeout=5.0,
                 )
             if scenario == "flight-crash" and published.returncode != 2:
                 raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
-        timed, artifact = _validated_timed_report(runner, *reports["offset"])
+        timed, artifact = timed_reports["offset"]
         _validate_timed_fixture_receipt(timed, *timed_evidence["offset"])
-        symbol, _ = _validated_timed_report(runner, *reports["symbol"])
+        symbol, _ = timed_reports["symbol"]
         _validate_timed_fixture_receipt(symbol, *timed_evidence["symbol"])
         _validate_timed_artifact_semantics(
             runner, timed, reports["offset"][0], converter=converter,
@@ -777,8 +850,7 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
         _validated_monitor_report(runner, *reports["exit"], status="process_exited")
         _validated_monitor_report(runner, *reports["crash"], status="crash_recovered")
     runner.run(("adb", "-s", device, "shell", "kill", "-0", str(timed["pid"])), timeout=10.0)
-    timed_oracle = json.loads(_read_retry(runner, Path(
-        f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"), timeout=5.0))
+    timed_oracle = _wait_for_timed_result(runner, timeout=5.0)
     if timed_oracle != baseline:
         raise RuntimeError("long timed target did not return the baseline oracle value")
     pulls = (("latest", ("--latest",), None, False), ("name", ("--name", artifact), artifact, False), ("all", ("--all",), None, False), ("compressed", ("--all", "--compressed-only"), None, True))

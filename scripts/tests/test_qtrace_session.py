@@ -17,7 +17,8 @@ from qtrace.models import (
     AppConfig, ElfIdentity, OffsetScene, ResolvedScene, ResolvedTarget, SymbolScene, TargetConfig, TracerConfig, UserConfig,
 )
 from qtrace.session import (
-    MonitorRequest, RunRequest, SessionOrchestrator, _strict_json, build_native_request, parse_status,
+    InstalledActionReceipt, MonitorRequest, RunRequest, SessionOrchestrator, _strict_json,
+    build_native_request, parse_status,
 )
 from qtrace.lock import TargetLock
 from scripts.bounded_process import BoundedProcessError
@@ -355,6 +356,39 @@ class SessionTests(unittest.TestCase):
         with self.assertRaisesRegex(QtraceError, "cleanup/detach"):
             runner.run(request)
         self.assertEqual([], action_calls)
+
+    def test_installed_action_nonce_is_bound_to_cleanup_detach_timeline(self) -> None:
+        device = FakeDevice([
+            status("sealed", transition=1, reason="duration_elapsed", acknowledged=True),
+        ], [4242])
+        runner, _ = orchestrator(device, ManualClock())
+        nonce = "223e4567-e89b-42d3-a456-426614174001"
+        request = dataclasses.replace(
+            self.run_request(),
+            installed_action=lambda *_args: InstalledActionReceipt(nonce),
+        )
+
+        result = runner.run(request)
+
+        timeline = json.loads(result.report.read_text(encoding="utf-8"))["timeline"]
+        installing = next(item for item in timeline if item["stage"] == "installing_hooks")
+        self.assertEqual(
+            {"stage", "at", "cleanup_detached", "action_nonce"},
+            set(installing),
+        )
+        self.assertTrue(installing["cleanup_detached"])
+        self.assertEqual(nonce, installing["action_nonce"])
+
+    def test_installed_action_rejects_malformed_receipt(self) -> None:
+        device = FakeDevice([status("running", transition=1)], [4242])
+        runner, _ = orchestrator(device, ManualClock())
+        request = dataclasses.replace(
+            self.run_request(),
+            installed_action=lambda *_args: InstalledActionReceipt("not-a-nonce"),
+        )
+
+        with self.assertRaisesRegex(QtraceError, "action receipt"):
+            runner.run(request)
 
     def test_tokenless_collector_result_never_overwrites_canonical_report(self) -> None:
         class ConcurrentCollector:

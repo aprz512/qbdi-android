@@ -56,6 +56,11 @@ static jlong native_run_timed_acceptance(JNIEnv *, jobject, jlong iterations, jl
     return std::bit_cast<jlong>(value);
 }
 
+static jlong native_get_last_timed_acceptance_entry_monotonic_ns(JNIEnv *, jobject) {
+    static_assert(sizeof(jlong) == sizeof(uint64_t));
+    return std::bit_cast<jlong>(demo_timed_acceptance_entry_monotonic_ns());
+}
+
 static jlong native_run_flight_acceptance(JNIEnv *, jobject, jlong seed, jint mode,
                                           jint selected_worker) {
     return static_cast<jlong>(demo_flight_acceptance_case(
@@ -76,6 +81,9 @@ JNINativeMethod kNativeMethods[] = {
      reinterpret_cast<void *>(native_run_benchmark_case)},
     {const_cast<char *>("runTimedAcceptance"), const_cast<char *>("(JJ)J"),
      reinterpret_cast<void *>(native_run_timed_acceptance)},
+    {const_cast<char *>("getLastTimedAcceptanceEntryMonotonicNs"),
+     const_cast<char *>("()J"),
+     reinterpret_cast<void *>(native_get_last_timed_acceptance_entry_monotonic_ns)},
     {const_cast<char *>("runFlightAcceptance"), const_cast<char *>("(JII)J"),
      reinterpret_cast<void *>(native_run_flight_acceptance)},
 };

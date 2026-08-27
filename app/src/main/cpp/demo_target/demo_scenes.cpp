@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <sys/syscall.h>
 #include <sys/system_properties.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -50,6 +51,17 @@ std::atomic<uint64_t> g_probe_expected_pc{0};
 std::atomic<uint64_t> g_probe_expected_cookie{0};
 alignas(uint32_t) uint32_t g_probe_pause_handler_once = 0;
 alignas(uint32_t) uint32_t g_probe_pause_after_handler_once = 0;
+std::atomic<uint64_t> g_timed_acceptance_entry_monotonic_ns{0};
+
+uint64_t monotonic_now_ns() noexcept {
+    timespec value{};
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0 || value.tv_sec < 0 ||
+        value.tv_nsec < 0 || value.tv_nsec >= 1'000'000'000L) {
+        return 0;
+    }
+    return static_cast<uint64_t>(value.tv_sec) * 1'000'000'000ULL +
+           static_cast<uint64_t>(value.tv_nsec);
+}
 
 #ifndef NDEBUG
 constexpr uint32_t kAcceptanceWorkers = 16;
@@ -618,6 +630,8 @@ extern "C" uint64_t demo_benchmark_case(uint64_t iterations, uint64_t seed) {
 
 extern "C" __attribute__((noinline, visibility("default"))) uint64_t
 demo_timed_acceptance_case(uint64_t iterations, uint64_t seed) noexcept {
+    g_timed_acceptance_entry_monotonic_ns.store(monotonic_now_ns(),
+                                                 std::memory_order_release);
     uint64_t state = seed ^ 0x9e3779b97f4a7c15ULL;
     for (uint64_t index = 0; index < iterations; ++index) {
         // Keep precisely one deterministic mixing block per iteration; sleep makes
@@ -629,6 +643,10 @@ demo_timed_acceptance_case(uint64_t iterations, uint64_t seed) noexcept {
         usleep(100000);
     }
     return state;
+}
+
+extern "C" uint64_t demo_timed_acceptance_entry_monotonic_ns() noexcept {
+    return g_timed_acceptance_entry_monotonic_ns.load(std::memory_order_acquire);
 }
 
 extern "C" uint64_t demo_signal_probe(uint64_t cookie) {

@@ -15,6 +15,7 @@ import kotlin.system.exitProcess
 /** Fixture-only protocol used by the manually invoked qtrace device gate. */
 data class QtraceAcceptanceRequest(val mode: String, val seed: Long, val iterations: Long)
 data class QtraceAcceptanceEvidence(val sessionId: String, val nonce: String)
+data class QtraceTimedInvocation(val result: Long, val receipt: String?)
 
 object QtraceAcceptance {
     private const val enabled = "qtrace_acceptance"
@@ -64,8 +65,24 @@ object QtraceAcceptance {
         "{\"iterations\":${request.iterations},\"seed\":${request.seed},\"result\":\"0x${java.lang.Long.toUnsignedString(result, 16)}\"}"
 
     fun entryReceiptJson(evidence: QtraceAcceptanceEvidence, entryMonotonicNs: Long): String {
-        require(entryMonotonicNs >= 0L)
+        require(entryMonotonicNs > 0L)
         return "{\"sessionId\":\"${evidence.sessionId}\",\"nonce\":\"${evidence.nonce}\",\"entryMonotonicNs\":$entryMonotonicNs}"
+    }
+
+    internal fun completeTimedInvocation(
+        evidence: QtraceAcceptanceEvidence?,
+        invokeNative: () -> Long,
+        readNativeEntryMonotonicNs: () -> Long,
+    ): QtraceTimedInvocation {
+        val result = invokeNative()
+        val receipt = evidence?.let {
+            val entryMonotonicNs = readNativeEntryMonotonicNs()
+            if (entryMonotonicNs <= 0L) {
+                throw IllegalStateException("native timed entry timestamp is unavailable")
+            }
+            entryReceiptJson(it, entryMonotonicNs)
+        }
+        return QtraceTimedInvocation(result, receipt)
     }
 
     internal fun awaitRunningEntryStatus(
@@ -181,13 +198,25 @@ object QtraceAcceptance {
                             "qtrace-acceptance-entry-status.json",
                             entryStatus,
                         )
-                        val entryMonotonicNs = System.nanoTime()
-                        writeAtomic(activity.filesDir, "qtrace-acceptance-receipt.json",
-                            entryReceiptJson(evidence, entryMonotonicNs))
                     }
-                    val result = NativeDemo.runTimedAcceptance(request.iterations, request.seed)
+                    val invocation = completeTimedInvocation(
+                        evidence,
+                        invokeNative = {
+                            NativeDemo.runTimedAcceptance(request.iterations, request.seed)
+                        },
+                        readNativeEntryMonotonicNs = {
+                            NativeDemo.getLastTimedAcceptanceEntryMonotonicNs()
+                        },
+                    )
+                    invocation.receipt?.let { receipt ->
+                        writeAtomic(
+                            activity.filesDir,
+                            "qtrace-acceptance-receipt.json",
+                            receipt,
+                        )
+                    }
                     val name = if (traced) "qtrace-acceptance-timed.json" else "qtrace-acceptance-baseline.json"
-                    writeAtomic(activity.filesDir, name, resultJson(request, result))
+                    writeAtomic(activity.filesDir, name, resultJson(request, invocation.result))
                 }
                 "exit" -> {
                     writeAtomic(activity.filesDir, "qtrace-acceptance-exit.json", resultJson(request, 0L))

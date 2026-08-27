@@ -72,6 +72,44 @@ class QtraceAcceptanceTest {
         )
     }
 
+    @Test fun timed_receipt_uses_native_entry_getter_after_native_call_returns() {
+        val evidence = QtraceAcceptanceEvidence(
+            "123e4567-e89b-42d3-a456-426614174000",
+            "223e4567-e89b-42d3-a456-426614174001",
+        )
+        val calls = mutableListOf<String>()
+
+        val invocation = QtraceAcceptance.completeTimedInvocation(
+            evidence,
+            invokeNative = { calls += "native"; 42L },
+            readNativeEntryMonotonicNs = { calls += "entry"; 123L },
+        )
+
+        assertEquals(listOf("native", "entry"), calls)
+        assertEquals(42L, invocation.result)
+        assertEquals(
+            "{\"sessionId\":\"${evidence.sessionId}\",\"nonce\":\"${evidence.nonce}\",\"entryMonotonicNs\":123}",
+            invocation.receipt,
+        )
+    }
+
+    @Test fun timed_receipt_rejects_missing_native_entry_timestamp() {
+        val evidence = QtraceAcceptanceEvidence(
+            "123e4567-e89b-42d3-a456-426614174000",
+            "223e4567-e89b-42d3-a456-426614174001",
+        )
+
+        val failure = runCatching {
+            QtraceAcceptance.completeTimedInvocation(
+                evidence,
+                invokeNative = { 42L },
+                readNativeEntryMonotonicNs = { 0L },
+            )
+        }.exceptionOrNull()
+
+        assertEquals(IllegalStateException::class, failure!!::class)
+    }
+
     @Test fun running_entry_snapshot_is_selected_before_absolute_deadline() {
         val session = "123e4567-e89b-42d3-a456-426614174000"
         val directory = Files.createTempDirectory("qtrace-entry-status").toFile()

@@ -24,6 +24,8 @@ __attribute__((noinline, visibility("default"))) uint64_t demo_benchmark_case(ui
                                                                                  uint64_t seed);
 __attribute__((noinline, visibility("default"))) uint64_t
 demo_timed_acceptance_case(uint64_t iterations, uint64_t seed) noexcept;
+__attribute__((visibility("hidden"))) uint64_t
+demo_timed_acceptance_entry_monotonic_ns() noexcept;
 __attribute__((noinline, visibility("default"))) uint64_t
 demo_signal_probe(uint64_t cookie);
 __attribute__((visibility("hidden"))) void demo_flight_acceptance_init();

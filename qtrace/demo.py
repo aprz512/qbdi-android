@@ -19,7 +19,7 @@ from qtrace.elf import ElfInspector
 from qtrace.errors import QtraceError
 from qtrace.models import AppConfig, OffsetScene, SymbolScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.process import BoundedRunner
-from qtrace.session import InstalledAction
+from qtrace.session import InstalledAction, InstalledActionReceipt
 
 
 _APK_RELATIVE = Path("app/build/outputs/apk/debug/app-debug.apk")
@@ -250,7 +250,7 @@ def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0
 
     nonce = str(uuid.uuid4())
 
-    def action(device: object, _pid: int, session_id: str) -> None:
+    def action(device: object, _pid: int, session_id: str) -> InstalledActionReceipt:
         shell = getattr(device, "shell", None)
         if not callable(shell):
             raise QtraceError("demo.device_invalid", "demo.action", "device cannot start the fixture activity")
@@ -263,5 +263,6 @@ def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0
               "--es", "qtrace_acceptance_session_id", session_id,
               "--es", "qtrace_acceptance_nonce", nonce,
               timeout=float(adb_timeout), maximum_bytes=64 * 1024)
+        return InstalledActionReceipt(nonce)
 
     return action
