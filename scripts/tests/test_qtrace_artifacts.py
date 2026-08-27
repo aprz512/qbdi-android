@@ -518,9 +518,12 @@ class ArtifactTests(unittest.TestCase):
             output = Path(root)
             real_fsync = __import__("os").fsync
             final = output / sid
+            failed_once = False
 
             def fsync(descriptor):
-                if final.exists():
+                nonlocal failed_once
+                if final.exists() and not failed_once:
+                    failed_once = True
                     raise OSError("directory fsync failed after commit")
                 return real_fsync(descriptor)
 
@@ -660,6 +663,75 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn(".report-prior.tmp", detail)
             canonical = json.loads((result.output_dir / "report.json").read_text(encoding="utf-8"))
             self.assertNotIn("artifact.report_refresh", {error["code"] for error in canonical["errors"]})
+
+    def test_refresh_persist_failure_writes_parent_sibling_without_following_collision(self):
+        """Removing the parent fallback would return a partial result with no durable diagnosis."""
+        session = "11111111-1111-4111-8111-111111111111"
+        processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+        original_publish = processor._publish
+
+        def publish_with_late_error(*args, **kwargs):
+            args[4].append({"name": "", "code": "artifact.late", "detail": "late diagnostic"})
+            return original_publish(*args, **kwargs)
+
+        stage_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        collision_id = uuid.UUID("33333333-3333-4333-8333-333333333333")
+        sibling_id = uuid.UUID("44444444-4444-4444-8444-444444444444")
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                processor, "_publish", side_effect=publish_with_late_error), patch(
+                "qtrace.artifacts._rewrite_published_report", side_effect=OSError("refresh failed")), patch(
+                "qtrace.artifacts._write_refresh_error_report", side_effect=OSError("session persist failed")), patch(
+                "qtrace.artifacts.uuid.uuid4", side_effect=[stage_id, collision_id, sibling_id]):
+            root_path = Path(root)
+            target = root_path / "do-not-follow"
+            target.write_text("keep", encoding="utf-8")
+            collision = root_path / f"{session}.error.{collision_id}.report.json"
+            collision.symlink_to(target)
+
+            result = processor.collect_session("d", "com.example.app", session,
+                                               self._status(session), root_path, 1)
+
+            fallback = next(path for path in result.files if path.name.startswith(session + ".error."))
+            document = json.loads(fallback.read_text(encoding="utf-8"))
+            self.assertEqual(root_path / f"{session}.error.{sibling_id}.report.json", fallback)
+            self.assertEqual("keep", target.read_text(encoding="utf-8"))
+            self.assertTrue(collision.is_symlink())
+            self.assertEqual(0o600, fallback.stat().st_mode & 0o777)
+            self.assertTrue({"artifact.report_refresh", "artifact.report_refresh_persist"}
+                            .issubset({entry["code"] for entry in document["errors"]}))
+            self.assertEqual(2, result.exit_code)
+
+    def test_refresh_persist_failures_raise_instead_of_returning_result(self):
+        """Removing the second failure escalation would expose a success-shaped artifact result."""
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+        original_publish = processor._publish
+
+        def publish_with_late_error(*args, **kwargs):
+            args[4].append({"name": "", "code": "artifact.late", "detail": "late diagnostic"})
+            return original_publish(*args, **kwargs)
+
+        real_open = os.open
+
+        def fail_parent_sibling(name, *args, **kwargs):
+            if type(name) is str and name.startswith(session + ".error."):
+                raise OSError("parent sibling persist failed")
+            return real_open(name, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                processor, "_publish", side_effect=publish_with_late_error), patch(
+                "qtrace.artifacts._rewrite_published_report", side_effect=OSError("refresh failed")), patch(
+                "qtrace.artifacts._write_refresh_error_report", side_effect=OSError("session persist failed")), patch(
+                "qtrace.artifacts.os.open", side_effect=fail_parent_sibling):
+            with self.assertRaises(QtraceError) as raised:
+                processor.collect_session("d", "com.example.app", session,
+                                          self._status(session), Path(root), 1)
+
+        self.assertEqual("artifact.report_refresh_persist", raised.exception.code)
+        self.assertIn("refresh failed", raised.exception.detail)
+        self.assertIn("session persist failed", raised.exception.detail)
 
     def test_final_output_swap_reclaims_manual_and_session_publications(self):
         """Removing the final identity check would return paths in a swapped output root."""

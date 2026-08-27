@@ -633,20 +633,22 @@ def _rewrite_published_report(parent: int, session_id: str,
         _cleanup_exhaustively(actions, primary)
 
 
-def _write_refresh_error_report(parent: int, session_id: str,
-                                records: Sequence[Mapping[str, object]],
-                                errors: Sequence[Mapping[str, str]]) -> str:
-    """Durably add a no-replace diagnostic beside a failed canonical refresh."""
+def _write_refresh_error_report_at(directory: int, session_id: str,
+                                   records: Sequence[Mapping[str, object]],
+                                   errors: Sequence[Mapping[str, str]], *,
+                                   parent_sibling: bool) -> str:
+    """Write one bounded, no-replace refresh diagnostic through an owned directory fd."""
     payload = _refresh_payload(session_id, records, errors)
-    directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                        getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
     descriptor = -1
     name = ""
     committed = False
     primary: BaseException | None = None
     try:
         for _ in range(32):
-            candidate = "report.error." + uuid.uuid4().hex + ".json"
+            if parent_sibling:
+                candidate = session_id + ".error." + str(uuid.uuid4()) + ".report.json"
+            else:
+                candidate = "report.error." + uuid.uuid4().hex + ".json"
             try:
                 descriptor = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                      getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -675,16 +677,41 @@ def _write_refresh_error_report(parent: int, session_id: str,
         raise
     finally:
         held_descriptor, descriptor = descriptor, -1
-        held_directory, directory = directory, -1
         actions = []
         if held_descriptor >= 0:
             actions.append(("refresh error report descriptor",
                             lambda: _close_descriptor(held_descriptor)))
         if name and not committed:
             actions.append(("refresh error report temporary",
-                            lambda: _unlink_if_present(held_directory, name)))
-        actions.append(("refresh error report directory", lambda: _close_descriptor(held_directory)))
+                            lambda: _unlink_if_present(directory, name)))
         _cleanup_exhaustively(actions, primary)
+
+
+def _write_refresh_error_report(parent: int, session_id: str,
+                                records: Sequence[Mapping[str, object]],
+                                errors: Sequence[Mapping[str, str]]) -> str:
+    """Durably add a no-replace diagnostic beside a failed canonical refresh."""
+    directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                        getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
+    primary: BaseException | None = None
+    try:
+        return _write_refresh_error_report_at(directory, session_id, records, errors,
+                                              parent_sibling=False)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        held_directory, directory = directory, -1
+        _cleanup_exhaustively([("refresh error report directory",
+                                lambda: _close_descriptor(held_directory))], primary)
+
+
+def _write_parent_refresh_error_report(parent: int, session_id: str,
+                                       records: Sequence[Mapping[str, object]],
+                                       errors: Sequence[Mapping[str, str]]) -> str:
+    """Persist a last-resort refresh diagnostic beside the committed session."""
+    return _write_refresh_error_report_at(parent, session_id, records, errors,
+                                          parent_sibling=True)
 
 
 def _safe_output(path: Path) -> Path:
@@ -1175,8 +1202,26 @@ class ArtifactProcessor:
                         }
                         errors.append(persistence_failure)
                         records.append(persistence_failure)
-                        if hasattr(error, "add_note"):
-                            error.add_note(f"refresh diagnostic publication failed: {persistence_error}")
+                        try:
+                            sibling_name = _write_parent_refresh_error_report(
+                                parent_fd, session_id, records, errors)
+                        except BaseException as sibling_error:
+                            if not isinstance(error, Exception):
+                                error.add_note(
+                                    f"session refresh diagnostic failed: {persistence_error}")
+                                error.add_note(
+                                    f"parent refresh diagnostic failed: {sibling_error}")
+                                raise
+                            terminal = _error(
+                                "artifact.report_refresh_persist",
+                                "refresh failed: " + str(error) + "; session diagnostic failed: "
+                                + str(persistence_error) + "; parent diagnostic failed: "
+                                + str(sibling_error))
+                            terminal.add_note(f"original report refresh failed: {error}")
+                            terminal.add_note(
+                                f"session refresh diagnostic failed: {persistence_error}")
+                            raise terminal from sibling_error
+                        refresh_error_path = output_handle.path / sibling_name
                     if not isinstance(error, Exception):
                         raise
             if create_token and not refresh_failed:
