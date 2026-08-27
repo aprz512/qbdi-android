@@ -8,7 +8,6 @@ import hashlib
 import os
 import re
 import stat
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -20,9 +19,10 @@ _SAFE_SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 
 
-def _close_owned(fds: tuple[int, ...]) -> None:
+def _close_owned(
+    fds: tuple[int, ...], primary: BaseException | None = None
+) -> None:
     """Close every owned FD, preserving a primary exception when present."""
-    primary = sys.exc_info()[1]
     first_failure: BaseException | None = None
     for fd in fds:
         try:
@@ -54,20 +54,15 @@ class TargetLock:
                 if component in {"", "."}:
                     continue
                 child = os.open(component, flags, dir_fd=descriptor)
-                try:
-                    _close_owned((descriptor,))
-                except BaseException:
-                    # The child is owned as soon as it is opened; do not leak it
-                    # when transferring ownership from the previous directory FD.
-                    _close_owned((child,))
-                    raise
+                previous = descriptor
                 descriptor = child
+                _close_owned((previous,))
             info = os.fstat(descriptor)
             if not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.getuid()}:
                 raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe")
             base_fd = descriptor
         except BaseException as error:
-            _close_owned((descriptor,))
+            _close_owned((descriptor,), error)
             if isinstance(error, OSError):
                 raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe") from error
             raise
@@ -80,14 +75,14 @@ class TargetLock:
                 pass
             root = os.open(name, flags, dir_fd=base_fd)
         except BaseException as error:
-            _close_owned((base_fd,))
+            _close_owned((base_fd,), error)
             if isinstance(error, OSError):
                 raise QtraceError("session.lock_invalid", "lock", "lock root is unsafe") from error
             raise
         try:
             _close_owned((base_fd,))
-        except BaseException:
-            _close_owned((root,))
+        except BaseException as error:
+            _close_owned((root,), error)
             raise
         assert root is not None
         try:
@@ -98,8 +93,8 @@ class TargetLock:
             if stat.S_IMODE(os.fstat(root).st_mode) != 0o700:
                 raise QtraceError("session.lock_invalid", "lock", "lock root mode is unsafe")
             return root
-        except BaseException:
-            _close_owned((root,))
+        except BaseException as error:
+            _close_owned((root,), error)
             raise
 
     @contextmanager
@@ -114,10 +109,12 @@ class TargetLock:
         try:
             descriptor = os.open(f"{digest}.lock", flags, 0o600, dir_fd=root)
         except BaseException as error:
-            _close_owned((root,))
+            _close_owned((root,), error)
             if isinstance(error, OSError):
                 raise QtraceError("session.lock_invalid", "lock", "lock file is unsafe") from error
             raise
+        operation_primary: BaseException | None = None
+        locked = False
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -131,9 +128,27 @@ class TargetLock:
                 if error.errno in {errno.EACCES, errno.EAGAIN}:
                     raise QtraceError(ErrorCode.SESSION_BUSY, "lock", "a session already owns this device/package") from error
                 raise
+            locked = True
             try:
                 yield
+            except BaseException as error:
+                operation_primary = error
+                raise
             finally:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                if locked:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    except BaseException as error:
+                        if operation_primary is None:
+                            operation_primary = error
+                            raise
+                        try:
+                            operation_primary.add_note(f"lock unlock failed: {error}")
+                        except BaseException:
+                            pass
+        except BaseException as error:
+            if operation_primary is None:
+                operation_primary = error
+            raise
         finally:
-            _close_owned((descriptor, root))
+            _close_owned((descriptor, root), operation_primary)

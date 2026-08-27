@@ -779,6 +779,56 @@ class LockTests(unittest.TestCase):
         self.assertEqual(2, len(closed))
         self.assertIn(root_fd, closed)
 
+    def test_directory_fd_transfer_never_retries_a_reused_closed_number(self) -> None:
+        runtime = Path(self.directory.name)
+        real_close = os.close
+        close_calls: list[int] = []
+        replacement: int | None = None
+
+        def close_reuse_then_fail(fd: int) -> None:
+            nonlocal replacement
+            close_calls.append(fd)
+            real_close(fd)
+            if replacement is None:
+                replacement = os.open("/dev/null", os.O_RDONLY)
+                self.assertEqual(fd, replacement)
+                raise OSError("close reported failure")
+
+        try:
+            with patch("qtrace.lock.os.close", side_effect=close_reuse_then_fail):
+                with self.assertRaisesRegex(QtraceError, "session.lock_invalid"):
+                    TargetLock(runtime)._root()
+            assert replacement is not None
+            os.fstat(replacement)
+            self.assertEqual(1, close_calls.count(replacement))
+        finally:
+            if replacement is not None:
+                real_close(replacement)
+
+    def test_handled_outer_exception_is_not_a_lock_cleanup_primary(self) -> None:
+        runtime = Path(self.directory.name)
+        root_fd = os.open(runtime, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        real_close = os.close
+        closed: list[int] = []
+
+        def close_then_raise_first(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+            if len(closed) == 1:
+                raise OSError("close failed")
+
+        try:
+            raise ValueError("handled outside lock")
+        except ValueError as handled:
+            with patch.object(TargetLock, "_root", return_value=root_fd), \
+                    patch("qtrace.lock.os.close", side_effect=close_then_raise_first):
+                with self.assertRaisesRegex(OSError, "close failed"):
+                    with TargetLock(runtime).acquire("device-1", PACKAGE):
+                        pass
+            self.assertEqual([], getattr(handled, "__notes__", []))
+        self.assertEqual(2, len(closed))
+        self.assertIn(root_fd, closed)
+
 
 if __name__ == "__main__":
     unittest.main()
