@@ -868,6 +868,20 @@ class ArtifactProcessor:
                 if local.name.endswith(".metrics") or local.name.endswith(".crash"):
                     if not local.exists():
                         continue
+                    try:
+                        if local.name.endswith(".metrics"):
+                            from scripts.trace_metrics import parse_metrics
+                            parse_metrics(local.read_bytes(), local.name.removesuffix(".metrics"))
+                        else:
+                            from scripts.pull_trace import parse_crash_marker
+                            parse_crash_marker(local.read_bytes())
+                    except Exception as error:
+                        _unlink_quiet(local)
+                        failure = {"name": artifact.remote_name, "code": "artifact.invalid",
+                                   "detail": str(error)[:256]}
+                        errors.append(failure)
+                        records.append(failure)
+                        continue
                     record["destination_size"] = local.stat().st_size
                     record["decoder"] = "sidecar"
                     records.append(record)

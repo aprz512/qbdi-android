@@ -365,10 +365,15 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn("artifact.incomplete", {item["code"] for item in result.errors})
 
     def test_validated_root_returns_existing_metrics_sidecar(self):
+        from scripts.tests.test_pull_trace import current_complete_stream, v3_sidecar
         session = "11111111-1111-4111-8111-111111111111"
-        root = "run.trace.txt"
+        root = "run.trace.bin"
         status = self._status(session, artifacts=[root])
-        client = FakeClient({root: COMPLETE_TERMINAL, root + ".metrics": b"profile=fast\n"})
+        binary = current_complete_stream(compression=0)
+        metrics = v3_sidecar(termination="completed", return_valid=1, profile="full",
+                             instructions=0, elapsed_ms=17, encoded_bytes=len(binary),
+                             compressed_bytes=len(binary))
+        client = FakeClient({root: binary, root + ".metrics": metrics})
         with tempfile.TemporaryDirectory() as directory:
             result = self._processor(client).collect_session(
                 "d", "com.example.app", session, status, Path(directory), 1)
