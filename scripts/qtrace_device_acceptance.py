@@ -10,6 +10,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import shutil
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 
@@ -21,8 +24,16 @@ ITERATIONS = 30
 BASELINE_PATH = f"/data/data/{PACKAGE}/files/qtrace-acceptance-baseline.json"
 
 
+@dataclass(frozen=True)
+class CommandResult:
+    stdout: str
+    stderr: str
+    returncode: int
+
+
 class Runner(Protocol):
-    def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None) -> str: ...
+    def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
+            allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
     def read_text(self, path: Path, *, timeout: float) -> str: ...
 
 
@@ -33,19 +44,22 @@ class SubprocessRunner:
         self.device = device
         self.inject_first_read_failure = inject_first_read_failure
 
-    def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None) -> str:
+    def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
+            allowed: tuple[int, ...] = (0,)) -> CommandResult:
         completed = subprocess.run(list(command), cwd=cwd, text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, timeout=timeout, check=False)
-        if completed.returncode:
+        if len(completed.stdout.encode()) > 1_048_576 or len(completed.stderr.encode()) > 1_048_576:
+            raise RuntimeError("command output exceeded one MiB bound")
+        if completed.returncode not in allowed:
             raise RuntimeError(f"command failed ({completed.returncode}): {' '.join(command)}\n{completed.stderr}")
-        return completed.stdout
+        return CommandResult(completed.stdout, completed.stderr, completed.returncode)
 
     def read_text(self, path: Path, *, timeout: float) -> str:
         if self.inject_first_read_failure:
             self.inject_first_read_failure = False
             raise ConnectionError("injected one-shot ADB read failure")
         if str(path).startswith("/data/data/"):
-            return self.run(("adb", "-s", self.device, "exec-out", "run-as", PACKAGE, "cat", str(path)), timeout=timeout)
+            return self.run(("adb", "-s", self.device, "exec-out", "run-as", PACKAGE, "cat", str(path)), timeout=timeout).stdout
         metadata = path.stat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
             raise RuntimeError("host report is not a bounded regular file")
@@ -57,6 +71,29 @@ def _read_retry(runner: Runner, path: Path, *, timeout: float) -> str:
         return runner.read_text(path, timeout=timeout)
     except ConnectionError:
         return runner.read_text(path, timeout=timeout)
+
+
+def _strict_json(raw: str) -> dict[str, object]:
+    def duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    def nonfinite(_: str) -> object:
+        raise ValueError("non-finite JSON number")
+    value = json.loads(raw, object_pairs_hook=duplicate, parse_constant=nonfinite)
+    if type(value) is not dict:
+        raise ValueError("JSON root is not an object")
+    return value
+
+
+def _strict_report(runner: Runner, path: Path) -> dict[str, object]:
+    try:
+        return _strict_json(_read_retry(runner, path, timeout=5.0))
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError("qtrace report is not strict JSON") from error
 
 
 def _wait_for_baseline(runner: Runner) -> dict[str, object]:
@@ -88,7 +125,7 @@ def _report_path(stdout: str, root: Path) -> Path:
 
 
 def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, object], str]:
-    value = json.loads(_read_retry(runner, path, timeout=5.0))
+    value = _strict_report(runner, path)
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or
             value.get("stage") != "completed" or value.get("package") != PACKAGE):
         raise RuntimeError("timed qtrace report is incomplete")
@@ -98,11 +135,13 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
             status.get("reason") != "duration_elapsed" or status.get("stopAcknowledged") is not True):
         raise RuntimeError("timed trace did not detach/seal after native duration stop")
     artifacts = value.get("artifacts")
-    if not isinstance(artifacts, list) or len(artifacts) != 1 or not isinstance(artifacts[0], dict):
-        raise RuntimeError("timed report does not own exactly one artifact")
-    artifact = artifacts[0].get("remote_name")
-    if not isinstance(artifact, str) or not artifact.endswith(".trace.bin.lz4"):
+    if not isinstance(artifacts, list):
+        raise RuntimeError("timed report has no artifact records")
+    roots = [record.get("remote_name") for record in artifacts if isinstance(record, dict) and
+             isinstance(record.get("remote_name"), str) and record["remote_name"].endswith(".trace.bin.lz4")]
+    if len(roots) != 1:
         raise RuntimeError("timed report lacks a trusted binary artifact name")
+    artifact = roots[0]
     if type(value.get("pid")) is not int or value["pid"] <= 0:
         raise RuntimeError("timed report does not retain its traced app PID")
     return value, artifact
@@ -160,8 +199,11 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
     reports: dict[str, Path] = {}
     for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
         output = directory / name
-        published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0)
-        reports[name] = _report_path(published or str(output / "report.json"), output)
+        published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
+                               allowed=(0, 2) if scenario == "flight-crash" else (0,))
+        reports[name] = _report_path(published.stdout or str(output / "report.json"), output)
+        if scenario == "flight-crash" and published.returncode != 2:
+            raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
     timed, artifact = _validated_timed_report(runner, reports["offset"])
     symbol, _ = _validated_timed_report(runner, reports["symbol"])
     _validate_timed_artifact_semantics(runner, timed)
@@ -169,6 +211,10 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
     symbol_status = symbol["native"]["status"]
     if timed_status["normalizedScenes"] != symbol_status["normalizedScenes"]:
         raise RuntimeError("offset and symbol timed scenes did not normalize identically")
+    exit_report = _strict_report(runner, reports["exit"])
+    crash_report = _strict_report(runner, reports["crash"])
+    if exit_report.get("status") != "process_exited" or crash_report.get("status") != "crash_recovered":
+        raise RuntimeError("monitor exit and Flight crash recovery were not classified separately")
     runner.run(("adb", "-s", device, "shell", "kill", "-0", str(timed["pid"])), timeout=10.0)
     timed_oracle = json.loads(_read_retry(runner, Path(
         f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"), timeout=5.0))
@@ -189,14 +235,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments = parser.parse_args(argv)
     except SystemExit as error:
         return int(error.code)
-    with tempfile.TemporaryDirectory(prefix="qtrace-device-acceptance-") as temporary:
-        root = Path(temporary)
-        try:
-            return run_acceptance(arguments.device, root, runner=SubprocessRunner(arguments.device))
-        except BaseException as error:
-            print(f"qtrace acceptance failed; generated reports remain at: {root}", file=sys.stderr)
-            print(str(error), file=sys.stderr)
-            return 1
+    temporary = tempfile.TemporaryDirectory(prefix="qtrace-device-acceptance-")
+    root = Path(temporary.name)
+    try:
+        result = run_acceptance(arguments.device, root, runner=SubprocessRunner(arguments.device))
+    except BaseException as error:
+        retained = Path(tempfile.gettempdir()) / f"qtrace-device-acceptance-failed-{uuid.uuid4().hex}"
+        shutil.copytree(root, retained)
+        temporary.cleanup()
+        print(f"qtrace acceptance failed; generated reports remain at: {retained}", file=sys.stderr)
+        print(str(error), file=sys.stderr)
+        return 1
+    temporary.cleanup()
+    return result
 
 
 if __name__ == "__main__":

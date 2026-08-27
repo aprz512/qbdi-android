@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qbdi-android.local/schema/qtrace-session-status.schema.json",
   "title": "qtrace native session status",
+  "x-qtrace-runtime-invariants": ["UTF-8 byte limits", "normalized scene names are unique", "active (sceneIndex, tid) pairs are unique and bounded by normalizedScenes"],
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "sessionId", "generation", "packageName", "pid", "state", "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes", "artifacts", "stopAcknowledged", "warnings", "errors"],
@@ -18,5 +19,10 @@
     "warnings": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/issue"}},
     "errors": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/issue"}}
   },
+  "allOf": [
+    {"if": {"properties": {"state": {"enum": ["installed", "running"]}}}, "then": {"properties": {"reason": {"const": ""}, "stopAcknowledged": {"const": false}}}},
+    {"if": {"properties": {"state": {"enum": ["stop_requested", "stopping", "stop_incomplete"]}}}, "then": {"properties": {"reason": {"const": "duration_elapsed"}, "stopAcknowledged": {"const": false}}}},
+    {"if": {"properties": {"state": {"const": "sealed"}}}, "then": {"properties": {"reason": {"const": "duration_elapsed"}, "stopAcknowledged": {"const": true}}}}
+  ],
   "$defs": {"issue": {"type": "object", "additionalProperties": false, "required": ["code", "path", "message"], "properties": {"code": {"type": "string", "maxLength": 1024}, "path": {"type": "string", "maxLength": 1024}, "message": {"type": "string", "maxLength": 1024}}}}
 }

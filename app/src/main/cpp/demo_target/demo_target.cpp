@@ -4,6 +4,7 @@
 #include <jni.h>
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -49,8 +50,10 @@ static jstring native_run_benchmark_case(JNIEnv *env, jobject /* thiz */) {
 }
 
 static jlong native_run_timed_acceptance(JNIEnv *, jobject, jlong iterations, jlong seed) {
-    return static_cast<jlong>(demo_timed_acceptance_case(
-        static_cast<uint64_t>(iterations), static_cast<uint64_t>(seed)));
+    static_assert(sizeof(jlong) == sizeof(uint64_t));
+    const uint64_t value = demo_timed_acceptance_case(
+        static_cast<uint64_t>(iterations), static_cast<uint64_t>(seed));
+    return std::bit_cast<jlong>(value);
 }
 
 static jlong native_run_flight_acceptance(JNIEnv *, jobject, jlong seed, jint mode,

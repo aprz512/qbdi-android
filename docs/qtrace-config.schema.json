@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qbdi-android.local/schema/qtrace-config.schema.json",
   "title": "qtrace strict configuration",
+  "x-qtrace-runtime-invariants": ["UTF-8 byte limits", "scene names are unique", "offset ranges are nonzero, aligned, and ordered"],
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "app", "target", "scenes"],
@@ -31,12 +32,17 @@
         "flightEntryScene": {"$ref": "#/$defs/text"},
         "library": {"$ref": "#/$defs/text"},
         "companion": {"$ref": "#/$defs/text"}
-      }
+      },
+      "allOf": [
+        {"if": {"required": ["library"]}, "then": {"required": ["companion"]}},
+        {"if": {"required": ["companion"]}, "then": {"required": ["library"]}},
+        {"if": {"properties": {"flightEnabled": {"const": true}}, "required": ["flightEnabled"]}, "then": {"required": ["flightEntryScene"]}, "else": {"not": {"required": ["flightEntryScene"]}}}
+      ]
     },
     "scene": {
       "oneOf": [
         {"type": "object", "additionalProperties": false, "required": ["name", "symbol"], "properties": {"name": {"$ref": "#/$defs/text"}, "symbol": {"$ref": "#/$defs/text"}}},
-        {"type": "object", "additionalProperties": false, "required": ["name", "startOffset", "endOffset"], "properties": {"name": {"$ref": "#/$defs/text"}, "startOffset": {"type": "string", "pattern": "^0x[0-9a-fA-F]+$"}, "endOffset": {"type": "string", "pattern": "^0x[0-9a-fA-F]+$"}}}
+        {"type": "object", "additionalProperties": false, "required": ["name", "startOffset", "endOffset"], "properties": {"name": {"$ref": "#/$defs/text"}, "startOffset": {"type": "string", "pattern": "^0x(?=[0-9a-fA-F]*[1-9a-fA-F])[0-9a-fA-F]*[048cC]$"}, "endOffset": {"type": "string", "pattern": "^0x(?=[0-9a-fA-F]*[1-9a-fA-F])[0-9a-fA-F]*[048cC]$"}}}
       ]
     }
   }

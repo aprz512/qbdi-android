@@ -65,6 +65,10 @@ class SchemaContractsTests(unittest.TestCase):
         self.assertEqual({"name", "symbol"}, set(forms[0]["properties"]))
         self.assertEqual({"name", "startOffset", "endOffset"}, set(forms[1]["properties"]))
         self.assertTrue(all(not form["additionalProperties"] for form in forms))
+        self.assertEqual(
+            ["UTF-8 byte limits", "scene names are unique", "offset ranges are nonzero, aligned, and ordered"],
+            schema["x-qtrace-runtime-invariants"],
+        )
 
     def test_status_schema_matches_the_strict_native_status_parser(self):
         schema = self.load_schema("qtrace-session-status.schema.json")
@@ -86,6 +90,10 @@ class SchemaContractsTests(unittest.TestCase):
         issue = schema["$defs"]["issue"]
         self.assertFalse(issue["additionalProperties"])
         self.assertEqual({"code", "path", "message"}, set(issue["properties"]))
+        self.assertEqual(
+            ["UTF-8 byte limits", "normalized scene names are unique", "active (sceneIndex, tid) pairs are unique and bounded by normalizedScenes"],
+            schema["x-qtrace-runtime-invariants"],
+        )
 
     def test_every_native_status_state_has_a_valid_golden_document(self):
         for state_name in ("installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"):
@@ -99,9 +107,11 @@ class FakeRunner:
         self.fail_first_read = fail_first_read
         self.reads = 0
 
-    def run(self, command, *, timeout, cwd=None):
+    def run(self, command, *, timeout, cwd=None, allowed=(0,)):
         self.commands.append(tuple(command))
-        return ""
+        if "flight-crash" in command:
+            return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult("", "", 2)
+        return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult("", "", 0)
 
     def read_text(self, path: Path, *, timeout: float) -> str:
         self.reads += 1
@@ -114,8 +124,13 @@ class FakeRunner:
         if path.name == "fixture.trace.txt":
             return "TRACE_BEGIN format=4 scene=fixture-entry\nTRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n"
         if path.name == "report.json":
+            report_status = "sealed"
+            if path.parent.name == "exit":
+                report_status = "process_exited"
+            elif path.parent.name == "crash":
+                report_status = "crash_recovered"
             return json.dumps({
-                "schema": 1, "session_id": SESSION, "status": "sealed", "stage": "completed",
+                "schema": 1, "session_id": SESSION, "status": report_status, "stage": "completed",
                 "package": "com.aprz.qbdiandroid", "pid": 4242,
                 "native": {"status": status("sealed")},
                 "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", "/tmp/fixture.trace.txt"],
@@ -125,6 +140,20 @@ class FakeRunner:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_timed_report_selects_one_binary_root_among_sidecars(self):
+        from scripts.qtrace_device_acceptance import _validated_timed_report
+
+        runner = FakeRunner()
+        document = json.loads(runner.read_text(Path("report.json"), timeout=1))
+        document["artifacts"].extend([
+            {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"},
+            {"remote_name": "fixture.trace.txt", "decoder": "qtrb"},
+        ])
+        runner.read_text = lambda _path, *, timeout: json.dumps(document)  # type: ignore[method-assign]
+        report, artifact = _validated_timed_report(runner, Path("report.json"))
+        self.assertEqual(document, report)
+        self.assertEqual("fixture.trace.bin.lz4", artifact)
+
     def test_requires_an_explicit_device(self):
         from scripts.qtrace_device_acceptance import main
 
@@ -150,7 +179,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[6])
         self.assertEqual(16, len(commands))
-        self.assertEqual(6, runner.reads)  # baseline retry, report/text semantics, and native oracle
+        self.assertEqual(8, runner.reads)  # baseline retry, all scenario reports, text semantics, and native oracle
         self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[11])
         self.assertIn("--name", commands[13])
         self.assertIn("fixture.trace.bin.lz4", commands[13])

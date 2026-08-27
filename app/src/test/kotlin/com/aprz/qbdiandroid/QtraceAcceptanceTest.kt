@@ -25,4 +25,5 @@ class QtraceAcceptanceTest {
             QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L), 0x42L),
         )
     }
+
 }

@@ -3,6 +3,8 @@ package com.aprz.qbdiandroid
 import android.os.Process
 import java.io.File
 import java.io.FileOutputStream
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
@@ -15,6 +17,7 @@ object QtraceAcceptance {
     private const val seed = "qtrace_acceptance_seed"
     private const val iterations = "qtrace_acceptance_iterations"
     private const val maximumIterations = 300L
+    private val started = AtomicBoolean(false)
 
     fun parse(extras: Map<String, Any?>): QtraceAcceptanceRequest? {
         if ((extras[enabled] as? Boolean) != true) return null
@@ -30,13 +33,18 @@ object QtraceAcceptance {
         "{\"iterations\":${request.iterations},\"seed\":${request.seed},\"result\":\"0x${java.lang.Long.toUnsignedString(result, 16)}\"}"
 
     fun start(activity: MainActivity, request: QtraceAcceptanceRequest) {
+        if (!started.compareAndSet(false, true)) return
+        val traced = activity.intent.hasExtra("qtrace_acceptance_worker")
+        if (request.mode == "timed" && !traced) {
+            File(activity.filesDir, "qtrace-acceptance-baseline.json").delete()
+            File(activity.filesDir, "qtrace-acceptance-timed.json").delete()
+        }
         thread(name = "qtrace-acceptance-${request.mode}", isDaemon = false) {
             when (request.mode) {
                 "timed" -> {
-                    val baseline = NativeDemo.runTimedAcceptance(request.iterations, request.seed)
-                    writeAtomic(activity.filesDir, "qtrace-acceptance-baseline.json", resultJson(request, baseline))
-                    val traced = NativeDemo.runTimedAcceptance(request.iterations, request.seed)
-                    writeAtomic(activity.filesDir, "qtrace-acceptance-timed.json", resultJson(request, traced))
+                    val result = NativeDemo.runTimedAcceptance(request.iterations, request.seed)
+                    val name = if (traced) "qtrace-acceptance-timed.json" else "qtrace-acceptance-baseline.json"
+                    writeAtomic(activity.filesDir, name, resultJson(request, result))
                 }
                 "exit" -> {
                     writeAtomic(activity.filesDir, "qtrace-acceptance-exit.json", resultJson(request, 0L))
@@ -49,7 +57,7 @@ object QtraceAcceptance {
 
     private fun writeAtomic(directory: File, name: String, payload: String) {
         val destination = File(directory, name)
-        val temporary = File(directory, ".${name}.${Process.myPid()}.tmp")
+        val temporary = File(directory, ".${name}.${Process.myPid()}.${UUID.randomUUID()}.tmp")
         FileOutputStream(temporary).use { stream ->
             stream.write(payload.toByteArray(Charsets.UTF_8))
             stream.fd.sync()
