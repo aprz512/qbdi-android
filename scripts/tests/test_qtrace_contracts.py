@@ -184,6 +184,19 @@ class FakeRunner:
         return ""
 
 
+class FakeArtifactClient:
+    def __init__(self, root: Path):
+        self.root = root
+        self.calls: list[tuple[str, int]] = []
+        self.evidence_present_during_retry: list[bool] = []
+
+    def read_file(self, name: str, *, maximum_bytes: int) -> bytes:
+        self.calls.append((name, maximum_bytes))
+        path = self.root / "artifacts" / name
+        self.evidence_present_during_retry.append(path.is_file())
+        return path.read_bytes()
+
+
 class AcceptanceHarnessTests(unittest.TestCase):
     def test_timed_semantics_reparses_a_real_stopped_qtrb_and_metrics_v3_sidecar(self):
         from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
@@ -275,13 +288,14 @@ class AcceptanceHarnessTests(unittest.TestCase):
         from scripts.qtrace_device_acceptance import OneShotArtifactRead
         class Client:
             def __init__(self): self.calls = []
-            def read_file(self, name, *, timeout): self.calls.append((name, timeout)); return b"evidence"
+            def read_file(self, name, *, maximum_bytes):
+                self.calls.append((name, maximum_bytes)); return b"evidence"
         client = Client()
         wrapped = OneShotArtifactRead(client)
         with self.assertRaises(ConnectionError):
-            wrapped.read_file("fixture.trace.bin.lz4", timeout=1)
+            wrapped.read_file("fixture.trace.bin.lz4", maximum_bytes=1)
         self.assertEqual([], client.calls)
-        self.assertEqual(b"evidence", wrapped.read_file("fixture.trace.bin.lz4", timeout=1))
+        self.assertEqual(b"evidence", wrapped.read_file("fixture.trace.bin.lz4", maximum_bytes=1))
         self.assertEqual([("fixture.trace.bin.lz4", 1)], client.calls)
     def test_trusted_output_rejects_escape_and_symlink(self):
         from scripts.qtrace_device_acceptance import _trusted_output
@@ -334,6 +348,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
             artifacts.mkdir()
             (artifacts / "fixture.trace.bin.lz4").write_bytes(b"fixture qtrb bytes")
             (artifacts / "fixture.trace.bin.lz4.metrics").write_text("metrics")
+            artifact_client = FakeArtifactClient(Path(temporary) / "offset")
             for name in ("latest", "name", "all", "compressed"):
                 (Path(temporary) / name).mkdir()
             def converter(_source, destination, *, lz4, crash_marked):
@@ -347,7 +362,10 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 return SimpleNamespace(termination="stopped", partial=False)
             self.assertEqual(0, run_acceptance(
                 "SERIAL", Path(temporary), runner=runner, converter=converter,
+                artifact_client_factory=lambda **_kwargs: artifact_client,
             ))
+            self.assertEqual([("fixture.trace.bin.lz4.metrics", 64 * 1024)], artifact_client.calls)
+            self.assertEqual([True], artifact_client.evidence_present_during_retry)
         commands = runner.commands
         self.assertEqual(("./gradlew", "nativeHostTest", "--no-daemon"), commands[0])
         self.assertEqual(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), commands[1])

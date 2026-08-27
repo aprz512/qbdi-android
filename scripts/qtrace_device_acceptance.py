@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 from scripts.bounded_process import BoundedProcessError, capture_bounded
+from scripts.pull_trace import AdbArtifactClient, MAX_METRICS_BYTES
 from scripts.trace_convert import convert_binary_file
 
 
@@ -81,11 +82,11 @@ class OneShotArtifactRead:
         self.client = client
         self.failed = False
 
-    def read_file(self, name: str, *, timeout: float) -> bytes:
+    def read_file(self, name: str, *, maximum_bytes: int) -> bytes:
         if not self.failed:
             self.failed = True
             raise ConnectionError("injected acceptance artifact read failure")
-        return self.client.read_file(name, timeout=timeout)
+        return self.client.read_file(name, maximum_bytes=maximum_bytes)
 
 
 def _read_retry(runner: Runner, path: Path, *, timeout: float) -> str:
@@ -262,6 +263,40 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
         converted.unlink(missing_ok=True)
 
 
+def _verify_artifact_read_recovery(device: str, report: dict[str, object], root: Path, *,
+                                   artifact_client_factory=AdbArtifactClient) -> None:
+    """Exercise one real app-private artifact read failure without restarting adbd."""
+    records = report.get("artifacts")
+    if not isinstance(records, list):
+        raise RuntimeError("timed report has no artifact records for recovery verification")
+    binary = [record for record in records if isinstance(record, dict) and
+              isinstance(record.get("remote_name"), str) and
+              (record["remote_name"].endswith(".trace.bin") or
+               record["remote_name"].endswith(".trace.bin.lz4"))]
+    if len(binary) != 1 or not isinstance(binary[0].get("local_path"), str):
+        raise RuntimeError("timed report has no trusted binary identity for recovery verification")
+    local_binary = _trusted_output(root / binary[0]["local_path"], root)
+    metrics_name = local_binary.name + ".metrics"
+    local_metrics = _trusted_output(Path(str(local_binary) + ".metrics"), root)
+    if local_metrics.stat().st_size > MAX_METRICS_BYTES:
+        raise RuntimeError("timed metrics evidence exceeds its bounded recovery read")
+    before = local_metrics.read_bytes()
+    client = artifact_client_factory(package=PACKAGE, device=device)
+    wrapped = OneShotArtifactRead(client)
+    try:
+        wrapped.read_file(metrics_name, maximum_bytes=MAX_METRICS_BYTES)
+    except ConnectionError:
+        # The first failure is deliberately before delegating; verify the same
+        # trusted session evidence remains intact before retrying the same client.
+        if _trusted_output(local_metrics, root).read_bytes() != before:
+            raise RuntimeError("artifact evidence changed after injected read failure")
+    else:
+        raise RuntimeError("injected artifact read unexpectedly succeeded")
+    remote = wrapped.read_file(metrics_name, maximum_bytes=MAX_METRICS_BYTES)
+    if remote != before:
+        raise RuntimeError("artifact retry did not recover the same metrics evidence")
+
+
 def _demo_command(device: str, scenario: str, form: str, output: Path) -> tuple[str, ...]:
     return ("python3", "-m", "qtrace", "demo", "--scenario", scenario,
             *( ("--duration", "2s") if scenario == "timed" else () ),
@@ -294,7 +329,7 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: st
 
 
 def run_acceptance(device: str, directory: Path, *, runner: Runner,
-                   converter=convert_binary_file) -> int:
+                   converter=convert_binary_file, artifact_client_factory=AdbArtifactClient) -> int:
     if not device:
         raise ValueError("--device is required for manual acceptance")
     directory.mkdir(parents=True, exist_ok=True)
@@ -321,6 +356,10 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     symbol, _ = _validated_timed_report(runner, reports["symbol"])
     _validate_timed_artifact_semantics(
         runner, timed, reports["offset"].parent, converter=converter,
+    )
+    _verify_artifact_read_recovery(
+        device, timed, reports["offset"].parent,
+        artifact_client_factory=artifact_client_factory,
     )
     timed_status = timed["native"]["status"]  # validated above
     symbol_status = symbol["native"]["status"]
