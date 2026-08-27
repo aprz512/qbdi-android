@@ -529,6 +529,19 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         self.assertEqual(2, main([]))
 
+    def test_failure_retains_generated_evidence_after_main_returns(self):
+        from scripts.qtrace_device_acceptance import main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            with patch("scripts.qtrace_device_acceptance.Path.cwd", return_value=workspace), \
+                    patch("scripts.qtrace_device_acceptance.run_acceptance",
+                          side_effect=RuntimeError("fixture failure")):
+                self.assertEqual(1, main(["--device", "SERIAL"]))
+            retained = list((workspace / "qtrace-acceptance-failures").iterdir())
+            self.assertEqual(1, len(retained))
+            self.assertTrue(retained[0].is_dir())
+
     def test_acceptance_runs_bounded_workflow_and_retries_one_read(self):
         from scripts.qtrace_device_acceptance import run_acceptance
 
