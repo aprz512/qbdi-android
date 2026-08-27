@@ -164,6 +164,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         runner = FakeRunner(fail_first_read=True)
         with tempfile.TemporaryDirectory() as temporary:
+            for name in ("latest", "name", "all", "compressed"):
+                (Path(temporary) / name).mkdir()
             self.assertEqual(0, run_acceptance("SERIAL", Path(temporary), runner=runner))
         commands = runner.commands
         self.assertEqual(("./gradlew", "nativeHostTest", "--no-daemon"), commands[0])

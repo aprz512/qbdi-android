@@ -101,14 +101,19 @@ def _wait_for_baseline(runner: Runner) -> dict[str, object]:
     last_error: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            value = json.loads(_read_retry(runner, Path(BASELINE_PATH), timeout=2.0))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            value = _strict_json(_read_retry(runner, Path(BASELINE_PATH), timeout=min(2.0, remaining)))
             if (type(value) is dict and value.get("iterations") == ITERATIONS and
                     value.get("seed") == SEED and isinstance(value.get("result"), str)):
                 return value
             raise ValueError("baseline has an invalid fixture result")
         except (ConnectionError, OSError, ValueError, json.JSONDecodeError) as error:
             last_error = error
-            time.sleep(0.25)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.25, remaining))
     raise RuntimeError(f"timed baseline was not available within 15 seconds: {last_error}")
 
 
@@ -174,11 +179,15 @@ def _demo_command(device: str, scenario: str, form: str, output: Path) -> tuple[
             "--scene-form", form, "--device", device, "--output", str(output))
 
 
-def _verify_pull_outputs(_root: Path) -> None:
+def _verify_pull_outputs(root: Path) -> None:
     """Pull itself validates binary terminal/metrics/text conversion contracts.
 
     The report is the authoritative artifact selector; no device directory listing is used here.
     """
+    expected = ("latest", "name", "all", "compressed")
+    missing = [name for name in expected if not (root / name).exists()]
+    if missing:
+        raise RuntimeError("manual pull did not publish output directories: " + ",".join(missing))
 
 
 def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
