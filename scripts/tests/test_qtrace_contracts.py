@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -581,6 +583,21 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 output.rename(parent / "original-output")
                 output.symlink_to(outside, target_is_directory=True)
                 self.assertEqual(b'{"trusted":true}', held.read_bytes(Path(SESSION) / "report.json"))
+
+    def test_timed_snapshot_and_converter_share_a_hard_deadline(self):
+        from scripts.qtrace_device_acceptance import RootedReader, _convert_snapshot_bounded
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "artifact").write_bytes(b"fixture")
+            with RootedReader(root) as held, self.assertRaisesRegex(RuntimeError, "exceeded deadline"):
+                held.read_bytes("artifact", deadline=0.0)
+            with patch("scripts.qtrace_device_acceptance.capture_bounded",
+                       side_effect=subprocess.TimeoutExpired(["decoder"], 1.0)) as bounded, \
+                    self.assertRaisesRegex(RuntimeError, "failed within deadline"):
+                _convert_snapshot_bounded(root / "artifact", root / "converted", lz4="lz4",
+                                          deadline=time.monotonic() + 1.0)
+            self.assertEqual(64 * 1024, bounded.call_args.kwargs["maximum_bytes"])
     def test_strict_report_rejects_duplicate_keys_and_nonfinite_numbers(self):
         from scripts.qtrace_device_acceptance import _strict_json
 
@@ -738,7 +755,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[6])
         self.assertEqual(16, len(commands))
-        self.assertEqual(12, runner.reads)  # baseline retry, rooted reports/text, oracle, and pull reports
+        self.assertEqual(11, runner.reads)  # baseline retry, rooted reports, oracle, and pull reports
         self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[11])
         self.assertIn("--name", commands[13])
         self.assertIn("fixture.trace.bin.lz4", commands[13])

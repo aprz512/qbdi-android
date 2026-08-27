@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -17,7 +18,6 @@ from pathlib import Path
 from typing import Protocol, Sequence
 from scripts.bounded_process import BoundedProcessError, capture_bounded
 from scripts.pull_trace import AdbArtifactClient, MAX_METRICS_BYTES
-from scripts.trace_convert import convert_binary_file
 
 
 PACKAGE = "com.aprz.qbdiandroid"
@@ -348,7 +348,8 @@ def _trusted_output(path: Path, root: Path) -> Path:
     return resolved
 
 
-def _read_beneath(root: Path, relative: str, maximum_bytes: int = 1_048_576) -> bytes:
+def _read_beneath(root: Path, relative: str, maximum_bytes: int = 1_048_576,
+                  *, deadline: float | None = None) -> bytes:
     """Read one regular file through held no-follow directory descriptors."""
     candidate = Path(relative)
     if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
@@ -369,10 +370,14 @@ def _read_beneath(root: Path, relative: str, maximum_bytes: int = 1_048_576) -> 
                 raise RuntimeError("reported output is not a bounded regular file")
             data = bytearray()
             while len(data) < details.st_size:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError("reported output read exceeded deadline")
                 block = os.read(descriptor, min(64 * 1024, details.st_size - len(data)))
                 if not block:
                     raise RuntimeError("reported output changed while being read")
                 data.extend(block)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise RuntimeError("reported output read exceeded deadline")
             return bytes(data)
         finally:
             os.close(descriptor)
@@ -386,7 +391,7 @@ def _read_root(root: Path | RootedReader, relative: str, maximum_bytes: int = 1_
                *, deadline: float | None = None) -> bytes:
     if isinstance(root, RootedReader):
         return root.read_bytes(relative, maximum_bytes, deadline=deadline)
-    return _read_beneath(root, relative, maximum_bytes)
+    return _read_beneath(root, relative, maximum_bytes, deadline=deadline)
 
 
 def _validated_timed_report(runner: Runner, root: Path | RootedReader, relative: Path) -> tuple[dict[str, object], str]:
@@ -441,8 +446,24 @@ def _validated_monitor_report(runner: Runner, root: Path | RootedReader, relativ
     return report
 
 
+def _convert_snapshot_bounded(snapshot: Path, destination: Path, *, lz4: str | None,
+                              deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("timed artifact conversion exceeded deadline")
+    command = [sys.executable, "-m", "scripts.trace_convert", str(snapshot), "--output",
+               str(destination), "--force"]
+    if lz4 is not None:
+        command.extend(("--lz4", lz4))
+    try:
+        capture_bounded(command, maximum_bytes=64 * 1024, timeout=remaining)
+    except (BoundedProcessError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("timed artifact conversion failed within deadline") from error
+
+
 def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object], root: Path | RootedReader, *,
-                                       converter=convert_binary_file) -> None:
+                                       converter=None) -> None:
+    deadline = time.monotonic() + 15.0
     records = report.get("artifacts")
     if not isinstance(records, list):
         raise RuntimeError("timed report has no artifact semantics")
@@ -458,13 +479,13 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
     if (not isinstance(remote_name, str) or not isinstance(local_path, str) or
             Path(local_path).name != remote_name):
         raise RuntimeError("timed binary record has no trusted local artifact identity")
-    binary_bytes = _read_root(root, local_path)
+    binary_bytes = _read_root(root, local_path, deadline=deadline)
     metrics_name = remote_name + ".metrics"
     if not any(isinstance(item, dict) and item.get("remote_name") == metrics_name
                for item in records):
         raise RuntimeError("timed binary root has no matching metrics sidecar record")
     metrics_relative = local_path + ".metrics"
-    metrics_bytes = _read_root(root, metrics_relative, MAX_METRICS_BYTES)
+    metrics_bytes = _read_root(root, metrics_relative, MAX_METRICS_BYTES, deadline=deadline)
     if (record.get("termination") != "stopped" or record.get("metrics_schema") != 3 or
             record.get("native_stop_acknowledged") is not True):
         raise RuntimeError("binary TRACE_STOP/metrics-v3 native-stop contract failed")
@@ -473,12 +494,17 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
         snapshot.write_bytes(binary_bytes)
         Path(str(snapshot) + ".metrics").write_bytes(metrics_bytes)
         converted = Path(staging) / "converted.trace.txt"
-        stats = converter(snapshot, converted,
-                          lz4="lz4" if remote_name.endswith(".lz4") else None,
-                          crash_marked=False)
-        if getattr(stats, "termination", None) != "stopped" or getattr(stats, "partial", True):
-            raise RuntimeError("timed binary conversion was not a complete stopped trace")
-        text = runner.read_text_beneath(Path(staging), converted.name, timeout=5.0)
+        if converter is None:
+            _convert_snapshot_bounded(snapshot, converted,
+                                      lz4="lz4" if remote_name.endswith(".lz4") else None,
+                                      deadline=deadline)
+        else:
+            stats = converter(snapshot, converted,
+                              lz4="lz4" if remote_name.endswith(".lz4") else None,
+                              crash_marked=False)
+            if getattr(stats, "termination", None) != "stopped" or getattr(stats, "partial", True):
+                raise RuntimeError("timed binary conversion was not a complete stopped trace")
+        text = _read_root(Path(staging), converted.name, deadline=deadline).decode("utf-8", errors="strict")
         lines = text.splitlines()
         terminals = [line for line in lines if line.startswith("TRACE_END ")]
         if (not lines or not lines[0].startswith("TRACE_BEGIN format=4 ") or len(terminals) != 1 or
@@ -584,7 +610,7 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
 
 
 def run_acceptance(device: str, directory: Path, *, runner: Runner,
-                   converter=convert_binary_file, artifact_client_factory=AdbArtifactClient) -> int:
+                   converter=None, artifact_client_factory=AdbArtifactClient) -> int:
     if not device:
         raise ValueError("--device is required for manual acceptance")
     directory.mkdir(parents=True, exist_ok=True)

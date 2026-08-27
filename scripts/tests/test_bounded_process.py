@@ -88,6 +88,15 @@ class BoundedProcessTests(unittest.TestCase):
         self.assertIs(primary, caught.exception)
         self.assert_reaped(process)
 
+    def test_starts_a_new_session_so_timeout_reaps_decoder_descendants(self):
+        process = FakeProcess()
+        primary = RuntimeError("selector constructor")
+        with patch.object(bounded_process.subprocess, "Popen", return_value=process) as popen, \
+             patch.object(bounded_process.selectors, "DefaultSelector", side_effect=primary):
+            with self.assertRaises(RuntimeError):
+                capture_bounded(["fake"], maximum_bytes=1, timeout=1)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
     def test_each_selector_registration_failure_reaps_child(self):
         for registration in (1, 2):
             with self.subTest(registration=registration):

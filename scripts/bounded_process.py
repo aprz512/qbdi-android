@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -26,9 +27,15 @@ class BoundedProcessError(RuntimeError):
 def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         try:
-            process.terminate()
+            pid = getattr(process, "pid", None)
+            if not isinstance(pid, int):
+                raise OSError("process has no PID")
+            os.killpg(pid, signal.SIGTERM)
         except OSError:
-            pass
+            try:
+                process.terminate()
+            except OSError:
+                pass
     try:
         process.wait(timeout=0.5)
         return
@@ -36,9 +43,15 @@ def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
         pass
     if process.poll() is None:
         try:
-            process.kill()
+            pid = getattr(process, "pid", None)
+            if not isinstance(pid, int):
+                raise OSError("process has no PID")
+            os.killpg(pid, signal.SIGKILL)
         except OSError:
-            pass
+            try:
+                process.kill()
+            except OSError:
+                pass
     try:
         process.wait()
     except OSError:
@@ -55,7 +68,7 @@ def capture_bounded(
         raise ValueError("timeout must be positive")
     argv = list(command)
     process = subprocess.Popen(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, start_new_session=True,
     )
     assert process.stdout is not None
     assert process.stderr is not None
