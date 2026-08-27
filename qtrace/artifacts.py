@@ -660,7 +660,7 @@ class ArtifactProcessor:
                     "metrics_schema": None,
                     "producer_waits": None, "producer_wait_ns": None, "conversion_ms": None,
                     "native_stop_acknowledged": status.get("stopAcknowledged") if status is not None else None,
-                    "host_observed_ack_ms": status.get("hostAckMs") if status is not None else None}
+                    "host_observed_ack_ms": status.get("_hostAckMs") if status is not None else None}
                 if local.name.endswith(".metrics") or local.name.endswith(".crash"):
                     if not local.exists():
                         continue
@@ -746,8 +746,8 @@ class ArtifactProcessor:
                     failure = {"name": artifact.remote_name, "code": "artifact.invalid", "detail": str(error)[:256]}
                     errors.append(failure)
                     records.append(failure)
-            # Sidecars are part of the published set, but never trace roots.
-            files.extend(item.local_path for item in pulled if item.remote_name.endswith(_SIDE_SUFFIXES))
+            # Only successfully validated members are returned/published.  Sidecars
+            # are recorded by their validated root path, never as recovery ghosts.
             recorded_paths = {record.get("local_path") for record in records if isinstance(record, Mapping)}
             for path in files:
                 if not path.exists():
@@ -767,16 +767,16 @@ class ArtifactProcessor:
             host_context: Mapping[str, object] = {}
             if status is not None and status.get("_native_present", True):
                 native_status = {key: value for key, value in status.items()
-                                 if key not in {"_native_present", "snapshot", "effectiveConfig", "device", "hostAckMs"}}
+                                 if key not in {"_native_present", "snapshot", "effectiveConfig", "device", "hostAckMs", "_hostAckMs"}}
                 host_context = {"snapshot": status.get("snapshot", []),
                                 "effectiveConfig": status.get("effectiveConfig"),
                                 "device": status.get("device"),
-                                "hostAckMs": status.get("hostAckMs")}
+                                "hostAckMs": status.get("_hostAckMs")}
             elif status is not None:
                 host_context = {"snapshot": status.get("snapshot", []),
                                 "effectiveConfig": status.get("effectiveConfig"),
                                 "device": status.get("device"),
-                                "hostAckMs": status.get("hostAckMs")}
+                                "hostAckMs": status.get("_hostAckMs")}
             _write_json(stage_root / "session.json", {"schema": 1, "sessionId": session_id, "packageName": package,
                                                         "status": native_status, "host": host_context})
             effective = status.get("effectiveConfig") if status is not None else None
@@ -913,8 +913,6 @@ class ArtifactProcessor:
                     candidate_status = _json_status(
                         _call(getattr(client, "read_file"), candidate, timeout=timeout), sid, None)
                 except QtraceError:
-                    if len(status_candidates) == 1:
-                        raise
                     continue
                 except (OSError, RuntimeError, TimeoutError, TypeError) as error:
                     raise _error("artifact.pull_failed", str(error), partial=True) from error

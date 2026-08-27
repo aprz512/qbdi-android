@@ -392,7 +392,7 @@ class SessionOrchestrator:
                                    getattr(device, "serial", ""), pid, started, self._clock.utc_timestamp(), tuple(timeline),
                                    {"identity": identity}, {"artifacts": artifacts, "deployment": deployment},
                                    {"resolved": resolved}, {"config": request.config},
-                                   {"request": native, "status": dict(status or {})}, artifact_records, (),
+                                   {"request": native, "status": {key: value for key, value in dict(status or {}).items() if not key.startswith("_")}}, artifact_records, (),
                                    None if error is None else {"code": error.code, "stage": error.stage, "detail": error.detail},
                                    tuple(str(item) for item in outputs))
             # ArtifactProcessor publishes a durable fragment first.  Merge it into the
@@ -618,12 +618,10 @@ class SessionOrchestrator:
                 if current["state"] == "sealed":
                     if current["reason"] != "duration_elapsed" or current["stopAcknowledged"] is not True:
                         raise QtraceError(ErrorCode.STOP_NOT_ACKNOWLEDGED, "session.stop", "sealed status did not acknowledge duration stop")
-                    current = dict(current)
-                    current["hostAckMs"] = round(max(0.0, self._clock.monotonic() - (stop_observed_at or self._clock.monotonic())) * 1000, 3)
+                    current = {**current, "_hostAckMs": round(max(0.0, self._clock.monotonic() - stop_observed_at) * 1000, 3) if stop_observed_at is not None else None}
                     return current, False
                 if current["state"] == "stop_incomplete":
-                    current = dict(current)
-                    current["hostAckMs"] = round(max(0.0, self._clock.monotonic() - (stop_observed_at or self._clock.monotonic())) * 1000, 3)
+                    current = {**current, "_hostAckMs": None}
                     return current, False
             except QtraceError as error:
                 if not _transient_adb(error):

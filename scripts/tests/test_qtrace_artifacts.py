@@ -245,7 +245,7 @@ class ArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(QtraceError) as raised:
                 self._processor(client).pull_manual("d", "com.example.app", PullSelection(), Path(root), 1)
-            self.assertEqual("artifact.status_invalid", raised.exception.code)
+            self.assertEqual("artifact.status_missing", raised.exception.code)
 
     def test_active_identity_allows_distinct_threads_on_one_scene(self):
         status = self._status(state="running", reason="", stopAcknowledged=False,
