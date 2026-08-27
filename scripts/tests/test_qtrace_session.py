@@ -385,7 +385,7 @@ class SessionTests(unittest.TestCase):
             def acquire(self, *_args):
                 class Context:
                     def __enter__(_self): raise QtraceError("lock.failed", "lock", "no")
-                    def __exit__(_self, *_args): pass
+                    def __exit__(_self, *_args): raise AssertionError("exit after failed enter")
                 return Context()
         runner, _ = orchestrator(device, ManualClock())
         runner._report_writer, runner._lock = Writer(), BadLock()
@@ -574,6 +574,16 @@ class LockTests(unittest.TestCase):
         with self.assertRaisesRegex(QtraceError, "session.lock_invalid"):
             with TargetLock(runtime).acquire("device-1", PACKAGE):
                 pass
+
+    def test_refuses_intermediate_symlinked_runtime_component(self) -> None:
+        runtime = Path(self.directory.name) / "runtime"
+        actual = Path(self.directory.name) / "actual"
+        runtime.mkdir(); actual.mkdir()
+        (runtime / "link").symlink_to(actual, target_is_directory=True)
+        with self.assertRaises(QtraceError):
+            with TargetLock(runtime / "link" / "sub").acquire("device-1", PACKAGE):
+                pass
+        self.assertFalse(any(actual.glob("qtrace-*")))
 
 
 if __name__ == "__main__":

@@ -233,21 +233,27 @@ def _request_config(config: object) -> UserConfig:
     if not isinstance(config, UserConfig) or config.schema_version != 1 or type(config.app) is not AppConfig or \
             type(config.target) is not TargetConfig or type(config.tracer) is not TracerConfig or type(config.scenes) is not tuple:
         raise QtraceError("session.request_invalid", "session.request", "config has an invalid shape")
-    if not isinstance(config.app.package, str) or _PACKAGE.fullmatch(config.app.package) is None or \
-            not isinstance(config.target.module, str) or not config.target.module:
+    def text(value: object, maximum: int = 1024) -> bool:
+        try:
+            return isinstance(value, str) and bool(value) and len(value.encode("utf-8")) <= maximum and not any(
+                unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value)
+        except UnicodeEncodeError:
+            return False
+    if not isinstance(config.app.package, str) or _PACKAGE.fullmatch(config.app.package) is None or not text(config.target.module):
         raise QtraceError("session.request_invalid", "session.request", "config package or module is invalid")
     tracer = config.tracer
     if tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
-            type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None):
+            type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None) or \
+            any(item is not None and not isinstance(item, Path) for item in (config.app.apk, config.target.binary, tracer.library, tracer.companion)):
         raise QtraceError("session.request_invalid", "session.request", "tracer configuration is invalid")
-    if not 1 <= len(config.scenes) <= 256 or len({scene.name for scene in config.scenes if hasattr(scene, "name")}) != len(config.scenes):
+    if not 1 <= len(config.scenes) <= 256:
         raise QtraceError("session.request_invalid", "session.request", "scenes are invalid")
     names: set[str] = set()
     for scene in config.scenes:
         if type(scene) is OffsetScene:
             valid = type(scene.start_offset) is int and type(scene.end_offset) is int and 0 < scene.start_offset < scene.end_offset and scene.start_offset % 4 == 0 and scene.end_offset % 4 == 0
         elif type(scene) is SymbolScene:
-            valid = isinstance(scene.symbol, str) and bool(scene.symbol)
+            valid = text(scene.symbol)
         else:
             valid = False
         try:
@@ -258,7 +264,7 @@ def _request_config(config: object) -> UserConfig:
         if not valid or not valid_name or scene.name in names:
             raise QtraceError("session.request_invalid", "session.request", "scene is invalid")
         names.add(scene.name)
-    if tracer.flight_enabled != (tracer.flight_entry_scene is not None) or (tracer.flight_entry_scene is not None and tracer.flight_entry_scene not in names):
+    if tracer.flight_enabled != (tracer.flight_entry_scene is not None) or (tracer.flight_entry_scene is not None and (not text(tracer.flight_entry_scene) or tracer.flight_entry_scene not in names)):
         raise QtraceError("session.request_invalid", "session.request", "flight entry scene is invalid")
     return config
 
@@ -372,6 +378,7 @@ class SessionOrchestrator:
             return SessionResult(session_id, exit_code, report_path, outputs)
 
         context = None
+        entered = False
         try:
             select = getattr(self._device_selector, "select", self._device_selector)
             device = select(request.device, timeout=request.adb_timeout)
@@ -380,6 +387,7 @@ class SessionOrchestrator:
                 raise QtraceError("session.selector_invalid", "selector", "selector did not return a bound device serial")
             context = self._lock.acquire(selected_device, request.config.app.package)
             context.__enter__()
+            entered = True
             mark(SessionStage.PREFLIGHT)
             device, identity = self._preflight.run(request.config, selected_device,
                                                     setup_timeout=request.setup_timeout, adb_timeout=request.adb_timeout)
@@ -449,7 +457,7 @@ class SessionOrchestrator:
                     note(publication_error)
             raise
         finally:
-            if context is not None:
+            if context is not None and entered:
                 context.__exit__(*sys.exc_info())
 
     def _status_path(self, package: str, session_id: str) -> str:

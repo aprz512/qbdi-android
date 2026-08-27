@@ -63,7 +63,7 @@ class TargetLock:
             if stat.S_IMODE(os.fstat(root).st_mode) != 0o700:
                 raise QtraceError("session.lock_invalid", "lock", "lock root mode is unsafe")
             return root
-        except Exception:
+        except BaseException:
             os.close(root)
             raise
 
