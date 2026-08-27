@@ -166,6 +166,9 @@ class FakeRunner:
         if path.name == "fixture.trace.txt":
             return "TRACE_BEGIN format=4 scene=fixture-entry\nTRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n"
         if path.name == "report.json":
+            if path.parent.name in {"latest", "name", "all", "compressed"}:
+                return json.dumps({"schema": 1, "sessionId": SESSION, "artifacts": [
+                    {"remote_name": "fixture.trace.bin.lz4"}], "errors": []})
             report_status = "sealed"
             if path.parent.name == "exit":
                 report_status = "process_exited"
@@ -174,6 +177,9 @@ class FakeRunner:
             return json.dumps({
                 "schema": 1, "session_id": SESSION, "status": report_status, "stage": "completed",
                 "package": "com.aprz.qbdiandroid", "pid": 4242,
+                "device": {}, "effective_config": {}, "error": None, "finished_at": 1,
+                "mode": "run", "serial": "SERIAL", "started_at": 0, "target": {},
+                "tracer": {}, "warnings": [],
                 "timeline": [{"stage": "installing_hooks"}, {"stage": "running"}],
                 "native": {"status": status("sealed")},
                 "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", str((self.offset_root or Path("/tmp")) / "fixture.trace.txt")],
@@ -390,6 +396,18 @@ class AcceptanceHarnessTests(unittest.TestCase):
         report, artifact = _validated_timed_report(runner, Path("report.json"))
         self.assertEqual(document, report)
         self.assertEqual("fixture.trace.bin.lz4", artifact)
+
+    def test_timed_report_rejects_extra_key_before_artifact_reads(self):
+        from scripts.qtrace_device_acceptance import _validated_timed_report
+
+        runner = FakeRunner()
+        document = json.loads(runner.read_text(Path("report.json"), timeout=1))
+        document["unexpected"] = True
+        reads: list[Path] = []
+        runner.read_text = lambda path, *, timeout: (reads.append(path), json.dumps(document))[1]  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "unexpected fields"):
+            _validated_timed_report(runner, Path("report.json"))
+        self.assertEqual([Path("report.json")], reads)
 
     def test_requires_an_explicit_device(self):
         from scripts.qtrace_device_acceptance import main

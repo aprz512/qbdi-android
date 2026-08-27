@@ -147,6 +147,37 @@ def _strict_report(runner: Runner, path: Path) -> dict[str, object]:
         raise RuntimeError("qtrace report is not strict JSON") from error
 
 
+_SESSION_REPORT_KEYS = frozenset((
+    "artifacts", "device", "effective_config", "error", "finished_at", "mode", "native",
+    "outputs", "package", "pid", "schema", "serial", "session_id", "stage", "started_at",
+    "status", "target", "timeline", "tracer", "warnings",
+))
+_PULL_REPORT_KEYS = frozenset(("schema", "sessionId", "artifacts", "errors"))
+
+
+def _strict_session_report(runner: Runner, path: Path) -> dict[str, object]:
+    value = _strict_report(runner, path)
+    if set(value) != _SESSION_REPORT_KEYS:
+        raise RuntimeError("session report has unexpected fields")
+    if (value.get("schema") != 1 or not isinstance(value.get("session_id"), str) or
+            not isinstance(value.get("status"), str) or not isinstance(value.get("stage"), str) or
+            not isinstance(value.get("package"), str) or type(value.get("pid")) is not int or
+            not isinstance(value.get("artifacts"), list) or not isinstance(value.get("outputs"), list) or
+            not isinstance(value.get("timeline"), list) or not isinstance(value.get("native"), dict)):
+        raise RuntimeError("session report has invalid field types")
+    return value
+
+
+def _strict_pull_report(runner: Runner, path: Path) -> dict[str, object]:
+    value = _strict_report(runner, path)
+    if set(value) != _PULL_REPORT_KEYS or value.get("schema") != 1:
+        raise RuntimeError("pull report has unexpected fields")
+    if (not isinstance(value.get("sessionId"), str) or not isinstance(value.get("artifacts"), list)
+            or not isinstance(value.get("errors"), list)):
+        raise RuntimeError("pull report has invalid field types")
+    return value
+
+
 def _wait_for_baseline(runner: Runner) -> dict[str, object]:
     deadline = time.monotonic() + 15.0
     last_error: BaseException | None = None
@@ -195,7 +226,7 @@ def _trusted_output(path: Path, root: Path) -> Path:
 
 
 def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, object], str]:
-    value = _strict_report(runner, path)
+    value = _strict_session_report(runner, path)
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or
             value.get("stage") != "completed" or value.get("package") != PACKAGE):
         raise RuntimeError("timed qtrace report is incomplete")
@@ -207,6 +238,17 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, list):
         raise RuntimeError("timed report has no artifact records")
+    for record in artifacts:
+        if not isinstance(record, dict):
+            raise RuntimeError("timed report has an invalid artifact record")
+        name = record.get("remote_name")
+        if name is not None and (not isinstance(name, str) or not name or "/" in name or "\\" in name
+                                 or any(ord(character) < 32 or ord(character) == 127 for character in name)):
+            raise RuntimeError("timed report artifact is not a safe basename")
+        local = record.get("local_path")
+        if local is not None and (not isinstance(local, str) or not local.startswith("artifacts/")
+                                  or local == "artifacts/" or ".." in Path(local).parts):
+            raise RuntimeError("timed report artifact path is unsafe")
     roots = [record.get("remote_name") for record in artifacts if isinstance(record, dict) and
              isinstance(record.get("remote_name"), str) and
              (record["remote_name"].endswith(".trace.bin") or
@@ -229,7 +271,7 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
 
 
 def _validated_monitor_report(runner: Runner, path: Path, *, status: str) -> dict[str, object]:
-    report = _strict_report(runner, path)
+    report = _strict_session_report(runner, path)
     if report.get("schema") != 1 or report.get("package") != PACKAGE or report.get("status") != status:
         raise RuntimeError("monitor report has an invalid classification")
     return report
@@ -346,7 +388,7 @@ def _verify_pull_outputs(root: Path) -> None:
 
 def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: str | None = None,
                            compressed_only: bool = False) -> dict[str, object]:
-    report = _strict_report(runner, _report_path(stdout, root))
+    report = _strict_pull_report(runner, _report_path(stdout, root))
     records = report.get("artifacts")
     if not isinstance(records, list) or not records:
         raise RuntimeError("manual pull report has no artifact records")
