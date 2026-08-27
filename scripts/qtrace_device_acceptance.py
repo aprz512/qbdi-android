@@ -170,6 +170,10 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
     if (record.get("termination") != "stopped" or record.get("metrics_schema") != 3 or
             record.get("native_stop_acknowledged") is not True):
         raise RuntimeError("binary TRACE_STOP/metrics-v3 native-stop contract failed")
+    # ArtifactProcessor already parses the sidecar before publishing it; retain
+    # the exact parsed v3 terminal facts in the trusted collector report.
+    if record.get("termination") != "stopped" or record.get("metrics_schema") != 3:
+        raise RuntimeError("metrics-v3 sidecar is not a stopped terminal")
     text_paths = [Path(item) for item in outputs if isinstance(item, str) and item.endswith(".trace.txt")]
     if len(text_paths) != 1:
         raise RuntimeError("timed binary pull did not publish exactly one format-4 text output")
