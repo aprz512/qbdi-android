@@ -836,8 +836,10 @@ class ArtifactProcessor:
     def _collect(self, device: object, package: str, session_id: str, names: list[str],
                  output: Path, timeout: float, status: Mapping[str, object] | None,
                  *, initial_errors: Sequence[Mapping[str, str]] = (), compressed_only: bool = False,
-                 create_token: bool = False) -> ArtifactResult:
+                 create_token: bool = False,
+                 root_statuses: Mapping[str, Mapping[str, object]] | None = None) -> ArtifactResult:
         client = _client_for(device, package, self._client_factory)
+        root_statuses = {} if root_statuses is None else root_statuses
         errors: list[Mapping[str, str]] = list(initial_errors)
         records: list[Mapping[str, object]] = []
         files: list[Path] = []
@@ -880,13 +882,15 @@ class ArtifactProcessor:
             for artifact in pulled:
                 local = artifact.local_path
                 remote_size = _remote_size(client, artifact.remote_name, timeout)
+                artifact_status = root_statuses.get(next((root for root in root_statuses
+                                                           if artifact.remote_name == root or artifact.remote_name.startswith(root + ".")), ""), status)
                 record: dict[str, object] = {"remote_name": artifact.remote_name, "local_path": "artifacts/" + artifact.remote_name,
                     "source_size": remote_size, "destination_size": None, "sha256": artifact.sha256,
                     "decoder": None, "termination": None,
-                    "stop_reason": status.get("reason") if status is not None else None,
+                    "stop_reason": artifact_status.get("reason") if artifact_status is not None else None,
                     "metrics_schema": None,
                     "producer_waits": None, "producer_wait_ns": None, "conversion_ms": None,
-                    "native_stop_acknowledged": status.get("stopAcknowledged") if status is not None else None,
+                    "native_stop_acknowledged": artifact_status.get("stopAcknowledged") if artifact_status is not None else None,
                     "host_observed_ack_ms": status.get("_hostAckMs") if status is not None else None}
                 if local.name.endswith(".metrics") or local.name.endswith(".crash"):
                     if not local.exists():
@@ -1159,6 +1163,7 @@ class ArtifactProcessor:
             for name in temporary_names
         ]
         status: Mapping[str, object] | None = None
+        manual_root_statuses: Mapping[str, Mapping[str, object]] = {}
         session_id: str | None = None
         if selection.mode is PullMode.LATEST:
             status_candidates = [item for item in listing if _status_name(item) is not None]
@@ -1235,6 +1240,7 @@ class ArtifactProcessor:
                         initial_errors.append({"name": root, "code": "artifact.incomplete",
                                                "detail": f"native session is {state}; artifact is not sealed"})
                 roots = eligible
+                manual_root_statuses = {root: root_statuses[root] for root in roots if root in root_statuses}
                 # Multiple independently proven roots share a generated manual pull session.
                 session_id = None
             elif len(uuid_values) != 1:
@@ -1260,6 +1266,8 @@ class ArtifactProcessor:
                                           for root in owned)
                 if all_owned:
                     status, session_id = candidate_status, candidate_id
+                elif selection.mode is PullMode.ALL:
+                    manual_root_statuses = {root: candidate_status for root in owned}
         if session_id is None:
             session_id = str(uuid.uuid4())
         selected = list(roots)
@@ -1269,4 +1277,4 @@ class ArtifactProcessor:
                     selected.append(side)
         return self._collect(device, package, session_id, selected, Path(output), timeout, status,
                              initial_errors=initial_errors,
-                             compressed_only=selection.compressed_only)
+                             compressed_only=selection.compressed_only, root_statuses=manual_root_statuses)

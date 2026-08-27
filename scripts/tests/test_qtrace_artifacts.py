@@ -365,6 +365,36 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn(f"session-{first}.status.json", reads)
             self.assertIn(f"session-{second}.status.json", reads)
 
+    def test_all_records_native_metadata_per_sealed_uuid_root(self):
+        first, second = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+        first_root, second_root = f"{first}.trace.txt", f"{second}.trace.txt"
+        first_status = self._status(first, reason="duration_elapsed", stopAcknowledged=True, artifacts=[first_root])
+        second_status = self._status(second, reason="duration_elapsed", stopAcknowledged=True,
+                                     artifacts=[second_root])
+        client = FakeClient({f"session-{first}.status.json": json.dumps(first_status).encode(),
+                             f"session-{second}.status.json": json.dumps(second_status).encode(),
+                             first_root: COMPLETE_TERMINAL, second_root: COMPLETE_TERMINAL})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual("d", "com.example.app", PullSelection(PullMode.ALL), Path(root), 1)
+            report = json.loads((result.output_dir / "report.json").read_text())
+            records = {item["remote_name"]: item for item in report["artifacts"] if "remote_name" in item}
+            self.assertEqual("duration_elapsed", records[first_root]["stop_reason"])
+            self.assertTrue(records[first_root]["native_stop_acknowledged"])
+            self.assertEqual("duration_elapsed", records[second_root]["stop_reason"])
+            self.assertTrue(records[second_root]["native_stop_acknowledged"])
+
+    def test_all_uuid_legacy_records_only_uuid_native_metadata(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        owned, legacy = f"{session}.trace.txt", "legacy.trace.txt"
+        client = FakeClient({f"session-{session}.status.json": json.dumps(
+            self._status(session, artifacts=[owned])).encode(), owned: COMPLETE_TERMINAL, legacy: COMPLETE_TERMINAL})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual("d", "com.example.app", PullSelection(PullMode.ALL), Path(root), 1)
+            records = {item["remote_name"]: item for item in json.loads(
+                (result.output_dir / "report.json").read_text())["artifacts"] if "remote_name" in item}
+            self.assertTrue(records[owned]["native_stop_acknowledged"])
+            self.assertIsNone(records[legacy]["native_stop_acknowledged"])
+
     def test_all_keeps_only_sealed_uuid_roots_and_marks_active_partial(self):
         sealed = "11111111-1111-4111-8111-111111111111"
         active = "22222222-2222-4222-8222-222222222222"
