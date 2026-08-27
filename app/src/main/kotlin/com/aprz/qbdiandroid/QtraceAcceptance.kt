@@ -19,6 +19,8 @@ object QtraceAcceptance {
     private const val maximumIterations = 300L
     private val started = AtomicBoolean(false)
 
+    fun claimStartForTest(): Boolean = started.compareAndSet(false, true)
+
     fun parse(extras: Map<String, Any?>): QtraceAcceptanceRequest? {
         if ((extras[enabled] as? Boolean) != true) return null
         val selectedMode = extras[mode] as? String ?: return null
