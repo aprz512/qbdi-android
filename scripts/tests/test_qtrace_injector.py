@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -177,6 +178,7 @@ class Scenario:
     def __init__(self):
         self.post_messages = [initialized_message()]
         self.resume_messages = [installed_message()]
+        self.resume_messages_synchronous = False
         self.resume_detached = None
         self.spawn_error = None
         self.attach_error = None
@@ -186,6 +188,7 @@ class Scenario:
         self.unload_error = None
         self.detach_error = None
         self.kill_error = None
+        self.kill_sleeps_for_timeout = False
 
 
 class FakeScript:
@@ -276,6 +279,30 @@ class FakeFridaDevice:
         if self.scenario.resume_detached is not None:
             reason, crash = self.scenario.resume_detached
             self.session.detached_handler(reason, crash)
+        if not self.scenario.resume_messages:
+            return
+        if self.scenario.resume_messages_synchronous:
+            self._deliver_resume_messages()
+            return
+        delivery = threading.Thread(
+            target=self._deliver_resume_messages_after_return,
+            name="fake-frida-resume-message",
+            daemon=True,
+        )
+        delivery.start()
+
+    def _deliver_resume_messages_after_return(self):
+        mailbox = self.script.handler.__self__
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with mailbox.lock:
+                resumed = mailbox.resume_phase == "resumed"
+            if resumed:
+                self._deliver_resume_messages()
+                return
+            time.sleep(0.001)
+
+    def _deliver_resume_messages(self):
         for item in self.scenario.resume_messages:
             payload = item.get("payload") if isinstance(item, dict) else None
             if isinstance(payload, dict) and payload.get("type") == "installed":
@@ -308,6 +335,7 @@ class FakeAdbDevice:
         self.scenario = scenario
         self.events = events
         self.kill_calls = []
+        self.kill_timeouts = []
 
     def shell(self, *args, timeout, maximum_bytes):
         self.events.append(("adb", tuple(args)))
@@ -320,8 +348,11 @@ class FakeAdbDevice:
     def target_shell(self, *args, timeout, maximum_bytes):
         self.events.append(("target", tuple(args)))
         self.kill_calls.append(tuple(args))
+        self.kill_timeouts.append(timeout)
         if self.scenario.kill_error:
             raise self.scenario.kill_error
+        if self.scenario.kill_sleeps_for_timeout:
+            time.sleep(timeout)
         return b""
 
 
@@ -533,6 +564,7 @@ class FridaInjectorTests(unittest.TestCase):
 
         scenario = Scenario()
         scenario.resume_messages = [installed_message(), installed_message()]
+        scenario.resume_messages_synchronous = True
         harness = InjectorHarness(scenario)
         with self.assertRaises(QtraceError):
             harness.install()
@@ -550,6 +582,17 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertEqual("inject.protocol_invalid", caught.exception.code)
         self.assertFalse(any(event == ("resume", 4242) for event in harness.events))
         self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+
+    def test_rejects_installed_message_that_arrived_before_resume_returned(self):
+        scenario = Scenario()
+        scenario.resume_messages_synchronous = True
+        harness = InjectorHarness(scenario)
+
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+
+        self.assertEqual("inject.protocol_invalid", caught.exception.code)
+        self.assertEqual([], harness.adb.kill_calls)
 
     def test_rejects_final_generation_session_module_and_scene_mismatches(self):
         status_cases = []
@@ -612,6 +655,24 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertEqual("inject.timeout", caught.exception.code)
         self.assertLess(time.monotonic() - started, 0.75)
         self.assertEqual([], harness.adb.kill_calls)
+
+    def test_pre_resume_kill_uses_budget_reserved_inside_setup_deadline(self):
+        scenario = Scenario()
+        scenario.post_messages = []
+        scenario.kill_sleeps_for_timeout = True
+        harness = InjectorHarness(scenario)
+        setup_timeout = 0.15
+
+        started = time.monotonic()
+        with self.assertRaises(QtraceError) as caught:
+            harness.install(harness.request(setup_timeout=setup_timeout))
+        elapsed = time.monotonic() - started
+
+        self.assertEqual("inject.timeout", caught.exception.code)
+        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+        self.assertEqual(1, len(harness.adb.kill_timeouts))
+        self.assertLessEqual(harness.adb.kill_timeouts[0], setup_timeout * 0.4)
+        self.assertLess(elapsed, setup_timeout + 0.1)
 
     def test_process_exit_uses_spawned_pid_and_never_kills_after_resume(self):
         scenario = Scenario()

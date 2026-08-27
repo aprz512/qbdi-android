@@ -31,6 +31,7 @@ _MAX_STARTUP_ENVELOPE_BYTES = _MAX_NATIVE_REQUEST_BYTES + 64 * 1024
 _MAX_MESSAGE_DETAIL_BYTES = 512
 _ADB_OUTPUT_BYTES = 64 * 1024
 _CLEANUP_TIMEOUT_SECONDS = 1.0
+_CLEANUP_BUDGET_FRACTION = 0.25
 _WORKER_REAP_SECONDS = 0.2
 _FRIDA_REMOTE_PORT = 27042
 _HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
@@ -519,7 +520,7 @@ class _Mailbox:
         if message_type == "installed":
             if not self.initialized:
                 _fail("inject.protocol_invalid", "inject.protocol", "installed message preceded initialization")
-            if arrival_resume_phase == "before" or self.resume_phase != "resumed":
+            if arrival_resume_phase != "resumed" or self.resume_phase != "resumed":
                 _fail("inject.protocol_invalid", "inject.protocol", "installed message preceded successful resume")
             if self.installed:
                 _fail("inject.protocol_invalid", "inject.protocol", "duplicate installed message")
@@ -810,7 +811,13 @@ class FridaInjector:
         self._frida_provider = None
         if provider is None:
             _fail("frida.provider_unavailable", "inject.frida", "injector has already consumed its Frida provider")
-        deadline = time.monotonic() + float(request.setup_timeout)
+        setup_timeout = float(request.setup_timeout)
+        deadline = time.monotonic() + setup_timeout
+        cleanup_budget = min(
+            _CLEANUP_TIMEOUT_SECONDS,
+            setup_timeout * _CLEANUP_BUDGET_FRACTION,
+        )
+        worker_deadline = deadline - cleanup_budget
 
         def budget() -> float:
             remaining = deadline - time.monotonic()
@@ -826,11 +833,13 @@ class FridaInjector:
                 timeout=budget(), maximum_bytes=_ADB_OUTPUT_BYTES,
             ),
         )
+        if time.monotonic() >= worker_deadline:
+            _fail("inject.timeout", "inject.wait", "setup deadline expired before Frida worker start")
         context = multiprocessing.get_context("fork")
         receiver, sender = context.Pipe(duplex=False)
         worker = context.Process(
             target=_run_injection_worker,
-            args=(validated, source, provider, deadline, sender),
+            args=(validated, source, provider, worker_deadline, sender),
             name="qtrace-frida-owner",
         )
         state = _WorkerState()
@@ -845,7 +854,7 @@ class FridaInjector:
             sender.close()
             provider = None
             while not state.complete:
-                remaining = deadline - time.monotonic()
+                remaining = worker_deadline - time.monotonic()
                 if remaining <= 0 or not receiver.poll(remaining):
                     timed_out = True
                     break
@@ -870,7 +879,7 @@ class FridaInjector:
                         break
             try:
                 if worker_started:
-                    graceful = max(0.0, deadline - time.monotonic()) if state.complete else 0.0
+                    graceful = max(0.0, worker_deadline - time.monotonic()) if state.complete else 0.0
                     forced = _kill_and_reap_worker(worker, graceful)
                     worker_exitcode = worker.exitcode
             except BaseException as error:
@@ -883,14 +892,22 @@ class FridaInjector:
 
         cleanup_error: BaseException | None = None
         if state.pid is not None and not state.resumed:
-            try:
-                self._device.target_shell(
-                    "kill", "-9", str(state.pid),
-                    timeout=min(_CLEANUP_TIMEOUT_SECONDS, float(request.setup_timeout)),
-                    maximum_bytes=_ADB_OUTPUT_BYTES,
+            cleanup_remaining = deadline - time.monotonic()
+            if cleanup_remaining <= 0:
+                cleanup_error = QtraceError(
+                    "inject.cleanup_timeout",
+                    "inject.cleanup",
+                    f"no setup budget remained to kill spawned PID {state.pid}",
                 )
-            except BaseException as error:
-                cleanup_error = error
+            else:
+                try:
+                    self._device.target_shell(
+                        "kill", "-9", str(state.pid),
+                        timeout=min(_CLEANUP_TIMEOUT_SECONDS, cleanup_remaining),
+                        maximum_bytes=_ADB_OUTPUT_BYTES,
+                    )
+                except BaseException as error:
+                    cleanup_error = error
 
         if monitor_error is not None:
             raise monitor_error
