@@ -114,6 +114,95 @@ class ReportWriterTests(unittest.TestCase):
         self.assertIn("old", {document["status"] for name, document in documents.items()
                               if name != "report.json"})
 
+    def test_mismatch_rollback_preserves_a_second_temporary_replacement(self) -> None:
+        """Removing the post-rollback inode check would unlink RACER-B."""
+        from qtrace import report as report_module
+        from qtrace.report import ConditionalReplaceRecoveryError
+
+        self.path.write_text("EXPECTED", encoding="utf-8")
+        expected = (self.path.stat().st_dev, self.path.stat().st_ino)
+        real_exchange = report_module._exchange
+        exchanges = 0
+
+        def replace_at(directory: int, name: str, contents: bytes) -> None:
+            staged = f".{name}.racer"
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                                 dir_fd=directory)
+            try:
+                os.write(descriptor, contents)
+            finally:
+                os.close(descriptor)
+            os.replace(staged, name, src_dir_fd=directory, dst_dir_fd=directory)
+
+        def exchange(directory: int, temporary: str, target: str) -> None:
+            nonlocal exchanges
+            exchanges += 1
+            real_exchange(directory, temporary, target)
+            if exchanges == 1:
+                replace_at(directory, temporary, b"RACER-A")
+            else:
+                replace_at(directory, temporary, b"RACER-B")
+
+        descriptor = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            with patch("qtrace.report._exchange", side_effect=exchange):
+                with self.assertRaises(ConditionalReplaceRecoveryError) as raised:
+                    ReportWriter().write_atomic_at(
+                        descriptor, self.path.name, report(), expected_identity=expected)
+        finally:
+            os.close(descriptor)
+
+        self.assertEqual("RACER-A", self.path.read_text(encoding="utf-8"))
+        self.assertEqual("RACER-B", (self.path.parent / raised.exception.recovery_name).read_text(
+            encoding="utf-8"))
+
+    def test_old_stat_rollback_preserves_second_temporary_replacement(self) -> None:
+        """The original old-inode stat failure must retain both EXPECTED and RACER-B."""
+        from qtrace import report as report_module
+
+        self.path.write_text("EXPECTED", encoding="utf-8")
+        expected = (self.path.stat().st_dev, self.path.stat().st_ino)
+        real_exchange, real_stat = report_module._exchange, report_module.os.stat
+        exchanges = 0
+        temporary: list[str] = []
+
+        def replace_at(directory: int, name: str) -> None:
+            staged = f".{name}.racer"
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                                 dir_fd=directory)
+            try:
+                os.write(descriptor, b"RACER-B")
+            finally:
+                os.close(descriptor)
+            os.replace(staged, name, src_dir_fd=directory, dst_dir_fd=directory)
+
+        def exchange(directory: int, left: str, right: str) -> None:
+            nonlocal exchanges
+            exchanges += 1
+            temporary[:] = [left]
+            real_exchange(directory, left, right)
+            if exchanges == 2:
+                replace_at(directory, left)
+
+        def stat_after_exchange(name, *args, **kwargs):
+            if exchanges == 1 and temporary and name == temporary[0]:
+                raise OSError("injected old report stat failure")
+            return real_stat(name, *args, **kwargs)
+
+        descriptor = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            with patch("qtrace.report._exchange", side_effect=exchange), patch(
+                    "qtrace.report.os.stat", side_effect=stat_after_exchange):
+                with self.assertRaisesRegex(OSError, "old report stat failure") as raised:
+                    ReportWriter().write_atomic_at(
+                        descriptor, self.path.name, report(), expected_identity=expected)
+        finally:
+            os.close(descriptor)
+
+        self.assertEqual("EXPECTED", self.path.read_text(encoding="utf-8"))
+        self.assertEqual("RACER-B", (self.path.parent / temporary[0]).read_text(encoding="utf-8"))
+        self.assertTrue(any(temporary[0] in note for note in raised.exception.__notes__))
+
 
 if __name__ == "__main__":
     unittest.main()
