@@ -8,6 +8,8 @@ import json
 import math
 import os
 import re
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1225,16 +1227,22 @@ class StagingDeviceRunner(FakeRunner):
                  cleanup_failures: frozenset[str] = frozenset(),
                  forged_stale_companion: bool = False,
                  wrong_types: frozenset[str] = frozenset(),
-                 wrong_hashes: frozenset[str] = frozenset()):
+                 wrong_hashes: frozenset[str] = frozenset(),
+                 before_first_push=None,
+                 app_parent_kind: str | None = "directory"):
         super().__init__(fail_first_read=fail_first_read)
         self.shell_files: dict[str, tuple[str, bytes | str]] = {}
         self.app_files: dict[str, tuple[str, bytes | str]] = {}
+        self.app_modes: dict[str, int] = {}
+        self.push_source_parent_modes: list[int] = []
+        self.app_parent_kind = app_parent_kind
         self.primary_failure = primary_failure
         self.cleanup_failures = set(cleanup_failures)
         self.primary_triggered = False
         self.forged_stale_companion = forged_stale_companion
         self.wrong_types = wrong_types
         self.wrong_hashes = wrong_hashes
+        self.before_first_push = before_first_push
 
     @staticmethod
     def _role(path: str) -> str:
@@ -1278,6 +1286,8 @@ class StagingDeviceRunner(FakeRunner):
         label = self._label("rm", path)
         self._fail_if_requested(label)
         files.pop(path, None)
+        if files is self.app_files:
+            self.app_modes.pop(path, None)
 
     def _read_app(self, path: str) -> bytes:
         kind, value = self.app_files[path]
@@ -1294,6 +1304,12 @@ class StagingDeviceRunner(FakeRunner):
             self.commands.pop()
             return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
         if command[:4] == ("adb", "-s", "SERIAL", "push"):
+            if self.before_first_push is not None:
+                callback, self.before_first_push = self.before_first_push, None
+                callback()
+            self.push_source_parent_modes.append(
+                stat.S_IMODE(Path(command[4]).parent.stat().st_mode)
+            )
             label = self._label("push", command[4])
             self._fail_if_requested(label)
             self.shell_files[command[5]] = ("regular file", Path(command[4]).read_bytes())
@@ -1307,22 +1323,53 @@ class StagingDeviceRunner(FakeRunner):
                     self._remove(self.shell_files, path)
             return self._result()
         operation, arguments = arguments[2], arguments[3:]
+        if operation == "mkdir":
+            self._fail_if_requested("mkdir:files")
+            if arguments != ("-p", "files"):
+                raise RuntimeError(f"unexpected app-private mkdir arguments: {arguments}")
+            if self.app_parent_kind is None:
+                self.app_parent_kind = "directory"
+            return self._result()
         if operation == "cp":
             source, destination = arguments
+            if self.app_parent_kind != "directory":
+                raise RuntimeError("app-private files parent is not a directory")
+            if not self._is_app_stage(destination):
+                raise RuntimeError(f"copy bypassed app-private staging: {destination}")
             label = self._label("copy", destination)
             self._fail_if_requested(label)
             data = self.shell_files[source][1]
             existing = self.app_files.get(destination)
             if existing is not None and existing[0] == "symlink":
                 self.app_files[str(existing[1])] = ("regular file", data)
+                self.app_modes[str(existing[1])] = 0o600
             else:
                 self.app_files[destination] = ("regular file", data)
+                self.app_modes[destination] = 0o600
             return self._result()
         if operation == "chmod":
             self._fail_if_requested("chmod")
+            if (len(arguments) != 3 or arguments[0] != "700" or
+                    {self._role(path) for path in arguments[1:]} !=
+                    {"tracer", "companion"}):
+                raise RuntimeError(f"unexpected app-private chmod arguments: {arguments}")
+            for path in arguments[1:]:
+                if (not self._is_app_stage(path) or path not in self.app_files or
+                        self.app_files[path][0] != "regular file"):
+                    raise RuntimeError(f"chmod target is not staged regular file: {path}")
+                self.app_modes[path] = 0o700
             return self._result()
         if operation == "stat":
             path = arguments[-1]
+            if arguments[:-1] != ("-c", "%F"):
+                raise RuntimeError(f"unexpected app-private stat arguments: {arguments}")
+            if path == "files":
+                self._fail_if_requested("stat:files")
+                if self.app_parent_kind is None:
+                    raise RuntimeError("app-private files parent is missing")
+                return self._result(self.app_parent_kind + "\n")
+            if self.app_parent_kind != "directory":
+                raise RuntimeError("app-private files parent is not a directory")
             label = self._label("stat", path)
             self._fail_if_requested(label)
             if label in self.wrong_types:
@@ -1331,12 +1378,16 @@ class StagingDeviceRunner(FakeRunner):
             return self._result(kind + "\n")
         if operation == "sha256sum":
             path = arguments[0]
+            if self.app_parent_kind != "directory":
+                raise RuntimeError("app-private files parent is not a directory")
             label = self._label("hash", path)
             self._fail_if_requested(label)
             payload = b"wrong hash" if label in self.wrong_hashes else self._read_app(path)
             digest = hashlib.sha256(payload).hexdigest()
             return self._result(f"{digest}  {path}\n")
         if operation == "rm" and arguments[0] == "-f":
+            if self.app_parent_kind != "directory":
+                raise RuntimeError("refusing to traverse untrusted app-private parent")
             for path in arguments[1:]:
                 self._remove(self.app_files, path)
             return self._result()
@@ -1345,9 +1396,11 @@ class StagingDeviceRunner(FakeRunner):
             role = self._role(destination)
             self._fail_if_requested(f"move:{role}")
             node = self.app_files.pop(source)
+            mode = self.app_modes.pop(source)
             if role == "companion" and self.forged_stale_companion:
                 node = ("regular file", b"forged stale companion")
             self.app_files[destination] = node
+            self.app_modes[destination] = mode
             return self._result()
         return self._result()
 
@@ -1862,6 +1915,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
             with self.assertRaises(ChildProcessError):
                 os.waitpid(child_pid, os.WNOHANG)
             child_pid = None
+
         finally:
             if child_pid is not None:
                 try:
@@ -2262,6 +2316,269 @@ class AcceptanceHarnessTests(unittest.TestCase):
             self.assertTrue(retained[0].is_dir())
             self.assertEqual(workspace / "qtrace-acceptance-failures", captured["dir"])
 
+    def test_host_binary_snapshot_is_bounded_nofollow_and_path_swap_safe(self):
+        from scripts.qtrace_device_acceptance import _snapshot_host_binary
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.so"
+            source.write_bytes(b"fresh tracer")
+            snapshot = _snapshot_host_binary(
+                source, root / "snapshot.so",
+                maximum_bytes=64, deadline=time.monotonic() + 1.0,
+            )
+            try:
+                source.unlink()
+                source.write_bytes(b"attacker replacement")
+                snapshot.verify_path()
+                self.assertEqual(
+                    "7c510872935123c9b6c917085d182b7dd57e7a5ba2cfe64ee273d475ee980925",
+                    snapshot.sha256,
+                )
+                self.assertEqual(b"fresh tracer", snapshot.path.read_bytes())
+            finally:
+                snapshot.close()
+
+            directory = root / "directory"
+            directory.mkdir()
+            symlink = root / "symlink.so"
+            symlink.symlink_to(source)
+            fifo = root / "fifo.so"
+            os.mkfifo(fifo)
+            oversized = root / "oversized.so"
+            oversized.write_bytes(b"12345")
+            for name, candidate in (
+                ("directory", directory),
+                ("symlink", symlink),
+                ("fifo", fifo),
+                ("device", Path("/dev/null")),
+                ("oversized", oversized),
+            ):
+                with self.subTest(case=name), self.assertRaisesRegex(
+                    RuntimeError, "bounded regular file",
+                ):
+                    _snapshot_host_binary(
+                        candidate, root / f"rejected-{name}.so",
+                        maximum_bytes=4, deadline=time.monotonic() + 0.2,
+                    )
+
+            growing = root / "growing.so"
+            growing.write_bytes(b"grow")
+
+            def growing_read(descriptor, size):
+                block = os.read(descriptor, size)
+                return b"x" if not block else block
+
+            with self.assertRaisesRegex(RuntimeError, "changed while being read"):
+                _snapshot_host_binary(
+                    growing, root / "growing-snapshot.so",
+                    maximum_bytes=64, deadline=time.monotonic() + 1.0,
+                    _read_hook=growing_read,
+                )
+
+    def test_host_binary_snapshot_kills_and_reaps_a_blocking_worker(self):
+        from scripts.qtrace_device_acceptance import _snapshot_host_binary
+
+        blocked_read, blocked_write = os.pipe()
+        pid_read, pid_write = os.pipe()
+        child_pid = None
+        try:
+            def blocking_read(_descriptor, _size):
+                os.write(pid_write, str(os.getpid()).encode("ascii"))
+                return os.read(blocked_read, 1)
+
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source.so"
+                source.write_bytes(b"fixture")
+                started = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, "exceeded deadline"):
+                    _snapshot_host_binary(
+                        source, root / "snapshot.so",
+                        maximum_bytes=64, deadline=started + 0.1,
+                        _read_hook=blocking_read,
+                    )
+                self.assertLess(time.monotonic() - started, 1.0)
+
+            child_pid = int(os.read(pid_read, 64).decode("ascii"))
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(child_pid, os.WNOHANG)
+            child_pid = None
+
+            def blocking_open(_path, _flags):
+                os.write(pid_write, str(os.getpid()).encode("ascii"))
+                os.read(blocked_read, 1)
+                raise AssertionError("blocking open unexpectedly resumed")
+
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source.so"
+                source.write_bytes(b"fixture")
+                started = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, "exceeded deadline"):
+                    _snapshot_host_binary(
+                        source, root / "snapshot.so",
+                        maximum_bytes=64, deadline=started + 0.1,
+                        _open_hook=blocking_open,
+                    )
+                self.assertLess(time.monotonic() - started, 1.0)
+
+            child_pid = int(os.read(pid_read, 64).decode("ascii"))
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(child_pid, os.WNOHANG)
+            child_pid = None
+        finally:
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(child_pid, 0)
+                except ChildProcessError:
+                    pass
+            for descriptor in (blocked_read, blocked_write, pid_read, pid_write):
+                os.close(descriptor)
+
+    def test_staging_pushes_private_snapshots_not_rebound_build_paths(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+
+            def replace_build_outputs():
+                tracer.write_bytes(b"attacker tracer")
+                companion.write_bytes(b"attacker companion")
+
+            runner = StagingDeviceRunner(before_first_push=replace_build_outputs)
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
+                _stage_app_private_binaries("SERIAL", runner, token="f" * 32)
+
+        self.assertEqual(("regular file", b"fresh tracer"),
+                         runner.app_files["files/libqbdi_tracer.so"])
+        self.assertEqual(("regular file", b"fresh companion"),
+                         runner.app_files["files/libshadowhook_nothing.so"])
+        pushed_sources = [Path(command[4]) for command in runner.commands
+                          if command[:4] == ("adb", "-s", "SERIAL", "push")]
+        self.assertEqual(2, len(pushed_sources))
+        self.assertNotIn(tracer, pushed_sources)
+        self.assertNotIn(companion, pushed_sources)
+        self.assertEqual([0o700, 0o700], runner.push_source_parent_modes)
+        self.assertTrue(all(not source.exists() for source in pushed_sources))
+
+    def test_staging_rejects_snapshot_rebinding_during_adb_push(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner()
+
+            def replace_snapshot():
+                snapshot = Path(runner.commands[-1][4])
+                snapshot.unlink()
+                snapshot.write_bytes(b"replacement during push")
+
+            runner.before_first_push = replace_snapshot
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    self.assertRaisesRegex(RuntimeError, "snapshot identity changed"):
+                _stage_app_private_binaries("SERIAL", runner, token="4" * 32)
+
+        self.assertNotIn("files/libqbdi_tracer.so", runner.app_files)
+        self.assertNotIn("files/libshadowhook_nothing.so", runner.app_files)
+
+    def test_fresh_install_creates_and_validates_app_private_files_directory(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner(app_parent_kind=None)
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
+                _stage_app_private_binaries("SERIAL", runner, token="1" * 32)
+
+        self.assertEqual("directory", runner.app_parent_kind)
+        mkdir_index = next(index for index, command in enumerate(runner.commands)
+                           if len(command) > 6 and command[6] == "mkdir")
+        first_copy_index = next(index for index, command in enumerate(runner.commands)
+                                if len(command) > 6 and command[6] == "cp")
+        self.assertLess(mkdir_index, first_copy_index)
+
+    def test_app_private_files_parent_symlink_is_rejected_without_traversal(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner(app_parent_kind="symbolic link")
+            runner.app_files["outside/victim"] = ("regular file", b"victim")
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    self.assertRaisesRegex(RuntimeError, "not a real directory"):
+                _stage_app_private_binaries("SERIAL", runner, token="2" * 32)
+
+        self.assertEqual(("regular file", b"victim"), runner.app_files["outside/victim"])
+        self.assertFalse(any(command[6] in {"cp", "chmod", "mv"}
+                             for command in runner.commands if len(command) > 6))
+
+    def test_files_parent_probe_failure_cleans_host_scratch_with_diagnostics(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        for primary in ("mkdir:files", "stat:files"):
+            with self.subTest(primary=primary), tempfile.TemporaryDirectory() as temporary:
+                tracer = Path(temporary) / "libqbdi_tracer.so"
+                companion = Path(temporary) / "libshadowhook_nothing.so"
+                tracer.write_bytes(b"fresh tracer")
+                companion.write_bytes(b"fresh companion")
+                binaries = (
+                    (tracer, "files/libqbdi_tracer.so"),
+                    (companion, "files/libshadowhook_nothing.so"),
+                )
+                cleanup_failures = frozenset((
+                    "cleanup:host-stage:tracer",
+                    "cleanup:host-stage:companion",
+                ))
+                runner = StagingDeviceRunner(
+                    primary_failure=primary,
+                    cleanup_failures=cleanup_failures,
+                )
+                with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                        self.assertRaisesRegex(RuntimeError, primary) as caught:
+                    _stage_app_private_binaries("SERIAL", runner, token="3" * 32)
+
+                diagnostics = str(caught.exception)
+                for cleanup in cleanup_failures:
+                    self.assertIn(cleanup, diagnostics)
+                self.assertFalse(any(
+                    command[4:8] ==
+                    ("run-as", "com.aprz.qbdiandroid", "rm", "-f")
+                    for command in runner.commands
+                ))
+
     def test_verified_pair_replaces_final_symlinks_with_tracer_as_activation_marker(self):
         from scripts.qtrace_device_acceptance import _stage_app_private_binaries
 
@@ -2288,6 +2605,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
                          runner.app_files["files/libqbdi_tracer.so"])
         self.assertEqual(("regular file", b"fresh companion"),
                          runner.app_files["files/libshadowhook_nothing.so"])
+        self.assertEqual(0o700, runner.app_modes["files/libqbdi_tracer.so"])
+        self.assertEqual(0o700, runner.app_modes["files/libshadowhook_nothing.so"])
         self.assertEqual(("regular file", b"tracer victim"),
                          runner.app_files["files/tracer-victim"])
         self.assertEqual(("regular file", b"companion victim"),
@@ -2520,8 +2839,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
         benchmark_index = next(index for index, command in enumerate(commands)
                                if "scripts/benchmark_trace.py" in command)
         self.assertLess(force_stop_index, min(push_indices))
-        self.assertEqual({tracer_path, str(companion)},
-                         {commands[index][4] for index in push_indices})
+        pushed_sources = [Path(commands[index][4]) for index in push_indices]
+        self.assertEqual({"libqbdi_tracer.so", "libshadowhook_nothing.so"},
+                         {source.name for source in pushed_sources})
+        self.assertNotIn(Path(tracer_path), pushed_sources)
+        self.assertNotIn(companion, pushed_sources)
+        self.assertTrue(all(not source.exists() for source in pushed_sources))
         self.assertEqual(["companion", "tracer"],
                          [StagingDeviceRunner._role(commands[index][-1])
                           for index in move_indices])

@@ -74,8 +74,38 @@ class RegularFileStat:
     identity: tuple[int, int]
 
 
+@dataclass
+class HostBinarySnapshot:
+    path: Path
+    sha256: str
+    size: int
+    descriptor: int
+    identity: tuple[int, int]
+
+    def verify_path(self) -> None:
+        if self.descriptor < 0:
+            raise RuntimeError("host tracer snapshot is closed")
+        held = os.fstat(self.descriptor)
+        try:
+            named = os.stat(self.path, follow_symlinks=False)
+        except OSError as error:
+            raise RuntimeError("host tracer snapshot identity changed") from error
+        if (not stat.S_ISREG(held.st_mode) or not stat.S_ISREG(named.st_mode) or
+                (held.st_dev, held.st_ino) != self.identity or
+                (named.st_dev, named.st_ino) != self.identity or
+                held.st_size != self.size or named.st_size != self.size):
+            raise RuntimeError("host tracer snapshot identity changed")
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
 _LOCAL_READ_TIMEOUT_SECONDS = 15.0
 _WORKER_CLEANUP_SECONDS = 0.05
+_MAX_HOST_BINARY_BYTES = 64 * 1024 * 1024
+_HOST_BINARY_SNAPSHOT_SECONDS = 30.0
 
 
 def _kill_and_reap(pid: int, *, cleanup_deadline: float | None = None) -> None:
@@ -181,6 +211,146 @@ def _read_regular_in_worker(
         scratch.close()
 
 
+def _snapshot_host_binary(
+    source_path: Path,
+    snapshot_path: Path,
+    *,
+    maximum_bytes: int,
+    deadline: float,
+    _open_hook: Callable[[Path, int], int] = os.open,
+    _read_hook: Callable[[int, int], bytes] = os.read,
+    _write_hook: Callable[[int, bytes | memoryview], int] = os.write,
+) -> HostBinarySnapshot:
+    """Create one immutable, bounded snapshot while holding the source fd.
+
+    Acceptance calls this from its single-threaded control path after the test
+    subprocesses return. Opening is inside the killable worker so a blocking
+    filesystem cannot pin the host controller before its deadline.
+    """
+    started = time.monotonic()
+    if maximum_bytes <= 0 or started >= deadline:
+        raise RuntimeError("host tracer input exceeded deadline")
+    cleanup_budget = min(_WORKER_CLEANUP_SECONDS, (deadline - started) / 2.0)
+    worker_deadline = deadline - cleanup_budget
+    destination = -1
+    status_read = -1
+    status_write = -1
+    pid = -1
+    success = False
+    try:
+        try:
+            destination = os.open(
+                snapshot_path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            status_read, status_write = os.pipe2(getattr(os, "O_CLOEXEC", 0))
+            pid = os.fork()
+        except OSError as error:
+            raise RuntimeError("cannot start bounded host tracer snapshot") from error
+        if pid == 0:
+            source = -1
+            try:
+                os.close(status_read)
+                source = _open_hook(
+                    source_path,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                    getattr(os, "O_NONBLOCK", 0),
+                )
+                before = os.fstat(source)
+                if (not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or
+                        before.st_size > maximum_bytes):
+                    os.write(status_write, b"B")
+                    os._exit(0)
+                digest = hashlib.sha256()
+                remaining = before.st_size
+                while remaining:
+                    block = _read_hook(source, min(1024 * 1024, remaining))
+                    if type(block) is not bytes or not block or len(block) > remaining:
+                        os.write(status_write, b"C")
+                        os._exit(0)
+                    digest.update(block)
+                    view = memoryview(block)
+                    while view:
+                        written = _write_hook(destination, view)
+                        if type(written) is not int or written <= 0 or written > len(view):
+                            os.write(status_write, b"W")
+                            os._exit(0)
+                        view = view[written:]
+                    remaining -= len(block)
+                trailing = _read_hook(source, 1)
+                after = os.fstat(source)
+                if (type(trailing) is not bytes or trailing or
+                        (after.st_dev, after.st_ino, after.st_size,
+                         after.st_mtime_ns, after.st_ctime_ns) !=
+                        (before.st_dev, before.st_ino, before.st_size,
+                         before.st_mtime_ns, before.st_ctime_ns)):
+                    os.write(status_write, b"C")
+                    os._exit(0)
+                payload = (
+                    b"S" + before.st_size.to_bytes(8, "big") +
+                    digest.hexdigest().encode("ascii")
+                )
+                os.write(status_write, payload)
+                os._exit(0)
+            except BaseException:
+                try:
+                    os.write(status_write, b"B")
+                except BaseException:
+                    pass
+                os._exit(73)
+
+        os.close(status_write)
+        status_write = -1
+        while True:
+            try:
+                finished, status = os.waitpid(pid, os.WNOHANG)
+            except InterruptedError:
+                finished, status = 0, 0
+            if finished == pid:
+                pid = -1
+                break
+            remaining = worker_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("host tracer input exceeded deadline")
+            time.sleep(min(0.01, remaining))
+        payload = os.read(status_read, 128)
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise RuntimeError("host tracer input is not a bounded regular file")
+        if payload == b"B":
+            raise RuntimeError("host tracer input is not a bounded regular file")
+        if payload == b"C":
+            raise RuntimeError("host tracer input changed while being read")
+        if payload == b"W":
+            raise RuntimeError("host tracer snapshot write failed")
+        if (len(payload) != 73 or payload[:1] != b"S" or
+                _SHA256.fullmatch(payload[9:].decode("ascii", errors="ignore")) is None):
+            raise RuntimeError("host tracer snapshot worker returned invalid evidence")
+        size = int.from_bytes(payload[1:9], "big")
+        metadata = os.fstat(destination)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != size:
+            raise RuntimeError("host tracer snapshot changed while being written")
+        result = HostBinarySnapshot(
+            snapshot_path, payload[9:].decode("ascii"), size, destination,
+            (metadata.st_dev, metadata.st_ino),
+        )
+        result.verify_path()
+        destination = -1
+        success = True
+        return result
+    finally:
+        if pid > 0:
+            _kill_and_reap(pid, cleanup_deadline=deadline)
+        for descriptor in (status_read, status_write, destination):
+            if descriptor >= 0:
+                os.close(descriptor)
+        if not success:
+            try:
+                snapshot_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
 class Runner(Protocol):
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
@@ -207,6 +377,9 @@ def _stage_app_private_binaries(
         for _source, destination in _APP_PRIVATE_BINARIES
     )
     final_paths = tuple(destination for _source, destination in _APP_PRIVATE_BINARIES)
+    local_staging = tempfile.TemporaryDirectory(prefix=".qtrace-acceptance-host-")
+    snapshots: list[HostBinarySnapshot] = []
+    app_parent_trusted = False
 
     def validate(remote: str, expected_hash: str) -> None:
         kind = runner.run(
@@ -248,35 +421,73 @@ def _stage_app_private_binaries(
                 failures.append((label, error))
         return failures
 
-    scratch_cleanup = tuple(
+    app_scratch_cleanup = tuple(
         (f"app staging path {remote}", lambda remote=remote: remove_app(remote))
         for remote in app_staged
-    ) + tuple(
+    )
+    host_scratch_cleanup = tuple(
         (f"host staging path {remote}", lambda remote=remote: remove_host(remote))
         for remote in host_staged
     )
-    failure_cleanup = tuple(
+    final_cleanup = tuple(
         (f"final path {remote}", lambda remote=remote: remove_app(remote))
         for remote in final_paths
-    ) + scratch_cleanup
+    )
+
+    def local_snapshot_cleanup() -> Sequence[tuple[str, Callable[[], None]]]:
+        return tuple(
+            (f"local snapshot {snapshot.path}", snapshot.close)
+            for snapshot in snapshots
+        ) + ((f"local snapshot directory {local_staging.name}", local_staging.cleanup),)
+
+    def scratch_cleanup() -> Sequence[tuple[str, Callable[[], None]]]:
+        if app_parent_trusted:
+            return app_scratch_cleanup + host_scratch_cleanup + local_snapshot_cleanup()
+        return host_scratch_cleanup + local_snapshot_cleanup()
+
+    def failure_cleanup() -> Sequence[tuple[str, Callable[[], None]]]:
+        if app_parent_trusted:
+            return (final_cleanup + app_scratch_cleanup + host_scratch_cleanup +
+                    local_snapshot_cleanup())
+        return host_scratch_cleanup + local_snapshot_cleanup()
 
     try:
-        expected_hashes: list[str] = []
+        snapshot_deadline = time.monotonic() + _HOST_BINARY_SNAPSHOT_SECONDS
         for source, _destination in _APP_PRIVATE_BINARIES:
-            digest = hashlib.sha256()
-            with source.open("rb") as stream:
-                while chunk := stream.read(1024 * 1024):
-                    digest.update(chunk)
-            expected_hashes.append(digest.hexdigest())
+            snapshots.append(_snapshot_host_binary(
+                source,
+                Path(local_staging.name) / source.name,
+                maximum_bytes=_MAX_HOST_BINARY_BYTES,
+                deadline=snapshot_deadline,
+            ))
+        expected_hashes = [snapshot.sha256 for snapshot in snapshots]
+        runner.run(
+            ("adb", "-s", device, "shell", "run-as", package,
+             "mkdir", "-p", "files"),
+            timeout=30.0,
+        )
+        parent_kind = runner.run(
+            ("adb", "-s", device, "shell", "run-as", package,
+             "stat", "-c", "%F", "files"),
+            timeout=30.0,
+        ).stdout.strip()
+        if parent_kind != "directory":
+            raise RuntimeError("app-private files path is not a real directory")
+        app_parent_trusted = True
         for remote in host_staged:
             remove_host(remote)
         for remote in app_staged:
             remove_app(remote)
-        for (source, _destination), remote in zip(_APP_PRIVATE_BINARIES, host_staged):
+        for snapshot, remote in zip(snapshots, host_staged):
+            # adb push only accepts a pathname. Keep the snapshot fd held and
+            # verify its name immediately before passing the private 0700
+            # TemporaryDirectory path; the mutable build path is never reused.
+            snapshot.verify_path()
             runner.run(
-                ("adb", "-s", device, "push", str(source), remote),
+                ("adb", "-s", device, "push", str(snapshot.path), remote),
                 timeout=120.0,
             )
+            snapshot.verify_path()
         for host_remote, app_remote in zip(host_staged, app_staged):
             runner.run(
                 ("adb", "-s", device, "shell", "run-as", package,
@@ -301,7 +512,7 @@ def _stage_app_private_binaries(
         for (_source, destination), expected_hash in zip(
                 _APP_PRIVATE_BINARIES, expected_hashes):
             validate(destination, expected_hash)
-        cleanup_failures = collect_cleanup(scratch_cleanup)
+        cleanup_failures = collect_cleanup(scratch_cleanup())
         if cleanup_failures:
             detail = "; ".join(
                 f"{label}: {type(error).__name__}: {error}"
@@ -312,7 +523,7 @@ def _stage_app_private_binaries(
             )
             raise cleanup_error
     except BaseException as primary:
-        cleanup_failures = collect_cleanup(failure_cleanup)
+        cleanup_failures = collect_cleanup(failure_cleanup())
         if cleanup_failures:
             detail = "; ".join(
                 f"{label}: {type(error).__name__}: {error}"
