@@ -757,33 +757,47 @@ def _rename_noreplace(parent: int, stage_name: str, final_name: str) -> None:
         raise OSError(failure, os.strerror(failure))
 
 
-def _remove_tree_at(parent: int, name: str) -> None:
-    """Remove an unpublished tree through its already trusted parent fd."""
+def _remove_tree_at(parent: int, name: str,
+                    expected_identity: tuple[int, int] | None = None) -> None:
+    """Remove a tree only while its parent entry names the opened directory inode."""
     try:
         root = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                        getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
     except FileNotFoundError:
+        if expected_identity is not None:
+            raise OSError("tree identity changed before opening")
         return
+    except OSError as error:
+        if expected_identity is not None:
+            raise OSError("tree identity changed before opening") from error
+        raise
     try:
+        root_info = os.fstat(root)
+        root_identity = (root_info.st_dev, root_info.st_ino)
+        if (not stat.S_ISDIR(root_info.st_mode)
+                or (expected_identity is not None and root_identity != expected_identity)):
+            raise OSError("tree identity changed after opening")
         for child in os.listdir(root):
             info = os.stat(child, dir_fd=root, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
-                _remove_tree_at(root, child)
+                _remove_tree_at(root, child, expected_identity=(info.st_dev, info.st_ino))
             else:
                 os.unlink(child, dir_fd=root)
     finally:
         os.close(root)
+    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if (not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != root_identity):
+        raise OSError("tree identity changed before final rmdir")
     os.rmdir(name, dir_fd=parent)
 
 
 def _reclaim_committed_session(parent: int, directory: int, session_id: str) -> None:
     """Remove one committed session only if its held inode still owns that name."""
     expected = os.fstat(directory)
-    current = os.stat(session_id, dir_fd=parent, follow_symlinks=False)
-    if (not stat.S_ISDIR(expected.st_mode) or not stat.S_ISDIR(current.st_mode)
-            or (expected.st_dev, expected.st_ino) != (current.st_dev, current.st_ino)):
+    if not stat.S_ISDIR(expected.st_mode):
         raise OSError("committed session identity changed before reclaim")
-    _remove_tree_at(parent, session_id)
+    _remove_tree_at(parent, session_id, expected_identity=(expected.st_dev, expected.st_ino))
     os.fsync(parent)
 
 

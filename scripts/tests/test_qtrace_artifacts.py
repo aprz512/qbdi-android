@@ -745,6 +745,82 @@ class ArtifactTests(unittest.TestCase):
                                 for note in raised.exception.__notes__))
             self.assertTrue((saved / published[0]).is_dir())
 
+    def test_reclaim_refuses_replacement_swapped_before_opening_session(self):
+        """Removing the expected-fd check would let reclaim erase a replacement session."""
+        from qtrace.artifacts import _close_token_and_reclaim
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            original = output / session
+            original.mkdir()
+            (original / "owned.txt").write_text("owned", encoding="utf-8")
+            parent = os.open(output, os.O_RDONLY)
+            held = os.open(session, os.O_RDONLY, dir_fd=parent)
+            real_open = os.open
+            swapped = False
+
+            def open_after_replacement(name, *args, **kwargs):
+                nonlocal swapped
+                if name == session and kwargs.get("dir_fd") == parent and not swapped:
+                    swapped = True
+                    os.rename(session, "owned", src_dir_fd=parent, dst_dir_fd=parent)
+                    os.mkdir(session, 0o700, dir_fd=parent)
+                    (output / session / "replacement.txt").write_text("replacement", encoding="utf-8")
+                return real_open(name, *args, **kwargs)
+
+            primary = QtraceError("artifact.destination_replaced", "artifact", "output replaced")
+            try:
+                with patch("qtrace.artifacts.os.open", side_effect=open_after_replacement):
+                    _close_token_and_reclaim(parent, held, session, None, primary)
+            finally:
+                os.close(held)
+                os.close(parent)
+
+            self.assertTrue(swapped)
+            self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
+            self.assertEqual("owned", (output / "owned" / "owned.txt").read_text())
+            self.assertIn("identity changed", primary.detail)
+
+    def test_remove_tree_refuses_replacement_before_final_rmdir(self):
+        """Removing the final name-to-held-inode check would rmdir a swapped replacement."""
+        from qtrace.artifacts import _remove_tree_at
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            original = output / session
+            original.mkdir()
+            (original / "owned.txt").write_text("owned", encoding="utf-8")
+            parent = os.open(output, os.O_RDONLY)
+            expected = (original.stat().st_dev, original.stat().st_ino)
+            real_stat = os.stat
+            swapped = False
+
+            def stat_after_emptying(name, *args, **kwargs):
+                nonlocal swapped
+                if (name == session and kwargs.get("dir_fd") == parent
+                        and kwargs.get("follow_symlinks") is False and not swapped):
+                    swapped = True
+                    os.rename(session, "owned", src_dir_fd=parent, dst_dir_fd=parent)
+                    os.mkdir(session, 0o700, dir_fd=parent)
+                    (output / session / "replacement.txt").write_text("replacement", encoding="utf-8")
+                return real_stat(name, *args, **kwargs)
+
+            try:
+                with patch("qtrace.artifacts.os.stat", side_effect=stat_after_emptying):
+                    with self.assertRaisesRegex(OSError, "identity changed"):
+                        _remove_tree_at(parent, session, expected_identity=expected)
+            finally:
+                os.close(parent)
+
+            self.assertTrue(swapped)
+            self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
+            self.assertFalse((output / "owned" / "owned.txt").exists())
+            self.assertTrue((output / "owned").is_dir())
+
     def test_collector_token_never_overwrites_a_concurrent_report_inode(self):
         from qtrace.artifacts import publish_collector_report
         session = "11111111-1111-4111-8111-111111111111"
