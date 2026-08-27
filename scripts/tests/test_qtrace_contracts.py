@@ -8,6 +8,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import unicodedata
@@ -1229,6 +1230,24 @@ class FakeArtifactClient:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_direct_acceptance_script_loads_repo_packages_without_pythonpath(self):
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+
+        completed = subprocess.run(
+            [sys.executable, "scripts/qtrace_device_acceptance.py", "--help"],
+            cwd=ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("--device DEVICE", completed.stdout)
+
     def test_timed_entry_evidence_requires_running_native_snapshot_before_entry(self):
         from scripts.qtrace_device_acceptance import _validate_timed_fixture_receipt
 

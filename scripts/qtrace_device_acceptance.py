@@ -20,6 +20,14 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
+
+if __package__ in {None, ""}:
+    _REPOSITORY_ROOT = str(Path(__file__).resolve().parents[1])
+    sys.path[:] = [
+        _REPOSITORY_ROOT,
+        *(entry for entry in sys.path if entry != _REPOSITORY_ROOT),
+    ]
+
 from scripts.bounded_process import BoundedProcessError, capture_bounded
 from scripts.pull_trace import AdbArtifactClient, MAX_METRICS_BYTES
 from qtrace.status import load_strict_json, validate_status_shape
