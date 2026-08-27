@@ -166,6 +166,10 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
         raise RuntimeError("timed binary root has no matching metrics sidecar record")
     if type(value.get("pid")) is not int or value["pid"] <= 0:
         raise RuntimeError("timed report does not retain its traced app PID")
+    timeline = value.get("timeline")
+    stages = [item.get("stage") for item in timeline] if isinstance(timeline, list) and all(isinstance(item, dict) for item in timeline) else []
+    if "installing_hooks" not in stages or "running" not in stages or stages.index("installing_hooks") > stages.index("running"):
+        raise RuntimeError("report lacks installed-action-before-running detach evidence")
     return value, artifact
 
 

@@ -162,6 +162,7 @@ class FakeRunner:
             return json.dumps({
                 "schema": 1, "session_id": SESSION, "status": report_status, "stage": "completed",
                 "package": "com.aprz.qbdiandroid", "pid": 4242,
+                "timeline": [{"stage": "installing_hooks"}, {"stage": "running"}],
                 "native": {"status": status("sealed")},
                 "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", str((self.offset_root or Path("/tmp")) / "fixture.trace.txt")],
                 "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
