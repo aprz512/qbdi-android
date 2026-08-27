@@ -151,6 +151,15 @@ class FakeRunner:
             output = Path(command[command.index("--output") + 1])
             if output.name == "offset":
                 self.offset_root = output
+            report = str(output / SESSION / "report.json") + "\n"
+            if "flight-crash" in command:
+                return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult(report, "", 2)
+            return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult(report, "", 0)
+        if "--output" in command and "qtrace" in command and "pull" in command:
+            output = Path(command[command.index("--output") + 1])
+            return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult(
+                str(output / SESSION / "report.json") + "\n", "", 0,
+            )
         if "flight-crash" in command:
             return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult("", "", 2)
         return __import__("scripts.qtrace_device_acceptance", fromlist=["CommandResult"]).CommandResult("", "", 0)
@@ -166,13 +175,14 @@ class FakeRunner:
         if path.name == "fixture.trace.txt":
             return "TRACE_BEGIN format=4 scene=fixture-entry\nTRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n"
         if path.name == "report.json":
-            if path.parent.name in {"latest", "name", "all", "compressed"}:
+            parent_names = {parent.name for parent in path.parents}
+            if parent_names & {"latest", "name", "all", "compressed"}:
                 return json.dumps({"schema": 1, "sessionId": SESSION, "artifacts": [
                     {"remote_name": "fixture.trace.bin.lz4"}], "errors": []})
             report_status = "sealed"
-            if path.parent.name == "exit":
+            if "exit" in parent_names:
                 report_status = "process_exited"
-            elif path.parent.name == "crash":
+            elif "crash" in parent_names:
                 report_status = "crash_recovered"
             return json.dumps({
                 "schema": 1, "session_id": SESSION, "status": report_status, "stage": "completed",
@@ -208,7 +218,7 @@ class FakeArtifactClient:
 
 class AcceptanceHarnessTests(unittest.TestCase):
     def test_report_path_returns_only_a_lexical_token(self):
-        from scripts.qtrace_device_acceptance import _report_path
+        from scripts.qtrace_device_acceptance import _published_report_path, _report_path
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "output"
@@ -221,6 +231,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 with self.subTest(unsafe=unsafe), self.assertRaisesRegex(
                         RuntimeError, "outside"):
                     _report_path(unsafe, root)
+            self.assertEqual(
+                Path(SESSION) / "report.json",
+                _published_report_path(str(root / SESSION / "report.json"), root),
+            )
+            with self.assertRaisesRegex(RuntimeError, "did not publish"):
+                _published_report_path("", root)
 
     def test_local_session_report_uses_rooted_read_after_parent_swap(self):
         from scripts.qtrace_device_acceptance import _report_path, _strict_session_report
@@ -299,6 +315,19 @@ class AcceptanceHarnessTests(unittest.TestCase):
             )
         self.assertEqual(("", "recovering", 2), (result.stdout, result.stderr, result.returncode))
         self.assertEqual(1_048_576, capture.call_args.kwargs["maximum_bytes"])
+
+    def test_allowed_crash_exit_preserves_bounded_report_stdout(self):
+        from scripts.bounded_process import BoundedProcessError
+        from scripts.qtrace_device_acceptance import SubprocessRunner
+
+        failure = BoundedProcessError("crashed", returncode=2, stderr=b"recovering")
+        failure.stdout = b"/tmp/output/" + SESSION.encode("ascii") + b"/report.json\n"
+        with patch("scripts.qtrace_device_acceptance.capture_bounded", side_effect=failure):
+            result = SubprocessRunner("SERIAL", inject_first_read_failure=False).run(
+                ("qtrace", "demo"), timeout=3.0, allowed=(0, 2),
+            )
+        self.assertEqual(failure.stdout.decode("utf-8"), result.stdout)
+        self.assertEqual(2, result.returncode)
 
     def test_host_reads_are_nofollow_bounded_and_timeout_checked(self):
         from scripts.qtrace_device_acceptance import SubprocessRunner

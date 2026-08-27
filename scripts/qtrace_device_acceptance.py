@@ -61,7 +61,8 @@ class SubprocessRunner:
         except BoundedProcessError as error:
             if error.returncode in allowed:
                 return CommandResult(
-                    "", error.stderr.decode("utf-8", errors="replace"), error.returncode,
+                    error.stdout.decode("utf-8", errors="strict"),
+                    error.stderr.decode("utf-8", errors="replace"), error.returncode,
                 )
             raise RuntimeError(str(error)) from error
         return CommandResult(output.decode("utf-8", errors="strict"), "", 0)
@@ -255,6 +256,12 @@ def _report_path(stdout: str, root: Path) -> Path:
     except ValueError as error:
         raise RuntimeError("qtrace reported a path outside its trusted output directory") from error
     return relative
+
+
+def _published_report_path(stdout: str, root: Path) -> Path:
+    if not stdout.strip():
+        raise RuntimeError("qtrace command did not publish a report path")
+    return _report_path(stdout, root)
 
 
 def _trusted_output(path: Path, root: Path) -> Path:
@@ -457,7 +464,7 @@ def _verify_pull_outputs(root: Path) -> None:
 
 def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: str | None = None,
                            compressed_only: bool = False) -> dict[str, object]:
-    report = _strict_pull_report(runner, root, _report_path(stdout, root))
+    report = _strict_pull_report(runner, root, _published_report_path(stdout, root))
     records = report.get("artifacts")
     if not isinstance(records, list) or not records:
         raise RuntimeError("manual pull report has no artifact records")
@@ -490,9 +497,7 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
         output = directory / name
         published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
                                allowed=(0, 2) if scenario == "flight-crash" else (0,))
-        reports[name] = (output, _report_path(
-            published.stdout or str(output / "report.json"), output,
-        ))
+        reports[name] = (output, _published_report_path(published.stdout, output))
         if scenario == "flight-crash" and published.returncode != 2:
             raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
     timed, artifact = _validated_timed_report(runner, *reports["offset"])
@@ -519,7 +524,8 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     for name, selector, expected, compressed in pulls:
         output = directory / name
         result = runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, *selector, "--device", device, "--output", str(output)), timeout=180.0)
-        _validated_pull_report(runner, result.stdout or str(output / "report.json"), output, named=expected, compressed_only=compressed)
+        _validated_pull_report(runner, result.stdout, output, named=expected,
+                               compressed_only=compressed)
     _verify_pull_outputs(directory)
     return 0
 

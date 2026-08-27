@@ -16,9 +16,10 @@ MAX_STDERR_BYTES = 64 * 1024
 
 class BoundedProcessError(RuntimeError):
     def __init__(self, message: str, *, returncode: int | None = None,
-                 stderr: bytes = b"") -> None:
+                 stdout: bytes = b"", stderr: bytes = b"") -> None:
         super().__init__(message)
         self.returncode = returncode
+        self.stdout = stdout
         self.stderr = stderr
 
 
@@ -99,6 +100,7 @@ def capture_bounded(
                 raise BoundedProcessError(
                     f"subprocess failed ({returncode}): {detail}",
                     returncode=returncode,
+                    stdout=bytes(output),
                     stderr=bytes(error_output),
                 )
             return bytes(output)
