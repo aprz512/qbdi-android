@@ -171,6 +171,18 @@ class FakeRunner:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_one_shot_artifact_read_preserves_evidence_for_retry(self):
+        from scripts.qtrace_device_acceptance import OneShotArtifactRead
+        class Client:
+            def __init__(self): self.calls = []
+            def read_file(self, name, *, timeout): self.calls.append((name, timeout)); return b"evidence"
+        client = Client()
+        wrapped = OneShotArtifactRead(client)
+        with self.assertRaises(ConnectionError):
+            wrapped.read_file("fixture.trace.bin.lz4", timeout=1)
+        self.assertEqual([], client.calls)
+        self.assertEqual(b"evidence", wrapped.read_file("fixture.trace.bin.lz4", timeout=1))
+        self.assertEqual([("fixture.trace.bin.lz4", 1)], client.calls)
     def test_trusted_output_rejects_escape_and_symlink(self):
         from scripts.qtrace_device_acceptance import _trusted_output
         with tempfile.TemporaryDirectory() as temporary:

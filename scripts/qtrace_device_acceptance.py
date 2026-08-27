@@ -66,6 +66,19 @@ class SubprocessRunner:
         return path.read_text(encoding="utf-8")
 
 
+class OneShotArtifactRead:
+    """Acceptance-only wrapper: fail exactly one artifact read, never disturb adbd."""
+    def __init__(self, client: object) -> None:
+        self.client = client
+        self.failed = False
+
+    def read_file(self, name: str, *, timeout: float) -> bytes:
+        if not self.failed:
+            self.failed = True
+            raise ConnectionError("injected acceptance artifact read failure")
+        return self.client.read_file(name, timeout=timeout)
+
+
 def _read_retry(runner: Runner, path: Path, *, timeout: float) -> str:
     try:
         return runner.read_text(path, timeout=timeout)
