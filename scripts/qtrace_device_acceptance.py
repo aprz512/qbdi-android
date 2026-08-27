@@ -147,6 +147,11 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
     if len(roots) != 1:
         raise RuntimeError("timed report lacks a trusted binary artifact name")
     artifact = roots[0]
+    if "/" in artifact or "\\" in artifact or artifact in {"", ".", ".."}:
+        raise RuntimeError("timed report artifact is not a safe basename")
+    names = {record.get("remote_name") for record in artifacts if isinstance(record, dict)}
+    if artifact + ".metrics" not in names:
+        raise RuntimeError("timed binary root has no matching metrics sidecar record")
     if type(value.get("pid")) is not int or value["pid"] <= 0:
         raise RuntimeError("timed report does not retain its traced app PID")
     return value, artifact

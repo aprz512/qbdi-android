@@ -159,7 +159,7 @@ class FakeRunner:
                 "package": "com.aprz.qbdiandroid", "pid": 4242,
                 "native": {"status": status("sealed")},
                 "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", "/tmp/fixture.trace.txt"],
-                "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}],
+                "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
             })
         return ""
 
