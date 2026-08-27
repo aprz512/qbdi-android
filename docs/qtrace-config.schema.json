@@ -2,12 +2,51 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qbdi-android.local/schema/qtrace-config.schema.json",
   "title": "qtrace strict configuration",
-  "x-qtrace-runtime-invariants": ["UTF-8 byte limits", "scene names are unique", "offset ranges are nonzero, aligned, and ordered"],
+  "x-qtrace-runtime-invariants": [
+    {
+      "id": "config.text.utf8",
+      "paths": [
+        "/app/package", "/app/apk", "/target/module", "/target/binary",
+        "/tracer/flightEntryScene", "/tracer/library", "/tracer/companion",
+        "/scenes/*/symbol"
+      ],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 1, "maxBytes": null, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "config.scene-name.utf8-bytes",
+      "paths": ["/scenes/*/name"],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 1, "maxBytes": 128, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "config.scene-name.unique",
+      "paths": ["/scenes/*/name"],
+      "predicate": "unique-field",
+      "args": {"field": "name", "caseSensitive": true}
+    },
+    {
+      "id": "config.offset-range.ordered",
+      "paths": ["/scenes/*"],
+      "predicate": "ordered-hex-fields",
+      "args": {"startField": "startOffset", "endField": "endOffset", "minimumExclusive": 0, "alignment": 4}
+    },
+    {
+      "id": "config.flight-entry.member",
+      "paths": ["/tracer/flightEnabled", "/tracer/flightEntryScene", "/scenes/*/name"],
+      "predicate": "conditional-member",
+      "args": {
+        "conditionPath": "/tracer/flightEnabled", "conditionEquals": true,
+        "valuePath": "/tracer/flightEntryScene", "membersPath": "/scenes/*/name",
+        "requiredWhenTrue": true, "forbiddenWhenFalse": true
+      }
+    }
+  ],
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "app", "target", "scenes"],
   "properties": {
-    "schemaVersion": {"const": 1},
+    "schemaVersion": {"type": "integer", "const": 1},
     "app": {"$ref": "#/$defs/app"},
     "target": {"$ref": "#/$defs/target"},
     "tracer": {"$ref": "#/$defs/tracer"},
@@ -15,6 +54,8 @@
   },
   "$defs": {
     "text": {"type": "string", "minLength": 1},
+    "sceneName": {"type": "string", "minLength": 1, "maxLength": 128},
+    "offset": {"type": "string", "pattern": "^0x(?=[0-9a-fA-F]*[1-9a-fA-F])[0-9a-fA-F]*[048cC]$(?![\\s\\S])"},
     "app": {
       "type": "object", "additionalProperties": false, "required": ["package"],
       "properties": {"package": {"$ref": "#/$defs/text"}, "apk": {"$ref": "#/$defs/text"}}
@@ -26,7 +67,7 @@
     "tracer": {
       "type": "object", "additionalProperties": false,
       "properties": {
-        "profile": {"enum": ["fast", "balanced", "full"]},
+        "profile": {"type": "string", "enum": ["fast", "balanced", "full"]},
         "compression": {"type": "boolean"},
         "flightEnabled": {"type": "boolean"},
         "flightEntryScene": {"$ref": "#/$defs/text"},
@@ -36,13 +77,28 @@
       "allOf": [
         {"if": {"required": ["library"]}, "then": {"required": ["companion"]}},
         {"if": {"required": ["companion"]}, "then": {"required": ["library"]}},
-        {"if": {"properties": {"flightEnabled": {"const": true}}, "required": ["flightEnabled"]}, "then": {"required": ["flightEntryScene"]}, "else": {"not": {"required": ["flightEntryScene"]}}}
+        {
+          "if": {"properties": {"flightEnabled": {"const": true}}, "required": ["flightEnabled"]},
+          "then": {"required": ["flightEntryScene"]},
+          "else": {"not": {"required": ["flightEntryScene"]}}
+        }
       ]
     },
     "scene": {
       "oneOf": [
-        {"type": "object", "additionalProperties": false, "required": ["name", "symbol"], "properties": {"name": {"$ref": "#/$defs/text"}, "symbol": {"$ref": "#/$defs/text"}}},
-        {"type": "object", "additionalProperties": false, "required": ["name", "startOffset", "endOffset"], "properties": {"name": {"$ref": "#/$defs/text"}, "startOffset": {"type": "string", "pattern": "^0x(?=[0-9a-fA-F]*[1-9a-fA-F])[0-9a-fA-F]*[048cC]$"}, "endOffset": {"type": "string", "pattern": "^0x(?=[0-9a-fA-F]*[1-9a-fA-F])[0-9a-fA-F]*[048cC]$"}}}
+        {
+          "type": "object", "additionalProperties": false, "required": ["name", "symbol"],
+          "properties": {"name": {"$ref": "#/$defs/sceneName"}, "symbol": {"$ref": "#/$defs/text"}}
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "startOffset", "endOffset"],
+          "properties": {
+            "name": {"$ref": "#/$defs/sceneName"},
+            "startOffset": {"$ref": "#/$defs/offset"},
+            "endOffset": {"$ref": "#/$defs/offset"}
+          }
+        }
       ]
     }
   }

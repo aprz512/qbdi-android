@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import re
 import subprocess
 import tempfile
 import time
+import unicodedata
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from qtrace.config import load_config
-from qtrace.errors import ConfigError
+from qtrace.errors import ConfigError, QtraceError
+from qtrace.models import ResolvedScene
+from qtrace.session import parse_status
 from qtrace.status import STATUS_KEYS, validate_status_shape
 from scripts.tests.test_pull_trace import stopped_binary_stream
 from scripts.tests.test_trace_convert import metrics_sidecar
@@ -20,6 +25,311 @@ from scripts.tests.test_trace_convert import metrics_sidecar
 
 ROOT = Path(__file__).resolve().parents[2]
 SESSION = "123e4567-e89b-42d3-a456-426614174000"
+
+
+class ProjectSchemaValidationError(ValueError):
+    pass
+
+
+class QtraceProjectSchemaEvaluator:
+    """Evaluate only the JSON Schema subset and x-rules used by qtrace docs.
+
+    This deliberately is not a general JSON Schema validator. Unknown keywords,
+    remote references, formats, and runtime predicates fail closed so the tests
+    cannot silently claim support for contracts that they did not execute.
+    """
+
+    _SUPPORTED_KEYS = frozenset({
+        "$schema", "$id", "$ref", "$defs", "title", "type", "const", "enum",
+        "required", "properties", "additionalProperties", "minItems", "maxItems",
+        "items", "uniqueItems", "minLength", "maxLength", "pattern", "format",
+        "minimum", "maximum", "oneOf", "allOf", "if", "then", "else", "not",
+        "x-qtrace-runtime-invariants",
+    })
+
+    def __init__(self, schema: dict[str, object]) -> None:
+        schema_id = schema.get("$id")
+        if schema_id not in {
+            "https://qbdi-android.local/schema/qtrace-config.schema.json",
+            "https://qbdi-android.local/schema/qtrace-session-status.schema.json",
+        }:
+            raise ProjectSchemaValidationError("unsupported qtrace schema")
+        self.schema = schema
+
+    def accepts(self, value: object) -> bool:
+        try:
+            self._validate(value, self.schema)
+        except ProjectSchemaValidationError:
+            return False
+        return True
+
+    def _matches(self, value: object, schema: dict[str, object]) -> bool:
+        try:
+            self._validate(value, schema)
+        except ProjectSchemaValidationError:
+            return False
+        return True
+
+    def _validate(self, value: object, schema: dict[str, object]) -> None:
+        unknown = set(schema) - self._SUPPORTED_KEYS
+        if unknown:
+            raise ProjectSchemaValidationError(
+                f"unsupported project schema keyword {sorted(unknown)[0]}"
+            )
+        if "$ref" in schema:
+            reference = schema["$ref"]
+            if type(reference) is not str or not reference.startswith("#/$defs/"):
+                raise ProjectSchemaValidationError("unsupported schema reference")
+            name = reference.removeprefix("#/$defs/")
+            definitions = self.schema.get("$defs")
+            if type(definitions) is not dict or type(definitions.get(name)) is not dict:
+                raise ProjectSchemaValidationError("missing schema definition")
+            self._validate(value, definitions[name])
+
+        expected_type = schema.get("type")
+        type_matches = {
+            "object": type(value) is dict,
+            "array": type(value) is list,
+            "string": type(value) is str,
+            "integer": type(value) is int,
+            "boolean": type(value) is bool,
+        }
+        if expected_type is not None:
+            if expected_type not in type_matches:
+                raise ProjectSchemaValidationError("unsupported schema type")
+            if not type_matches[expected_type]:
+                raise ProjectSchemaValidationError("schema type mismatch")
+        if "const" in schema and (type(value) is not type(schema["const"])
+                                  or value != schema["const"]):
+            raise ProjectSchemaValidationError("schema const mismatch")
+        if "enum" in schema and not any(
+            type(value) is type(candidate) and value == candidate
+            for candidate in schema["enum"]
+        ):
+            raise ProjectSchemaValidationError("schema enum mismatch")
+
+        if type(value) is dict:
+            required = schema.get("required", [])
+            if any(key not in value for key in required):
+                raise ProjectSchemaValidationError("schema required property missing")
+            properties = schema.get("properties", {})
+            if type(properties) is not dict:
+                raise ProjectSchemaValidationError("invalid project properties")
+            if schema.get("additionalProperties") is False and set(value) - set(properties):
+                raise ProjectSchemaValidationError("schema additional property")
+            for key, child_schema in properties.items():
+                if key in value:
+                    self._validate(value[key], child_schema)
+        if type(value) is list:
+            if "minItems" in schema and len(value) < schema["minItems"]:
+                raise ProjectSchemaValidationError("schema array too short")
+            if "maxItems" in schema and len(value) > schema["maxItems"]:
+                raise ProjectSchemaValidationError("schema array too long")
+            if schema.get("uniqueItems") is True:
+                serialized = [json.dumps(item, sort_keys=True, ensure_ascii=True) for item in value]
+                if len(set(serialized)) != len(serialized):
+                    raise ProjectSchemaValidationError("schema array items are duplicated")
+            if "items" in schema:
+                for item in value:
+                    self._validate(item, schema["items"])
+        if type(value) is str:
+            if "minLength" in schema and len(value) < schema["minLength"]:
+                raise ProjectSchemaValidationError("schema string too short")
+            if "maxLength" in schema and len(value) > schema["maxLength"]:
+                raise ProjectSchemaValidationError("schema string too long")
+            if "pattern" in schema and re.search(schema["pattern"], value) is None:
+                raise ProjectSchemaValidationError("schema string pattern mismatch")
+            if "format" in schema and schema["format"] != "uuid":
+                raise ProjectSchemaValidationError("unsupported project format")
+        if type(value) is int and type(value) is not bool:
+            if "minimum" in schema and value < schema["minimum"]:
+                raise ProjectSchemaValidationError("schema number below minimum")
+            if "maximum" in schema and value > schema["maximum"]:
+                raise ProjectSchemaValidationError("schema number above maximum")
+
+        if "oneOf" in schema:
+            if sum(self._matches(value, candidate) for candidate in schema["oneOf"]) != 1:
+                raise ProjectSchemaValidationError("schema oneOf mismatch")
+        for candidate in schema.get("allOf", []):
+            self._validate(value, candidate)
+        if "if" in schema:
+            branch = "then" if self._matches(value, schema["if"]) else "else"
+            if branch in schema:
+                self._validate(value, schema[branch])
+        if "not" in schema and self._matches(value, schema["not"]):
+            raise ProjectSchemaValidationError("schema not mismatch")
+        if "x-qtrace-runtime-invariants" in schema:
+            self._validate_runtime_rules(value, schema["x-qtrace-runtime-invariants"])
+
+    @staticmethod
+    def _pointer_values(root: object, pointer: str) -> list[object]:
+        if not pointer.startswith("/"):
+            raise ProjectSchemaValidationError("runtime rule path is not a JSON pointer")
+        current = [root]
+        for encoded in pointer.split("/")[1:]:
+            token = encoded.replace("~1", "/").replace("~0", "~")
+            following: list[object] = []
+            for value in current:
+                if token == "*":
+                    if type(value) is list:
+                        following.extend(value)
+                    elif type(value) is dict:
+                        following.extend(value.values())
+                elif type(value) is dict and token in value:
+                    following.append(value[token])
+                elif type(value) is list and token.isdecimal() and int(token) < len(value):
+                    following.append(value[int(token)])
+            current = following
+        return current
+
+    def _single_pointer(self, root: object, pointer: str) -> object | None:
+        values = self._pointer_values(root, pointer)
+        if len(values) > 1:
+            raise ProjectSchemaValidationError("runtime rule pointer is not singular")
+        return values[0] if values else None
+
+    def _validate_runtime_rules(self, root: object, rules: object) -> None:
+        if type(rules) is not list:
+            raise ProjectSchemaValidationError("runtime rules must be an array")
+        identifiers: list[str] = []
+        for rule in rules:
+            if type(rule) is not dict or set(rule) != {"id", "paths", "predicate", "args"}:
+                raise ProjectSchemaValidationError("runtime rule shape is not exact")
+            if (type(rule["id"]) is not str or type(rule["paths"]) is not list
+                    or not rule["paths"] or not all(type(path) is str for path in rule["paths"])
+                    or type(rule["predicate"]) is not str or type(rule["args"]) is not dict):
+                raise ProjectSchemaValidationError("runtime rule fields are invalid")
+            identifiers.append(rule["id"])
+            predicate = getattr(self, f"_rule_{rule['predicate'].replace('-', '_')}", None)
+            if predicate is None:
+                raise ProjectSchemaValidationError("unsupported runtime predicate")
+            predicate(root, rule["paths"], rule["args"])
+        if len(set(identifiers)) != len(identifiers):
+            raise ProjectSchemaValidationError("runtime rule ids are duplicated")
+
+    def _rule_utf8_text(self, root: object, paths: list[str], args: dict[str, object]) -> None:
+        if set(args) != {"minBytes", "maxBytes", "forbiddenCategories"}:
+            raise ProjectSchemaValidationError("utf8-text args are not exact")
+        for path in paths:
+            for value in self._pointer_values(root, path):
+                if type(value) is not str:
+                    raise ProjectSchemaValidationError("runtime text is not a string")
+                try:
+                    encoded = value.encode("utf-8")
+                except UnicodeEncodeError as error:
+                    raise ProjectSchemaValidationError("runtime text is not UTF-8") from error
+                if len(encoded) < args["minBytes"]:
+                    raise ProjectSchemaValidationError("runtime text is too short")
+                if args["maxBytes"] is not None and len(encoded) > args["maxBytes"]:
+                    raise ProjectSchemaValidationError("runtime text is too long")
+                if any(unicodedata.category(character) in args["forbiddenCategories"]
+                       for character in value):
+                    raise ProjectSchemaValidationError("runtime text category is forbidden")
+
+    def _rule_unique_field(self, root: object, paths: list[str], args: dict[str, object]) -> None:
+        if set(args) != {"field", "caseSensitive"} or args["caseSensitive"] is not True:
+            raise ProjectSchemaValidationError("unique-field args are not exact")
+        values = [value for path in paths for value in self._pointer_values(root, path)]
+        if len(set(values)) != len(values):
+            raise ProjectSchemaValidationError("runtime field values are duplicated")
+
+    def _rule_ordered_hex_fields(self, root: object, paths: list[str], args: dict[str, object]) -> None:
+        if set(args) != {"startField", "endField", "minimumExclusive", "alignment"}:
+            raise ProjectSchemaValidationError("ordered-hex-fields args are not exact")
+        for path in paths:
+            for value in self._pointer_values(root, path):
+                if type(value) is not dict or args["startField"] not in value:
+                    continue
+                try:
+                    start_text = value[args["startField"]]
+                    end_text = value[args["endField"]]
+                    if (type(start_text) is not str or type(end_text) is not str
+                            or re.fullmatch(r"0x[0-9a-fA-F]+", start_text) is None
+                            or re.fullmatch(r"0x[0-9a-fA-F]+", end_text) is None):
+                        raise ValueError("offset syntax")
+                    start = int(start_text, 16)
+                    end = int(end_text, 16)
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ProjectSchemaValidationError("runtime offset is invalid") from error
+                if (start <= args["minimumExclusive"] or end <= args["minimumExclusive"]
+                        or start % args["alignment"] or end % args["alignment"]
+                        or start >= end):
+                    raise ProjectSchemaValidationError("runtime offset range is invalid")
+
+    def _rule_conditional_member(self, root: object, _paths: list[str], args: dict[str, object]) -> None:
+        expected = {"conditionPath", "conditionEquals", "valuePath", "membersPath",
+                    "requiredWhenTrue", "forbiddenWhenFalse"}
+        if set(args) != expected:
+            raise ProjectSchemaValidationError("conditional-member args are not exact")
+        enabled = self._single_pointer(root, args["conditionPath"])
+        enabled = False if enabled is None else enabled == args["conditionEquals"]
+        selected = self._single_pointer(root, args["valuePath"])
+        if enabled:
+            members = self._pointer_values(root, args["membersPath"])
+            if args["requiredWhenTrue"] is True and selected is None:
+                raise ProjectSchemaValidationError("runtime member is missing")
+            if selected not in members:
+                raise ProjectSchemaValidationError("runtime member does not exist")
+        elif args["forbiddenWhenFalse"] is True and selected is not None:
+            raise ProjectSchemaValidationError("runtime member is forbidden")
+
+    def _rule_ordered_integer_fields(self, root: object, paths: list[str], args: dict[str, object]) -> None:
+        if set(args) != {"startField", "endField", "minimumStart", "strict"}:
+            raise ProjectSchemaValidationError("ordered-integer-fields args are not exact")
+        for path in paths:
+            for value in self._pointer_values(root, path):
+                start, end = value[args["startField"]], value[args["endField"]]
+                if (type(start) is not int or type(end) is not int
+                        or start < args["minimumStart"] or end <= start):
+                    raise ProjectSchemaValidationError("runtime integer range is invalid")
+
+    def _rule_unique_pair(self, root: object, paths: list[str], args: dict[str, object]) -> None:
+        if set(args) != {"fields"} or len(args["fields"]) != 2:
+            raise ProjectSchemaValidationError("unique-pair args are not exact")
+        pairs = []
+        for path in paths:
+            pairs.extend(tuple(value[field] for field in args["fields"])
+                         for value in self._pointer_values(root, path))
+        if len(set(pairs)) != len(pairs):
+            raise ProjectSchemaValidationError("runtime pairs are duplicated")
+
+    def _rule_index_within_array(self, root: object, paths: list[str], args: dict[str, object]) -> None:
+        if set(args) != {"indexField", "arrayPath", "minimum"}:
+            raise ProjectSchemaValidationError("index-within-array args are not exact")
+        target = self._single_pointer(root, args["arrayPath"])
+        if type(target) is not list:
+            raise ProjectSchemaValidationError("runtime index target is not an array")
+        for path in paths:
+            for value in self._pointer_values(root, path):
+                index = value[args["indexField"]]
+                if type(index) is not int or not args["minimum"] <= index < len(target):
+                    raise ProjectSchemaValidationError("runtime index is out of range")
+
+    def _rule_safe_artifact_basename(self, root: object, paths: list[str], args: dict[str, object]) -> None:
+        expected = {"minBytes", "maxBytes", "forbiddenNames", "forbiddenSeparators",
+                    "forbiddenCategoryPrefixes", "allowedSuffixes", "embeddedUuidPattern",
+                    "embeddedUuidMustEqualPath"}
+        if set(args) != expected:
+            raise ProjectSchemaValidationError("safe-artifact-basename args are not exact")
+        owner = self._single_pointer(root, args["embeddedUuidMustEqualPath"])
+        uuid_pattern = re.compile(args["embeddedUuidPattern"])
+        for path in paths:
+            for value in self._pointer_values(root, path):
+                if type(value) is not str:
+                    raise ProjectSchemaValidationError("runtime artifact is not text")
+                try:
+                    encoded = value.encode("utf-8")
+                except UnicodeEncodeError as error:
+                    raise ProjectSchemaValidationError("runtime artifact is not UTF-8") from error
+                if (not args["minBytes"] <= len(encoded) <= args["maxBytes"]
+                        or value in args["forbiddenNames"]
+                        or any(separator in value for separator in args["forbiddenSeparators"])
+                        or any(any(unicodedata.category(character).startswith(prefix)
+                                   for prefix in args["forbiddenCategoryPrefixes"])
+                               for character in value)
+                        or not value.endswith(tuple(args["allowedSuffixes"]))
+                        or any(found.group(0) != owner for found in uuid_pattern.finditer(value))):
+                    raise ProjectSchemaValidationError("runtime artifact basename is unsafe")
 
 
 def status(state: str) -> dict[str, object]:
@@ -47,6 +357,31 @@ class SchemaContractsTests(unittest.TestCase):
     def load_schema(self, name: str) -> dict[str, object]:
         return json.loads((ROOT / "docs" / name).read_text(encoding="utf-8"))
 
+    def config_runtime_accepts(self, document: object) -> bool:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            try:
+                load_config(path)
+            except ConfigError:
+                return False
+        return True
+
+    def status_runtime_accepts(self, document: object) -> bool:
+        try:
+            parse_status(
+                document,
+                SESSION,
+                "com.aprz.qbdiandroid",
+                1,
+                4242,
+                (ResolvedScene("fixture-entry", 16, 32),),
+                None,
+            )
+        except (ValueError, QtraceError):
+            return False
+        return True
+
     def test_config_schema_matches_the_strict_configuration_field_sets(self):
         schema = self.load_schema("qtrace-config.schema.json")
         self.assertEqual(1, schema["properties"]["schemaVersion"]["const"])
@@ -73,9 +408,14 @@ class SchemaContractsTests(unittest.TestCase):
         self.assertEqual({"name", "symbol"}, set(forms[0]["properties"]))
         self.assertEqual({"name", "startOffset", "endOffset"}, set(forms[1]["properties"]))
         self.assertTrue(all(not form["additionalProperties"] for form in forms))
+        rules = schema["x-qtrace-runtime-invariants"]
+        self.assertTrue(all(set(rule) == {"id", "paths", "predicate", "args"} for rule in rules))
+        self.assertEqual(len(rules), len({rule["id"] for rule in rules}))
         self.assertEqual(
-            ["UTF-8 byte limits", "scene names are unique", "offset ranges are nonzero, aligned, and ordered"],
-            schema["x-qtrace-runtime-invariants"],
+            {"config.text.utf8", "config.scene-name.utf8-bytes",
+             "config.scene-name.unique", "config.offset-range.ordered",
+             "config.flight-entry.member"},
+            {rule["id"] for rule in rules},
         )
 
     def test_status_schema_matches_the_strict_native_status_parser(self):
@@ -98,10 +438,171 @@ class SchemaContractsTests(unittest.TestCase):
         issue = schema["$defs"]["issue"]
         self.assertFalse(issue["additionalProperties"])
         self.assertEqual({"code", "path", "message"}, set(issue["properties"]))
+        rules = schema["x-qtrace-runtime-invariants"]
+        self.assertTrue(all(set(rule) == {"id", "paths", "predicate", "args"} for rule in rules))
+        self.assertEqual(len(rules), len({rule["id"] for rule in rules}))
         self.assertEqual(
-            ["UTF-8 byte limits", "normalized scene names are unique", "active (sceneIndex, tid) pairs are unique and bounded by normalizedScenes"],
-            schema["x-qtrace-runtime-invariants"],
+            {"status.session-id.utf8-bytes", "status.package-name.utf8-bytes",
+             "status.state.utf8-bytes", "status.reason.utf8-bytes",
+             "status.scene-name.utf8-bytes", "status.issue-text.utf8-bytes",
+             "status.scene-range.ordered", "status.scene-name.unique",
+             "status.active-scene.unique-pair", "status.active-scene.index-bound",
+             "status.artifact.safe-basename"},
+            {rule["id"] for rule in rules},
         )
+
+    def test_config_runtime_and_documented_schema_accept_exactly_the_same_corpus(self):
+        minimal = {
+            "schemaVersion": 1,
+            "app": {"package": "com.example.app"},
+            "target": {"module": "libx.so"},
+            "scenes": [{"name": "entry", "startOffset": "0x4", "endOffset": "0x8"}],
+        }
+        symbol = copy.deepcopy(minimal)
+        symbol["scenes"] = [{"name": "入口", "symbol": "demo_entry"}]
+        symbol_boundaries = copy.deepcopy(minimal)
+        symbol_boundaries["scenes"] = [
+            {"name": "界" * 42 + "ab", "symbol": "s" * 2048}
+        ]
+        flight = copy.deepcopy(minimal)
+        flight["tracer"] = {
+            "profile": "full", "compression": False, "flightEnabled": True,
+            "flightEntryScene": "entry", "library": "tracer.so", "companion": "agent.js",
+        }
+        corpus = {
+            "minimal-offset": minimal,
+            "symbol-unicode": symbol,
+            "symbol-unbounded-scene-name-128-bytes": symbol_boundaries,
+            "flight-paired": flight,
+        }
+
+        mutations = {
+            "offset-zero": ("scenes", 0, "startOffset", "0x0"),
+            "offset-misaligned": ("scenes", 0, "startOffset", "0x2"),
+            "offset-reversed": ("scenes", 0, "startOffset", "0xc"),
+            "offset-trailing-control": ("scenes", 0, "startOffset", "0x4\n"),
+            "scene-name-byte-limit": ("scenes", 0, "name", "界" * 43),
+            "scene-name-control": ("scenes", 0, "name", "bad\nname"),
+            "scene-name-surrogate": ("scenes", 0, "name", "bad\ud800"),
+        }
+        for name, (array, index, field, value) in mutations.items():
+            candidate = copy.deepcopy(minimal)
+            candidate[array][index][field] = value
+            corpus[name] = candidate
+        duplicate = copy.deepcopy(minimal)
+        duplicate["scenes"].append({"name": "entry", "symbol": "other"})
+        corpus["duplicate-scene-name"] = duplicate
+        for name, symbol_value in {
+            "symbol-empty": "",
+            "symbol-control": "bad\nname",
+            "symbol-formatting": "bad\u200bname",
+            "symbol-surrogate": "bad\ud800",
+        }.items():
+            candidate = copy.deepcopy(symbol)
+            candidate["scenes"][0]["symbol"] = symbol_value
+            corpus[name] = candidate
+        for name, tracer in {
+            "tracer-library-only": {"library": "tracer.so"},
+            "tracer-companion-only": {"companion": "agent.js"},
+            "flight-missing-entry": {"flightEnabled": True},
+            "flight-unknown-entry": {"flightEnabled": True, "flightEntryScene": "missing"},
+            "flight-entry-while-disabled": {"flightEnabled": False, "flightEntryScene": "entry"},
+            "flight-entry-control": {"flightEnabled": True, "flightEntryScene": "entry\n"},
+            "flight-entry-surrogate": {"flightEnabled": True, "flightEntryScene": "entry\ud800"},
+        }.items():
+            candidate = copy.deepcopy(minimal)
+            candidate["tracer"] = tracer
+            corpus[name] = candidate
+
+        expected = {
+            "minimal-offset", "symbol-unicode",
+            "symbol-unbounded-scene-name-128-bytes", "flight-paired",
+        }
+        runtime_accepted = {name for name, value in corpus.items() if self.config_runtime_accepts(value)}
+        schema = QtraceProjectSchemaEvaluator(self.load_schema("qtrace-config.schema.json"))
+        schema_accepted = {name for name, value in corpus.items() if schema.accepts(value)}
+        self.assertEqual(expected, runtime_accepted)
+        self.assertEqual(runtime_accepted, schema_accepted)
+
+    def test_status_runtime_and_documented_schema_accept_exactly_the_same_corpus(self):
+        corpus = {state_name: status(state_name) for state_name in (
+            "installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"
+        )}
+        active_valid = status("running")
+        active_valid["activeScenes"] = [{"sceneIndex": 0, "tid": 7, "sealed": False}]
+        corpus["active-valid"] = active_valid
+        issue_boundary = status("running")
+        issue_boundary["warnings"] = [{"code": "界" * 341, "path": "", "message": "x"}]
+        corpus["issue-1023-bytes"] = issue_boundary
+        artifact_boundary = status("running")
+        artifact_boundary["artifacts"] = ["a" * 245 + ".trace.bin"]
+        corpus["artifact-255-bytes"] = artifact_boundary
+
+        def mutated(name: str, update) -> None:
+            candidate = copy.deepcopy(status("running"))
+            update(candidate)
+            corpus[name] = candidate
+
+        mutated("uuid-not-v4", lambda value: value.update(sessionId="123e4567-e89b-12d3-a456-426614174000"))
+        mutated("uuid-uppercase", lambda value: value.update(sessionId=SESSION.upper()))
+        mutated("generation-zero", lambda value: value.update(generation=0))
+        mutated("generation-bool", lambda value: value.update(generation=True))
+        mutated("pid-zero", lambda value: value.update(pid=0))
+        mutated("pid-bool", lambda value: value.update(pid=True))
+        mutated("timestamp-negative", lambda value: value.update(transitionMonotonicNs=-1))
+        mutated("timestamp-bool", lambda value: value.update(transitionMonotonicNs=True))
+        mutated("scene-start-negative", lambda value: value["normalizedScenes"][0].update(startOffset=-1))
+        mutated("scene-empty-range", lambda value: value["normalizedScenes"][0].update(endOffset=16))
+        mutated("scene-reversed", lambda value: value["normalizedScenes"][0].update(startOffset=32))
+        mutated("scene-name-byte-limit", lambda value: value["normalizedScenes"][0].update(name="界" * 43))
+        mutated("scene-name-control", lambda value: value["normalizedScenes"][0].update(name="bad\u200bname"))
+        mutated("scene-name-surrogate", lambda value: value["normalizedScenes"][0].update(name="bad\ud800"))
+        mutated("scene-name-duplicate", lambda value: value["normalizedScenes"].append(
+            {"name": "fixture-entry", "startOffset": 40, "endOffset": 44}))
+        mutated("active-pair-duplicate", lambda value: value.update(activeScenes=[
+            {"sceneIndex": 0, "tid": 7, "sealed": False},
+            {"sceneIndex": 0, "tid": 7, "sealed": True},
+        ]))
+        mutated("active-index-outside", lambda value: value.update(activeScenes=[
+            {"sceneIndex": 1, "tid": 7, "sealed": False}]))
+        mutated("active-tid-zero", lambda value: value.update(activeScenes=[
+            {"sceneIndex": 0, "tid": 0, "sealed": False}]))
+        mutated("active-index-bool", lambda value: value.update(activeScenes=[
+            {"sceneIndex": False, "tid": 7, "sealed": False}]))
+        mutated("artifact-traversal", lambda value: value.update(artifacts=["../escape.trace.bin"]))
+        mutated("artifact-backslash", lambda value: value.update(artifacts=["bad\\name.trace.bin"]))
+        mutated("artifact-byte-limit", lambda value: value.update(artifacts=["a" * 246 + ".trace.bin"]))
+        mutated("artifact-control", lambda value: value.update(artifacts=["bad\nname.trace.bin"]))
+        mutated("artifact-surrogate", lambda value: value.update(artifacts=["bad\ud800.trace.bin"]))
+        mutated("artifact-foreign-uuid", lambda value: value.update(
+            artifacts=["223e4567-e89b-42d3-a456-426614174000.trace.bin"]))
+        mutated("artifact-wrong-suffix", lambda value: value.update(artifacts=[SESSION + ".txt"]))
+        mutated("artifact-duplicate", lambda value: value.update(
+            artifacts=[SESSION + ".trace.bin", SESSION + ".trace.bin"]))
+        mutated("state-reason-ack", lambda value: value.update(
+            state="sealed", reason="duration_elapsed", stopAcknowledged=False))
+        mutated("running-terminal-fields", lambda value: value.update(
+            state="running", reason="duration_elapsed", stopAcknowledged=True))
+        mutated("stop-requested-empty-reason", lambda value: value.update(
+            state="stop_requested", reason="", stopAcknowledged=False))
+        mutated("warning-byte-limit", lambda value: value.update(warnings=[
+            {"code": "界" * 342, "path": "", "message": ""}]))
+        mutated("error-control", lambda value: value.update(errors=[
+            {"code": "E", "path": "/x", "message": "bad\nmessage"}]))
+        mutated("error-surrogate", lambda value: value.update(errors=[
+            {"code": "E", "path": "/x", "message": "bad\ud800"}]))
+
+        expected = {
+            "installed", "running", "stop_requested", "stopping", "sealed",
+            "stop_incomplete", "active-valid", "issue-1023-bytes", "artifact-255-bytes",
+        }
+        runtime_accepted = {name for name, value in corpus.items() if self.status_runtime_accepts(value)}
+        schema = QtraceProjectSchemaEvaluator(
+            self.load_schema("qtrace-session-status.schema.json")
+        )
+        schema_accepted = {name for name, value in corpus.items() if schema.accepts(value)}
+        self.assertEqual(expected, runtime_accepted)
+        self.assertEqual(runtime_accepted, schema_accepted)
 
     def test_every_native_status_state_has_a_valid_golden_document(self):
         for state_name in ("installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"):

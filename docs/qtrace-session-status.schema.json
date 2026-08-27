@@ -2,27 +2,168 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://qbdi-android.local/schema/qtrace-session-status.schema.json",
   "title": "qtrace native session status",
-  "x-qtrace-runtime-invariants": ["UTF-8 byte limits", "normalized scene names are unique", "active (sceneIndex, tid) pairs are unique and bounded by normalizedScenes"],
+  "x-qtrace-runtime-invariants": [
+    {
+      "id": "status.session-id.utf8-bytes",
+      "paths": ["/sessionId"],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 1, "maxBytes": 64, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "status.package-name.utf8-bytes",
+      "paths": ["/packageName"],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 1, "maxBytes": 256, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "status.state.utf8-bytes",
+      "paths": ["/state"],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 1, "maxBytes": 64, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "status.reason.utf8-bytes",
+      "paths": ["/reason"],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 0, "maxBytes": 256, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "status.scene-name.utf8-bytes",
+      "paths": ["/normalizedScenes/*/name"],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 1, "maxBytes": 128, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "status.issue-text.utf8-bytes",
+      "paths": [
+        "/warnings/*/code", "/warnings/*/path", "/warnings/*/message",
+        "/errors/*/code", "/errors/*/path", "/errors/*/message"
+      ],
+      "predicate": "utf8-text",
+      "args": {"minBytes": 0, "maxBytes": 1024, "forbiddenCategories": ["Cc", "Cf", "Zl", "Zp"]}
+    },
+    {
+      "id": "status.scene-range.ordered",
+      "paths": ["/normalizedScenes/*"],
+      "predicate": "ordered-integer-fields",
+      "args": {"startField": "startOffset", "endField": "endOffset", "minimumStart": 0, "strict": true}
+    },
+    {
+      "id": "status.scene-name.unique",
+      "paths": ["/normalizedScenes/*/name"],
+      "predicate": "unique-field",
+      "args": {"field": "name", "caseSensitive": true}
+    },
+    {
+      "id": "status.active-scene.unique-pair",
+      "paths": ["/activeScenes/*"],
+      "predicate": "unique-pair",
+      "args": {"fields": ["sceneIndex", "tid"]}
+    },
+    {
+      "id": "status.active-scene.index-bound",
+      "paths": ["/activeScenes/*"],
+      "predicate": "index-within-array",
+      "args": {"indexField": "sceneIndex", "arrayPath": "/normalizedScenes", "minimum": 0}
+    },
+    {
+      "id": "status.artifact.safe-basename",
+      "paths": ["/artifacts/*"],
+      "predicate": "safe-artifact-basename",
+      "args": {
+        "minBytes": 1,
+        "maxBytes": 255,
+        "forbiddenNames": ["", ".", ".."],
+        "forbiddenSeparators": ["/", "\\"],
+        "forbiddenCategoryPrefixes": ["C"],
+        "allowedSuffixes": [".trace.bin", ".trace.bin.lz4", ".flight.bin"],
+        "embeddedUuidPattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        "embeddedUuidMustEqualPath": "/sessionId"
+      }
+    }
+  ],
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "sessionId", "generation", "packageName", "pid", "state", "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes", "artifacts", "stopAcknowledged", "warnings", "errors"],
+  "required": [
+    "schemaVersion", "sessionId", "generation", "packageName", "pid", "state",
+    "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes", "artifacts",
+    "stopAcknowledged", "warnings", "errors"
+  ],
   "properties": {
-    "schemaVersion": {"const": 1}, "sessionId": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "maxLength": 64},
-    "generation": {"type": "integer", "minimum": 1}, "packageName": {"type": "string", "minLength": 1, "maxLength": 256},
+    "schemaVersion": {"type": "integer", "const": 1},
+    "sessionId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "minLength": 36,
+      "maxLength": 36
+    },
+    "generation": {"type": "integer", "minimum": 1},
+    "packageName": {"type": "string", "minLength": 1, "maxLength": 256},
     "pid": {"type": "integer", "minimum": 1},
-    "state": {"enum": ["installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"]},
-    "reason": {"type": "string", "maxLength": 256}, "transitionMonotonicNs": {"type": "integer", "minimum": 0},
-    "normalizedScenes": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["name", "startOffset", "endOffset"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 128}, "startOffset": {"type": "integer", "minimum": 0}, "endOffset": {"type": "integer", "minimum": 1}}}},
-    "activeScenes": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["sceneIndex", "tid", "sealed"], "properties": {"sceneIndex": {"type": "integer", "minimum": 0}, "tid": {"type": "integer", "minimum": 1}, "sealed": {"type": "boolean"}}}},
-    "artifacts": {"type": "array", "maxItems": 256, "items": {"type": "string", "minLength": 1, "maxLength": 255}, "uniqueItems": true},
+    "state": {"type": "string", "enum": ["installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"]},
+    "reason": {"type": "string", "maxLength": 256},
+    "transitionMonotonicNs": {"type": "integer", "minimum": 0},
+    "normalizedScenes": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "startOffset", "endOffset"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 128},
+          "startOffset": {"type": "integer", "minimum": 0},
+          "endOffset": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "activeScenes": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sceneIndex", "tid", "sealed"],
+        "properties": {
+          "sceneIndex": {"type": "integer", "minimum": 0},
+          "tid": {"type": "integer", "minimum": 1},
+          "sealed": {"type": "boolean"}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array", "maxItems": 256, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 255}
+    },
     "stopAcknowledged": {"type": "boolean"},
     "warnings": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/issue"}},
     "errors": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/issue"}}
   },
   "allOf": [
-    {"if": {"properties": {"state": {"enum": ["installed", "running"]}}}, "then": {"properties": {"reason": {"const": ""}, "stopAcknowledged": {"const": false}}}},
-    {"if": {"properties": {"state": {"enum": ["stop_requested", "stopping", "stop_incomplete"]}}}, "then": {"properties": {"reason": {"const": "duration_elapsed"}, "stopAcknowledged": {"const": false}}}},
-    {"if": {"properties": {"state": {"const": "sealed"}}}, "then": {"properties": {"reason": {"const": "duration_elapsed"}, "stopAcknowledged": {"const": true}}}}
+    {
+      "if": {"properties": {"state": {"enum": ["installed", "running"]}}, "required": ["state"]},
+      "then": {"properties": {"reason": {"const": ""}, "stopAcknowledged": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"state": {"enum": ["stop_requested", "stopping", "stop_incomplete"]}}, "required": ["state"]},
+      "then": {"properties": {"reason": {"const": "duration_elapsed"}, "stopAcknowledged": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"state": {"const": "sealed"}}, "required": ["state"]},
+      "then": {"properties": {"reason": {"const": "duration_elapsed"}, "stopAcknowledged": {"const": true}}}
+    }
   ],
-  "$defs": {"issue": {"type": "object", "additionalProperties": false, "required": ["code", "path", "message"], "properties": {"code": {"type": "string", "maxLength": 1024}, "path": {"type": "string", "maxLength": 1024}, "message": {"type": "string", "maxLength": 1024}}}}
+  "$defs": {
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "path", "message"],
+      "properties": {
+        "code": {"type": "string", "maxLength": 1024},
+        "path": {"type": "string", "maxLength": 1024},
+        "message": {"type": "string", "maxLength": 1024}
+      }
+    }
+  }
 }
