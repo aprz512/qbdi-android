@@ -915,6 +915,57 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn("artifact.concurrent_report", json.loads(
                 error_path.read_text())["artifacts"][-1]["code"])
 
+    def test_collector_rollback_recovery_is_a_concurrent_report(self):
+        """A post-exchange CAS race keeps both canonical and recovery report files."""
+        from qtrace import report as report_module
+        from qtrace.artifacts import (_PublicationToken, publish_collector_report)
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            committed = output / session
+            committed.mkdir()
+            target = committed / "report.json"
+            target.write_text(json.dumps({"artifacts": [], "errors": []}), encoding="utf-8")
+            parent = os.open(output, os.O_RDONLY)
+            directory = os.open(session, os.O_RDONLY, dir_fd=parent)
+            token = _PublicationToken(
+                session, output, parent, directory,
+                (output.stat().st_dev, output.stat().st_ino),
+                (target.stat().st_dev, target.stat().st_ino),
+            )
+            real_exchange = report_module._exchange
+            exchanges = 0
+            temporary: list[str] = []
+
+            def exchange(fd: int, left: str, right: str) -> None:
+                nonlocal exchanges
+                exchanges += 1
+                temporary[:] = [left]
+                real_exchange(fd, left, right)
+                if exchanges == 1:
+                    racer = ".collector-racer"
+                    descriptor = os.open(racer, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600,
+                                         dir_fd=fd)
+                    try:
+                        os.write(descriptor, b"RACER-A")
+                    finally:
+                        os.close(descriptor)
+                    os.replace(racer, left, src_dir_fd=fd, dst_dir_fd=fd)
+
+            with patch("qtrace.report._exchange", side_effect=exchange):
+                merged, error_path, applied = publish_collector_report(
+                    token, ReportWriter(), self._report(session, "sealed"))
+
+            self.assertFalse(applied)
+            self.assertEqual("RACER-A", target.read_text(encoding="utf-8"))
+            self.assertTrue((committed / temporary[0]).is_file())
+            marker = json.loads(error_path.read_text(encoding="utf-8"))["artifacts"][-1]
+            self.assertEqual("artifact.concurrent_report", marker["code"])
+            self.assertIn(temporary[0], marker["detail"])
+            self.assertTrue(merged.artifacts)
+
     def test_collector_merge_reads_short_chunks_without_closing_verified_fd(self):
         from qtrace.artifacts import publish_collector_report
         import os
@@ -1046,6 +1097,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_conditional_report_exchange_rolls_back_last_moment_replacement(self):
         from qtrace import report as report_module
+        from qtrace.report import ConditionalReplaceRecoveryError
         session = "11111111-1111-4111-8111-111111111111"
         writer = ReportWriter()
         with tempfile.TemporaryDirectory() as root:
@@ -1067,11 +1119,13 @@ class ArtifactTests(unittest.TestCase):
             fd = __import__("os").open(directory, __import__("os").O_RDONLY)
             try:
                 with patch("qtrace.report._exchange", side_effect=exchange):
-                    self.assertFalse(writer.write_atomic_at(fd, "report.json", self._report(session, "new"),
-                                                          expected_identity=identity))
+                    with self.assertRaises(ConditionalReplaceRecoveryError) as raised:
+                        writer.write_atomic_at(fd, "report.json", self._report(session, "new"),
+                                               expected_identity=identity)
             finally:
                 __import__("os").close(fd)
             self.assertEqual("concurrent", target.read_text(encoding="utf-8"))
+            self.assertTrue((directory / raised.exception.recovery_name).is_file())
 
     def test_report_writer_preserves_old_report_when_stat_and_rollback_fail(self):
         from qtrace import report as report_module

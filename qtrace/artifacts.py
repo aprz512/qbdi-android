@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from qtrace.errors import EXIT_PARTIAL, QtraceError
-from qtrace.report import conditional_replace_at
+from qtrace.report import ConditionalReplaceRecoveryError, conditional_replace_at
 from qtrace.status import (NativeStatusValidationError, StrictJsonLoadError,
                            load_strict_json, validate_status_shape)
 
@@ -196,8 +196,12 @@ def publish_collector_report(token: object, writer: Any, report: object) -> tupl
                                       expected_identity=token.report_identity):
                 return report, token.visible_path(f"{token.session_id}/report.json"), True
             raise FileExistsError("collector report was replaced concurrently")
-        except FileExistsError:
-            marker = {"code": "artifact.concurrent_report", "detail": "collector report changed concurrently"}
+        except (ConditionalReplaceRecoveryError, FileExistsError) as concurrent:
+            detail = "collector report changed concurrently"
+            recovery_name = getattr(concurrent, "recovery_name", None)
+            if type(recovery_name) is str and recovery_name:
+                detail += f"; rollback recovery file is {recovery_name}"
+            marker = {"code": "artifact.concurrent_report", "detail": detail}
             report = dataclasses.replace(report, artifacts=tuple((*getattr(report, "artifacts"), marker)))
             name = f"{token.session_id}.error.{uuid.uuid4()}.report.json"
             writer.write_atomic_at(token.parent, name, report, no_replace=True)

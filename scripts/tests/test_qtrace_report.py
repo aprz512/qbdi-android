@@ -115,7 +115,7 @@ class ReportWriterTests(unittest.TestCase):
                               if name != "report.json"})
 
     def test_mismatch_rollback_preserves_a_second_temporary_replacement(self) -> None:
-        """Removing the post-rollback inode check would unlink RACER-B."""
+        """A RACER-B installed after the original identity check remains recoverable."""
         from qtrace import report as report_module
         from qtrace.report import ConditionalReplaceRecoveryError
 
@@ -155,6 +155,40 @@ class ReportWriterTests(unittest.TestCase):
         self.assertEqual("RACER-A", self.path.read_text(encoding="utf-8"))
         self.assertEqual("RACER-B", (self.path.parent / raised.exception.recovery_name).read_text(
             encoding="utf-8"))
+
+    def test_mismatch_rollback_retains_the_owned_recovery_file(self) -> None:
+        """A successful rollback must return its new report as recovery, never unlink it."""
+        from qtrace import report as report_module
+        from qtrace.report import (ConditionalReplaceRecoveryError,
+                                   conditional_replace_at)
+
+        self.path.write_text("EXPECTED", encoding="utf-8")
+        temporary = self.path.parent / ".replacement.tmp"
+        temporary.write_text("NEW", encoding="utf-8")
+        expected = (self.path.stat().st_dev, self.path.stat().st_ino)
+        real_exchange = report_module._exchange
+        exchanges = 0
+
+        def exchange(directory: int, left: str, right: str) -> None:
+            nonlocal exchanges
+            exchanges += 1
+            real_exchange(directory, left, right)
+            if exchanges == 1:
+                staged = self.path.parent / ".racer-a"
+                staged.write_text("RACER-A", encoding="utf-8")
+                os.replace(staged, self.path.parent / left)
+
+        descriptor = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            with patch("qtrace.report._exchange", side_effect=exchange):
+                with self.assertRaises(ConditionalReplaceRecoveryError) as raised:
+                    conditional_replace_at(descriptor, temporary.name, self.path.name, expected)
+        finally:
+            os.close(descriptor)
+
+        self.assertEqual(temporary.name, raised.exception.recovery_name)
+        self.assertEqual("RACER-A", self.path.read_text(encoding="utf-8"))
+        self.assertEqual("NEW", temporary.read_text(encoding="utf-8"))
 
     def test_old_stat_rollback_preserves_second_temporary_replacement(self) -> None:
         """The original old-inode stat failure must retain both EXPECTED and RACER-B."""

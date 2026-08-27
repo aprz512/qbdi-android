@@ -31,13 +31,18 @@ def _exchange(directory: int, left: str, right: str) -> None:
         raise OSError(failure, os.strerror(failure))
 
 
-class ConditionalReplaceRecoveryError(OSError):
-    """A conditional report exchange left a recovery file whose ownership is unknown."""
+class ConditionalReplaceRecoveryError(FileExistsError):
+    """A conditional report exchange left a recovery file for explicit handling."""
 
     def __init__(self, recovery_name: str, primary: BaseException,
-                 recovery: BaseException) -> None:
-        super().__init__("conditional report recovery failed after "
-                         f"{primary}: recovery file is {recovery_name}; recovery was {recovery}")
+                 recovery: BaseException | None = None) -> None:
+        if recovery is None:
+            detail = ("conditional report replacement was rolled back after "
+                      f"{primary}: recovery file is {recovery_name}")
+        else:
+            detail = ("conditional report recovery failed after "
+                      f"{primary}: recovery file is {recovery_name}; recovery was {recovery}")
+        super().__init__(detail)
         self.recovery_name = recovery_name
 
 
@@ -60,22 +65,6 @@ def _discard_owned_temporary(directory: int, temporary: str,
         if primary is None:
             raise
         primary.add_note(f"could not remove owned report temporary {temporary}: {cleanup}")
-
-
-def _discard_rollback_temporary(directory: int, temporary: str,
-                                temporary_identity: tuple[int, int]) -> BaseException | None:
-    """Delete a rolled-back temporary only while its original inode still owns the name."""
-    try:
-        current = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
-    except BaseException as error:
-        return error
-    if not stat.S_ISREG(current.st_mode) or _identity(current) != temporary_identity:
-        return RuntimeError("owned report temporary changed after rollback")
-    try:
-        os.unlink(temporary, dir_fd=directory)
-    except BaseException as error:
-        return error
-    return None
 
 
 def conditional_replace_at(directory: int, temporary: str, target: str,
@@ -130,10 +119,8 @@ def conditional_replace_at(directory: int, temporary: str, target: str,
             _exchange(directory, temporary, target)
         except BaseException as rollback:
             raise ConditionalReplaceRecoveryError(temporary, primary, rollback) from rollback
-        cleanup = _discard_rollback_temporary(directory, temporary, temporary_identity)
-        if cleanup is not None:
-            _recovery_note(primary, temporary)
-            primary.add_note(f"recovered report left at {temporary}: {cleanup}")
+        _recovery_note(primary, temporary)
+        primary.add_note(f"report replacement was rolled back; retained recovery file {temporary}")
         raise
     if not matched:
         primary = RuntimeError("conditional report target changed")
@@ -141,10 +128,7 @@ def conditional_replace_at(directory: int, temporary: str, target: str,
             _exchange(directory, temporary, target)
         except BaseException as rollback:
             raise ConditionalReplaceRecoveryError(temporary, primary, rollback) from rollback
-        cleanup = _discard_rollback_temporary(directory, temporary, temporary_identity)
-        if cleanup is not None:
-            raise ConditionalReplaceRecoveryError(temporary, primary, cleanup) from cleanup
-        return False
+        raise ConditionalReplaceRecoveryError(temporary, primary)
     os.unlink(temporary, dir_fd=directory)
     return True
 
