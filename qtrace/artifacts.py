@@ -122,26 +122,24 @@ def publish_collector_report(token: object, writer: Any, report: object) -> tupl
     """Conditionally replace only the fragment inode issued by this collector."""
     if not isinstance(token, _PublicationToken):
         raise ValueError("collector token is invalid")
+    descriptor = -1
     try:
         descriptor = os.open("report.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
                              dir_fd=token.directory)
-        try:
-            current = os.fstat(descriptor)
-            if (current.st_dev, current.st_ino) != token.report_identity:
-                raise FileExistsError("collector report was replaced concurrently")
-            chunks: list[bytes] = []
-            total = 0
-            while True:
-                chunk = os.read(descriptor, min(64 * 1024, 1024 * 1024 + 1 - total))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-                if total > 1024 * 1024:
-                    raise _error("artifact.report_too_large", "collector report exceeds size bound")
-            fragment = json.loads(b"".join(chunks).decode("utf-8"))
-        finally:
-            os.close(descriptor)
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != token.report_identity:
+            raise FileExistsError("collector report was replaced concurrently")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, 1024 * 1024 + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > 1024 * 1024:
+                raise _error("artifact.report_too_large", "collector report exceeds size bound")
+        fragment = json.loads(b"".join(chunks).decode("utf-8"))
         records = fragment.get("artifacts", []) if type(fragment) is dict else []
         errors = fragment.get("errors", []) if type(fragment) is dict else []
         merged = list(getattr(report, "artifacts"))
@@ -161,6 +159,8 @@ def publish_collector_report(token: object, writer: Any, report: object) -> tupl
         writer.write_atomic_at(token.parent, name, report, no_replace=True)
         return report, token.visible_path(name), False
     finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         token.close()
 
 
@@ -561,7 +561,8 @@ def _write_json(path: Path, value: object) -> None:
 
 def _rewrite_published_report(parent: int, session_id: str,
                               records: Sequence[Mapping[str, object]],
-                              errors: Sequence[Mapping[str, str]]) -> None:
+                              errors: Sequence[Mapping[str, str]], *,
+                              expected_identity: tuple[int, int]) -> None:
     """Refresh the committed diagnostic through the held directory descriptor."""
     payload = json.dumps({"schema": 1, "sessionId": session_id,
                           "artifacts": list(records), "errors": list(errors)},
@@ -575,6 +576,8 @@ def _rewrite_published_report(parent: int, session_id: str,
     temporary = ".report-" + uuid.uuid4().hex + ".tmp"
     try:
         original = os.stat("report.json", dir_fd=directory, follow_symlinks=False)
+        if (original.st_dev, original.st_ino) != expected_identity:
+            raise FileExistsError("collector report changed before refresh")
         try:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                  getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -986,6 +989,7 @@ class ArtifactProcessor:
                 device_metadata.update(status["device"])
             _write_json(stage_root / "device.json", device_metadata)
             _write_json(stage_root / "report.json", {"schema": 1, "sessionId": session_id, "artifacts": records, "errors": errors})
+            staged_report = os.stat("report.json", dir_fd=stage_fd, follow_symlinks=False)
             relative_files = tuple(path.relative_to(stage_root) for path in files)
             error_count = len(errors)
             final = self._publish(stage_root, output_handle, session_id, files, errors, records,
@@ -993,7 +997,8 @@ class ArtifactProcessor:
             published = True
             if len(errors) != error_count:
                 try:
-                    _rewrite_published_report(parent_fd, session_id, records, errors)
+                    _rewrite_published_report(parent_fd, session_id, records, errors,
+                                              expected_identity=(staged_report.st_dev, staged_report.st_ino))
                 except KeyboardInterrupt:
                     raise
                 except Exception as error:
@@ -1192,6 +1197,11 @@ class ArtifactProcessor:
                 owned = [root for root in roots if candidate_id in root.lower()]
                 if any(root not in candidate_status["artifacts"] for root in owned):
                     raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
+                if selection.mode is PullMode.ALL and candidate_status["state"] != "sealed":
+                    roots = [root for root in roots if root not in owned]
+                    initial_errors.extend({"name": root, "code": "artifact.incomplete",
+                                           "detail": f"native session is {candidate_status['state']}; artifact is not sealed"}
+                                          for root in owned)
                 if len(owned) == len(roots):
                     status, session_id = candidate_status, candidate_id
         if session_id is None:
