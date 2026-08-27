@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Mapping, Protocol
 
+from scripts.bounded_process import BoundedProcessError
+
 from qtrace.device import AdbDevice
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.models import TracerConfig
@@ -47,8 +49,19 @@ class Deployment:
     load_probe: Mapping[str, str]
 
 
-class _RouteProbeFailure(RuntimeError):
+class _PrivateCapabilityFailure(RuntimeError):
     pass
+
+
+_PRIVATE_CAPABILITY_CODES = frozenset({
+    "device.route_probe_failed",
+    "device.load_probe_failed",
+})
+_PRIVATE_PERMISSION_MARKERS = (
+    b"permission denied",
+    b"operation not permitted",
+    b"not debuggable",
+)
 
 
 def _fail(code: ErrorCode | str, stage: str, detail: str) -> None:
@@ -212,14 +225,105 @@ def _device_sha256(remote: str, shell) -> str:
     return fields[0]
 
 
-class Deployer:
-    def _access_shell(self, device: AdbDevice, package: str, access_mode: str):
-        def invoke(*arguments: str, **kwargs):
-            if access_mode == "run-as":
-                return device.shell("run-as", package, *arguments, **kwargs)
-            return device.shell(*arguments, **kwargs)
+def _is_private_capability_failure(error: QtraceError) -> bool:
+    """Recognize only an explicit/private permission denial, never transport loss."""
+    if error.code in _PRIVATE_CAPABILITY_CODES:
+        return True
+    cause = error.__cause__
+    if not isinstance(cause, BoundedProcessError) or cause.returncode is None:
+        return False
+    stderr = cause.stderr.lower()
+    return any(marker in stderr for marker in _PRIVATE_PERMISSION_MARKERS)
 
-        return invoke
+
+def _device_operation(stage: str, operation):
+    try:
+        return operation()
+    except QtraceError:
+        raise
+    except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
+        wrapped = QtraceError(
+            "device.command_failed", stage, f"device deployment operation failed: {error}"
+        )
+        raise wrapped from error
+
+
+class Deployer:
+    def _control_shell(self, device: AdbDevice, access_mode: str, route: str):
+        if access_mode == "root":
+            return device.root_shell
+        if route == "app-private":
+            return device.target_shell
+        return device.shell
+
+    def _probe_route_capability(
+        self,
+        *,
+        control_shell,
+        target_shell,
+        route: str,
+        remote_dir: str,
+        probe: str,
+    ) -> None:
+        try:
+            _device_operation(
+                "deploy.probe",
+                lambda: control_shell("mkdir", "-p", remote_dir, maximum_bytes=64 * 1024),
+            )
+            _device_operation(
+                "deploy.probe",
+                lambda: control_shell("chmod", "0755", remote_dir, maximum_bytes=64 * 1024),
+            )
+            _device_operation(
+                "deploy.probe",
+                lambda: control_shell("touch", probe, maximum_bytes=64 * 1024),
+            )
+            _device_operation(
+                "deploy.probe",
+                lambda: control_shell("chmod", "0644", probe, maximum_bytes=64 * 1024),
+            )
+            _device_operation(
+                "deploy.probe",
+                lambda: target_shell("cat", probe, maximum_bytes=4096),
+            )
+        except QtraceError as error:
+            if route == "app-private" and _is_private_capability_failure(error):
+                raise _PrivateCapabilityFailure(str(error)) from error
+            raise
+
+    def _probe_load(
+        self,
+        *,
+        target_shell,
+        route: str,
+        remote_dir: str,
+        tracer_remote: str,
+        companion_remote: str,
+    ) -> bytes:
+        try:
+            return _device_operation(
+                "deploy.probe",
+                lambda: target_shell(
+                    "env",
+                    f"LD_LIBRARY_PATH={remote_dir}",
+                    f"LD_PRELOAD={companion_remote}",
+                    "/system/bin/linker64",
+                    "--list",
+                    tracer_remote,
+                    maximum_bytes=64 * 1024,
+                ),
+            )
+        except QtraceError as error:
+            if route == "app-private" and _is_private_capability_failure(error):
+                raise _PrivateCapabilityFailure(str(error)) from error
+            if _is_private_capability_failure(error):
+                wrapped = QtraceError(
+                    ErrorCode.TRACER_LOAD_FAILED,
+                    "deploy.probe",
+                    f"target linker load probe failed: {error.detail}",
+                )
+                raise wrapped from error
+            raise
 
     def _attempt(
         self,
@@ -231,8 +335,8 @@ class Deployer:
         session_id: str,
         artifacts: TracerArtifacts,
     ) -> Deployment:
-        app_shell = self._access_shell(device, package, access_mode)
-        control_shell = device.shell if route == "local-tmp" else app_shell
+        target_shell = device.target_shell
+        control_shell = self._control_shell(device, access_mode, route)
         probe = _remote_join(remote_dir, f".qtrace-probe-{session_id}")
         tracer_remote = _remote_join(remote_dir, "libqbdi_tracer.so")
         companion_remote = _remote_join(remote_dir, "libshadowhook_nothing.so")
@@ -241,31 +345,69 @@ class Deployer:
             companion_remote: artifacts.companion,
         }
         try:
-            control_shell("mkdir", "-p", remote_dir, maximum_bytes=64 * 1024)
-            control_shell("chmod", "0755", remote_dir, maximum_bytes=64 * 1024)
-            control_shell("touch", probe, maximum_bytes=64 * 1024)
-            control_shell("chmod", "0644", probe, maximum_bytes=64 * 1024)
-            app_shell("cat", probe, maximum_bytes=4096)
+            self._probe_route_capability(
+                control_shell=control_shell,
+                target_shell=target_shell,
+                route=route,
+                remote_dir=remote_dir,
+                probe=probe,
+            )
 
-            if route == "app-private" and access_mode == "run-as":
-                staging_dir = f"/data/local/tmp/qtrace/{session_id}"
-                device.shell("mkdir", "-p", staging_dir, maximum_bytes=64 * 1024)
-                device.shell("chmod", "0755", staging_dir, maximum_bytes=64 * 1024)
+            # adb push uses the adbd identity even when control is bound to Magisk
+            # su. Stage as shell, then let the selected control identity publish
+            # into app-private or root-created local-tmp directories.
+            needs_staging = device.root_strategy == "su" or (
+                route == "app-private" and access_mode == "run-as"
+            )
+            if needs_staging:
+                staging_dir = f"/data/local/tmp/qtrace-staging/{session_id}"
+                _device_operation(
+                    "deploy.stage",
+                    lambda: device.shell(
+                        "mkdir", "-p", staging_dir, maximum_bytes=64 * 1024
+                    ),
+                )
+                _device_operation(
+                    "deploy.stage",
+                    lambda: device.shell(
+                        "chmod", "0755", staging_dir, maximum_bytes=64 * 1024
+                    ),
+                )
                 for remote, host in host_paths.items():
                     staged = _remote_join(staging_dir, f".stage-{PurePosixPath(remote).name}")
-                    device.push(host, staged)
-                    device.shell("chmod", "0644", staged, maximum_bytes=64 * 1024)
-                    app_shell("cp", staged, remote, maximum_bytes=64 * 1024)
+                    _device_operation("deploy.push", lambda: device.push(host, staged))
+                    _device_operation(
+                        "deploy.stage",
+                        lambda: device.shell(
+                            "chmod", "0644", staged, maximum_bytes=64 * 1024
+                        ),
+                    )
+                    _device_operation(
+                        "deploy.stage",
+                        lambda: control_shell("cp", staged, remote, maximum_bytes=64 * 1024),
+                    )
             else:
-                device.push(artifacts.tracer_so, tracer_remote)
-                device.push(artifacts.companion, companion_remote)
-            control_shell("chmod", "0755", tracer_remote, maximum_bytes=64 * 1024)
-            control_shell("chmod", "0755", companion_remote, maximum_bytes=64 * 1024)
+                _device_operation(
+                    "deploy.push", lambda: device.push(artifacts.tracer_so, tracer_remote)
+                )
+                _device_operation(
+                    "deploy.push", lambda: device.push(artifacts.companion, companion_remote)
+                )
+            _device_operation(
+                "deploy.permissions",
+                lambda: control_shell("chmod", "0755", tracer_remote, maximum_bytes=64 * 1024),
+            )
+            _device_operation(
+                "deploy.permissions",
+                lambda: control_shell("chmod", "0755", companion_remote, maximum_bytes=64 * 1024),
+            )
 
             hashes: dict[str, str] = {}
             for remote, host in host_paths.items():
                 host_digest = _host_sha256(host)
-                device_digest = _device_sha256(remote, app_shell)
+                device_digest = _device_operation(
+                    "deploy.integrity", lambda: _device_sha256(remote, target_shell)
+                )
                 if host_digest != device_digest:
                     _fail(
                         ErrorCode.ARTIFACT_INTEGRITY_FAILED,
@@ -274,14 +416,12 @@ class Deployer:
                     )
                 hashes[remote] = host_digest
 
-            load_output = app_shell(
-                "env",
-                f"LD_LIBRARY_PATH={remote_dir}",
-                f"LD_PRELOAD={companion_remote}",
-                "/system/bin/linker64",
-                "--list",
-                tracer_remote,
-                maximum_bytes=64 * 1024,
+            load_output = self._probe_load(
+                target_shell=target_shell,
+                route=route,
+                remote_dir=remote_dir,
+                tracer_remote=tracer_remote,
+                companion_remote=companion_remote,
             )
             load_probe = {
                 "status": "ok",
@@ -295,12 +435,6 @@ class Deployer:
                 sha256=hashes,
                 load_probe=load_probe,
             )
-        except QtraceError as error:
-            if error.code == ErrorCode.ARTIFACT_INTEGRITY_FAILED.value:
-                raise
-            raise _RouteProbeFailure(str(error)) from error
-        except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
-            raise _RouteProbeFailure(str(error)) from error
         finally:
             try:
                 control_shell("rm", "-f", probe, maximum_bytes=64 * 1024)
@@ -314,7 +448,27 @@ class Deployer:
             _fail("session.id_invalid", "deploy", "session ID must be a lowercase UUIDv4")
         package = device.package
         access_mode = device.access_mode
-        if package is None or access_mode not in {"root", "run-as"}:
+        root_strategy = device.root_strategy
+        package_uid = device.package_uid
+        target_strategy = device.target_strategy
+        valid_binding = (
+            package is not None
+            and access_mode in {"root", "run-as"}
+            and isinstance(package_uid, int)
+            and not isinstance(package_uid, bool)
+            and package_uid > 0
+            and target_strategy in {"run-as", "su-uid"}
+            and (
+                (access_mode == "root" and root_strategy in {"direct", "su"})
+                or (
+                    access_mode == "run-as"
+                    and root_strategy == "none"
+                    and target_strategy == "run-as"
+                )
+            )
+            and (target_strategy != "su-uid" or access_mode == "root")
+        )
+        if not valid_binding:
             _fail(
                 "device.unbound",
                 "deploy",
@@ -336,7 +490,7 @@ class Deployer:
                 session_id,
                 validated,
             )
-        except _RouteProbeFailure as private_error:
+        except _PrivateCapabilityFailure as private_error:
             fallback_dir = f"/data/local/tmp/qtrace/{session_id}"
             try:
                 deployment = self._attempt(
@@ -348,7 +502,7 @@ class Deployer:
                     session_id,
                     validated,
                 )
-            except _RouteProbeFailure as fallback_error:
+            except QtraceError as fallback_error:
                 wrapped = QtraceError(
                     ErrorCode.TRACER_LOAD_FAILED,
                     "deploy.probe",

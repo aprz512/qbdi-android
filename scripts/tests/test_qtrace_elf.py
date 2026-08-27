@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from qtrace.device import AdbDevice
 from qtrace.elf import ElfInspector, TargetResolver
 from qtrace.errors import QtraceError
 from qtrace.models import (
@@ -188,6 +189,19 @@ class ProviderBoundaryFake:
         if self.pull_error is not None:
             raise self.pull_error
         return self.pull_result
+
+
+class InstalledApkRunner:
+    def __init__(self, outputs):
+        self.outputs = dict(outputs)
+        self.calls = []
+
+    def capture(self, command, *, maximum_bytes, timeout):
+        command = tuple(command)
+        self.calls.append((command, maximum_bytes, timeout))
+        if command not in self.outputs:
+            raise AssertionError(f"unexpected adb command: {command!r}")
+        return self.outputs[command]
 
 
 class RaisingPath:
@@ -555,6 +569,33 @@ class TargetResolverTests(unittest.TestCase):
             "/data/app/split_config.arm64_v8a.apk!/lib/arm64-v8a/libtarget.so",
             resolved.device_binary,
         )
+
+    def test_real_adb_provider_continues_from_empty_base_member_to_split_hit(self):
+        base = (
+            "/data/app/~~9lCyyVYNZiRf1LlUj274Jg==/"
+            "com.aprz.qbdiandroid-hCRBTRTLLT7gbWeO0joMXA==/base.apk"
+        )
+        split = base.removesuffix("base.apk") + "split_config.arm64_v8a.apk"
+        member = "lib/arm64-v8a/libtarget.so"
+        prefix = ("adb", "-s", "SERIAL")
+        adb_runner = InstalledApkRunner({
+            prefix + ("shell", "pm", "path", "com.example.external"):
+                f"package:{base}\npackage:{split}\n".encode(),
+            prefix + ("exec-out", "unzip", "-p", base, member): b"",
+            prefix + ("exec-out", "unzip", "-p", split, member): b"split-device",
+        })
+        inspector_runner = FakeRunner(
+            readelf_by_content={b"split-device": ARM64_READELF.encode()},
+            nm_by_content={b"split-device": b"work T 120 40\n"},
+        )
+        resolver = TargetResolver(
+            ElfInspector(inspector_runner, Path("/ndk bin")),
+            AdbDevice("SERIAL", adb_runner),
+        )
+
+        resolved = resolver.resolve(config_with_scene(SymbolScene("work", "work")))
+
+        self.assertEqual(f"{split}!/{member}", resolved.device_binary)
 
     def test_installed_module_rejects_no_match_and_multiple_matches(self):
         member = "lib/arm64-v8a/libtarget.so"

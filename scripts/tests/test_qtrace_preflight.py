@@ -46,14 +46,20 @@ class FakeDevice:
         abi=b"arm64-v8a\n",
         api=b"34\n",
         root=b"0\n",
+        su_root=None,
         run_as=b"20000\n",
+        stat_uid=b"20000\n",
+        su_uid=b"20000\n",
         df=b"Filesystem 1024-blocks Used Available Capacity Mounted on\n/data 1000000 1 999999 1% /data\n",
         package_paths=("/data/app/base.apk",),
     ):
         self.abi = abi
         self.api = api
         self.root = root
+        self.su_root = su_root
         self.run_as = run_as
+        self.stat_uid = stat_uid
+        self.su_uid = su_uid
         self.df = df
         self.package_paths = package_paths
         self.events = []
@@ -97,8 +103,40 @@ class FakeDevice:
             return self.df
         raise AssertionError(f"unexpected shell command: {command!r}")
 
-    def bind_package(self, package, access_mode):
-        self.events.append(("bind", package, access_mode))
+    def su_shell(self, *args, timeout=30.0, maximum_bytes=1_048_576):
+        self.shell_calls.append((("su", *args), timeout, maximum_bytes))
+        if args == ("id", "-u"):
+            if self.su_root is None:
+                raise QtraceError("device.command_failed", "device.shell", "su unavailable")
+            if isinstance(self.su_root, BaseException):
+                raise self.su_root
+            return self.su_root
+        if args == ("stat", "-c", "%u", "/data/user/0/com.example.external"):
+            if isinstance(self.stat_uid, BaseException):
+                raise self.stat_uid
+            return self.stat_uid
+        raise AssertionError(f"unexpected su command: {args!r}")
+
+    def su_uid_shell(self, uid, *args, timeout=30.0, maximum_bytes=1_048_576):
+        self.shell_calls.append((("su-uid", str(uid), *args), timeout, maximum_bytes))
+        if args != ("id", "-u"):
+            raise AssertionError(f"unexpected uid command: {args!r}")
+        if isinstance(self.su_uid, BaseException):
+            raise self.su_uid
+        return self.su_uid
+
+    def bind_package(
+        self,
+        package,
+        access_mode,
+        *,
+        root_strategy,
+        package_uid,
+        target_strategy,
+    ):
+        self.events.append((
+            "bind", package, access_mode, root_strategy, package_uid, target_strategy
+        ))
 
 
 class FakeFridaProbe:
@@ -148,12 +186,48 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(1, len(frida.calls))
         self.assertTrue(0 < frida.calls[0][1] <= 9.0)
         self.assertTrue(all(call[1] <= 2.0 for call in device.shell_calls))
+        self.assertIn(
+            ("bind", "com.example.external", "root", "direct", 20000, "run-as"),
+            device.events,
+        )
 
     def test_uses_run_as_when_root_is_unavailable(self):
         device = FakeDevice(root=QtraceError("device.command_failed", "device.shell", "not root"))
         (_selected, identity), _frida = self.run_preflight(device)
         self.assertEqual("run-as", identity.access_mode)
-        self.assertIn(("bind", "com.example.external", "run-as"), device.events)
+        self.assertIn(
+            ("bind", "com.example.external", "run-as", "none", 20000, "run-as"),
+            device.events,
+        )
+
+    def test_accepts_magisk_su_root_and_keeps_run_as_target_identity(self):
+        device = FakeDevice(root=b"2000\n", su_root=b"0\n", run_as=b"10905\n")
+
+        (_selected, identity), _frida = self.run_preflight(device)
+
+        self.assertEqual("root", identity.access_mode)
+        self.assertIn(
+            ("bind", "com.example.external", "root", "su", 10905, "run-as"),
+            device.events,
+        )
+
+    def test_root_without_run_as_resolves_uid_and_proves_su_uid_target(self):
+        no_run_as = QtraceError("device.command_failed", "device.shell", "not debuggable")
+        device = FakeDevice(
+            root=b"2000\n",
+            su_root=b"0\n",
+            run_as=no_run_as,
+            stat_uid=b"10905\n",
+            su_uid=b"10905\n",
+        )
+
+        (_selected, identity), _frida = self.run_preflight(device)
+
+        self.assertEqual("root", identity.access_mode)
+        self.assertIn(
+            ("bind", "com.example.external", "root", "su", 10905, "su-uid"),
+            device.events,
+        )
 
     def test_rejects_missing_package_without_apk(self):
         device = FakeDevice(package_paths=())

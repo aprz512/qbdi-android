@@ -10,6 +10,12 @@ from qtrace.device import AdbDevice, DeviceSelector
 from qtrace.errors import ErrorCode, QtraceError
 
 
+PIXEL_BASE_APK = (
+    "/data/app/~~9lCyyVYNZiRf1LlUj274Jg==/"
+    "com.aprz.qbdiandroid-hCRBTRTLLT7gbWeO0joMXA==/base.apk"
+)
+
+
 @dataclass(frozen=True)
 class Call:
     command: tuple[str, ...]
@@ -93,6 +99,18 @@ class DeviceSelectorTests(unittest.TestCase):
 
 
 class AdbDeviceTests(unittest.TestCase):
+    def test_accepts_literal_tildes_in_normalized_absolute_pixel_apk_path(self):
+        command = (
+            "adb", "-s", "SERIAL", "shell", "pm", "path", "com.aprz.qbdiandroid"
+        )
+        device = AdbDevice(
+            "SERIAL", FakeRunner({command: f"package:{PIXEL_BASE_APK}\n".encode()})
+        )
+
+        self.assertEqual((PIXEL_BASE_APK,), device.package_apk_paths("com.aprz.qbdiandroid"))
+        with self.assertRaises(QtraceError):
+            device.shell("echo", "~")
+
     def test_package_paths_pid_install_push_and_read_are_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
             apk = Path(directory) / "external.apk"
@@ -155,6 +173,23 @@ class AdbDeviceTests(unittest.TestCase):
             self.assertEqual(destination, result)
             self.assertEqual(b"ELF bytes", destination.read_bytes())
             self.assertEqual(512 * 1024 * 1024, runner.calls[0].maximum_bytes)
+
+    def test_empty_unzip_output_signals_missing_member_without_publishing_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "libtarget.so"
+            command = (
+                "adb", "-s", "SERIAL", "exec-out", "unzip", "-p",
+                PIXEL_BASE_APK, "lib/arm64-v8a/libtarget.so",
+            )
+            device = AdbDevice("SERIAL", FakeRunner({command: b""}))
+
+            with self.assertRaises(FileNotFoundError):
+                device.pull_member(
+                    PIXEL_BASE_APK,
+                    "lib/arm64-v8a/libtarget.so",
+                    destination,
+                )
+            self.assertFalse(destination.exists())
 
     def test_package_query_transport_failure_is_not_package_absence(self):
         command = (
@@ -225,19 +260,59 @@ class AdbDeviceTests(unittest.TestCase):
 
     def test_validated_package_binding_is_idempotent_but_cannot_be_retargeted(self):
         device = AdbDevice("SERIAL", FakeRunner())
-        device.bind_package("com.example.one", "root")
-        device.bind_package("com.example.one", "root")
+        binding = {
+            "root_strategy": "su",
+            "package_uid": 10905,
+            "target_strategy": "run-as",
+        }
+        device.bind_package("com.example.one", "root", **binding)
+        device.bind_package("com.example.one", "root", **binding)
 
-        for package, access_mode in (
-            ("com.example.two", "root"),
-            ("com.example.one", "run-as"),
+        for package, access_mode, overrides in (
+            ("com.example.two", "root", {}),
+            ("com.example.one", "run-as", {"root_strategy": "none"}),
+            ("com.example.one", "root", {"package_uid": 10906}),
+            ("com.example.one", "root", {"target_strategy": "su-uid"}),
         ):
+            candidate = dict(binding)
+            candidate.update(overrides)
             with self.subTest(package=package, access_mode=access_mode), self.assertRaisesRegex(
                 QtraceError, "device.binding_conflict"
             ):
-                device.bind_package(package, access_mode)
+                device.bind_package(package, access_mode, **candidate)
         self.assertEqual("com.example.one", device.package)
         self.assertEqual("root", device.access_mode)
+        self.assertEqual("su", device.root_strategy)
+        self.assertEqual(10905, device.package_uid)
+        self.assertEqual("run-as", device.target_strategy)
+
+    def test_root_and_target_shells_use_the_bound_validated_identity_strategy(self):
+        prefix = ("adb", "-s", "SERIAL", "shell")
+        runner = FakeRunner({
+            prefix + ("su", "-c", "'id -u'"): b"0\n",
+            prefix + ("su", "-c", "'mkdir -p /data/local/tmp/qtrace'"): b"",
+            prefix + ("run-as", "com.example.one", "id", "-u"): b"10905\n",
+            prefix + ("su", "10905", "-c", "'id -u'"): b"10905\n",
+        })
+        device = AdbDevice("SERIAL", runner)
+
+        self.assertEqual(b"0\n", device.su_shell("id", "-u"))
+        device.bind_package(
+            "com.example.one", "root",
+            root_strategy="su", package_uid=10905, target_strategy="run-as",
+        )
+        device.root_shell("mkdir", "-p", "/data/local/tmp/qtrace")
+        self.assertEqual(b"10905\n", device.target_shell("id", "-u"))
+
+        uid_device = AdbDevice("SERIAL", runner)
+        uid_device.bind_package(
+            "com.example.one", "root",
+            root_strategy="su", package_uid=10905, target_strategy="su-uid",
+        )
+        self.assertEqual(b"10905\n", uid_device.target_shell("id", "-u"))
+
+        with self.assertRaises(QtraceError):
+            device.su_shell("echo", "unsafe;id")
 
 
 if __name__ == "__main__":

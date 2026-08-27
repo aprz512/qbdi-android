@@ -5,6 +5,8 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.bounded_process import BoundedProcessError
+
 from qtrace.build import ArtifactBuilder, Deployer, TracerArtifacts
 from qtrace.errors import QtraceError
 from qtrace.models import TracerConfig
@@ -135,33 +137,68 @@ class FakeDeployDevice:
         private_probe=True,
         corrupt_hash=False,
         load_failure=False,
+        private_load_failure=False,
+        capability_error=None,
+        push_error=None,
+        chmod_error=None,
+        hash_error=None,
+        load_error=None,
         access_mode="root",
+        root_strategy="direct",
+        target_strategy="run-as",
+        package_uid=20000,
     ):
         self.package = "com.example.external"
         self.access_mode = access_mode
+        self.root_strategy = root_strategy
+        self.target_strategy = target_strategy
+        self.package_uid = package_uid
         self.private_probe = private_probe
         self.corrupt_hash = corrupt_hash
         self.load_failure = load_failure
+        self.private_load_failure = private_load_failure
+        self.capability_error = capability_error
+        self.push_error = push_error
+        self.chmod_error = chmod_error
+        self.hash_error = hash_error
+        self.load_error = load_error
         self.calls = []
         self.host_by_remote = {}
 
-    def shell(self, *args, timeout=30.0, maximum_bytes=1_048_576):
+    def _execute(self, channel, args, timeout, maximum_bytes):
         if timeout <= 0 or maximum_bytes <= 0:
             raise AssertionError("unbounded deployment command")
-        self.calls.append(("shell", tuple(args), timeout, maximum_bytes))
-        command = args[2:] if args[:2] == ("run-as", self.package) else args
+        self.calls.append((channel, tuple(args), timeout, maximum_bytes))
+        command = args
         if command[0] in ("mkdir", "touch", "cat"):
             if any("data/user/0" in arg for arg in command) and not self.private_probe:
                 raise QtraceError("device.route_probe_failed", "deploy.probe", "private denied")
+            if (
+                self.capability_error is not None
+                and command[0] in ("touch", "cat")
+                and any("data/user/0" in arg for arg in command)
+            ):
+                raise self.capability_error
             return b""
         if command[0] == "chmod":
+            if self.chmod_error is not None and command[-1].endswith(".so"):
+                raise self.chmod_error
+            return b""
+        if command[0] == "cp":
+            self.host_by_remote[command[2]] = self.host_by_remote[command[1]]
             return b""
         if command[0] == "sha256sum":
+            if self.hash_error is not None:
+                raise self.hash_error
             digest = hashlib.sha256(self.host_by_remote[command[1]].read_bytes()).hexdigest()
             if self.corrupt_hash:
                 digest = "0" * 64
             return f"{digest}  {command[1]}\n".encode()
         if command[0] == "env":
+            if self.load_error is not None:
+                raise self.load_error
+            if self.private_load_failure and any("data/user/0" in arg for arg in command):
+                raise QtraceError("device.load_probe_failed", "deploy.probe", "private namespace")
             if self.load_failure:
                 raise QtraceError("device.load_probe_failed", "deploy.probe", "namespace denied")
             return b"libshadowhook_nothing.so => namespace-ok\n"
@@ -169,8 +206,19 @@ class FakeDeployDevice:
             return b""
         raise AssertionError(f"unexpected shell call: {args!r}")
 
+    def shell(self, *args, timeout=30.0, maximum_bytes=1_048_576):
+        return self._execute("shell", args, timeout, maximum_bytes)
+
+    def root_shell(self, *args, timeout=30.0, maximum_bytes=1_048_576):
+        return self._execute("root", args, timeout, maximum_bytes)
+
+    def target_shell(self, *args, timeout=30.0, maximum_bytes=1_048_576):
+        return self._execute("target", args, timeout, maximum_bytes)
+
     def push(self, source, destination, *, timeout=30.0):
         self.calls.append(("push", Path(source), destination, timeout))
+        if self.push_error is not None:
+            raise self.push_error
         self.host_by_remote[destination] = Path(source)
 
 
@@ -196,7 +244,8 @@ class DeployerTests(unittest.TestCase):
         self.assertEqual("ok", deployment.load_probe["status"])
         pushed = [call for call in device.calls if call[0] == "push"]
         self.assertEqual(2, len(pushed))
-        self.assertTrue(any(call[0] == "shell" and call[1][0:2] == ("chmod", "0755") for call in device.calls))
+        self.assertTrue(any(call[0] == "root" and call[1][0:2] == ("chmod", "0755") for call in device.calls))
+        self.assertTrue(any(call[0] == "target" and call[1][0] == "sha256sum" for call in device.calls))
 
     def test_falls_back_only_after_explicit_private_probe_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -214,7 +263,12 @@ class DeployerTests(unittest.TestCase):
 
     def test_run_as_fallback_uses_shell_for_directory_control_and_app_identity_for_reads(self):
         with tempfile.TemporaryDirectory() as directory:
-            device = FakeDeployDevice(private_probe=False, access_mode="run-as")
+            device = FakeDeployDevice(
+                private_probe=False,
+                access_mode="run-as",
+                root_strategy="none",
+                target_strategy="run-as",
+            )
             deployment = Deployer().deploy(
                 device,
                 "123e4567-e89b-42d3-a456-426614174000",
@@ -230,11 +284,105 @@ class DeployerTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(fallback_mkdir))
         self.assertTrue(any(
-            call[0] == "shell"
-            and call[1][:3] == ("run-as", "com.example.external", "cat")
+            call[0] == "target"
+            and call[1][0] == "cat"
             and "/data/local/tmp/qtrace/" in call[1][-1]
             for call in device.calls
         ))
+
+    def test_su_root_controls_paths_but_target_identity_reads_hashes_and_loads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(root_strategy="su", target_strategy="run-as")
+            deployment = Deployer().deploy(
+                device,
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+
+        self.assertEqual("app-private", deployment.route)
+        self.assertTrue(any(call[0] == "root" and call[1][0] == "mkdir" for call in device.calls))
+        self.assertTrue(any(call[0] == "target" and call[1][0] == "cat" for call in device.calls))
+        self.assertTrue(any(call[0] == "target" and call[1][0] == "sha256sum" for call in device.calls))
+        self.assertTrue(any(call[0] == "target" and call[1][0] == "env" for call in device.calls))
+
+    def test_su_root_fallback_stages_shell_push_then_copies_with_root_transport(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(
+                private_probe=False,
+                root_strategy="su",
+                target_strategy="run-as",
+            )
+            deployment = Deployer().deploy(
+                device,
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+
+        self.assertEqual("local-tmp", deployment.route)
+        pushed = [call for call in device.calls if call[0] == "push"]
+        self.assertTrue(all("/data/local/tmp/qtrace-staging/" in call[2] for call in pushed))
+        self.assertEqual(
+            2,
+            sum(call[0] == "root" and call[1][0] == "cp" for call in device.calls),
+        )
+
+    def test_private_linker_capability_failure_may_fall_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            deployment = Deployer().deploy(
+                FakeDeployDevice(private_load_failure=True),
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+        self.assertEqual("local-tmp", deployment.route)
+
+    def test_only_private_permission_process_failures_are_capability_failures(self):
+        permission = QtraceError("process.failed", "process", "remote command failed")
+        permission.__cause__ = BoundedProcessError(
+            "remote command failed", returncode=1, stderr=b"Permission denied\n"
+        )
+        transport = QtraceError("process.failed", "process", "remote command failed")
+        transport.__cause__ = BoundedProcessError(
+            "remote command failed", returncode=1, stderr=b"error: device offline\n"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            deployment = Deployer().deploy(
+                FakeDeployDevice(capability_error=permission),
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+        self.assertEqual("local-tmp", deployment.route)
+
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(capability_error=transport)
+            with self.assertRaises(QtraceError) as caught:
+                Deployer().deploy(
+                    device,
+                    "123e4567-e89b-42d3-a456-426614174000",
+                    self.make_artifacts(Path(directory)),
+                )
+        self.assertIs(transport, caught.exception)
+        self.assertNotIn("/data/local/tmp/qtrace/", repr(device.calls))
+
+    def test_generic_private_failures_do_not_attempt_fallback(self):
+        failures = (
+            {"capability_error": QtraceError("process.timeout", "process", "probe transport")},
+            {"push_error": QtraceError("process.timeout", "process", "push transport")},
+            {"chmod_error": QtraceError("device.command_failed", "deploy", "chmod transport")},
+            {"hash_error": QtraceError("device.command_failed", "deploy", "hash transport")},
+            {"corrupt_hash": True},
+            {"load_error": QtraceError("process.timeout", "process", "load transport")},
+        )
+        for options in failures:
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                device = FakeDeployDevice(**options)
+                with self.assertRaises(QtraceError):
+                    Deployer().deploy(
+                        device,
+                        "123e4567-e89b-42d3-a456-426614174000",
+                        self.make_artifacts(Path(directory)),
+                    )
+                self.assertNotIn("/data/local/tmp/qtrace/", repr(device.calls))
 
     def test_integrity_or_load_failure_removes_only_owned_probe_file(self):
         for options in ({"corrupt_hash": True}, {"load_failure": True}):
@@ -246,7 +394,10 @@ class DeployerTests(unittest.TestCase):
                         "123e4567-e89b-42d3-a456-426614174000",
                         self.make_artifacts(Path(directory)),
                     )
-                removals = [call for call in device.calls if call[0] == "shell" and call[1][0] == "rm"]
+                removals = [
+                    call for call in device.calls
+                    if call[0] in {"shell", "root", "target"} and call[1][0] == "rm"
+                ]
                 self.assertGreaterEqual(len(removals), 1)
                 self.assertTrue(all(".qtrace-probe-" in call[1][-1] for call in removals))
                 self.assertFalse(any("libqbdi_tracer.so" in call[1][-1] for call in removals))
@@ -264,6 +415,9 @@ class DeployerTests(unittest.TestCase):
             device = FakeDeployDevice()
             device.package = None
             device.access_mode = None
+            device.root_strategy = None
+            device.target_strategy = None
+            device.package_uid = None
             with self.assertRaisesRegex(QtraceError, "device.unbound"):
                 Deployer().deploy(
                     device,

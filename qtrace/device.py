@@ -15,7 +15,8 @@ from qtrace.errors import ErrorCode, QtraceError
 
 
 _SAFE_SHELL_TOKEN = re.compile(r"[A-Za-z0-9._/@:+,=-]+\Z")
-_SAFE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9._@:+,=-]+\Z")
+_SAFE_REMOTE_PATH_COMPONENT = re.compile(r"[A-Za-z0-9._~@:+,=-]+\Z")
+_SAFE_ARCHIVE_COMPONENT = re.compile(r"[A-Za-z0-9._@:+,=-]+\Z")
 _SAFE_SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 _MAX_ADB_LIST_BYTES = 64 * 1024
@@ -56,18 +57,23 @@ def _validate_package(package: str) -> str:
     return package
 
 
-def _validate_remote_path(path: str) -> str:
+def _is_valid_remote_path(path: object) -> bool:
     if not isinstance(path, str) or not path.startswith("/") or "//" in path:
-        _fail("device.path_invalid", "device", "remote path must be an absolute normalized path")
+        return False
     parts = path.split("/")[1:]
     if not parts or any(
-        not part or part in {".", ".."} or _SAFE_PATH_COMPONENT.fullmatch(part) is None
+        not part
+        or part in {".", ".."}
+        or _SAFE_REMOTE_PATH_COMPONENT.fullmatch(part) is None
         for part in parts
     ):
-        _fail("device.path_invalid", "device", "remote path contains an unsafe component")
-    normalized = str(PurePosixPath(path))
-    if normalized != path:
-        _fail("device.path_invalid", "device", "remote path must be normalized")
+        return False
+    return str(PurePosixPath(path)) == path
+
+
+def _validate_remote_path(path: str) -> str:
+    if not _is_valid_remote_path(path):
+        _fail("device.path_invalid", "device", "remote path must be an absolute normalized path")
     return path
 
 
@@ -76,7 +82,7 @@ def _validate_archive_member(member: str) -> str:
         _fail("device.member_invalid", "device.pull_member", "APK member path is invalid")
     parts = member.split("/")
     if not parts or any(
-        not part or part in {".", ".."} or _SAFE_PATH_COMPONENT.fullmatch(part) is None
+        not part or part in {".", ".."} or _SAFE_ARCHIVE_COMPONENT.fullmatch(part) is None
         for part in parts
     ):
         _fail("device.member_invalid", "device.pull_member", "APK member path is unsafe")
@@ -88,9 +94,31 @@ def _shell_tokens(arguments: tuple[str, ...]) -> tuple[str, ...]:
     if not arguments:
         _fail("device.shell_invalid", "device.shell", "shell command must not be empty")
     for token in arguments:
-        if not isinstance(token, str) or _SAFE_SHELL_TOKEN.fullmatch(token) is None:
+        # Android package paths can contain literal ``~`` inside an absolute path.
+        # Keep it out of the generic shell alphabet (where a leading tilde has
+        # expansion semantics) and accept it only after full path normalization.
+        fixed_stat_format = token == "%u"
+        safe = isinstance(token, str) and (
+            _SAFE_SHELL_TOKEN.fullmatch(token) is not None
+            or _is_valid_remote_path(token)
+            or fixed_stat_format
+        )
+        if not safe:
             _fail("device.shell_token_unsafe", "device.shell", "shell token contains unsafe characters")
     return arguments
+
+
+def _compose_su_command(arguments: tuple[str, ...]) -> str:
+    """Validate each interpolated token before building the fixed ``su -c`` operand."""
+    # adb concatenates the remote-shell argv. Single quotes (which interpolated
+    # tokens cannot contain) preserve the validated command as one ``-c`` value.
+    return "'" + " ".join(_shell_tokens(arguments)) + "'"
+
+
+def _validate_package_uid(uid: int) -> int:
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid <= 0:
+        _fail("device.uid_invalid", "device.bind", "package UID must be a positive integer")
+    return uid
 
 
 def _decode(output: bytes, *, stage: str) -> str:
@@ -132,6 +160,9 @@ class AdbDevice:
         self.runner = runner
         self._package: str | None = None
         self._access_mode: str | None = None
+        self._root_strategy: str | None = None
+        self._package_uid: int | None = None
+        self._target_strategy: str | None = None
 
     @property
     def package(self) -> str | None:
@@ -141,28 +172,80 @@ class AdbDevice:
     def access_mode(self) -> str | None:
         return self._access_mode
 
-    def bind_package(self, package: str, access_mode: str) -> None:
-        """Bind validated deployment identity once; conflicting reuse is forbidden."""
+    @property
+    def root_strategy(self) -> str | None:
+        return self._root_strategy
+
+    @property
+    def package_uid(self) -> int | None:
+        return self._package_uid
+
+    @property
+    def target_strategy(self) -> str | None:
+        return self._target_strategy
+
+    def bind_package(
+        self,
+        package: str,
+        access_mode: str,
+        *,
+        root_strategy: str,
+        package_uid: int,
+        target_strategy: str,
+    ) -> None:
+        """Bind control and target identities once; conflicting reuse is forbidden."""
         validated = _validate_package(package)
         if access_mode not in {"root", "run-as"}:
             _fail("device.access_mode_invalid", "device.bind", "access mode is invalid")
-        binding = (validated, access_mode)
-        if self._package is None and self._access_mode is None:
-            self._package, self._access_mode = binding
+        uid = _validate_package_uid(package_uid)
+        if root_strategy not in {"direct", "su", "none"}:
+            _fail("device.root_strategy_invalid", "device.bind", "root strategy is invalid")
+        if target_strategy not in {"run-as", "su-uid"}:
+            _fail("device.target_strategy_invalid", "device.bind", "target strategy is invalid")
+        if access_mode == "run-as" and (root_strategy != "none" or target_strategy != "run-as"):
+            _fail(
+                "device.binding_invalid",
+                "device.bind",
+                "run-as access cannot carry a root or su-uid strategy",
+            )
+        if access_mode == "root" and root_strategy == "none":
+            _fail("device.binding_invalid", "device.bind", "root access requires a root strategy")
+        if target_strategy == "su-uid" and access_mode != "root":
+            _fail("device.binding_invalid", "device.bind", "su-uid requires root access")
+        binding = (validated, access_mode, root_strategy, uid, target_strategy)
+        current = (
+            self._package,
+            self._access_mode,
+            self._root_strategy,
+            self._package_uid,
+            self._target_strategy,
+        )
+        if all(value is None for value in current):
+            (
+                self._package,
+                self._access_mode,
+                self._root_strategy,
+                self._package_uid,
+                self._target_strategy,
+            ) = binding
             return
-        if (self._package, self._access_mode) != binding:
+        if current != binding:
             _fail(
                 "device.binding_conflict",
                 "device.bind",
-                "device is already bound to a different package or access mode",
+                "device is already bound to a different identity strategy",
             )
 
-    def command(self, *args: str) -> list[str]:
+    def _host_command(self, *args: str) -> list[str]:
         if any(not isinstance(argument, str) or not argument or "\0" in argument for argument in args):
             _fail("device.command_invalid", "device", "ADB arguments must be nonempty strings without NUL")
+        return ["adb", "-s", self.serial, *args]
+
+    def command(self, *args: str) -> list[str]:
+        command = self._host_command(*args)
         if args and args[0] == "shell":
             _shell_tokens(tuple(args[1:]))
-        return ["adb", "-s", self.serial, *args]
+        return command
 
     def _capture(
         self,
@@ -171,11 +254,16 @@ class AdbDevice:
         timeout: float,
         maximum_bytes: int,
         stage: str,
+        composed_shell: bool = False,
     ) -> bytes:
         maximum_bytes, timeout = _validate_limits(maximum_bytes, timeout, stage=stage)
         try:
             return self.runner.capture(
-                self.command(*arguments),
+                (
+                    self._host_command(*arguments)
+                    if composed_shell
+                    else self.command(*arguments)
+                ),
                 maximum_bytes=maximum_bytes,
                 timeout=timeout,
             )
@@ -198,6 +286,72 @@ class AdbDevice:
             maximum_bytes=maximum_bytes,
             stage="device.shell",
         )
+
+    def su_shell(
+        self,
+        *args: str,
+        timeout: float = 30.0,
+        maximum_bytes: int = 1_048_576,
+    ) -> bytes:
+        command = _compose_su_command(tuple(args))
+        return self._capture(
+            ("shell", "su", "-c", command),
+            timeout=timeout,
+            maximum_bytes=maximum_bytes,
+            stage="device.shell",
+            composed_shell=True,
+        )
+
+    def su_uid_shell(
+        self,
+        uid: int,
+        *args: str,
+        timeout: float = 30.0,
+        maximum_bytes: int = 1_048_576,
+    ) -> bytes:
+        uid = _validate_package_uid(uid)
+        command = _compose_su_command(tuple(args))
+        return self._capture(
+            ("shell", "su", str(uid), "-c", command),
+            timeout=timeout,
+            maximum_bytes=maximum_bytes,
+            stage="device.shell",
+            composed_shell=True,
+        )
+
+    def root_shell(
+        self,
+        *args: str,
+        timeout: float = 30.0,
+        maximum_bytes: int = 1_048_576,
+    ) -> bytes:
+        if self._access_mode != "root" or self._root_strategy is None:
+            _fail("device.unbound", "device.root_shell", "root identity is not bound")
+        if self._root_strategy == "direct":
+            return self.shell(*args, timeout=timeout, maximum_bytes=maximum_bytes)
+        if self._root_strategy == "su":
+            return self.su_shell(*args, timeout=timeout, maximum_bytes=maximum_bytes)
+        _fail("device.binding_invalid", "device.root_shell", "bound root strategy is invalid")
+
+    def target_shell(
+        self,
+        *args: str,
+        timeout: float = 30.0,
+        maximum_bytes: int = 1_048_576,
+    ) -> bytes:
+        if self._package is None or self._package_uid is None or self._target_strategy is None:
+            _fail("device.unbound", "device.target_shell", "target identity is not bound")
+        if self._target_strategy == "run-as":
+            return self.shell(
+                "run-as", self._package, *args,
+                timeout=timeout, maximum_bytes=maximum_bytes,
+            )
+        if self._target_strategy == "su-uid":
+            return self.su_uid_shell(
+                self._package_uid, *args,
+                timeout=timeout, maximum_bytes=maximum_bytes,
+            )
+        _fail("device.binding_invalid", "device.target_shell", "bound target strategy is invalid")
 
     def package_apk_paths(
         self, package: str, *, timeout: float = 30.0
@@ -299,7 +453,9 @@ class AdbDevice:
             stage="device.pull_member",
         )
         if not output:
-            _fail("device.member_missing", "device.pull_member", "APK member is empty or missing")
+            # Android's unzip exits successfully with no bytes for a missing member.
+            # Match DeviceFileProvider's absence contract so the resolver tries splits.
+            raise FileNotFoundError(member)
         destination = Path(destination)
         try:
             try:
