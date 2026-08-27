@@ -109,19 +109,21 @@ class _PublicationToken:
         return self.output_path / name
 
 
-def _collector_token(parent: int, session_id: str, output: _OutputDirectory) -> _PublicationToken:
+def _collector_token(parent: int, session_id: str, output: _OutputDirectory,
+                     expected_report_identity: tuple[int, int]) -> _PublicationToken:
     held_parent = os.dup(parent)
     directory = -1
     try:
         directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                             getattr(os, "O_NOFOLLOW", 0), dir_fd=held_parent)
         report = os.stat("report.json", dir_fd=directory, follow_symlinks=False)
-        if not stat.S_ISREG(report.st_mode):
-            raise _error("artifact.report_invalid", "collector report is not a regular file")
+        if (not stat.S_ISREG(report.st_mode)
+                or (report.st_dev, report.st_ino) != expected_report_identity):
+            raise FileExistsError("collector report changed before token issuance")
         parent_info = os.fstat(held_parent)
         return _PublicationToken(session_id, output.path, held_parent, directory,
                                  (parent_info.st_dev, parent_info.st_ino),
-                                 (report.st_dev, report.st_ino))
+                                 expected_report_identity)
     except BaseException:
         if directory >= 0:
             os.close(directory)
@@ -582,17 +584,23 @@ def _write_json(path: Path, value: object) -> None:
         os.fsync(output.fileno())
 
 
-def _rewrite_published_report(parent: int, session_id: str,
-                              records: Sequence[Mapping[str, object]],
-                              errors: Sequence[Mapping[str, str]], *,
-                              expected_identity: tuple[int, int]) -> None:
-    """Refresh the committed diagnostic through the held directory descriptor."""
+def _refresh_payload(session_id: str, records: Sequence[Mapping[str, object]],
+                     errors: Sequence[Mapping[str, str]]) -> bytes:
     payload = json.dumps({"schema": 1, "sessionId": session_id,
                           "artifacts": list(records), "errors": list(errors)},
                          sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                          allow_nan=False).encode("utf-8")
     if len(payload) > 1024 * 1024:
         raise _error("artifact.report_too_large", "report refresh exceeds size bound")
+    return payload
+
+
+def _rewrite_published_report(parent: int, session_id: str,
+                              records: Sequence[Mapping[str, object]],
+                              errors: Sequence[Mapping[str, str]], *,
+                              expected_identity: tuple[int, int]) -> tuple[int, int]:
+    """Refresh the committed diagnostic through the held directory descriptor."""
+    payload = _refresh_payload(session_id, records, errors)
     directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                         getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
     descriptor = -1
@@ -612,15 +620,69 @@ def _rewrite_published_report(parent: int, session_id: str,
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
+        replacement = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+        if not stat.S_ISREG(replacement.st_mode):
+            raise _error("artifact.report_invalid", "refresh replacement is not a regular file")
+        replacement_identity = (replacement.st_dev, replacement.st_ino)
         owned_temporary = temporary
         temporary = ""
         if not conditional_replace_at(directory, owned_temporary, "report.json", expected_identity):
             raise FileExistsError("collector report changed during refresh")
         os.fsync(directory)
+        return replacement_identity
     finally:
         if temporary:
             try:
                 os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+        os.close(directory)
+
+
+def _write_refresh_error_report(parent: int, session_id: str,
+                                records: Sequence[Mapping[str, object]],
+                                errors: Sequence[Mapping[str, str]]) -> str:
+    """Durably add a no-replace diagnostic beside a failed canonical refresh."""
+    payload = _refresh_payload(session_id, records, errors)
+    directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                        getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
+    descriptor = -1
+    name = ""
+    committed = False
+    try:
+        for _ in range(32):
+            candidate = "report.error." + uuid.uuid4().hex + ".json"
+            try:
+                descriptor = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                     getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                                     0o600, dir_fd=directory)
+            except FileExistsError:
+                continue
+            name = candidate
+            break
+        if descriptor < 0:
+            raise _error("artifact.report_refresh", "unable to allocate refresh error report")
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("short refresh error report write")
+            offset += written
+        os.fsync(descriptor)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise _error("artifact.report_invalid", "refresh error report is unsafe")
+        os.close(descriptor)
+        descriptor = -1
+        os.fsync(directory)
+        committed = True
+        return name
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if name and not committed:
+            try:
+                os.unlink(name, dir_fd=directory)
             except FileNotFoundError:
                 pass
         os.close(directory)
@@ -1025,27 +1087,52 @@ class ArtifactProcessor:
             _write_json(stage_root / "device.json", device_metadata)
             _write_json(stage_root / "report.json", {"schema": 1, "sessionId": session_id, "artifacts": records, "errors": errors})
             staged_report = os.stat("report.json", dir_fd=stage_fd, follow_symlinks=False)
+            canonical_report_identity = (staged_report.st_dev, staged_report.st_ino)
             relative_files = tuple(path.relative_to(stage_root) for path in files)
             error_count = len(errors)
             final = self._publish(stage_root, output_handle, session_id, files, errors, records,
                                   parent=parent_fd, stage_fd=stage_fd, stage_name=stage_name)
             published = True
+            refresh_failed = False
+            refresh_error_path: Path | None = None
             if len(errors) != error_count:
                 try:
-                    _rewrite_published_report(parent_fd, session_id, records, errors,
-                                              expected_identity=(staged_report.st_dev, staged_report.st_ino))
-                except KeyboardInterrupt:
-                    raise
-                except Exception as error:
+                    canonical_report_identity = _rewrite_published_report(
+                        parent_fd, session_id, records, errors,
+                        expected_identity=canonical_report_identity)
+                except BaseException as error:
+                    recovery_name = getattr(error, "recovery_name", None)
+                    detail = f"committed report refresh failed: {error}"
+                    if type(recovery_name) is str:
+                        detail += f"; recovery file={recovery_name}"
                     failure = {"name": "", "code": "artifact.report_refresh",
-                               "detail": f"committed report refresh failed: {error}"[:256]}
+                               "detail": detail[:256]}
                     errors.append(failure)
                     records.append(failure)
-            result = ArtifactResult(final, tuple(final / path for path in relative_files), tuple(errors),
+                    refresh_failed = True
+                    try:
+                        refresh_error_path = final / _write_refresh_error_report(
+                            parent_fd, session_id, records, errors)
+                    except BaseException as persistence_error:
+                        persistence_failure = {
+                            "name": "", "code": "artifact.report_refresh_persist",
+                            "detail": f"failed to persist refresh diagnostic: {persistence_error}"[:256],
+                        }
+                        errors.append(persistence_failure)
+                        records.append(persistence_failure)
+                        if hasattr(error, "add_note"):
+                            error.add_note(f"refresh diagnostic publication failed: {persistence_error}")
+                    if not isinstance(error, Exception):
+                        raise
+            result_files = tuple(final / path for path in relative_files)
+            if refresh_error_path is not None:
+                result_files += (refresh_error_path,)
+            result = ArtifactResult(final, result_files, tuple(errors),
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
-            if create_token:
-                object.__setattr__(result, "_publication_token", _collector_token(parent_fd, session_id, output_handle))
+            if create_token and not refresh_failed:
+                object.__setattr__(result, "_publication_token", _collector_token(
+                    parent_fd, session_id, output_handle, canonical_report_identity))
             return result
         except QtraceError:
             raise

@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceError
+from qtrace.artifacts import ArtifactResult
 from qtrace.models import (
     AppConfig, ElfIdentity, OffsetScene, ResolvedScene, ResolvedTarget, SymbolScene, TargetConfig, TracerConfig, UserConfig,
 )
@@ -264,6 +265,23 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(document["effective_config"]["config"])
         self.assertTrue(document["native"]["request"])
         self.assertEqual(7, document["native"]["status"]["generation"])
+
+    def test_tokenless_collector_result_never_overwrites_canonical_report(self) -> None:
+        class ConcurrentCollector:
+            def collect_session(self, _device, _package, session_id, _status, output, _timeout):
+                directory = Path(output) / session_id
+                directory.mkdir()
+                (directory / "report.json").write_text('{"status":"CONCURRENT"}', encoding="utf-8")
+                return ArtifactResult(directory, (), ({"name": "", "code": "artifact.report_refresh",
+                                                       "detail": "refresh rejected"},), EXIT_PARTIAL)
+
+        device = FakeDevice([status("sealed", transition=1, reason="duration_elapsed", acknowledged=True)], [4242])
+        runner, _ = orchestrator(device, ManualClock(), ConcurrentCollector())
+        result = runner.run(self.run_request())
+        canonical = Path(self.directory.name) / SESSION_ID / "report.json"
+        self.assertEqual("CONCURRENT", json.loads(canonical.read_text(encoding="utf-8"))["status"])
+        self.assertNotEqual(canonical, result.report)
+        self.assertTrue(result.report.name.startswith(SESSION_ID + ".error."))
 
     def test_timed_stop_timeout_is_partial_without_reinjection(self) -> None:
         device = FakeDevice([status("stop_requested", transition=1)] * 100, [4242])

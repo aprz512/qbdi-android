@@ -558,6 +558,109 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 processor.collect_session("d", "com.example.app", session, status, Path(root), 1)
 
+    def test_refresh_returns_the_replaced_canonical_report_inode(self):
+        from qtrace.artifacts import _rewrite_published_report
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            parent = Path(root)
+            directory = parent / session
+            directory.mkdir()
+            target = directory / "report.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            expected = (target.stat().st_dev, target.stat().st_ino)
+            descriptor = os.open(parent, os.O_RDONLY)
+            try:
+                current = _rewrite_published_report(
+                    descriptor, session, (), (), expected_identity=expected)
+            finally:
+                os.close(descriptor)
+            self.assertNotEqual(expected, current)
+            self.assertEqual(current, (target.stat().st_dev, target.stat().st_ino))
+
+    def test_refresh_returns_applied_inode_not_a_late_replacement(self):
+        from qtrace import artifacts as artifacts_module
+        from qtrace.report import conditional_replace_at
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            parent = Path(root)
+            directory = parent / session
+            directory.mkdir()
+            target = directory / "report.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            expected = (target.stat().st_dev, target.stat().st_ino)
+
+            def apply_then_replace(fd, temporary, name, identity):
+                applied = conditional_replace_at(fd, temporary, name, identity)
+                replacement = os.open("racer", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
+                os.write(replacement, b"CONCURRENT")
+                os.close(replacement)
+                os.replace("racer", name, src_dir_fd=fd, dst_dir_fd=fd)
+                return applied
+
+            descriptor = os.open(parent, os.O_RDONLY)
+            try:
+                with patch("qtrace.artifacts.conditional_replace_at", side_effect=apply_then_replace):
+                    current = artifacts_module._rewrite_published_report(
+                        descriptor, session, (), (), expected_identity=expected)
+            finally:
+                os.close(descriptor)
+            self.assertNotEqual(current, (target.stat().st_dev, target.stat().st_ino))
+
+    def test_refresh_concurrent_report_does_not_issue_merge_token(self):
+        from qtrace.artifacts import publish_collector_report
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        status = self._status(session, artifacts=["run.trace.txt"])
+        processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+        original_publish = processor._publish
+
+        def publish_with_concurrent_report(*args, **kwargs):
+            final = original_publish(*args, **kwargs)
+            replacement = final / "racer"
+            replacement.write_text('{"status":"CONCURRENT"}', encoding="utf-8")
+            os.replace(replacement, final / "report.json")
+            args[4].append({"name": "", "code": "artifact.late", "detail": "late diagnostic"})
+            return final
+
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                processor, "_publish", side_effect=publish_with_concurrent_report):
+            result = processor.collect_session("d", "com.example.app", session, status, Path(root), 1)
+            canonical = result.output_dir / "report.json"
+            self.assertFalse(hasattr(result, "_publication_token"))
+            self.assertEqual("CONCURRENT", json.loads(canonical.read_text()) ["status"])
+            self.assertIn("artifact.report_refresh", {error["code"] for error in result.errors})
+            with self.assertRaises(ValueError):
+                publish_collector_report(None, ReportWriter(), self._report(session, "sealed"))
+            self.assertEqual("CONCURRENT", json.loads(canonical.read_text())["status"])
+
+    def test_manual_refresh_failure_persists_error_report_with_recovery_name(self):
+        from qtrace.report import ConditionalReplaceRecoveryError
+        session = "11111111-1111-4111-8111-111111111111"
+        processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
+        original_publish = processor._publish
+
+        def publish_with_late_error(*args, **kwargs):
+            args[4].append({"name": "", "code": "artifact.late", "detail": "late diagnostic"})
+            return original_publish(*args, **kwargs)
+
+        refresh_error = ConditionalReplaceRecoveryError(
+            ".report-prior.tmp", OSError("old report stat failed"), OSError("rollback failed"))
+        with tempfile.TemporaryDirectory() as root, patch.object(
+                processor, "_publish", side_effect=publish_with_late_error), patch(
+                "qtrace.artifacts._rewrite_published_report", side_effect=refresh_error):
+            result = processor.pull_manual(
+                "d", "com.example.app", PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
+            error_report = next(path for path in result.files if path.name.startswith("report.error."))
+            persisted = json.loads(error_report.read_text(encoding="utf-8"))
+            self.assertIn("artifact.report_refresh", {error["code"] for error in persisted["errors"]})
+            detail = next(error["detail"] for error in persisted["errors"]
+                          if error["code"] == "artifact.report_refresh")
+            self.assertIn(".report-prior.tmp", detail)
+            canonical = json.loads((result.output_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertNotIn("artifact.report_refresh", {error["code"] for error in canonical["errors"]})
+
     def test_collector_token_never_overwrites_a_concurrent_report_inode(self):
         from qtrace.artifacts import publish_collector_report
         session = "11111111-1111-4111-8111-111111111111"
