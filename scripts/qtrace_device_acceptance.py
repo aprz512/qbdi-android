@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import stat
-import subprocess
 import sys
 import tempfile
 import time
@@ -50,19 +49,17 @@ class SubprocessRunner:
 
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult:
-        if allowed == (0,) and cwd is None:
-            try:
-                output = capture_bounded(command, maximum_bytes=1_048_576, timeout=timeout)
-            except BoundedProcessError as error:
-                raise RuntimeError(str(error)) from error
-            return CommandResult(output.decode("utf-8", errors="strict"), "", 0)
-        completed = subprocess.run(list(command), cwd=cwd, text=True, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, timeout=timeout, check=False)
-        if len(completed.stdout.encode()) > 1_048_576 or len(completed.stderr.encode()) > 1_048_576:
-            raise RuntimeError("command output exceeded one MiB bound")
-        if completed.returncode not in allowed:
-            raise RuntimeError(f"command failed ({completed.returncode}): {' '.join(command)}\n{completed.stderr}")
-        return CommandResult(completed.stdout, completed.stderr, completed.returncode)
+        if cwd is not None:
+            raise ValueError("bounded acceptance commands do not support a working directory")
+        try:
+            output = capture_bounded(command, maximum_bytes=1_048_576, timeout=timeout)
+        except BoundedProcessError as error:
+            if error.returncode in allowed:
+                return CommandResult(
+                    "", error.stderr.decode("utf-8", errors="replace"), error.returncode,
+                )
+            raise RuntimeError(str(error)) from error
+        return CommandResult(output.decode("utf-8", errors="strict"), "", 0)
 
     def read_text(self, path: Path, *, timeout: float) -> str:
         if self.inject_first_read_failure:
@@ -70,10 +67,32 @@ class SubprocessRunner:
             raise ConnectionError("injected one-shot ADB read failure")
         if str(path).startswith("/data/data/"):
             return self.run(("adb", "-s", self.device, "exec-out", "run-as", PACKAGE, "cat", str(path)), timeout=timeout).stdout
-        metadata = path.stat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+        deadline = time.monotonic() + timeout
+        if timeout <= 0:
+            raise RuntimeError("host report read timeout must be positive")
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError as error:
+            raise RuntimeError("host report is not a bounded regular file") from error
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+                raise RuntimeError("host report is not a bounded regular file")
+            chunks = bytearray()
+            while len(chunks) < metadata.st_size:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("host report read exceeded timeout")
+                chunk = os.read(descriptor, min(64 * 1024, metadata.st_size - len(chunks)))
+                if not chunk:
+                    raise RuntimeError("host report changed during bounded read")
+                chunks.extend(chunk)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("host report read exceeded timeout")
+        finally:
+            os.close(descriptor)
+        if len(chunks) != metadata.st_size:
             raise RuntimeError("host report is not a bounded regular file")
-        return path.read_text(encoding="utf-8")
+        return bytes(chunks).decode("utf-8", errors="strict")
 
 
 class OneShotArtifactRead:
@@ -89,11 +108,20 @@ class OneShotArtifactRead:
         return self.client.read_file(name, maximum_bytes=maximum_bytes)
 
 
-def _read_retry(runner: Runner, path: Path, *, timeout: float) -> str:
+def _read_retry(runner: Runner, path: Path, *, timeout: float,
+                deadline: float | None = None) -> str:
+    if timeout <= 0:
+        raise ValueError("read timeout must be positive")
+    final_deadline = time.monotonic() + timeout if deadline is None else deadline
+    def read_once() -> str:
+        remaining = final_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("read deadline elapsed before retry")
+        return runner.read_text(path, timeout=remaining)
     try:
-        return runner.read_text(path, timeout=timeout)
+        return read_once()
     except ConnectionError:
-        return runner.read_text(path, timeout=timeout)
+        return read_once()
 
 
 def _strict_json(raw: str) -> dict[str, object]:
@@ -127,7 +155,9 @@ def _wait_for_baseline(runner: Runner) -> dict[str, object]:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            value = _strict_json(_read_retry(runner, Path(BASELINE_PATH), timeout=min(2.0, remaining)))
+            value = _strict_json(_read_retry(
+                runner, Path(BASELINE_PATH), timeout=min(2.0, remaining), deadline=deadline,
+            ))
             if (type(value) is dict and value.get("iterations") == ITERATIONS and
                     value.get("seed") == SEED and isinstance(value.get("result"), str)):
                 return value

@@ -198,6 +198,65 @@ class FakeArtifactClient:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_subprocess_runner_uses_bounded_capture_for_allowed_crash_exit(self):
+        from scripts.bounded_process import BoundedProcessError
+        from scripts.qtrace_device_acceptance import SubprocessRunner
+
+        with patch("scripts.qtrace_device_acceptance.capture_bounded", side_effect=BoundedProcessError(
+                "crashed", returncode=2, stderr=b"recovering")) as capture:
+            result = SubprocessRunner("SERIAL", inject_first_read_failure=False).run(
+                ("qtrace", "demo"), timeout=3.0, allowed=(0, 2),
+            )
+        self.assertEqual(("", "recovering", 2), (result.stdout, result.stderr, result.returncode))
+        self.assertEqual(1_048_576, capture.call_args.kwargs["maximum_bytes"])
+
+    def test_host_reads_are_nofollow_bounded_and_timeout_checked(self):
+        from scripts.qtrace_device_acceptance import SubprocessRunner
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oversized = root / "oversized.json"
+            oversized.write_bytes(b"x" * (1_048_576 + 1))
+            safe = root / "safe.json"
+            safe.write_text("safe")
+            link = root / "link.json"
+            link.symlink_to(safe)
+            runner = SubprocessRunner("SERIAL", inject_first_read_failure=False)
+            with self.assertRaisesRegex(RuntimeError, "bounded regular file"):
+                runner.read_text(oversized, timeout=1.0)
+            with self.assertRaisesRegex(RuntimeError, "bounded regular file"):
+                runner.read_text(link, timeout=1.0)
+
+    def test_retry_clips_second_read_to_the_shared_deadline(self):
+        from scripts.qtrace_device_acceptance import _read_retry
+
+        class Runner:
+            def __init__(self): self.timeouts = []
+            def read_text(self, _path, *, timeout):
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    raise ConnectionError("once")
+                return "ok"
+
+        runner = Runner()
+        with patch("scripts.qtrace_device_acceptance.time.monotonic", side_effect=(100.0, 100.0, 101.5)):
+            self.assertEqual("ok", _read_retry(runner, Path("result"), timeout=5.0))
+        self.assertEqual([5.0, 3.5], runner.timeouts)
+
+    def test_baseline_sleep_is_clipped_to_the_absolute_deadline(self):
+        from scripts.qtrace_device_acceptance import _wait_for_baseline
+
+        class Runner:
+            def read_text(self, _path, *, timeout):
+                raise ValueError("not ready")
+
+        with patch("scripts.qtrace_device_acceptance.time.monotonic", side_effect=(
+                100.0, 100.0, 100.0, 100.0, 114.95, 115.0)), \
+                patch("scripts.qtrace_device_acceptance.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "within 15 seconds"):
+                _wait_for_baseline(Runner())
+        sleep.assert_called_once_with(0.04999999999999716)
+
     def test_timed_semantics_reparses_a_real_stopped_qtrb_and_metrics_v3_sidecar(self):
         from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
 
