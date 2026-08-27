@@ -103,6 +103,20 @@ class SchemaContractsTests(unittest.TestCase):
             with self.subTest(state=state_name):
                 self.assertEqual(status(state_name), validate_status_shape(status(state_name)))
 
+    def test_status_state_reason_acknowledgement_corpus_is_rejected(self):
+        invalid = (
+            ("running", "duration_elapsed", True),
+            ("stop_requested", "", False),
+            ("sealed", "duration_elapsed", False),
+        )
+        for state_name, reason, acknowledgement in invalid:
+            with self.subTest(state=state_name):
+                document = status(state_name)
+                document["reason"] = reason
+                document["stopAcknowledged"] = acknowledgement
+                with self.assertRaises(ValueError):
+                    validate_status_shape(document)
+
     def test_runtime_corpus_rejects_offset_zero_misalignment_and_reversed_ranges(self):
         for start, end in (("0x0", "0x4"), ("0x2", "0x4"), ("0x8", "0x4")):
             with self.subTest(start=start, end=end), tempfile.TemporaryDirectory() as temporary:
