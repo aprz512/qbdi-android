@@ -6,7 +6,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from qtrace.config import load_config
+from qtrace.errors import ConfigError
 from qtrace.status import STATUS_KEYS, validate_status_shape
 
 
@@ -99,6 +102,14 @@ class SchemaContractsTests(unittest.TestCase):
         for state_name in ("installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"):
             with self.subTest(state=state_name):
                 self.assertEqual(status(state_name), validate_status_shape(status(state_name)))
+
+    def test_runtime_corpus_rejects_offset_zero_misalignment_and_reversed_ranges(self):
+        for start, end in (("0x0", "0x4"), ("0x2", "0x4"), ("0x8", "0x4")):
+            with self.subTest(start=start, end=end), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "config.json"
+                path.write_text(json.dumps({"schemaVersion": 1, "app": {"package": "com.example.app"}, "target": {"module": "libx.so"}, "scenes": [{"name": "x", "startOffset": start, "endOffset": end}]}))
+                with self.assertRaises(ConfigError):
+                    load_config(path)
 
 
 class FakeRunner:
