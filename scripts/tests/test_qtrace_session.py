@@ -194,6 +194,47 @@ class StatusTests(unittest.TestCase):
                               SESSION_ID, PACKAGE, 7, 4242, SCENES, None)
         self.assertEqual("sealed", parsed["state"])
 
+    def test_native_status_shape_has_the_same_artifact_and_session_rejections(self) -> None:
+        """Removing the shared structural guard would let its entry points drift again."""
+        from qtrace.artifacts import _json_status
+        from qtrace.status import NativeStatusValidationError, validate_status_shape
+
+        valid = (
+            status("running", transition=1),
+            status("stop_incomplete", transition=2),
+            status("sealed", transition=3, reason="duration_elapsed", acknowledged=True),
+        )
+        for candidate in valid:
+            with self.subTest(valid=candidate["state"]):
+                self.assertEqual(candidate, validate_status_shape(candidate))
+                self.assertEqual(candidate["state"], parse_status(
+                    candidate, SESSION_ID, PACKAGE, 7, 4242, SCENES, None)["state"])
+                self.assertEqual(candidate["state"], _json_status(
+                    json.dumps(candidate).encode("utf-8"), SESSION_ID, PACKAGE)["state"])
+
+        invalid = {
+            "bool_schema_version": {**status("running", transition=1), "schemaVersion": True},
+            "bool_generation": {**status("running", transition=1), "generation": True},
+            "duplicate_active": {**status("running", transition=1), "activeScenes": [
+                {"sceneIndex": 0, "tid": 7, "sealed": False},
+                {"sceneIndex": 0, "tid": 7, "sealed": False},
+            ]},
+            "bad_issue": {**status("running", transition=1), "warnings": [
+                {"code": "E", "path": "/x", "message": True},
+            ]},
+            "bad_reason_ack": status("sealed", transition=1, reason="duration_elapsed", acknowledged=False),
+        }
+        for name, candidate in invalid.items():
+            with self.subTest(invalid=name):
+                with self.assertRaises(NativeStatusValidationError):
+                    validate_status_shape(candidate)
+                with self.assertRaises(QtraceError) as session_error:
+                    parse_status(candidate, SESSION_ID, PACKAGE, 7, 4242, SCENES, None)
+                self.assertEqual("session.status_invalid", session_error.exception.code)
+                with self.assertRaises(QtraceError) as artifact_error:
+                    _json_status(json.dumps(candidate).encode("utf-8"), SESSION_ID, PACKAGE)
+                self.assertEqual("artifact.status_invalid", artifact_error.exception.code)
+
     def test_rejects_extra_bool_and_unsafe_artifact_fields(self) -> None:
         for mutate in (
             lambda value: value.update({"extra": 1}),

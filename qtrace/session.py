@@ -22,15 +22,9 @@ from qtrace.injector import InjectionRequest, InjectionResult
 from qtrace.lock import TargetLock
 from qtrace.models import AppConfig, OffsetScene, ResolvedScene, ResolvedTarget, SymbolScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.report import ReportWriter, SessionReport, SessionStage
+from qtrace.status import STATE_ORDER, NativeStatusValidationError, validate_status_shape
 
 
-_STATUS_KEYS = {
-    "schemaVersion", "sessionId", "generation", "packageName", "pid", "state", "reason",
-    "transitionMonotonicNs", "normalizedScenes", "activeScenes", "artifacts",
-    "stopAcknowledged", "warnings", "errors",
-}
-_STATE_ORDER = {"installed": 0, "running": 1, "stop_requested": 2, "stopping": 3,
-                "sealed": 4, "stop_incomplete": 4}
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _ANY_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TRACER_ARTIFACT_SUFFIXES = (".trace.bin", ".trace.bin.lz4", ".flight.bin")
@@ -82,23 +76,6 @@ class SessionResult:
     outputs: tuple[Path, ...]
 
 
-def _integer(value: object, field: str, *, positive: bool = False) -> int:
-    if type(value) is not int or value < 0 or (positive and value == 0):
-        raise QtraceError("session.status_invalid", "session.status", f"{field} is not a valid integer")
-    return value
-
-
-def _text(value: object, field: str, limit: int) -> str:
-    try:
-        valid = isinstance(value, str) and len(value.encode("utf-8")) <= limit and not any(
-            unicodedata.category(character).startswith("C") for character in value)
-    except UnicodeEncodeError:
-        valid = False
-    if not valid:
-        raise QtraceError("session.status_invalid", "session.status", f"{field} is not valid text")
-    return value
-
-
 def _artifact_basename(value: object) -> bool:
     try:
         return (isinstance(value, str) and value not in {"", ".", ".."} and
@@ -135,18 +112,6 @@ def _transient_adb(error: BaseException) -> bool:
     return any(token in stderr for token in ("device offline", "device not found", "transport closed", "transport error"))
 
 
-def _issues(value: object, field: str) -> None:
-    if type(value) is not list or len(value) > 256:
-        raise QtraceError("session.status_invalid", "session.status", f"{field} is invalid")
-    for issue in value:
-        if type(issue) is not dict or set(issue) != {"code", "path", "message"} or any(
-            not isinstance(issue[key], str) for key in issue
-        ):
-            raise QtraceError("session.status_invalid", "session.status", f"{field} has an invalid issue")
-        for key in issue:
-            _text(issue[key], f"{field}.{key}", 1024)
-
-
 def _expected_scenes(scenes: tuple[ResolvedScene, ...]) -> list[dict[str, object]]:
     return [{"name": scene.name, "startOffset": scene.start_offset, "endOffset": scene.end_offset}
             for scene in scenes]
@@ -154,60 +119,31 @@ def _expected_scenes(scenes: tuple[ResolvedScene, ...]) -> list[dict[str, object
 
 def parse_status(value: object, session_id: str, package: str, generation: int, pid: int,
                  scenes: tuple[ResolvedScene, ...], previous: Mapping[str, object] | None) -> dict[str, object]:
-    if type(value) is not dict or set(value) != _STATUS_KEYS:
-        raise QtraceError("session.status_invalid", "session.status", "status does not have the exact schema")
-    if value.get("schemaVersion") != 1 or value.get("sessionId") != session_id or value.get("packageName") != package:
+    try:
+        status = validate_status_shape(value)
+    except NativeStatusValidationError as error:
+        raise QtraceError("session.status_invalid", "session.status", error.detail) from error
+    if status["sessionId"] != session_id or status["packageName"] != package:
         raise QtraceError("session.status_identity", "session.status", "status identity does not match the session")
-    if _integer(value.get("generation"), "generation", positive=True) != generation or _integer(value.get("pid"), "pid", positive=True) != pid:
+    if status["generation"] != generation or status["pid"] != pid:
         raise QtraceError("session.status_identity", "session.status", "status process identity does not match")
-    state = value.get("state")
-    if not isinstance(state, str) or state not in _STATE_ORDER:
-        raise QtraceError("session.status_invalid", "session.status", "status state or reason is invalid")
-    _text(state, "state", 64)
-    _text(value.get("reason"), "reason", 256)
-    transition = _integer(value.get("transitionMonotonicNs"), "transitionMonotonicNs")
-    if value.get("normalizedScenes") != _expected_scenes(scenes):
+    state = status["state"]
+    transition = status["transitionMonotonicNs"]
+    if status["normalizedScenes"] != _expected_scenes(scenes):
         raise QtraceError("session.status_identity", "session.status", "normalized scenes do not match")
-    active = value.get("activeScenes")
-    if type(active) is not list or len(active) > 256:
-        raise QtraceError("session.status_invalid", "session.status", "active scenes are invalid")
-    active_identity: set[tuple[int, int]] = set()
-    for entry in active:
-        if type(entry) is not dict or set(entry) != {"sceneIndex", "tid", "sealed"}:
-            raise QtraceError("session.status_invalid", "session.status", "active scene is invalid")
-        index = _integer(entry.get("sceneIndex"), "active scene index")
-        if index >= len(scenes) or _integer(entry.get("tid"), "active scene tid", positive=True) <= 0 or type(entry.get("sealed")) is not bool:
-            raise QtraceError("session.status_invalid", "session.status", "active scene is invalid")
-        identity = (index, entry["tid"])
-        if identity in active_identity:
-            raise QtraceError("session.status_invalid", "session.status", "active scene identity is duplicated")
-        active_identity.add(identity)
-    artifacts = value.get("artifacts")
-    if type(artifacts) is not list or len(artifacts) > 256 or len(set(artifacts)) != len(artifacts) or any(
+    artifacts = status["artifacts"]
+    if any(
         not _artifact_basename(name) or not name.endswith(_TRACER_ARTIFACT_SUFFIXES) or
         any(found.group(0) != session_id for found in _ANY_UUID.finditer(name)) for name in artifacts
     ):
         raise QtraceError("session.status_invalid", "session.status", "artifacts are not safe unique basenames")
-    if type(value.get("stopAcknowledged")) is not bool:
-        raise QtraceError("session.status_invalid", "session.status", "stop acknowledgement is invalid")
-    reason, acknowledged = value["reason"], value["stopAcknowledged"]
-    if state in {"installed", "running"}:
-        valid_terminal = reason == "" and acknowledged is False
-    elif state in {"stop_requested", "stopping", "stop_incomplete"}:
-        valid_terminal = reason == "duration_elapsed" and acknowledged is False
-    else:
-        valid_terminal = reason == "duration_elapsed" and acknowledged is True
-    if not valid_terminal:
-        raise QtraceError("session.status_invalid", "session.status", "status reason/acknowledgement does not match state")
-    _issues(value.get("warnings"), "warnings")
-    _issues(value.get("errors"), "errors")
     if previous is not None:
         old_state, old_transition = previous["state"], previous["transitionMonotonicNs"]
         if ((old_state in {"sealed", "stop_incomplete"} and state != old_state) or
-                _STATE_ORDER[state] < _STATE_ORDER[old_state] or transition < old_transition or
+                STATE_ORDER[state] < STATE_ORDER[old_state] or transition < old_transition or
                 (state != old_state and transition <= old_transition)):
             raise QtraceError("session.status_regression", "session.status", "native status regressed")
-    return dict(value)
+    return status
 
 
 def _strict_json(raw: bytes) -> object:

@@ -23,14 +23,12 @@ from typing import Any, Mapping, Sequence
 
 from qtrace.errors import EXIT_PARTIAL, QtraceError
 from qtrace.report import conditional_replace_at
+from qtrace.status import NativeStatusValidationError, validate_status_shape
 
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 _TRACE_SUFFIXES = (".trace.bin.lz4", ".trace.bin", ".trace.txt.lz4", ".trace.txt", ".flight.bin")
 _SIDE_SUFFIXES = (".metrics", ".crash")
-_STATUS_KEYS = {"schemaVersion", "sessionId", "generation", "packageName", "pid", "state",
-                "reason", "transitionMonotonicNs", "normalizedScenes", "activeScenes",
-                "artifacts", "stopAcknowledged", "warnings", "errors"}
 _MAX_NAME_BYTES = 255
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 _MAX_STATUS_BYTES = 64 * 1024
@@ -421,15 +419,6 @@ def _temporary_name(name: str) -> bool:
 
 
 def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[str, object]:
-    def safe_text(value: object, limit: int) -> bool:
-        if type(value) is not str:
-            return False
-        try:
-            return len(value.encode("utf-8")) <= limit and not any(
-                unicodedata.category(character).startswith("C") for character in value)
-        except UnicodeEncodeError:
-            return False
-
     def reject_constant(value: str) -> object:
         raise ValueError("non-finite JSON number")
 
@@ -447,69 +436,22 @@ def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[st
                            object_pairs_hook=reject_duplicate)
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
         raise _error("artifact.status_invalid", "native status is not strict JSON") from error
-    if type(value) is not dict or set(value) != _STATUS_KEYS:
-        raise _error("artifact.status_invalid", "native status schema is not exact")
-    if (not safe_text(value.get("packageName"), 256) or value.get("sessionId") != session_id or
-            not safe_text(value.get("sessionId"), 64) or
-            value.get("schemaVersion") != 1 or
-            (package is not None and value.get("packageName") != package)):
+    try:
+        status = validate_status_shape(value)
+    except NativeStatusValidationError as error:
+        raise _error("artifact.status_invalid", error.detail) from error
+    if status["sessionId"] != session_id or (package is not None and status["packageName"] != package):
         raise _error("artifact.status_identity", "native status identity does not match")
-    if (type(value.get("generation")) is not int or value["generation"] <= 0 or
-            type(value.get("pid")) is not int or value["pid"] <= 0 or
-            type(value.get("transitionMonotonicNs")) is not int or value["transitionMonotonicNs"] < 0):
-        raise _error("artifact.status_invalid", "native status numeric fields are invalid")
-    state = value.get("state")
-    if type(state) is not str or state not in {"installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"}:
-        raise _error("artifact.status_invalid", "native status state is invalid")
-    if not safe_text(value.get("reason"), 256) or not safe_text(value.get("state"), 64) or type(value.get("stopAcknowledged")) is not bool:
-        raise _error("artifact.status_invalid", "native status terminal fields are invalid")
-    if state in {"installed", "running"} and (value["reason"] != "" or value["stopAcknowledged"]):
-        raise _error("artifact.status_invalid", "active native status has terminal fields")
-    if state in {"stop_requested", "stopping", "stop_incomplete"} and (
-            value["reason"] != "duration_elapsed" or value["stopAcknowledged"]):
-        raise _error("artifact.status_invalid", "stopping native status has invalid reason")
-    if state == "sealed" and (value["reason"] != "duration_elapsed" or not value["stopAcknowledged"]):
-        raise _error("artifact.status_invalid", "sealed native status has invalid acknowledgement")
-    if type(value.get("normalizedScenes")) is not list or type(value.get("activeScenes")) is not list:
-        raise _error("artifact.status_invalid", "native status scene fields are invalid")
-    if type(value.get("warnings")) is not list or type(value.get("errors")) is not list:
-        raise _error("artifact.status_invalid", "native status issue fields are invalid")
-    scenes = value["normalizedScenes"]
-    if len(scenes) > 256 or any(
-            type(scene) is not dict or set(scene) != {"name", "startOffset", "endOffset"}
-            or not safe_text(scene["name"], 128) or type(scene["startOffset"]) is not int
-            or type(scene["endOffset"]) is not int or scene["startOffset"] < 0
-            or scene["endOffset"] <= scene["startOffset"]
-            for scene in scenes):
-        raise _error("artifact.status_invalid", "native normalized scenes are invalid")
-    active = value["activeScenes"]
-    if len(active) > 256 or any(
-            type(scene) is not dict or set(scene) != {"sceneIndex", "tid", "sealed"}
-            or type(scene["sceneIndex"]) is not int or scene["sceneIndex"] < 0
-            or type(scene["tid"]) is not int or scene["tid"] <= 0
-            or type(scene["sealed"]) is not bool
-            for scene in active):
-        raise _error("artifact.status_invalid", "native active scenes are invalid")
-    identities = [(scene["sceneIndex"], scene["tid"]) for scene in active]
-    if len(set(identities)) != len(identities) or any(index >= len(scenes) for index, _ in identities):
-        raise _error("artifact.status_invalid", "native active scene indices are invalid")
-    for issue_list in (value["warnings"], value["errors"]):
-        if len(issue_list) > 256 or any(
-                type(issue) is not dict or set(issue) != {"code", "path", "message"}
-                or any(not safe_text(issue[key], 1024) for key in issue)
-                for issue in issue_list):
-            raise _error("artifact.status_invalid", "native status issues are invalid")
-    artifacts = value.get("artifacts")
-    if (type(artifacts) is not list or any(type(item) is not str for item in artifacts)
-            or len(set(artifacts)) != len(artifacts)):
-        raise _error("artifact.status_invalid", "native status artifacts are invalid")
-    for item in artifacts:
-        _name(item, trace=True)
+    for item in status["artifacts"]:
+        try:
+            _name(item, trace=True)
+        except QtraceError as error:
+            raise _error("artifact.status_invalid", "native status artifact basename is invalid") from error
         uuids = re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", item,
                            flags=re.IGNORECASE)
         if any(found != session_id for found in uuids):
             raise _error("artifact.status_identity", "foreign artifact UUID")
-    return value
+    return status
 
 
 def _trace_roots(names: Sequence[str]) -> list[str]:
