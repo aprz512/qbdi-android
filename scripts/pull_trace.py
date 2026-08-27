@@ -86,6 +86,17 @@ MAX_LISTING_BYTES = 1024 * 1024
 MAX_METRICS_BYTES = 64 * 1024
 
 
+def _pull_named(client: object, package: str, name: str, destination: Path, timeout: float) -> None:
+    try:
+        from qtrace.artifacts import pull_named_artifacts
+    except ModuleNotFoundError as error:
+        if error.name != "qtrace":
+            raise
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from qtrace.artifacts import pull_named_artifacts
+    pull_named_artifacts(client, package, [name], destination, timeout=timeout)
+
+
 @dataclasses.dataclass(frozen=True)
 class CrashMarker:
     signal: int
@@ -321,10 +332,9 @@ def pull_artifact_set(
                 source = staging / name
                 # Keep the legacy CLI's publication semantics, but share the
                 # bounded/hash-checked named pull primitive with qtrace sessions.
-                from qtrace.artifacts import pull_named_artifacts
                 try:
-                    pull_named_artifacts(client, getattr(client, "package", "com.example.app"), [name], staging,
-                                         timeout=getattr(client, "timeout", 120.0))
+                    _pull_named(client, getattr(client, "package", "com.example.app"), name, staging,
+                                getattr(client, "timeout", 120.0))
                 except Exception as error:
                     raise PullTraceError(str(error)) from error
                 if compressed_only:
@@ -395,10 +405,9 @@ def pull_artifact_set(
                 prefix=".pull-trace-", dir=output_directory) as staging_name:
             staging = Path(staging_name)
             staged_source = staging / name
-            from qtrace.artifacts import pull_named_artifacts
             try:
-                pull_named_artifacts(client, getattr(client, "package", "com.example.app"), [name], staging,
-                                     timeout=getattr(client, "timeout", 120.0))
+                _pull_named(client, getattr(client, "package", "com.example.app"), name, staging,
+                            getattr(client, "timeout", 120.0))
             except Exception as error:
                 raise PullTraceError(str(error)) from error
             staged_sidecars = []

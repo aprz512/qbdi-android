@@ -113,6 +113,17 @@ class ArtifactTests(unittest.TestCase):
                                                              status, Path(root), 1)
             self.assertNotIn("run.trace.txt.metrics", [p.name for p in result.files])
 
+    def test_missing_native_status_recovers_listing_as_partial(self):
+        client = FakeClient({"old.trace.txt": b"TRACE_END status=completed\n",
+                             "new.trace.txt": b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).collect_session(
+                "d", "com.example.app", "11111111-1111-4111-8111-111111111111", None,
+                Path(root), 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertIn("new.trace.txt", [path.name for path in result.files])
+            self.assertIn("artifact.status_missing", {error["code"] for error in result.errors})
+
     def test_latest_rejects_non_strict_status_instead_of_fallback(self):
         session = "11111111-1111-4111-8111-111111111111"
         value = self._status(session, generation=float("nan"))

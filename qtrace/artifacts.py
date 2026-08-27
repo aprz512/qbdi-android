@@ -32,6 +32,7 @@ _STATUS_KEYS = {"schemaVersion", "sessionId", "generation", "packageName", "pid"
                 "artifacts", "stopAcknowledged", "warnings", "errors"}
 _MAX_NAME_BYTES = 255
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+_MAX_STATUS_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,15 @@ def _temporary_name(name: str) -> bool:
 
 
 def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[str, object]:
+    def safe_text(value: object, limit: int) -> bool:
+        if type(value) is not str:
+            return False
+        try:
+            return len(value.encode("utf-8")) <= limit and not any(
+                unicodedata.category(character).startswith("C") for character in value)
+        except UnicodeEncodeError:
+            return False
+
     def reject_constant(value: str) -> object:
         raise ValueError("non-finite JSON number")
 
@@ -262,13 +272,17 @@ def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[st
             document[key] = value
         return document
     try:
+        if type(raw) is not bytes or len(raw) > _MAX_STATUS_BYTES:
+            raise ValueError("native status exceeds bound")
         value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
                            object_pairs_hook=reject_duplicate)
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
         raise _error("artifact.status_invalid", "native status is not strict JSON") from error
     if type(value) is not dict or set(value) != _STATUS_KEYS:
         raise _error("artifact.status_invalid", "native status schema is not exact")
-    if (value.get("schemaVersion") != 1 or value.get("sessionId") != session_id or
+    if (not safe_text(value.get("packageName"), 256) or value.get("sessionId") != session_id or
+            not safe_text(value.get("sessionId"), 64) or
+            value.get("schemaVersion") != 1 or
             (package is not None and value.get("packageName") != package)):
         raise _error("artifact.status_identity", "native status identity does not match")
     if (type(value.get("generation")) is not int or value["generation"] <= 0 or
@@ -278,7 +292,7 @@ def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[st
     state = value.get("state")
     if type(state) is not str or state not in {"installed", "running", "stop_requested", "stopping", "sealed", "stop_incomplete"}:
         raise _error("artifact.status_invalid", "native status state is invalid")
-    if type(value.get("reason")) is not str or type(value.get("stopAcknowledged")) is not bool:
+    if not safe_text(value.get("reason"), 256) or not safe_text(value.get("state"), 64) or type(value.get("stopAcknowledged")) is not bool:
         raise _error("artifact.status_invalid", "native status terminal fields are invalid")
     if state in {"installed", "running"} and (value["reason"] != "" or value["stopAcknowledged"]):
         raise _error("artifact.status_invalid", "active native status has terminal fields")
@@ -293,8 +307,9 @@ def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[st
     scenes = value["normalizedScenes"]
     if len(scenes) > 256 or any(
             type(scene) is not dict or set(scene) != {"name", "startOffset", "endOffset"}
-            or type(scene["name"]) is not str or type(scene["startOffset"]) is not int
-            or type(scene["endOffset"]) is not int
+            or not safe_text(scene["name"], 128) or type(scene["startOffset"]) is not int
+            or type(scene["endOffset"]) is not int or scene["startOffset"] < 0
+            or scene["endOffset"] <= scene["startOffset"]
             for scene in scenes):
         raise _error("artifact.status_invalid", "native normalized scenes are invalid")
     active = value["activeScenes"]
@@ -305,10 +320,13 @@ def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[st
             or type(scene["sealed"]) is not bool
             for scene in active):
         raise _error("artifact.status_invalid", "native active scenes are invalid")
+    indices = [scene["sceneIndex"] for scene in active]
+    if len(set(indices)) != len(indices) or any(index >= len(scenes) for index in indices):
+        raise _error("artifact.status_invalid", "native active scene indices are invalid")
     for issue_list in (value["warnings"], value["errors"]):
         if len(issue_list) > 256 or any(
                 type(issue) is not dict or set(issue) != {"code", "path", "message"}
-                or any(type(issue[key]) is not str for key in issue)
+                or any(not safe_text(issue[key], 1024) for key in issue)
                 for issue in issue_list):
             raise _error("artifact.status_invalid", "native status issues are invalid")
     artifacts = value.get("artifacts")
@@ -369,7 +387,9 @@ def _text_complete(path: Path) -> bool:
         data = path.read_bytes()
     except OSError:
         return False
-    return b"TRACE_END status=completed" in data or b"TRACE_END status=crashed" in data
+    return any(marker in data for marker in (
+        b"TRACE_END status=completed", b"TRACE_END status=stopped",
+        b"TRACE_END status=crashed", b"TRACE_END status=ok"))
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -402,26 +422,22 @@ def _safe_output(path: Path) -> Path:
     return path
 
 
-def _rename_noreplace(stage: Path, output: Path, final_name: str) -> None:
+def _rename_noreplace(parent: int, stage_name: str, final_name: str) -> None:
     """Atomically publish a complete staging directory without replacing anything."""
     if os.name != "posix":
         raise _error("artifact.atomic_unsupported", "atomic no-replace publication is unavailable")
-    parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = getattr(libc, "renameat2", None)
-        if renameat2 is None:
-            raise _error("artifact.atomic_unsupported", "Linux renameat2 is unavailable")
-        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        renameat2.restype = ctypes.c_int
-        result = renameat2(parent, stage.name.encode(), parent, final_name.encode(), 1)
-        if result != 0:
-            failure = ctypes.get_errno()
-            if failure == errno.EEXIST:
-                raise _error("artifact.destination_exists", "session destination already exists")
-            raise OSError(failure, os.strerror(failure))
-    finally:
-        os.close(parent)
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise _error("artifact.atomic_unsupported", "Linux renameat2 is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(parent, stage_name.encode(), parent, final_name.encode(), 1)
+    if result != 0:
+        failure = ctypes.get_errno()
+        if failure == errno.EEXIST:
+            raise _error("artifact.destination_exists", "session destination already exists")
+        raise OSError(failure, os.strerror(failure))
 
 
 class ArtifactProcessor:
@@ -433,27 +449,29 @@ class ArtifactProcessor:
         _safe_output(output)
         if output.is_symlink() or not output.is_dir():
             raise _error("artifact.destination_invalid", "output must be a real directory")
+        parent = -1
+        parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                         getattr(os, "O_NOFOLLOW", 0))
         try:
             for directory in (stage, stage / "artifacts"):
                 descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                                      getattr(os, "O_NOFOLLOW", 0))
                 os.fsync(descriptor)
                 os.close(descriptor)
-            _rename_noreplace(stage, output, session_id)
+            _rename_noreplace(parent, stage.name, session_id)
             final = output / session_id
-            descriptor = os.open(final, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                                 getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                 getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
             try:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-            parent_descriptor = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(parent_descriptor)
-            finally:
-                os.close(parent_descriptor)
+            os.fsync(parent)
         except Exception:
             raise
+        finally:
+            if parent >= 0:
+                os.close(parent)
         return final
 
     def _collect(self, device: object, package: str, session_id: str, names: list[str],
@@ -468,7 +486,8 @@ class ArtifactProcessor:
         stage_artifacts = stage_root / "artifacts"
         stage_artifacts.mkdir()
         try:
-            active = status is not None and status.get("state") not in {"sealed", "stop_incomplete"}
+            active = (status is not None and status.get("_native_present", True)
+                      and status.get("state") not in {"sealed", "stop_incomplete"})
             if active:
                 errors.append({"code": "artifact.incomplete", "name": "", "detail": "native trace is still active"})
                 pulled = ()
@@ -499,12 +518,14 @@ class ArtifactProcessor:
                     "stop_reason": status.get("reason") if status is not None else None,
                     "metrics_schema": None,
                     "producer_waits": None, "producer_wait_ns": None, "conversion_ms": None,
-                    "host_observed_ack": status.get("stopAcknowledged") if status is not None else None}
+                    "native_stop_acknowledged": status.get("stopAcknowledged") if status is not None else None,
+                    "host_observed_ack_ms": status.get("hostAckMs") if status is not None else None}
                 if local.name.endswith(".metrics") or local.name.endswith(".crash"):
                     record["destination_size"] = local.stat().st_size
                     record["decoder"] = "sidecar"
                     records.append(record)
                     continue
+                before_members = set(stage_artifacts.iterdir())
                 try:
                     if compressed_only and not local.name.endswith((".trace.bin.lz4", ".trace.txt.lz4")):
                         raise ValueError("compressed-only selection contains an uncompressed artifact")
@@ -533,9 +554,18 @@ class ArtifactProcessor:
                             record["producer_waits"] = values.get("producer_waits")
                             record["producer_wait_ns"] = values.get("producer_wait_ns")
                     elif local.name.endswith(".flight.bin"):
-                        from scripts.flight_convert import publish_flight_outputs
+                        from scripts.flight_convert import publish_flight_outputs, recovery_status
                         derived = publish_flight_outputs(local, stage_artifacts, force=False)
-                        record.update(decoder="flight", termination="recovered")
+                        summary = json.loads(derived[-1].read_text(encoding="utf-8"))
+                        if type(summary) is not dict or type(summary.get("complete")) is not bool:
+                            raise ValueError("flight recovery summary is malformed")
+                        record.update(decoder="flight", termination=summary.get("termination"),
+                                     recovery_status=recovery_status(summary))
+                        if not summary["complete"]:
+                            failure = {"name": artifact.remote_name, "code": "artifact.incomplete",
+                                       "detail": "flight recovery reports damage or incomplete committed data"}
+                            errors.append(failure)
+                            records.append(failure)
                         files.extend(derived)
                     elif local.name.endswith(".trace.txt.lz4"):
                         from scripts.lz4_frames import decode_lz4_file
@@ -544,7 +574,7 @@ class ArtifactProcessor:
                             raise ValueError("host lz4 CLI is required for compressed text traces")
                         text = stage_artifacts / local.name.removesuffix(".lz4")
                         truncated = decode_lz4_file(local, text, lz4)
-                        if truncated:
+                        if truncated or not _text_complete(text):
                             raise ValueError("compressed text trace is incomplete")
                         record.update(decoder="lz4-text", termination="completed")
                         if not compressed_only:
@@ -562,6 +592,14 @@ class ArtifactProcessor:
                     if isinstance(error, QtraceError) and error.code in {
                             "artifact.pull_failed", "artifact.truncated", "artifact.size_invalid"}:
                         raise
+                    for member in stage_artifacts.iterdir():
+                        if member not in before_members:
+                            _unlink_quiet(member)
+                    _unlink_quiet(local)
+                    for sidecar in (local.with_name(local.name + ".metrics"),
+                                    local.with_name(local.name + ".crash")):
+                        _unlink_quiet(sidecar)
+                    files[:] = [path for path in files if path.exists()]
                     failure = {"name": artifact.remote_name, "code": "artifact.invalid", "detail": str(error)[:256]}
                     errors.append(failure)
                     records.append(failure)
@@ -578,9 +616,19 @@ class ArtifactProcessor:
                                 "sha256": hashlib.sha256(data).hexdigest(), "decoder": None,
                                 "termination": None, "stop_reason": None, "metrics_schema": None,
                                 "producer_waits": None, "producer_wait_ns": None,
-                                "conversion_ms": None, "host_observed_ack": None})
+                                "conversion_ms": None, "native_stop_acknowledged": None,
+                                "host_observed_ack_ms": None})
+            native_status = None
+            host_context: Mapping[str, object] = {}
+            if status is not None:
+                native_status = {key: value for key, value in status.items()
+                                 if key not in {"_native_present", "snapshot", "effectiveConfig", "device", "hostAckMs"}}
+                host_context = {"snapshot": status.get("snapshot", []),
+                                "effectiveConfig": status.get("effectiveConfig"),
+                                "device": status.get("device"),
+                                "hostAckMs": status.get("hostAckMs")}
             _write_json(stage_root / "session.json", {"schema": 1, "sessionId": session_id, "packageName": package,
-                                                        "status": status or None})
+                                                        "status": native_status, "host": host_context})
             effective = status.get("effectiveConfig") if status is not None else None
             if effective is None:
                 effective = None
@@ -615,17 +663,23 @@ class ArtifactProcessor:
         _package(package)
         if type(session_id) is not str or not _UUID4.fullmatch(session_id):
             raise _error("artifact.session_invalid", "session ID is not lowercase UUIDv4")
-        if status is None or type(status) is not dict:
+        if status is None:
+            status = {"_native_present": False, "artifacts": [], "snapshot": []}
+        if type(status) is not dict:
             raise _error("artifact.status_missing", "session collection requires native status")
-        if status.get("sessionId") != session_id or status.get("packageName") != package:
+        native_present = status.get("_native_present", True)
+        if type(native_present) is not bool:
+            raise _error("artifact.status_invalid", "native presence marker is invalid")
+        if native_present and (status.get("sessionId") != session_id or status.get("packageName") != package):
             raise _error("artifact.status_identity", "native status identity does not match")
-        if status.get("state") not in {"sealed", "stop_incomplete"}:
+        if native_present and status.get("state") not in {"sealed", "stop_incomplete"}:
             raise _error("artifact.incomplete", "native status is not terminal")
         declared = status.get("artifacts")
+        if not native_present:
+            declared = []
         if (type(declared) is not list or any(type(item) is not str for item in declared)
                 or len(set(declared)) != len(declared)):
             raise _error("artifact.status_invalid", "native status has no artifact list")
-        names = [_name(name, trace=True) for name in declared]
         client = _client_for(device, package, self._client_factory)
         raw_listing = list(_call(getattr(client, "list_names"), timeout=timeout))
         if any(type(item) is not str for item in raw_listing) or len(set(raw_listing)) != len(raw_listing):
@@ -638,6 +692,12 @@ class ArtifactProcessor:
         snapshot_set = set(snapshot)
         selected: list[str] = []
         initial_errors: list[Mapping[str, str]] = []
+        if not native_present:
+            initial_errors.append({"name": "", "code": "artifact.status_missing",
+                                   "detail": "native status unavailable; recovered listing is partial"})
+            declared = [name for name in listing if name.endswith(_TRACE_SUFFIXES)
+                        and name not in snapshot_set]
+        names = [_name(name, trace=True) for name in declared]
         for name in names:
             if name in snapshot_set:
                 initial_errors.append({"name": name, "code": "artifact.ownership", "detail": "artifact predates this session"})

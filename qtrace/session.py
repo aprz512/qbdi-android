@@ -654,22 +654,25 @@ class SessionOrchestrator:
     def _collect(self, device: object, request: RunRequest | MonitorRequest, session_id: str,
                  snapshot: tuple[str, ...], status: Mapping[str, object] | None
                  ) -> tuple[int, tuple[Path, ...], tuple[Mapping[str, object], ...]]:
-        owned = None if status is None else {**status, "artifacts": [
-            name for name in status.get("artifacts", []) if name not in snapshot
-        ], "snapshot": list(snapshot),
+        owned = ({**status} if status is not None else {})
+        owned.update({"_native_present": status is not None,
+        "artifacts": [] if status is None else list(status.get("artifacts", [])),
+        "snapshot": list(snapshot),
         "effectiveConfig": {
             "package": request.config.app.package,
             "module": request.config.target.module,
             "profile": request.config.tracer.profile,
             "compression": request.config.tracer.compression,
             "flight_enabled": request.config.tracer.flight_enabled,
+            "flight_entry_scene": request.config.tracer.flight_entry_scene,
+            "scenes": [dataclasses.asdict(scene) for scene in request.config.scenes],
         },
         "device": {
             "serial": getattr(device, "serial", None),
             "access_mode": getattr(device, "access_mode", None),
             "target_strategy": getattr(device, "target_strategy", None),
             "package_uid": getattr(device, "package_uid", None),
-        }}
+        }})
         value = self._collector.collect_session(device, request.config.app.package, session_id, owned,
                                                 Path(request.output), request.pull_timeout)
         if type(value) is tuple and len(value) == 2:
