@@ -40,9 +40,11 @@ class TargetLock:
             if not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.getuid()}:
                 raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe")
             base_fd = descriptor
-        except OSError as error:
+        except BaseException as error:
             os.close(descriptor)
-            raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe") from error
+            if isinstance(error, OSError):
+                raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe") from error
+            raise
         name = f"qtrace-{os.getuid()}"
         try:
             try:

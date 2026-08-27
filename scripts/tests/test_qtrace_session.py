@@ -493,6 +493,23 @@ class SessionTests(unittest.TestCase):
             runner.monitor(MonitorRequest(config(), None, Path(self.directory.name), .05, .5, 1))
         self.assertLessEqual(clock.monotonic(), .05)
 
+    def test_tiny_timed_deadline_timeout_is_adb_unavailable(self) -> None:
+        device = FakeDevice([], [4242])
+        clock = ManualClock()
+        original_shell = device.target_shell
+        def shell(*args, **kwargs):
+            if args[0] == "pidof":
+                clock.sleep(kwargs["timeout"])
+                raise process_timeout()
+            return original_shell(*args, **kwargs)
+        device.target_shell = shell  # type: ignore[method-assign]
+        runner, injector = orchestrator(device, clock)
+        request = RunRequest(config(), None, Path(self.directory.name), 100, 2, .001, .5, 1)
+        with self.assertRaisesRegex(QtraceError, ErrorCode.ADB_UNAVAILABLE.value):
+            runner.run(request)
+        self.assertLessEqual(clock.monotonic(), .101)
+        self.assertEqual(1, len(injector.requests))
+
     def test_error_and_interrupt_reports_are_published_before_unlock_and_never_mask_primary(self) -> None:
         for primary in (QtraceError("session.boom", "test", "boom"), KeyboardInterrupt(), ValueError("raw")):
             with self.subTest(primary=type(primary).__name__):
