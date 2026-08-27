@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unicodedata
 
 
@@ -26,6 +27,43 @@ class NativeStatusValidationError(ValueError):
     def __init__(self, detail: str) -> None:
         self.detail = detail
         super().__init__(detail)
+
+
+class StrictJsonLoadError(ValueError):
+    """A strict JSON decoding violation with a non-input-derived detail."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
+def load_strict_json(raw: object, maximum_bytes: int | None = None) -> object:
+    """Decode exact bytes as UTF-8 JSON, rejecting duplicate keys and non-finite values."""
+    if type(raw) is not bytes:
+        raise StrictJsonLoadError("JSON input must be exact bytes")
+    if maximum_bytes is not None and (type(maximum_bytes) is not int or maximum_bytes < 0):
+        raise StrictJsonLoadError("JSON byte bound is invalid")
+    if maximum_bytes is not None and len(raw) > maximum_bytes:
+        raise StrictJsonLoadError("JSON input exceeds byte bound")
+
+    def reject_constant(_value: str) -> object:
+        raise StrictJsonLoadError("JSON input contains a non-finite number")
+
+    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise StrictJsonLoadError("JSON input contains a duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
+                          object_pairs_hook=reject_duplicate)
+    except StrictJsonLoadError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise StrictJsonLoadError("JSON input is not strict UTF-8 JSON") from error
 
 
 def _invalid(detail: str) -> NativeStatusValidationError:

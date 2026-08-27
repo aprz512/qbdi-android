@@ -23,7 +23,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 from qtrace.errors import EXIT_PARTIAL, QtraceError
 from qtrace.report import conditional_replace_at
-from qtrace.status import NativeStatusValidationError, validate_status_shape
+from qtrace.status import (NativeStatusValidationError, StrictJsonLoadError,
+                           load_strict_json, validate_status_shape)
 
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
@@ -457,23 +458,10 @@ def _temporary_name(name: str) -> bool:
 
 
 def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[str, object]:
-    def reject_constant(value: str) -> object:
-        raise ValueError("non-finite JSON number")
-
-    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        document: dict[str, object] = {}
-        for key, value in pairs:
-            if key in document:
-                raise ValueError("duplicate JSON key")
-            document[key] = value
-        return document
     try:
-        if type(raw) is not bytes or len(raw) > _MAX_STATUS_BYTES:
-            raise ValueError("native status exceeds bound")
-        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
-                           object_pairs_hook=reject_duplicate)
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
-        raise _error("artifact.status_invalid", "native status is not strict JSON") from error
+        value = load_strict_json(raw, maximum_bytes=_MAX_STATUS_BYTES)
+    except StrictJsonLoadError as error:
+        raise _error("artifact.status_invalid", error.detail) from error
     try:
         status = validate_status_shape(value)
     except NativeStatusValidationError as error:

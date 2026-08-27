@@ -268,10 +268,39 @@ class StatusTests(unittest.TestCase):
                 parse_status(candidate, SESSION_ID, PACKAGE, 7, 4242, SCENES,
                              sealed if candidate["state"] == "stop_incomplete" else None)
 
-    def test_strict_json_rejects_duplicate_nonfinite_and_non_utf8_input(self) -> None:
-        for raw in (b'{"x":1,"x":2}', b'{"x":NaN}', b'\xff'):
-            with self.subTest(raw=raw), self.assertRaises(QtraceError):
-                _strict_json(raw)
+    def test_shared_strict_json_loader_keeps_session_and_artifact_rejections_in_parity(self) -> None:
+        """Removing the shared loader would let strict JSON handling drift across status consumers."""
+        from qtrace.artifacts import _json_status
+        from qtrace.status import StrictJsonLoadError, load_strict_json
+
+        syntax_invalid = (b'{"x":1,"x":2}', b'{"x":NaN}', b'\xff')
+        for raw in syntax_invalid:
+            with self.subTest(raw=raw):
+                with self.assertRaises(StrictJsonLoadError):
+                    load_strict_json(raw)
+                with self.assertRaises(QtraceError) as session_error:
+                    _strict_json(raw)
+                self.assertEqual("session.status_invalid", session_error.exception.code)
+                with self.assertRaises(QtraceError) as artifact_error:
+                    _json_status(raw, SESSION_ID, PACKAGE)
+                self.assertEqual("artifact.status_invalid", artifact_error.exception.code)
+
+        bool_schema = json.dumps({**status("running", transition=1), "schemaVersion": True}).encode("utf-8")
+        self.assertTrue(load_strict_json(bool_schema)["schemaVersion"])
+        with self.assertRaises(QtraceError) as session_error:
+            parse_status(_strict_json(bool_schema), SESSION_ID, PACKAGE, 7, 4242, SCENES, None)
+        self.assertEqual("session.status_invalid", session_error.exception.code)
+        with self.assertRaises(QtraceError) as artifact_error:
+            _json_status(bool_schema, SESSION_ID, PACKAGE)
+        self.assertEqual("artifact.status_invalid", artifact_error.exception.code)
+
+        with self.assertRaises(StrictJsonLoadError):
+            load_strict_json(bytearray(b"{}"))
+        with self.assertRaises(StrictJsonLoadError):
+            load_strict_json(b" " * (64 * 1024 + 1), maximum_bytes=64 * 1024)
+        with self.assertRaises(QtraceError) as artifact_error:
+            _json_status(b" " * (64 * 1024 + 1), SESSION_ID, PACKAGE)
+        self.assertEqual("artifact.status_invalid", artifact_error.exception.code)
 
 
 class SessionTests(unittest.TestCase):

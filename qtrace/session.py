@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import subprocess
 import re
@@ -22,7 +21,8 @@ from qtrace.injector import InjectionRequest, InjectionResult
 from qtrace.lock import TargetLock
 from qtrace.models import AppConfig, OffsetScene, ResolvedScene, ResolvedTarget, SymbolScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.report import ReportWriter, SessionReport, SessionStage
-from qtrace.status import STATE_ORDER, NativeStatusValidationError, validate_status_shape
+from qtrace.status import (STATE_ORDER, NativeStatusValidationError, StrictJsonLoadError,
+                           load_strict_json, validate_status_shape)
 
 
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
@@ -146,22 +146,11 @@ def parse_status(value: object, session_id: str, package: str, generation: int, 
     return status
 
 
-def _strict_json(raw: bytes) -> object:
-    def reject_constant(value: str) -> object:
-        raise ValueError("non-finite JSON number")
-
-    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("duplicate JSON key")
-            result[key] = value
-        return result
+def _strict_json(raw: object) -> object:
     try:
-        return json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
-                          object_pairs_hook=reject_duplicate)
-    except (AttributeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        raise QtraceError("session.status_invalid", "session.status", "status is not valid strict UTF-8 JSON") from error
+        return load_strict_json(raw)
+    except StrictJsonLoadError as error:
+        raise QtraceError("session.status_invalid", "session.status", error.detail) from error
 
 
 def _timeout(value: object, field: str) -> float:
