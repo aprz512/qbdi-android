@@ -574,6 +574,7 @@ def _rewrite_published_report(parent: int, session_id: str,
                         getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
     descriptor = -1
     temporary = ".report-" + uuid.uuid4().hex + ".tmp"
+    exchanged = False
     try:
         original = os.stat("report.json", dir_fd=directory, follow_symlinks=False)
         if (original.st_dev, original.st_ino) != expected_identity:
@@ -594,15 +595,31 @@ def _rewrite_published_report(parent: int, session_id: str,
                 os.close(descriptor)
         from qtrace.report import _exchange
         _exchange(directory, temporary, "report.json")
-        exchanged = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
-        if (exchanged.st_dev, exchanged.st_ino) != (original.st_dev, original.st_ino):
-            _exchange(directory, temporary, "report.json")
+        exchanged = True
+        try:
+            old = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+            matched = (old.st_dev, old.st_ino) == (original.st_dev, original.st_ino)
+        except BaseException:
+            try:
+                _exchange(directory, temporary, "report.json")
+                exchanged = False
+            except BaseException:
+                temporary = ""
+            raise
+        if not matched:
+            try:
+                _exchange(directory, temporary, "report.json")
+                exchanged = False
+            except BaseException:
+                temporary = ""
+                raise OSError("collector report refresh rollback failed")
             raise FileExistsError("collector report changed during refresh")
         os.unlink(temporary, dir_fd=directory)
+        exchanged = False
         temporary = ""
         os.fsync(directory)
     finally:
-        if temporary:
+        if temporary and not exchanged:
             try:
                 os.unlink(temporary, dir_fd=directory)
             except FileNotFoundError:

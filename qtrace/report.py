@@ -162,6 +162,7 @@ class ReportWriter:
         directory = os.dup(directory)
         temporary = f".{name}.{secrets.token_hex(16)}"
         descriptor = -1
+        exchanged = False
         try:
             _check_directory(directory)
             try:
@@ -199,11 +200,27 @@ class ReportWriter:
                 os.unlink(temporary, dir_fd=directory)
             elif expected_identity is not None:
                 _exchange(directory, temporary, name)
-                old = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
-                if (old.st_dev, old.st_ino) != expected_identity:
-                    _exchange(directory, temporary, name)
+                exchanged = True
+                try:
+                    old = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+                    matched = (old.st_dev, old.st_ino) == expected_identity
+                except BaseException:
+                    try:
+                        _exchange(directory, temporary, name)
+                        exchanged = False
+                    except BaseException:
+                        temporary = ""
+                    raise
+                if not matched:
+                    try:
+                        _exchange(directory, temporary, name)
+                        exchanged = False
+                    except BaseException:
+                        temporary = ""
+                        raise OSError("report conditional rollback failed")
                     return False
                 os.unlink(temporary, dir_fd=directory)
+                exchanged = False
             else:
                 os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
             temporary = ""
@@ -212,7 +229,7 @@ class ReportWriter:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-            if temporary:
+            if temporary and not exchanged:
                 try:
                     os.unlink(temporary, dir_fd=directory)
                 except FileNotFoundError:
