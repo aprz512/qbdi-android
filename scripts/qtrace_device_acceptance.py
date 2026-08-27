@@ -129,6 +129,18 @@ def _report_path(stdout: str, root: Path) -> Path:
     return report
 
 
+def _trusted_output(path: Path, root: Path) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve())
+        metadata = resolved.lstat()
+    except (OSError, ValueError) as error:
+        raise RuntimeError("reported output is outside the trusted directory") from error
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+        raise RuntimeError("reported output is not a regular non-symlink file")
+    return resolved
+
+
 def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, object], str]:
     value = _strict_report(runner, path)
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or

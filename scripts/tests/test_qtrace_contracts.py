@@ -165,6 +165,19 @@ class FakeRunner:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_trusted_output_rejects_escape_and_symlink(self):
+        from scripts.qtrace_device_acceptance import _trusted_output
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            root.mkdir()
+            outside = Path(temporary) / "outside"
+            outside.write_text("x")
+            link = root / "link"
+            link.symlink_to(outside)
+            with self.assertRaises(RuntimeError):
+                _trusted_output(outside, root)
+            with self.assertRaises(RuntimeError):
+                _trusted_output(link, root)
     def test_strict_report_rejects_duplicate_keys_and_nonfinite_numbers(self):
         from scripts.qtrace_device_acceptance import _strict_json
 
