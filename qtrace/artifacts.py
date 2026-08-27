@@ -536,8 +536,12 @@ def _new_stage(output: Path) -> tuple[Path, int, int, str]:
                 os.mkdir(name, 0o700, dir_fd=parent)
             except FileExistsError:
                 continue
-            stage_fd = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                               getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+            try:
+                stage_fd = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                   getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+            except BaseException:
+                _remove_tree_at(parent, name)
+                raise
             try:
                 os.mkdir("artifacts", 0o700, dir_fd=stage_fd)
             except BaseException:
@@ -580,9 +584,11 @@ class ArtifactProcessor:
                     descriptor = os.open(stage if directory_name == "." else stage / directory_name,
                                          os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                                          getattr(os, "O_NOFOLLOW", 0))
-                os.fsync(descriptor)
-                if not (directory_name == "." and stage_fd is not None):
-                    os.close(descriptor)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    if not (directory_name == "." and stage_fd is not None):
+                        os.close(descriptor)
             _rename_noreplace(parent, stage_name, session_id)
             committed = True
             final = output / session_id
