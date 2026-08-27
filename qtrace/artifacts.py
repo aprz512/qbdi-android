@@ -812,21 +812,9 @@ def _remove_tree_at(parent: int, name: str,
     os.rmdir(name, dir_fd=parent)
 
 
-def _restore_untrusted_quarantine(parent: int, quarantine: str, original_name: str,
-                                  primary: BaseException) -> OSError:
-    """Return a diagnostic after a no-replace attempt to restore unknown data."""
-    try:
-        _rename_noreplace(parent, quarantine, original_name)
-    except BaseException as rollback:
-        return OSError(
-            f"{primary}; recovery entry {quarantine} retained after safe rollback failed: {rollback}")
-    return OSError(
-        f"{primary}; recovery entry {quarantine} was safely restored to {original_name}")
-
-
 def _reclaim_parent_fallback_sibling(parent: int, name: str,
                                      expected_identity: tuple[int, int]) -> None:
-    """Remove a parent fallback only after an atomic handoff to a private name."""
+    """Quarantine a parent fallback as a recovery file without deleting by name."""
     quarantine = ""
     for _ in range(32):
         candidate = ".qtrace-reclaim-sibling-" + uuid.uuid4().hex
@@ -849,21 +837,18 @@ def _reclaim_parent_fallback_sibling(parent: int, name: str,
                         getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
         quarantined = os.fstat(probe)
     except BaseException as error:
-        raise _restore_untrusted_quarantine(
-            parent, quarantine, name,
-            OSError(f"parent fallback identity changed after quarantine rename: {error}")) from error
+        raise OSError(
+            f"parent fallback recovery file={quarantine}; unable to verify identity: {error}") from error
     finally:
         _close_descriptor(probe)
     if (not stat.S_ISREG(quarantined.st_mode)
             or (quarantined.st_dev, quarantined.st_ino) != expected_identity):
-        raise _restore_untrusted_quarantine(
-            parent, quarantine, name,
-            OSError("parent fallback identity changed after quarantine rename"))
+        raise OSError(f"parent fallback recovery file={quarantine}; identity changed")
     try:
-        os.unlink(quarantine, dir_fd=parent)
         os.fsync(parent)
     except BaseException as error:
-        raise _restore_untrusted_quarantine(parent, quarantine, name, OSError(str(error))) from error
+        raise OSError(f"parent fallback recovery file={quarantine}; parent fsync failed: {error}") from error
+    raise OSError(f"parent fallback recovery file={quarantine}")
 
 
 def _note_parent_fallback_cleanup_failure(primary: BaseException,
@@ -879,7 +864,7 @@ def _note_parent_fallback_cleanup_failure(primary: BaseException,
 
 
 def _reclaim_committed_session(parent: int, directory: int, session_id: str) -> None:
-    """Quarantine a held committed directory before recursively removing only its inode."""
+    """Quarantine a held committed directory as recovery without recursive deletion."""
     expected = os.fstat(directory)
     if not stat.S_ISDIR(expected.st_mode):
         raise OSError("committed session identity changed before reclaim")
@@ -906,23 +891,19 @@ def _reclaim_committed_session(parent: int, directory: int, session_id: str) -> 
                         getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
         quarantined = os.fstat(probe)
     except BaseException as error:
-        raise _restore_untrusted_quarantine(
-            parent, quarantine, session_id,
-            OSError(f"committed session identity changed after quarantine rename: {error}")) from error
+        raise OSError(
+            f"committed session recovery directory={quarantine}; unable to verify identity: {error}") from error
     finally:
         _close_descriptor(probe)
     if (not stat.S_ISDIR(quarantined.st_mode)
             or (quarantined.st_dev, quarantined.st_ino) != expected_identity):
-        raise _restore_untrusted_quarantine(
-            parent, quarantine, session_id,
-            OSError("committed session identity changed after quarantine rename"))
+        raise OSError(f"committed session recovery directory={quarantine}; identity changed")
     try:
-        _remove_tree_at(parent, quarantine, expected_identity=expected_identity)
+        os.fsync(parent)
     except BaseException as error:
-        raise _restore_untrusted_quarantine(
-            parent, quarantine, session_id,
-            OSError(str(error))) from error
-    os.fsync(parent)
+        raise OSError(
+            f"committed session recovery directory={quarantine}; parent fsync failed: {error}") from error
+    raise OSError(f"committed session recovery directory={quarantine}")
 
 
 def _note_committed_cleanup_failure(primary: BaseException, failure: BaseException) -> None:

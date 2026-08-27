@@ -733,8 +733,8 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn("refresh failed", raised.exception.detail)
         self.assertIn("session persist failed", raised.exception.detail)
 
-    def test_output_swap_after_parent_fallback_reclaims_held_sibling(self):
-        """Leaving fallback ownership behind would orphan this sibling in the old output root."""
+    def test_output_swap_after_parent_fallback_retains_private_recoveries(self):
+        """Deleting validated recoveries would lose the old-root session or sibling."""
         session = "11111111-1111-4111-8111-111111111111"
         processor = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL}))
         original_publish = processor._publish
@@ -775,9 +775,14 @@ class ArtifactTests(unittest.TestCase):
             self.assertFalse((saved / fallback_names[0]).exists())
             self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
             self.assertEqual("replacement sibling", (output / fallback_names[0]).read_text())
+            recoveries = list(saved.glob(".qtrace-reclaim-*"))
+            self.assertEqual(1, len([path for path in recoveries if path.is_dir()]))
+            self.assertEqual(1, len([path for path in recoveries if path.is_file()]))
+            self.assertIn("recovery directory=", raised.exception.detail)
+            self.assertIn("recovery file=", raised.exception.detail)
 
-    def test_parent_fallback_reclaim_preserves_a_concurrently_replaced_sibling(self):
-        """Deleting by the old sibling name would remove this concurrent replacement."""
+    def test_parent_fallback_reclaim_retains_a_concurrently_replaced_sibling(self):
+        """Restoring or deleting a replaced sibling would lose its private recovery evidence."""
         import os
 
         session = "11111111-1111-4111-8111-111111111111"
@@ -818,13 +823,15 @@ class ArtifactTests(unittest.TestCase):
 
             self.assertEqual("artifact.destination_replaced", raised.exception.code)
             self.assertFalse((saved / session).exists())
-            self.assertEqual("RACER", (saved / fallback_names[0]).read_text())
+            self.assertFalse((saved / fallback_names[0]).exists())
+            recovery = next(path for path in saved.glob(".qtrace-reclaim-sibling-*")
+                            if path.is_file())
+            self.assertEqual("RACER", recovery.read_text())
             self.assertIn("parent fallback sibling cleanup failed", raised.exception.detail)
-            self.assertIn("recovery", raised.exception.detail)
-            self.assertFalse(list(saved.glob(".qtrace-reclaim-*")))
+            self.assertIn(f"recovery file={recovery.name}", raised.exception.detail)
 
-    def test_final_output_swap_reclaims_manual_and_session_publications(self):
-        """Removing the final identity check would return paths in a swapped output root."""
+    def test_final_output_swap_hides_public_sessions_but_keeps_private_recovery(self):
+        """Deleting the validated committed tree would lose failure recovery after an output swap."""
         for session_collection in (False, True):
             with self.subTest(session_collection=session_collection), tempfile.TemporaryDirectory() as root:
                 root_path = Path(root)
@@ -871,14 +878,16 @@ class ArtifactTests(unittest.TestCase):
                 self.assertEqual("artifact.destination_replaced", raised.exception.code)
                 session_id = session if session_collection else captured[0]
                 self.assertFalse((saved / session_id).exists())
+                self.assertTrue(any(path.is_dir() for path in saved.glob(".qtrace-reclaim-*")))
+                self.assertIn("recovery directory=", raised.exception.detail)
                 self.assertTrue((output / "attacker").is_dir())
                 if session_collection:
                     token = captured[0]
                     self.assertEqual(-1, token.parent)
                     self.assertEqual(-1, token.directory)
 
-    def test_final_output_swap_reports_committed_cleanup_failure(self):
-        """A reclaim failure must not turn an orphaned committed session into a silent result."""
+    def test_final_output_swap_reports_private_committed_recovery(self):
+        """A validated committed session must become a named private recovery, not be deleted."""
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             output = root_path / "output"
@@ -895,20 +904,22 @@ class ArtifactTests(unittest.TestCase):
                 output.mkdir()
                 return final
 
-            with patch.object(processor, "_publish", side_effect=publish_then_swap), patch(
-                    "qtrace.artifacts._remove_tree_at", side_effect=OSError("reclaim refused")):
+            with patch.object(processor, "_publish", side_effect=publish_then_swap):
                 with self.assertRaises(QtraceError) as raised:
                     processor.pull_manual("d", "com.example.app",
                                           PullSelection(PullMode.NAME, "run.trace.txt"), output, 1)
 
             self.assertEqual("artifact.destination_replaced", raised.exception.code)
-            self.assertIn("committed session cleanup failed: reclaim refused", raised.exception.detail)
-            self.assertTrue(any("committed session cleanup failed: reclaim refused" in note
+            self.assertFalse((saved / published[0]).exists())
+            recoveries = [path for path in saved.glob(".qtrace-reclaim-*") if path.is_dir()]
+            self.assertTrue(recoveries)
+            recovery = recoveries[0]
+            self.assertIn(f"recovery directory={recovery.name}", raised.exception.detail)
+            self.assertTrue(any(f"recovery directory={recovery.name}" in note
                                 for note in raised.exception.__notes__))
-            self.assertTrue((saved / published[0]).is_dir())
 
-    def test_reclaim_refuses_replacement_swapped_before_opening_session(self):
-        """Removing quarantine inode validation would let reclaim erase a replacement session."""
+    def test_reclaim_retains_replacement_swapped_before_quarantine_validation(self):
+        """Restoring an untrusted quarantine would hide the replacement recovery evidence."""
         from qtrace import artifacts as artifacts_module
         from qtrace.artifacts import _close_token_and_reclaim
         import os
@@ -942,12 +953,14 @@ class ArtifactTests(unittest.TestCase):
                 os.close(parent)
 
             self.assertTrue(swapped)
-            self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
+            self.assertFalse((output / session).exists())
             self.assertEqual("owned", (output / "owned" / "owned.txt").read_text())
-            self.assertIn("identity changed", primary.detail)
+            recovery = next(path for path in output.glob(".qtrace-reclaim-*") if path.is_dir())
+            self.assertEqual("replacement", (recovery / "replacement.txt").read_text())
+            self.assertIn(f"recovery directory={recovery.name}", primary.detail)
 
-    def test_reclaim_quarantines_owned_session_before_a_final_rmdir_replacement(self):
-        """Removing private quarantine would let final-rmdir cleanup erase this replacement."""
+    def test_reclaim_retains_validated_session_before_a_final_rmdir_replacement(self):
+        """Deleting a validated quarantine would lose the held session recovery tree."""
         from qtrace import artifacts as artifacts_module
         from qtrace.artifacts import _reclaim_committed_session
         import os
@@ -974,17 +987,20 @@ class ArtifactTests(unittest.TestCase):
 
             try:
                 with patch("qtrace.artifacts._rename_noreplace", side_effect=quarantine_then_replace):
-                    _reclaim_committed_session(parent, held, session)
+                    with self.assertRaisesRegex(OSError, "recovery directory=") as raised:
+                        _reclaim_committed_session(parent, held, session)
             finally:
                 os.close(held)
                 os.close(parent)
 
             self.assertTrue(moved)
             self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
-            self.assertFalse(list(output.glob(".qtrace-reclaim-*")))
+            recovery = next(path for path in output.glob(".qtrace-reclaim-*") if path.is_dir())
+            self.assertEqual("owned", (recovery / "owned.txt").read_text())
+            self.assertIn(f"recovery directory={recovery.name}", str(raised.exception))
 
-    def test_reclaim_restores_untrusted_quarantine_without_deleting_it(self):
-        """A swap before quarantine rename must not let cleanup delete the foreign replacement."""
+    def test_reclaim_retains_untrusted_quarantine_without_deleting_it(self):
+        """A swap before quarantine rename must retain the foreign replacement privately."""
         from qtrace import artifacts as artifacts_module
         from qtrace.artifacts import _reclaim_committed_session
         import os
@@ -1020,7 +1036,7 @@ class ArtifactTests(unittest.TestCase):
 
             try:
                 with patch("qtrace.artifacts._rename_noreplace", side_effect=replace_before_quarantine):
-                    with self.assertRaisesRegex(OSError, "identity changed"):
+                    with self.assertRaisesRegex(OSError, "recovery directory=") as raised:
                         _reclaim_committed_session(parent, held, session)
             finally:
                 os.close(held)
@@ -1028,8 +1044,100 @@ class ArtifactTests(unittest.TestCase):
 
             self.assertTrue(swapped)
             self.assertEqual("owned", (output / "owned" / "owned.txt").read_text())
-            self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
-            self.assertFalse(list(output.glob(".qtrace-reclaim-*")))
+            self.assertFalse((output / session).exists())
+            recovery = next(path for path in output.glob(".qtrace-reclaim-*") if path.is_dir())
+            self.assertEqual("replacement", (recovery / "replacement.txt").read_text())
+            self.assertIn(f"recovery directory={recovery.name}", str(raised.exception))
+
+    def test_parent_fallback_fstat_race_retains_owned_and_unknown_files(self):
+        """An unlink after the verified fstat would delete RACER instead of preserving recovery."""
+        from qtrace import artifacts as artifacts_module
+        from qtrace.artifacts import _reclaim_parent_fallback_sibling
+        import os
+
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            fallback = "session.error.test.report.json"
+            (output / fallback).write_text("OWNED", encoding="utf-8")
+            expected = ((output / fallback).stat().st_dev, (output / fallback).stat().st_ino)
+            parent = os.open(output, os.O_RDONLY)
+            real_rename, real_fstat = artifacts_module._rename_noreplace, os.fstat
+            quarantine: list[str] = []
+            swapped = False
+
+            def capture_rename(fd: int, source: str, destination: str) -> None:
+                real_rename(fd, source, destination)
+                if source == fallback:
+                    quarantine[:] = [destination]
+
+            def fstat_then_swap(descriptor: int):
+                nonlocal swapped
+                info = real_fstat(descriptor)
+                if quarantine and not swapped:
+                    swapped = True
+                    os.rename(quarantine[0], "owned-fallback", src_dir_fd=parent, dst_dir_fd=parent)
+                    racer = output / quarantine[0]
+                    racer.write_text("RACER", encoding="utf-8")
+                return info
+
+            try:
+                with patch("qtrace.artifacts._rename_noreplace", side_effect=capture_rename), patch(
+                        "qtrace.artifacts.os.fstat", side_effect=fstat_then_swap):
+                    with self.assertRaisesRegex(OSError, "recovery file=") as raised:
+                        _reclaim_parent_fallback_sibling(parent, fallback, expected)
+            finally:
+                os.close(parent)
+
+            self.assertTrue(swapped)
+            self.assertEqual("OWNED", (output / "owned-fallback").read_text())
+            self.assertEqual("RACER", (output / quarantine[0]).read_text())
+            self.assertIn(f"recovery file={quarantine[0]}", str(raised.exception))
+
+    def test_committed_fstat_race_retains_owned_and_unknown_trees(self):
+        """A recursive rmdir after the verified fstat would delete a raced directory tree."""
+        from qtrace import artifacts as artifacts_module
+        from qtrace.artifacts import _reclaim_committed_session
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            (output / session).mkdir()
+            (output / session / "owned.txt").write_text("OWNED", encoding="utf-8")
+            parent = os.open(output, os.O_RDONLY)
+            held = os.open(session, os.O_RDONLY, dir_fd=parent)
+            real_rename, real_fstat = artifacts_module._rename_noreplace, os.fstat
+            quarantine: list[str] = []
+            swapped = False
+
+            def capture_rename(fd: int, source: str, destination: str) -> None:
+                real_rename(fd, source, destination)
+                if source == session:
+                    quarantine[:] = [destination]
+
+            def fstat_then_swap(descriptor: int):
+                nonlocal swapped
+                info = real_fstat(descriptor)
+                if quarantine and not swapped:
+                    swapped = True
+                    os.rename(quarantine[0], "owned-session", src_dir_fd=parent, dst_dir_fd=parent)
+                    os.mkdir(quarantine[0], 0o700, dir_fd=parent)
+                    (output / quarantine[0] / "racer.txt").write_text("RACER", encoding="utf-8")
+                return info
+
+            try:
+                with patch("qtrace.artifacts._rename_noreplace", side_effect=capture_rename), patch(
+                        "qtrace.artifacts.os.fstat", side_effect=fstat_then_swap):
+                    with self.assertRaisesRegex(OSError, "recovery directory=") as raised:
+                        _reclaim_committed_session(parent, held, session)
+            finally:
+                os.close(held)
+                os.close(parent)
+
+            self.assertTrue(swapped)
+            self.assertEqual("OWNED", (output / "owned-session" / "owned.txt").read_text())
+            self.assertEqual("RACER", (output / quarantine[0] / "racer.txt").read_text())
+            self.assertIn(f"recovery directory={quarantine[0]}", str(raised.exception))
 
     def test_remove_tree_refuses_replacement_before_final_rmdir(self):
         """Removing the final name-to-held-inode check would rmdir a swapped replacement."""
