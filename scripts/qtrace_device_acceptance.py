@@ -446,6 +446,21 @@ def _validated_monitor_report(runner: Runner, root: Path | RootedReader, relativ
     return report
 
 
+def _validate_timed_fixture_receipt(runner: Runner, report: dict[str, object]) -> None:
+    receipt = _strict_json(_read_retry(runner, Path(
+        f"/data/data/{PACKAGE}/files/qtrace-acceptance-receipt.json"), timeout=5.0))
+    if (type(receipt) is not dict or set(receipt) != {"sessionId", "nonce", "entryElapsedMs", "deadlineElapsedMs"} or
+            receipt.get("sessionId") != report.get("session_id") or not isinstance(receipt.get("nonce"), str) or
+            not receipt["nonce"] or type(receipt.get("entryElapsedMs")) is not int or
+            type(receipt.get("deadlineElapsedMs")) is not int or receipt["entryElapsedMs"] >= receipt["deadlineElapsedMs"]):
+        raise RuntimeError("timed fixture receipt does not prove native entry before its deadline")
+    timeline = report.get("timeline")
+    if not isinstance(timeline, list) or not any(
+            isinstance(item, dict) and item.get("stage") == "installing_hooks" and
+            item.get("cleanup_detached") is True for item in timeline):
+        raise RuntimeError("timed report lacks injector cleanup/detach receipt")
+
+
 def _convert_snapshot_bounded(snapshot: Path, destination: Path, *, lz4: str | None,
                               deadline: float) -> None:
     remaining = deadline - time.monotonic()
@@ -635,6 +650,7 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
     try:
         timed, artifact = _validated_timed_report(runner, *reports["offset"])
+        _validate_timed_fixture_receipt(runner, timed)
         symbol, _ = _validated_timed_report(runner, *reports["symbol"])
         _validate_timed_artifact_semantics(
             runner, timed, reports["offset"][0], converter=converter,

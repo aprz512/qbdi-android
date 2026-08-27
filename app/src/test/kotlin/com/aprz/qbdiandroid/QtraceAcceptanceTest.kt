@@ -8,12 +8,14 @@ import java.util.concurrent.Executors
 class QtraceAcceptanceTest {
     @Test fun parses_only_explicit_supported_fixture_intents() {
         assertEquals(
-            QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L),
+            QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L, "session", "nonce"),
             QtraceAcceptance.parse(mapOf(
                 "qtrace_acceptance" to true,
                 "qtrace_acceptance_mode" to "timed",
                 "qtrace_acceptance_seed" to 5855319310239641971L,
                 "qtrace_acceptance_iterations" to 30L,
+                "qtrace_acceptance_session_id" to "session",
+                "qtrace_acceptance_nonce" to "nonce",
             )),
         )
         assertNull(QtraceAcceptance.parse(mapOf("qtrace_acceptance" to true, "qtrace_acceptance_mode" to "unknown", "qtrace_acceptance_seed" to 1L, "qtrace_acceptance_iterations" to 1L)))
@@ -23,14 +25,14 @@ class QtraceAcceptanceTest {
     @Test fun serializes_fixture_results_as_strict_stable_json() {
         assertEquals(
             "{\"iterations\":30,\"seed\":5855319310239641971,\"result\":\"0x42\"}",
-            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L), 0x42L),
+            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L, "session", "nonce"), 0x42L),
         )
     }
 
     @Test fun serializes_high_bit_native_return_as_unsigned_hex() {
         assertEquals(
             "{\"iterations\":1,\"seed\":1,\"result\":\"0x8000000000000000\"}",
-            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 1L, 1L), Long.MIN_VALUE),
+            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 1L, 1L, "session", "nonce"), Long.MIN_VALUE),
         )
     }
 

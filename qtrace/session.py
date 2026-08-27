@@ -41,7 +41,7 @@ class Clock(Protocol):
 
 
 class InstalledAction(Protocol):
-    def __call__(self, device: object, pid: int) -> None: ...
+    def __call__(self, device: object, pid: int, session_id: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -384,7 +384,7 @@ class SessionOrchestrator:
                                   "injector returned before Frida cleanup/detach completed")
             timeline[-1] = {**timeline[-1], "cleanup_detached": True}
             if request.installed_action is not None:
-                request.installed_action(device, pid)
+                request.installed_action(device, pid, session_id)
             if mode == "run":
                 mark(SessionStage.RUNNING)
                 status, host_stop_timeout = self._wait_for_seal(

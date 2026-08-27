@@ -224,7 +224,7 @@ class QtraceCliTests(unittest.TestCase):
         device = Mock()
 
         action = make_demo_action("timed", 7, adb_timeout=17.0)
-        action(device, 42)
+        action(device, 42, "123e4567-e89b-42d3-a456-426614174000")
 
         self.assertEqual(17.0, device.shell.call_args.kwargs["timeout"])
 
@@ -234,7 +234,7 @@ class QtraceCliTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 device = Mock()
 
-                make_demo_action(scenario, 7)(device, 42)
+                make_demo_action(scenario, 7)(device, 42, "123e4567-e89b-42d3-a456-426614174000")
 
                 arguments = device.shell.call_args.args
                 mode_index = arguments.index("qtrace_acceptance_mode")

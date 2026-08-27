@@ -1,6 +1,7 @@
 package com.aprz.qbdiandroid
 
 import android.os.Process
+import android.os.SystemClock
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -9,13 +10,16 @@ import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
 /** Fixture-only protocol used by the manually invoked qtrace device gate. */
-data class QtraceAcceptanceRequest(val mode: String, val seed: Long, val iterations: Long)
+data class QtraceAcceptanceRequest(val mode: String, val seed: Long, val iterations: Long,
+                                   val sessionId: String, val nonce: String)
 
 object QtraceAcceptance {
     private const val enabled = "qtrace_acceptance"
     private const val mode = "qtrace_acceptance_mode"
     private const val seed = "qtrace_acceptance_seed"
     private const val iterations = "qtrace_acceptance_iterations"
+    private const val sessionId = "qtrace_acceptance_session_id"
+    private const val nonce = "qtrace_acceptance_nonce"
     private const val maximumIterations = 300L
     private val started = AtomicBoolean(false)
 
@@ -34,9 +38,12 @@ object QtraceAcceptance {
         val selectedMode = extras[mode] as? String ?: return null
         val selectedSeed = extras[seed] as? Long ?: return null
         val selectedIterations = extras[iterations] as? Long ?: return null
+        val selectedSessionId = extras[sessionId] as? String ?: return null
+        val selectedNonce = extras[nonce] as? String ?: return null
         if (selectedMode !in setOf("timed", "exit", "flight-crash") || selectedSeed < 0L ||
-            selectedIterations !in 1..maximumIterations) return null
-        return QtraceAcceptanceRequest(selectedMode, selectedSeed, selectedIterations)
+            selectedIterations !in 1..maximumIterations || selectedSessionId.length !in 1..64 ||
+            selectedNonce.length !in 1..64) return null
+        return QtraceAcceptanceRequest(selectedMode, selectedSeed, selectedIterations, selectedSessionId, selectedNonce)
     }
 
     fun resultJson(request: QtraceAcceptanceRequest, result: Long): String =
@@ -54,6 +61,9 @@ object QtraceAcceptance {
         thread(name = "qtrace-acceptance-${request.mode}", isDaemon = false) {
             when (request.mode) {
                 "timed" -> {
+                    val entryElapsedMs = SystemClock.elapsedRealtime()
+                    writeAtomic(activity.filesDir, "qtrace-acceptance-receipt.json",
+                        "{\"sessionId\":\"${request.sessionId}\",\"nonce\":\"${request.nonce}\",\"entryElapsedMs\":$entryElapsedMs,\"deadlineElapsedMs\":${entryElapsedMs + 2000}}")
                     val result = NativeDemo.runTimedAcceptance(request.iterations, request.seed)
                     val name = if (traced) "qtrace-acceptance-timed.json" else "qtrace-acceptance-baseline.json"
                     writeAtomic(activity.filesDir, name, resultJson(request, result))

@@ -423,7 +423,7 @@ class SessionTests(unittest.TestCase):
         device = FakeDevice([status("running", transition=1)], [4242])
         runner, _ = orchestrator(device, ManualClock())
         request = RunRequest(config(), None, Path(self.directory.name), 250, 2.0, 2.0, 0.5, 1.0,
-                             installed_action=lambda _device, _pid: (_ for _ in ()).throw(KeyboardInterrupt()))
+                             installed_action=lambda _device, _pid, _session: (_ for _ in ()).throw(KeyboardInterrupt()))
         with self.assertRaises(KeyboardInterrupt):
             runner.run(request)
         report = Path(self.directory.name) / SESSION_ID / "report.json"
@@ -440,7 +440,7 @@ class SessionTests(unittest.TestCase):
         runner, _ = orchestrator(device, ManualClock())
         runner._report_writer = FailingWriter()  # explicit publication seam
         request = RunRequest(config(), None, Path(self.directory.name), 250, 2.0, 2.0, 0.5, 1.0,
-                             installed_action=lambda _device, _pid: (_ for _ in ()).throw(KeyboardInterrupt()))
+                             installed_action=lambda _device, _pid, _session: (_ for _ in ()).throw(KeyboardInterrupt()))
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr), self.assertRaises(KeyboardInterrupt):
             runner.run(request)

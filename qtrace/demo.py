@@ -248,7 +248,9 @@ def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0
             not math.isfinite(adb_timeout) or adb_timeout <= 0):
         raise QtraceError("demo.action_invalid", "demo.action", "ADB timeout must be finite and positive")
 
-    def action(device: object, _pid: int) -> None:
+    nonce = str(uuid.uuid4())
+
+    def action(device: object, _pid: int, session_id: str) -> None:
         shell = getattr(device, "shell", None)
         if not callable(shell):
             raise QtraceError("demo.device_invalid", "demo.action", "device cannot start the fixture activity")
@@ -258,6 +260,8 @@ def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0
               "--el", "qtrace_acceptance_seed", str(seed),
               "--el", "qtrace_acceptance_iterations", str(iterations),
               "--ei", "qtrace_acceptance_worker", str(worker),
+              "--es", "qtrace_acceptance_session_id", session_id,
+              "--es", "qtrace_acceptance_nonce", nonce,
               timeout=float(adb_timeout), maximum_bytes=64 * 1024)
 
     return action

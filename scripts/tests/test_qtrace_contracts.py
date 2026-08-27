@@ -175,6 +175,9 @@ class FakeRunner:
             return json.dumps({"iterations": 30, "seed": 5855319310239641971, "result": "0x42"})
         if path.name == "qtrace-acceptance-timed.json":
             return json.dumps({"iterations": 30, "seed": 5855319310239641971, "result": "0x42"})
+        if path.name == "qtrace-acceptance-receipt.json":
+            return json.dumps({"sessionId": SESSION, "nonce": "fixture-nonce", "entryElapsedMs": 1,
+                               "deadlineElapsedMs": 2001})
         if path.name == "fixture.trace.txt":
             return "TRACE_BEGIN format=4 scene=fixture-entry\nTRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n"
         if path.name == "report.json":
@@ -208,7 +211,7 @@ class FakeRunner:
                 "device": {}, "effective_config": {}, "error": None, "finished_at": 1,
                 "mode": "run", "serial": "SERIAL", "started_at": 0, "target": {},
                 "tracer": {}, "warnings": [],
-                "timeline": [{"stage": "installing_hooks"}, {"stage": "running"}],
+                "timeline": [{"stage": "installing_hooks", "cleanup_detached": True}, {"stage": "running"}],
                 "native": {"status": status("sealed")},
                 "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", str((self.offset_root or Path("/tmp")) / "fixture.trace.txt")],
                 "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "local_path": "artifacts/fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
@@ -755,7 +758,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[6])
         self.assertEqual(16, len(commands))
-        self.assertEqual(11, runner.reads)  # baseline retry, rooted reports, oracle, and pull reports
+        self.assertEqual(12, runner.reads)  # baseline retry, receipt, rooted reports, oracle, and pull reports
         self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[11])
         self.assertIn("--name", commands[13])
         self.assertIn("fixture.trace.bin.lz4", commands[13])
