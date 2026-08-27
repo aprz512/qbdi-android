@@ -189,6 +189,9 @@ class FakeRunner:
             return path.read_text(encoding="utf-8")
         return ""
 
+    def read_text_beneath(self, root: Path, relative: Path, *, timeout: float) -> str:
+        return self.read_text(root / relative, timeout=timeout)
+
 
 class FakeArtifactClient:
     def __init__(self, root: Path):
@@ -204,6 +207,16 @@ class FakeArtifactClient:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_beneath_read_rejects_final_and_parent_symlinks(self):
+        from scripts.qtrace_device_acceptance import SubprocessRunner
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"; root.mkdir()
+            outside = Path(temporary) / "outside"; outside.mkdir(); (outside / "x").write_text("x")
+            (root / "x").symlink_to(outside / "x")
+            runner = SubprocessRunner("SERIAL", inject_first_read_failure=False)
+            with self.assertRaises(RuntimeError): runner.read_text_beneath(root, Path("x"), timeout=1)
+            (root / "x").unlink(); (root / "dir").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(RuntimeError): runner.read_text_beneath(root, Path("dir/x"), timeout=1)
     def test_subprocess_runner_uses_bounded_capture_for_allowed_crash_exit(self):
         from scripts.bounded_process import BoundedProcessError
         from scripts.qtrace_device_acceptance import SubprocessRunner

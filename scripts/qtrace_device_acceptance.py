@@ -38,6 +38,7 @@ class Runner(Protocol):
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
     def read_text(self, path: Path, *, timeout: float) -> str: ...
+    def read_text_beneath(self, root: Path, relative: Path, *, timeout: float) -> str: ...
 
 
 class SubprocessRunner:
@@ -93,6 +94,15 @@ class SubprocessRunner:
         if len(chunks) != metadata.st_size:
             raise RuntimeError("host report is not a bounded regular file")
         return bytes(chunks).decode("utf-8", errors="strict")
+
+    def read_text_beneath(self, root: Path, relative: Path, *, timeout: float) -> str:
+        if timeout <= 0:
+            raise RuntimeError("bounded report read timeout must be positive")
+        deadline = time.monotonic() + timeout
+        value = _read_beneath(root, str(relative))
+        if time.monotonic() >= deadline:
+            raise RuntimeError("bounded report read exceeded timeout")
+        return value.decode("utf-8", errors="strict")
 
 
 class OneShotArtifactRead:
