@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -1203,6 +1204,44 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 _convert_snapshot_bounded(root / "artifact", root / "converted", lz4="lz4",
                                           deadline=time.monotonic() + 1.0)
             self.assertEqual(64 * 1024, bounded.call_args.kwargs["maximum_bytes"])
+
+    def test_held_root_reader_kills_and_reaps_a_truly_blocking_read_worker(self):
+        from scripts.qtrace_device_acceptance import RootedReader
+
+        blocked_read, blocked_write = os.pipe()
+        pid_read, pid_write = os.pipe()
+        child_pid = None
+        try:
+            def blocking_read(_descriptor, _size):
+                os.write(pid_write, str(os.getpid()).encode("ascii"))
+                return os.read(blocked_read, 1)
+
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "artifact").write_bytes(b"fixture")
+                started = time.monotonic()
+                with RootedReader(root, _read_hook=blocking_read) as held, \
+                        self.assertRaisesRegex(RuntimeError, "exceeded deadline"):
+                    held.read_bytes("artifact", deadline=started + 0.1)
+                self.assertLess(time.monotonic() - started, 1.0)
+
+            child_pid = int(os.read(pid_read, 64).decode("ascii"))
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(child_pid, os.WNOHANG)
+            child_pid = None
+        finally:
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, 9)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(child_pid, 0)
+                except ChildProcessError:
+                    pass
+            for descriptor in (blocked_read, blocked_write, pid_read, pid_write):
+                os.close(descriptor)
+
     def test_strict_report_rejects_duplicate_keys_and_nonfinite_numbers(self):
         from scripts.qtrace_device_acceptance import _strict_json
 

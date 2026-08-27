@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -18,7 +19,7 @@ import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 from scripts.bounded_process import BoundedProcessError, capture_bounded
 from scripts.pull_trace import AdbArtifactClient, MAX_METRICS_BYTES
 from qtrace.status import load_strict_json, validate_status_shape
@@ -57,6 +58,95 @@ class RegularFileStat:
     identity: tuple[int, int]
 
 
+_LOCAL_READ_TIMEOUT_SECONDS = 15.0
+
+
+def _kill_and_reap(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    while True:
+        try:
+            os.waitpid(pid, 0)
+            return
+        except InterruptedError:
+            continue
+        except ChildProcessError:
+            return
+
+
+def _read_regular_in_worker(
+    descriptor: int,
+    size: int,
+    *,
+    deadline: float,
+    read_hook: Callable[[int, int], bytes] = os.read,
+) -> bytes:
+    """Read in a killable child which inherits the held file capability.
+
+    The acceptance host calls this from its single-threaded control path. The
+    fork child performs only low-level descriptor operations and is always reaped.
+    """
+    if time.monotonic() >= deadline:
+        raise RuntimeError("reported output read exceeded deadline")
+    scratch = tempfile.TemporaryFile()
+    source = os.dup(descriptor)
+    pid = -1
+    try:
+        try:
+            pid = os.fork()
+        except OSError as error:
+            raise RuntimeError("cannot start bounded output reader") from error
+        if pid == 0:
+            try:
+                remaining = size
+                while remaining:
+                    block = read_hook(source, min(64 * 1024, remaining))
+                    if type(block) is not bytes or not block or len(block) > remaining:
+                        os._exit(71)
+                    view = memoryview(block)
+                    while view:
+                        written = os.write(scratch.fileno(), view)
+                        if written <= 0:
+                            os._exit(72)
+                        view = view[written:]
+                    remaining -= len(block)
+                os._exit(0)
+            except BaseException:
+                os._exit(73)
+
+        os.close(source)
+        source = -1
+        while True:
+            try:
+                finished, status = os.waitpid(pid, os.WNOHANG)
+            except InterruptedError:
+                continue
+            if finished == pid:
+                pid = -1
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("reported output read exceeded deadline")
+            time.sleep(min(0.01, remaining))
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise RuntimeError("reported output changed while being read")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("reported output read exceeded deadline")
+        scratch.seek(0)
+        data = scratch.read(size + 1)
+        if len(data) != size:
+            raise RuntimeError("reported output changed while being read")
+        return data
+    finally:
+        if pid > 0:
+            _kill_and_reap(pid)
+        if source >= 0:
+            os.close(source)
+        scratch.close()
+
+
 class Runner(Protocol):
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
@@ -67,7 +157,8 @@ class Runner(Protocol):
 class RootedReader:
     """A fixed output directory capability, immune to later pathname rebinding."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *,
+                 _read_hook: Callable[[int, int], bytes] = os.read) -> None:
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = -1
         try:
@@ -86,6 +177,7 @@ class RootedReader:
         self._descriptor = descriptor
         self.path = root
         self._identity = (details.st_dev, details.st_ino)
+        self._read_hook = _read_hook
 
     def __enter__(self) -> "RootedReader":
         return self
@@ -146,17 +238,12 @@ class RootedReader:
         try:
             if details.st_size > maximum_bytes:
                 raise RuntimeError("reported output is not a bounded regular file")
-            data = bytearray()
-            while len(data) < details.st_size:
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise RuntimeError("reported output read exceeded deadline")
-                block = os.read(descriptor, min(64 * 1024, details.st_size - len(data)))
-                if not block:
-                    raise RuntimeError("reported output changed while being read")
-                data.extend(block)
-            if deadline is not None and time.monotonic() >= deadline:
-                raise RuntimeError("reported output read exceeded deadline")
-            return bytes(data)
+            final_deadline = (time.monotonic() + _LOCAL_READ_TIMEOUT_SECONDS
+                              if deadline is None else deadline)
+            return _read_regular_in_worker(
+                descriptor, details.st_size, deadline=final_deadline,
+                read_hook=self._read_hook,
+            )
         finally:
             os.close(descriptor)
 
@@ -208,21 +295,14 @@ class SubprocessRunner:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
                 raise RuntimeError("host report is not a bounded regular file")
-            chunks = bytearray()
-            while len(chunks) < metadata.st_size:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("host report read exceeded timeout")
-                chunk = os.read(descriptor, min(64 * 1024, metadata.st_size - len(chunks)))
-                if not chunk:
-                    raise RuntimeError("host report changed during bounded read")
-                chunks.extend(chunk)
-            if time.monotonic() >= deadline:
-                raise RuntimeError("host report read exceeded timeout")
+            chunks = _read_regular_in_worker(
+                descriptor, metadata.st_size, deadline=deadline,
+            )
         finally:
             os.close(descriptor)
         if len(chunks) != metadata.st_size:
             raise RuntimeError("host report is not a bounded regular file")
-        return bytes(chunks).decode("utf-8", errors="strict")
+        return chunks.decode("utf-8", errors="strict")
 
     def read_text_beneath(self, root: Path | RootedReader, relative: Path, *, timeout: float) -> str:
         if timeout <= 0:
@@ -402,40 +482,8 @@ def _trusted_output(path: Path, root: Path) -> Path:
 def _read_beneath(root: Path, relative: str, maximum_bytes: int = 1_048_576,
                   *, deadline: float | None = None) -> bytes:
     """Read one regular file through held no-follow directory descriptors."""
-    candidate = Path(relative)
-    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
-        raise RuntimeError("reported output path is unsafe")
-    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                        getattr(os, "O_NOFOLLOW", 0))
-    try:
-        for part in candidate.parts[:-1]:
-            child = os.open(part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                            getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
-            os.close(directory)
-            directory = child
-        descriptor = os.open(candidate.parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                             dir_fd=directory)
-        try:
-            details = os.fstat(descriptor)
-            if not stat.S_ISREG(details.st_mode) or details.st_size > maximum_bytes:
-                raise RuntimeError("reported output is not a bounded regular file")
-            data = bytearray()
-            while len(data) < details.st_size:
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise RuntimeError("reported output read exceeded deadline")
-                block = os.read(descriptor, min(64 * 1024, details.st_size - len(data)))
-                if not block:
-                    raise RuntimeError("reported output changed while being read")
-                data.extend(block)
-            if deadline is not None and time.monotonic() >= deadline:
-                raise RuntimeError("reported output read exceeded deadline")
-            return bytes(data)
-        finally:
-            os.close(descriptor)
-    except OSError as error:
-        raise RuntimeError("reported output is outside the trusted directory") from error
-    finally:
-        os.close(directory)
+    with RootedReader(root) as held:
+        return held.read_bytes(relative, maximum_bytes, deadline=deadline)
 
 
 def _read_root(root: Path | RootedReader, relative: str, maximum_bytes: int = 1_048_576,
@@ -671,6 +719,7 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
 def _verify_artifact_read_recovery(device: str, report: dict[str, object], root: Path | RootedReader, *,
                                    artifact_client_factory=AdbArtifactClient) -> None:
     """Exercise one real app-private artifact read failure without restarting adbd."""
+    deadline = time.monotonic() + 15.0
     records = report.get("artifacts")
     if not isinstance(records, list):
         raise RuntimeError("timed report has no artifact records for recovery verification")
@@ -683,19 +732,26 @@ def _verify_artifact_read_recovery(device: str, report: dict[str, object], root:
     local_path = Path(binary[0]["local_path"])
     metrics_name = str(binary[0]["remote_name"]) + ".metrics"
     metrics_relative = Path(str(local_path) + ".metrics")
-    before = _read_root(root, str(metrics_relative), MAX_METRICS_BYTES)
-    client = artifact_client_factory(package=PACKAGE, device=device)
+    before = _read_root(root, str(metrics_relative), MAX_METRICS_BYTES,
+                        deadline=deadline)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("artifact recovery verification exceeded deadline")
+    client = artifact_client_factory(package=PACKAGE, device=device, timeout=remaining)
     wrapped = OneShotArtifactRead(client)
     try:
         wrapped.read_file(metrics_name, maximum_bytes=MAX_METRICS_BYTES)
     except ConnectionError:
         # The first failure is deliberately before delegating; verify the same
         # trusted session evidence remains intact before retrying the same client.
-        if _read_root(root, str(metrics_relative), MAX_METRICS_BYTES) != before:
+        if _read_root(root, str(metrics_relative), MAX_METRICS_BYTES,
+                      deadline=deadline) != before:
             raise RuntimeError("artifact evidence changed after injected read failure")
     else:
         raise RuntimeError("injected artifact read unexpectedly succeeded")
     remote = wrapped.read_file(metrics_name, maximum_bytes=MAX_METRICS_BYTES)
+    if time.monotonic() >= deadline:
+        raise RuntimeError("artifact recovery verification exceeded deadline")
     if remote != before:
         raise RuntimeError("artifact retry did not recover the same metrics evidence")
 
