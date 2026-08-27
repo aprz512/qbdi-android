@@ -127,14 +127,19 @@ def publish_collector_report(token: object, writer: Any, report: object) -> tupl
                              dir_fd=token.directory)
         try:
             current = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
-        if (current.st_dev, current.st_ino) != token.report_identity:
-            raise FileExistsError("collector report was replaced concurrently")
-        descriptor = os.open("report.json", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                             dir_fd=token.directory)
-        try:
-            fragment = json.loads(os.read(descriptor, 1024 * 1024 + 1).decode("utf-8"))
+            if (current.st_dev, current.st_ino) != token.report_identity:
+                raise FileExistsError("collector report was replaced concurrently")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(64 * 1024, 1024 * 1024 + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > 1024 * 1024:
+                    raise _error("artifact.report_too_large", "collector report exceeds size bound")
+            fragment = json.loads(b"".join(chunks).decode("utf-8"))
         finally:
             os.close(descriptor)
         records = fragment.get("artifacts", []) if type(fragment) is dict else []
@@ -569,6 +574,7 @@ def _rewrite_published_report(parent: int, session_id: str,
     descriptor = -1
     temporary = ".report-" + uuid.uuid4().hex + ".tmp"
     try:
+        original = os.stat("report.json", dir_fd=directory, follow_symlinks=False)
         try:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                  getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -583,7 +589,13 @@ def _rewrite_published_report(parent: int, session_id: str,
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-        os.replace(temporary, "report.json", src_dir_fd=directory, dst_dir_fd=directory)
+        from qtrace.report import _exchange
+        _exchange(directory, temporary, "report.json")
+        exchanged = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+        if (exchanged.st_dev, exchanged.st_ino) != (original.st_dev, original.st_ino):
+            _exchange(directory, temporary, "report.json")
+            raise FileExistsError("collector report changed during refresh")
+        os.unlink(temporary, dir_fd=directory)
         temporary = ""
         os.fsync(directory)
     finally:
@@ -1152,6 +1164,9 @@ class ArtifactProcessor:
                     root_statuses.update({root: candidate_status for root in owned})
                 eligible: list[str] = []
                 for root in roots:
+                    if root not in root_statuses:
+                        eligible.append(root)
+                        continue
                     candidate_status = root_statuses[root]
                     state = candidate_status["state"]
                     if state == "sealed":
@@ -1174,9 +1189,11 @@ class ArtifactProcessor:
                                                            timeout=timeout), candidate_id, package)
                 except QtraceError as error:
                     raise _error("artifact.status_missing", "matching native status is invalid") from error
-                if any(root not in candidate_status["artifacts"] for root in roots):
+                owned = [root for root in roots if candidate_id in root.lower()]
+                if any(root not in candidate_status["artifacts"] for root in owned):
                     raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
-                status, session_id = candidate_status, candidate_id
+                if len(owned) == len(roots):
+                    status, session_id = candidate_status, candidate_id
         if session_id is None:
             session_id = str(uuid.uuid4())
         selected = list(roots)

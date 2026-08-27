@@ -375,6 +375,17 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn(root + ".metrics", [path.name for path in result.files])
             self.assertTrue(all(path.exists() for path in result.files))
 
+    def test_all_mixes_uuid_owned_and_legacy_roots(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        owned, legacy = f"{session}.trace.txt", "legacy.trace.txt"
+        client = FakeClient({f"session-{session}.status.json": json.dumps(
+            self._status(session, artifacts=[owned])).encode(), owned: COMPLETE_TERMINAL,
+            legacy: COMPLETE_TERMINAL})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual(
+                "d", "com.example.app", PullSelection(PullMode.ALL), Path(root), 1)
+            self.assertEqual({owned, legacy}, {path.name for path in result.files})
+
     def test_text_terminal_rejects_unversioned_or_extra_terminal_fields(self):
         invalid = (
             b"TRACE_END status=ok\n",
