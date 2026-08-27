@@ -134,6 +134,25 @@ def _read_retry(runner: Runner, path: Path, *, timeout: float,
         return read_once()
 
 
+def _read_retry_beneath(runner: Runner, root: Path, relative: Path, *, timeout: float,
+                        deadline: float | None = None) -> str:
+    """Read a local acceptance result only through its trusted output root."""
+    if timeout <= 0:
+        raise ValueError("read timeout must be positive")
+    final_deadline = time.monotonic() + timeout if deadline is None else deadline
+
+    def read_once() -> str:
+        remaining = final_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("read deadline elapsed before retry")
+        return runner.read_text_beneath(root, relative, timeout=remaining)
+
+    try:
+        return read_once()
+    except ConnectionError:
+        return read_once()
+
+
 def _strict_json(raw: str) -> dict[str, object]:
     def duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -150,9 +169,9 @@ def _strict_json(raw: str) -> dict[str, object]:
     return value
 
 
-def _strict_report(runner: Runner, path: Path) -> dict[str, object]:
+def _strict_report(runner: Runner, root: Path, relative: Path) -> dict[str, object]:
     try:
-        return _strict_json(_read_retry(runner, path, timeout=5.0))
+        return _strict_json(_read_retry_beneath(runner, root, relative, timeout=5.0))
     except (UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise RuntimeError("qtrace report is not strict JSON") from error
 
@@ -165,8 +184,8 @@ _SESSION_REPORT_KEYS = frozenset((
 _PULL_REPORT_KEYS = frozenset(("schema", "sessionId", "artifacts", "errors"))
 
 
-def _strict_session_report(runner: Runner, path: Path) -> dict[str, object]:
-    value = _strict_report(runner, path)
+def _strict_session_report(runner: Runner, root: Path, relative: Path) -> dict[str, object]:
+    value = _strict_report(runner, root, relative)
     if set(value) != _SESSION_REPORT_KEYS:
         raise RuntimeError("session report has unexpected fields")
     if (value.get("schema") != 1 or not isinstance(value.get("session_id"), str) or
@@ -178,8 +197,8 @@ def _strict_session_report(runner: Runner, path: Path) -> dict[str, object]:
     return value
 
 
-def _strict_pull_report(runner: Runner, path: Path) -> dict[str, object]:
-    value = _strict_report(runner, path)
+def _strict_pull_report(runner: Runner, root: Path, relative: Path) -> dict[str, object]:
+    value = _strict_report(runner, root, relative)
     if set(value) != _PULL_REPORT_KEYS or value.get("schema") != 1:
         raise RuntimeError("pull report has unexpected fields")
     if (not isinstance(value.get("sessionId"), str) or not isinstance(value.get("artifacts"), list)
@@ -222,7 +241,7 @@ def _report_path(stdout: str, root: Path) -> Path:
             raise ValueError("unsafe report path")
     except ValueError as error:
         raise RuntimeError("qtrace reported a path outside its trusted output directory") from error
-    return root / relative
+    return relative
 
 
 def _trusted_output(path: Path, root: Path) -> Path:
@@ -271,8 +290,8 @@ def _read_beneath(root: Path, relative: str, maximum_bytes: int = 1_048_576) -> 
         os.close(directory)
 
 
-def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, object], str]:
-    value = _strict_session_report(runner, path)
+def _validated_timed_report(runner: Runner, root: Path, relative: Path) -> tuple[dict[str, object], str]:
+    value = _strict_session_report(runner, root, relative)
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or
             value.get("stage") != "completed" or value.get("package") != PACKAGE):
         raise RuntimeError("timed qtrace report is incomplete")
@@ -316,8 +335,8 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
     return value, artifact
 
 
-def _validated_monitor_report(runner: Runner, path: Path, *, status: str) -> dict[str, object]:
-    report = _strict_session_report(runner, path)
+def _validated_monitor_report(runner: Runner, root: Path, relative: Path, *, status: str) -> dict[str, object]:
+    report = _strict_session_report(runner, root, relative)
     if report.get("schema") != 1 or report.get("package") != PACKAGE or report.get("status") != status:
         raise RuntimeError("monitor report has an invalid classification")
     return report
@@ -363,7 +382,7 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
                           crash_marked=False)
         if getattr(stats, "termination", None) != "stopped" or getattr(stats, "partial", True):
             raise RuntimeError("timed binary conversion was not a complete stopped trace")
-        text = _read_beneath(Path(staging), converted.name).decode("utf-8", errors="strict")
+        text = runner.read_text_beneath(Path(staging), converted.name, timeout=5.0)
         lines = text.splitlines()
         terminals = [line for line in lines if line.startswith("TRACE_END ")]
         if (not lines or not lines[0].startswith("TRACE_BEGIN format=4 ") or len(terminals) != 1 or
@@ -384,12 +403,12 @@ def _verify_artifact_read_recovery(device: str, report: dict[str, object], root:
                record["remote_name"].endswith(".trace.bin.lz4"))]
     if len(binary) != 1 or not isinstance(binary[0].get("local_path"), str):
         raise RuntimeError("timed report has no trusted binary identity for recovery verification")
-    local_binary = _trusted_output(root / binary[0]["local_path"], root)
+    local_path = Path(binary[0]["local_path"])
+    local_binary = _trusted_output(root / local_path, root)
     metrics_name = local_binary.name + ".metrics"
-    local_metrics = _trusted_output(Path(str(local_binary) + ".metrics"), root)
-    if local_metrics.stat().st_size > MAX_METRICS_BYTES:
-        raise RuntimeError("timed metrics evidence exceeds its bounded recovery read")
-    before = local_metrics.read_bytes()
+    metrics_relative = Path(str(local_path) + ".metrics")
+    _trusted_output(root / metrics_relative, root)
+    before = _read_beneath(root, str(metrics_relative), MAX_METRICS_BYTES)
     client = artifact_client_factory(package=PACKAGE, device=device)
     wrapped = OneShotArtifactRead(client)
     try:
@@ -397,7 +416,7 @@ def _verify_artifact_read_recovery(device: str, report: dict[str, object], root:
     except ConnectionError:
         # The first failure is deliberately before delegating; verify the same
         # trusted session evidence remains intact before retrying the same client.
-        if _trusted_output(local_metrics, root).read_bytes() != before:
+        if _read_beneath(root, str(metrics_relative), MAX_METRICS_BYTES) != before:
             raise RuntimeError("artifact evidence changed after injected read failure")
     else:
         raise RuntimeError("injected artifact read unexpectedly succeeded")
@@ -425,7 +444,7 @@ def _verify_pull_outputs(root: Path) -> None:
 
 def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: str | None = None,
                            compressed_only: bool = False) -> dict[str, object]:
-    report = _strict_pull_report(runner, _report_path(stdout, root))
+    report = _strict_pull_report(runner, root, _report_path(stdout, root))
     records = report.get("artifacts")
     if not isinstance(records, list) or not records:
         raise RuntimeError("manual pull report has no artifact records")
@@ -453,29 +472,31 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     baseline = _wait_for_baseline(runner)
     runner.run(("python3", "scripts/benchmark_trace.py", "--device", device, "--profile", "fast", "--runs", "5",
                 "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), timeout=900.0)
-    reports: dict[str, Path] = {}
+    reports: dict[str, tuple[Path, Path]] = {}
     for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
         output = directory / name
         published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
                                allowed=(0, 2) if scenario == "flight-crash" else (0,))
-        reports[name] = _report_path(published.stdout or str(output / "report.json"), output)
+        reports[name] = (output, _report_path(
+            published.stdout or str(output / "report.json"), output,
+        ))
         if scenario == "flight-crash" and published.returncode != 2:
             raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
-    timed, artifact = _validated_timed_report(runner, reports["offset"])
-    symbol, _ = _validated_timed_report(runner, reports["symbol"])
+    timed, artifact = _validated_timed_report(runner, *reports["offset"])
+    symbol, _ = _validated_timed_report(runner, *reports["symbol"])
     _validate_timed_artifact_semantics(
-        runner, timed, reports["offset"].parent, converter=converter,
+        runner, timed, reports["offset"][0], converter=converter,
     )
     _verify_artifact_read_recovery(
-        device, timed, reports["offset"].parent,
+        device, timed, reports["offset"][0],
         artifact_client_factory=artifact_client_factory,
     )
     timed_status = timed["native"]["status"]  # validated above
     symbol_status = symbol["native"]["status"]
     if timed_status["normalizedScenes"] != symbol_status["normalizedScenes"]:
         raise RuntimeError("offset and symbol timed scenes did not normalize identically")
-    _validated_monitor_report(runner, reports["exit"], status="process_exited")
-    _validated_monitor_report(runner, reports["crash"], status="crash_recovered")
+    _validated_monitor_report(runner, *reports["exit"], status="process_exited")
+    _validated_monitor_report(runner, *reports["crash"], status="crash_recovered")
     runner.run(("adb", "-s", device, "shell", "kill", "-0", str(timed["pid"])), timeout=10.0)
     timed_oracle = json.loads(_read_retry(runner, Path(
         f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"), timeout=5.0))

@@ -207,6 +207,58 @@ class FakeArtifactClient:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_report_path_returns_only_a_lexical_token(self):
+        from scripts.qtrace_device_acceptance import _report_path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "output"
+            root.mkdir()
+            self.assertEqual(
+                Path("report.json"),
+                _report_path(str(root / "report.json"), root),
+            )
+            for unsafe in ("../report.json", str(root.parent / "report.json")):
+                with self.subTest(unsafe=unsafe), self.assertRaisesRegex(
+                        RuntimeError, "outside"):
+                    _report_path(unsafe, root)
+
+    def test_local_session_report_uses_rooted_read_after_parent_swap(self):
+        from scripts.qtrace_device_acceptance import _report_path, _strict_session_report
+
+        document = json.dumps({
+            "schema": 1, "session_id": SESSION, "status": "sealed", "stage": "completed",
+            "package": "com.aprz.qbdiandroid", "pid": 4242,
+            "device": {}, "effective_config": {}, "error": None, "finished_at": 1,
+            "mode": "run", "serial": "SERIAL", "started_at": 0, "target": {},
+            "tracer": {}, "warnings": [], "timeline": [], "native": {}, "outputs": [],
+            "artifacts": [],
+        })
+
+        class Runner:
+            def read_text(self, *_args, **_kwargs):
+                raise AssertionError("local reports must not use read_text")
+
+            def read_text_beneath(self, root, relative, *, timeout):
+                self.root = root
+                self.relative = relative
+                return document
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "output"
+            root.mkdir()
+            token = _report_path(str(root / "report.json"), root)
+            moved = parent / "moved-output"
+            root.rename(moved)
+            outside = parent / "outside"
+            outside.mkdir()
+            (outside / "report.json").write_text("external legal report", encoding="utf-8")
+            root.symlink_to(outside, target_is_directory=True)
+            runner = Runner()
+            self.assertEqual(document, json.dumps(_strict_session_report(runner, root, token)))
+            self.assertEqual(root, runner.root)
+            self.assertEqual(Path("report.json"), runner.relative)
+
     def test_beneath_read_rejects_final_and_parent_symlinks(self):
         from scripts.qtrace_device_acceptance import SubprocessRunner
         with tempfile.TemporaryDirectory() as temporary:
@@ -217,6 +269,25 @@ class AcceptanceHarnessTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): runner.read_text_beneath(root, Path("x"), timeout=1)
             (root / "x").unlink(); (root / "dir").symlink_to(outside, target_is_directory=True)
             with self.assertRaises(RuntimeError): runner.read_text_beneath(root, Path("dir/x"), timeout=1)
+
+    def test_beneath_read_rejects_traversal_root_escape_and_parent_swap(self):
+        from scripts.qtrace_device_acceptance import SubprocessRunner, _report_path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "output"
+            nested = root / "nested"
+            nested.mkdir(parents=True)
+            outside = parent / "outside"
+            outside.mkdir()
+            (outside / "report.json").write_text("external but legal", encoding="utf-8")
+            runner = SubprocessRunner("SERIAL", inject_first_read_failure=False)
+            token = _report_path(str(nested / "report.json"), root)
+            nested.rename(parent / "original-nested")
+            nested.symlink_to(outside, target_is_directory=True)
+            for candidate in (token, Path("../outside/report.json"), outside / "report.json"):
+                with self.subTest(candidate=candidate), self.assertRaises(RuntimeError):
+                    runner.read_text_beneath(root, candidate, timeout=1.0)
     def test_subprocess_runner_uses_bounded_capture_for_allowed_crash_exit(self):
         from scripts.bounded_process import BoundedProcessError
         from scripts.qtrace_device_acceptance import SubprocessRunner
@@ -380,6 +451,30 @@ class AcceptanceHarnessTests(unittest.TestCase):
         self.assertEqual([], client.calls)
         self.assertEqual(b"evidence", wrapped.read_file("fixture.trace.bin.lz4", maximum_bytes=1))
         self.assertEqual([("fixture.trace.bin.lz4", 1)], client.calls)
+
+    def test_artifact_recovery_uses_rooted_bounded_reads_for_local_metrics(self):
+        from scripts.qtrace_device_acceptance import _verify_artifact_read_recovery
+
+        report = {"artifacts": [{
+            "remote_name": "fixture.trace.bin.lz4",
+            "local_path": "artifacts/fixture.trace.bin.lz4",
+        }]}
+
+        class Client:
+            def read_file(self, _name, *, maximum_bytes):
+                self.maximum_bytes = maximum_bytes
+                return b"metrics"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "fixture.trace.bin.lz4").write_bytes(b"binary")
+            (artifacts / "fixture.trace.bin.lz4.metrics").write_bytes(b"metrics")
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")):
+                _verify_artifact_read_recovery(
+                    "SERIAL", report, root, artifact_client_factory=lambda **_kwargs: Client(),
+                )
     def test_trusted_output_rejects_escape_and_symlink(self):
         from scripts.qtrace_device_acceptance import _trusted_output
         with tempfile.TemporaryDirectory() as temporary:
@@ -411,7 +506,9 @@ class AcceptanceHarnessTests(unittest.TestCase):
             {"remote_name": "fixture.trace.txt", "decoder": "qtrb"},
         ])
         runner.read_text = lambda _path, *, timeout: json.dumps(document)  # type: ignore[method-assign]
-        report, artifact = _validated_timed_report(runner, Path("report.json"))
+        report, artifact = _validated_timed_report(
+            runner, Path("output"), Path("report.json"),
+        )
         self.assertEqual(document, report)
         self.assertEqual("fixture.trace.bin.lz4", artifact)
 
@@ -424,8 +521,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
         reads: list[Path] = []
         runner.read_text = lambda path, *, timeout: (reads.append(path), json.dumps(document))[1]  # type: ignore[method-assign]
         with self.assertRaisesRegex(RuntimeError, "unexpected fields"):
-            _validated_timed_report(runner, Path("report.json"))
-        self.assertEqual([Path("report.json")], reads)
+            _validated_timed_report(runner, Path("output"), Path("report.json"))
+        self.assertEqual([Path("output") / "report.json"], reads)
 
     def test_requires_an_explicit_device(self):
         from scripts.qtrace_device_acceptance import main
@@ -475,7 +572,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[6])
         self.assertEqual(16, len(commands))
-        self.assertEqual(11, runner.reads)  # baseline retry, scenario reports, oracle, and four pull reports
+        self.assertEqual(12, runner.reads)  # baseline retry, rooted reports/text, oracle, and pull reports
         self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[11])
         self.assertIn("--name", commands[13])
         self.assertIn("fixture.trace.bin.lz4", commands[13])
