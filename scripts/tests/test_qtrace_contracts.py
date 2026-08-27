@@ -1229,13 +1229,17 @@ class StagingDeviceRunner(FakeRunner):
                  wrong_types: frozenset[str] = frozenset(),
                  wrong_hashes: frozenset[str] = frozenset(),
                  before_first_push=None,
-                 app_parent_kind: str | None = "directory"):
+                 app_parent_kind: str | None = "directory",
+                 app_parent_mode: int = 0o777,
+                 parent_chmod_result_mode: int = 0o771):
         super().__init__(fail_first_read=fail_first_read)
         self.shell_files: dict[str, tuple[str, bytes | str]] = {}
         self.app_files: dict[str, tuple[str, bytes | str]] = {}
         self.app_modes: dict[str, int] = {}
         self.push_source_parent_modes: list[int] = []
         self.app_parent_kind = app_parent_kind
+        self.app_parent_mode = None if app_parent_kind is None else app_parent_mode
+        self.parent_chmod_result_mode = parent_chmod_result_mode
         self.primary_failure = primary_failure
         self.cleanup_failures = set(cleanup_failures)
         self.primary_triggered = False
@@ -1329,6 +1333,7 @@ class StagingDeviceRunner(FakeRunner):
                 raise RuntimeError(f"unexpected app-private mkdir arguments: {arguments}")
             if self.app_parent_kind is None:
                 self.app_parent_kind = "directory"
+                self.app_parent_mode = 0o777
             return self._result()
         if operation == "cp":
             source, destination = arguments
@@ -1348,6 +1353,12 @@ class StagingDeviceRunner(FakeRunner):
                 self.app_modes[destination] = 0o600
             return self._result()
         if operation == "chmod":
+            if arguments == ("771", "files"):
+                self._fail_if_requested("chmod:files")
+                if self.app_parent_kind != "directory":
+                    raise RuntimeError("app-private files parent is not a directory")
+                self.app_parent_mode = self.parent_chmod_result_mode
+                return self._result()
             self._fail_if_requested("chmod")
             if (len(arguments) != 3 or arguments[0] != "700" or
                     {self._role(path) for path in arguments[1:]} !=
@@ -1361,13 +1372,18 @@ class StagingDeviceRunner(FakeRunner):
             return self._result()
         if operation == "stat":
             path = arguments[-1]
-            if arguments[:-1] != ("-c", "%F"):
+            if arguments[:-1] not in (("-c", "%F"), ("-c", "%a")):
                 raise RuntimeError(f"unexpected app-private stat arguments: {arguments}")
             if path == "files":
-                self._fail_if_requested("stat:files")
                 if self.app_parent_kind is None:
                     raise RuntimeError("app-private files parent is missing")
-                return self._result(self.app_parent_kind + "\n")
+                if arguments[1] == "%F":
+                    self._fail_if_requested("stat:files")
+                    return self._result(self.app_parent_kind + "\n")
+                self._fail_if_requested("stat-mode:files")
+                return self._result(f"{self.app_parent_mode:o}\n")
+            if arguments[1] != "%F":
+                raise RuntimeError(f"unexpected app-private stat arguments: {arguments}")
             if self.app_parent_kind != "directory":
                 raise RuntimeError("app-private files parent is not a directory")
             label = self._label("stat", path)
@@ -2345,6 +2361,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
             symlink.symlink_to(source)
             fifo = root / "fifo.so"
             os.mkfifo(fifo)
+            empty = root / "empty.so"
+            empty.touch()
             oversized = root / "oversized.so"
             oversized.write_bytes(b"12345")
             for name, candidate in (
@@ -2352,6 +2370,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 ("symlink", symlink),
                 ("fifo", fifo),
                 ("device", Path("/dev/null")),
+                ("empty", empty),
                 ("oversized", oversized),
             ):
                 with self.subTest(case=name), self.assertRaisesRegex(
@@ -2440,6 +2459,138 @@ class AcceptanceHarnessTests(unittest.TestCase):
             for descriptor in (blocked_read, blocked_write, pid_read, pid_write):
                 os.close(descriptor)
 
+    def test_host_binary_snapshot_rejects_completion_at_or_after_work_deadline(self):
+        from scripts.qtrace_device_acceptance import _snapshot_host_binary
+
+        for observed_at in (1000.95, 1000.950001):
+            with self.subTest(observed_at=observed_at), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source.so"
+                snapshot_path = root / "snapshot.so"
+                source.write_bytes(b"fixture")
+                clock = [1000.0]
+                reaped_pids = []
+                real_waitpid = os.waitpid
+
+                def observe_completed_worker(pid, _options):
+                    finished, status = real_waitpid(pid, 0)
+                    reaped_pids.append(pid)
+                    clock[0] = observed_at
+                    return finished, status
+
+                result = None
+                caught = None
+                with patch(
+                    "scripts.qtrace_device_acceptance.time.monotonic",
+                    side_effect=lambda: clock[0],
+                ), patch(
+                    "scripts.qtrace_device_acceptance.os.waitpid",
+                    side_effect=observe_completed_worker,
+                ):
+                    try:
+                        result = _snapshot_host_binary(
+                            source, snapshot_path,
+                            maximum_bytes=64, deadline=1001.0,
+                        )
+                    except RuntimeError as error:
+                        caught = error
+                if result is not None:
+                    result.close()
+
+                self.assertIsNotNone(caught)
+                self.assertRegex(str(caught), "exceeded deadline")
+                self.assertFalse(snapshot_path.exists())
+                self.assertEqual(1, len(reaped_pids))
+                with self.assertRaises(ChildProcessError):
+                    real_waitpid(reaped_pids[0], os.WNOHANG)
+
+    def test_host_binary_snapshot_preserves_primary_and_all_cleanup_failures(self):
+        from scripts.qtrace_device_acceptance import _snapshot_host_binary
+
+        blocked_read, blocked_write = os.pipe()
+        parent_pid = os.getpid()
+        cleanup_started = [False]
+        failed_close = [False]
+        pipe_descriptors = []
+        destination_descriptors = []
+        tracked_descriptors = set()
+        real_close = os.close
+        real_open = os.open
+        real_pipe2 = os.pipe2
+        real_waitpid = os.waitpid
+
+        def blocking_read(_descriptor, _size):
+            return os.read(blocked_read, 1)
+
+        def record_open(path, flags, mode=0o777, *, dir_fd=None):
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+            if flags & os.O_CREAT:
+                destination_descriptors.append(descriptor)
+                tracked_descriptors.add(descriptor)
+            return descriptor
+
+        def record_pipe(flags):
+            descriptors = real_pipe2(flags)
+            pipe_descriptors.extend(descriptors)
+            tracked_descriptors.update(descriptors)
+            return descriptors
+
+        def reap_then_fail(pid, *, cleanup_deadline):
+            os.kill(pid, signal.SIGKILL)
+            real_waitpid(pid, 0)
+            cleanup_started[0] = True
+            raise RuntimeError("kill cleanup exploded")
+
+        def fail_first_cleanup_close(descriptor):
+            if (os.getpid() == parent_pid and cleanup_started[0] and
+                    pipe_descriptors and descriptor == pipe_descriptors[0] and
+                    not failed_close[0]):
+                failed_close[0] = True
+                raise OSError("close cleanup exploded")
+            real_close(descriptor)
+            tracked_descriptors.discard(descriptor)
+
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source.so"
+                snapshot_path = root / "snapshot.so"
+                source.write_bytes(b"fixture")
+                with patch(
+                    "scripts.qtrace_device_acceptance.os.open",
+                    side_effect=record_open,
+                ), patch(
+                    "scripts.qtrace_device_acceptance.os.pipe2",
+                    side_effect=record_pipe,
+                ), patch(
+                    "scripts.qtrace_device_acceptance.os.close",
+                    side_effect=fail_first_cleanup_close,
+                ), patch(
+                    "scripts.qtrace_device_acceptance._kill_and_reap",
+                    side_effect=reap_then_fail,
+                ), self.assertRaises(RuntimeError) as caught:
+                    _snapshot_host_binary(
+                        source, snapshot_path,
+                        maximum_bytes=64, deadline=time.monotonic() + 0.1,
+                        _read_hook=blocking_read,
+                    )
+
+                diagnostics = str(caught.exception)
+                self.assertIn("host tracer input exceeded deadline", diagnostics)
+                self.assertIn("kill cleanup exploded", diagnostics)
+                self.assertIn("close cleanup exploded", diagnostics)
+                self.assertTrue(failed_close[0])
+                self.assertFalse(snapshot_path.exists())
+                with self.assertRaises(OSError):
+                    os.fstat(destination_descriptors[0])
+        finally:
+            for descriptor in (*tracked_descriptors, blocked_read, blocked_write):
+                try:
+                    real_close(descriptor)
+                except OSError:
+                    pass
+
     def test_staging_pushes_private_snapshots_not_rebound_build_paths(self):
         from scripts.qtrace_device_acceptance import _stage_app_private_binaries
 
@@ -2517,6 +2668,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 _stage_app_private_binaries("SERIAL", runner, token="1" * 32)
 
         self.assertEqual("directory", runner.app_parent_kind)
+        self.assertEqual(0o771, runner.app_parent_mode)
         mkdir_index = next(index for index, command in enumerate(runner.commands)
                            if len(command) > 6 and command[6] == "mkdir")
         first_copy_index = next(index for index, command in enumerate(runner.commands)
@@ -2545,10 +2697,30 @@ class AcceptanceHarnessTests(unittest.TestCase):
         self.assertFalse(any(command[6] in {"cp", "chmod", "mv"}
                              for command in runner.commands if len(command) > 6))
 
+    def test_app_private_files_parent_mode_is_verified_before_traversal(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner(parent_chmod_result_mode=0o777)
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    self.assertRaisesRegex(RuntimeError, "canonical mode 771"):
+                _stage_app_private_binaries("SERIAL", runner, token="5" * 32)
+
+        self.assertFalse(any(command[6] in {"cp", "mv"}
+                             for command in runner.commands if len(command) > 6))
+
     def test_files_parent_probe_failure_cleans_host_scratch_with_diagnostics(self):
         from scripts.qtrace_device_acceptance import _stage_app_private_binaries
 
-        for primary in ("mkdir:files", "stat:files"):
+        for primary in ("mkdir:files", "stat:files", "chmod:files", "stat-mode:files"):
             with self.subTest(primary=primary), tempfile.TemporaryDirectory() as temporary:
                 tracer = Path(temporary) / "libqbdi_tracer.so"
                 companion = Path(temporary) / "libshadowhook_nothing.so"

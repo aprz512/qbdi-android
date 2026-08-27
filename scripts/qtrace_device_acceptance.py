@@ -237,6 +237,7 @@ def _snapshot_host_binary(
     status_write = -1
     pid = -1
     success = False
+    result: HostBinarySnapshot | None = None
     try:
         try:
             destination = os.open(
@@ -303,16 +304,20 @@ def _snapshot_host_binary(
         os.close(status_write)
         status_write = -1
         while True:
+            remaining = worker_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("host tracer input exceeded deadline")
             try:
                 finished, status = os.waitpid(pid, os.WNOHANG)
             except InterruptedError:
                 finished, status = 0, 0
             if finished == pid:
                 pid = -1
-                break
             remaining = worker_deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError("host tracer input exceeded deadline")
+            if finished:
+                break
             time.sleep(min(0.01, remaining))
         payload = os.read(status_read, 128)
         if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
@@ -337,18 +342,57 @@ def _snapshot_host_binary(
         result.verify_path()
         destination = -1
         success = True
-        return result
     finally:
+        primary = sys.exception()
+        cleanup_failures: list[tuple[str, BaseException]] = []
         if pid > 0:
-            _kill_and_reap(pid, cleanup_deadline=deadline)
-        for descriptor in (status_read, status_write, destination):
+            try:
+                _kill_and_reap(pid, cleanup_deadline=deadline)
+            except BaseException as error:
+                cleanup_failures.append((f"worker PID {pid}", error))
+        for label, descriptor in (
+            ("status read descriptor", status_read),
+            ("status write descriptor", status_write),
+            ("snapshot descriptor", destination),
+        ):
             if descriptor >= 0:
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except BaseException as error:
+                    cleanup_failures.append((label, error))
         if not success:
             try:
                 snapshot_path.unlink()
             except FileNotFoundError:
                 pass
+            except BaseException as error:
+                cleanup_failures.append((f"snapshot path {snapshot_path}", error))
+        if cleanup_failures:
+            if success and result is not None:
+                try:
+                    result.close()
+                except BaseException as error:
+                    cleanup_failures.append(("returned snapshot descriptor", error))
+                try:
+                    snapshot_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except BaseException as error:
+                    cleanup_failures.append((f"snapshot path {snapshot_path}", error))
+                success = False
+            detail = "; ".join(
+                f"{label}: {type(error).__name__}: {error}"
+                for label, error in cleanup_failures
+            )
+            if primary is not None:
+                combined = RuntimeError(
+                    "host tracer snapshot failed: "
+                    f"{type(primary).__name__}: {primary}; cleanup failed: {detail}"
+                )
+                raise combined from primary
+            raise RuntimeError(f"host tracer snapshot cleanup failed: {detail}")
+    assert result is not None
+    return result
 
 
 class Runner(Protocol):
@@ -473,6 +517,18 @@ def _stage_app_private_binaries(
         ).stdout.strip()
         if parent_kind != "directory":
             raise RuntimeError("app-private files path is not a real directory")
+        runner.run(
+            ("adb", "-s", device, "shell", "run-as", package,
+             "chmod", "771", "files"),
+            timeout=30.0,
+        )
+        parent_mode = runner.run(
+            ("adb", "-s", device, "shell", "run-as", package,
+             "stat", "-c", "%a", "files"),
+            timeout=30.0,
+        ).stdout.strip()
+        if parent_mode != "771":
+            raise RuntimeError("app-private files path does not have canonical mode 771")
         app_parent_trusted = True
         for remote in host_staged:
             remove_host(remote)
