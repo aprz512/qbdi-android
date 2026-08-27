@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import os
 import stat
-import tempfile
+import uuid
 import zipfile
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,12 +48,42 @@ def _regular(path: Path, stage: str) -> Path:
     return path
 
 
-def _extract_target(apk: Path, destination: Path) -> Path:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".qtrace-demo-", suffix=".so", dir=destination.parent)
-    temporary = Path(temporary_name)
+def _open_safe_directory(path: Path) -> int:
+    """Open/create an absolute directory path without ever following a symlink."""
+    candidate = Path(path)
+    if not candidate.is_absolute() or not hasattr(os, "O_NOFOLLOW"):
+        raise QtraceError("demo.output_unsafe", "demo.extract",
+                          "fixture output directory must support no-follow traversal")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+    descriptor = os.open(candidate.anchor, flags)
     try:
+        for part in candidate.parts[1:]:
+            try:
+                os.mkdir(part, 0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            try:
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            except OSError as error:
+                raise QtraceError("demo.output_unsafe", "demo.extract",
+                                  "fixture output directory contains an unsafe parent") from error
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _extract_target(apk: Path, destination: Path) -> Path:
+    directory = _open_safe_directory(destination.parent)
+    temporary = f".qtrace-demo-{uuid.uuid4().hex}.so"
+    descriptor = -1
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
         with os.fdopen(descriptor, "wb") as target, zipfile.ZipFile(apk) as archive:
+            descriptor = -1
             try:
                 info = archive.getinfo(_TARGET_MEMBER)
             except KeyError as error:
@@ -75,14 +106,18 @@ def _extract_target(apk: Path, destination: Path) -> Path:
                                       "fixture target member exceeds its declared size")
             target.flush()
             os.fsync(target.fileno())
-        os.replace(temporary, destination)
+        os.replace(temporary, destination.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
     except (OSError, zipfile.BadZipFile) as error:
         raise QtraceError("demo.extract_failed", "demo.extract", f"cannot extract fixture target: {error}") from error
     finally:
         try:
-            temporary.unlink(missing_ok=True)
+            os.unlink(temporary, dir_fd=directory)
         except OSError:
             pass
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
     return _regular(destination, "demo.extract")
 
 
@@ -135,7 +170,8 @@ def make_demo_config(fixture: DemoFixture, inspector: ElfInspector, scene_form: 
     )
 
 
-def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0) -> InstalledAction:
+def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0,
+                     *, adb_timeout: float = 30.0) -> InstalledAction:
     """Return the generic post-detach action which starts the fixture intent."""
     intents = {"timed": "timed", "monitor-exit": "exit", "flight-crash": "flight-crash"}
     if mode not in intents:
@@ -144,6 +180,9 @@ def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0
         raise QtraceError("demo.action_invalid", "demo.action", "seed must be an unsigned 64-bit integer")
     if type(iterations) is not int or iterations <= 0 or type(worker) is not int or worker < 0:
         raise QtraceError("demo.action_invalid", "demo.action", "iterations and worker are invalid")
+    if (isinstance(adb_timeout, bool) or not isinstance(adb_timeout, (int, float)) or
+            not math.isfinite(adb_timeout) or adb_timeout <= 0):
+        raise QtraceError("demo.action_invalid", "demo.action", "ADB timeout must be finite and positive")
 
     def action(device: object, _pid: int) -> None:
         shell = getattr(device, "shell", None)
@@ -155,6 +194,6 @@ def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0
               "--el", "qtrace_acceptance_seed", str(seed),
               "--el", "qtrace_acceptance_iterations", str(iterations),
               "--ei", "qtrace_acceptance_worker", str(worker),
-              timeout=30.0, maximum_bytes=64 * 1024)
+              timeout=float(adb_timeout), maximum_bytes=64 * 1024)
 
     return action

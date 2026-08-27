@@ -269,7 +269,8 @@ def _demo(arguments: argparse.Namespace, repo_root: Path) -> int:
     fixture = build_demo_fixture(repo_root, runner, arguments.setup_timeout)
     inspector = _make_inspector(runner)
     config = make_demo_config(fixture, inspector, arguments.scene_form, arguments.scenario)
-    action = make_demo_action(arguments.scenario, 5855319310239641971)
+    action = make_demo_action(arguments.scenario, 5855319310239641971,
+                              adb_timeout=arguments.adb_timeout)
     orchestrator = _make_orchestrator(repo_root, inspector)
     if is_timed:
         assert duration is not None

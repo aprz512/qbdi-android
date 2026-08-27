@@ -1,11 +1,15 @@
 import contextlib
+import builtins
 import io
 import json
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from qtrace.artifacts import ArtifactResult, PullMode
+from qtrace.demo import _TARGET_MEMBER, _extract_target, make_demo_action
 from qtrace.errors import QtraceError
 from qtrace.models import AppConfig, OffsetScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.session import SessionResult
@@ -71,9 +75,22 @@ class QtraceCliTests(unittest.TestCase):
         selected = Mock()
         selected.serial = "serial"
         result = ArtifactResult(Path("out/session"), (Path("out/session/artifacts/run.trace.bin"),), (), 0)
+        real_import = builtins.__import__
+
+        def reject_runtime_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "frida" or name.startswith(("qtrace.build", "qtrace.injector", "qtrace.preflight")):
+                raise AssertionError(f"pull must not import {name}")
+            return real_import(name, globals, locals, fromlist, level)
+
         with patch.object(cli, "load_config", side_effect=AssertionError("must not load config")), \
                 patch.object(cli, "_select_device", return_value=selected), \
-                patch.object(cli, "ArtifactProcessor") as processor:
+                patch.object(cli, "_make_orchestrator", side_effect=AssertionError("must not construct session")) as orchestrator, \
+                patch.object(cli, "_make_inspector", side_effect=AssertionError("must not inspect target")) as inspector, \
+                patch.object(cli, "build_demo_fixture", side_effect=AssertionError("must not build fixture")) as fixture, \
+                patch.object(cli, "make_demo_config", side_effect=AssertionError("must not configure fixture")) as demo_config, \
+                patch.object(cli, "make_demo_action", side_effect=AssertionError("must not start fixture")) as demo_action, \
+                patch.object(cli, "ArtifactProcessor") as processor, \
+                patch("builtins.__import__", side_effect=reject_runtime_import):
             processor.return_value.pull_manual.return_value = result
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(0, cli.main(["pull", "--package", "com.example.app", "--output", "out"]))
@@ -81,6 +98,11 @@ class QtraceCliTests(unittest.TestCase):
         selection = processor.return_value.pull_manual.call_args.args[2]
         self.assertIs(PullMode.LATEST, selection.mode)
         self.assertFalse(selection.compressed_only)
+        orchestrator.assert_not_called()
+        inspector.assert_not_called()
+        fixture.assert_not_called()
+        demo_config.assert_not_called()
+        demo_action.assert_not_called()
 
     def test_pull_selection_is_exclusive_but_compressed_only_is_orthogonal(self):
         from qtrace import cli
@@ -150,6 +172,56 @@ class QtraceCliTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(1, cli.main(["demo", "--scenario", "monitor-exit", "--duration", "1s"]))
             self.assertEqual(1, cli.main(["demo", "--scenario", "monitor-exit", "--stop-timeout", "1"]))
+
+    def test_demo_monitor_scenarios_use_monitor_and_preserve_scenario_action_mapping(self):
+        from qtrace import cli
+
+        for scenario in ("monitor-exit", "flight-crash"):
+            with self.subTest(scenario=scenario):
+                orchestrator = Mock()
+                orchestrator.monitor.return_value = SessionResult(
+                    "123e4567-e89b-42d3-a456-426614174000", 0, Path("out/report.json"), (),
+                )
+                action = Mock()
+                fixture = Mock(apk=Path("demo.apk"), target_binary=Path("demo.so"))
+                with patch.object(cli, "build_demo_fixture", return_value=fixture), \
+                        patch.object(cli, "_make_inspector", return_value=Mock()), \
+                        patch.object(cli, "make_demo_config", return_value=config()) as make_config, \
+                        patch.object(cli, "make_demo_action", return_value=action) as make_action, \
+                        patch.object(cli, "_make_orchestrator", return_value=orchestrator), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, cli.main(["demo", "--scenario", scenario, "--adb-timeout", "17"]))
+                orchestrator.run.assert_not_called()
+                request = orchestrator.monitor.call_args.args[0]
+                self.assertEqual("MonitorRequest", type(request).__name__)
+                self.assertFalse(hasattr(request, "duration_ms"))
+                self.assertIs(action, request.installed_action)
+                self.assertEqual(scenario, make_config.call_args.args[3])
+                self.assertEqual(scenario, make_action.call_args.args[0])
+                self.assertEqual(17.0, make_action.call_args.kwargs["adb_timeout"])
+
+    def test_demo_action_uses_configured_adb_timeout(self):
+        device = Mock()
+
+        action = make_demo_action("timed", 7, adb_timeout=17.0)
+        action(device, 42)
+
+        self.assertEqual(17.0, device.shell.call_args.kwargs["timeout"])
+
+    def test_demo_target_extraction_rejects_symlink_parent_without_writing_escape_target(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            apk = root / "fixture.apk"
+            with zipfile.ZipFile(apk, "w") as archive:
+                archive.writestr(_TARGET_MEMBER, b"fixture-target")
+            (root / "build").symlink_to(outside, target_is_directory=True)
+            destination = root / "build/qtrace-demo/arm64-v8a/libdemo_target.so"
+            escaped = Path(outside) / "qtrace-demo/arm64-v8a/libdemo_target.so"
+
+            with self.assertRaisesRegex(QtraceError, "unsafe"):
+                _extract_target(apk, destination)
+
+            self.assertFalse(escaped.exists())
 
 
 if __name__ == "__main__":
