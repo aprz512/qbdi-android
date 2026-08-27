@@ -818,7 +818,8 @@ class ArtifactTests(unittest.TestCase):
             self.assertTrue((saved / published[0]).is_dir())
 
     def test_reclaim_refuses_replacement_swapped_before_opening_session(self):
-        """Removing the expected-fd check would let reclaim erase a replacement session."""
+        """Removing quarantine inode validation would let reclaim erase a replacement session."""
+        from qtrace import artifacts as artifacts_module
         from qtrace.artifacts import _close_token_and_reclaim
         import os
 
@@ -830,21 +831,21 @@ class ArtifactTests(unittest.TestCase):
             (original / "owned.txt").write_text("owned", encoding="utf-8")
             parent = os.open(output, os.O_RDONLY)
             held = os.open(session, os.O_RDONLY, dir_fd=parent)
-            real_open = os.open
+            real_rename = artifacts_module._rename_noreplace
             swapped = False
 
-            def open_after_replacement(name, *args, **kwargs):
+            def rename_after_replacement(fd: int, source: str, destination: str) -> None:
                 nonlocal swapped
-                if name == session and kwargs.get("dir_fd") == parent and not swapped:
+                if source == session and not swapped:
                     swapped = True
-                    os.rename(session, "owned", src_dir_fd=parent, dst_dir_fd=parent)
-                    os.mkdir(session, 0o700, dir_fd=parent)
+                    os.rename(session, "owned", src_dir_fd=fd, dst_dir_fd=fd)
+                    os.mkdir(session, 0o700, dir_fd=fd)
                     (output / session / "replacement.txt").write_text("replacement", encoding="utf-8")
-                return real_open(name, *args, **kwargs)
+                real_rename(fd, source, destination)
 
             primary = QtraceError("artifact.destination_replaced", "artifact", "output replaced")
             try:
-                with patch("qtrace.artifacts.os.open", side_effect=open_after_replacement):
+                with patch("qtrace.artifacts._rename_noreplace", side_effect=rename_after_replacement):
                     _close_token_and_reclaim(parent, held, session, None, primary)
             finally:
                 os.close(held)
@@ -854,6 +855,91 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
             self.assertEqual("owned", (output / "owned" / "owned.txt").read_text())
             self.assertIn("identity changed", primary.detail)
+
+    def test_reclaim_quarantines_owned_session_before_a_final_rmdir_replacement(self):
+        """Removing private quarantine would let final-rmdir cleanup erase this replacement."""
+        from qtrace import artifacts as artifacts_module
+        from qtrace.artifacts import _reclaim_committed_session
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            committed = output / session
+            committed.mkdir()
+            (committed / "owned.txt").write_text("owned", encoding="utf-8")
+            parent = os.open(output, os.O_RDONLY)
+            held = os.open(session, os.O_RDONLY, dir_fd=parent)
+            real_rename = artifacts_module._rename_noreplace
+            moved = False
+
+            def quarantine_then_replace(fd: int, source: str, destination: str) -> None:
+                nonlocal moved
+                real_rename(fd, source, destination)
+                if not moved and source == session:
+                    moved = True
+                    os.mkdir(session, 0o700, dir_fd=fd)
+                    replacement = output / session / "replacement.txt"
+                    replacement.write_text("replacement", encoding="utf-8")
+
+            try:
+                with patch("qtrace.artifacts._rename_noreplace", side_effect=quarantine_then_replace):
+                    _reclaim_committed_session(parent, held, session)
+            finally:
+                os.close(held)
+                os.close(parent)
+
+            self.assertTrue(moved)
+            self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
+            self.assertFalse(list(output.glob(".qtrace-reclaim-*")))
+
+    def test_reclaim_restores_untrusted_quarantine_without_deleting_it(self):
+        """A swap before quarantine rename must not let cleanup delete the foreign replacement."""
+        from qtrace import artifacts as artifacts_module
+        from qtrace.artifacts import _reclaim_committed_session
+        import os
+
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            committed = output / session
+            committed.mkdir()
+            (committed / "owned.txt").write_text("owned", encoding="utf-8")
+            parent = os.open(output, os.O_RDONLY)
+            held = os.open(session, os.O_RDONLY, dir_fd=parent)
+            real_rename = artifacts_module._rename_noreplace
+            swapped = False
+
+            def replace_before_quarantine(fd: int, source: str, destination: str) -> None:
+                nonlocal swapped
+                if not swapped and source == session:
+                    swapped = True
+                    os.rename(session, "owned", src_dir_fd=fd, dst_dir_fd=fd)
+                    os.mkdir(session, 0o700, dir_fd=fd)
+                    session_directory = os.open(session, os.O_RDONLY, dir_fd=fd)
+                    try:
+                        descriptor = os.open("replacement.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                             0o600, dir_fd=session_directory)
+                        try:
+                            os.write(descriptor, b"replacement")
+                        finally:
+                            os.close(descriptor)
+                    finally:
+                        os.close(session_directory)
+                real_rename(fd, source, destination)
+
+            try:
+                with patch("qtrace.artifacts._rename_noreplace", side_effect=replace_before_quarantine):
+                    with self.assertRaisesRegex(OSError, "identity changed"):
+                        _reclaim_committed_session(parent, held, session)
+            finally:
+                os.close(held)
+                os.close(parent)
+
+            self.assertTrue(swapped)
+            self.assertEqual("owned", (output / "owned" / "owned.txt").read_text())
+            self.assertEqual("replacement", (output / session / "replacement.txt").read_text())
+            self.assertFalse(list(output.glob(".qtrace-reclaim-*")))
 
     def test_remove_tree_refuses_replacement_before_final_rmdir(self):
         """Removing the final name-to-held-inode check would rmdir a swapped replacement."""

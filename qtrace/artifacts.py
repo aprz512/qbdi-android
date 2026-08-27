@@ -811,12 +811,62 @@ def _remove_tree_at(parent: int, name: str,
     os.rmdir(name, dir_fd=parent)
 
 
+def _restore_untrusted_quarantine(parent: int, quarantine: str, session_id: str,
+                                  primary: BaseException) -> OSError:
+    """Return a diagnostic after a no-replace attempt to restore unknown data."""
+    try:
+        _rename_noreplace(parent, quarantine, session_id)
+    except BaseException as rollback:
+        return OSError(
+            f"{primary}; recovery directory {quarantine} retained after safe rollback failed: {rollback}")
+    return OSError(
+        f"{primary}; recovery directory {quarantine} was safely restored to {session_id}")
+
+
 def _reclaim_committed_session(parent: int, directory: int, session_id: str) -> None:
-    """Remove one committed session only if its held inode still owns that name."""
+    """Quarantine a held committed directory before recursively removing only its inode."""
     expected = os.fstat(directory)
     if not stat.S_ISDIR(expected.st_mode):
         raise OSError("committed session identity changed before reclaim")
-    _remove_tree_at(parent, session_id, expected_identity=(expected.st_dev, expected.st_ino))
+    expected_identity = (expected.st_dev, expected.st_ino)
+    quarantine = ""
+    for _ in range(32):
+        candidate = ".qtrace-reclaim-" + uuid.uuid4().hex
+        try:
+            _rename_noreplace(parent, session_id, candidate)
+        except QtraceError as error:
+            if error.code == "artifact.destination_exists":
+                continue
+            raise OSError(f"committed session identity changed before quarantine rename: {error}") from error
+        except OSError as error:
+            raise OSError(f"committed session identity changed before quarantine rename: {error}") from error
+        quarantine = candidate
+        break
+    if not quarantine:
+        raise OSError("committed session quarantine allocation exhausted")
+
+    probe = -1
+    try:
+        probe = os.open(quarantine, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                        getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+        quarantined = os.fstat(probe)
+    except BaseException as error:
+        raise _restore_untrusted_quarantine(
+            parent, quarantine, session_id,
+            OSError(f"committed session identity changed after quarantine rename: {error}")) from error
+    finally:
+        _close_descriptor(probe)
+    if (not stat.S_ISDIR(quarantined.st_mode)
+            or (quarantined.st_dev, quarantined.st_ino) != expected_identity):
+        raise _restore_untrusted_quarantine(
+            parent, quarantine, session_id,
+            OSError("committed session identity changed after quarantine rename"))
+    try:
+        _remove_tree_at(parent, quarantine, expected_identity=expected_identity)
+    except BaseException as error:
+        raise _restore_untrusted_quarantine(
+            parent, quarantine, session_id,
+            OSError(str(error))) from error
     os.fsync(parent)
 
 
