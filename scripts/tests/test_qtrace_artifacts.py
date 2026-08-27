@@ -530,6 +530,40 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn("artifact.concurrent_report", json.loads(
                 error_path.read_text())["artifacts"][-1]["code"])
 
+    def test_collector_merge_reads_short_chunks_without_closing_verified_fd(self):
+        from qtrace.artifacts import publish_collector_report
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        status = self._status(session, artifacts=["run.trace.txt"])
+        result = self._processor(FakeClient({"run.trace.txt": COMPLETE_TERMINAL})).collect_session(
+            "d", "com.example.app", session, status, Path(tempfile.mkdtemp()), 1)
+        token = getattr(result, "_publication_token")
+        real_open, real_read = os.open, os.read
+        verified: list[int] = []
+        case = self
+
+        def open_capture(name, *args, **kwargs):
+            fd = real_open(name, *args, **kwargs)
+            if name == "report.json" and kwargs.get("dir_fd") == token.directory:
+                verified.append(fd)
+            return fd
+
+        def short_read(fd, size):
+            return real_read(fd, min(size, 2))
+
+        class Writer:
+            def write_atomic_at(self, _directory, _name, _report, **_kwargs):
+                case.assertTrue(verified)
+                info = os.fstat(verified[0])
+                case.assertEqual(token.report_identity, (info.st_dev, info.st_ino))
+                return True
+
+        with patch("qtrace.artifacts.os.open", side_effect=open_capture), patch(
+                "qtrace.artifacts.os.read", side_effect=short_read):
+            merged, _path, applied = publish_collector_report(token, Writer(), self._report(session, "sealed"))
+        self.assertTrue(applied)
+        self.assertTrue(merged.artifacts)
+
     def test_conditional_report_exchange_rolls_back_last_moment_replacement(self):
         from qtrace import report as report_module
         session = "11111111-1111-4111-8111-111111111111"
