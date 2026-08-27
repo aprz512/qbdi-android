@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 import subprocess
@@ -37,6 +38,10 @@ class ProjectSchemaValidationError(ValueError):
     pass
 
 
+class _InstanceSchemaMismatch(Exception):
+    pass
+
+
 class QtraceProjectSchemaEvaluator:
     """Evaluate only the JSON Schema subset and x-rules used by qtrace docs.
 
@@ -49,48 +54,263 @@ class QtraceProjectSchemaEvaluator:
         "$schema", "$id", "$ref", "$defs", "title", "type", "const", "enum",
         "required", "properties", "additionalProperties", "minItems", "maxItems",
         "items", "uniqueItems", "minLength", "maxLength", "pattern", "format",
-        "minimum", "maximum", "oneOf", "allOf", "if", "then", "else", "not",
+        "minimum", "maximum", "oneOf", "anyOf", "allOf", "if", "then", "else", "not",
         "x-qtrace-runtime-invariants",
     })
+    _SCHEMA_IDS = frozenset({
+        "https://qbdi-android.local/schema/qtrace-config.schema.json",
+        "https://qbdi-android.local/schema/qtrace-session-status.schema.json",
+    })
+    _SCHEMA_TYPES = frozenset({"object", "array", "string", "integer", "boolean"})
+    _RUNTIME_PREDICATES = frozenset({
+        "utf8-text", "unique-field", "ordered-hex-fields", "conditional-member",
+        "ordered-integer-fields", "unique-pair", "index-within-array",
+        "safe-artifact-basename",
+    })
+    _UNICODE_CATEGORIES = frozenset({
+        "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No",
+        "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Sm", "Sc", "Sk", "So",
+        "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co", "Cn",
+    })
+    _UNICODE_CATEGORY_PREFIXES = frozenset("LMNPSZC")
 
     def __init__(self, schema: dict[str, object]) -> None:
-        schema_id = schema.get("$id")
-        if schema_id not in {
-            "https://qbdi-android.local/schema/qtrace-config.schema.json",
-            "https://qbdi-android.local/schema/qtrace-session-status.schema.json",
-        }:
-            raise ProjectSchemaValidationError("unsupported qtrace schema")
+        if type(schema) is not dict:
+            self._contract_error("#", "root must be an object")
+        self._validate_json_ast(schema, "#")
         self.schema = schema
+        if type(schema.get("$id")) is not str or schema["$id"] not in self._SCHEMA_IDS:
+            self._contract_error("#/$id", "unsupported qtrace schema id")
+        self._validate_schema_node(schema, "#", root=True)
+
+    @staticmethod
+    def _contract_error(path: str, message: str) -> None:
+        raise ProjectSchemaValidationError(
+            f"invalid qtrace schema contract at {path}: {message}"
+        )
+
+    @staticmethod
+    def _child_path(path: str, token: object) -> str:
+        encoded = str(token).replace("~", "~0").replace("/", "~1")
+        return f"{path}/{encoded}"
+
+    @classmethod
+    def _validate_json_ast(cls, value: object, path: str) -> None:
+        if value is None or type(value) in {str, int, bool}:
+            return
+        if type(value) is float:
+            if not math.isfinite(value):
+                cls._contract_error(path, "schema JSON number must be finite")
+            return
+        if type(value) is list:
+            for index, item in enumerate(value):
+                cls._validate_json_ast(item, cls._child_path(path, index))
+            return
+        if type(value) is dict:
+            for key, item in value.items():
+                if type(key) is not str:
+                    cls._contract_error(path, "schema object keys must be strings")
+                cls._validate_json_ast(item, cls._child_path(path, key))
+            return
+        cls._contract_error(path, "schema must contain only JSON values")
+
+    @staticmethod
+    def _is_nonnegative_integer(value: object) -> bool:
+        return type(value) is int and value >= 0
+
+    @classmethod
+    def _validate_string_list(
+        cls,
+        value: object,
+        path: str,
+        *,
+        allow_empty_strings: bool = False,
+        allow_empty_list: bool = True,
+    ) -> list[str]:
+        if (type(value) is not list or (not allow_empty_list and not value)
+                or not all(type(item) is str for item in value)
+                or (not allow_empty_strings and any(not item for item in value))
+                or len(set(value)) != len(value)):
+            cls._contract_error(path, "must be a unique string array")
+        return value
+
+    @classmethod
+    def _validate_pointer(cls, pointer: object, path: str) -> None:
+        if type(pointer) is not str or not pointer.startswith("/"):
+            cls._contract_error(path, "must be an absolute project JSON pointer")
+        encoded_tokens = pointer.split("/")[1:]
+        if not encoded_tokens or any(token == "" for token in encoded_tokens):
+            cls._contract_error(path, "must contain non-empty pointer tokens")
+        for token in encoded_tokens:
+            index = 0
+            while index < len(token):
+                if token[index] == "~":
+                    if index + 1 >= len(token) or token[index + 1] not in "01":
+                        cls._contract_error(path, "contains an invalid JSON pointer escape")
+                    index += 2
+                else:
+                    index += 1
+
+    @classmethod
+    def _validate_field_name(cls, value: object, path: str) -> None:
+        if type(value) is not str or not value:
+            cls._contract_error(path, "must be a non-empty field name")
+
+    def _validate_schema_node(self, schema: object, path: str, *, root: bool = False) -> None:
+        if type(schema) is bool:
+            return
+        if type(schema) is not dict:
+            self._contract_error(path, "schema node must be an object or boolean")
+        unknown = set(schema) - self._SUPPORTED_KEYS
+        if unknown:
+            self._contract_error(
+                self._child_path(path, sorted(unknown)[0]),
+                "unsupported project schema keyword",
+            )
+
+        if root and schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+            self._contract_error(self._child_path(path, "$schema"), "unsupported dialect")
+        if "$schema" in schema and not root:
+            self._contract_error(self._child_path(path, "$schema"), "nested dialect is unsupported")
+        if "$id" in schema:
+            if not root or schema["$id"] not in self._SCHEMA_IDS:
+                self._contract_error(self._child_path(path, "$id"), "unsupported schema id")
+        if "title" in schema and type(schema["title"]) is not str:
+            self._contract_error(self._child_path(path, "title"), "title must be a string")
+        if "type" in schema and (
+            type(schema["type"]) is not str or schema["type"] not in self._SCHEMA_TYPES
+        ):
+            self._contract_error(self._child_path(path, "type"), "unsupported schema type")
+
+        if "$defs" in schema:
+            definitions = schema["$defs"]
+            if type(definitions) is not dict or not all(
+                type(name) is str and name for name in definitions
+            ):
+                self._contract_error(self._child_path(path, "$defs"), "must be an object")
+            for name, child in definitions.items():
+                self._validate_schema_node(
+                    child,
+                    self._child_path(self._child_path(path, "$defs"), name),
+                )
+
+        if "properties" in schema:
+            properties = schema["properties"]
+            if type(properties) is not dict or not all(type(name) is str for name in properties):
+                self._contract_error(self._child_path(path, "properties"), "must be an object")
+            for name, child in properties.items():
+                self._validate_schema_node(
+                    child,
+                    self._child_path(self._child_path(path, "properties"), name),
+                )
+
+        if "$ref" in schema:
+            reference = schema["$ref"]
+            if (type(reference) is not str
+                    or re.fullmatch(r"#/\$defs/[^~/]+", reference) is None):
+                self._contract_error(self._child_path(path, "$ref"), "unsupported reference")
+            name = reference.removeprefix("#/$defs/")
+            root_definitions = self.schema.get("$defs")
+            if type(root_definitions) is not dict or name not in root_definitions:
+                self._contract_error(self._child_path(path, "$ref"), "missing definition")
+            if type(root_definitions[name]) not in {dict, bool}:
+                self._contract_error(self._child_path(path, "$ref"), "target is not a schema")
+
+        if "required" in schema:
+            self._validate_string_list(schema["required"], self._child_path(path, "required"))
+        if "additionalProperties" in schema and type(schema["additionalProperties"]) is not bool:
+            self._contract_error(
+                self._child_path(path, "additionalProperties"),
+                "must be a boolean in the project subset",
+            )
+
+        for minimum_key, maximum_key in (
+            ("minItems", "maxItems"),
+            ("minLength", "maxLength"),
+        ):
+            for key in (minimum_key, maximum_key):
+                if key in schema and not self._is_nonnegative_integer(schema[key]):
+                    self._contract_error(self._child_path(path, key), "must be a non-negative integer")
+            if (minimum_key in schema and maximum_key in schema
+                    and schema[minimum_key] > schema[maximum_key]):
+                self._contract_error(path, f"{minimum_key} must not exceed {maximum_key}")
+
+        if "uniqueItems" in schema and type(schema["uniqueItems"]) is not bool:
+            self._contract_error(self._child_path(path, "uniqueItems"), "must be a boolean")
+        if "pattern" in schema:
+            if type(schema["pattern"]) is not str:
+                self._contract_error(self._child_path(path, "pattern"), "must be a string")
+            try:
+                re.compile(schema["pattern"])
+            except re.error as error:
+                self._contract_error(self._child_path(path, "pattern"), f"invalid regex: {error}")
+        if "format" in schema and schema["format"] != "uuid":
+            self._contract_error(self._child_path(path, "format"), "unsupported format")
+        for key in ("minimum", "maximum"):
+            if key in schema and type(schema[key]) is not int:
+                self._contract_error(self._child_path(path, key), "must be an integer")
+        if ("minimum" in schema and "maximum" in schema
+                and schema["minimum"] > schema["maximum"]):
+            self._contract_error(path, "minimum must not exceed maximum")
+        if "enum" in schema:
+            enum = schema["enum"]
+            if type(enum) is not list or not enum:
+                self._contract_error(self._child_path(path, "enum"), "must be a non-empty array")
+            serialized = [json.dumps(item, sort_keys=True, ensure_ascii=True) for item in enum]
+            if len(set(serialized)) != len(serialized):
+                self._contract_error(self._child_path(path, "enum"), "values must be unique")
+
+        if "items" in schema:
+            self._validate_schema_node(schema["items"], self._child_path(path, "items"))
+        for key in ("allOf", "anyOf", "oneOf"):
+            if key not in schema:
+                continue
+            candidates = schema[key]
+            if type(candidates) is not list or (key != "allOf" and not candidates):
+                self._contract_error(self._child_path(path, key), "must be a schema array")
+            for index, child in enumerate(candidates):
+                self._validate_schema_node(
+                    child,
+                    self._child_path(self._child_path(path, key), index),
+                )
+        for key in ("not", "if", "then", "else"):
+            if key in schema:
+                self._validate_schema_node(schema[key], self._child_path(path, key))
+        if ("then" in schema or "else" in schema) and "if" not in schema:
+            self._contract_error(path, "then/else require if in the project subset")
+
+        if "x-qtrace-runtime-invariants" in schema:
+            self._validate_runtime_rule_contracts(
+                schema["x-qtrace-runtime-invariants"],
+                self._child_path(path, "x-qtrace-runtime-invariants"),
+            )
 
     def accepts(self, value: object) -> bool:
         try:
-            self._validate(value, self.schema)
-        except ProjectSchemaValidationError:
+            self._validate_instance(value, self.schema)
+        except _InstanceSchemaMismatch:
             return False
         return True
 
-    def _matches(self, value: object, schema: dict[str, object]) -> bool:
+    def _matches(self, value: object, schema: object) -> bool:
         try:
-            self._validate(value, schema)
-        except ProjectSchemaValidationError:
+            self._validate_instance(value, schema)
+        except _InstanceSchemaMismatch:
             return False
         return True
 
-    def _validate(self, value: object, schema: dict[str, object]) -> None:
-        unknown = set(schema) - self._SUPPORTED_KEYS
-        if unknown:
-            raise ProjectSchemaValidationError(
-                f"unsupported project schema keyword {sorted(unknown)[0]}"
-            )
+    def _validate_instance(self, value: object, schema: object) -> None:
+        if schema is True:
+            return
+        if schema is False:
+            raise _InstanceSchemaMismatch("false schema")
+        assert type(schema) is dict
         if "$ref" in schema:
             reference = schema["$ref"]
-            if type(reference) is not str or not reference.startswith("#/$defs/"):
-                raise ProjectSchemaValidationError("unsupported schema reference")
             name = reference.removeprefix("#/$defs/")
             definitions = self.schema.get("$defs")
-            if type(definitions) is not dict or type(definitions.get(name)) is not dict:
-                raise ProjectSchemaValidationError("missing schema definition")
-            self._validate(value, definitions[name])
+            assert type(definitions) is dict
+            self._validate_instance(value, definitions[name])
 
         expected_type = schema.get("type")
         type_matches = {
@@ -101,76 +321,249 @@ class QtraceProjectSchemaEvaluator:
             "boolean": type(value) is bool,
         }
         if expected_type is not None:
-            if expected_type not in type_matches:
-                raise ProjectSchemaValidationError("unsupported schema type")
             if not type_matches[expected_type]:
-                raise ProjectSchemaValidationError("schema type mismatch")
+                raise _InstanceSchemaMismatch("schema type mismatch")
         if "const" in schema and (type(value) is not type(schema["const"])
                                   or value != schema["const"]):
-            raise ProjectSchemaValidationError("schema const mismatch")
+            raise _InstanceSchemaMismatch("schema const mismatch")
         if "enum" in schema and not any(
             type(value) is type(candidate) and value == candidate
             for candidate in schema["enum"]
         ):
-            raise ProjectSchemaValidationError("schema enum mismatch")
+            raise _InstanceSchemaMismatch("schema enum mismatch")
 
         if type(value) is dict:
             required = schema.get("required", [])
             if any(key not in value for key in required):
-                raise ProjectSchemaValidationError("schema required property missing")
+                raise _InstanceSchemaMismatch("schema required property missing")
             properties = schema.get("properties", {})
-            if type(properties) is not dict:
-                raise ProjectSchemaValidationError("invalid project properties")
             if schema.get("additionalProperties") is False and set(value) - set(properties):
-                raise ProjectSchemaValidationError("schema additional property")
+                raise _InstanceSchemaMismatch("schema additional property")
             for key, child_schema in properties.items():
                 if key in value:
-                    self._validate(value[key], child_schema)
+                    self._validate_instance(value[key], child_schema)
         if type(value) is list:
             if "minItems" in schema and len(value) < schema["minItems"]:
-                raise ProjectSchemaValidationError("schema array too short")
+                raise _InstanceSchemaMismatch("schema array too short")
             if "maxItems" in schema and len(value) > schema["maxItems"]:
-                raise ProjectSchemaValidationError("schema array too long")
+                raise _InstanceSchemaMismatch("schema array too long")
             if schema.get("uniqueItems") is True:
                 serialized = [json.dumps(item, sort_keys=True, ensure_ascii=True) for item in value]
                 if len(set(serialized)) != len(serialized):
-                    raise ProjectSchemaValidationError("schema array items are duplicated")
+                    raise _InstanceSchemaMismatch("schema array items are duplicated")
             if "items" in schema:
                 for item in value:
-                    self._validate(item, schema["items"])
+                    self._validate_instance(item, schema["items"])
         if type(value) is str:
             if "minLength" in schema and len(value) < schema["minLength"]:
-                raise ProjectSchemaValidationError("schema string too short")
+                raise _InstanceSchemaMismatch("schema string too short")
             if "maxLength" in schema and len(value) > schema["maxLength"]:
-                raise ProjectSchemaValidationError("schema string too long")
+                raise _InstanceSchemaMismatch("schema string too long")
             if "pattern" in schema and re.search(schema["pattern"], value) is None:
-                raise ProjectSchemaValidationError("schema string pattern mismatch")
-            if "format" in schema and schema["format"] != "uuid":
-                raise ProjectSchemaValidationError("unsupported project format")
+                raise _InstanceSchemaMismatch("schema string pattern mismatch")
         if type(value) is int and type(value) is not bool:
             if "minimum" in schema and value < schema["minimum"]:
-                raise ProjectSchemaValidationError("schema number below minimum")
+                raise _InstanceSchemaMismatch("schema number below minimum")
             if "maximum" in schema and value > schema["maximum"]:
-                raise ProjectSchemaValidationError("schema number above maximum")
+                raise _InstanceSchemaMismatch("schema number above maximum")
 
         if "oneOf" in schema:
             if sum(self._matches(value, candidate) for candidate in schema["oneOf"]) != 1:
-                raise ProjectSchemaValidationError("schema oneOf mismatch")
+                raise _InstanceSchemaMismatch("schema oneOf mismatch")
+        if "anyOf" in schema:
+            if not any(self._matches(value, candidate) for candidate in schema["anyOf"]):
+                raise _InstanceSchemaMismatch("schema anyOf mismatch")
         for candidate in schema.get("allOf", []):
-            self._validate(value, candidate)
+            self._validate_instance(value, candidate)
         if "if" in schema:
             branch = "then" if self._matches(value, schema["if"]) else "else"
             if branch in schema:
-                self._validate(value, schema[branch])
+                self._validate_instance(value, schema[branch])
         if "not" in schema and self._matches(value, schema["not"]):
-            raise ProjectSchemaValidationError("schema not mismatch")
+            raise _InstanceSchemaMismatch("schema not mismatch")
         if "x-qtrace-runtime-invariants" in schema:
-            self._validate_runtime_rules(value, schema["x-qtrace-runtime-invariants"])
+            self._evaluate_runtime_rules(value, schema["x-qtrace-runtime-invariants"])
+
+    def _validate_runtime_rule_contracts(self, rules: object, path: str) -> None:
+        if type(rules) is not list:
+            self._contract_error(path, "runtime rules must be an array")
+        identifiers: list[str] = []
+        for index, rule in enumerate(rules):
+            rule_path = self._child_path(path, index)
+            if type(rule) is not dict or set(rule) != {"id", "paths", "predicate", "args"}:
+                self._contract_error(rule_path, "runtime rule shape must be exact")
+            if type(rule["id"]) is not str or not rule["id"]:
+                self._contract_error(self._child_path(rule_path, "id"), "must be non-empty text")
+            identifiers.append(rule["id"])
+            paths_path = self._child_path(rule_path, "paths")
+            paths = self._validate_string_list(
+                rule["paths"],
+                paths_path,
+                allow_empty_list=False,
+            )
+            for path_index, pointer in enumerate(paths):
+                self._validate_pointer(pointer, self._child_path(paths_path, path_index))
+            predicate = rule["predicate"]
+            if type(predicate) is not str or predicate not in self._RUNTIME_PREDICATES:
+                self._contract_error(
+                    self._child_path(rule_path, "predicate"),
+                    "unsupported runtime predicate",
+                )
+            self._validate_runtime_rule_args(
+                predicate,
+                rule["args"],
+                self._child_path(rule_path, "args"),
+            )
+        if len(set(identifiers)) != len(identifiers):
+            self._contract_error(path, "runtime rule ids must be unique")
+
+    def _validate_runtime_rule_args(
+        self,
+        predicate: str,
+        args: object,
+        path: str,
+    ) -> None:
+        expected_keys = {
+            "utf8-text": {"minBytes", "maxBytes", "forbiddenCategories"},
+            "unique-field": {"field", "caseSensitive"},
+            "ordered-hex-fields": {
+                "startField", "endField", "minimumExclusive", "alignment",
+            },
+            "conditional-member": {
+                "conditionPath", "conditionEquals", "valuePath", "membersPath",
+                "requiredWhenTrue", "forbiddenWhenFalse",
+            },
+            "ordered-integer-fields": {
+                "startField", "endField", "minimumStart", "strict",
+            },
+            "unique-pair": {"fields"},
+            "index-within-array": {"indexField", "arrayPath", "minimum"},
+            "safe-artifact-basename": {
+                "minBytes", "maxBytes", "forbiddenNames", "forbiddenSeparators",
+                "forbiddenCategoryPrefixes", "allowedSuffixes", "embeddedUuidPattern",
+                "embeddedUuidMustEqualPath",
+            },
+        }[predicate]
+        if type(args) is not dict or set(args) != expected_keys:
+            self._contract_error(path, f"{predicate} arguments must be exact")
+
+        if predicate == "utf8-text":
+            minimum = args["minBytes"]
+            maximum = args["maxBytes"]
+            if (not self._is_nonnegative_integer(minimum)
+                    or (maximum is not None and (
+                        not self._is_nonnegative_integer(maximum) or maximum < minimum
+                    ))):
+                self._contract_error(path, "UTF-8 byte bounds are invalid")
+            categories = self._validate_string_list(
+                args["forbiddenCategories"],
+                self._child_path(path, "forbiddenCategories"),
+            )
+            if any(category not in self._UNICODE_CATEGORIES for category in categories):
+                self._contract_error(path, "unknown Unicode category")
+            return
+
+        if predicate == "unique-field":
+            self._validate_field_name(args["field"], self._child_path(path, "field"))
+            if args["caseSensitive"] is not True:
+                self._contract_error(
+                    self._child_path(path, "caseSensitive"),
+                    "only exact case-sensitive comparison is supported",
+                )
+            return
+
+        if predicate in {"ordered-hex-fields", "ordered-integer-fields"}:
+            self._validate_field_name(
+                args["startField"], self._child_path(path, "startField")
+            )
+            self._validate_field_name(args["endField"], self._child_path(path, "endField"))
+            if args["startField"] == args["endField"]:
+                self._contract_error(path, "ordered field names must differ")
+            if predicate == "ordered-hex-fields":
+                if (not self._is_nonnegative_integer(args["minimumExclusive"])
+                        or type(args["alignment"]) is not int or args["alignment"] <= 0):
+                    self._contract_error(path, "ordered hex bounds are invalid")
+            elif (not self._is_nonnegative_integer(args["minimumStart"])
+                  or args["strict"] is not True):
+                self._contract_error(path, "ordered integer bounds are invalid")
+            return
+
+        if predicate == "conditional-member":
+            for key in ("conditionPath", "valuePath", "membersPath"):
+                self._validate_pointer(args[key], self._child_path(path, key))
+            if (type(args["conditionEquals"]) is not bool
+                    or type(args["requiredWhenTrue"]) is not bool
+                    or type(args["forbiddenWhenFalse"]) is not bool):
+                self._contract_error(path, "conditional-member flags must be booleans")
+            return
+
+        if predicate == "unique-pair":
+            fields = self._validate_string_list(
+                args["fields"],
+                self._child_path(path, "fields"),
+                allow_empty_list=False,
+            )
+            if len(fields) != 2:
+                self._contract_error(path, "unique-pair requires exactly two fields")
+            return
+
+        if predicate == "index-within-array":
+            self._validate_field_name(
+                args["indexField"], self._child_path(path, "indexField")
+            )
+            self._validate_pointer(args["arrayPath"], self._child_path(path, "arrayPath"))
+            if not self._is_nonnegative_integer(args["minimum"]):
+                self._contract_error(self._child_path(path, "minimum"), "must be non-negative")
+            return
+
+        if predicate == "safe-artifact-basename":
+            minimum = args["minBytes"]
+            maximum = args["maxBytes"]
+            if (not self._is_nonnegative_integer(minimum)
+                    or not self._is_nonnegative_integer(maximum)
+                    or minimum > maximum):
+                self._contract_error(path, "artifact byte bounds are invalid")
+            self._validate_string_list(
+                args["forbiddenNames"],
+                self._child_path(path, "forbiddenNames"),
+                allow_empty_strings=True,
+            )
+            self._validate_string_list(
+                args["forbiddenSeparators"],
+                self._child_path(path, "forbiddenSeparators"),
+                allow_empty_list=False,
+            )
+            prefixes = self._validate_string_list(
+                args["forbiddenCategoryPrefixes"],
+                self._child_path(path, "forbiddenCategoryPrefixes"),
+            )
+            if any(prefix not in self._UNICODE_CATEGORY_PREFIXES for prefix in prefixes):
+                self._contract_error(path, "unknown Unicode category prefix")
+            self._validate_string_list(
+                args["allowedSuffixes"],
+                self._child_path(path, "allowedSuffixes"),
+                allow_empty_list=False,
+            )
+            pattern = args["embeddedUuidPattern"]
+            if type(pattern) is not str:
+                self._contract_error(
+                    self._child_path(path, "embeddedUuidPattern"),
+                    "must be a regex string",
+                )
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                self._contract_error(
+                    self._child_path(path, "embeddedUuidPattern"),
+                    f"invalid regex: {error}",
+                )
+            self._validate_pointer(
+                args["embeddedUuidMustEqualPath"],
+                self._child_path(path, "embeddedUuidMustEqualPath"),
+            )
 
     @staticmethod
     def _pointer_values(root: object, pointer: str) -> list[object]:
-        if not pointer.startswith("/"):
-            raise ProjectSchemaValidationError("runtime rule path is not a JSON pointer")
         current = [root]
         for encoded in pointer.split("/")[1:]:
             token = encoded.replace("~1", "/").replace("~0", "~")
@@ -191,57 +584,39 @@ class QtraceProjectSchemaEvaluator:
     def _single_pointer(self, root: object, pointer: str) -> object | None:
         values = self._pointer_values(root, pointer)
         if len(values) > 1:
-            raise ProjectSchemaValidationError("runtime rule pointer is not singular")
+            raise _InstanceSchemaMismatch("runtime rule pointer is not singular")
         return values[0] if values else None
 
-    def _validate_runtime_rules(self, root: object, rules: object) -> None:
-        if type(rules) is not list:
-            raise ProjectSchemaValidationError("runtime rules must be an array")
-        identifiers: list[str] = []
+    def _evaluate_runtime_rules(self, root: object, rules: list[object]) -> None:
         for rule in rules:
-            if type(rule) is not dict or set(rule) != {"id", "paths", "predicate", "args"}:
-                raise ProjectSchemaValidationError("runtime rule shape is not exact")
-            if (type(rule["id"]) is not str or type(rule["paths"]) is not list
-                    or not rule["paths"] or not all(type(path) is str for path in rule["paths"])
-                    or type(rule["predicate"]) is not str or type(rule["args"]) is not dict):
-                raise ProjectSchemaValidationError("runtime rule fields are invalid")
-            identifiers.append(rule["id"])
+            assert type(rule) is dict
             predicate = getattr(self, f"_rule_{rule['predicate'].replace('-', '_')}", None)
-            if predicate is None:
-                raise ProjectSchemaValidationError("unsupported runtime predicate")
+            assert predicate is not None
             predicate(root, rule["paths"], rule["args"])
-        if len(set(identifiers)) != len(identifiers):
-            raise ProjectSchemaValidationError("runtime rule ids are duplicated")
 
     def _rule_utf8_text(self, root: object, paths: list[str], args: dict[str, object]) -> None:
-        if set(args) != {"minBytes", "maxBytes", "forbiddenCategories"}:
-            raise ProjectSchemaValidationError("utf8-text args are not exact")
         for path in paths:
             for value in self._pointer_values(root, path):
                 if type(value) is not str:
-                    raise ProjectSchemaValidationError("runtime text is not a string")
+                    raise _InstanceSchemaMismatch("runtime text is not a string")
                 try:
                     encoded = value.encode("utf-8")
                 except UnicodeEncodeError as error:
-                    raise ProjectSchemaValidationError("runtime text is not UTF-8") from error
+                    raise _InstanceSchemaMismatch("runtime text is not UTF-8") from error
                 if len(encoded) < args["minBytes"]:
-                    raise ProjectSchemaValidationError("runtime text is too short")
+                    raise _InstanceSchemaMismatch("runtime text is too short")
                 if args["maxBytes"] is not None and len(encoded) > args["maxBytes"]:
-                    raise ProjectSchemaValidationError("runtime text is too long")
+                    raise _InstanceSchemaMismatch("runtime text is too long")
                 if any(unicodedata.category(character) in args["forbiddenCategories"]
                        for character in value):
-                    raise ProjectSchemaValidationError("runtime text category is forbidden")
+                    raise _InstanceSchemaMismatch("runtime text category is forbidden")
 
     def _rule_unique_field(self, root: object, paths: list[str], args: dict[str, object]) -> None:
-        if set(args) != {"field", "caseSensitive"} or args["caseSensitive"] is not True:
-            raise ProjectSchemaValidationError("unique-field args are not exact")
         values = [value for path in paths for value in self._pointer_values(root, path)]
         if len(set(values)) != len(values):
-            raise ProjectSchemaValidationError("runtime field values are duplicated")
+            raise _InstanceSchemaMismatch("runtime field values are duplicated")
 
     def _rule_ordered_hex_fields(self, root: object, paths: list[str], args: dict[str, object]) -> None:
-        if set(args) != {"startField", "endField", "minimumExclusive", "alignment"}:
-            raise ProjectSchemaValidationError("ordered-hex-fields args are not exact")
         for path in paths:
             for value in self._pointer_values(root, path):
                 if type(value) is not dict or args["startField"] not in value:
@@ -256,77 +631,62 @@ class QtraceProjectSchemaEvaluator:
                     start = int(start_text, 16)
                     end = int(end_text, 16)
                 except (KeyError, TypeError, ValueError) as error:
-                    raise ProjectSchemaValidationError("runtime offset is invalid") from error
+                    raise _InstanceSchemaMismatch("runtime offset is invalid") from error
                 if (start <= args["minimumExclusive"] or end <= args["minimumExclusive"]
                         or start % args["alignment"] or end % args["alignment"]
                         or start >= end):
-                    raise ProjectSchemaValidationError("runtime offset range is invalid")
+                    raise _InstanceSchemaMismatch("runtime offset range is invalid")
 
     def _rule_conditional_member(self, root: object, _paths: list[str], args: dict[str, object]) -> None:
-        expected = {"conditionPath", "conditionEquals", "valuePath", "membersPath",
-                    "requiredWhenTrue", "forbiddenWhenFalse"}
-        if set(args) != expected:
-            raise ProjectSchemaValidationError("conditional-member args are not exact")
         enabled = self._single_pointer(root, args["conditionPath"])
         enabled = False if enabled is None else enabled == args["conditionEquals"]
         selected = self._single_pointer(root, args["valuePath"])
         if enabled:
             members = self._pointer_values(root, args["membersPath"])
             if args["requiredWhenTrue"] is True and selected is None:
-                raise ProjectSchemaValidationError("runtime member is missing")
+                raise _InstanceSchemaMismatch("runtime member is missing")
             if selected not in members:
-                raise ProjectSchemaValidationError("runtime member does not exist")
+                raise _InstanceSchemaMismatch("runtime member does not exist")
         elif args["forbiddenWhenFalse"] is True and selected is not None:
-            raise ProjectSchemaValidationError("runtime member is forbidden")
+            raise _InstanceSchemaMismatch("runtime member is forbidden")
 
     def _rule_ordered_integer_fields(self, root: object, paths: list[str], args: dict[str, object]) -> None:
-        if set(args) != {"startField", "endField", "minimumStart", "strict"}:
-            raise ProjectSchemaValidationError("ordered-integer-fields args are not exact")
         for path in paths:
             for value in self._pointer_values(root, path):
                 start, end = value[args["startField"]], value[args["endField"]]
                 if (type(start) is not int or type(end) is not int
                         or start < args["minimumStart"] or end <= start):
-                    raise ProjectSchemaValidationError("runtime integer range is invalid")
+                    raise _InstanceSchemaMismatch("runtime integer range is invalid")
 
     def _rule_unique_pair(self, root: object, paths: list[str], args: dict[str, object]) -> None:
-        if set(args) != {"fields"} or len(args["fields"]) != 2:
-            raise ProjectSchemaValidationError("unique-pair args are not exact")
         pairs = []
         for path in paths:
             pairs.extend(tuple(value[field] for field in args["fields"])
                          for value in self._pointer_values(root, path))
         if len(set(pairs)) != len(pairs):
-            raise ProjectSchemaValidationError("runtime pairs are duplicated")
+            raise _InstanceSchemaMismatch("runtime pairs are duplicated")
 
     def _rule_index_within_array(self, root: object, paths: list[str], args: dict[str, object]) -> None:
-        if set(args) != {"indexField", "arrayPath", "minimum"}:
-            raise ProjectSchemaValidationError("index-within-array args are not exact")
         target = self._single_pointer(root, args["arrayPath"])
         if type(target) is not list:
-            raise ProjectSchemaValidationError("runtime index target is not an array")
+            raise _InstanceSchemaMismatch("runtime index target is not an array")
         for path in paths:
             for value in self._pointer_values(root, path):
                 index = value[args["indexField"]]
                 if type(index) is not int or not args["minimum"] <= index < len(target):
-                    raise ProjectSchemaValidationError("runtime index is out of range")
+                    raise _InstanceSchemaMismatch("runtime index is out of range")
 
     def _rule_safe_artifact_basename(self, root: object, paths: list[str], args: dict[str, object]) -> None:
-        expected = {"minBytes", "maxBytes", "forbiddenNames", "forbiddenSeparators",
-                    "forbiddenCategoryPrefixes", "allowedSuffixes", "embeddedUuidPattern",
-                    "embeddedUuidMustEqualPath"}
-        if set(args) != expected:
-            raise ProjectSchemaValidationError("safe-artifact-basename args are not exact")
         owner = self._single_pointer(root, args["embeddedUuidMustEqualPath"])
         uuid_pattern = re.compile(args["embeddedUuidPattern"])
         for path in paths:
             for value in self._pointer_values(root, path):
                 if type(value) is not str:
-                    raise ProjectSchemaValidationError("runtime artifact is not text")
+                    raise _InstanceSchemaMismatch("runtime artifact is not text")
                 try:
                     encoded = value.encode("utf-8")
                 except UnicodeEncodeError as error:
-                    raise ProjectSchemaValidationError("runtime artifact is not UTF-8") from error
+                    raise _InstanceSchemaMismatch("runtime artifact is not UTF-8") from error
                 if (not args["minBytes"] <= len(encoded) <= args["maxBytes"]
                         or value in args["forbiddenNames"]
                         or any(separator in value for separator in args["forbiddenSeparators"])
@@ -335,7 +695,7 @@ class QtraceProjectSchemaEvaluator:
                                for character in value)
                         or not value.endswith(tuple(args["allowedSuffixes"]))
                         or any(found.group(0) != owner for found in uuid_pattern.finditer(value))):
-                    raise ProjectSchemaValidationError("runtime artifact basename is unsafe")
+                    raise _InstanceSchemaMismatch("runtime artifact basename is unsafe")
 
 
 def status(state: str) -> dict[str, object]:
@@ -458,6 +818,124 @@ class SchemaContractsTests(unittest.TestCase):
              "status.artifact.safe-basename"},
             {rule["id"] for rule in rules},
         )
+
+    def test_schema_contract_validation_rejects_inactive_invalid_nodes(self):
+        base = self.load_schema("qtrace-config.schema.json")
+        valid_document = {
+            "schemaVersion": 1,
+            "app": {"package": "com.example.app"},
+            "target": {"module": "libx.so"},
+            "scenes": [{"name": "entry", "startOffset": "0x4", "endOffset": "0x8"}],
+        }
+
+        invalid_contracts: dict[str, dict[str, object]] = {}
+
+        invalid_if = copy.deepcopy(base)
+        invalid_if["allOf"] = [{"if": {"unknownKeyword": True}, "else": True}]
+        invalid_contracts["if-unknown-keyword"] = invalid_if
+
+        inactive_then = copy.deepcopy(base)
+        inactive_then["allOf"] = [
+            {"if": {"const": "never"}, "then": {"unknownKeyword": True}}
+        ]
+        invalid_contracts["inactive-then-unknown-keyword"] = inactive_then
+
+        inactive_else = copy.deepcopy(base)
+        inactive_else["allOf"] = [
+            {
+                "if": {"const": valid_document},
+                "then": True,
+                "else": {"minLength": "one"},
+            }
+        ]
+        invalid_contracts["inactive-else-malformed-standard-keyword"] = inactive_else
+
+        losing_one_of = copy.deepcopy(base)
+        losing_one_of["$defs"]["unused"] = {
+            "oneOf": [True, {"type": "string", "unknownKeyword": True}]
+        }
+        invalid_contracts["losing-one-of-unknown-keyword"] = losing_one_of
+
+        unknown_predicate = copy.deepcopy(base)
+        unknown_predicate["allOf"] = [
+            {
+                "if": {"const": "never"},
+                "then": {
+                    "x-qtrace-runtime-invariants": [{
+                        "id": "invalid.predicate",
+                        "paths": ["/scenes/*/name"],
+                        "predicate": "not-supported",
+                        "args": {},
+                    }],
+                },
+            }
+        ]
+        invalid_contracts["inactive-unknown-predicate"] = unknown_predicate
+
+        malformed_paths = copy.deepcopy(base)
+        malformed_paths["$defs"]["unused"] = {
+            "x-qtrace-runtime-invariants": [{
+                "id": "invalid.path",
+                "paths": ["scenes/*/name"],
+                "predicate": "utf8-text",
+                "args": {
+                    "minBytes": 1,
+                    "maxBytes": 128,
+                    "forbiddenCategories": ["Cc"],
+                },
+            }],
+        }
+        invalid_contracts["unused-malformed-path"] = malformed_paths
+
+        malformed_args = copy.deepcopy(base)
+        malformed_args["allOf"] = [
+            {
+                "if": {"const": valid_document},
+                "then": True,
+                "else": {
+                    "x-qtrace-runtime-invariants": [{
+                        "id": "invalid.args",
+                        "paths": ["/scenes/*/name"],
+                        "predicate": "utf8-text",
+                        "args": {
+                            "minBytes": "one",
+                            "maxBytes": 128,
+                            "forbiddenCategories": ["Cc"],
+                        },
+                    }],
+                },
+            }
+        ]
+        invalid_contracts["inactive-malformed-args"] = malformed_args
+
+        missing_reference = copy.deepcopy(base)
+        missing_reference["$defs"]["unused"] = {"$ref": "#/$defs/missing"}
+        invalid_contracts["unused-missing-reference"] = missing_reference
+
+        for name, schema in invalid_contracts.items():
+            with self.subTest(contract=name):
+                with self.assertRaisesRegex(
+                    ProjectSchemaValidationError,
+                    "invalid qtrace schema contract",
+                ):
+                    QtraceProjectSchemaEvaluator(schema)
+
+    def test_schema_contract_validation_supports_prevalidated_boolean_combinators(self):
+        schema = self.load_schema("qtrace-config.schema.json")
+        schema["allOf"] = [True, {"anyOf": [False, True]}, {"not": False}]
+        document = {
+            "schemaVersion": 1,
+            "app": {"package": "com.example.app"},
+            "target": {"module": "libx.so"},
+            "scenes": [{"name": "entry", "startOffset": "0x4", "endOffset": "0x8"}],
+        }
+
+        evaluator = QtraceProjectSchemaEvaluator(schema)
+
+        self.assertTrue(evaluator.accepts(document))
+        invalid_document = copy.deepcopy(document)
+        invalid_document["schemaVersion"] = 2
+        self.assertFalse(evaluator.accepts(invalid_document))
 
     def test_config_runtime_and_documented_schema_accept_exactly_the_same_corpus(self):
         minimal = {
