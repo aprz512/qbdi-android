@@ -370,6 +370,23 @@ class SessionTests(unittest.TestCase):
                 runner.run(request)
         self.assertEqual([], calls)
 
+    def test_adversarial_normalized_config_has_zero_selector_calls(self) -> None:
+        calls: list[str] = []
+        runner, _ = orchestrator(FakeDevice([], []), ManualClock())
+        runner._device_selector = lambda *_args, **_kwargs: calls.append("select")
+        base = config()
+        invalid = (
+            UserConfig(True, base.app, base.target, base.tracer, base.scenes),
+            UserConfig(1, base.app, TargetConfig("../bad", None), base.tracer, base.scenes),
+            UserConfig(1, base.app, base.target, TracerConfig([], True, False, None, None, None), base.scenes),
+            UserConfig(1, base.app, base.target, base.tracer, ()),
+        )
+        for value in invalid:
+            request = RunRequest(value, None, Path(self.directory.name), 250, 2, 2, .5, 1)
+            with self.assertRaises(QtraceError):
+                runner.run(request)
+        self.assertEqual([], calls)
+
     def test_selector_and_lock_enter_failures_publish_without_masking(self) -> None:
         device = FakeDevice([], [])
         publications: list[str] = []

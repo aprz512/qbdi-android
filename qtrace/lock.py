@@ -78,7 +78,11 @@ class TargetLock:
         digest = hashlib.sha256((serial + "\0" + package).encode("utf-8")).hexdigest()
         flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
         root = self._root()
-        descriptor = os.open(f"{digest}.lock", flags, 0o600, dir_fd=root)
+        try:
+            descriptor = os.open(f"{digest}.lock", flags, 0o600, dir_fd=root)
+        except OSError as error:
+            os.close(root)
+            raise QtraceError("session.lock_invalid", "lock", "lock file is unsafe") from error
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():

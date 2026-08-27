@@ -33,6 +33,7 @@ _ANY_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 _TRACER_ARTIFACT_SUFFIXES = (".trace.bin", ".trace.bin.lz4", ".flight.bin")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 _SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
+_MODULE = re.compile(r"[A-Za-z0-9._+-]+\Z")
 
 
 class Clock(Protocol):
@@ -230,7 +231,7 @@ def _timeout(value: object, field: str) -> float:
 
 
 def _request_config(config: object) -> UserConfig:
-    if not isinstance(config, UserConfig) or config.schema_version != 1 or type(config.app) is not AppConfig or \
+    if type(config) is not UserConfig or type(config.schema_version) is not int or config.schema_version != 1 or type(config.app) is not AppConfig or \
             type(config.target) is not TargetConfig or type(config.tracer) is not TracerConfig or type(config.scenes) is not tuple:
         raise QtraceError("session.request_invalid", "session.request", "config has an invalid shape")
     def text(value: object, maximum: int = 1024) -> bool:
@@ -239,10 +240,10 @@ def _request_config(config: object) -> UserConfig:
                 unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value)
         except UnicodeEncodeError:
             return False
-    if not isinstance(config.app.package, str) or _PACKAGE.fullmatch(config.app.package) is None or not text(config.target.module):
+    if type(config.app.package) is not str or _PACKAGE.fullmatch(config.app.package) is None or type(config.target.module) is not str or not text(config.target.module) or _MODULE.fullmatch(config.target.module) is None or config.target.module in {".", ".."}:
         raise QtraceError("session.request_invalid", "session.request", "config package or module is invalid")
     tracer = config.tracer
-    if tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
+    if type(tracer.profile) is not str or tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
             type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None) or \
             any(item is not None and not isinstance(item, Path) for item in (config.app.apk, config.target.binary, tracer.library, tracer.companion)):
         raise QtraceError("session.request_invalid", "session.request", "tracer configuration is invalid")
