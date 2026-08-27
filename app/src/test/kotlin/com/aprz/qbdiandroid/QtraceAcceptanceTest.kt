@@ -2,10 +2,19 @@ package com.aprz.qbdiandroid
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.nio.file.Files
 import java.util.concurrent.Executors
 
 class QtraceAcceptanceTest {
+    private fun runningStatus(session: String, state: String = "running"): String =
+        "{\"schemaVersion\":1,\"sessionId\":\"$session\",\"generation\":1," +
+            "\"packageName\":\"com.aprz.qbdiandroid\",\"pid\":4242,\"state\":\"$state\"," +
+            "\"reason\":\"\",\"transitionMonotonicNs\":100,\"normalizedScenes\":[]," +
+            "\"activeScenes\":[],\"artifacts\":[],\"stopAcknowledged\":false," +
+            "\"warnings\":[],\"errors\":[]}"
+
     @Test fun parses_only_explicit_supported_fixture_intents() {
         assertEquals(
             QtraceAcceptanceRequest("timed", 5855319310239641971L, 30L),
@@ -49,6 +58,59 @@ class QtraceAcceptanceTest {
         assertNull(QtraceAcceptance.parseTracedEvidence(evidence - "qtrace_acceptance_session_id"))
         assertNull(QtraceAcceptance.parseTracedEvidence(evidence - "qtrace_acceptance_nonce"))
         assertNull(QtraceAcceptance.parseTracedEvidence(evidence - "qtrace_acceptance_worker"))
+    }
+
+    @Test fun entry_receipt_contains_only_identity_and_real_native_entry_time() {
+        val evidence = QtraceAcceptanceEvidence(
+            "123e4567-e89b-42d3-a456-426614174000",
+            "223e4567-e89b-42d3-a456-426614174001",
+        )
+        assertEquals(
+            "{\"sessionId\":\"${evidence.sessionId}\",\"nonce\":\"${evidence.nonce}\",\"entryMonotonicNs\":123}",
+            QtraceAcceptance.entryReceiptJson(evidence, 123L),
+        )
+    }
+
+    @Test fun running_entry_snapshot_is_selected_before_absolute_deadline() {
+        val session = "123e4567-e89b-42d3-a456-426614174000"
+        val directory = Files.createTempDirectory("qtrace-entry-status").toFile()
+        val status = directory.resolve("status.json")
+        status.writeText(runningStatus(session, "installed"))
+        var now = 0L
+        val selected = QtraceAcceptance.awaitRunningEntryStatus(
+            status,
+            session,
+            deadlineMonotonicNs = 1_000_000_000L,
+            nowMonotonicNs = { now },
+            pause = {
+                now += it
+                status.writeText(runningStatus(session))
+            },
+        )
+        assertTrue(selected.contains("\"state\":\"running\""))
+    }
+
+    @Test fun entry_snapshot_rejects_oversize_and_invalid_utf8_within_deadline() {
+        val session = "123e4567-e89b-42d3-a456-426614174000"
+        for (payload in listOf(
+            ByteArray(65_537) { 'x'.code.toByte() },
+            byteArrayOf(0xc3.toByte()),
+            "{\"sessionId\":\"$session\",\"state\":\"running\"}".toByteArray(),
+        )) {
+            val status = Files.createTempFile("qtrace-entry-status", ".json").toFile()
+            status.writeBytes(payload)
+            var now = 0L
+            val failure = runCatching {
+                QtraceAcceptance.awaitRunningEntryStatus(
+                    status,
+                    session,
+                    deadlineMonotonicNs = 100L,
+                    nowMonotonicNs = { now },
+                    pause = { now += it },
+                )
+            }.exceptionOrNull()
+            assertEquals(IllegalStateException::class, failure!!::class)
+        }
     }
 
     @Test fun serializes_fixture_results_as_strict_stable_json() {

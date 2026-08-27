@@ -677,8 +677,9 @@ class FakeRunner:
         if path.name == "qtrace-acceptance-timed.json":
             return json.dumps({"iterations": 30, "seed": 5855319310239641971, "result": "0x42"})
         if path.name == "qtrace-acceptance-receipt.json":
-            return json.dumps({"sessionId": SESSION, "nonce": "fixture-nonce", "entryElapsedMs": 1,
-                               "deadlineElapsedMs": 2001})
+            return json.dumps({"sessionId": SESSION, "nonce": SESSION, "entryMonotonicNs": 101})
+        if path.name == "qtrace-acceptance-entry-status.json":
+            return json.dumps(status("running"))
         if path.name == "fixture.trace.txt":
             return "TRACE_BEGIN format=4 scene=fixture-entry\nTRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n"
         if path.name == "report.json":
@@ -739,6 +740,36 @@ class FakeArtifactClient:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_timed_entry_evidence_requires_running_native_snapshot_before_entry(self):
+        from scripts.qtrace_device_acceptance import _validate_timed_fixture_receipt
+
+        report = {
+            "session_id": SESSION,
+            "pid": 4242,
+            "timeline": [{"stage": "installing_hooks", "cleanup_detached": True}],
+            "native": {"status": status("sealed")},
+        }
+        receipt = {
+            "sessionId": SESSION,
+            "nonce": "123e4567-e89b-42d3-a456-426614174000",
+            "entryMonotonicNs": 101,
+        }
+        entry = status("running")
+        entry["transitionMonotonicNs"] = 100
+        _validate_timed_fixture_receipt(
+            report, json.dumps(receipt), json.dumps(entry),
+        )
+
+        invalid = {
+            "missing": "",
+            "non-running": json.dumps(status("installed")),
+            "session-mismatch": json.dumps({**entry, "sessionId": "223e4567-e89b-42d3-a456-426614174001"}),
+            "transition-after-entry": json.dumps({**entry, "transitionMonotonicNs": 102}),
+        }
+        for name, raw in invalid.items():
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                _validate_timed_fixture_receipt(report, json.dumps(receipt), raw)
+
     def test_report_path_returns_only_a_lexical_token(self):
         from scripts.qtrace_device_acceptance import _published_report_path, _report_path
 
@@ -1259,7 +1290,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[6])
         self.assertEqual(16, len(commands))
-        self.assertEqual(12, runner.reads)  # baseline retry, receipt, rooted reports, oracle, and pull reports
+        self.assertEqual(15, runner.reads)  # baseline retry, per-run entry evidence, reports, oracle, pulls
         self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[11])
         self.assertIn("--name", commands[13])
         self.assertIn("fixture.trace.bin.lz4", commands[13])
