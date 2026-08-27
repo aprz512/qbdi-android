@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import errno
 import re
 import sys
 import unicodedata
@@ -25,7 +26,6 @@ _STATUS_KEYS = {
 }
 _STATE_ORDER = {"installed": 0, "running": 1, "stop_requested": 2, "stopping": 3,
                 "sealed": 4, "stop_incomplete": 4}
-_ARTIFACT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}\Z")
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _ANY_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -79,10 +79,46 @@ def _integer(value: object, field: str, *, positive: bool = False) -> int:
 
 
 def _text(value: object, field: str, limit: int) -> str:
-    if not isinstance(value, str) or len(value.encode("utf-8")) > limit or any(
-            unicodedata.category(character).startswith("C") for character in value):
+    try:
+        valid = isinstance(value, str) and len(value.encode("utf-8")) <= limit and not any(
+            unicodedata.category(character).startswith("C") for character in value)
+    except UnicodeEncodeError:
+        valid = False
+    if not valid:
         raise QtraceError("session.status_invalid", "session.status", f"{field} is not valid text")
     return value
+
+
+def _artifact_basename(value: object) -> bool:
+    try:
+        return (isinstance(value, str) and value not in {"", ".", ".."} and
+                len(value.encode("utf-8")) <= 255 and "/" not in value and "\\" not in value and
+                not any(unicodedata.category(character).startswith("C") for character in value))
+    except UnicodeEncodeError:
+        return False
+
+
+def _missing_remote(error: BaseException) -> bool:
+    """Only the bound-device ENOENT wrapper represents an empty trace directory/file."""
+    if isinstance(error, FileNotFoundError):
+        return True
+    if not isinstance(error, QtraceError) or error.code != "device.command_failed":
+        return False
+    cause = error.__cause__
+    if isinstance(cause, OSError) and cause.errno == errno.ENOENT:
+        return True
+    return "[Errno 2]" in error.detail or "No such file or directory" in error.detail
+
+
+def _transient_adb(error: BaseException) -> bool:
+    if isinstance(error, QtraceError) and error.code == ErrorCode.ADB_UNAVAILABLE.value:
+        return True
+    if not isinstance(error, QtraceError) or error.code != "device.command_failed":
+        return False
+    cause = error.__cause__
+    return isinstance(cause, TimeoutError) or (
+        isinstance(cause, OSError) and cause.errno in {errno.ECONNABORTED, errno.ECONNRESET,
+                                                        errno.ENETDOWN, errno.ENETUNREACH, errno.EPIPE})
 
 
 def _issues(value: object, field: str) -> None:
@@ -134,7 +170,7 @@ def parse_status(value: object, session_id: str, package: str, generation: int, 
         active_identity.add(identity)
     artifacts = value.get("artifacts")
     if type(artifacts) is not list or len(artifacts) > 256 or len(set(artifacts)) != len(artifacts) or any(
-        not isinstance(name, str) or _ARTIFACT.fullmatch(name) is None or "/" in name or
+        not _artifact_basename(name) or
         any(found.group(0) != session_id for found in _ANY_UUID.finditer(name)) for name in artifacts
     ):
         raise QtraceError("session.status_invalid", "session.status", "artifacts are not safe unique basenames")
@@ -228,7 +264,7 @@ class SessionOrchestrator:
         self._device_selector = device_selector
 
     def run(self, request: RunRequest) -> SessionResult:
-        return self._execute("run", request, request.duration_ms)
+        return self._execute("run", request, None)
 
     def monitor(self, request: MonitorRequest) -> SessionResult:
         return self._execute("monitor", request, None)
@@ -236,6 +272,7 @@ class SessionOrchestrator:
     def _execute(self, mode: str, request: RunRequest | MonitorRequest, duration_ms: int | None) -> SessionResult:
         session_id = self._uuid_factory()
         request = _validate_request(request, mode == "run", session_id)
+        duration_ms = request.duration_ms if isinstance(request, RunRequest) else None
         timeline, started = [], self._clock.utc_timestamp()
         device = None
         pid: int | None = None
@@ -263,7 +300,8 @@ class SessionOrchestrator:
             self._report_writer.write_atomic(report_path, report)
             return SessionResult(session_id, exit_code, report_path, outputs)
 
-        device = self._device_selector(request.device, request.adb_timeout)
+        select = getattr(self._device_selector, "select", self._device_selector)
+        device = select(request.device, timeout=request.adb_timeout)
         selected_device = getattr(device, "serial", None)
         if not isinstance(selected_device, str) or not selected_device:
             raise QtraceError("session.selector_invalid", "selector", "selector did not return a bound device serial")
@@ -311,6 +349,7 @@ class SessionOrchestrator:
             self._wait_for_exit(device, request, pid)
             mark(SessionStage.PULLING)
             final_status = self._read_final_status(device, request, result, session_id)
+            status = final_status
             exit_code, outputs = self._collect(device, request, session_id, snapshot, final_status)
             mark(SessionStage.COMPLETED)
             return publish("crash_recovered" if exit_code == EXIT_PARTIAL else "process_exited", exit_code, outputs=outputs)
@@ -322,9 +361,10 @@ class SessionOrchestrator:
                 command = f"qtrace pull --package {request.config.app.package} --latest --device {device.serial}"
                 try:
                     publish("interrupted", 130, outputs=(command,))
-                    print(command, file=sys.stderr)
                 except Exception as publication_error:
                     note(publication_error)
+                finally:
+                    print(command, file=sys.stderr)
             elif isinstance(primary, QtraceError):
                 try:
                     publish("error", primary.exit_code, primary)
@@ -347,8 +387,13 @@ class SessionOrchestrator:
         directory = f"/data/data/{request.config.app.package}/files/qbdi-traces"
         target_shell = getattr(device, "target_shell", None)
         if target_shell is not None:
-            raw = target_shell("ls", "-1", directory, maximum_bytes=1_048_576,
-                               timeout=request.adb_timeout)
+            try:
+                raw = target_shell("ls", "-1", directory, maximum_bytes=1_048_576,
+                                   timeout=request.adb_timeout)
+            except BaseException as error:
+                if _missing_remote(error):
+                    return ()
+                raise
             try:
                 names = tuple(line for line in raw.decode("utf-8").splitlines() if line)
             except (AttributeError, UnicodeDecodeError) as error:
@@ -356,7 +401,7 @@ class SessionOrchestrator:
         else:
             raise QtraceError("session.snapshot_invalid", "session.snapshot", "bound target identity cannot list tracer artifacts")
         if len(names) > 256 or len(set(names)) != len(names) or any(
-            not isinstance(name, str) or _ARTIFACT.fullmatch(name) is None for name in names
+            not _artifact_basename(name) for name in names
         ):
             raise QtraceError("session.snapshot_invalid", "session.snapshot", "artifact snapshot has unsafe names")
         return names
@@ -391,8 +436,10 @@ class SessionOrchestrator:
                            session_id: str) -> Mapping[str, object] | None:
         try:
             return self._read_status(device, request, result, session_id, None)
-        except FileNotFoundError:
-            return None
+        except BaseException as error:
+            if _missing_remote(error):
+                return None
+            raise
 
     def _wait_for_seal(self, device: object, request: RunRequest, result: InjectionResult,
                        session_id: str, on_stopping: Callable[[], None]) -> tuple[Mapping[str, object], bool]:
@@ -419,7 +466,7 @@ class SessionOrchestrator:
                 if current["state"] == "stop_incomplete":
                     return current, False
             except QtraceError as error:
-                if error.code != ErrorCode.ADB_UNAVAILABLE.value:
+                if not _transient_adb(error):
                     raise
                 transient_count += 1
             except (OSError, TimeoutError):
@@ -444,7 +491,7 @@ class SessionOrchestrator:
                 if current != pid:
                     raise QtraceError("session.pid_replaced", "session.monitor", "package PID changed after injection")
             except QtraceError as error:
-                if error.code != ErrorCode.ADB_UNAVAILABLE.value:
+                if not _transient_adb(error):
                     raise
                 transient_count += 1
             except (OSError, TimeoutError):

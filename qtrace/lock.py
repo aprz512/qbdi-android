@@ -15,7 +15,8 @@ from typing import Iterator
 from qtrace.errors import ErrorCode, QtraceError
 
 
-_SAFE_TARGET = re.compile(r"[A-Za-z0-9._:@-]+\Z")
+_SAFE_SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
+_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 
 
 class TargetLock:
@@ -55,9 +56,9 @@ class TargetLock:
 
     @contextmanager
     def acquire(self, serial: str, package: str) -> Iterator[None]:
-        if not isinstance(serial, str) or not _SAFE_TARGET.fullmatch(serial):
+        if not isinstance(serial, str) or not _SAFE_SERIAL.fullmatch(serial):
             raise QtraceError("session.lock_invalid", "lock", "device serial is invalid")
-        if not isinstance(package, str) or not _SAFE_TARGET.fullmatch(package):
+        if not isinstance(package, str) or not _PACKAGE.fullmatch(package):
             raise QtraceError("session.lock_invalid", "lock", "package is invalid")
         digest = hashlib.sha256((serial + "\0" + package).encode("utf-8")).hexdigest()
         flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)

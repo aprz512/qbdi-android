@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -148,7 +150,7 @@ def orchestrator(device: FakeDevice, clock: ManualClock, collector: FakeCollecto
     return SessionOrchestrator(
         FakePreflight(device), lambda selected: type("Resolver", (), {"resolve": lambda self, _: target()})(),
         FakeBuilder(), FakeDeployer(), lambda selected: injector, collector or FakeCollector(), clock,
-        lambda: SESSION_ID, device_selector=lambda _requested, _timeout: device,
+        lambda: SESSION_ID, device_selector=lambda _requested, *, timeout: device,
     ), injector
 
 
@@ -306,6 +308,20 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(["qtrace pull --package com.example.app --latest --device device-1"], document["outputs"])
         self.assertEqual([], device.killed)
 
+    def test_keyboard_interrupt_prints_pull_command_when_report_fails(self) -> None:
+        device = FakeDevice([], [])
+        class FailingWriter:
+            def write_atomic(self, *_args):
+                raise OSError("disk unavailable")
+        runner, _ = orchestrator(device, ManualClock())
+        runner._report_writer = FailingWriter()  # explicit publication seam
+        request = RunRequest(config(), None, Path(self.directory.name), 250, 2.0, 2.0, 0.5, 1.0,
+                             installed_action=lambda _device, _pid: (_ for _ in ()).throw(KeyboardInterrupt()))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(KeyboardInterrupt):
+            runner.run(request)
+        self.assertIn("qtrace pull --package com.example.app", stderr.getvalue())
+
     def test_invalid_request_and_uuid_do_not_call_selector(self) -> None:
         calls: list[object] = []
         device = FakeDevice([], [])
@@ -313,7 +329,7 @@ class SessionTests(unittest.TestCase):
         runner = SessionOrchestrator(
             FakePreflight(device), lambda _selected: None, FakeBuilder(), FakeDeployer(),
             lambda _selected: FakeInjector(), FakeCollector(), ManualClock(), lambda: "not-a-uuid",
-            device_selector=lambda *_args: calls.append("selector"),
+            device_selector=lambda *_args, **_kwargs: calls.append("selector"),
         )
         with self.assertRaises(QtraceError):
             runner.run(invalid)
@@ -347,10 +363,45 @@ class SessionTests(unittest.TestCase):
         runner = SessionOrchestrator(
             OrderedPreflight(device), lambda _selected: type("Resolver", (), {"resolve": lambda self, _: target()})(),
             FakeBuilder(), FakeDeployer(), lambda _selected: FakeInjector(), FakeCollector(), ManualClock(),
-            lambda: SESSION_ID, lock=OrderedLock(), device_selector=lambda requested, _timeout: (events.append("select") or device),
+            lambda: SESSION_ID, lock=OrderedLock(), device_selector=lambda requested, *, timeout: (events.append("select") or device),
         )
         runner.run(self.run_request())
         self.assertEqual(["select", "lock", "preflight"], events[:3])
+
+    def test_real_selector_shape_uses_keyword_timeout(self) -> None:
+        device = FakeDevice([status("sealed", transition=2, reason="duration_elapsed", acknowledged=True)], [4242])
+        calls = []
+        class Selector:
+            def select(self, requested_device, *, timeout):
+                calls.append((requested_device, timeout))
+                return device
+        runner = SessionOrchestrator(
+            FakePreflight(device), lambda _selected: type("Resolver", (), {"resolve": lambda self, _: target()})(),
+            FakeBuilder(), FakeDeployer(), lambda _selected: FakeInjector(), FakeCollector(), ManualClock(),
+            lambda: SESSION_ID, device_selector=Selector(),
+        )
+        runner.run(self.run_request())
+        self.assertEqual([(None, 0.5)], calls)
+
+    def test_none_request_and_surrogate_status_are_stable_qtrace_errors(self) -> None:
+        runner, _ = orchestrator(FakeDevice([], []), ManualClock())
+        with self.assertRaises(QtraceError):
+            runner.run(None)  # type: ignore[arg-type]
+        malformed = status("running", transition=1, reason="\ud800")
+        with self.assertRaises(QtraceError):
+            parse_status(malformed, SESSION_ID, PACKAGE, 7, 4242, SCENES, None)
+
+    def test_wrapped_enoent_snapshot_and_final_status_are_absent_only(self) -> None:
+        missing = QtraceError("device.command_failed", "device.shell", "ADB command failed: [Errno 2] No such file or directory")
+        device = FakeDevice([], [4242, None])
+        original_shell = device.target_shell
+        def shell(*args, **kwargs):
+            if args[0] == "ls" or args[0] == "cat":
+                raise missing
+            return original_shell(*args, **kwargs)
+        device.target_shell = shell  # type: ignore[method-assign]
+        runner, _ = orchestrator(device, ManualClock())
+        self.assertEqual(0, runner.monitor(MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)).exit_code)
 
     def test_error_and_interrupt_reports_are_published_before_unlock_and_never_mask_primary(self) -> None:
         for primary in (QtraceError("session.boom", "test", "boom"), KeyboardInterrupt(), ValueError("raw")):
@@ -378,7 +429,7 @@ class SessionTests(unittest.TestCase):
                     FakePreflight(device), lambda _selected: type("Resolver", (), {"resolve": lambda self, _: target()})(),
                     FakeBuilder(), FakeDeployer(), lambda _selected: injector, FakeCollector(), ManualClock(),
                     lambda: SESSION_ID, lock=RecordingLock(), report_writer=FailingWriter(),
-                    device_selector=lambda _requested, _timeout: device,
+                    device_selector=lambda _requested, *, timeout: device,
                 )
                 with self.assertRaises(type(primary)):
                     runner.run(self.run_request())
@@ -392,6 +443,7 @@ class SessionTests(unittest.TestCase):
         result = runner.monitor(MonitorRequest(config(), None, Path(self.directory.name), 0.2, 0.5, 1.0))
         self.assertGreater(clock.monotonic(), 0.2)
         self.assertEqual("sealed", collector.calls[-1]["state"])
+        self.assertEqual("sealed", json.loads(result.report.read_text(encoding="utf-8"))["native"]["status"]["state"])
 
     def test_wrapped_transient_qtrace_error_retries_without_reinjection(self) -> None:
         device = FakeDevice([QtraceError(ErrorCode.ADB_UNAVAILABLE, "adb", "lost"),
