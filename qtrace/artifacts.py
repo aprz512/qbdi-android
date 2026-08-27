@@ -251,7 +251,9 @@ def _status_name(name: str) -> str | None:
 
 
 def _temporary_name(name: str) -> bool:
-    return (name.startswith(".") or name.endswith((".tmp", ".partial", ".current", ".writing"))
+    return (name.startswith(".") or name.endswith((".tmp", ".partial", ".current", ".writer"))
+            or re.search(r"\.tmp\.\d+\.\d+\Z", name) is not None
+            or re.search(r"\.writing\.\d+\Z", name) is not None
             or ".qtrace-stage-" in name)
 
 
@@ -902,6 +904,7 @@ class ArtifactProcessor:
         status: Mapping[str, object] | None = None
         session_id: str | None = None
         if selection.mode is PullMode.LATEST:
+            status_candidates = [item for item in listing if _status_name(item) is not None]
             for candidate in listing:
                 sid = _status_name(candidate)
                 if sid is None:
@@ -910,7 +913,9 @@ class ArtifactProcessor:
                     candidate_status = _json_status(
                         _call(getattr(client, "read_file"), candidate, timeout=timeout), sid, None)
                 except QtraceError:
-                    raise
+                    if len(status_candidates) == 1:
+                        raise
+                    continue
                 except (OSError, RuntimeError, TimeoutError, TypeError) as error:
                     raise _error("artifact.pull_failed", str(error), partial=True) from error
                 if candidate_status.get("packageName") != package:
