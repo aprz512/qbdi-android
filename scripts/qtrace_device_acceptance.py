@@ -235,6 +235,20 @@ def _verify_pull_outputs(root: Path) -> None:
         raise RuntimeError("manual pull did not publish output directories: " + ",".join(missing))
 
 
+def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: str | None = None,
+                           compressed_only: bool = False) -> dict[str, object]:
+    report = _strict_report(runner, _report_path(stdout, root))
+    records = report.get("artifacts")
+    if not isinstance(records, list) or not records:
+        raise RuntimeError("manual pull report has no artifact records")
+    names = {item.get("remote_name") for item in records if isinstance(item, dict)}
+    if named is not None and named not in names:
+        raise RuntimeError("named pull report omitted the trusted artifact")
+    if compressed_only and any(isinstance(name, str) and name.endswith(".trace.txt") for name in names):
+        raise RuntimeError("compressed-only pull published a decoded text artifact")
+    return report
+
+
 def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
     if not device:
         raise ValueError("--device is required for manual acceptance")
@@ -272,10 +286,11 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
         f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"), timeout=5.0))
     if timed_oracle != baseline:
         raise RuntimeError("long timed target did not return the baseline oracle value")
-    runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, "--latest", "--device", device, "--output", str(directory / "latest")), timeout=180.0)
-    runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, "--name", artifact, "--device", device, "--output", str(directory / "name")), timeout=180.0)
-    runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, "--all", "--device", device, "--output", str(directory / "all")), timeout=180.0)
-    runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, "--all", "--compressed-only", "--device", device, "--output", str(directory / "compressed")), timeout=180.0)
+    pulls = (("latest", ("--latest",), None, False), ("name", ("--name", artifact), artifact, False), ("all", ("--all",), None, False), ("compressed", ("--all", "--compressed-only"), None, True))
+    for name, selector, expected, compressed in pulls:
+        output = directory / name
+        result = runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, *selector, "--device", device, "--output", str(output)), timeout=180.0)
+        _validated_pull_report(runner, result.stdout or str(output / "report.json"), output, named=expected, compressed_only=compressed)
     _verify_pull_outputs(directory)
     return 0
 
