@@ -74,6 +74,7 @@ class FakeDevice:
     def __init__(self, statuses: list[object], pids: list[int | None]) -> None:
         self.statuses, self.pids = list(statuses), list(pids)
         self.read_paths: list[str] = []
+        self.shell_timeouts: list[tuple[str, float]] = []
         self.killed: list[int] = []
 
     def read_file(self, path: str, maximum_bytes: int, *, timeout: float) -> bytes:
@@ -88,6 +89,7 @@ class FakeDevice:
         return self.pids.pop(0) if self.pids else 4242
 
     def target_shell(self, *args: str, timeout: float, maximum_bytes: int) -> bytes:
+        self.shell_timeouts.append((args[0], timeout))
         if args[:2] == ("ls", "-1"):
             return b"old.trace.bin.lz4\n"
         if args[0] == "cat":
@@ -422,6 +424,14 @@ class SessionTests(unittest.TestCase):
         device.target_shell = shell  # type: ignore[method-assign]
         runner, _ = orchestrator(device, ManualClock())
         self.assertIsNone(runner._current_pid(device, PACKAGE, 0.5))
+
+    def test_target_shell_status_receives_explicit_clipped_timeout(self) -> None:
+        device = FakeDevice([status("running", transition=1)], [4242])
+        runner, _ = orchestrator(device, ManualClock())
+        from qtrace.injector import InjectionResult
+        request = self.run_request()
+        runner._read_status(device, request, InjectionResult(4242, SESSION_ID, 7, SCENES), SESSION_ID, None, 0.125)
+        self.assertEqual(("cat", 0.125), device.shell_timeouts[-1])
 
     def test_error_and_interrupt_reports_are_published_before_unlock_and_never_mask_primary(self) -> None:
         for primary in (QtraceError("session.boom", "test", "boom"), KeyboardInterrupt(), ValueError("raw")):

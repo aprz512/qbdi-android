@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import errno
 import subprocess
 import re
 import sys
@@ -448,7 +447,7 @@ class SessionOrchestrator:
         path = self._status_path(request.config.app.package, session_id)
         target_shell = getattr(device, "target_shell", None)
         timeout = request.adb_timeout if timeout is None else timeout
-        raw = (target_shell("cat", path, maximum_bytes=1_048_576, timeout=request.adb_timeout)
+        raw = (target_shell("cat", path, maximum_bytes=1_048_576, timeout=timeout)
                if target_shell is not None else
                device.read_file(path, 1_048_576, timeout=timeout))
         decoded = _strict_json(raw)
@@ -482,6 +481,10 @@ class SessionOrchestrator:
                     raise QtraceError("session.process_exited", "session.running", "injected process exited before seal")
                 if current_pid != result.pid:
                     raise QtraceError("session.pid_replaced", "session.running", "package PID changed after injection")
+                remaining = deadline - self._clock.monotonic()
+                timeout = min(request.adb_timeout, remaining)
+                if timeout <= 0:
+                    break
                 current = self._read_status(device, request, result, session_id, previous, timeout)
                 previous, transient_count = current, 0
                 if current["state"] in {"stop_requested", "stopping", "stop_incomplete", "sealed"}:
@@ -511,8 +514,10 @@ class SessionOrchestrator:
         outage_deadline: float | None = None
         transient_count = 0
         while True:
+            candidate_deadline = self._clock.monotonic() + request.setup_timeout
             try:
-                remaining = request.adb_timeout if outage_deadline is None else outage_deadline - self._clock.monotonic()
+                deadline = candidate_deadline if outage_deadline is None else outage_deadline
+                remaining = deadline - self._clock.monotonic()
                 if remaining <= 0:
                     raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.monitor", "ADB process polling deadline exhausted")
                 current = self._current_pid(device, request.config.app.package, min(request.adb_timeout, remaining))
@@ -531,7 +536,7 @@ class SessionOrchestrator:
                     outage_deadline = self._clock.monotonic() + request.setup_timeout
             if transient_count:
                 if outage_deadline is None:
-                    outage_deadline = self._clock.monotonic() + request.setup_timeout
+                    outage_deadline = candidate_deadline
                 if self._clock.monotonic() >= outage_deadline:
                     raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.monitor", "ADB process polling deadline exhausted")
             self._clock.sleep(0.1)
