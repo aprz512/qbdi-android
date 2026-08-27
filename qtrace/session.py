@@ -6,6 +6,7 @@ import json
 import math
 import subprocess
 import re
+import stat
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -239,7 +240,7 @@ def _request_config(config: object) -> UserConfig:
     if tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
             type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None):
         raise QtraceError("session.request_invalid", "session.request", "tracer configuration is invalid")
-    if len(config.scenes) > 256 or len({scene.name for scene in config.scenes if hasattr(scene, "name")}) != len(config.scenes):
+    if not 1 <= len(config.scenes) <= 256 or len({scene.name for scene in config.scenes if hasattr(scene, "name")}) != len(config.scenes):
         raise QtraceError("session.request_invalid", "session.request", "scenes are invalid")
     names: set[str] = set()
     for scene in config.scenes:
@@ -249,7 +250,12 @@ def _request_config(config: object) -> UserConfig:
             valid = isinstance(scene.symbol, str) and bool(scene.symbol)
         else:
             valid = False
-        if not valid or not isinstance(scene.name, str) or not scene.name or len(scene.name.encode("utf-8")) > 128 or scene.name in names:
+        try:
+            valid_name = isinstance(scene.name, str) and bool(scene.name) and len(scene.name.encode("utf-8")) <= 128 and not any(
+                unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in scene.name)
+        except UnicodeEncodeError:
+            valid_name = False
+        if not valid or not valid_name or scene.name in names:
             raise QtraceError("session.request_invalid", "session.request", "scene is invalid")
         names.add(scene.name)
     if tracer.flight_enabled != (tracer.flight_entry_scene is not None) or (tracer.flight_entry_scene is not None and tracer.flight_entry_scene not in names):
@@ -264,8 +270,11 @@ def _safe_output(path: Path) -> None:
     for part in path.parts[1 if path.is_absolute() else 0:]:
         current /= part
         try:
-            if current.is_symlink():
-                raise QtraceError("session.request_invalid", "session.request", "output ancestor is a symlink")
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise QtraceError("session.request_invalid", "session.request", "output ancestor is unsafe")
+        except FileNotFoundError:
+            break
         except OSError as error:
             raise QtraceError("session.request_invalid", "session.request", "output path is invalid") from error
 
@@ -362,14 +371,15 @@ class SessionOrchestrator:
             self._report_writer.write_atomic(report_path, report)
             return SessionResult(session_id, exit_code, report_path, outputs)
 
-        select = getattr(self._device_selector, "select", self._device_selector)
-        device = select(request.device, timeout=request.adb_timeout)
-        selected_device = getattr(device, "serial", None)
-        if not isinstance(selected_device, str) or not selected_device:
-            raise QtraceError("session.selector_invalid", "selector", "selector did not return a bound device serial")
-        context = self._lock.acquire(selected_device, request.config.app.package)
-        context.__enter__()
+        context = None
         try:
+            select = getattr(self._device_selector, "select", self._device_selector)
+            device = select(request.device, timeout=request.adb_timeout)
+            selected_device = getattr(device, "serial", None)
+            if not isinstance(selected_device, str) or not selected_device:
+                raise QtraceError("session.selector_invalid", "selector", "selector did not return a bound device serial")
+            context = self._lock.acquire(selected_device, request.config.app.package)
+            context.__enter__()
             mark(SessionStage.PREFLIGHT)
             device, identity = self._preflight.run(request.config, selected_device,
                                                     setup_timeout=request.setup_timeout, adb_timeout=request.adb_timeout)
@@ -439,7 +449,8 @@ class SessionOrchestrator:
                     note(publication_error)
             raise
         finally:
-            context.__exit__(*sys.exc_info())
+            if context is not None:
+                context.__exit__(*sys.exc_info())
 
     def _status_path(self, package: str, session_id: str) -> str:
         return f"/data/data/{package}/files/qbdi-traces/session-{session_id}.status.json"

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceError
 from qtrace.models import (
-    AppConfig, ElfIdentity, ResolvedScene, ResolvedTarget, TargetConfig, TracerConfig, UserConfig,
+    AppConfig, ElfIdentity, OffsetScene, ResolvedScene, ResolvedTarget, TargetConfig, TracerConfig, UserConfig,
 )
 from qtrace.session import (
     MonitorRequest, RunRequest, SessionOrchestrator, _strict_json, build_native_request, parse_status,
@@ -25,7 +25,7 @@ SCENES = (ResolvedScene("work", 0x120, 0x180),)
 
 def config() -> UserConfig:
     return UserConfig(1, AppConfig(PACKAGE, None), TargetConfig("libwork.so", None),
-                      TracerConfig("balanced", True, False, None, None, None), ())
+                      TracerConfig("balanced", True, False, None, None, None), (OffsetScene("work", 0x120, 0x180),))
 
 
 def target() -> ResolvedTarget:
@@ -49,6 +49,12 @@ def status(state: str, *, transition: int, pid: int = 4242, reason: str = "",
 def process_failed(returncode: int, stderr: bytes) -> QtraceError:
     error = QtraceError("process.failed", "process", "command failed")
     error.__cause__ = BoundedProcessError("command failed", returncode=returncode, stderr=stderr)
+    return error
+
+
+def process_timeout() -> QtraceError:
+    error = QtraceError("process.timeout", "process", "timed out")
+    error.__cause__ = subprocess.TimeoutExpired(("adb",), 0.1)
     return error
 
 
@@ -347,6 +353,46 @@ class SessionTests(unittest.TestCase):
             runner.run(invalid)
         self.assertEqual([], calls)
 
+    def test_invalid_action_package_and_output_have_zero_selector_calls(self) -> None:
+        device = FakeDevice([], [])
+        calls: list[str] = []
+        runner, _ = orchestrator(device, ManualClock())
+        runner._device_selector = lambda *_args, **_kwargs: calls.append("select")
+        regular = Path(self.directory.name) / "regular"
+        regular.write_text("x", encoding="utf-8")
+        invalid = (
+            RunRequest(config(), None, Path(self.directory.name), 250, 2, 2, .5, 1, installed_action=object()),
+            RunRequest(UserConfig(1, AppConfig("bad package", None), TargetConfig("x", None), config().tracer, config().scenes), None, Path(self.directory.name), 250, 2, 2, .5, 1),
+            RunRequest(config(), None, regular / "out", 250, 2, 2, .5, 1),
+        )
+        for request in invalid:
+            with self.assertRaises(QtraceError):
+                runner.run(request)
+        self.assertEqual([], calls)
+
+    def test_selector_and_lock_enter_failures_publish_without_masking(self) -> None:
+        device = FakeDevice([], [])
+        publications: list[str] = []
+        class Writer:
+            def write_atomic(self, _path, report): publications.append(report.status)
+        runner, _ = orchestrator(device, ManualClock())
+        runner._report_writer = Writer()
+        runner._device_selector = lambda *_args, **_kwargs: (_ for _ in ()).throw(QtraceError("selector.failed", "selector", "no"))
+        with self.assertRaisesRegex(QtraceError, "selector.failed"):
+            runner.run(self.run_request())
+        self.assertEqual(["error"], publications)
+        class BadLock:
+            def acquire(self, *_args):
+                class Context:
+                    def __enter__(_self): raise QtraceError("lock.failed", "lock", "no")
+                    def __exit__(_self, *_args): pass
+                return Context()
+        runner, _ = orchestrator(device, ManualClock())
+        runner._report_writer, runner._lock = Writer(), BadLock()
+        with self.assertRaisesRegex(QtraceError, "lock.failed"):
+            runner.run(self.run_request())
+        self.assertEqual(["error", "error"], publications)
+
     def test_selector_is_a_required_constructor_dependency(self) -> None:
         device = FakeDevice([], [])
         with self.assertRaises(TypeError):
@@ -432,6 +478,20 @@ class SessionTests(unittest.TestCase):
         request = self.run_request()
         runner._read_status(device, request, InjectionResult(4242, SESSION_ID, 7, SCENES), SESSION_ID, None, 0.125)
         self.assertEqual(("cat", 0.125), device.shell_timeouts[-1])
+
+    def test_monitor_outage_sleep_does_not_overshoot_deadline(self) -> None:
+        device = FakeDevice([], [4242])
+        device.pids = [process_timeout()] * 2
+        # target_shell uses pid(), so make each pid query a production timeout.
+        def shell(*args, **kwargs):
+            if args[0] == "ls": return b""
+            if args[0] == "pidof": raise process_timeout()
+            raise AssertionError(args)
+        device.target_shell = shell  # type: ignore[method-assign]
+        clock = ManualClock(); runner, _ = orchestrator(device, clock)
+        with self.assertRaisesRegex(QtraceError, ErrorCode.ADB_UNAVAILABLE.value):
+            runner.monitor(MonitorRequest(config(), None, Path(self.directory.name), .05, .5, 1))
+        self.assertLessEqual(clock.monotonic(), .05)
 
     def test_error_and_interrupt_reports_are_published_before_unlock_and_never_mask_primary(self) -> None:
         for primary in (QtraceError("session.boom", "test", "boom"), KeyboardInterrupt(), ValueError("raw")):
