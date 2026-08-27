@@ -34,6 +34,7 @@ _TRACER_ARTIFACT_SUFFIXES = (".trace.bin", ".trace.bin.lz4", ".flight.bin")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 _SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
 _MODULE = re.compile(r"[A-Za-z0-9._+-]+\Z")
+_PATH_TYPE = type(Path())
 
 
 class Clock(Protocol):
@@ -236,16 +237,29 @@ def _request_config(config: object) -> UserConfig:
         raise QtraceError("session.request_invalid", "session.request", "config has an invalid shape")
     def text(value: object, maximum: int = 1024) -> bool:
         try:
-            return isinstance(value, str) and bool(value) and len(value.encode("utf-8")) <= maximum and not any(
+            return type(value) is str and bool(value) and len(value.encode("utf-8")) <= maximum and not any(
                 unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value)
         except UnicodeEncodeError:
             return False
+
+    def host_path(value: object) -> bool:
+        if value is None:
+            return True
+        if type(value) is not _PATH_TYPE or not value.is_absolute():
+            return False
+        try:
+            info = value.lstat()
+        except (OSError, TypeError, ValueError):
+            return False
+        return stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+
     if type(config.app.package) is not str or _PACKAGE.fullmatch(config.app.package) is None or type(config.target.module) is not str or not text(config.target.module) or _MODULE.fullmatch(config.target.module) is None or config.target.module in {".", ".."}:
         raise QtraceError("session.request_invalid", "session.request", "config package or module is invalid")
     tracer = config.tracer
     if type(tracer.profile) is not str or tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
             type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None) or \
-            any(item is not None and not isinstance(item, Path) for item in (config.app.apk, config.target.binary, tracer.library, tracer.companion)):
+            any(not host_path(item) for item in (
+                config.app.apk, config.target.binary, tracer.library, tracer.companion)):
         raise QtraceError("session.request_invalid", "session.request", "tracer configuration is invalid")
     if not 1 <= len(config.scenes) <= 256:
         raise QtraceError("session.request_invalid", "session.request", "scenes are invalid")
@@ -258,7 +272,7 @@ def _request_config(config: object) -> UserConfig:
         else:
             valid = False
         try:
-            valid_name = isinstance(scene.name, str) and bool(scene.name) and len(scene.name.encode("utf-8")) <= 128 and not any(
+            valid_name = type(scene.name) is str and bool(scene.name) and len(scene.name.encode("utf-8")) <= 128 and not any(
                 unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in scene.name)
         except UnicodeEncodeError:
             valid_name = False
@@ -290,7 +304,7 @@ def _validate_request(request: object, timed: bool, session_id: str) -> RunReque
     expected = RunRequest if timed else MonitorRequest
     if not isinstance(request, expected):
         raise QtraceError("session.request_invalid", "session.request", "request type does not match command")
-    if not isinstance(request.output, Path) or (request.device is not None and (not isinstance(request.device, str) or _SERIAL.fullmatch(request.device) is None)) or \
+    if type(request.output) is not _PATH_TYPE or (request.device is not None and (type(request.device) is not str or _SERIAL.fullmatch(request.device) is None)) or \
             (request.installed_action is not None and not callable(request.installed_action)):
         raise QtraceError("session.request_invalid", "session.request", "config and output are invalid")
     _request_config(request.config)
@@ -572,9 +586,9 @@ class SessionOrchestrator:
             if transient_count >= 3 and self._clock.monotonic() + 0.1 > deadline:
                 raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.status", "ADB status polling deadline exhausted")
             self._clock.sleep(min(0.1, max(0.0, deadline - self._clock.monotonic())))
+        if transient_count:
+            raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.status", "ADB status polling deadline exhausted")
         if not saw_stop:
-            if transient_count:
-                raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.status", "ADB status polling deadline exhausted")
             raise QtraceError("session.run_timeout", "session.running", "native stop did not begin before the deadline")
         assert previous is not None
         return previous, True

@@ -19,6 +19,14 @@ _SAFE_SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 
 
+def _close(fd: int) -> None:
+    try:
+        os.close(fd)
+    except BaseException:
+        # Cleanup must never replace the operation's original exception.
+        pass
+
+
 class TargetLock:
     def __init__(self, runtime_dir: Path | None = None) -> None:
         self._runtime_dir = runtime_dir
@@ -41,7 +49,7 @@ class TargetLock:
                 raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe")
             base_fd = descriptor
         except BaseException as error:
-            os.close(descriptor)
+            _close(descriptor)
             if isinstance(error, OSError):
                 raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe") from error
             raise
@@ -56,7 +64,7 @@ class TargetLock:
             except OSError as error:
                 raise QtraceError("session.lock_invalid", "lock", "lock root is unsafe") from error
         finally:
-            os.close(base_fd)
+            _close(base_fd)
         try:
             info = os.fstat(root)
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
@@ -66,7 +74,7 @@ class TargetLock:
                 raise QtraceError("session.lock_invalid", "lock", "lock root mode is unsafe")
             return root
         except BaseException:
-            os.close(root)
+            _close(root)
             raise
 
     @contextmanager
@@ -80,9 +88,11 @@ class TargetLock:
         root = self._root()
         try:
             descriptor = os.open(f"{digest}.lock", flags, 0o600, dir_fd=root)
-        except OSError as error:
-            os.close(root)
-            raise QtraceError("session.lock_invalid", "lock", "lock file is unsafe") from error
+        except BaseException as error:
+            _close(root)
+            if isinstance(error, OSError):
+                raise QtraceError("session.lock_invalid", "lock", "lock file is unsafe") from error
+            raise
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -101,5 +111,5 @@ class TargetLock:
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            os.close(descriptor)
-            os.close(root)
+            _close(descriptor)
+            _close(root)

@@ -1,15 +1,18 @@
 import contextlib
+import hashlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
 from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceError
 from qtrace.models import (
-    AppConfig, ElfIdentity, OffsetScene, ResolvedScene, ResolvedTarget, TargetConfig, TracerConfig, UserConfig,
+    AppConfig, ElfIdentity, OffsetScene, ResolvedScene, ResolvedTarget, SymbolScene, TargetConfig, TracerConfig, UserConfig,
 )
 from qtrace.session import (
     MonitorRequest, RunRequest, SessionOrchestrator, _strict_json, build_native_request, parse_status,
@@ -387,6 +390,72 @@ class SessionTests(unittest.TestCase):
                 runner.run(request)
         self.assertEqual([], calls)
 
+    def test_all_optional_host_paths_are_absolute_regular_non_symlinks_before_selection(self) -> None:
+        calls: list[str] = []
+        runner, _ = orchestrator(FakeDevice([], []), ManualClock())
+        runner._device_selector = lambda *_args, **_kwargs: calls.append("select")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            valid = root / "valid.so"
+            valid.write_bytes(b"valid")
+            link = root / "link.so"
+            link.symlink_to(valid)
+            invalid_paths = (Path("relative.so"), root, link, root / "missing.so")
+
+            for field in ("apk", "binary", "library", "companion"):
+                for invalid_path in invalid_paths:
+                    app = AppConfig(PACKAGE, invalid_path if field == "apk" else None)
+                    target_config = TargetConfig("libwork.so", invalid_path if field == "binary" else None)
+                    library = invalid_path if field == "library" else valid
+                    companion = invalid_path if field == "companion" else valid
+                    tracer = TracerConfig("balanced", True, False, None, library, companion)
+                    candidate = UserConfig(1, app, target_config, tracer, config().scenes)
+                    request = RunRequest(candidate, None, root, 250, 2, 2, .5, 1)
+                    with self.subTest(field=field, path=invalid_path):
+                        with self.assertRaises(QtraceError):
+                            runner.run(request)
+            self.assertEqual([], calls)
+
+    def test_normalized_config_rejects_string_subclasses_at_every_string_boundary(self) -> None:
+        class StringSubclass(str):
+            pass
+
+        calls: list[str] = []
+        runner, _ = orchestrator(FakeDevice([], []), ManualClock())
+        runner._device_selector = lambda *_args, **_kwargs: calls.append("select")
+        base = config()
+        candidates = (
+            UserConfig(1, AppConfig(StringSubclass(PACKAGE), None), base.target, base.tracer, base.scenes),
+            UserConfig(1, base.app, TargetConfig(StringSubclass("libwork.so"), None), base.tracer, base.scenes),
+            UserConfig(1, base.app, base.target,
+                       TracerConfig(StringSubclass("balanced"), True, False, None, None, None), base.scenes),
+            UserConfig(1, base.app, base.target, base.tracer,
+                       (OffsetScene(StringSubclass("work"), 0x120, 0x180),)),
+            UserConfig(1, base.app, base.target, base.tracer,
+                       (SymbolScene("work", StringSubclass("symbol")),)),
+            UserConfig(1, base.app, base.target,
+                       TracerConfig("balanced", True, True, StringSubclass("work"), None, None),
+                       base.scenes),
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate), self.assertRaises(QtraceError):
+                runner.run(RunRequest(candidate, None, Path(self.directory.name), 250, 2, 2, .5, 1))
+        with self.assertRaises(QtraceError):
+            runner.run(RunRequest(base, StringSubclass("device-1"), Path(self.directory.name), 250, 2, 2, .5, 1))
+        self.assertEqual([], calls)
+
+    def test_transient_after_stop_request_is_adb_error_and_does_not_collect(self) -> None:
+        device = FakeDevice(
+            [status("stop_requested", transition=1), process_timeout()], [4242]
+        )
+        clock = ManualClock()
+        collector = FakeCollector()
+        runner, _ = orchestrator(device, clock, collector)
+        request = RunRequest(config(), None, Path(self.directory.name), 100, 2, .001, .5, 1)
+        with self.assertRaisesRegex(QtraceError, ErrorCode.ADB_UNAVAILABLE.value):
+            runner.run(request)
+        self.assertEqual([], collector.calls)
+
     def test_selector_and_lock_enter_failures_publish_without_masking(self) -> None:
         device = FakeDevice([], [])
         publications: list[str] = []
@@ -618,6 +687,58 @@ class LockTests(unittest.TestCase):
             with TargetLock(runtime / "link" / "sub").acquire("device-1", PACKAGE):
                 pass
         self.assertFalse(any(actual.glob("qtrace-*")))
+
+    def test_preexisting_digest_symlink_is_stable_across_repeated_attempts(self) -> None:
+        runtime = Path(self.directory.name)
+        root = runtime / f"qtrace-{os.getuid()}"
+        root.mkdir()
+        digest = hashlib.sha256(("device-1" + "\0" + PACKAGE).encode("utf-8")).hexdigest()
+        lock_path = root / f"{digest}.lock"
+        target = runtime / "target.lock"
+        target.write_text("keep", encoding="utf-8")
+        lock_path.symlink_to(target)
+        before = len(os.listdir("/proc/self/fd"))
+        for _ in range(12):
+            with self.assertRaisesRegex(QtraceError, "session.lock_invalid"):
+                with TargetLock(runtime).acquire("device-1", PACKAGE):
+                    pass
+        after = len(os.listdir("/proc/self/fd"))
+        self.assertLessEqual(after, before + 1)
+        self.assertTrue(lock_path.is_symlink())
+        self.assertEqual("keep", target.read_text(encoding="utf-8"))
+
+    def test_lock_cleanup_does_not_mask_non_oserror_primary(self) -> None:
+        lock = TargetLock(Path(self.directory.name))
+        real_close = os.close
+        armed = False
+
+        def close_then_fail(fd: int) -> None:
+            real_close(fd)
+            if armed:
+                raise OSError("close failed")
+
+        def fchmod_then_interrupt(*_args: object) -> None:
+            nonlocal armed
+            armed = True
+            raise KeyboardInterrupt()
+
+        with patch("qtrace.lock.os.fchmod", side_effect=fchmod_then_interrupt), \
+                patch("qtrace.lock.os.close", side_effect=close_then_fail):
+            with self.assertRaises(KeyboardInterrupt):
+                lock._root()
+
+    def test_lock_file_open_closes_root_and_maps_only_oserrors(self) -> None:
+        lock = TargetLock(Path(self.directory.name))
+        for failure, expected in ((OSError("open failed"), QtraceError),
+                                  (KeyboardInterrupt(), KeyboardInterrupt)):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(TargetLock, "_root", return_value=123), \
+                        patch("qtrace.lock.os.open", side_effect=failure), \
+                        patch("qtrace.lock.os.close") as close:
+                    with self.assertRaises(expected):
+                        with lock.acquire("device-1", PACKAGE):
+                            pass
+                    close.assert_called_once_with(123)
 
 
 if __name__ == "__main__":
