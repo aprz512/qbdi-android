@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from qtrace.errors import EXIT_PARTIAL, QtraceError
+from qtrace.report import conditional_replace_at
 
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
@@ -596,11 +597,7 @@ def _rewrite_published_report(parent: int, session_id: str,
                         getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
     descriptor = -1
     temporary = ".report-" + uuid.uuid4().hex + ".tmp"
-    exchanged = False
     try:
-        original = os.stat("report.json", dir_fd=directory, follow_symlinks=False)
-        if (original.st_dev, original.st_ino) != expected_identity:
-            raise FileExistsError("collector report changed before refresh")
         try:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                  getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -615,33 +612,13 @@ def _rewrite_published_report(parent: int, session_id: str,
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-        from qtrace.report import _exchange
-        _exchange(directory, temporary, "report.json")
-        exchanged = True
-        try:
-            old = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
-            matched = (old.st_dev, old.st_ino) == (original.st_dev, original.st_ino)
-        except BaseException:
-            try:
-                _exchange(directory, temporary, "report.json")
-                exchanged = False
-            except BaseException:
-                temporary = ""
-            raise
-        if not matched:
-            try:
-                _exchange(directory, temporary, "report.json")
-                exchanged = False
-            except BaseException:
-                temporary = ""
-                raise OSError("collector report refresh rollback failed")
-            raise FileExistsError("collector report changed during refresh")
-        os.unlink(temporary, dir_fd=directory)
-        exchanged = False
+        owned_temporary = temporary
         temporary = ""
+        if not conditional_replace_at(directory, owned_temporary, "report.json", expected_identity):
+            raise FileExistsError("collector report changed during refresh")
         os.fsync(directory)
     finally:
-        if temporary and not exchanged:
+        if temporary:
             try:
                 os.unlink(temporary, dir_fd=directory)
             except FileNotFoundError:

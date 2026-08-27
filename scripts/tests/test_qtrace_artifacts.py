@@ -725,9 +725,41 @@ class ArtifactTests(unittest.TestCase):
                     os.close(fd)
                 self.assertEqual("CONCURRENT", target.read_text(encoding="utf-8"))
 
+    def test_refresh_exchange_interrupt_preserves_old_report_as_recovery(self):
+        from qtrace.artifacts import _rewrite_published_report
+        from qtrace import report as report_module
+        import os
+        session = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as root:
+            parent = Path(root)
+            directory = parent / session
+            directory.mkdir()
+            target = directory / "report.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            expected = (target.stat().st_dev, target.stat().st_ino)
+            exchange = report_module._exchange
+
+            def exchanged_then_interrupted(fd, temporary, name):
+                exchange(fd, temporary, name)
+                raise KeyboardInterrupt("injected after refresh exchange")
+
+            fd = os.open(parent, os.O_RDONLY)
+            try:
+                with patch("qtrace.report._exchange", side_effect=exchanged_then_interrupted):
+                    with self.assertRaises(KeyboardInterrupt) as raised:
+                        _rewrite_published_report(fd, session, (), (), expected_identity=expected)
+            finally:
+                os.close(fd)
+
+            contents = {path.name: path.read_text(encoding="utf-8")
+                        for path in directory.iterdir() if path.is_file()}
+            recovery = next(name for name, content in contents.items()
+                            if name != "report.json" and content == "ORIGINAL")
+            self.assertTrue(any(recovery in note for note in raised.exception.__notes__))
+
     def test_refresh_preserves_old_report_when_stat_and_rollback_fail(self):
         from qtrace.artifacts import _rewrite_published_report
-        from qtrace import artifacts as artifacts_module
+        from qtrace.report import ConditionalReplaceRecoveryError
         from qtrace import report as report_module
         import os
         session = "11111111-1111-4111-8111-111111111111"
@@ -739,7 +771,7 @@ class ArtifactTests(unittest.TestCase):
             target.write_text("ORIGINAL", encoding="utf-8")
             expected = (target.stat().st_dev, target.stat().st_ino)
             real_exchange = report_module._exchange
-            real_stat = artifacts_module.os.stat
+            real_stat = report_module.os.stat
             exchange_calls = 0
 
             def exchange(fd, left, right):
@@ -757,17 +789,16 @@ class ArtifactTests(unittest.TestCase):
             fd = os.open(parent, os.O_RDONLY)
             try:
                 with patch("qtrace.report._exchange", side_effect=exchange), patch(
-                        "qtrace.artifacts.os.stat", side_effect=stat_after_exchange):
-                    with self.assertRaisesRegex(OSError, "refresh old-inode stat failure"):
+                        "qtrace.report.os.stat", side_effect=stat_after_exchange):
+                    with self.assertRaises(ConditionalReplaceRecoveryError) as raised:
                         _rewrite_published_report(
                             fd, session, (), (), expected_identity=expected)
             finally:
                 os.close(fd)
 
-            contents = {path.read_text(encoding="utf-8")
-                        for path in directory.iterdir() if path.is_file()}
-            self.assertIn("ORIGINAL", contents)
-            self.assertEqual(2, len(contents))
+            recovery = directory / raised.exception.recovery_name
+            self.assertEqual("ORIGINAL", recovery.read_text(encoding="utf-8"))
+            self.assertEqual(2, len([path for path in directory.iterdir() if path.is_file()]))
 
     def test_statusless_session_json_uses_null_native_status(self):
         client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
