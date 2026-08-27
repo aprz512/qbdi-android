@@ -379,6 +379,10 @@ class SessionOrchestrator:
             ))
             pid = result.pid
             resumed = True
+            if not result.cleanup_detached:
+                raise QtraceError("session.detach_unverified", "session.injecting",
+                                  "injector returned before Frida cleanup/detach completed")
+            timeline[-1] = {**timeline[-1], "cleanup_detached": True}
             if request.installed_action is not None:
                 request.installed_action(device, pid)
             if mode == "run":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import dataclasses
 import ipaddress
 import math
 import multiprocessing
@@ -54,6 +55,7 @@ class InjectionResult:
     session_id: str
     generation: int
     normalized_scenes: tuple[ResolvedScene, ...]
+    cleanup_detached: bool = True
 
 
 class FridaProvider:
@@ -699,10 +701,6 @@ def _run_injection_worker(
     except BaseException as error:
         primary = error
     finally:
-        if primary is not None:
-            _send_worker_event(channel, "error", _serialize_worker_error(primary))
-        else:
-            _send_worker_event(channel, "result", result)
         cleanup_error: BaseException | None = None
         for callback in (
             getattr(script, "unload", None) if script is not None else None,
@@ -714,6 +712,12 @@ def _run_injection_worker(
                 callback()
             except BaseException as error:
                 cleanup_error = cleanup_error or error
+        if primary is not None:
+            _send_worker_event(channel, "error", _serialize_worker_error(primary))
+        else:
+            assert result is not None
+            result = dataclasses.replace(result, cleanup_detached=cleanup_error is None)
+            _send_worker_event(channel, "result", result)
         _send_worker_event(
             channel,
             "complete",

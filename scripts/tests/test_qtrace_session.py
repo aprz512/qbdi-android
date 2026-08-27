@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import json
+import dataclasses
 import os
 import subprocess
 import tempfile
@@ -327,6 +328,7 @@ class SessionTests(unittest.TestCase):
              "installing_hooks", "running", "stopping", "sealed", "pulling", "completed"],
             [entry["stage"] for entry in timeline],
         )
+        self.assertTrue(timeline[5]["cleanup_detached"])
         document = json.loads(result.report.read_text(encoding="utf-8"))
         self.assertTrue(document["device"]["identity"])
         self.assertTrue(document["tracer"]["artifacts"])
@@ -335,6 +337,19 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(document["effective_config"]["config"])
         self.assertTrue(document["native"]["request"])
         self.assertEqual(7, document["native"]["status"]["generation"])
+
+    def test_installed_action_requires_worker_cleanup_detach_receipt(self) -> None:
+        from qtrace.injector import InjectionResult
+
+        device = FakeDevice([status("running", transition=1)], [4242])
+        clock = ManualClock()
+        runner, injector = orchestrator(device, clock)
+        injector.install = lambda _request: InjectionResult(4242, SESSION_ID, 7, SCENES, False)
+        action_calls = []
+        request = dataclasses.replace(self.run_request(), installed_action=lambda *_args: action_calls.append(True))
+        with self.assertRaisesRegex(QtraceError, "cleanup/detach"):
+            runner.run(request)
+        self.assertEqual([], action_calls)
 
     def test_tokenless_collector_result_never_overwrites_canonical_report(self) -> None:
         class ConcurrentCollector:
