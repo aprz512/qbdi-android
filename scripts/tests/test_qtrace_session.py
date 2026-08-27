@@ -628,6 +628,23 @@ class SessionTests(unittest.TestCase):
                     runner.run(self.run_request())
                 self.assertLess(events.index("publish"), events.index("unlock"))
 
+    def test_collector_report_race_cannot_replace_preexisting_final_report(self) -> None:
+        class RacingCollector:
+            def collect_session(self, _device, _package, session_id, _status, output, _timeout):
+                destination = Path(output) / session_id
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / "report.json").write_text("old collector-owned report", encoding="utf-8")
+                raise QtraceError("artifact.pull_failed", "artifacts", "simulated collector failure")
+
+        device = FakeDevice([status("sealed", transition=4, reason="duration_elapsed", acknowledged=True)], [4242])
+        runner, _ = orchestrator(device, ManualClock(), RacingCollector())
+        with self.assertRaises(QtraceError):
+            runner.run(self.run_request())
+        report = Path(self.directory.name) / SESSION_ID / "report.json"
+        self.assertEqual("old collector-owned report", report.read_text(encoding="utf-8"))
+        error_reports = list(Path(self.directory.name).glob(f"{SESSION_ID}.error*.report.json"))
+        self.assertTrue(error_reports)
+
     def test_monitor_has_no_total_runtime_deadline_and_reads_final_status(self) -> None:
         device = FakeDevice([status("sealed", transition=4, reason="duration_elapsed", acknowledged=True)],
                             [4242] * 25 + [None])

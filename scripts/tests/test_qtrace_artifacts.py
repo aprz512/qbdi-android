@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from qtrace.artifacts import (ArtifactProcessor, ArtifactResult, PullMode,
                               PullSelection, PulledArtifact,
@@ -236,6 +237,111 @@ class ArtifactTests(unittest.TestCase):
             self.assertIsNone(report["artifacts"][0]["source_size"])
             self.assertEqual(len(b"TRACE_END status=completed\n"), report["artifacts"][0]["destination_size"])
             self.assertIn("remote_name", report["artifacts"][0])
+
+    def test_stopping_status_must_not_acknowledge_before_seal(self):
+        status = self._status(state="stopping", reason="duration_elapsed", stopAcknowledged=True)
+        client = FakeClient({"session-11111111-1111-4111-8111-111111111111.status.json":
+                             json.dumps(status).encode(), "run.trace.txt": b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(QtraceError) as raised:
+                self._processor(client).pull_manual("d", "com.example.app", PullSelection(), Path(root), 1)
+            self.assertEqual("artifact.status_invalid", raised.exception.code)
+
+    def test_active_identity_allows_distinct_threads_on_one_scene(self):
+        status = self._status(state="running", reason="", stopAcknowledged=False,
+                              normalizedScenes=[{"name": "s", "startOffset": 4, "endOffset": 8}],
+                              activeScenes=[{"sceneIndex": 0, "tid": 11, "sealed": False},
+                                            {"sceneIndex": 0, "tid": 12, "sealed": False}],
+                              artifacts=["run.trace.txt"])
+        client = FakeClient({"session-11111111-1111-4111-8111-111111111111.status.json":
+                             json.dumps(status).encode(), "run.trace.txt": b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual("d", "com.example.app", PullSelection(), Path(root), 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertTrue(any(error["code"] == "artifact.incomplete" for error in result.errors))
+
+    def test_stop_incomplete_is_published_as_partial(self):
+        status = self._status(state="stop_incomplete", reason="duration_elapsed", stopAcknowledged=False)
+        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).collect_session("d", "com.example.app", status["sessionId"],
+                                                             status, Path(root), 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertIn("artifact.incomplete", {error["code"] for error in result.errors})
+
+    def test_manual_uuid_artifact_requires_matching_native_status(self):
+        name = "11111111-1111-4111-8111-111111111111.trace.txt"
+        client = FakeClient({name: b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(QtraceError) as raised:
+                self._processor(client).pull_manual("d", "com.example.app",
+                                                    PullSelection(PullMode.NAME, name), Path(root), 1)
+            self.assertEqual("artifact.status_missing", raised.exception.code)
+
+    def test_current_writer_is_retained_as_bounded_incomplete_evidence(self):
+        client = FakeClient({"run.trace.txt.current": b"partial", "good.trace.txt":
+                             b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual("d", "com.example.app",
+                                                         PullSelection(PullMode.ALL), Path(root), 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertIn("artifact.incomplete", {error["code"] for error in result.errors})
+            self.assertIn("good.trace.txt", [path.name for path in result.files])
+
+    def test_text_requires_one_terminal_line_at_eof_and_rejects_crashed(self):
+        for payload in (b"prefix TRACE_END status=completed suffix\nTRACE_END status=completed\n",
+                        b"TRACE_END status=crashed\n"):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as root:
+                result = self._processor(FakeClient({"run.trace.txt": payload})).pull_manual(
+                    "d", "com.example.app", PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
+                self.assertEqual(2, result.exit_code)
+                self.assertFalse((result.output_dir / "artifacts" / "run.trace.txt").exists())
+
+    def test_corrupt_root_removes_sidecars_but_preserves_valid_sibling(self):
+        client = FakeClient({"bad.trace.bin": b"bad", "bad.trace.bin.metrics": b"old",
+                             "good.trace.txt": b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual("d", "com.example.app",
+                                                         PullSelection(PullMode.ALL), Path(root), 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertIn("good.trace.txt", [path.name for path in result.files])
+            self.assertFalse((result.output_dir / "artifacts" / "bad.trace.bin.metrics").exists())
+
+    def test_post_rename_fsync_failure_returns_committed_partial(self):
+        sid = "11111111-1111-4111-8111-111111111111"
+        status = self._status(sid)
+        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root)
+            real_fsync = __import__("os").fsync
+            final = output / sid
+
+            def fsync(descriptor):
+                if final.exists():
+                    raise OSError("directory fsync failed after commit")
+                return real_fsync(descriptor)
+
+            with patch("qtrace.artifacts.os.fsync", side_effect=fsync):
+                result = self._processor(client).collect_session("d", "com.example.app", sid,
+                                                                 status, output, 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertTrue(final.is_dir())
+            self.assertIn("artifact.commit_durable", {error["code"] for error in result.errors})
+
+    def test_statusless_session_json_uses_null_native_status(self):
+        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).collect_session(
+                "d", "com.example.app", "11111111-1111-4111-8111-111111111111", None,
+                Path(root), 1)
+            document = json.loads((result.output_dir / "session.json").read_text())
+            self.assertIsNone(document["status"])
+
+    def test_shared_legacy_validator_accepts_space_emoji_and_punctuation(self):
+        from scripts.pull_trace import _validate_artifact_name
+        for name in ("trace with space.trace.txt", "trace😀.trace.txt", "trace·mark.trace.txt"):
+            with self.subTest(name=name):
+                _validate_artifact_name(name)
 
 
 if __name__ == "__main__":

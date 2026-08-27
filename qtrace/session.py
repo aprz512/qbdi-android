@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import subprocess
 import re
+import uuid
 import stat
 import sys
 import unicodedata
@@ -376,8 +376,8 @@ class SessionOrchestrator:
         snapshot: tuple[str, ...] = ()
         identity = artifacts = deployment = resolved = native = None
         collection_records: tuple[Mapping[str, object], ...] = ()
+        collection_token: object | None = None
         report_path = Path(request.output) / session_id / "report.json"
-        session_destination_preexisting = os.path.lexists(report_path.parent)
 
         def mark(next_stage: SessionStage) -> None:
             nonlocal stage
@@ -386,7 +386,8 @@ class SessionOrchestrator:
 
         def publish(outcome: str, exit_code: int, error: QtraceError | None = None,
                     outputs: tuple[Path, ...] = (),
-                    artifact_records: tuple[Mapping[str, object], ...] = ()) -> SessionResult:
+                    artifact_records: tuple[Mapping[str, object], ...] = (),
+                    collector_token: object | None = None) -> SessionResult:
             report = SessionReport(1, session_id, mode, outcome, stage.value, request.config.app.package,
                                    getattr(device, "serial", ""), pid, started, self._clock.utc_timestamp(), tuple(timeline),
                                    {"identity": identity}, {"artifacts": artifacts, "deployment": deployment},
@@ -398,7 +399,7 @@ class SessionOrchestrator:
             # final Task 5 report before the atomic replacement so collection metadata
             # (including per-file failures) cannot be lost.
             try:
-                if not session_destination_preexisting and report_path.is_file() and not report_path.is_symlink():
+                if collector_token == (session_id, str(report_path)) and report_path.is_file() and not report_path.is_symlink():
                     fragment = json.loads(report_path.read_text(encoding="utf-8"))
                     fragment_records = fragment.get("artifacts", []) if type(fragment) is dict else []
                     fragment_errors = fragment.get("errors", []) if type(fragment) is dict else []
@@ -411,9 +412,18 @@ class SessionOrchestrator:
             except (OSError, UnicodeError, ValueError, TypeError):
                 pass
             target_report = report_path
-            if session_destination_preexisting:
+            no_replace = False
+            if error is not None or (collector_token is None and report_path.exists()):
                 target_report = Path(request.output) / f"{session_id}.error.report.json"
-            self._report_writer.write_atomic(target_report, report)
+                if target_report.exists() or target_report.is_symlink():
+                    target_report = Path(request.output) / f"{session_id}.error.{uuid.uuid4()}.report.json"
+                no_replace = True
+            try:
+                self._report_writer.write_atomic(target_report, report, no_replace=no_replace)
+            except TypeError as publication_error:
+                if "no_replace" not in str(publication_error):
+                    raise
+                self._report_writer.write_atomic(target_report, report)
             return SessionResult(session_id, exit_code, target_report, outputs)
 
         context = None
@@ -456,24 +466,29 @@ class SessionOrchestrator:
                 )
                 if host_stop_timeout or status["state"] == "stop_incomplete":
                     mark(SessionStage.PULLING)
-                    _exit, outputs, collection_records = self._collect(device, request, session_id, snapshot, status)
+                    _exit, outputs, collection_records, collection_token = self._collect(device, request, session_id, snapshot, status,
+                                                                                         native_request=native)
                     mark(SessionStage.COMPLETED)
                     return publish("stop_incomplete", EXIT_STOP_INCOMPLETE, outputs=outputs,
-                                   artifact_records=collection_records)
+                                   artifact_records=collection_records, collector_token=collection_token)
                 mark(SessionStage.SEALED)
                 mark(SessionStage.PULLING)
-                exit_code, outputs, collection_records = self._collect(device, request, session_id, snapshot, status)
+                exit_code, outputs, collection_records, collection_token = self._collect(device, request, session_id, snapshot, status,
+                                                                                         native_request=native)
                 mark(SessionStage.COMPLETED)
-                return publish("sealed", exit_code, outputs=outputs, artifact_records=collection_records)
+                return publish("sealed", exit_code, outputs=outputs, artifact_records=collection_records,
+                               collector_token=collection_token)
             mark(SessionStage.MONITORING)
             self._wait_for_exit(device, request, pid)
             mark(SessionStage.PULLING)
             final_status = self._read_final_status(device, request, result, session_id)
             status = final_status
-            exit_code, outputs, collection_records = self._collect(device, request, session_id, snapshot, final_status)
+            exit_code, outputs, collection_records, collection_token = self._collect(device, request, session_id, snapshot, final_status,
+                                                                                      native_request=native)
             mark(SessionStage.COMPLETED)
             return publish("crash_recovered" if exit_code == EXIT_PARTIAL else "process_exited", exit_code,
-                           outputs=outputs, artifact_records=collection_records)
+                           outputs=outputs, artifact_records=collection_records,
+                           collector_token=collection_token)
         except BaseException as primary:
             def note(publication_error: Exception) -> None:
                 if hasattr(primary, "add_note"):
@@ -577,6 +592,7 @@ class SessionOrchestrator:
         previous = None
         saw_stop = False
         transient_count = 0
+        stop_observed_at: float | None = None
         while self._clock.monotonic() < deadline:
             try:
                 remaining = deadline - self._clock.monotonic()
@@ -596,12 +612,18 @@ class SessionOrchestrator:
                 previous, transient_count = current, 0
                 if current["state"] in {"stop_requested", "stopping", "stop_incomplete", "sealed"}:
                     saw_stop = True
+                    if stop_observed_at is None:
+                        stop_observed_at = self._clock.monotonic()
                     on_stopping()
                 if current["state"] == "sealed":
                     if current["reason"] != "duration_elapsed" or current["stopAcknowledged"] is not True:
                         raise QtraceError(ErrorCode.STOP_NOT_ACKNOWLEDGED, "session.stop", "sealed status did not acknowledge duration stop")
+                    current = dict(current)
+                    current["hostAckMs"] = round(max(0.0, self._clock.monotonic() - (stop_observed_at or self._clock.monotonic())) * 1000, 3)
                     return current, False
                 if current["state"] == "stop_incomplete":
+                    current = dict(current)
+                    current["hostAckMs"] = round(max(0.0, self._clock.monotonic() - (stop_observed_at or self._clock.monotonic())) * 1000, 3)
                     return current, False
             except QtraceError as error:
                 if not _transient_adb(error):
@@ -652,13 +674,14 @@ class SessionOrchestrator:
             self._clock.sleep(sleep)
 
     def _collect(self, device: object, request: RunRequest | MonitorRequest, session_id: str,
-                 snapshot: tuple[str, ...], status: Mapping[str, object] | None
-                 ) -> tuple[int, tuple[Path, ...], tuple[Mapping[str, object], ...]]:
+                 snapshot: tuple[str, ...], status: Mapping[str, object] | None,
+                 *, native_request: Mapping[str, object] | None = None
+                 ) -> tuple[int, tuple[Path, ...], tuple[Mapping[str, object], ...], object | None]:
         owned = ({**status} if status is not None else {})
         owned.update({"_native_present": status is not None,
         "artifacts": [] if status is None else list(status.get("artifacts", [])),
         "snapshot": list(snapshot),
-        "effectiveConfig": {
+        "effectiveConfig": native_request if native_request is not None else {
             "package": request.config.app.package,
             "module": request.config.target.module,
             "profile": request.config.tracer.profile,
@@ -676,6 +699,6 @@ class SessionOrchestrator:
         value = self._collector.collect_session(device, request.config.app.package, session_id, owned,
                                                 Path(request.output), request.pull_timeout)
         if type(value) is tuple and len(value) == 2:
-            return int(value[0]), tuple(Path(item) for item in value[1]), ()
+            return int(value[0]), tuple(Path(item) for item in value[1]), (), None
         records = tuple(getattr(value, "records", getattr(value, "_records", ())))
-        return int(value.exit_code), tuple(Path(item) for item in value.files), records
+        return int(value.exit_code), tuple(Path(item) for item in value.files), records, getattr(value, "_publication_token", None)

@@ -267,14 +267,16 @@ def _temporary_path(directory: Path) -> Path:
 
 def _validate_artifact_name(name: str) -> None:
     try:
-        valid = (type(name) is str and ARTIFACT_NAME.fullmatch(name) is not None and
-                 name not in (".", "..") and len(name.encode("utf-8")) <= 255 and
-                 all(character.isalnum() or character in "._-" or
-                     unicodedata.category(character).startswith("M") for character in name))
-    except UnicodeEncodeError:
-        valid = False
-    if not valid:
-        raise PullTraceError(f"unsafe artifact name: {name!r}")
+        from qtrace.artifacts import validate_artifact_name
+    except ModuleNotFoundError as error:
+        if error.name != "qtrace":
+            raise
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from qtrace.artifacts import validate_artifact_name
+    try:
+        validate_artifact_name(name)
+    except Exception as error:
+        raise PullTraceError(f"unsafe artifact name: {name!r}") from error
 
 
 def _publish_temp(source: Path, destination: Path, force: bool) -> None:

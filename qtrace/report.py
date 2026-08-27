@@ -131,7 +131,7 @@ def _trusted_parent(path: Path) -> int:
 
 
 class ReportWriter:
-    def write_atomic(self, output: Path, report: SessionReport) -> None:
+    def write_atomic(self, output: Path, report: SessionReport, *, no_replace: bool = False) -> None:
         output = Path(output)
         if output.name in {"", ".", ".."}:
             raise ValueError("report destination has no filename")
@@ -165,7 +165,15 @@ class ReportWriter:
             finally:
                 os.close(descriptor)
                 descriptor = -1
-            os.replace(temporary, output.name, src_dir_fd=directory, dst_dir_fd=directory)
+            if no_replace:
+                try:
+                    os.link(temporary, output.name, src_dir_fd=directory, dst_dir_fd=directory,
+                            follow_symlinks=False)
+                except FileExistsError:
+                    raise ValueError("report destination already exists")
+                os.unlink(temporary, dir_fd=directory)
+            else:
+                os.replace(temporary, output.name, src_dir_fd=directory, dst_dir_fd=directory)
             temporary = ""
             os.fsync(directory)
         finally:

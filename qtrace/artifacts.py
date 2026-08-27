@@ -12,7 +12,6 @@ import os
 import re
 import shutil
 import stat
-import tempfile
 import time
 import unicodedata
 import uuid
@@ -82,6 +81,13 @@ def _valid_name(value: object, *, trace: bool = False) -> bool:
     return (not trace) or value.endswith(_TRACE_SUFFIXES)
 
 
+def validate_artifact_name(value: object, *, trace: bool = False) -> str:
+    """Validate and return one device artifact basename for legacy callers."""
+    if not _valid_name(value, trace=trace):
+        raise _error("artifact.name_invalid", "artifact name is not a safe basename")
+    return value  # type: ignore[return-value]
+
+
 def _package(value: object) -> str:
     if type(value) is not str or _PACKAGE.fullmatch(value) is None:
         raise _error("artifact.package_invalid", "package name is invalid")
@@ -89,9 +95,7 @@ def _package(value: object) -> str:
 
 
 def _name(value: object, *, trace: bool = False) -> str:
-    if not _valid_name(value, trace=trace):
-        raise _error("artifact.name_invalid", "artifact name is not a safe basename")
-    return value
+    return validate_artifact_name(value, trace=trace)
 
 
 def _unlink_quiet(path: Path) -> None:
@@ -296,7 +300,8 @@ def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[st
         raise _error("artifact.status_invalid", "native status terminal fields are invalid")
     if state in {"installed", "running"} and (value["reason"] != "" or value["stopAcknowledged"]):
         raise _error("artifact.status_invalid", "active native status has terminal fields")
-    if state in {"stop_requested", "stopping", "stop_incomplete"} and value["reason"] != "duration_elapsed":
+    if state in {"stop_requested", "stopping", "stop_incomplete"} and (
+            value["reason"] != "duration_elapsed" or value["stopAcknowledged"]):
         raise _error("artifact.status_invalid", "stopping native status has invalid reason")
     if state == "sealed" and (value["reason"] != "duration_elapsed" or not value["stopAcknowledged"]):
         raise _error("artifact.status_invalid", "sealed native status has invalid acknowledgement")
@@ -320,8 +325,8 @@ def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[st
             or type(scene["sealed"]) is not bool
             for scene in active):
         raise _error("artifact.status_invalid", "native active scenes are invalid")
-    indices = [scene["sceneIndex"] for scene in active]
-    if len(set(indices)) != len(indices) or any(index >= len(scenes) for index in indices):
+    identities = [(scene["sceneIndex"], scene["tid"]) for scene in active]
+    if len(set(identities)) != len(identities) or any(index >= len(scenes) for index, _ in identities):
         raise _error("artifact.status_invalid", "native active scene indices are invalid")
     for issue_list in (value["warnings"], value["errors"]):
         if len(issue_list) > 256 or any(
@@ -387,9 +392,34 @@ def _text_complete(path: Path) -> bool:
         data = path.read_bytes()
     except OSError:
         return False
-    return any(marker in data for marker in (
-        b"TRACE_END status=completed", b"TRACE_END status=stopped",
-        b"TRACE_END status=crashed", b"TRACE_END status=ok"))
+    try:
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return False
+    if not lines:
+        return False
+    def terminal(line: str) -> bool:
+        words = line.split()
+        if len(words) < 2 or words[0] != "TRACE_END" or not words[1].startswith("status="):
+            return False
+        state = words[1][len("status="):]
+        if state not in {"completed", "ok", "stopped"}:
+            return False
+        fields: dict[str, str] = {}
+        for word in words[2:]:
+            if "=" not in word:
+                return False
+            key, value = word.split("=", 1)
+            if not key or key in fields or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not value:
+                return False
+            fields[key] = value
+        if state == "stopped":
+            return fields.get("reason") == "duration_elapsed" and fields.get("return_valid") == "0"
+        return True
+    if any("TRACE_END" in line and not terminal(line) for line in lines):
+        return False
+    matches = [line for line in lines if terminal(line)]
+    return len(matches) == 1 and lines[-1] == matches[0]
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -403,8 +433,44 @@ def _write_json(path: Path, value: object) -> None:
         os.fsync(output.fileno())
 
 
+def _rewrite_published_report(parent: int, session_id: str,
+                              records: Sequence[Mapping[str, object]],
+                              errors: Sequence[Mapping[str, str]]) -> None:
+    """Refresh the committed diagnostic through the held directory descriptor."""
+    payload = json.dumps({"schema": 1, "sessionId": session_id,
+                          "artifacts": list(records), "errors": list(errors)},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                         allow_nan=False).encode("utf-8")
+    if len(payload) > 1024 * 1024:
+        return
+    directory = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                        getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+    descriptor = -1
+    try:
+        descriptor = os.open("report.json", os.O_WRONLY | os.O_TRUNC |
+                             getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                             dir_fd=directory)
+        offset = 0
+        while offset < len(payload):
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                return
+            offset += written
+        os.ftruncate(descriptor, len(payload))
+        os.fsync(descriptor)
+        os.fsync(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(directory)
+
+
 def _safe_output(path: Path) -> Path:
     path = Path(path)
+    if path.is_absolute() and path.parts[:4] == ("/", "proc", "self", "fd"):
+        if not path.is_dir() or path.is_symlink():
+            raise _error("artifact.destination_invalid", "output must be a real directory")
+        return path
     current = Path(path.anchor) if path.is_absolute() else Path(".")
     for component in path.parts[1:] if path.is_absolute() else path.parts:
         if component == "..":
@@ -440,25 +506,85 @@ def _rename_noreplace(parent: int, stage_name: str, final_name: str) -> None:
         raise OSError(failure, os.strerror(failure))
 
 
+def _remove_tree_at(parent: int, name: str) -> None:
+    """Remove an unpublished tree through its already trusted parent fd."""
+    try:
+        root = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                       getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+    except FileNotFoundError:
+        return
+    try:
+        for child in os.listdir(root):
+            info = os.stat(child, dir_fd=root, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                _remove_tree_at(root, child)
+            else:
+                os.unlink(child, dir_fd=root)
+    finally:
+        os.close(root)
+    os.rmdir(name, dir_fd=parent)
+
+
+def _new_stage(output: Path) -> tuple[Path, int, int, str]:
+    """Create stage and artifacts using one trusted output directory descriptor."""
+    parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                     getattr(os, "O_NOFOLLOW", 0))
+    try:
+        for _ in range(32):
+            name = ".qtrace-stage-" + uuid.uuid4().hex
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent)
+            except FileExistsError:
+                continue
+            stage_fd = os.open(name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                               getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
+            try:
+                os.mkdir("artifacts", 0o700, dir_fd=stage_fd)
+            except BaseException:
+                os.close(stage_fd)
+                _remove_tree_at(parent, name)
+                raise
+            # Keep every subsequent Path operation rooted at the held descriptor;
+            # the proc fd remains valid even if an attacker swaps output names.
+            return Path(f"/proc/self/fd/{stage_fd}"), parent, stage_fd, name
+        raise _error("artifact.stage_failed", "unable to allocate a unique staging directory")
+    except BaseException:
+        os.close(parent)
+        raise
+
+
 class ArtifactProcessor:
     def __init__(self, *, client_factory: Any | None = None) -> None:
         self._client_factory = client_factory
 
     def _publish(self, stage: Path, output: Path, session_id: str, files: list[Path],
-                 errors: list[Mapping[str, str]], records: list[Mapping[str, object]]) -> Path:
+                 errors: list[Mapping[str, str]], records: list[Mapping[str, object]],
+                 *, parent: int | None = None, stage_fd: int | None = None,
+                 stage_name: str | None = None) -> Path:
         _safe_output(output)
-        if output.is_symlink() or not output.is_dir():
-            raise _error("artifact.destination_invalid", "output must be a real directory")
-        parent = -1
-        parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                         getattr(os, "O_NOFOLLOW", 0))
+        owned_parent = parent is None
+        if parent is None:
+            parent = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                             getattr(os, "O_NOFOLLOW", 0))
+        if stage_name is None:
+            stage_name = stage.name
+        committed = False
         try:
-            for directory in (stage, stage / "artifacts"):
-                descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
-                                     getattr(os, "O_NOFOLLOW", 0))
+            for directory_name in (".", "artifacts"):
+                if stage_fd is not None and directory_name == ".":
+                    descriptor = stage_fd
+                elif stage_fd is not None:
+                    descriptor = os.open(directory_name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                          getattr(os, "O_NOFOLLOW", 0), dir_fd=stage_fd)
+                else:
+                    descriptor = os.open(stage if directory_name == "." else stage / directory_name,
+                                         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                         getattr(os, "O_NOFOLLOW", 0))
                 os.fsync(descriptor)
-                os.close(descriptor)
-            _rename_noreplace(parent, stage.name, session_id)
+                if not (directory_name == "." and stage_fd is not None):
+                    os.close(descriptor)
+            _rename_noreplace(parent, stage_name, session_id)
+            committed = True
             final = output / session_id
             descriptor = os.open(session_id, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
                                  getattr(os, "O_NOFOLLOW", 0), dir_fd=parent)
@@ -467,10 +593,14 @@ class ArtifactProcessor:
             finally:
                 os.close(descriptor)
             os.fsync(parent)
-        except Exception:
+        except BaseException as error:
+            if committed:
+                errors.append({"name": "", "code": "artifact.commit_durable",
+                               "detail": f"published session durability is uncertain: {error}"[:256]})
+                return output / session_id
             raise
         finally:
-            if parent >= 0:
+            if owned_parent and parent is not None:
                 os.close(parent)
         return final
 
@@ -482,12 +612,15 @@ class ArtifactProcessor:
         records: list[Mapping[str, object]] = []
         files: list[Path] = []
         output = _safe_output(Path(output))
-        stage_root = Path(tempfile.mkdtemp(prefix=".qtrace-stage-", dir=str(output)))
+        stage_root, parent_fd, stage_fd, stage_name = _new_stage(output)
         stage_artifacts = stage_root / "artifacts"
-        stage_artifacts.mkdir()
+        published = False
         try:
             active = (status is not None and status.get("_native_present", True)
                       and status.get("state") not in {"sealed", "stop_incomplete"})
+            if status is not None and status.get("state") == "stop_incomplete":
+                errors.append({"name": "", "code": "artifact.incomplete",
+                               "detail": "native stop did not seal all artifacts"})
             if active:
                 errors.append({"code": "artifact.incomplete", "name": "", "detail": "native trace is still active"})
                 pulled = ()
@@ -521,6 +654,8 @@ class ArtifactProcessor:
                     "native_stop_acknowledged": status.get("stopAcknowledged") if status is not None else None,
                     "host_observed_ack_ms": status.get("hostAckMs") if status is not None else None}
                 if local.name.endswith(".metrics") or local.name.endswith(".crash"):
+                    if not local.exists():
+                        continue
                     record["destination_size"] = local.stat().st_size
                     record["decoder"] = "sidecar"
                     records.append(record)
@@ -607,6 +742,8 @@ class ArtifactProcessor:
             files.extend(item.local_path for item in pulled if item.remote_name.endswith(_SIDE_SUFFIXES))
             recorded_paths = {record.get("local_path") for record in records if isinstance(record, Mapping)}
             for path in files:
+                if not path.exists():
+                    continue
                 relative = "artifacts/" + path.name if path.parent == stage_artifacts else path.name
                 if relative in recorded_paths:
                     continue
@@ -620,9 +757,14 @@ class ArtifactProcessor:
                                 "host_observed_ack_ms": None})
             native_status = None
             host_context: Mapping[str, object] = {}
-            if status is not None:
+            if status is not None and status.get("_native_present", True):
                 native_status = {key: value for key, value in status.items()
                                  if key not in {"_native_present", "snapshot", "effectiveConfig", "device", "hostAckMs"}}
+                host_context = {"snapshot": status.get("snapshot", []),
+                                "effectiveConfig": status.get("effectiveConfig"),
+                                "device": status.get("device"),
+                                "hostAckMs": status.get("hostAckMs")}
+            elif status is not None:
                 host_context = {"snapshot": status.get("snapshot", []),
                                 "effectiveConfig": status.get("effectiveConfig"),
                                 "device": status.get("device"),
@@ -646,17 +788,32 @@ class ArtifactProcessor:
             _write_json(stage_root / "device.json", device_metadata)
             _write_json(stage_root / "report.json", {"schema": 1, "sessionId": session_id, "artifacts": records, "errors": errors})
             relative_files = tuple(path.relative_to(stage_root) for path in files)
-            final = self._publish(stage_root, output, session_id, files, errors, records)
+            error_count = len(errors)
+            final = self._publish(stage_root, output, session_id, files, errors, records,
+                                  parent=parent_fd, stage_fd=stage_fd, stage_name=stage_name)
+            published = True
+            if len(errors) != error_count:
+                try:
+                    _rewrite_published_report(parent_fd, session_id, records, errors)
+                except BaseException:
+                    pass
             result = ArtifactResult(final, tuple(final / path for path in relative_files), tuple(errors),
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
+            object.__setattr__(result, "_publication_token", (session_id, str(final / "report.json")))
             return result
         except QtraceError:
             raise
         except Exception as error:
             raise _error("artifact.collect_failed", str(error), partial=True) from error
         finally:
-            shutil.rmtree(stage_root, ignore_errors=True)
+            if not published:
+                try:
+                    _remove_tree_at(parent_fd, stage_name)
+                except BaseException:
+                    pass
+            os.close(stage_fd)
+            os.close(parent_fd)
 
     def collect_session(self, device: object, package: str, session_id: str, status: Mapping[str, object] | None,
                         output: Path, timeout: float) -> ArtifactResult:
@@ -684,6 +841,7 @@ class ArtifactProcessor:
         raw_listing = list(_call(getattr(client, "list_names"), timeout=timeout))
         if any(type(item) is not str for item in raw_listing) or len(set(raw_listing)) != len(raw_listing):
             raise _error("artifact.duplicate", "device listing contains duplicate or invalid names")
+        temporary_names = [_name(item) for item in raw_listing if _temporary_name(_name(item))]
         listing = _validate_listing([_name(item) for item in raw_listing if not _temporary_name(_name(item))])
         available = set(listing)
         snapshot = status.get("snapshot", ())
@@ -692,6 +850,9 @@ class ArtifactProcessor:
         snapshot_set = set(snapshot)
         selected: list[str] = []
         initial_errors: list[Mapping[str, str]] = []
+        initial_errors.extend({"name": name, "code": "artifact.incomplete",
+                               "detail": "temporary/current-writer artifact was not eligible for pull"}
+                              for name in temporary_names)
         if not native_present:
             initial_errors.append({"name": "", "code": "artifact.status_missing",
                                    "detail": "native status unavailable; recovered listing is partial"})
@@ -725,7 +886,13 @@ class ArtifactProcessor:
             raise _error("artifact.list_invalid", "device listing contains a non-string name")
         if len(set(listing)) != len(listing):
             raise _error("artifact.duplicate", "device listing contains duplicate names")
+        temporary_names = [_name(item) for item in listing if _temporary_name(_name(item))]
         listing = _validate_listing([_name(item) for item in listing if not _temporary_name(_name(item))])
+        initial_errors: list[Mapping[str, str]] = [
+            {"name": name, "code": "artifact.incomplete",
+             "detail": "temporary/current-writer artifact was not eligible for pull"}
+            for name in temporary_names
+        ]
         status: Mapping[str, object] | None = None
         session_id: str | None = None
         if selection.mode is PullMode.LATEST:
@@ -736,10 +903,8 @@ class ArtifactProcessor:
                 try:
                     candidate_status = _json_status(
                         _call(getattr(client, "read_file"), candidate, timeout=timeout), sid, None)
-                except QtraceError as error:
-                    if error.code not in {"artifact.status_invalid", "artifact.status_identity"}:
-                        raise
-                    continue
+                except QtraceError:
+                    raise
                 except (OSError, RuntimeError, TimeoutError, TypeError) as error:
                     raise _error("artifact.pull_failed", str(error), partial=True) from error
                 if candidate_status.get("packageName") != package:
@@ -769,6 +934,27 @@ class ArtifactProcessor:
             roots = [name for name in roots if name.endswith(".lz4")]
         if not roots:
             raise _error("artifact.not_found", "no eligible trace artifacts were found")
+        # A UUID-bearing manual artifact is session-owned evidence.  Require the
+        # corresponding strict native status and its explicit declaration before
+        # allowing NAME/ALL to pull it.
+        uuid_values = {found.lower() for root in roots
+                       for found in re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", root,
+                                               flags=re.IGNORECASE)}
+        if uuid_values:
+            if len(uuid_values) != 1:
+                raise _error("artifact.status_missing", "UUID-bearing artifacts belong to multiple sessions")
+            candidate_id = next(iter(uuid_values))
+            candidate_name = f"session-{candidate_id}.status.json"
+            if candidate_name not in listing:
+                raise _error("artifact.status_missing", "UUID-bearing artifact has no matching native status")
+            try:
+                candidate_status = _json_status(_call(getattr(client, "read_file"), candidate_name,
+                                                       timeout=timeout), candidate_id, package)
+            except QtraceError as error:
+                raise _error("artifact.status_missing", "matching native status is invalid") from error
+            if any(root not in candidate_status["artifacts"] for root in roots):
+                raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
+            status, session_id = candidate_status, candidate_id
         if session_id is None:
             session_id = str(uuid.uuid4())
         selected = list(roots)
@@ -777,4 +963,5 @@ class ArtifactProcessor:
                 if side in listing:
                     selected.append(side)
         return self._collect(device, package, session_id, selected, Path(output), timeout, status,
+                             initial_errors=initial_errors,
                              compressed_only=selection.compressed_only)
