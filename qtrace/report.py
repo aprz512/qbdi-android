@@ -31,6 +31,106 @@ def _exchange(directory: int, left: str, right: str) -> None:
         raise OSError(failure, os.strerror(failure))
 
 
+class ConditionalReplaceRecoveryError(OSError):
+    """A conditional report exchange left both versions recoverable on disk."""
+
+    def __init__(self, recovery_name: str, primary: BaseException,
+                 rollback: BaseException) -> None:
+        super().__init__("conditional report rollback failed after "
+                         f"{primary}: recovery file is {recovery_name}; rollback was {rollback}")
+        self.recovery_name = recovery_name
+
+
+def _identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _recovery_note(error: BaseException, recovery_name: str) -> None:
+    error.add_note("conditional report exchange may have completed; "
+                   f"recovery file for the prior report is {recovery_name}")
+
+
+def _discard_owned_temporary(directory: int, temporary: str,
+                             primary: BaseException | None = None) -> None:
+    try:
+        os.unlink(temporary, dir_fd=directory)
+    except FileNotFoundError:
+        pass
+    except BaseException as cleanup:
+        if primary is None:
+            raise
+        primary.add_note(f"could not remove owned report temporary {temporary}: {cleanup}")
+
+
+def conditional_replace_at(directory: int, temporary: str, target: str,
+                           expected_identity: tuple[int, int]) -> bool:
+    """Atomically replace *target* only if its inode matches, taking temp ownership.
+
+    From entry onward this module owns ``temporary``. It removes it after a
+    safe rejection or completed exchange; ambiguous exchanges retain it as a
+    recovery file and propagate the original interruption/error.
+    """
+    try:
+        try:
+            existing = os.stat(target, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+    except BaseException as error:
+        _discard_owned_temporary(directory, temporary, error)
+        raise
+    if (existing is None or not stat.S_ISREG(existing.st_mode)
+            or _identity(existing) != expected_identity):
+        _discard_owned_temporary(directory, temporary)
+        return False
+
+    try:
+        temporary_before = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+    except BaseException as error:
+        _discard_owned_temporary(directory, temporary, error)
+        raise
+    if not stat.S_ISREG(temporary_before.st_mode):
+        _discard_owned_temporary(directory, temporary)
+        raise ValueError("report temporary file is unsafe")
+    temporary_identity = _identity(temporary_before)
+    try:
+        _exchange(directory, temporary, target)
+    except BaseException as error:
+        try:
+            unchanged = _identity(os.stat(temporary, dir_fd=directory,
+                                          follow_symlinks=False)) == temporary_identity
+        except BaseException:
+            unchanged = False
+        if unchanged:
+            _discard_owned_temporary(directory, temporary, error)
+        else:
+            _recovery_note(error, temporary)
+        raise
+
+    try:
+        old = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+        matched = _identity(old) == expected_identity
+    except BaseException as primary:
+        try:
+            _exchange(directory, temporary, target)
+        except BaseException as rollback:
+            raise ConditionalReplaceRecoveryError(temporary, primary, rollback) from rollback
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except BaseException as cleanup:
+            primary.add_note(f"recovered report left at {temporary}: {cleanup}")
+        raise
+    if not matched:
+        try:
+            _exchange(directory, temporary, target)
+        except BaseException as rollback:
+            raise ConditionalReplaceRecoveryError(temporary, RuntimeError(
+                "conditional report target changed"), rollback) from rollback
+        os.unlink(temporary, dir_fd=directory)
+        return False
+    os.unlink(temporary, dir_fd=directory)
+    return True
+
+
 class SessionStage(str, Enum):
     PREFLIGHT = "preflight"
     RESOLVING_TARGET = "resolving_target"
@@ -162,7 +262,6 @@ class ReportWriter:
         directory = os.dup(directory)
         temporary = f".{name}.{secrets.token_hex(16)}"
         descriptor = -1
-        exchanged = False
         try:
             _check_directory(directory)
             try:
@@ -199,28 +298,10 @@ class ReportWriter:
                     raise ValueError("report destination already exists")
                 os.unlink(temporary, dir_fd=directory)
             elif expected_identity is not None:
-                _exchange(directory, temporary, name)
-                exchanged = True
-                try:
-                    old = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
-                    matched = (old.st_dev, old.st_ino) == expected_identity
-                except BaseException:
-                    try:
-                        _exchange(directory, temporary, name)
-                        exchanged = False
-                    except BaseException:
-                        temporary = ""
-                    raise
-                if not matched:
-                    try:
-                        _exchange(directory, temporary, name)
-                        exchanged = False
-                    except BaseException:
-                        temporary = ""
-                        raise OSError("report conditional rollback failed")
+                owned_temporary = temporary
+                temporary = ""
+                if not conditional_replace_at(directory, owned_temporary, name, expected_identity):
                     return False
-                os.unlink(temporary, dir_fd=directory)
-                exchanged = False
             else:
                 os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
             temporary = ""
@@ -229,7 +310,7 @@ class ReportWriter:
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-            if temporary and not exchanged:
+            if temporary:
                 try:
                     os.unlink(temporary, dir_fd=directory)
                 except FileNotFoundError:

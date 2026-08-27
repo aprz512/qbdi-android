@@ -87,6 +87,33 @@ class ReportWriterTests(unittest.TestCase):
                 ReportWriter().write_atomic(output, report())
         self.assertFalse((target / "report.json").exists())
 
+    def test_exchange_interrupt_preserves_old_report_as_recovery(self) -> None:
+        from qtrace import report as report_module
+
+        self.path.write_text('{"status":"old"}', encoding="utf-8")
+        expected = (self.path.stat().st_dev, self.path.stat().st_ino)
+        exchange = report_module._exchange
+
+        def exchanged_then_interrupted(directory: int, temporary: str, target: str) -> None:
+            exchange(directory, temporary, target)
+            raise KeyboardInterrupt("injected after exchange")
+
+        descriptor = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            with patch("qtrace.report._exchange", side_effect=exchanged_then_interrupted):
+                with self.assertRaises(KeyboardInterrupt) as raised:
+                    ReportWriter().write_atomic_at(
+                        descriptor, self.path.name, report(), expected_identity=expected)
+        finally:
+            os.close(descriptor)
+
+        self.assertTrue(any("recovery" in note for note in raised.exception.__notes__))
+        documents = {path.name: json.loads(path.read_text(encoding="utf-8"))
+                     for path in self.path.parent.iterdir() if path.is_file()}
+        self.assertEqual("sealed", documents["report.json"]["status"])
+        self.assertIn("old", {document["status"] for name, document in documents.items()
+                              if name != "report.json"})
+
 
 if __name__ == "__main__":
     unittest.main()
