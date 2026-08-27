@@ -594,13 +594,23 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
+            actual_temporary_directory = tempfile.TemporaryDirectory
+            captured: dict[str, object] = {}
+
+            def tracked_temporary_directory(*args, **kwargs):
+                captured.update(kwargs)
+                return actual_temporary_directory(*args, **kwargs)
+
             with patch("scripts.qtrace_device_acceptance.Path.cwd", return_value=workspace), \
+                    patch("scripts.qtrace_device_acceptance.tempfile.TemporaryDirectory",
+                          side_effect=tracked_temporary_directory), \
                     patch("scripts.qtrace_device_acceptance.run_acceptance",
                           side_effect=RuntimeError("fixture failure")):
                 self.assertEqual(1, main(["--device", "SERIAL"]))
             retained = list((workspace / "qtrace-acceptance-failures").iterdir())
             self.assertEqual(1, len(retained))
             self.assertTrue(retained[0].is_dir())
+            self.assertEqual(workspace / "qtrace-acceptance-failures", captured["dir"])
 
     def test_acceptance_runs_bounded_workflow_and_retries_one_read(self):
         from scripts.qtrace_device_acceptance import run_acceptance

@@ -537,15 +537,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments = parser.parse_args(argv)
     except SystemExit as error:
         return int(error.code)
-    temporary = tempfile.TemporaryDirectory(prefix="qtrace-device-acceptance-")
+    parent = Path.cwd() / "qtrace-acceptance-failures"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    if parent.is_symlink() or not parent.is_dir():
+        raise RuntimeError("acceptance failure parent is unsafe")
+    temporary = tempfile.TemporaryDirectory(prefix=".qtrace-device-acceptance-", dir=parent)
     root = Path(temporary.name)
     try:
         result = run_acceptance(arguments.device, root, runner=SubprocessRunner(arguments.device))
     except BaseException as error:
-        parent = Path.cwd() / "qtrace-acceptance-failures"
-        parent.mkdir(mode=0o700, exist_ok=True)
-        if parent.is_symlink() or not parent.is_dir():
-            raise RuntimeError("acceptance failure parent is unsafe")
         retained = parent / uuid.uuid4().hex
         root.rename(retained)
         temporary.cleanup()
