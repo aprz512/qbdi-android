@@ -1,14 +1,18 @@
 import copy
 import json
 import math
+import multiprocessing
+import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from qtrace.errors import ErrorCode, QtraceError
-from qtrace.injector import FridaInjector, InjectionRequest
+from qtrace.injector import FridaInjector, FridaProvider, InjectionRequest
 from qtrace.models import ResolvedScene
 
 
@@ -134,34 +138,39 @@ def error_message(code, *, stage="load", detail="agent rejected startup"):
     }
 
 
-class ManualClock:
+class SharedLog:
+    """One-writer-at-a-time observation log that survives the worker fork."""
+
     def __init__(self):
-        self.now = 100.0
+        self._reader, self._writer = multiprocessing.get_context("fork").Pipe(duplex=False)
+        self._items = []
 
-    def monotonic(self):
-        return self.now
+    def append(self, item):
+        self._writer.send(item)
 
-    def event(self):
-        return ManualEvent(self)
+    def extend(self, items):
+        for item in items:
+            self.append(item)
 
+    def snapshot(self):
+        while self._reader.poll():
+            self._items.append(self._reader.recv())
+        return list(self._items)
 
-class ManualEvent:
-    def __init__(self, clock):
-        self.clock = clock
-        self.is_set = False
+    def __contains__(self, item):
+        return item in self.snapshot()
 
-    def set(self):
-        self.is_set = True
+    def __getitem__(self, item):
+        return self.snapshot()[item]
 
-    def clear(self):
-        self.is_set = False
+    def __iter__(self):
+        return iter(self.snapshot())
 
-    def wait(self, timeout=None):
-        if self.is_set:
-            return True
-        if timeout is not None:
-            self.clock.now += max(0.0, timeout)
-        return self.is_set
+    def __len__(self):
+        return len(self.snapshot())
+
+    def index(self, item):
+        return self.snapshot().index(item)
 
 
 class Scenario:
@@ -184,7 +193,7 @@ class FakeScript:
         self.scenario = scenario
         self.events = events
         self.handler = None
-        self.posts = []
+        self.posts = SharedLog()
 
     def on(self, event, handler):
         self.events.append(("on", event))
@@ -222,7 +231,7 @@ class FakeSession:
         self.events = events
         self.script = script
         self.detached_handler = None
-        self.sources = []
+        self.sources = SharedLog()
 
     def on(self, event, handler):
         self.events.append(("session-on", event))
@@ -319,8 +328,7 @@ class FakeAdbDevice:
 class InjectorHarness:
     def __init__(self, scenario=None):
         self.scenario = scenario or Scenario()
-        self.events = []
-        self.clock = ManualClock()
+        self.events = SharedLog()
         self.adb = FakeAdbDevice(self.scenario, self.events)
         self.provider = FakeProvider(self.scenario, self.events)
         self.injector = FridaInjector(self.adb, self.provider)
@@ -338,10 +346,7 @@ class InjectorHarness:
         return InjectionRequest(**values)
 
     def install(self, request=None):
-        with patch("qtrace.injector.time.monotonic", self.clock.monotonic), patch(
-            "qtrace.injector.threading.Event", self.clock.event
-        ):
-            return self.injector.install(request or self.request())
+        return self.injector.install(request or self.request())
 
 
 class FridaInjectorTests(unittest.TestCase):
@@ -370,7 +375,7 @@ class FridaInjectorTests(unittest.TestCase):
                 "unload",
                 "detach",
             ],
-            harness.events,
+            harness.events.snapshot(),
         )
         script = harness.provider.device.script
         self.assertEqual(1, len(script.posts))
@@ -384,7 +389,7 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertIs(type(envelope["setupTimeoutMs"]), int)
         self.assertTrue(0 < envelope["setupTimeoutMs"] <= 5000)
         sources = harness.provider.device.session.sources
-        self.assertEqual([AGENT_PATH.read_text(encoding="utf-8")], sources)
+        self.assertEqual([AGENT_PATH.read_text(encoding="utf-8")], sources.snapshot())
         self.assertNotIn(PACKAGE, sources[0])
         self.assertNotIn(SESSION_ID, sources[0])
         self.assertEqual(
@@ -427,14 +432,14 @@ class FridaInjectorTests(unittest.TestCase):
             harness = InjectorHarness()
             with self.subTest(changes=changes), self.assertRaises(QtraceError):
                 harness.install(harness.request(**changes))
-            self.assertEqual([], harness.events)
+            self.assertEqual([], harness.events.snapshot())
 
         harness = InjectorHarness()
         oversized = native_request()
         oversized["padding"] = "x" * (1024 * 1024)
         with self.assertRaises(QtraceError):
             harness.install(harness.request(native_request=oversized))
-        self.assertEqual([], harness.events)
+        self.assertEqual([], harness.events.snapshot())
 
     def test_module_load_is_authoritative_for_ok_and_deferred_deployments(self):
         for load_probe_status in ("ok", "deferred"):
@@ -533,6 +538,19 @@ class FridaInjectorTests(unittest.TestCase):
             harness.install()
         self.assertEqual([], harness.adb.kill_calls)
 
+    def test_rejects_installed_message_that_arrived_before_resume_started(self):
+        scenario = Scenario()
+        scenario.post_messages = [initialized_message(), installed_message()]
+        scenario.resume_messages = []
+        harness = InjectorHarness(scenario)
+
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+
+        self.assertEqual("inject.protocol_invalid", caught.exception.code)
+        self.assertFalse(any(event == ("resume", 4242) for event in harness.events))
+        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+
     def test_rejects_final_generation_session_module_and_scene_mismatches(self):
         status_cases = []
         wrong_generation = final_status(generation=8)
@@ -578,19 +596,21 @@ class FridaInjectorTests(unittest.TestCase):
         pre_resume = Scenario()
         pre_resume.post_messages = []
         harness = InjectorHarness(pre_resume)
+        started = time.monotonic()
         with self.assertRaises(QtraceError) as caught:
             harness.install(harness.request(setup_timeout=0.25))
         self.assertEqual("inject.timeout", caught.exception.code)
-        self.assertAlmostEqual(100.25, harness.clock.now)
+        self.assertLess(time.monotonic() - started, 0.75)
         self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
 
         post_resume = Scenario()
         post_resume.resume_messages = []
         harness = InjectorHarness(post_resume)
+        started = time.monotonic()
         with self.assertRaises(QtraceError) as caught:
             harness.install(harness.request(setup_timeout=0.25))
         self.assertEqual("inject.timeout", caught.exception.code)
-        self.assertAlmostEqual(100.25, harness.clock.now)
+        self.assertLess(time.monotonic() - started, 0.75)
         self.assertEqual([], harness.adb.kill_calls)
 
     def test_process_exit_uses_spawned_pid_and_never_kills_after_resume(self):
@@ -602,6 +622,31 @@ class FridaInjectorTests(unittest.TestCase):
             harness.install()
         self.assertEqual(ErrorCode.PROCESS_EXITED_DURING_SETUP.value, caught.exception.code)
         self.assertIn("4242", caught.exception.detail)
+        self.assertEqual([], harness.adb.kill_calls)
+
+    def test_process_termination_wins_race_with_installed_message(self):
+        scenario = Scenario()
+        scenario.resume_detached = ("process-terminated", None)
+        harness = InjectorHarness(scenario)
+
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+
+        self.assertEqual(ErrorCode.PROCESS_EXITED_DURING_SETUP.value, caught.exception.code)
+        self.assertIn("4242", caught.exception.detail)
+        self.assertEqual([], harness.adb.kill_calls)
+
+    def test_non_process_detach_reason_is_not_reported_as_process_exit(self):
+        scenario = Scenario()
+        scenario.resume_messages = []
+        scenario.resume_detached = ("device-lost", None)
+        harness = InjectorHarness(scenario)
+
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+
+        self.assertEqual("frida.session_detached", caught.exception.code)
+        self.assertIn("device-lost", caught.exception.detail)
         self.assertEqual([], harness.adb.kill_calls)
 
     def test_pre_resume_frida_failure_kills_only_exact_spawned_pid(self):
@@ -654,14 +699,11 @@ class FridaInjectorTests(unittest.TestCase):
 
     def test_raw_provider_and_frida_errors_are_stable_one_line_qtrace_errors(self):
         scenario = Scenario()
-        events = []
+        events = SharedLog()
         provider = FakeProvider(scenario, events, error=OSError("provider\nfailed"))
         adb = FakeAdbDevice(scenario, events)
         injector = FridaInjector(adb, provider)
-        clock = ManualClock()
-        with patch("qtrace.injector.time.monotonic", clock.monotonic), patch(
-            "qtrace.injector.threading.Event", clock.event
-        ), self.assertRaises(QtraceError) as caught:
+        with self.assertRaises(QtraceError) as caught:
             injector.install(InjectorHarness().request())
         self.assertEqual("frida.device_failed", caught.exception.code)
         self.assertNotIn("\n", str(caught.exception))
@@ -683,6 +725,160 @@ class FridaInjectorTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(0, probe.returncode, probe.stderr)
+
+    @unittest.skipUnless(hasattr(os, "fork"), "Frida isolation requires POSIX fork")
+    def test_blocked_frida_calls_are_killed_and_reaped_inside_the_setup_bound(self):
+        context = multiprocessing.get_context("fork")
+        blocked_read, blocked_write = os.pipe()
+        observed = {}
+
+        def probe(stage, channel):
+            scenario = Scenario()
+            events = []
+
+            class BlockingScript(FakeScript):
+                def unload(self):
+                    self.events.append("unload")
+                    if stage == "unload":
+                        os.read(blocked_read, 1)
+                    return super().unload()
+
+            class BlockingSession(FakeSession):
+                def __init__(self, scenario, events, script):
+                    super().__init__(scenario, events, script)
+
+                def detach(self):
+                    self.events.append("detach")
+                    if stage == "detach":
+                        os.read(blocked_read, 1)
+
+            class BlockingFridaDevice(FakeFridaDevice):
+                def __init__(self, scenario, events):
+                    self.scenario = scenario
+                    self.events = events
+                    self.script = BlockingScript(scenario, events)
+                    self.session = BlockingSession(scenario, events, self.script)
+
+                def attach(self, pid):
+                    self.events.append(("attach", pid))
+                    if stage == "attach":
+                        os.read(blocked_read, 1)
+                    return self.session
+
+                def resume(self, pid):
+                    self.events.append(("resume", pid))
+                    if stage == "resume":
+                        os.read(blocked_read, 1)
+                    return super().resume(pid)
+
+            class BlockingProvider(FakeProvider):
+                def __init__(self):
+                    self.events = events
+                    self.error = None
+                    self.device = BlockingFridaDevice(scenario, events)
+                    self.calls = []
+
+            adb = FakeAdbDevice(scenario, events)
+            injector = FridaInjector(adb, BlockingProvider())
+            request = InjectorHarness().request(setup_timeout=0.05)
+            started = time.monotonic()
+            try:
+                injector.install(request)
+            except QtraceError as error:
+                outcome = ("error", error.code)
+            except BaseException as error:
+                outcome = ("raw", type(error).__name__)
+            else:
+                outcome = ("success", None)
+            channel.send({
+                "outcome": outcome,
+                "elapsed": time.monotonic() - started,
+                "children": [child.pid for child in multiprocessing.active_children()],
+                "kills": adb.kill_calls,
+            })
+            channel.close()
+
+        try:
+            for stage in ("attach", "resume", "unload", "detach"):
+                receiver, sender = context.Pipe(duplex=False)
+                process = context.Process(target=probe, args=(stage, sender))
+                process.start()
+                sender.close()
+                process.join(0.75)
+                if process.is_alive():
+                    process.kill()
+                    process.join(0.2)
+                    observed[stage] = {"outcome": ("hung", None)}
+                elif receiver.poll(0.1):
+                    observed[stage] = receiver.recv()
+                else:
+                    observed[stage] = {"outcome": ("missing", process.exitcode)}
+                receiver.close()
+                process.close()
+        finally:
+            os.close(blocked_read)
+            os.close(blocked_write)
+
+        self.assertEqual(
+            {stage: "error" for stage in ("attach", "resume", "unload", "detach")},
+            {stage: result["outcome"][0] for stage, result in observed.items()},
+            observed,
+        )
+        for stage, result in observed.items():
+            self.assertLess(result["elapsed"], 0.7, (stage, result))
+            self.assertEqual([], result["children"], (stage, result))
+        self.assertEqual([("kill", "-9", "4242")], observed["attach"]["kills"])
+        self.assertEqual([("kill", "-9", "4242")], observed["resume"]["kills"])
+        self.assertEqual([], observed["unload"]["kills"])
+        self.assertEqual([], observed["detach"]["kills"])
+
+
+class FridaProviderTests(unittest.TestCase):
+    def test_usb_lookup_uses_seconds_without_double_conversion(self):
+        calls = []
+        frida = SimpleNamespace(
+            get_device=lambda serial, timeout: calls.append((serial, timeout)) or object()
+        )
+
+        with patch.dict(sys.modules, {"frida": frida}):
+            selected = FridaProvider().get_device(SimpleNamespace(serial="USB-SERIAL"), 5.0)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual([("USB-SERIAL", 5.0)], calls)
+
+    def test_wifi_and_ipv6_adb_serials_map_to_explicit_remote_frida_endpoint(self):
+        endpoints = []
+        manager = SimpleNamespace(
+            add_remote_device=lambda endpoint: endpoints.append(endpoint) or object()
+        )
+        frida = SimpleNamespace(get_device_manager=lambda: manager)
+
+        with patch.dict(sys.modules, {"frida": frida}):
+            for serial in ("192.0.2.8:5555", "[2001:db8::8]:5555"):
+                with self.subTest(serial=serial):
+                    self.assertIsNotNone(
+                        FridaProvider().get_device(SimpleNamespace(serial=serial), 5.0)
+                    )
+
+        self.assertEqual(["192.0.2.8:27042", "[2001:db8::8]:27042"], endpoints)
+
+    def test_provider_normalizes_frida_specific_errors(self):
+        class InvalidArgumentError(Exception):
+            pass
+
+        def fail_lookup(_serial, timeout):
+            self.assertGreater(timeout, 0)
+            raise InvalidArgumentError("bad device\nargument")
+
+        frida = SimpleNamespace(
+            InvalidArgumentError=InvalidArgumentError,
+            get_device=fail_lookup,
+        )
+        with patch.dict(sys.modules, {"frida": frida}), self.assertRaises(QtraceError) as caught:
+            FridaProvider().get_device(SimpleNamespace(serial="USB-SERIAL"), 5.0)
+
+        self.assertEqual("frida.device_failed", caught.exception.code)
+        self.assertNotIn("\n", str(caught.exception))
 
 
 class AgentSourceTests(unittest.TestCase):

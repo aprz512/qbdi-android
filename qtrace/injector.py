@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import math
+import multiprocessing
 import re
 import threading
 import time
@@ -29,6 +31,9 @@ _MAX_STARTUP_ENVELOPE_BYTES = _MAX_NATIVE_REQUEST_BYTES + 64 * 1024
 _MAX_MESSAGE_DETAIL_BYTES = 512
 _ADB_OUTPUT_BYTES = 64 * 1024
 _CLEANUP_TIMEOUT_SECONDS = 1.0
+_WORKER_REAP_SECONDS = 0.2
+_FRIDA_REMOTE_PORT = 27042
+_HOST_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 _AGENT_SOURCE = Path(__file__).with_name("agent.js")
 
 
@@ -62,15 +67,74 @@ class FridaProvider:
                 "inject.frida",
                 "Frida Python bindings are required for injection",
             ) from error
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
+            _fail("frida.timeout_invalid", "inject.frida", "Frida timeout must be finite and positive")
         try:
-            return frida.get_device(device.serial, timeout=max(1, int(timeout * 1000)))
-        except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
+            endpoint = _remote_frida_endpoint(device.serial)
+            if endpoint is not None:
+                return frida.get_device_manager().add_remote_device(endpoint)
+            return frida.get_device(device.serial, timeout=float(timeout))
+        except QtraceError:
+            raise
+        except Exception as error:
             wrapped = QtraceError(
                 "frida.device_failed",
                 "inject.frida",
                 f"Frida device lookup failed: {error}",
             )
             raise wrapped from error
+
+
+def _valid_hostname(value: str) -> bool:
+    return (
+        0 < len(value) <= 253
+        and all(_HOST_LABEL.fullmatch(label) is not None for label in value.split("."))
+    )
+
+
+def _remote_frida_endpoint(serial: object) -> str | None:
+    if not isinstance(serial, str) or not serial:
+        _fail("frida.endpoint_invalid", "inject.frida", "ADB serial is invalid")
+    if ":" not in serial:
+        return None
+    if serial.startswith("["):
+        match = re.fullmatch(r"\[([^\]]+)\]:([0-9]+)", serial)
+        if match is None:
+            _fail("frida.endpoint_invalid", "inject.frida", "bracketed ADB endpoint is invalid")
+        host, adb_port = match.groups()
+        try:
+            ipaddress.IPv6Address(host)
+        except ipaddress.AddressValueError as error:
+            wrapped = QtraceError("frida.endpoint_invalid", "inject.frida", "ADB IPv6 endpoint is invalid")
+            raise wrapped from error
+        rendered_host = f"[{host}]"
+    else:
+        host, separator, adb_port = serial.rpartition(":")
+        if not separator or not host or not adb_port.isascii() or not adb_port.isdigit():
+            _fail("frida.endpoint_invalid", "inject.frida", "ADB remote endpoint is invalid")
+        if ":" in host:
+            try:
+                ipaddress.IPv6Address(host)
+            except ipaddress.AddressValueError as error:
+                wrapped = QtraceError("frida.endpoint_invalid", "inject.frida", "ADB IPv6 endpoint is invalid")
+                raise wrapped from error
+            rendered_host = f"[{host}]"
+        else:
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                if not _valid_hostname(host):
+                    _fail("frida.endpoint_invalid", "inject.frida", "ADB remote host is invalid")
+            rendered_host = host
+    port = int(adb_port, 10)
+    if not 1 <= port <= 65535:
+        _fail("frida.endpoint_invalid", "inject.frida", "ADB remote port is invalid")
+    return f"{rendered_host}:{_FRIDA_REMOTE_PORT}"
 
 
 def _fail(code: ErrorCode | str, stage: str, detail: str) -> None:
@@ -162,6 +226,7 @@ class _ValidatedRequest:
     request: InjectionRequest
     native_request: dict[str, object]
     expected_scenes: tuple[ResolvedScene, ...]
+    request_device: AdbDevice
 
 
 def _validate_request(request: InjectionRequest, device: AdbDevice) -> _ValidatedRequest:
@@ -209,7 +274,7 @@ def _validate_request(request: InjectionRequest, device: AdbDevice) -> _Validate
         raise wrapped from error
     if not encoded or len(encoded) > _MAX_NATIVE_REQUEST_BYTES:
         _fail("inject.request_invalid", "inject.validate", "serialized native request exceeds 1 MiB")
-    return _ValidatedRequest(request, copied, expected_scenes)
+    return _ValidatedRequest(request, copied, expected_scenes, device)
 
 
 def _exact_object(value: object, keys: set[str], location: str) -> dict[str, object]:
@@ -343,9 +408,9 @@ class _Mailbox:
         self.pid = pid
         self.event = threading.Event()
         self.lock = threading.Lock()
-        self.messages: list[tuple[object, object, bool]] = []
-        self.detached: tuple[object, tuple[object, ...]] | None = None
+        self.events: list[tuple[object, ...]] = []
         self.posted = False
+        self.resume_phase = "before"
         self.initialized = False
         self.installed = False
         self.generation: int | None = None
@@ -355,41 +420,63 @@ class _Mailbox:
         with self.lock:
             self.posted = True
 
+    def mark_resume_started(self) -> None:
+        with self.lock:
+            self.resume_phase = "resuming"
+
+    def mark_resumed(self) -> None:
+        with self.lock:
+            self.resume_phase = "resumed"
+
     def on_message(self, message: object, data: object) -> None:
         with self.lock:
-            self.messages.append((message, data, self.posted))
+            self.events.append(("message", message, data, self.posted, self.resume_phase))
             self.event.set()
 
     def on_detached(self, reason: object, *details: object) -> None:
         with self.lock:
-            if self.detached is None:
-                self.detached = (reason, details)
+            self.events.append(("detached", reason, details))
             self.event.set()
 
     def wait_for(self, phase: str, deadline: float) -> None:
         while True:
             with self.lock:
-                messages = self.messages
-                self.messages = []
-                detached = self.detached
+                events = self.events
+                self.events = []
                 self.event.clear()
-            for message, data, posted in messages:
-                self._accept(message, data, posted)
+            detached = next((event for event in events if event[0] == "detached"), None)
+            if detached is not None:
+                self._raise_detached(detached[1])
+            for event in events:
+                if event[0] == "message":
+                    self._accept(event[1], event[2], event[3], event[4])
             reached = self.initialized if phase == "initialized" else self.installed
             if reached:
                 return
-            if detached is not None:
-                reason = detached[0]
-                _fail(
-                    ErrorCode.PROCESS_EXITED_DURING_SETUP,
-                    "inject.wait",
-                    f"spawned PID {self.pid} exited during setup: {reason}",
-                )
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not self.event.wait(remaining):
                 _fail("inject.timeout", "inject.wait", "setup deadline expired")
 
-    def _accept(self, message: object, data: object, posted: bool) -> None:
+    def _raise_detached(self, reason: object) -> None:
+        if reason == "process-terminated":
+            _fail(
+                ErrorCode.PROCESS_EXITED_DURING_SETUP,
+                "inject.wait",
+                f"spawned PID {self.pid} exited during setup: process-terminated",
+            )
+        _fail(
+            "frida.session_detached",
+            "inject.wait",
+            f"Frida session for PID {self.pid} detached during setup: {reason}",
+        )
+
+    def _accept(
+        self,
+        message: object,
+        data: object,
+        posted: bool,
+        arrival_resume_phase: object,
+    ) -> None:
         if not posted:
             _fail("inject.protocol_invalid", "inject.protocol", "agent message arrived before startup request")
         if data is not None:
@@ -432,6 +519,8 @@ class _Mailbox:
         if message_type == "installed":
             if not self.initialized:
                 _fail("inject.protocol_invalid", "inject.protocol", "installed message preceded initialization")
+            if arrival_resume_phase == "before" or self.resume_phase != "resumed":
+                _fail("inject.protocol_invalid", "inject.protocol", "installed message preceded successful resume")
             if self.installed:
                 _fail("inject.protocol_invalid", "inject.protocol", "duplicate installed message")
             assert self.generation is not None and self.normalized_scenes is not None
@@ -456,6 +545,253 @@ def _external(code: str, stage: str, operation):
         raise wrapped from error
 
 
+def _send_worker_event(channel: Any, kind: str, payload: object) -> None:
+    try:
+        channel.send((kind, payload))
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+
+
+def _serialize_worker_error(error: BaseException) -> dict[str, object]:
+    if isinstance(error, QtraceError):
+        return {
+            "kind": "qtrace",
+            "code": error.code,
+            "stage": error.stage,
+            "detail": error.detail,
+            "exitCode": error.exit_code,
+        }
+    if isinstance(error, KeyboardInterrupt):
+        return {"kind": "keyboard_interrupt"}
+    if isinstance(error, SystemExit):
+        return {"kind": "system_exit", "code": error.code}
+    wrapped = QtraceError("inject.failed", "inject", f"injection failed: {error}")
+    return {
+        "kind": "qtrace",
+        "code": wrapped.code,
+        "stage": wrapped.stage,
+        "detail": wrapped.detail,
+        "exitCode": wrapped.exit_code,
+    }
+
+
+def _restore_worker_error(payload: object) -> BaseException:
+    if type(payload) is not dict or not isinstance(payload.get("kind"), str):
+        return QtraceError("frida.worker_protocol_invalid", "inject.worker", "worker error payload is malformed")
+    if payload["kind"] == "keyboard_interrupt" and set(payload) == {"kind"}:
+        return KeyboardInterrupt()
+    if payload["kind"] == "system_exit" and set(payload) == {"kind", "code"}:
+        return SystemExit(payload.get("code"))
+    if payload["kind"] == "qtrace" and set(payload) == {
+        "kind", "code", "stage", "detail", "exitCode",
+    }:
+        code, stage, detail, exit_code = (
+            payload.get("code"), payload.get("stage"), payload.get("detail"), payload.get("exitCode")
+        )
+        if (
+            isinstance(code, str)
+            and isinstance(stage, str)
+            and isinstance(detail, str)
+            and type(exit_code) is int
+        ):
+            return QtraceError(code, stage, detail, exit_code=exit_code)
+    return QtraceError("frida.worker_protocol_invalid", "inject.worker", "worker error payload is malformed")
+
+
+def _run_injection_worker(
+    validated: _ValidatedRequest,
+    source: str,
+    provider: FridaProvider,
+    deadline: float,
+    channel: Any,
+) -> None:
+    request = validated.request
+    session: Any | None = None
+    script: Any | None = None
+    primary: BaseException | None = None
+    result: InjectionResult | None = None
+
+    def budget() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _fail("inject.timeout", "inject.wait", "setup deadline expired")
+        return remaining
+
+    try:
+        frida_device = _external(
+            "frida.device_failed",
+            "inject.frida",
+            lambda: provider.get_device(validated.request_device, budget()),
+        )
+        pid_value = _external(
+            "frida.spawn_failed",
+            "inject.spawn",
+            lambda: frida_device.spawn([request.package]),
+        )
+        if type(pid_value) is not int or pid_value <= 0:
+            _fail("frida.spawn_failed", "inject.spawn", "Frida returned an invalid spawned PID")
+        pid = pid_value
+        _send_worker_event(channel, "pid", pid)
+        session = _external(
+            "frida.attach_failed",
+            "inject.attach",
+            lambda: frida_device.attach(pid),
+        )
+        mailbox = _Mailbox(validated, pid)
+        _external(
+            "frida.handler_failed",
+            "inject.attach",
+            lambda: session.on("detached", mailbox.on_detached),
+        )
+        script = _external(
+            "frida.script_failed",
+            "inject.load",
+            lambda: session.create_script(source),
+        )
+        _external(
+            "frida.handler_failed",
+            "inject.load",
+            lambda: script.on("message", mailbox.on_message),
+        )
+        _external("frida.load_failed", "inject.load", script.load)
+        remaining_ms = max(1, int(budget() * 1000))
+        envelope = {
+            "package": request.package,
+            "sessionId": request.session_id,
+            "tracerSo": request.tracer_so,
+            "companion": request.companion,
+            "nativeRequest": validated.native_request,
+            "setupTimeoutMs": remaining_ms,
+        }
+        envelope_size = len(json.dumps(
+            envelope,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8"))
+        if envelope_size > _MAX_STARTUP_ENVELOPE_BYTES:
+            _fail("inject.request_invalid", "inject.validate", "startup envelope exceeds its size bound")
+        mailbox.mark_posted()
+        _external(
+            "frida.post_failed",
+            "inject.initialize",
+            lambda: script.post({"type": "qtrace-startup", "payload": envelope}),
+        )
+        mailbox.wait_for("initialized", deadline)
+        mailbox.mark_resume_started()
+        _external(
+            "frida.resume_failed",
+            "inject.resume",
+            lambda: frida_device.resume(pid),
+        )
+        mailbox.mark_resumed()
+        _send_worker_event(channel, "resumed", pid)
+        mailbox.wait_for("installed", deadline)
+        assert mailbox.generation is not None and mailbox.normalized_scenes is not None
+        result = InjectionResult(
+            pid=pid,
+            session_id=request.session_id,
+            generation=mailbox.generation,
+            normalized_scenes=mailbox.normalized_scenes,
+        )
+    except BaseException as error:
+        primary = error
+    finally:
+        if primary is not None:
+            _send_worker_event(channel, "error", _serialize_worker_error(primary))
+        else:
+            _send_worker_event(channel, "result", result)
+        cleanup_error: BaseException | None = None
+        for callback in (
+            getattr(script, "unload", None) if script is not None else None,
+            getattr(session, "detach", None) if session is not None else None,
+        ):
+            if callback is None:
+                continue
+            try:
+                callback()
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+        _send_worker_event(
+            channel,
+            "complete",
+            None if cleanup_error is None else _serialize_worker_error(
+                QtraceError("frida.cleanup_failed", "inject.cleanup", f"Frida cleanup failed: {cleanup_error}")
+            ),
+        )
+        channel.close()
+
+
+@dataclass
+class _WorkerState:
+    pid: int | None = None
+    resumed: bool = False
+    outcome_kind: str | None = None
+    outcome: object = None
+    complete: bool = False
+    cleanup_error: object = None
+
+
+def _record_worker_event(state: _WorkerState, event: object) -> None:
+    if type(event) is not tuple or len(event) != 2:
+        _fail("frida.worker_protocol_invalid", "inject.worker", "worker event is malformed")
+    kind, payload = event
+    if state.complete:
+        _fail("frida.worker_protocol_invalid", "inject.worker", "worker event followed completion")
+    if kind == "pid":
+        if state.pid is not None or state.outcome_kind is not None or type(payload) is not int or payload <= 0:
+            _fail("frida.worker_protocol_invalid", "inject.worker", "worker PID event is invalid")
+        state.pid = payload
+        return
+    if kind == "resumed":
+        if state.pid is None or state.resumed or state.outcome_kind is not None or payload != state.pid:
+            _fail("frida.worker_protocol_invalid", "inject.worker", "worker resumed event is invalid")
+        state.resumed = True
+        return
+    if kind == "result":
+        if (
+            state.pid is None
+            or not state.resumed
+            or state.outcome_kind is not None
+            or not isinstance(payload, InjectionResult)
+            or payload.pid != state.pid
+        ):
+            _fail("frida.worker_protocol_invalid", "inject.worker", "worker result event is invalid")
+        state.outcome_kind = "result"
+        state.outcome = payload
+        return
+    if kind == "error":
+        if state.outcome_kind is not None:
+            _fail("frida.worker_protocol_invalid", "inject.worker", "worker error event is duplicate")
+        state.outcome_kind = "error"
+        state.outcome = payload
+        return
+    if kind == "complete":
+        if state.outcome_kind is None:
+            _fail("frida.worker_protocol_invalid", "inject.worker", "worker completed before an outcome")
+        if payload is not None and type(payload) is not dict:
+            _fail("frida.worker_protocol_invalid", "inject.worker", "worker cleanup payload is malformed")
+        state.complete = True
+        state.cleanup_error = payload
+        return
+    _fail("frida.worker_protocol_invalid", "inject.worker", "worker event type is unknown")
+
+
+def _kill_and_reap_worker(worker: Any, graceful_timeout: float) -> bool:
+    worker.join(max(0.0, graceful_timeout))
+    if not worker.is_alive():
+        return False
+    worker.kill()
+    worker.join(_WORKER_REAP_SECONDS)
+    if worker.is_alive():
+        worker.kill()
+        worker.join(_WORKER_REAP_SECONDS)
+    if worker.is_alive():
+        _fail("frida.worker_reap_failed", "inject.worker", "Frida worker survived SIGKILL")
+    return True
+
+
 class FridaInjector:
     def __init__(self, device: AdbDevice, frida_provider: FridaProvider):
         self._device = device
@@ -468,6 +804,12 @@ class FridaInjector:
         except (OSError, UnicodeError) as error:
             wrapped = QtraceError("inject.agent_unavailable", "inject.prepare", f"cannot read fixed agent: {error}")
             raise wrapped from error
+        if not hasattr(multiprocessing, "get_context") or "fork" not in multiprocessing.get_all_start_methods():
+            _fail("frida.isolation_unavailable", "inject.worker", "Frida injection requires POSIX fork isolation")
+        provider = self._frida_provider
+        self._frida_provider = None
+        if provider is None:
+            _fail("frida.provider_unavailable", "inject.frida", "injector has already consumed its Frida provider")
         deadline = time.monotonic() + float(request.setup_timeout)
 
         def budget() -> float:
@@ -476,147 +818,95 @@ class FridaInjector:
                 _fail("inject.timeout", "inject.wait", "setup deadline expired")
             return remaining
 
-        pid: int | None = None
-        frida_device: Any | None = None
-        session: Any | None = None
-        script: Any | None = None
-        resumed = False
-        result: InjectionResult | None = None
-        primary: Exception | None = None
-        cleanup_errors: list[Exception] = []
-        provider = self._frida_provider
-        self._frida_provider = None
-
+        _external(
+            "device.force_stop_failed",
+            "inject.force_stop",
+            lambda: self._device.shell(
+                "am", "force-stop", request.package,
+                timeout=budget(), maximum_bytes=_ADB_OUTPUT_BYTES,
+            ),
+        )
+        context = multiprocessing.get_context("fork")
+        receiver, sender = context.Pipe(duplex=False)
+        worker = context.Process(
+            target=_run_injection_worker,
+            args=(validated, source, provider, deadline, sender),
+            name="qtrace-frida-owner",
+        )
+        state = _WorkerState()
+        worker_started = False
+        forced = False
+        timed_out = False
+        monitor_error: BaseException | None = None
+        worker_exitcode: int | None = None
         try:
-            if provider is None:
-                _fail("frida.provider_unavailable", "inject.frida", "injector has already consumed its Frida provider")
-            _external(
-                "device.force_stop_failed",
-                "inject.force_stop",
-                lambda: self._device.shell(
-                    "am",
-                    "force-stop",
-                    request.package,
-                    timeout=budget(),
-                    maximum_bytes=_ADB_OUTPUT_BYTES,
-                ),
-            )
-            frida_device = _external(
-                "frida.device_failed",
-                "inject.frida",
-                lambda: provider.get_device(self._device, budget()),
-            )
-            pid_value = _external(
-                "frida.spawn_failed",
-                "inject.spawn",
-                lambda: frida_device.spawn([request.package]),
-            )
-            if type(pid_value) is not int or pid_value <= 0:
-                _fail("frida.spawn_failed", "inject.spawn", "Frida returned an invalid spawned PID")
-            pid = pid_value
-            session = _external(
-                "frida.attach_failed",
-                "inject.attach",
-                lambda: frida_device.attach(pid),
-            )
-            mailbox = _Mailbox(validated, pid)
-            _external(
-                "frida.handler_failed",
-                "inject.attach",
-                lambda: session.on("detached", mailbox.on_detached),
-            )
-            script = _external(
-                "frida.script_failed",
-                "inject.load",
-                lambda: session.create_script(source),
-            )
-            _external(
-                "frida.handler_failed",
-                "inject.load",
-                lambda: script.on("message", mailbox.on_message),
-            )
-            _external("frida.load_failed", "inject.load", script.load)
-            remaining_ms = max(1, int(budget() * 1000))
-            envelope = {
-                "package": request.package,
-                "sessionId": request.session_id,
-                "tracerSo": request.tracer_so,
-                "companion": request.companion,
-                "nativeRequest": validated.native_request,
-                "setupTimeoutMs": remaining_ms,
-            }
-            try:
-                envelope_size = len(json.dumps(
-                    envelope,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8"))
-            except (TypeError, ValueError, UnicodeError) as error:
-                wrapped = QtraceError("inject.request_invalid", "inject.validate", f"startup envelope is not JSON-safe: {error}")
-                raise wrapped from error
-            if envelope_size > _MAX_STARTUP_ENVELOPE_BYTES:
-                _fail("inject.request_invalid", "inject.validate", "startup envelope exceeds its size bound")
-            mailbox.mark_posted()
-            _external(
-                "frida.post_failed",
-                "inject.initialize",
-                lambda: script.post({"type": "qtrace-startup", "payload": envelope}),
-            )
-            mailbox.wait_for("initialized", deadline)
-            _external(
-                "frida.resume_failed",
-                "inject.resume",
-                lambda: frida_device.resume(pid),
-            )
-            resumed = True
-            mailbox.wait_for("installed", deadline)
-            assert mailbox.generation is not None and mailbox.normalized_scenes is not None
-            result = InjectionResult(
-                pid=pid,
-                session_id=request.session_id,
-                generation=mailbox.generation,
-                normalized_scenes=mailbox.normalized_scenes,
-            )
-        except Exception as error:
-            primary = error
-        finally:
-            for callback in (
-                getattr(script, "unload", None) if script is not None else None,
-                getattr(session, "detach", None) if session is not None else None,
-            ):
-                if callback is None:
-                    continue
-                try:
-                    callback()
-                except Exception as error:
-                    cleanup_errors.append(error)
-            if pid is not None and not resumed:
-                try:
-                    self._device.target_shell(
-                        "kill",
-                        "-9",
-                        str(pid),
-                        timeout=min(_CLEANUP_TIMEOUT_SECONDS, float(request.setup_timeout)),
-                        maximum_bytes=_ADB_OUTPUT_BYTES,
-                    )
-                except Exception as error:
-                    cleanup_errors.append(error)
-            frida_device = None
-            session = None
-            script = None
+            worker.start()
+            worker_started = True
+            sender.close()
             provider = None
+            while not state.complete:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not receiver.poll(remaining):
+                    timed_out = True
+                    break
+                try:
+                    event = receiver.recv()
+                except EOFError:
+                    break
+                _record_worker_event(state, event)
+        except BaseException as error:
+            monitor_error = error
+        finally:
+            if worker_started and (timed_out or monitor_error is not None or not state.complete):
+                for _index in range(32):
+                    if not receiver.poll(0):
+                        break
+                    try:
+                        _record_worker_event(state, receiver.recv())
+                    except EOFError:
+                        break
+                    except BaseException as error:
+                        monitor_error = monitor_error or error
+                        break
+            try:
+                if worker_started:
+                    graceful = max(0.0, deadline - time.monotonic()) if state.complete else 0.0
+                    forced = _kill_and_reap_worker(worker, graceful)
+                    worker_exitcode = worker.exitcode
+            except BaseException as error:
+                monitor_error = monitor_error or error
+            finally:
+                receiver.close()
+                sender.close()
+                if worker_started and not worker.is_alive():
+                    worker.close()
 
-        if primary is not None:
-            if isinstance(primary, QtraceError):
-                raise primary
-            wrapped = QtraceError("inject.failed", "inject", f"injection failed: {primary}")
-            raise wrapped from primary
-        if cleanup_errors:
-            error = cleanup_errors[0]
-            wrapped = QtraceError("frida.cleanup_failed", "inject.cleanup", f"Frida cleanup failed: {error}")
-            raise wrapped from error
-        if result is None:
-            _fail("inject.failed", "inject", "injection completed without a result")
-        return result
+        cleanup_error: BaseException | None = None
+        if state.pid is not None and not state.resumed:
+            try:
+                self._device.target_shell(
+                    "kill", "-9", str(state.pid),
+                    timeout=min(_CLEANUP_TIMEOUT_SECONDS, float(request.setup_timeout)),
+                    maximum_bytes=_ADB_OUTPUT_BYTES,
+                )
+            except BaseException as error:
+                cleanup_error = error
+
+        if monitor_error is not None:
+            raise monitor_error
+        if state.outcome_kind == "error":
+            raise _restore_worker_error(state.outcome)
+        if timed_out or forced or not state.complete:
+            _fail("inject.timeout", "inject.wait", "Frida setup worker exceeded the setup deadline")
+        if worker_exitcode != 0:
+            _fail("frida.worker_failed", "inject.worker", f"Frida worker exited with status {worker_exitcode}")
+        if cleanup_error is not None:
+            if isinstance(cleanup_error, QtraceError):
+                raise cleanup_error
+            wrapped = QtraceError("device.kill_failed", "inject.cleanup", f"spawned PID cleanup failed: {cleanup_error}")
+            raise wrapped from cleanup_error
+        if state.cleanup_error is not None:
+            raise _restore_worker_error(state.cleanup_error)
+        if state.outcome_kind != "result" or not isinstance(state.outcome, InjectionResult):
+            _fail("frida.worker_failed", "inject.worker", "Frida worker exited without a result")
+        return state.outcome
