@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
+import secrets
 import stat
-import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Mapping
 
 
 _MAX_REPORT_BYTES = 1_048_576
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
 class SessionStage(str, Enum):
@@ -55,25 +57,77 @@ class SessionReport:
     outputs: tuple[str, ...]
 
 
-def _regular_or_missing(path: Path) -> None:
+def _normalize(value: object) -> object:
+    if dataclasses.is_dataclass(value):
+        return {field.name: _normalize(getattr(value, field.name)) for field in dataclasses.fields(value)}
+    if isinstance(value, Enum):
+        return _normalize(value.value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _normalize(member) for key, member in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_normalize(member) for member in value]
+    if value is None or type(value) in {str, int, bool}:
+        return value
+    return str(value)[:1024]
+
+
+def _check_directory(descriptor: int) -> None:
+    info = os.fstat(descriptor)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise ValueError("report destination directory must not be a symlink")
+
+
+def _trusted_parent(path: Path) -> int:
+    """Open/create every component using only trusted directory descriptors."""
+    if path.is_absolute():
+        descriptor = os.open("/", _DIR_FLAGS)
+        components = path.parts[1:]
+    else:
+        descriptor = os.open(".", _DIR_FLAGS)
+        components = path.parts
     try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise ValueError("report destination must be a regular non-symlink file")
-
-
-def _safe_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    current = path
-    while True:
-        mode = current.lstat().st_mode
-        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-            raise ValueError("report destination directory must not be a symlink")
-        if current == current.parent:
-            return
-        current = current.parent
+        _check_directory(descriptor)
+        for component in components:
+            if component in {"", "."}:
+                continue
+            if component == "..":
+                raise ValueError("report destination must not contain parent traversal")
+            created = False
+            try:
+                child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                    created = True
+                except FileExistsError:
+                    pass
+                try:
+                    child = os.open(component, _DIR_FLAGS, dir_fd=descriptor)
+                except OSError as error:
+                    if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise ValueError("report destination directory must not be a symlink") from error
+                    raise
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError("report destination directory must not be a symlink") from error
+                raise
+            try:
+                _check_directory(child)
+                if created:
+                    os.fchmod(child, 0o700)
+                if created and stat.S_IMODE(os.fstat(child).st_mode) != 0o700:
+                    raise ValueError("report destination directory mode is unsafe")
+            except Exception:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
 
 
 class ReportWriter:
@@ -81,49 +135,45 @@ class ReportWriter:
         output = Path(output)
         if output.name in {"", ".", ".."}:
             raise ValueError("report destination has no filename")
-        _safe_directory(output.parent)
-        _regular_or_missing(output)
-        def normalize(value: object) -> object:
-            if dataclasses.is_dataclass(value):
-                return {field.name: normalize(getattr(value, field.name)) for field in dataclasses.fields(value)}
-            if isinstance(value, Enum):
-                return normalize(value.value)
-            if isinstance(value, Path):
-                return str(value)
-            if isinstance(value, Mapping):
-                return {str(key): normalize(member) for key, member in value.items()}
-            if isinstance(value, (tuple, list)):
-                return [normalize(member) for member in value]
-            if value is None or type(value) in {str, int, bool}:
-                return value
-            return str(value)[:1024]
-        encoded = json.dumps(normalize(report), sort_keys=True, separators=(",", ":"),
+        encoded = json.dumps(_normalize(report), sort_keys=True, separators=(",", ":"),
                              ensure_ascii=False, allow_nan=False).encode("utf-8")
         if not encoded or len(encoded) > _MAX_REPORT_BYTES:
             raise ValueError("report exceeds the 1 MiB publication limit")
+        directory = _trusted_parent(output.parent)
+        temporary = f".{output.name}.{secrets.token_hex(16)}"
         descriptor = -1
-        temporary: Path | None = None
         try:
-            descriptor, name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
-            temporary = Path(name)
-            with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                descriptor = -1
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            _regular_or_missing(output)
-            os.replace(temporary, output)
-            temporary = None
-            directory = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
-                os.fsync(directory)
+                existing = os.stat(output.name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
+                raise ValueError("report destination must be a regular non-symlink file")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+            try:
+                offset = 0
+                while offset < len(encoded):
+                    written = os.write(descriptor, encoded[offset:])
+                    if written <= 0:
+                        raise OSError("report temporary write made no progress")
+                    offset += written
+                os.fsync(descriptor)
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                    raise ValueError("report temporary file is unsafe")
             finally:
-                os.close(directory)
+                os.close(descriptor)
+                descriptor = -1
+            os.replace(temporary, output.name, src_dir_fd=directory, dst_dir_fd=directory)
+            temporary = ""
+            os.fsync(directory)
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
-            if temporary is not None:
+            if temporary:
                 try:
-                    temporary.unlink()
+                    os.unlink(temporary, dir_fd=directory)
                 except FileNotFoundError:
                     pass
+            os.close(directory)

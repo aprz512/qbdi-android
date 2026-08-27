@@ -61,6 +61,32 @@ class ReportWriterTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertFalse(list(self.path.parent.glob(".report.json.*")))
 
+    def test_creates_nested_private_directories_without_following_existing_symlink(self) -> None:
+        output = Path(self.directory.name) / "one" / "two" / "report.json"
+        ReportWriter().write_atomic(output, report())
+        self.assertEqual(0o700, (output.parent.stat().st_mode & 0o777))
+        self.assertEqual("sealed", json.loads(output.read_text(encoding="utf-8"))["status"])
+
+    def test_symlink_race_at_the_new_directory_boundary_does_not_publish_to_target(self) -> None:
+        safe = Path(self.directory.name) / "safe"
+        target = Path(self.directory.name) / "target"
+        target.mkdir()
+        safe.mkdir()
+        output = safe / "new" / "report.json"
+        original_mkdir = os.mkdir
+
+        def race(path, mode=0o777, *, dir_fd=None):
+            if path == "new" and dir_fd is not None:
+                # A competing writer turns the just-missing component into a link.
+                (safe / "new").symlink_to(target, target_is_directory=True)
+                raise FileExistsError()
+            return original_mkdir(path, mode, dir_fd=dir_fd)
+
+        with patch("qtrace.report.os.mkdir", side_effect=race):
+            with self.assertRaises((OSError, ValueError)):
+                ReportWriter().write_atomic(output, report())
+        self.assertFalse((target / "report.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

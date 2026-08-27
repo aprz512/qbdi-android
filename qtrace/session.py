@@ -6,7 +6,7 @@ import json
 import math
 import re
 import sys
-import uuid
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -27,6 +27,7 @@ _STATE_ORDER = {"installed": 0, "running": 1, "stop_requested": 2, "stopping": 3
                 "sealed": 4, "stop_incomplete": 4}
 _ARTIFACT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}\Z")
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
+_ANY_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 class Clock(Protocol):
@@ -77,14 +78,23 @@ def _integer(value: object, field: str, *, positive: bool = False) -> int:
     return value
 
 
+def _text(value: object, field: str, limit: int) -> str:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > limit or any(
+            unicodedata.category(character).startswith("C") for character in value):
+        raise QtraceError("session.status_invalid", "session.status", f"{field} is not valid text")
+    return value
+
+
 def _issues(value: object, field: str) -> None:
     if type(value) is not list or len(value) > 256:
         raise QtraceError("session.status_invalid", "session.status", f"{field} is invalid")
     for issue in value:
         if type(issue) is not dict or set(issue) != {"code", "path", "message"} or any(
-            not isinstance(issue[key], str) or len(issue[key]) > 1024 for key in issue
+            not isinstance(issue[key], str) for key in issue
         ):
             raise QtraceError("session.status_invalid", "session.status", f"{field} has an invalid issue")
+        for key in issue:
+            _text(issue[key], f"{field}.{key}", 1024)
 
 
 def _expected_scenes(scenes: tuple[ResolvedScene, ...]) -> list[dict[str, object]]:
@@ -101,23 +111,31 @@ def parse_status(value: object, session_id: str, package: str, generation: int, 
     if _integer(value.get("generation"), "generation", positive=True) != generation or _integer(value.get("pid"), "pid", positive=True) != pid:
         raise QtraceError("session.status_identity", "session.status", "status process identity does not match")
     state = value.get("state")
-    if not isinstance(state, str) or state not in _STATE_ORDER or not isinstance(value.get("reason"), str) or len(value["reason"]) > 256:
+    if not isinstance(state, str) or state not in _STATE_ORDER:
         raise QtraceError("session.status_invalid", "session.status", "status state or reason is invalid")
+    _text(state, "state", 64)
+    _text(value.get("reason"), "reason", 256)
     transition = _integer(value.get("transitionMonotonicNs"), "transitionMonotonicNs")
     if value.get("normalizedScenes") != _expected_scenes(scenes):
         raise QtraceError("session.status_identity", "session.status", "normalized scenes do not match")
     active = value.get("activeScenes")
     if type(active) is not list or len(active) > 256:
         raise QtraceError("session.status_invalid", "session.status", "active scenes are invalid")
+    active_identity: set[tuple[int, int]] = set()
     for entry in active:
         if type(entry) is not dict or set(entry) != {"sceneIndex", "tid", "sealed"}:
             raise QtraceError("session.status_invalid", "session.status", "active scene is invalid")
         index = _integer(entry.get("sceneIndex"), "active scene index")
         if index >= len(scenes) or _integer(entry.get("tid"), "active scene tid", positive=True) <= 0 or type(entry.get("sealed")) is not bool:
             raise QtraceError("session.status_invalid", "session.status", "active scene is invalid")
+        identity = (index, entry["tid"])
+        if identity in active_identity:
+            raise QtraceError("session.status_invalid", "session.status", "active scene identity is duplicated")
+        active_identity.add(identity)
     artifacts = value.get("artifacts")
     if type(artifacts) is not list or len(artifacts) > 256 or len(set(artifacts)) != len(artifacts) or any(
-        not isinstance(name, str) or _ARTIFACT.fullmatch(name) is None or "/" in name for name in artifacts
+        not isinstance(name, str) or _ARTIFACT.fullmatch(name) is None or "/" in name or
+        any(found.group(0) != session_id for found in _ANY_UUID.finditer(name)) for name in artifacts
     ):
         raise QtraceError("session.status_invalid", "session.status", "artifacts are not safe unique basenames")
     if type(value.get("stopAcknowledged")) is not bool:
@@ -126,7 +144,8 @@ def parse_status(value: object, session_id: str, package: str, generation: int, 
     _issues(value.get("errors"), "errors")
     if previous is not None:
         old_state, old_transition = previous["state"], previous["transitionMonotonicNs"]
-        if (_STATE_ORDER[state] < _STATE_ORDER[old_state] or transition < old_transition or
+        if ((old_state in {"sealed", "stop_incomplete"} and state != old_state) or
+                _STATE_ORDER[state] < _STATE_ORDER[old_state] or transition < old_transition or
                 (state != old_state and transition <= old_transition)):
             raise QtraceError("session.status_regression", "session.status", "native status regressed")
     return dict(value)
@@ -202,7 +221,7 @@ class SessionOrchestrator:
     def __init__(self, preflight: object, resolver_factory: Callable[[object], object], builder: object,
                  deployer: object, injector_factory: Callable[[object], object], collector: object,
                  clock: Clock, uuid_factory: Callable[[], str], *, report_writer: ReportWriter | None = None,
-                 lock: TargetLock | None = None, device_selector: Callable[[str | None, float], object] | None = None) -> None:
+                 lock: TargetLock | None = None, device_selector: Callable[[str | None, float], object]) -> None:
         self._preflight, self._resolver_factory, self._builder, self._deployer = preflight, resolver_factory, builder, deployer
         self._injector_factory, self._collector, self._clock, self._uuid_factory = injector_factory, collector, clock, uuid_factory
         self._report_writer, self._lock = report_writer or ReportWriter(), lock or TargetLock()
@@ -244,71 +263,81 @@ class SessionOrchestrator:
             self._report_writer.write_atomic(report_path, report)
             return SessionResult(session_id, exit_code, report_path, outputs)
 
+        device = self._device_selector(request.device, request.adb_timeout)
+        selected_device = getattr(device, "serial", None)
+        if not isinstance(selected_device, str) or not selected_device:
+            raise QtraceError("session.selector_invalid", "selector", "selector did not return a bound device serial")
+        context = self._lock.acquire(selected_device, request.config.app.package)
+        context.__enter__()
         try:
-            if self._device_selector is not None:
-                device = self._device_selector(request.device, request.adb_timeout)
-                selected_device = device.serial
-            else:
-                selected_device = request.device
             mark(SessionStage.PREFLIGHT)
-            with self._lock.acquire(device.serial if device is not None else selected_device or "default", request.config.app.package):
-                device, identity = self._preflight.run(request.config, selected_device,
-                                                        setup_timeout=request.setup_timeout, adb_timeout=request.adb_timeout)
-                mark(SessionStage.RESOLVING_TARGET)
-                resolved = self._resolver_factory(device).resolve(request.config)
-                mark(SessionStage.BUILDING_TRACER)
-                artifacts = self._builder.select_or_build(request.config.tracer, timeout=request.setup_timeout)
-                mark(SessionStage.DEPLOYING)
-                deployment = self._deployer.deploy(device, session_id, artifacts)
-                snapshot = self._snapshot_artifacts(device, request, session_id)
-                native = build_native_request(request.config, resolved, session_id, duration_ms)
-                mark(SessionStage.INJECTING)
-                mark(SessionStage.INSTALLING_HOOKS)
-                result: InjectionResult = self._injector_factory(device).install(InjectionRequest(
-                    request.config.app.package, session_id, deployment.tracer_so, deployment.companion,
-                    native, request.setup_timeout,
-                ))
-                pid = result.pid
-                resumed = True
-                if request.installed_action is not None:
-                    request.installed_action(device, pid)
-                if mode == "run":
-                    mark(SessionStage.RUNNING)
-                    status = self._wait_for_seal(
-                        device, request, result, session_id,
-                        lambda: mark(SessionStage.STOPPING) if stage == SessionStage.RUNNING else None,
-                    )
-                    if status["state"] == "stop_incomplete":
-                        mark(SessionStage.PULLING)
-                        _exit, outputs = self._collect(device, request, session_id, snapshot, status)
-                        mark(SessionStage.COMPLETED)
-                        return publish("stop_incomplete", EXIT_STOP_INCOMPLETE, outputs=outputs)
-                    mark(SessionStage.SEALED)
+            device, identity = self._preflight.run(request.config, selected_device,
+                                                    setup_timeout=request.setup_timeout, adb_timeout=request.adb_timeout)
+            mark(SessionStage.RESOLVING_TARGET)
+            resolved = self._resolver_factory(device).resolve(request.config)
+            mark(SessionStage.BUILDING_TRACER)
+            artifacts = self._builder.select_or_build(request.config.tracer, timeout=request.setup_timeout)
+            mark(SessionStage.DEPLOYING)
+            deployment = self._deployer.deploy(device, session_id, artifacts)
+            snapshot = self._snapshot_artifacts(device, request, session_id)
+            native = build_native_request(request.config, resolved, session_id, duration_ms)
+            mark(SessionStage.INJECTING)
+            mark(SessionStage.INSTALLING_HOOKS)
+            result: InjectionResult = self._injector_factory(device).install(InjectionRequest(
+                request.config.app.package, session_id, deployment.tracer_so, deployment.companion,
+                native, request.setup_timeout,
+            ))
+            pid = result.pid
+            resumed = True
+            if request.installed_action is not None:
+                request.installed_action(device, pid)
+            if mode == "run":
+                mark(SessionStage.RUNNING)
+                status, host_stop_timeout = self._wait_for_seal(
+                    device, request, result, session_id,
+                    lambda: mark(SessionStage.STOPPING) if stage == SessionStage.RUNNING else None,
+                )
+                if host_stop_timeout or status["state"] == "stop_incomplete":
                     mark(SessionStage.PULLING)
-                    exit_code, outputs = self._collect(device, request, session_id, snapshot, status)
+                    _exit, outputs = self._collect(device, request, session_id, snapshot, status)
                     mark(SessionStage.COMPLETED)
-                    return publish("sealed", exit_code, outputs=outputs)
-                mark(SessionStage.MONITORING)
-                self._wait_for_exit(device, request, pid)
+                    return publish("stop_incomplete", EXIT_STOP_INCOMPLETE, outputs=outputs)
+                mark(SessionStage.SEALED)
                 mark(SessionStage.PULLING)
-                final_status = self._read_final_status(device, request, result, session_id)
-                exit_code, outputs = self._collect(device, request, session_id, snapshot, final_status)
+                exit_code, outputs = self._collect(device, request, session_id, snapshot, status)
                 mark(SessionStage.COMPLETED)
-                return publish("crash_recovered" if exit_code == EXIT_PARTIAL else "process_exited", exit_code, outputs=outputs)
-        except KeyboardInterrupt:
-            if resumed:
+                return publish("sealed", exit_code, outputs=outputs)
+            mark(SessionStage.MONITORING)
+            self._wait_for_exit(device, request, pid)
+            mark(SessionStage.PULLING)
+            final_status = self._read_final_status(device, request, result, session_id)
+            exit_code, outputs = self._collect(device, request, session_id, snapshot, final_status)
+            mark(SessionStage.COMPLETED)
+            return publish("crash_recovered" if exit_code == EXIT_PARTIAL else "process_exited", exit_code, outputs=outputs)
+        except BaseException as primary:
+            def note(publication_error: Exception) -> None:
+                if hasattr(primary, "add_note"):
+                    primary.add_note(f"report publication failed: {publication_error}")
+            if isinstance(primary, KeyboardInterrupt) and resumed:
                 command = f"qtrace pull --package {request.config.app.package} --latest --device {device.serial}"
                 try:
                     publish("interrupted", 130, outputs=(command,))
-                finally:
                     print(command, file=sys.stderr)
+                except Exception as publication_error:
+                    note(publication_error)
+            elif isinstance(primary, QtraceError):
+                try:
+                    publish("error", primary.exit_code, primary)
+                except Exception as publication_error:
+                    note(publication_error)
+            else:
+                try:
+                    publish("error", 1, QtraceError("session.unexpected", "session", str(primary)))
+                except Exception as publication_error:
+                    note(publication_error)
             raise
-        except QtraceError as error:
-            try:
-                publish("error", error.exit_code, error)
-            except OSError:
-                pass
-            raise
+        finally:
+            context.__exit__(*sys.exc_info())
 
     def _status_path(self, package: str, session_id: str) -> str:
         return f"/data/data/{package}/files/qbdi-traces/session-{session_id}.status.json"
@@ -366,7 +395,7 @@ class SessionOrchestrator:
             return None
 
     def _wait_for_seal(self, device: object, request: RunRequest, result: InjectionResult,
-                       session_id: str, on_stopping: Callable[[], None]) -> Mapping[str, object]:
+                       session_id: str, on_stopping: Callable[[], None]) -> tuple[Mapping[str, object], bool]:
         deadline = self._clock.monotonic() + request.duration_ms / 1000.0 + request.stop_timeout
         previous = None
         saw_stop = False
@@ -386,9 +415,13 @@ class SessionOrchestrator:
                 if current["state"] == "sealed":
                     if current["reason"] != "duration_elapsed" or current["stopAcknowledged"] is not True:
                         raise QtraceError(ErrorCode.STOP_NOT_ACKNOWLEDGED, "session.stop", "sealed status did not acknowledge duration stop")
-                    return current
+                    return current, False
                 if current["state"] == "stop_incomplete":
-                    return current
+                    return current, False
+            except QtraceError as error:
+                if error.code != ErrorCode.ADB_UNAVAILABLE.value:
+                    raise
+                transient_count += 1
             except (OSError, TimeoutError):
                 transient_count += 1
             if transient_count >= 3 and self._clock.monotonic() + 0.1 > deadline:
@@ -397,7 +430,7 @@ class SessionOrchestrator:
         if not saw_stop:
             raise QtraceError("session.run_timeout", "session.running", "native stop did not begin before the deadline")
         assert previous is not None
-        return {**previous, "state": "stop_incomplete", "hostStopTimeout": True}
+        return previous, True
 
     def _wait_for_exit(self, device: object, request: MonitorRequest, pid: int) -> None:
         outage_deadline: float | None = None
@@ -410,10 +443,15 @@ class SessionOrchestrator:
                     return
                 if current != pid:
                     raise QtraceError("session.pid_replaced", "session.monitor", "package PID changed after injection")
-            except QtraceError:
-                raise
+            except QtraceError as error:
+                if error.code != ErrorCode.ADB_UNAVAILABLE.value:
+                    raise
+                transient_count += 1
             except (OSError, TimeoutError):
                 transient_count += 1
+                if outage_deadline is None:
+                    outage_deadline = self._clock.monotonic() + request.setup_timeout
+            if transient_count:
                 if outage_deadline is None:
                     outage_deadline = self._clock.monotonic() + request.setup_timeout
                 if self._clock.monotonic() >= outage_deadline:

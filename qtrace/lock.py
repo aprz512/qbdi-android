@@ -22,18 +22,36 @@ class TargetLock:
     def __init__(self, runtime_dir: Path | None = None) -> None:
         self._runtime_dir = runtime_dir
 
-    def _root(self) -> Path:
+    def _root(self) -> int:
         base = self._runtime_dir or Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
-        root = base / f"qtrace-{os.getuid()}"
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = root.lstat()
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-            raise QtraceError("session.lock_invalid", "lock", "lock root is unsafe")
-        os.chmod(root, 0o700)
-        info = root.stat()
-        if stat.S_IMODE(info.st_mode) != 0o700:
-            raise QtraceError("session.lock_invalid", "lock", "lock root mode is unsafe")
-        return root
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            base_fd = os.open(base, flags)
+        except OSError as error:
+            raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe") from error
+        name = f"qtrace-{os.getuid()}"
+        try:
+            try:
+                os.mkdir(name, 0o700, dir_fd=base_fd)
+            except FileExistsError:
+                pass
+            try:
+                root = os.open(name, flags, dir_fd=base_fd)
+            except OSError as error:
+                raise QtraceError("session.lock_invalid", "lock", "lock root is unsafe") from error
+        finally:
+            os.close(base_fd)
+        try:
+            info = os.fstat(root)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise QtraceError("session.lock_invalid", "lock", "lock root is unsafe")
+            os.fchmod(root, 0o700)
+            if stat.S_IMODE(os.fstat(root).st_mode) != 0o700:
+                raise QtraceError("session.lock_invalid", "lock", "lock root mode is unsafe")
+            return root
+        except Exception:
+            os.close(root)
+            raise
 
     @contextmanager
     def acquire(self, serial: str, package: str) -> Iterator[None]:
@@ -43,7 +61,8 @@ class TargetLock:
             raise QtraceError("session.lock_invalid", "lock", "package is invalid")
         digest = hashlib.sha256((serial + "\0" + package).encode("utf-8")).hexdigest()
         flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(self._root() / f"{digest}.lock", flags, 0o600)
+        root = self._root()
+        descriptor = os.open(f"{digest}.lock", flags, 0o600, dir_fd=root)
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -63,3 +82,4 @@ class TargetLock:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+            os.close(root)
