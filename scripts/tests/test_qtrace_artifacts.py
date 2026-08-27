@@ -233,7 +233,7 @@ class ArtifactTests(unittest.TestCase):
                         "d", "com.example.app", session, status, output, 1)
             self.assertEqual("artifact.destination_replaced", raised.exception.code)
             self.assertFalse((output / session).exists())
-            self.assertTrue((original / session).is_dir())
+            self.assertFalse((original / session).exists())
 
     def test_artifact_report_uses_actual_device_metadata(self):
         class Device:
@@ -344,6 +344,36 @@ class ArtifactTests(unittest.TestCase):
             reads = [call[1] for call in client.calls if call[0] == "read"]
             self.assertIn(f"session-{first}.status.json", reads)
             self.assertIn(f"session-{second}.status.json", reads)
+
+    def test_all_keeps_only_sealed_uuid_roots_and_marks_active_partial(self):
+        sealed = "11111111-1111-4111-8111-111111111111"
+        active = "22222222-2222-4222-8222-222222222222"
+        sealed_root, active_root = f"{sealed}.trace.txt", f"{active}.trace.txt"
+        active_status = self._status(active, state="running", reason="", stopAcknowledged=False,
+                                     artifacts=[active_root])
+        client = FakeClient({
+            f"session-{sealed}.status.json": json.dumps(self._status(sealed, artifacts=[sealed_root])).encode(),
+            f"session-{active}.status.json": json.dumps(active_status).encode(),
+            sealed_root: COMPLETE_TERMINAL, active_root: COMPLETE_TERMINAL,
+        })
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual(
+                "d", "com.example.app", PullSelection(PullMode.ALL), Path(root), 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertIn(sealed_root, [path.name for path in result.files])
+            self.assertNotIn(active_root, [path.name for path in result.files])
+            self.assertIn("artifact.incomplete", {item["code"] for item in result.errors})
+
+    def test_validated_root_returns_existing_metrics_sidecar(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        root = "run.trace.txt"
+        status = self._status(session, artifacts=[root])
+        client = FakeClient({root: COMPLETE_TERMINAL, root + ".metrics": b"profile=fast\n"})
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._processor(client).collect_session(
+                "d", "com.example.app", session, status, Path(directory), 1)
+            self.assertIn(root + ".metrics", [path.name for path in result.files])
+            self.assertTrue(all(path.exists() for path in result.files))
 
     def test_text_terminal_rejects_unversioned_or_extra_terminal_fields(self):
         invalid = (
@@ -470,6 +500,35 @@ class ArtifactTests(unittest.TestCase):
             self.assertTrue(error_path.is_file())
             self.assertIn("artifact.concurrent_report", json.loads(
                 error_path.read_text())["artifacts"][-1]["code"])
+
+    def test_conditional_report_exchange_rolls_back_last_moment_replacement(self):
+        from qtrace import report as report_module
+        session = "11111111-1111-4111-8111-111111111111"
+        writer = ReportWriter()
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            target = directory / "report.json"
+            writer.write_atomic(target, self._report(session, "original"))
+            identity = (target.stat().st_dev, target.stat().st_ino)
+            (directory / "racer").write_text("concurrent", encoding="utf-8")
+            real_exchange = report_module._exchange
+            first = True
+
+            def exchange(fd, left, right):
+                nonlocal first
+                if first:
+                    first = False
+                    __import__("os").replace("racer", right, src_dir_fd=fd, dst_dir_fd=fd)
+                real_exchange(fd, left, right)
+
+            fd = __import__("os").open(directory, __import__("os").O_RDONLY)
+            try:
+                with patch("qtrace.report._exchange", side_effect=exchange):
+                    self.assertFalse(writer.write_atomic_at(fd, "report.json", self._report(session, "new"),
+                                                          expected_identity=identity))
+            finally:
+                __import__("os").close(fd)
+            self.assertEqual("concurrent", target.read_text(encoding="utf-8"))
 
     def test_statusless_session_json_uses_null_native_status(self):
         client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})

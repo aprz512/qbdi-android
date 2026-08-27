@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import ctypes
 import errno
 import json
 import os
@@ -16,6 +17,18 @@ from typing import Mapping
 
 _MAX_REPORT_BYTES = 1_048_576
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _exchange(directory: int, left: str, right: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(directory, left.encode(), directory, right.encode(), 2) != 0:
+        failure = ctypes.get_errno()
+        raise OSError(failure, os.strerror(failure))
 
 
 class SessionStage(str, Enum):
@@ -183,6 +196,13 @@ class ReportWriter:
                             follow_symlinks=False)
                 except FileExistsError:
                     raise ValueError("report destination already exists")
+                os.unlink(temporary, dir_fd=directory)
+            elif expected_identity is not None:
+                _exchange(directory, temporary, name)
+                old = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+                if (old.st_dev, old.st_ino) != expected_identity:
+                    _exchange(directory, temporary, name)
+                    return False
                 os.unlink(temporary, dir_fd=directory)
             else:
                 os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)

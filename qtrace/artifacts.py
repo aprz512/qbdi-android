@@ -93,9 +93,9 @@ class _PublicationToken:
             current = os.stat(self.output_path, follow_symlinks=False)
         except OSError:
             current = None
-        if current is not None and (current.st_dev, current.st_ino) == self.parent_identity:
-            return self.output_path / name
-        return Path(f"/proc/self/fd/{self.parent}/{name}")
+        if current is None or (current.st_dev, current.st_ino) != self.parent_identity:
+            raise _error("artifact.destination_replaced", "collector output identity changed before report merge")
+        return self.output_path / name
 
 
 def _collector_token(parent: int, session_id: str, output: _OutputDirectory) -> _PublicationToken:
@@ -167,7 +167,7 @@ class _OutputDirectory:
     device: int
     inode: int
 
-    def result_path(self, child: str) -> Path:
+    def assert_identity(self) -> None:
         try:
             current = os.stat(self.path, follow_symlinks=False)
         except OSError as error:
@@ -175,6 +175,8 @@ class _OutputDirectory:
         if (not stat.S_ISDIR(current.st_mode)
                 or (current.st_dev, current.st_ino) != (self.device, self.inode)):
             raise _error("artifact.destination_replaced", "output directory identity changed during pull")
+    def result_path(self, child: str) -> Path:
+        self.assert_identity()
         return self.path / child
 
     def close(self) -> None:
@@ -568,9 +570,9 @@ def _rewrite_published_report(parent: int, session_id: str,
     temporary = ".report-" + uuid.uuid4().hex + ".tmp"
     try:
         try:
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | 0o600 |
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                  getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-                                 dir_fd=directory)
+                                 0o600, dir_fd=directory)
             offset = 0
             while offset < len(payload):
                 written = os.write(descriptor, payload[offset:])
@@ -743,6 +745,7 @@ class ArtifactProcessor:
                 finally:
                     if not (directory_name == "." and stage_fd is not None):
                         os.close(descriptor)
+            output.assert_identity()
             _rename_noreplace(parent, stage_name, session_id)
             committed = True
             final = output.result_path(session_id)
@@ -754,9 +757,21 @@ class ArtifactProcessor:
                 os.close(descriptor)
             os.fsync(parent)
         except BaseException as error:
+            if committed and isinstance(error, QtraceError) and error.code == "artifact.destination_replaced":
+                try:
+                    expected = os.fstat(stage_fd) if stage_fd is not None else None
+                    current = os.stat(session_id, dir_fd=parent, follow_symlinks=False)
+                    if expected is not None and (expected.st_dev, expected.st_ino) == (current.st_dev, current.st_ino):
+                        _remove_tree_at(parent, session_id)
+                        os.fsync(parent)
+                except OSError:
+                    pass
+                raise
             if committed:
-                errors.append({"name": "", "code": "artifact.commit_durable",
-                               "detail": f"published session durability is uncertain: {error}"[:256]})
+                failure = {"name": "", "code": "artifact.commit_durable",
+                           "detail": f"published session durability is uncertain: {error}"[:256]}
+                errors.append(failure)
+                records.append(failure)
                 return output.result_path(session_id)
             raise
         finally:
@@ -771,6 +786,7 @@ class ArtifactProcessor:
         errors: list[Mapping[str, str]] = list(initial_errors)
         records: list[Mapping[str, object]] = []
         files: list[Path] = []
+        validated_roots: set[str] = set()
         output_handle = _open_output(Path(output))
         try:
             stage_root, parent_fd, stage_fd, stage_name = _new_stage(output_handle)
@@ -887,6 +903,7 @@ class ArtifactProcessor:
                     files.append(local)
                     record["destination_size"] = local.stat().st_size
                     records.append(record)
+                    validated_roots.add(artifact.remote_name)
                 except Exception as error:
                     if isinstance(error, QtraceError) and error.code in {
                             "artifact.pull_failed", "artifact.truncated", "artifact.size_invalid"}:
@@ -902,6 +919,12 @@ class ArtifactProcessor:
                     failure = {"name": artifact.remote_name, "code": "artifact.invalid", "detail": str(error)[:256]}
                     errors.append(failure)
                     records.append(failure)
+            for artifact in pulled:
+                if artifact.remote_name.endswith(_SIDE_SUFFIXES):
+                    root = next((artifact.remote_name.removesuffix(suffix) for suffix in _SIDE_SUFFIXES
+                                 if artifact.remote_name.endswith(suffix)), "")
+                    if root in validated_roots and artifact.local_path.exists():
+                        files.append(artifact.local_path)
             # Only successfully validated members are returned/published.  Sidecars
             # are recorded by their validated root path, never as recovery ghosts.
             recorded_paths = {record.get("local_path") for record in records if isinstance(record, Mapping)}
@@ -962,8 +985,10 @@ class ArtifactProcessor:
                 except KeyboardInterrupt:
                     raise
                 except Exception as error:
-                    errors.append({"name": "", "code": "artifact.report_refresh",
-                                   "detail": f"committed report refresh failed: {error}"[:256]})
+                    failure = {"name": "", "code": "artifact.report_refresh",
+                               "detail": f"committed report refresh failed: {error}"[:256]}
+                    errors.append(failure)
+                    records.append(failure)
             result = ArtifactResult(final, tuple(final / path for path in relative_files), tuple(errors),
                                    EXIT_PARTIAL if errors else 0)
             object.__setattr__(result, "_records", tuple(records))
@@ -1111,6 +1136,7 @@ class ArtifactProcessor:
                                                flags=re.IGNORECASE)}
         if uuid_values:
             if selection.mode is PullMode.ALL and len(uuid_values) > 1:
+                root_statuses: dict[str, Mapping[str, object]] = {}
                 for candidate_id in uuid_values:
                     candidate_name = f"session-{candidate_id}.status.json"
                     if candidate_name not in listing:
@@ -1123,6 +1149,17 @@ class ArtifactProcessor:
                     owned = [root for root in roots if candidate_id in root.lower()]
                     if any(root not in candidate_status["artifacts"] for root in owned):
                         raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
+                    root_statuses.update({root: candidate_status for root in owned})
+                eligible: list[str] = []
+                for root in roots:
+                    candidate_status = root_statuses[root]
+                    state = candidate_status["state"]
+                    if state == "sealed":
+                        eligible.append(root)
+                    else:
+                        initial_errors.append({"name": root, "code": "artifact.incomplete",
+                                               "detail": f"native session is {state}; artifact is not sealed"})
+                roots = eligible
                 # Multiple independently proven roots share a generated manual pull session.
                 session_id = None
             elif len(uuid_values) != 1:
