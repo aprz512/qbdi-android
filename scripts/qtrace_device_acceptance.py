@@ -42,7 +42,73 @@ class Runner(Protocol):
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
     def read_text(self, path: Path, *, timeout: float) -> str: ...
-    def read_text_beneath(self, root: Path, relative: Path, *, timeout: float) -> str: ...
+    def read_text_beneath(self, root: Path | RootedReader, relative: Path, *, timeout: float) -> str: ...
+
+
+class RootedReader:
+    """A fixed output directory capability, immune to later pathname rebinding."""
+
+    def __init__(self, root: Path) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            self._descriptor = os.open(root, flags)
+            details = os.fstat(self._descriptor)
+        except OSError as error:
+            raise RuntimeError("trusted output root is not a directory") from error
+        self.path = root
+        self._identity = (details.st_dev, details.st_ino)
+
+    def __enter__(self) -> "RootedReader":
+        return self
+
+    def __exit__(self, *_unused: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._descriptor >= 0:
+            os.close(self._descriptor)
+            self._descriptor = -1
+
+    def read_bytes(self, relative: Path | str, maximum_bytes: int = 1_048_576,
+                   *, deadline: float | None = None) -> bytes:
+        candidate = Path(relative)
+        if (self._descriptor < 0 or candidate.is_absolute() or not candidate.parts or
+                ".." in candidate.parts):
+            raise RuntimeError("reported output path is unsafe")
+        try:
+            root_details = os.fstat(self._descriptor)
+            if (root_details.st_dev, root_details.st_ino) != self._identity:
+                raise RuntimeError("trusted output root identity changed")
+            directory = os.dup(self._descriptor)
+            for part in candidate.parts[:-1]:
+                child = os.open(part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                                getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+                os.close(directory)
+                directory = child
+            descriptor = os.open(candidate.parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                                 dir_fd=directory)
+            try:
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode) or details.st_size > maximum_bytes:
+                    raise RuntimeError("reported output is not a bounded regular file")
+                data = bytearray()
+                while len(data) < details.st_size:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise RuntimeError("reported output read exceeded deadline")
+                    block = os.read(descriptor, min(64 * 1024, details.st_size - len(data)))
+                    if not block:
+                        raise RuntimeError("reported output changed while being read")
+                    data.extend(block)
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError("reported output read exceeded deadline")
+                return bytes(data)
+            finally:
+                os.close(descriptor)
+        except OSError as error:
+            raise RuntimeError("reported output is outside the trusted directory") from error
+        finally:
+            if "directory" in locals():
+                os.close(directory)
 
 
 class SubprocessRunner:
@@ -108,11 +174,11 @@ class SubprocessRunner:
             raise RuntimeError("host report is not a bounded regular file")
         return bytes(chunks).decode("utf-8", errors="strict")
 
-    def read_text_beneath(self, root: Path, relative: Path, *, timeout: float) -> str:
+    def read_text_beneath(self, root: Path | RootedReader, relative: Path, *, timeout: float) -> str:
         if timeout <= 0:
             raise RuntimeError("bounded report read timeout must be positive")
         deadline = time.monotonic() + timeout
-        value = _read_beneath(root, str(relative))
+        value = _read_root(root, str(relative), deadline=deadline)
         if time.monotonic() >= deadline:
             raise RuntimeError("bounded report read exceeded timeout")
         return value.decode("utf-8", errors="strict")
@@ -249,13 +315,14 @@ def _wait_for_baseline(runner: Runner) -> dict[str, object]:
     raise RuntimeError(f"timed baseline was not available within 15 seconds: {last_error}")
 
 
-def _report_path(stdout: str, root: Path) -> Path:
+def _report_path(stdout: str, root: Path | RootedReader) -> Path:
     candidates = [Path(line.strip()) for line in stdout.splitlines() if line.strip().endswith("report.json")]
     if len(candidates) != 1:
         raise RuntimeError("qtrace demo did not publish exactly one report path")
     report = candidates[0]
     try:
-        relative = report.relative_to(root) if report.is_absolute() else report
+        root_path = root.path if isinstance(root, RootedReader) else root
+        relative = report.relative_to(root_path) if report.is_absolute() else report
         if relative.is_absolute() or not relative.parts or ".." in relative.parts:
             raise ValueError("unsafe report path")
     except ValueError as error:
@@ -263,7 +330,7 @@ def _report_path(stdout: str, root: Path) -> Path:
     return relative
 
 
-def _published_report_path(stdout: str, root: Path) -> Path:
+def _published_report_path(stdout: str, root: Path | RootedReader) -> Path:
     if not stdout.strip():
         raise RuntimeError("qtrace command did not publish a report path")
     return _report_path(stdout, root)
@@ -315,7 +382,14 @@ def _read_beneath(root: Path, relative: str, maximum_bytes: int = 1_048_576) -> 
         os.close(directory)
 
 
-def _validated_timed_report(runner: Runner, root: Path, relative: Path) -> tuple[dict[str, object], str]:
+def _read_root(root: Path | RootedReader, relative: str, maximum_bytes: int = 1_048_576,
+               *, deadline: float | None = None) -> bytes:
+    if isinstance(root, RootedReader):
+        return root.read_bytes(relative, maximum_bytes, deadline=deadline)
+    return _read_beneath(root, relative, maximum_bytes)
+
+
+def _validated_timed_report(runner: Runner, root: Path | RootedReader, relative: Path) -> tuple[dict[str, object], str]:
     value = _strict_session_report(runner, root, relative)
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or
             value.get("stage") != "completed" or value.get("package") != PACKAGE):
@@ -360,14 +434,14 @@ def _validated_timed_report(runner: Runner, root: Path, relative: Path) -> tuple
     return value, artifact
 
 
-def _validated_monitor_report(runner: Runner, root: Path, relative: Path, *, status: str) -> dict[str, object]:
+def _validated_monitor_report(runner: Runner, root: Path | RootedReader, relative: Path, *, status: str) -> dict[str, object]:
     report = _strict_session_report(runner, root, relative)
     if report.get("schema") != 1 or report.get("package") != PACKAGE or report.get("status") != status:
         raise RuntimeError("monitor report has an invalid classification")
     return report
 
 
-def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object], root: Path, *,
+def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object], root: Path | RootedReader, *,
                                        converter=convert_binary_file) -> None:
     records = report.get("artifacts")
     if not isinstance(records, list):
@@ -384,26 +458,23 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
     if (not isinstance(remote_name, str) or not isinstance(local_path, str) or
             Path(local_path).name != remote_name):
         raise RuntimeError("timed binary record has no trusted local artifact identity")
-    binary_path = _trusted_output(root / local_path, root)
+    binary_bytes = _read_root(root, local_path)
     metrics_name = remote_name + ".metrics"
     if not any(isinstance(item, dict) and item.get("remote_name") == metrics_name
                for item in records):
         raise RuntimeError("timed binary root has no matching metrics sidecar record")
-    metrics_path = _trusted_output(Path(str(binary_path) + ".metrics"), root)
-    if metrics_path.name != metrics_name:
-        raise RuntimeError("timed metrics sidecar does not match binary root")
+    metrics_relative = local_path + ".metrics"
+    metrics_bytes = _read_root(root, metrics_relative, MAX_METRICS_BYTES)
     if (record.get("termination") != "stopped" or record.get("metrics_schema") != 3 or
             record.get("native_stop_acknowledged") is not True):
         raise RuntimeError("binary TRACE_STOP/metrics-v3 native-stop contract failed")
-    with tempfile.TemporaryDirectory(prefix=".qtrace-acceptance-validate-", dir=root) as staging:
-        snapshot = Path(staging) / binary_path.name
-        snapshot.write_bytes(_read_beneath(root, local_path))
-        Path(str(snapshot) + ".metrics").write_bytes(
-            _read_beneath(root, local_path + ".metrics", MAX_METRICS_BYTES)
-        )
+    with tempfile.TemporaryDirectory(prefix=".qtrace-acceptance-validate-") as staging:
+        snapshot = Path(staging) / remote_name
+        snapshot.write_bytes(binary_bytes)
+        Path(str(snapshot) + ".metrics").write_bytes(metrics_bytes)
         converted = Path(staging) / "converted.trace.txt"
         stats = converter(snapshot, converted,
-                          lz4="lz4" if binary_path.name.endswith(".lz4") else None,
+                          lz4="lz4" if remote_name.endswith(".lz4") else None,
                           crash_marked=False)
         if getattr(stats, "termination", None) != "stopped" or getattr(stats, "partial", True):
             raise RuntimeError("timed binary conversion was not a complete stopped trace")
@@ -416,7 +487,7 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
             raise RuntimeError("timed binary does not contain one duration_elapsed TRACE_STOP terminal")
 
 
-def _verify_artifact_read_recovery(device: str, report: dict[str, object], root: Path, *,
+def _verify_artifact_read_recovery(device: str, report: dict[str, object], root: Path | RootedReader, *,
                                    artifact_client_factory=AdbArtifactClient) -> None:
     """Exercise one real app-private artifact read failure without restarting adbd."""
     records = report.get("artifacts")
@@ -429,11 +500,9 @@ def _verify_artifact_read_recovery(device: str, report: dict[str, object], root:
     if len(binary) != 1 or not isinstance(binary[0].get("local_path"), str):
         raise RuntimeError("timed report has no trusted binary identity for recovery verification")
     local_path = Path(binary[0]["local_path"])
-    local_binary = _trusted_output(root / local_path, root)
-    metrics_name = local_binary.name + ".metrics"
+    metrics_name = str(binary[0]["remote_name"]) + ".metrics"
     metrics_relative = Path(str(local_path) + ".metrics")
-    _trusted_output(root / metrics_relative, root)
-    before = _read_beneath(root, str(metrics_relative), MAX_METRICS_BYTES)
+    before = _read_root(root, str(metrics_relative), MAX_METRICS_BYTES)
     client = artifact_client_factory(package=PACKAGE, device=device)
     wrapped = OneShotArtifactRead(client)
     try:
@@ -441,7 +510,7 @@ def _verify_artifact_read_recovery(device: str, report: dict[str, object], root:
     except ConnectionError:
         # The first failure is deliberately before delegating; verify the same
         # trusted session evidence remains intact before retrying the same client.
-        if _read_beneath(root, str(metrics_relative), MAX_METRICS_BYTES) != before:
+        if _read_root(root, str(metrics_relative), MAX_METRICS_BYTES) != before:
             raise RuntimeError("artifact evidence changed after injected read failure")
     else:
         raise RuntimeError("injected artifact read unexpectedly succeeded")
@@ -467,7 +536,7 @@ def _verify_pull_outputs(root: Path) -> None:
         raise RuntimeError("manual pull did not publish output directories: " + ",".join(missing))
 
 
-def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: str | None = None,
+def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReader, *, named: str | None = None,
                            compressed_only: bool = False) -> dict[str, object]:
     relative = _published_report_path(stdout, root)
     report = _strict_pull_report(runner, root, relative)
@@ -502,7 +571,10 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: st
             raise RuntimeError("manual pull report has invalid artifact counters")
         if item["native_stop_acknowledged"] is not None and type(item["native_stop_acknowledged"]) is not bool:
             raise RuntimeError("manual pull report has invalid stop acknowledgement")
-        _trusted_output(root / relative.parent / local, root)
+        if isinstance(root, RootedReader):
+            _read_root(root, str(relative.parent / local))
+        else:
+            _trusted_output(root / relative.parent / local, root)
         names.add(name)
     if named is not None and named not in names:
         raise RuntimeError("named pull report omitted the trusted artifact")
@@ -527,29 +599,33 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     baseline = _wait_for_baseline(runner)
     runner.run(("python3", "scripts/benchmark_trace.py", "--device", device, "--profile", "fast", "--runs", "5",
                 "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), timeout=900.0)
-    reports: dict[str, tuple[Path, Path]] = {}
+    reports: dict[str, tuple[RootedReader, Path]] = {}
     for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
         output = directory / name
         published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
                                allowed=(0, 2) if scenario == "flight-crash" else (0,))
-        reports[name] = (output, _published_report_path(published.stdout, output))
+        reports[name] = (RootedReader(output), _published_report_path(published.stdout, output))
         if scenario == "flight-crash" and published.returncode != 2:
             raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
-    timed, artifact = _validated_timed_report(runner, *reports["offset"])
-    symbol, _ = _validated_timed_report(runner, *reports["symbol"])
-    _validate_timed_artifact_semantics(
-        runner, timed, reports["offset"][0], converter=converter,
-    )
-    _verify_artifact_read_recovery(
-        device, timed, reports["offset"][0],
-        artifact_client_factory=artifact_client_factory,
-    )
-    timed_status = timed["native"]["status"]  # validated above
-    symbol_status = symbol["native"]["status"]
-    if timed_status["normalizedScenes"] != symbol_status["normalizedScenes"]:
-        raise RuntimeError("offset and symbol timed scenes did not normalize identically")
-    _validated_monitor_report(runner, *reports["exit"], status="process_exited")
-    _validated_monitor_report(runner, *reports["crash"], status="crash_recovered")
+    try:
+        timed, artifact = _validated_timed_report(runner, *reports["offset"])
+        symbol, _ = _validated_timed_report(runner, *reports["symbol"])
+        _validate_timed_artifact_semantics(
+            runner, timed, reports["offset"][0], converter=converter,
+        )
+        _verify_artifact_read_recovery(
+            device, timed, reports["offset"][0],
+            artifact_client_factory=artifact_client_factory,
+        )
+        timed_status = timed["native"]["status"]  # validated above
+        symbol_status = symbol["native"]["status"]
+        if timed_status["normalizedScenes"] != symbol_status["normalizedScenes"]:
+            raise RuntimeError("offset and symbol timed scenes did not normalize identically")
+        _validated_monitor_report(runner, *reports["exit"], status="process_exited")
+        _validated_monitor_report(runner, *reports["crash"], status="crash_recovered")
+    finally:
+        for held, _relative in reports.values():
+            held.close()
     runner.run(("adb", "-s", device, "shell", "kill", "-0", str(timed["pid"])), timeout=10.0)
     timed_oracle = json.loads(_read_retry(runner, Path(
         f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"), timeout=5.0))
@@ -559,8 +635,9 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     for name, selector, expected, compressed in pulls:
         output = directory / name
         result = runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, *selector, "--device", device, "--output", str(output)), timeout=180.0)
-        _validated_pull_report(runner, result.stdout, output, named=expected,
-                               compressed_only=compressed)
+        with RootedReader(output) as held:
+            _validated_pull_report(runner, result.stdout, held, named=expected,
+                                   compressed_only=compressed)
     _verify_pull_outputs(directory)
     return 0
 

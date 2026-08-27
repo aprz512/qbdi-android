@@ -149,6 +149,7 @@ class FakeRunner:
         self.commands.append(tuple(command))
         if "--output" in command and "qtrace" in command and "demo" in command:
             output = Path(command[command.index("--output") + 1])
+            output.mkdir(parents=True, exist_ok=True)
             if output.name == "offset":
                 self.offset_root = output
             report = str(output / SESSION / "report.json") + "\n"
@@ -215,7 +216,7 @@ class FakeRunner:
         return ""
 
     def read_text_beneath(self, root: Path, relative: Path, *, timeout: float) -> str:
-        return self.read_text(root / relative, timeout=timeout)
+        return self.read_text(getattr(root, "path", root) / relative, timeout=timeout)
 
 
 class FakeArtifactClient:
@@ -563,6 +564,23 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 _trusted_output(outside, root)
             with self.assertRaises(RuntimeError):
                 _trusted_output(link, root)
+
+    def test_held_root_reader_survives_a_legal_output_directory_rebind(self):
+        from scripts.qtrace_device_acceptance import RootedReader
+
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            output = parent / "output"
+            report = output / SESSION / "report.json"
+            report.parent.mkdir(parents=True)
+            report.write_text('{"trusted":true}', encoding="utf-8")
+            outside = parent / "outside"
+            (outside / SESSION).mkdir(parents=True)
+            (outside / SESSION / "report.json").write_text('{"trusted":false}', encoding="utf-8")
+            with RootedReader(output) as held:
+                output.rename(parent / "original-output")
+                output.symlink_to(outside, target_is_directory=True)
+                self.assertEqual(b'{"trusted":true}', held.read_bytes(Path(SESSION) / "report.json"))
     def test_strict_report_rejects_duplicate_keys_and_nonfinite_numbers(self):
         from scripts.qtrace_device_acceptance import _strict_json
 
