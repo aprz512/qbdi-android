@@ -125,6 +125,7 @@ static std::atomic<int> g_module_callback_state{0};
 #if defined(QTRACE_HOST_TEST)
 using RegistrationGate = void (*)();
 static RegistrationGate g_registration_gate = nullptr;
+static std::atomic<RegistrationGate> g_atfork_prepare_gate{nullptr};
 static std::atomic<RegistrationGate> g_stub_entry_gate{nullptr};
 static RegistrationGate g_installed_status_gate = nullptr;
 static RegistrationGate g_hook_commit_gate = nullptr;
@@ -569,7 +570,8 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
     releases.reserve(4);
     {
         std::unique_lock<std::mutex> registry_guard(g_lock);
-        std::lock_guard<std::mutex> transition_guard(runtime->hook->transition_mutex);
+        std::unique_lock<std::mutex> transition_guard(
+                runtime->hook->transition_mutex);
         --runtime->hook->active_proxy_calls;
         if (runtime->hook->active_proxy_calls == 0) {
             if (!runtime->hook->retired && runtime->hook->pending_install) {
@@ -640,16 +642,26 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
             } else if (!runtime->hook->retired && !runtime->hook->installed) {
                 // Every physical hook installation gets a distinct proxy identity.
                 // A thread may still be paused in this generation's old stub.
+                const TraceConfig rehook_config = runtime->hook->config;
+                const SceneConfig rehook_scene = runtime->hook->scene;
+                const ModuleRange rehook_module = runtime->hook->module;
+                const std::shared_ptr<CaptureCoordinator> rehook_coordinator =
+                        runtime->hook->coordinator;
                 const std::shared_ptr<TraceGenerationRuntime> rehook_runtime =
                         runtime->hook->runtime;
                 runtime->hook->retired = true;
-                (void)create_hook_generation_locked(
-                        runtime->hook->config, runtime->hook->scene,
-                        runtime->hook->module, runtime->hook->config_generation,
-                        runtime->hook->coordinator, rehook_runtime,
-                        &releases, &registry_guard);
                 retire_runtime_ownership_locked(runtime->hook.get(),
                                                 &releases);
+                // create_hook_generation_locked drops and reacquires g_lock
+                // across ShadowHook. Never carry the retired generation's
+                // transition lock into that registry reacquisition: atfork
+                // holds g_lock while it claims every transition lock.
+                transition_guard.unlock();
+                (void)create_hook_generation_locked(
+                        rehook_config, rehook_scene, rehook_module,
+                        runtime->hook->config_generation,
+                        rehook_coordinator, rehook_runtime,
+                        &releases, &registry_guard);
             } else if (!runtime->hook->retired) {
                 runtime->hook->unhook_failed_window = false;
             }
@@ -961,6 +973,7 @@ void trace_proxy_test_reset(const TraceConfig &config) {
     }
     g_configured = true;
     g_registration_gate = nullptr;
+    g_atfork_prepare_gate.store(nullptr, std::memory_order_release);
     g_stub_entry_gate.store(nullptr, std::memory_order_release);
     g_installed_status_gate = nullptr;
     g_hook_commit_gate = nullptr;
@@ -1032,6 +1045,10 @@ bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
 void trace_proxy_test_set_registration_gate(RegistrationGate gate) {
     std::lock_guard<std::mutex> guard(g_lock);
     g_registration_gate = gate;
+}
+
+void trace_proxy_test_set_atfork_prepare_gate(RegistrationGate gate) {
+    g_atfork_prepare_gate.store(gate, std::memory_order_release);
 }
 
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate) {
@@ -1161,6 +1178,11 @@ static void tracer_atfork_prepare() {
     // callback needs g_lock; taking these in the reverse order recreates that
     // three-party cycle during fork.
     process_thread_create_gateway().prepare_for_fork();
+#if defined(QTRACE_HOST_TEST)
+    const RegistrationGate prepare_gate =
+            g_atfork_prepare_gate.load(std::memory_order_acquire);
+    if (prepare_gate != nullptr) prepare_gate();
+#endif
     g_lock.lock();
     g_atfork_locked_generations = 0;
     for (size_t generation = 0; generation < g_next_proxy_generation; ++generation) {

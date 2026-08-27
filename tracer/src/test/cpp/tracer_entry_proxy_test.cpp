@@ -18,11 +18,15 @@
 #include <cstdlib>
 #include <cstdint>
 #include <chrono>
+#include <cerrno>
+#include <climits>
+#include <fcntl.h>
 #include <fstream>
 #include <mutex>
 #include <new>
 #include <memory>
 #include <link.h>
+#include <spawn.h>
 #include <string>
 #include <thread>
 #include <sys/wait.h>
@@ -48,6 +52,7 @@ bool trace_proxy_test_update(const TraceConfig &config, const SceneConfig &scene
 bool trace_proxy_test_repeat_current_install(const SceneConfig &scene,
                                              const ModuleRange &module);
 void trace_proxy_test_set_registration_gate(RegistrationGate gate);
+void trace_proxy_test_set_atfork_prepare_gate(RegistrationGate gate);
 void trace_proxy_test_set_stub_entry_gate(RegistrationGate gate);
 void trace_proxy_test_set_installed_status_gate(RegistrationGate gate);
 void trace_proxy_test_set_hook_commit_gate(RegistrationGate gate);
@@ -84,6 +89,8 @@ volatile sig_atomic_t g_fail_on_child_delete = 0;
 volatile sig_atomic_t g_fail_next_nothrow_allocation = 0;
 std::atomic<size_t> g_throwing_allocation_calls{0};
 bool g_fail_inline_hook_init = false;
+
+extern char **environ;
 
 std::string json_abi_request(std::string package_name,
                              std::string target_module,
@@ -461,6 +468,8 @@ bool g_block_hook_on_linker = false;
 bool g_hook_waiting_for_linker = false;
 bool g_registration_entered = false;
 bool g_release_registration = false;
+bool g_atfork_prepare_entered = false;
+int g_fork_transition_phase_fd = -1;
 bool g_stub_entry_entered = false;
 bool g_release_stub_entry = false;
 bool g_installed_status_entered = false;
@@ -544,6 +553,23 @@ void registration_gate() {
     g_registration_entered = true;
     g_gate_condition.notify_all();
     g_gate_condition.wait(lock, [] { return g_release_registration; });
+}
+
+void report_fork_transition_phase(char phase) {
+    if (g_fork_transition_phase_fd < 0) return;
+    ssize_t written = 0;
+    do {
+        written = ::write(g_fork_transition_phase_fd, &phase, 1);
+    } while (written < 0 && errno == EINTR);
+}
+
+void atfork_prepare_gate() {
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_atfork_prepare_entered = true;
+    }
+    report_fork_transition_phase('P');
+    g_gate_condition.notify_all();
 }
 
 void stub_entry_gate() {
@@ -634,6 +660,7 @@ void reset_fakes() {
         std::lock_guard<std::mutex> gate_lock(g_gate_mutex);
         g_registration_entered = false;
         g_release_registration = false;
+        g_atfork_prepare_entered = false;
         g_stub_entry_entered = false;
         g_release_stub_entry = false;
         g_installed_status_entered = false;
@@ -2840,7 +2867,8 @@ void residual_hook_without_an_original_never_branches_to_null() {
     CHECK(g_unhook_calls == 1);
 }
 
-void fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock() {
+void fork_transition_child_case() {
+    report_fork_transition_phase('S');
     reset_fakes();
     const TraceConfig config = config_named("fork-generation");
     const SceneConfig scene = scene_named("fork-generation",
@@ -2848,6 +2876,7 @@ void fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock(
     trace_proxy_test_reset(config);
     CHECK(trace_proxy_test_update(config, scene, module_named("fork-module")));
     trace_proxy_test_set_registration_gate(registration_gate);
+    trace_proxy_test_set_atfork_prepare_gate(atfork_prepare_gate);
 
     uint64_t args[8]{9};
     std::thread entrant([&] { (void)trace_proxy_dispatch(0, args, 0); });
@@ -2855,10 +2884,9 @@ void fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock(
         std::unique_lock<std::mutex> lock(g_gate_mutex);
         g_gate_condition.wait(lock, [] { return g_registration_entered; });
     }
-    std::atomic<bool> fork_started{false};
+    report_fork_transition_phase('R');
     int child_status = -1;
     std::thread forker([&] {
-        fork_started = true;
         const pid_t child = ::fork();
         if (child == 0) {
             const size_t runner_before = g_runner_calls;
@@ -2867,16 +2895,107 @@ void fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock(
         }
         if (child < 0 || ::waitpid(child, &child_status, 0) != child) child_status = -1;
     });
-    while (!fork_started.load()) std::this_thread::yield();
     {
-        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        g_gate_condition.wait(lock, [] { return g_atfork_prepare_entered; });
         g_release_registration = true;
     }
+    report_fork_transition_phase('L');
     g_gate_condition.notify_all();
     entrant.join();
     forker.join();
+    trace_proxy_test_set_atfork_prepare_gate(nullptr);
     trace_proxy_test_set_registration_gate(nullptr);
     CHECK(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    report_fork_transition_phase('C');
+}
+
+const char *fork_transition_phase_name(char phase) {
+    switch (phase) {
+        case 'S': return "setup";
+        case 'R': return "registration-held";
+        case 'P': return "atfork-prepare-before-registry";
+        case 'L': return "registration-released";
+        case 'C': return "complete";
+        default: return "not-started";
+    }
+}
+
+void drain_fork_transition_phase(int fd, char *phase) {
+    char observed[32]{};
+    for (;;) {
+        const ssize_t size = ::read(fd, observed, sizeof(observed));
+        if (size > 0) {
+            *phase = observed[size - 1];
+            continue;
+        }
+        if (size < 0 && errno == EINTR) continue;
+        CHECK(size == 0 || (errno == EAGAIN || errno == EWOULDBLOCK));
+        return;
+    }
+}
+
+void fork_waits_for_transition_and_child_uses_inherited_bypass_without_deadlock() {
+    int phase_pipe[2]{-1, -1};
+    CHECK(::pipe(phase_pipe) == 0);
+    const int read_flags = ::fcntl(phase_pipe[0], F_GETFL, 0);
+    CHECK(read_flags >= 0);
+    CHECK(::fcntl(phase_pipe[0], F_SETFL, read_flags | O_NONBLOCK) == 0);
+
+    posix_spawn_file_actions_t actions{};
+    CHECK(::posix_spawn_file_actions_init(&actions) == 0);
+    CHECK(::posix_spawn_file_actions_addclose(&actions, phase_pipe[0]) == 0);
+    char phase_fd[32]{};
+    std::snprintf(phase_fd, sizeof(phase_fd), "%d", phase_pipe[1]);
+    char executable[] = "/proc/self/exe";
+    char selected[] = "fork-transition-child";
+    char *const arguments[]{executable, selected, phase_fd, nullptr};
+    pid_t child = -1;
+    const int spawn_error = ::posix_spawn(
+            &child, executable, &actions, nullptr, arguments, environ);
+    CHECK(::posix_spawn_file_actions_destroy(&actions) == 0);
+    CHECK(::close(phase_pipe[1]) == 0);
+    phase_pipe[1] = -1;
+    CHECK(spawn_error == 0 && child > 0);
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto operation_deadline = started + std::chrono::seconds(4);
+    const auto cleanup_deadline = started + std::chrono::seconds(5);
+    char phase = 0;
+    int status = -1;
+    pid_t waited = 0;
+    while (std::chrono::steady_clock::now() < operation_deadline) {
+        drain_fork_transition_phase(phase_pipe[0], &phase);
+        waited = ::waitpid(child, &status, WNOHANG);
+        if (waited == child) break;
+        if (waited < 0 && errno == EINTR) continue;
+        CHECK(waited == 0);
+        (void)::usleep(1000);
+    }
+    if (waited == 0) {
+        drain_fork_transition_phase(phase_pipe[0], &phase);
+        std::fprintf(stderr,
+                     "fork transition subprocess timeout pid=%ld phase=%s\n",
+                     static_cast<long>(child),
+                     fork_transition_phase_name(phase));
+        (void)::kill(child, SIGKILL);
+        while (std::chrono::steady_clock::now() < cleanup_deadline) {
+            waited = ::waitpid(child, &status, WNOHANG);
+            if (waited == child) break;
+            if (waited < 0 && errno == EINTR) continue;
+            CHECK(waited == 0);
+            (void)::usleep(1000);
+        }
+        if (waited == 0) {
+            std::fprintf(stderr,
+                         "fork transition subprocess unreaped pid=%ld phase=%s\n",
+                         static_cast<long>(child),
+                         fork_transition_phase_name(phase));
+        }
+    }
+    CHECK(::close(phase_pipe[0]) == 0);
+    CHECK(waited == child);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 void target_fork_child_skips_inherited_proxy_postamble() {
@@ -3464,6 +3583,15 @@ extern "C" uint64_t call_target_arm64(uintptr_t target, const uint64_t args[8], 
 void set_jni_backtrace_funcs(const std::vector<std::string> &) {}
 
 int main(int argc, char **argv) {
+    if (argc == 3 && std::string_view(argv[1]) == "fork-transition-child") {
+        char *end = nullptr;
+        const long phase_fd = std::strtol(argv[2], &end, 10);
+        CHECK(end != argv[2] && end != nullptr && *end == '\0' &&
+              phase_fd >= 0 && phase_fd <= INT_MAX);
+        g_fork_transition_phase_fd = static_cast<int>(phase_fd);
+        fork_transition_child_case();
+        return 0;
+    }
     if (argc == 2) {
         const std::string_view selected(argv[1]);
         if (selected == "flight-hook-failure") {
