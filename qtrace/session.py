@@ -16,7 +16,7 @@ from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceE
 from scripts.bounded_process import BoundedProcessError
 from qtrace.injector import InjectionRequest, InjectionResult
 from qtrace.lock import TargetLock
-from qtrace.models import ResolvedScene, ResolvedTarget, UserConfig
+from qtrace.models import AppConfig, OffsetScene, ResolvedScene, ResolvedTarget, SymbolScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.report import ReportWriter, SessionReport, SessionStage
 
 
@@ -30,6 +30,8 @@ _STATE_ORDER = {"installed": 0, "running": 1, "stop_requested": 2, "stopping": 3
 _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _ANY_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TRACER_ARTIFACT_SUFFIXES = (".trace.bin", ".trace.bin.lz4", ".flight.bin")
+_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
+_SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
 
 
 class Clock(Protocol):
@@ -226,12 +228,57 @@ def _timeout(value: object, field: str) -> float:
     return float(value)
 
 
+def _request_config(config: object) -> UserConfig:
+    if not isinstance(config, UserConfig) or config.schema_version != 1 or type(config.app) is not AppConfig or \
+            type(config.target) is not TargetConfig or type(config.tracer) is not TracerConfig or type(config.scenes) is not tuple:
+        raise QtraceError("session.request_invalid", "session.request", "config has an invalid shape")
+    if not isinstance(config.app.package, str) or _PACKAGE.fullmatch(config.app.package) is None or \
+            not isinstance(config.target.module, str) or not config.target.module:
+        raise QtraceError("session.request_invalid", "session.request", "config package or module is invalid")
+    tracer = config.tracer
+    if tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
+            type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None):
+        raise QtraceError("session.request_invalid", "session.request", "tracer configuration is invalid")
+    if len(config.scenes) > 256 or len({scene.name for scene in config.scenes if hasattr(scene, "name")}) != len(config.scenes):
+        raise QtraceError("session.request_invalid", "session.request", "scenes are invalid")
+    names: set[str] = set()
+    for scene in config.scenes:
+        if type(scene) is OffsetScene:
+            valid = type(scene.start_offset) is int and type(scene.end_offset) is int and 0 < scene.start_offset < scene.end_offset and scene.start_offset % 4 == 0 and scene.end_offset % 4 == 0
+        elif type(scene) is SymbolScene:
+            valid = isinstance(scene.symbol, str) and bool(scene.symbol)
+        else:
+            valid = False
+        if not valid or not isinstance(scene.name, str) or not scene.name or len(scene.name.encode("utf-8")) > 128 or scene.name in names:
+            raise QtraceError("session.request_invalid", "session.request", "scene is invalid")
+        names.add(scene.name)
+    if tracer.flight_enabled != (tracer.flight_entry_scene is not None) or (tracer.flight_entry_scene is not None and tracer.flight_entry_scene not in names):
+        raise QtraceError("session.request_invalid", "session.request", "flight entry scene is invalid")
+    return config
+
+
+def _safe_output(path: Path) -> None:
+    if any(part == ".." for part in path.parts):
+        raise QtraceError("session.request_invalid", "session.request", "output contains parent traversal")
+    current = Path(path.anchor) if path.is_absolute() else Path(".")
+    for part in path.parts[1 if path.is_absolute() else 0:]:
+        current /= part
+        try:
+            if current.is_symlink():
+                raise QtraceError("session.request_invalid", "session.request", "output ancestor is a symlink")
+        except OSError as error:
+            raise QtraceError("session.request_invalid", "session.request", "output path is invalid") from error
+
+
 def _validate_request(request: object, timed: bool, session_id: str) -> RunRequest | MonitorRequest:
     expected = RunRequest if timed else MonitorRequest
     if not isinstance(request, expected):
         raise QtraceError("session.request_invalid", "session.request", "request type does not match command")
-    if not isinstance(request.config, UserConfig) or not isinstance(request.output, Path):
+    if not isinstance(request.output, Path) or (request.device is not None and (not isinstance(request.device, str) or _SERIAL.fullmatch(request.device) is None)) or \
+            (request.installed_action is not None and not callable(request.installed_action)):
         raise QtraceError("session.request_invalid", "session.request", "config and output are invalid")
+    _request_config(request.config)
+    _safe_output(request.output)
     _timeout(request.setup_timeout, "setup timeout")
     _timeout(request.adb_timeout, "ADB timeout")
     _timeout(request.pull_timeout, "pull timeout")
@@ -506,6 +553,8 @@ class SessionOrchestrator:
                 raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.status", "ADB status polling deadline exhausted")
             self._clock.sleep(min(0.1, max(0.0, deadline - self._clock.monotonic())))
         if not saw_stop:
+            if transient_count:
+                raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.status", "ADB status polling deadline exhausted")
             raise QtraceError("session.run_timeout", "session.running", "native stop did not begin before the deadline")
         assert previous is not None
         return previous, True
@@ -539,7 +588,8 @@ class SessionOrchestrator:
                     outage_deadline = candidate_deadline
                 if self._clock.monotonic() >= outage_deadline:
                     raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.monitor", "ADB process polling deadline exhausted")
-            self._clock.sleep(0.1)
+            sleep = 0.1 if outage_deadline is None else min(0.1, max(0.0, outage_deadline - self._clock.monotonic()))
+            self._clock.sleep(sleep)
 
     def _collect(self, device: object, request: RunRequest | MonitorRequest, session_id: str,
                  snapshot: tuple[str, ...], status: Mapping[str, object] | None) -> tuple[int, tuple[Path, ...]]:

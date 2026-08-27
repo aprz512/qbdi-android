@@ -26,9 +26,22 @@ class TargetLock:
     def _root(self) -> int:
         base = self._runtime_dir or Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        if any(part == ".." for part in base.parts):
+            raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe")
+        descriptor = os.open("/" if base.is_absolute() else ".", flags)
         try:
-            base_fd = os.open(base, flags)
+            for component in base.parts[1 if base.is_absolute() else 0:]:
+                if component in {"", "."}:
+                    continue
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            info = os.fstat(descriptor)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.getuid()}:
+                raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe")
+            base_fd = descriptor
         except OSError as error:
+            os.close(descriptor)
             raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe") from error
         name = f"qtrace-{os.getuid()}"
         try:
