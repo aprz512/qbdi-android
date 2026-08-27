@@ -1,7 +1,11 @@
+import os
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import scripts.bounded_process as bounded_process
@@ -132,6 +136,68 @@ class BoundedProcessTests(unittest.TestCase):
         with self.assertRaisesRegex(BoundedProcessError, "size limit"):
             capture_bounded(command, maximum_bytes=1024, timeout=5)
         self.assertLess(time.monotonic() - started, 2)
+
+    def test_timeout_kills_pipe_inheriting_descendant_after_leader_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "descendant.pid"
+            command = [
+                sys.executable,
+                "-c",
+                (
+                    "import os, pathlib, time\n"
+                    "child = os.fork()\n"
+                    f"if child:\n pathlib.Path({str(pid_path)!r}).write_text(str(child))\n"
+                    "else:\n time.sleep(30)\n"
+                ),
+            ]
+            child_pid = None
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    capture_bounded(command, maximum_bytes=1024, timeout=0.1)
+                child_pid = int(pid_path.read_text(encoding="utf-8"))
+
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(child_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail(f"descendant {child_pid} survived timeout cleanup")
+            finally:
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_success_returns_stdout(self):
+        with patch.object(bounded_process.os, "killpg") as kill_group:
+            output = capture_bounded(
+                [sys.executable, "-c", "import os; os.write(1, b'ok')"],
+                maximum_bytes=1024,
+                timeout=5,
+            )
+
+        self.assertEqual(b"ok", output)
+        kill_group.assert_not_called()
+
+    def test_nonzero_error_preserves_stdout(self):
+        with self.assertRaises(BoundedProcessError) as caught:
+            capture_bounded(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os; os.write(1, b'partial'); os.write(2, b'boom'); raise SystemExit(7)",
+                ],
+                maximum_bytes=1024,
+                timeout=5,
+            )
+
+        self.assertEqual(7, caught.exception.returncode)
+        self.assertEqual(b"partial", caught.exception.stdout)
+        self.assertEqual(b"boom", caught.exception.stderr)
 
     def test_reaps_timeout_and_reports_bounded_stderr(self):
         with self.assertRaises(subprocess.TimeoutExpired):
