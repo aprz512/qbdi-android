@@ -740,6 +740,45 @@ class LockTests(unittest.TestCase):
                             pass
                     close.assert_called_once_with(123)
 
+    def test_success_cleanup_attempts_both_fds_and_propagates_first_close_error(self) -> None:
+        runtime = Path(self.directory.name)
+        root_fd = os.open(runtime, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        real_close = os.close
+        closed: list[int] = []
+
+        def close_then_raise(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+            if len(closed) == 1:
+                raise OSError("close failed")
+
+        with patch.object(TargetLock, "_root", return_value=root_fd), \
+                patch("qtrace.lock.os.close", side_effect=close_then_raise):
+            with self.assertRaisesRegex(OSError, "close failed"):
+                with TargetLock(runtime).acquire("device-1", PACKAGE):
+                    pass
+        self.assertEqual(2, len(closed))
+        self.assertIn(root_fd, closed)
+
+    def test_body_primary_survives_close_failures_after_both_fds_are_attempted(self) -> None:
+        runtime = Path(self.directory.name)
+        root_fd = os.open(runtime, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        real_close = os.close
+        closed: list[int] = []
+
+        def close_then_raise(fd: int) -> None:
+            closed.append(fd)
+            real_close(fd)
+            raise OSError("close failed")
+
+        with patch.object(TargetLock, "_root", return_value=root_fd), \
+                patch("qtrace.lock.os.close", side_effect=close_then_raise):
+            with self.assertRaises(KeyboardInterrupt):
+                with TargetLock(runtime).acquire("device-1", PACKAGE):
+                    raise KeyboardInterrupt()
+        self.assertEqual(2, len(closed))
+        self.assertIn(root_fd, closed)
+
 
 if __name__ == "__main__":
     unittest.main()

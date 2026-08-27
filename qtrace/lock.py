@@ -8,6 +8,7 @@ import hashlib
 import os
 import re
 import stat
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -19,12 +20,23 @@ _SAFE_SERIAL = re.compile(r"[A-Za-z0-9._:@+-]+\Z")
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 
 
-def _close(fd: int) -> None:
-    try:
-        os.close(fd)
-    except BaseException:
-        # Cleanup must never replace the operation's original exception.
-        pass
+def _close_owned(fds: tuple[int, ...]) -> None:
+    """Close every owned FD, preserving a primary exception when present."""
+    primary = sys.exc_info()[1]
+    first_failure: BaseException | None = None
+    for fd in fds:
+        try:
+            os.close(fd)
+        except BaseException as error:
+            if primary is None:
+                first_failure = first_failure or error
+            else:
+                try:
+                    primary.add_note(f"lock FD close failed: {error}")
+                except BaseException:
+                    pass
+    if primary is None and first_failure is not None:
+        raise first_failure
 
 
 class TargetLock:
@@ -42,29 +54,42 @@ class TargetLock:
                 if component in {"", "."}:
                     continue
                 child = os.open(component, flags, dir_fd=descriptor)
-                os.close(descriptor)
+                try:
+                    _close_owned((descriptor,))
+                except BaseException:
+                    # The child is owned as soon as it is opened; do not leak it
+                    # when transferring ownership from the previous directory FD.
+                    _close_owned((child,))
+                    raise
                 descriptor = child
             info = os.fstat(descriptor)
             if not stat.S_ISDIR(info.st_mode) or info.st_uid not in {0, os.getuid()}:
                 raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe")
             base_fd = descriptor
         except BaseException as error:
-            _close(descriptor)
+            _close_owned((descriptor,))
             if isinstance(error, OSError):
                 raise QtraceError("session.lock_invalid", "lock", "lock base is unsafe") from error
             raise
         name = f"qtrace-{os.getuid()}"
+        root: int | None = None
         try:
             try:
                 os.mkdir(name, 0o700, dir_fd=base_fd)
             except FileExistsError:
                 pass
-            try:
-                root = os.open(name, flags, dir_fd=base_fd)
-            except OSError as error:
+            root = os.open(name, flags, dir_fd=base_fd)
+        except BaseException as error:
+            _close_owned((base_fd,))
+            if isinstance(error, OSError):
                 raise QtraceError("session.lock_invalid", "lock", "lock root is unsafe") from error
-        finally:
-            _close(base_fd)
+            raise
+        try:
+            _close_owned((base_fd,))
+        except BaseException:
+            _close_owned((root,))
+            raise
+        assert root is not None
         try:
             info = os.fstat(root)
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
@@ -74,7 +99,7 @@ class TargetLock:
                 raise QtraceError("session.lock_invalid", "lock", "lock root mode is unsafe")
             return root
         except BaseException:
-            _close(root)
+            _close_owned((root,))
             raise
 
     @contextmanager
@@ -89,7 +114,7 @@ class TargetLock:
         try:
             descriptor = os.open(f"{digest}.lock", flags, 0o600, dir_fd=root)
         except BaseException as error:
-            _close(root)
+            _close_owned((root,))
             if isinstance(error, OSError):
                 raise QtraceError("session.lock_invalid", "lock", "lock file is unsafe") from error
             raise
@@ -111,5 +136,4 @@ class TargetLock:
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
-            _close(descriptor)
-            _close(root)
+            _close_owned((descriptor, root))
