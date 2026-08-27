@@ -32,6 +32,23 @@ _STATUS_KEYS = {"schemaVersion", "sessionId", "generation", "packageName", "pid"
 _MAX_NAME_BYTES = 255
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 _MAX_STATUS_BYTES = 64 * 1024
+_FORMAT4_COMPLETED_TERMINAL = re.compile(
+    r"TRACE_END status=completed return_valid=1 return=0x[0-9a-fA-F]+ elapsed_ms=\d+ "
+    r"instructions=\d+ encoded_bytes=\d+ compressed_bytes=\d+ cache_hits=\d+ "
+    r"cache_misses=\d+ cache_collisions=\d+ buffer_swaps=\d+ producer_waits=\d+ "
+    r"producer_wait_ns=\d+ effective_buffer_bytes=\d+\Z"
+)
+_FORMAT4_STOPPED_TERMINAL = re.compile(
+    r"TRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=\d+ "
+    r"instructions=\d+ encoded_bytes=\d+ compressed_bytes=\d+ cache_hits=\d+ "
+    r"cache_misses=\d+ cache_collisions=\d+ buffer_swaps=\d+ producer_waits=\d+ "
+    r"producer_wait_ns=\d+ effective_buffer_bytes=\d+\Z"
+)
+_LEGACY_OK_TERMINAL = re.compile(
+    r"TRACE_END status=ok ret=0x[0-9a-fA-F]+ elapsed_ms=\d+ "
+    r"(?:bytes=\d+|instructions=\d+ raw_bytes=\d+ cache_hit_rate=\d+\.\d{6} "
+    r"buffer_swaps=\d+ producer_waits=\d+ producer_wait_ns=\d+)\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -401,23 +418,9 @@ def _text_complete(path: Path) -> bool:
     if not lines:
         return False
     def terminal(line: str) -> bool:
-        words = line.split()
-        if len(words) < 2 or words[0] != "TRACE_END" or not words[1].startswith("status="):
-            return False
-        state = words[1][len("status="):]
-        if state not in {"completed", "ok", "stopped"}:
-            return False
-        fields: dict[str, str] = {}
-        for word in words[2:]:
-            if "=" not in word:
-                return False
-            key, value = word.split("=", 1)
-            if not key or key in fields or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not value:
-                return False
-            fields[key] = value
-        if state == "stopped":
-            return fields.get("reason") == "duration_elapsed" and fields.get("return_valid") == "0"
-        return True
+        return any(pattern.fullmatch(line) is not None for pattern in (
+            _FORMAT4_COMPLETED_TERMINAL, _FORMAT4_STOPPED_TERMINAL, _LEGACY_OK_TERMINAL,
+        ))
     if any("TRACE_END" in line and not terminal(line) for line in lines):
         return False
     matches = [line for line in lines if terminal(line)]
@@ -950,20 +953,36 @@ class ArtifactProcessor:
                        for found in re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", root,
                                                flags=re.IGNORECASE)}
         if uuid_values:
-            if len(uuid_values) != 1:
+            if selection.mode is PullMode.ALL and len(uuid_values) > 1:
+                for candidate_id in uuid_values:
+                    candidate_name = f"session-{candidate_id}.status.json"
+                    if candidate_name not in listing:
+                        raise _error("artifact.status_missing", "UUID-bearing artifact has no matching native status")
+                    try:
+                        candidate_status = _json_status(_call(getattr(client, "read_file"), candidate_name,
+                                                               timeout=timeout), candidate_id, package)
+                    except QtraceError as error:
+                        raise _error("artifact.status_missing", "matching native status is invalid") from error
+                    owned = [root for root in roots if candidate_id in root.lower()]
+                    if any(root not in candidate_status["artifacts"] for root in owned):
+                        raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
+                # Multiple independently proven roots share a generated manual pull session.
+                session_id = None
+            elif len(uuid_values) != 1:
                 raise _error("artifact.status_missing", "UUID-bearing artifacts belong to multiple sessions")
-            candidate_id = next(iter(uuid_values))
-            candidate_name = f"session-{candidate_id}.status.json"
-            if candidate_name not in listing:
-                raise _error("artifact.status_missing", "UUID-bearing artifact has no matching native status")
-            try:
-                candidate_status = _json_status(_call(getattr(client, "read_file"), candidate_name,
-                                                       timeout=timeout), candidate_id, package)
-            except QtraceError as error:
-                raise _error("artifact.status_missing", "matching native status is invalid") from error
-            if any(root not in candidate_status["artifacts"] for root in roots):
-                raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
-            status, session_id = candidate_status, candidate_id
+            else:
+                candidate_id = next(iter(uuid_values))
+                candidate_name = f"session-{candidate_id}.status.json"
+                if candidate_name not in listing:
+                    raise _error("artifact.status_missing", "UUID-bearing artifact has no matching native status")
+                try:
+                    candidate_status = _json_status(_call(getattr(client, "read_file"), candidate_name,
+                                                           timeout=timeout), candidate_id, package)
+                except QtraceError as error:
+                    raise _error("artifact.status_missing", "matching native status is invalid") from error
+                if any(root not in candidate_status["artifacts"] for root in roots):
+                    raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
+                status, session_id = candidate_status, candidate_id
         if session_id is None:
             session_id = str(uuid.uuid4())
         selected = list(roots)

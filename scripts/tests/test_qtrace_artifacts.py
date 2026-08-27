@@ -2,6 +2,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,14 @@ from qtrace.artifacts import (ArtifactProcessor, ArtifactResult, PullMode,
                               PullSelection, PulledArtifact,
                               pull_named_artifacts)
 from qtrace.errors import QtraceError
+
+
+COMPLETE_TERMINAL = (
+    b"TRACE_END status=completed return_valid=1 return=0x0 elapsed_ms=0 "
+    b"instructions=0 encoded_bytes=0 compressed_bytes=0 cache_hits=0 cache_misses=0 "
+    b"cache_collisions=0 buffer_swaps=0 producer_waits=0 producer_wait_ns=0 "
+    b"effective_buffer_bytes=0\n"
+)
 
 
 class FakeClient:
@@ -115,8 +124,8 @@ class ArtifactTests(unittest.TestCase):
             self.assertNotIn("run.trace.txt.metrics", [p.name for p in result.files])
 
     def test_missing_native_status_recovers_listing_as_partial(self):
-        client = FakeClient({"old.trace.txt": b"TRACE_END status=completed\n",
-                             "new.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"old.trace.txt": COMPLETE_TERMINAL,
+                             "new.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).collect_session(
                 "d", "com.example.app", "11111111-1111-4111-8111-111111111111", None,
@@ -176,7 +185,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertTrue((result.output_dir / "artifacts" / "run.flight.json").is_file())
 
     def test_corrupt_member_is_not_in_published_files(self):
-        client = FakeClient({"bad.trace.bin": b"bad", "good.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"bad.trace.bin": b"bad", "good.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).pull_manual("d", "com.example.app",
                                                          PullSelection(PullMode.ALL), Path(root), 1)
@@ -198,7 +207,7 @@ class ArtifactTests(unittest.TestCase):
             serial = "SERIAL"
             access_mode = "root"
             target_strategy = "su-uid"
-        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).pull_manual(Device(), "com.example.app",
                                                          PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
@@ -207,7 +216,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual("su-uid", document["target_strategy"])
 
     def test_unicode_legacy_basename_is_accepted_by_client(self):
-        client = FakeClient({"合法.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"合法.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).pull_manual("d", "com.example.app",
                                                          PullSelection(PullMode.NAME, "合法.trace.txt"), Path(root), 1)
@@ -229,19 +238,19 @@ class ArtifactTests(unittest.TestCase):
             self.assertEqual(1, client.count)
 
     def test_pull_result_does_not_claim_remote_size_as_destination_size(self):
-        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).pull_manual("d", "com.example.app",
                                                          PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
             report = json.loads((result.output_dir / "report.json").read_text())
             self.assertIsNone(report["artifacts"][0]["source_size"])
-            self.assertEqual(len(b"TRACE_END status=completed\n"), report["artifacts"][0]["destination_size"])
+            self.assertEqual(len(COMPLETE_TERMINAL), report["artifacts"][0]["destination_size"])
             self.assertIn("remote_name", report["artifacts"][0])
 
     def test_stopping_status_must_not_acknowledge_before_seal(self):
         status = self._status(state="stopping", reason="duration_elapsed", stopAcknowledged=True)
         client = FakeClient({"session-11111111-1111-4111-8111-111111111111.status.json":
-                             json.dumps(status).encode(), "run.trace.txt": b"TRACE_END status=completed\n"})
+                             json.dumps(status).encode(), "run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(QtraceError) as raised:
                 self._processor(client).pull_manual("d", "com.example.app", PullSelection(), Path(root), 1)
@@ -254,7 +263,7 @@ class ArtifactTests(unittest.TestCase):
                                             {"sceneIndex": 0, "tid": 12, "sealed": False}],
                               artifacts=["run.trace.txt"])
         client = FakeClient({"session-11111111-1111-4111-8111-111111111111.status.json":
-                             json.dumps(status).encode(), "run.trace.txt": b"TRACE_END status=completed\n"})
+                             json.dumps(status).encode(), "run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).pull_manual("d", "com.example.app", PullSelection(), Path(root), 1)
             self.assertEqual(2, result.exit_code)
@@ -262,7 +271,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_stop_incomplete_is_published_as_partial(self):
         status = self._status(state="stop_incomplete", reason="duration_elapsed", stopAcknowledged=False)
-        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).collect_session("d", "com.example.app", status["sessionId"],
                                                              status, Path(root), 1)
@@ -271,16 +280,68 @@ class ArtifactTests(unittest.TestCase):
 
     def test_manual_uuid_artifact_requires_matching_native_status(self):
         name = "11111111-1111-4111-8111-111111111111.trace.txt"
-        client = FakeClient({name: b"TRACE_END status=completed\n"})
+        client = FakeClient({name: COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(QtraceError) as raised:
                 self._processor(client).pull_manual("d", "com.example.app",
                                                     PullSelection(PullMode.NAME, name), Path(root), 1)
             self.assertEqual("artifact.status_missing", raised.exception.code)
 
+    def test_all_uses_each_matching_status_for_multiple_uuid_roots(self):
+        first = "11111111-1111-4111-8111-111111111111"
+        second = "22222222-2222-4222-8222-222222222222"
+        generated = "33333333-3333-4333-8333-333333333333"
+        first_root = f"{first}.trace.txt"
+        second_root = f"{second}.trace.txt"
+        client = FakeClient({
+            f"session-{first}.status.json": json.dumps(
+                self._status(first, artifacts=[first_root])).encode(),
+            f"session-{second}.status.json": json.dumps(
+                self._status(second, artifacts=[second_root])).encode(),
+            first_root: COMPLETE_TERMINAL,
+            second_root: COMPLETE_TERMINAL,
+        })
+        with tempfile.TemporaryDirectory() as root, patch(
+                "qtrace.artifacts.uuid.uuid4", return_value=uuid.UUID(generated)):
+            result = self._processor(client).pull_manual(
+                "d", "com.example.app", PullSelection(PullMode.ALL), Path(root), 1)
+            self.assertEqual({first_root, second_root}, {path.name for path in result.files})
+            self.assertEqual(generated, json.loads(
+                (result.output_dir / "session.json").read_text())["sessionId"])
+            reads = [call[1] for call in client.calls if call[0] == "read"]
+            self.assertIn(f"session-{first}.status.json", reads)
+            self.assertIn(f"session-{second}.status.json", reads)
+
+    def test_text_terminal_rejects_unversioned_or_extra_terminal_fields(self):
+        invalid = (
+            b"TRACE_END status=ok\n",
+            b"TRACE_END status=completed extra=untrusted\n",
+            b"TRACE_END status=stopped reason=duration_elapsed return_valid=0\n",
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as root:
+                result = self._processor(FakeClient({"run.trace.txt": payload})).pull_manual(
+                    "d", "com.example.app", PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
+                self.assertEqual(2, result.exit_code)
+                self.assertFalse((result.output_dir / "artifacts" / "run.trace.txt").exists())
+
+    def test_text_terminal_accepts_exact_legacy_and_stopped_forms(self):
+        valid = (
+            b"TRACE_END status=ok ret=0x0 elapsed_ms=0 bytes=0\n",
+            b"TRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=0 "
+            b"instructions=0 encoded_bytes=0 compressed_bytes=0 cache_hits=0 cache_misses=0 "
+            b"cache_collisions=0 buffer_swaps=0 producer_waits=0 producer_wait_ns=0 "
+            b"effective_buffer_bytes=0\n",
+        )
+        for payload in valid:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as root:
+                result = self._processor(FakeClient({"run.trace.txt": payload})).pull_manual(
+                    "d", "com.example.app", PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
+                self.assertEqual(0, result.exit_code)
+                self.assertTrue((result.output_dir / "artifacts" / "run.trace.txt").exists())
+
     def test_current_writer_is_retained_as_bounded_incomplete_evidence(self):
-        client = FakeClient({"run.trace.txt.current": b"partial", "good.trace.txt":
-                             b"TRACE_END status=completed\n"})
+        client = FakeClient({"run.trace.txt.current": b"partial", "good.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).pull_manual("d", "com.example.app",
                                                          PullSelection(PullMode.ALL), Path(root), 1)
@@ -299,7 +360,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_corrupt_root_removes_sidecars_but_preserves_valid_sibling(self):
         client = FakeClient({"bad.trace.bin": b"bad", "bad.trace.bin.metrics": b"old",
-                             "good.trace.txt": b"TRACE_END status=completed\n"})
+                             "good.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).pull_manual("d", "com.example.app",
                                                          PullSelection(PullMode.ALL), Path(root), 1)
@@ -310,7 +371,7 @@ class ArtifactTests(unittest.TestCase):
     def test_post_rename_fsync_failure_returns_committed_partial(self):
         sid = "11111111-1111-4111-8111-111111111111"
         status = self._status(sid)
-        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             output = Path(root)
             real_fsync = __import__("os").fsync
@@ -329,7 +390,7 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn("artifact.commit_durable", {error["code"] for error in result.errors})
 
     def test_statusless_session_json_uses_null_native_status(self):
-        client = FakeClient({"run.trace.txt": b"TRACE_END status=completed\n"})
+        client = FakeClient({"run.trace.txt": COMPLETE_TERMINAL})
         with tempfile.TemporaryDirectory() as root:
             result = self._processor(client).collect_session(
                 "d", "com.example.app", "11111111-1111-4111-8111-111111111111", None,
