@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
+from scripts.bounded_process import BoundedProcessError, capture_bounded
 
 
 PACKAGE = "com.aprz.qbdiandroid"
@@ -46,6 +47,12 @@ class SubprocessRunner:
 
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult:
+        if allowed == (0,) and cwd is None:
+            try:
+                output = capture_bounded(command, maximum_bytes=1_048_576, timeout=timeout)
+            except BoundedProcessError as error:
+                raise RuntimeError(str(error)) from error
+            return CommandResult(output.decode("utf-8", errors="strict"), "", 0)
         completed = subprocess.run(list(command), cwd=cwd, text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, timeout=timeout, check=False)
         if len(completed.stdout.encode()) > 1_048_576 or len(completed.stderr.encode()) > 1_048_576:
