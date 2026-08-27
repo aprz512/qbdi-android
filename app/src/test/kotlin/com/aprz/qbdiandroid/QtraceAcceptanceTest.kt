@@ -27,6 +27,13 @@ class QtraceAcceptanceTest {
         )
     }
 
+    @Test fun serializes_high_bit_native_return_as_unsigned_hex() {
+        assertEquals(
+            "{\"iterations\":1,\"seed\":1,\"result\":\"0x8000000000000000\"}",
+            QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 1L, 1L), Long.MIN_VALUE),
+        )
+    }
+
     @Test fun process_gate_allows_only_one_concurrent_claim() {
         val pool = Executors.newFixedThreadPool(2)
         try {
