@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+import hashlib
 import json
 import math
 import os
@@ -53,6 +54,7 @@ _POLLABLE_FIXTURE_PATHS = frozenset((
 _UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class AcceptanceNotReadyError(RuntimeError):
@@ -196,37 +198,132 @@ def _stage_app_private_binaries(
     """Install the freshly built tracer pair without trusting persistent app data."""
     if re.fullmatch(r"[0-9a-f]{32}", token) is None:
         raise ValueError("acceptance staging token must be 32 lowercase hex characters")
-    staged = tuple(
+    host_staged = tuple(
         f"/data/local/tmp/qtrace-acceptance-{token}-{Path(destination).name}"
         for _source, destination in _APP_PRIVATE_BINARIES
     )
-    staged_successfully = False
+    app_staged = tuple(
+        f"files/.qtrace-acceptance-{token}-{Path(destination).name}"
+        for _source, destination in _APP_PRIVATE_BINARIES
+    )
+    final_paths = tuple(destination for _source, destination in _APP_PRIVATE_BINARIES)
+
+    def validate(remote: str, expected_hash: str) -> None:
+        kind = runner.run(
+            ("adb", "-s", device, "shell", "run-as", package,
+             "stat", "-c", "%F", remote),
+            timeout=30.0,
+        ).stdout.strip()
+        if kind != "regular file":
+            raise RuntimeError(f"app-private tracer path is not a regular file: {remote}")
+        output = runner.run(
+            ("adb", "-s", device, "shell", "run-as", package, "sha256sum", remote),
+            timeout=30.0,
+        ).stdout
+        fields = output.strip().split()
+        if (len(fields) != 2 or _SHA256.fullmatch(fields[0]) is None or
+                fields[1] != remote or fields[0] != expected_hash):
+            raise RuntimeError(f"app-private tracer SHA-256 mismatch: {remote}")
+
+    def remove_app(path: str) -> None:
+        runner.run(
+            ("adb", "-s", device, "shell", "run-as", package, "rm", "-f", path),
+            timeout=30.0,
+        )
+
+    def remove_host(path: str) -> None:
+        runner.run(
+            ("adb", "-s", device, "shell", "rm", "-f", path),
+            timeout=30.0,
+        )
+
+    def collect_cleanup(
+        actions: Sequence[tuple[str, Callable[[], None]]],
+    ) -> list[tuple[str, BaseException]]:
+        failures: list[tuple[str, BaseException]] = []
+        for label, action in actions:
+            try:
+                action()
+            except BaseException as error:
+                failures.append((label, error))
+        return failures
+
+    scratch_cleanup = tuple(
+        (f"app staging path {remote}", lambda remote=remote: remove_app(remote))
+        for remote in app_staged
+    ) + tuple(
+        (f"host staging path {remote}", lambda remote=remote: remove_host(remote))
+        for remote in host_staged
+    )
+    failure_cleanup = tuple(
+        (f"final path {remote}", lambda remote=remote: remove_app(remote))
+        for remote in final_paths
+    ) + scratch_cleanup
+
     try:
-        for (source, _destination), remote in zip(_APP_PRIVATE_BINARIES, staged):
+        expected_hashes: list[str] = []
+        for source, _destination in _APP_PRIVATE_BINARIES:
+            digest = hashlib.sha256()
+            with source.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+            expected_hashes.append(digest.hexdigest())
+        for remote in host_staged:
+            remove_host(remote)
+        for remote in app_staged:
+            remove_app(remote)
+        for (source, _destination), remote in zip(_APP_PRIVATE_BINARIES, host_staged):
             runner.run(
                 ("adb", "-s", device, "push", str(source), remote),
                 timeout=120.0,
             )
-        for (_source, destination), remote in zip(_APP_PRIVATE_BINARIES, staged):
+        for host_remote, app_remote in zip(host_staged, app_staged):
             runner.run(
-                ("adb", "-s", device, "shell", "run-as", package, "cp", remote, destination),
+                ("adb", "-s", device, "shell", "run-as", package,
+                 "cp", host_remote, app_remote),
                 timeout=30.0,
             )
         runner.run(
             ("adb", "-s", device, "shell", "run-as", package, "chmod", "700",
-             *(_destination for _source, _destination in _APP_PRIVATE_BINARIES)),
+             *app_staged),
             timeout=30.0,
         )
-        staged_successfully = True
-    finally:
-        try:
+        for remote, expected_hash in zip(app_staged, expected_hashes):
+            validate(remote, expected_hash)
+        for destination in final_paths:
+            remove_app(destination)
+        for index in (1, 0):
             runner.run(
-                ("adb", "-s", device, "shell", "rm", "-f", *staged),
+                ("adb", "-s", device, "shell", "run-as", package,
+                 "mv", app_staged[index], _APP_PRIVATE_BINARIES[index][1]),
                 timeout=30.0,
             )
-        except Exception:
-            if staged_successfully:
-                raise
+        for (_source, destination), expected_hash in zip(
+                _APP_PRIVATE_BINARIES, expected_hashes):
+            validate(destination, expected_hash)
+        cleanup_failures = collect_cleanup(scratch_cleanup)
+        if cleanup_failures:
+            detail = "; ".join(
+                f"{label}: {type(error).__name__}: {error}"
+                for label, error in cleanup_failures
+            )
+            cleanup_error = RuntimeError(
+                f"app-private tracer staging cleanup failed: {detail}"
+            )
+            raise cleanup_error
+    except BaseException as primary:
+        cleanup_failures = collect_cleanup(failure_cleanup)
+        if cleanup_failures:
+            detail = "; ".join(
+                f"{label}: {type(error).__name__}: {error}"
+                for label, error in cleanup_failures
+            )
+            combined = RuntimeError(
+                "app-private tracer staging failed: "
+                f"{type(primary).__name__}: {primary}; cleanup failed: {detail}"
+            )
+            raise combined from primary
+        raise
 
 
 class RootedReader:
@@ -938,10 +1035,10 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
     runner.run(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), timeout=300.0)
     runner.run(("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"), timeout=900.0)
     runner.run(("adb", "-s", device, "install", "-r", "app/build/outputs/apk/debug/app-debug.apk"), timeout=120.0)
+    runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)
     _stage_app_private_binaries(
         device, runner, token=uuid.uuid4().hex, package=PACKAGE,
     )
-    runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)
     runner.run(("adb", "-s", device, "shell", "am", "start", "-n", ACTIVITY,
                 "--ez", "qtrace_acceptance", "true", "--es", "qtrace_acceptance_mode", "timed",
                 "--el", "qtrace_acceptance_seed", str(SEED), "--el", "qtrace_acceptance_iterations", str(ITERATIONS)), timeout=30.0)

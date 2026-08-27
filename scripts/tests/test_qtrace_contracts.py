@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -1216,6 +1217,141 @@ class FakeRunner:
         return self.read_text(getattr(root, "path", root) / relative, timeout=timeout)
 
 
+class StagingDeviceRunner(FakeRunner):
+    """Stateful fake for the external ADB filesystem boundary."""
+
+    def __init__(self, *, fail_first_read: bool = False,
+                 primary_failure: str | None = None,
+                 cleanup_failures: frozenset[str] = frozenset(),
+                 forged_stale_companion: bool = False,
+                 wrong_types: frozenset[str] = frozenset(),
+                 wrong_hashes: frozenset[str] = frozenset()):
+        super().__init__(fail_first_read=fail_first_read)
+        self.shell_files: dict[str, tuple[str, bytes | str]] = {}
+        self.app_files: dict[str, tuple[str, bytes | str]] = {}
+        self.primary_failure = primary_failure
+        self.cleanup_failures = set(cleanup_failures)
+        self.primary_triggered = False
+        self.forged_stale_companion = forged_stale_companion
+        self.wrong_types = wrong_types
+        self.wrong_hashes = wrong_hashes
+
+    @staticmethod
+    def _role(path: str) -> str:
+        return "companion" if path.endswith("libshadowhook_nothing.so") else "tracer"
+
+    @staticmethod
+    def _is_app_stage(path: str) -> bool:
+        return path.startswith("files/.qtrace-acceptance-")
+
+    def _label(self, operation: str, path: str) -> str:
+        role = self._role(path)
+        if operation in {"stat", "hash"}:
+            phase = "stage" if self._is_app_stage(path) else "final"
+            return f"{operation}:{phase}:{role}"
+        if operation == "rm":
+            if path.startswith("/data/local/tmp/"):
+                phase = "host-stage"
+            elif self._is_app_stage(path):
+                phase = "app-stage"
+            else:
+                phase = "final"
+            if self.primary_triggered:
+                return f"cleanup:{phase}:{role}"
+            return f"remove:{phase}:{role}"
+        return f"{operation}:{role}"
+
+    def _fail_if_requested(self, label: str) -> None:
+        if not self.primary_triggered and label == self.primary_failure:
+            self.primary_triggered = True
+            raise RuntimeError(f"injected primary failure at {label}")
+        if self.primary_triggered and label in self.cleanup_failures:
+            raise RuntimeError(f"injected cleanup failure at {label}")
+
+    @staticmethod
+    def _result(stdout: str = ""):
+        return __import__(
+            "scripts.qtrace_device_acceptance", fromlist=["CommandResult"],
+        ).CommandResult(stdout, "", 0)
+
+    def _remove(self, files: dict[str, tuple[str, bytes | str]], path: str) -> None:
+        label = self._label("rm", path)
+        self._fail_if_requested(label)
+        files.pop(path, None)
+
+    def _read_app(self, path: str) -> bytes:
+        kind, value = self.app_files[path]
+        if kind == "symlink":
+            kind, value = self.app_files[str(value)]
+        if kind != "regular file" or not isinstance(value, bytes):
+            raise RuntimeError(f"cannot read non-regular fake path {path}")
+        return value
+
+    def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+        command = tuple(command)
+        self.commands.append(command)
+        if not command or command[0] != "adb":
+            self.commands.pop()
+            return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+        if command[:4] == ("adb", "-s", "SERIAL", "push"):
+            label = self._label("push", command[4])
+            self._fail_if_requested(label)
+            self.shell_files[command[5]] = ("regular file", Path(command[4]).read_bytes())
+            return self._result()
+        if command[:4] != ("adb", "-s", "SERIAL", "shell"):
+            return self._result()
+        arguments = command[4:]
+        if arguments[:2] != ("run-as", "com.aprz.qbdiandroid"):
+            if arguments[:2] == ("rm", "-f"):
+                for path in arguments[2:]:
+                    self._remove(self.shell_files, path)
+            return self._result()
+        operation, arguments = arguments[2], arguments[3:]
+        if operation == "cp":
+            source, destination = arguments
+            label = self._label("copy", destination)
+            self._fail_if_requested(label)
+            data = self.shell_files[source][1]
+            existing = self.app_files.get(destination)
+            if existing is not None and existing[0] == "symlink":
+                self.app_files[str(existing[1])] = ("regular file", data)
+            else:
+                self.app_files[destination] = ("regular file", data)
+            return self._result()
+        if operation == "chmod":
+            self._fail_if_requested("chmod")
+            return self._result()
+        if operation == "stat":
+            path = arguments[-1]
+            label = self._label("stat", path)
+            self._fail_if_requested(label)
+            if label in self.wrong_types:
+                return self._result("symbolic link\n")
+            kind = self.app_files[path][0]
+            return self._result(kind + "\n")
+        if operation == "sha256sum":
+            path = arguments[0]
+            label = self._label("hash", path)
+            self._fail_if_requested(label)
+            payload = b"wrong hash" if label in self.wrong_hashes else self._read_app(path)
+            digest = hashlib.sha256(payload).hexdigest()
+            return self._result(f"{digest}  {path}\n")
+        if operation == "rm" and arguments[0] == "-f":
+            for path in arguments[1:]:
+                self._remove(self.app_files, path)
+            return self._result()
+        if operation == "mv":
+            source, destination = arguments
+            role = self._role(destination)
+            self._fail_if_requested(f"move:{role}")
+            node = self.app_files.pop(source)
+            if role == "companion" and self.forged_stale_companion:
+                node = ("regular file", b"forged stale companion")
+            self.app_files[destination] = node
+            return self._result()
+        return self._result()
+
+
 class FakeArtifactClient:
     def __init__(self, root: Path):
         self.root = root
@@ -2126,56 +2262,215 @@ class AcceptanceHarnessTests(unittest.TestCase):
             self.assertTrue(retained[0].is_dir())
             self.assertEqual(workspace / "qtrace-acceptance-failures", captured["dir"])
 
-    def test_app_private_tracer_pair_is_staged_through_unique_temporary_paths(self):
+    def test_verified_pair_replaces_final_symlinks_with_tracer_as_activation_marker(self):
         from scripts.qtrace_device_acceptance import _stage_app_private_binaries
 
-        runner = FakeRunner()
-        _stage_app_private_binaries("SERIAL", runner, token="a" * 32)
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner()
+            runner.app_files.update({
+                "files/libqbdi_tracer.so": ("symlink", "files/tracer-victim"),
+                "files/libshadowhook_nothing.so": ("symlink", "files/companion-victim"),
+                "files/tracer-victim": ("regular file", b"tracer victim"),
+                "files/companion-victim": ("regular file", b"companion victim"),
+            })
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
+                _stage_app_private_binaries("SERIAL", runner, token="a" * 32)
 
-        tracer_stage = "/data/local/tmp/qtrace-acceptance-" + "a" * 32 + "-libqbdi_tracer.so"
-        companion_stage = (
-            "/data/local/tmp/qtrace-acceptance-" + "a" * 32 + "-libshadowhook_nothing.so"
+        self.assertEqual(("regular file", b"fresh tracer"),
+                         runner.app_files["files/libqbdi_tracer.so"])
+        self.assertEqual(("regular file", b"fresh companion"),
+                         runner.app_files["files/libshadowhook_nothing.so"])
+        self.assertEqual(("regular file", b"tracer victim"),
+                         runner.app_files["files/tracer-victim"])
+        self.assertEqual(("regular file", b"companion victim"),
+                         runner.app_files["files/companion-victim"])
+        self.assertEqual({}, runner.shell_files)
+        self.assertFalse(any(path.startswith("files/.qtrace-acceptance-")
+                             for path in runner.app_files))
+        move_roles = [
+            StagingDeviceRunner._role(command[-1])
+            for command in runner.commands
+            if len(command) > 6 and command[6] == "mv"
+        ]
+        final_removal_roles = [
+            StagingDeviceRunner._role(command[-1])
+            for command in runner.commands
+            if command[4:8] == ("run-as", "com.aprz.qbdiandroid", "rm", "-f")
+            and command[-1] in {
+                "files/libqbdi_tracer.so", "files/libshadowhook_nothing.so",
+            }
+        ]
+        self.assertEqual(["tracer", "companion"], final_removal_roles)
+        self.assertEqual(["companion", "tracer"], move_roles)
+        self.assertTrue(any(command[6:8] == ("stat", "-c") for command in runner.commands))
+        self.assertTrue(any(command[6] == "sha256sum" for command in runner.commands
+                            if len(command) > 6))
+
+    def test_forged_successful_companion_move_fails_final_hash_and_removes_pair(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner(forged_stale_companion=True)
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
+                _stage_app_private_binaries("SERIAL", runner, token="c" * 32)
+
+        self.assertNotIn("files/libqbdi_tracer.so", runner.app_files)
+        self.assertNotIn("files/libshadowhook_nothing.so", runner.app_files)
+
+    def test_each_pair_staging_boundary_fails_closed_without_final_files(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        command_failures = (
+            "push:tracer", "push:companion", "copy:tracer", "copy:companion", "chmod",
+            "stat:stage:tracer", "stat:stage:companion",
+            "hash:stage:tracer", "hash:stage:companion",
+            "move:companion", "move:tracer",
+            "stat:final:tracer", "stat:final:companion",
+            "hash:final:tracer", "hash:final:companion",
         )
-        self.assertEqual([
-            ("adb", "-s", "SERIAL", "push", "out/arm64-v8a/libqbdi_tracer.so", tracer_stage),
-            ("adb", "-s", "SERIAL", "push", "out/arm64-v8a/libshadowhook_nothing.so", companion_stage),
-            ("adb", "-s", "SERIAL", "shell", "run-as", "com.aprz.qbdiandroid", "cp",
-             tracer_stage, "files/libqbdi_tracer.so"),
-            ("adb", "-s", "SERIAL", "shell", "run-as", "com.aprz.qbdiandroid", "cp",
-             companion_stage, "files/libshadowhook_nothing.so"),
-            ("adb", "-s", "SERIAL", "shell", "run-as", "com.aprz.qbdiandroid", "chmod", "700",
-             "files/libqbdi_tracer.so", "files/libshadowhook_nothing.so"),
-            ("adb", "-s", "SERIAL", "shell", "rm", "-f", tracer_stage, companion_stage),
-        ], runner.commands)
+        malformed_types = (
+            "stat:stage:tracer", "stat:stage:companion",
+            "stat:final:tracer", "stat:final:companion",
+        )
+        mismatched_hashes = (
+            "hash:stage:tracer", "hash:stage:companion",
+            "hash:final:tracer", "hash:final:companion",
+        )
+        cases = [
+            (f"command-{label}", {"primary_failure": label})
+            for label in command_failures
+        ] + [
+            (f"type-{label}", {"wrong_types": frozenset((label,))})
+            for label in malformed_types
+        ] + [
+            (f"digest-{label}", {"wrong_hashes": frozenset((label,))})
+            for label in mismatched_hashes
+        ]
+        for name, options in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary:
+                tracer = Path(temporary) / "libqbdi_tracer.so"
+                companion = Path(temporary) / "libshadowhook_nothing.so"
+                tracer.write_bytes(b"fresh tracer")
+                companion.write_bytes(b"fresh companion")
+                binaries = (
+                    (tracer, "files/libqbdi_tracer.so"),
+                    (companion, "files/libshadowhook_nothing.so"),
+                )
+                runner = StagingDeviceRunner(**options)
+                runner.app_files.update({
+                    "files/libqbdi_tracer.so": ("regular file", b"stale tracer"),
+                    "files/libshadowhook_nothing.so": ("regular file", b"stale companion"),
+                })
+                with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                        self.assertRaises(RuntimeError):
+                    _stage_app_private_binaries("SERIAL", runner, token="d" * 32)
+                self.assertNotIn("files/libqbdi_tracer.so", runner.app_files)
+                self.assertNotIn("files/libshadowhook_nothing.so", runner.app_files)
+                self.assertFalse(any(path.startswith("files/.qtrace-acceptance-")
+                                     for path in runner.app_files))
+                self.assertEqual({}, runner.shell_files)
 
-    def test_app_private_staging_aborts_and_cleans_up_when_companion_push_fails(self):
+    def test_staging_failure_force_stops_first_and_never_starts_or_benchmarks(self):
+        from scripts.qtrace_device_acceptance import run_acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner(primary_failure="copy:companion")
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    self.assertRaisesRegex(RuntimeError, "copy:companion"):
+                run_acceptance("SERIAL", Path(temporary) / "results", runner=runner)
+
+        push_index = next(index for index, command in enumerate(runner.commands)
+                          if command[:4] == ("adb", "-s", "SERIAL", "push"))
+        force_stop_index = next(index for index, command in enumerate(runner.commands)
+                                if command[4:7] == ("am", "force-stop",
+                                                   "com.aprz.qbdiandroid"))
+        self.assertLess(force_stop_index, push_index)
+        self.assertFalse(any(command[4:6] == ("am", "start")
+                             for command in runner.commands))
+        self.assertFalse(any("scripts/benchmark_trace.py" in command
+                             for command in runner.commands))
+
+    def test_primary_and_every_cleanup_failure_remain_in_diagnostics(self):
         from scripts.qtrace_device_acceptance import _stage_app_private_binaries
 
-        class FailingCompanionRunner(FakeRunner):
-            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
-                if command[:4] == ("adb", "-s", "SERIAL", "push"):
-                    self.commands.append(tuple(command))
-                    if command[4].endswith("libshadowhook_nothing.so"):
-                        raise RuntimeError("injected companion push failure")
-                    return __import__(
-                        "scripts.qtrace_device_acceptance", fromlist=["CommandResult"],
-                    ).CommandResult("", "", 0)
-                return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+        cleanup_failures = frozenset((
+            "cleanup:final:tracer",
+            "cleanup:final:companion",
+            "cleanup:app-stage:tracer",
+            "cleanup:host-stage:companion",
+        ))
+        for primary in ("push:companion", "copy:companion", "chmod"):
+            with self.subTest(primary=primary), tempfile.TemporaryDirectory() as temporary:
+                tracer = Path(temporary) / "libqbdi_tracer.so"
+                companion = Path(temporary) / "libshadowhook_nothing.so"
+                tracer.write_bytes(b"fresh tracer")
+                companion.write_bytes(b"fresh companion")
+                binaries = (
+                    (tracer, "files/libqbdi_tracer.so"),
+                    (companion, "files/libshadowhook_nothing.so"),
+                )
+                runner = StagingDeviceRunner(
+                    primary_failure=primary,
+                    cleanup_failures=cleanup_failures,
+                )
+                with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                        self.assertRaisesRegex(RuntimeError, primary) as caught:
+                    _stage_app_private_binaries("SERIAL", runner, token="e" * 32)
 
-        runner = FailingCompanionRunner()
-        with self.assertRaisesRegex(RuntimeError, "companion push failure"):
-            _stage_app_private_binaries("SERIAL", runner, token="b" * 32)
-
-        self.assertEqual("push", runner.commands[0][3])
-        self.assertEqual("push", runner.commands[1][3])
-        self.assertEqual(("adb", "-s", "SERIAL", "shell", "rm", "-f"), runner.commands[2][:6])
-        self.assertFalse(any("run-as" in command for command in runner.commands))
+                diagnostics = str(caught.exception)
+                self.assertIsNotNone(caught.exception.__cause__)
+                self.assertIn(primary, str(caught.exception.__cause__))
+                final_cleanup_roles = [
+                    StagingDeviceRunner._role(command[-1])
+                    for command in runner.commands
+                    if command[4:8] ==
+                    ("run-as", "com.aprz.qbdiandroid", "rm", "-f")
+                    and command[-1] in {
+                        "files/libqbdi_tracer.so", "files/libshadowhook_nothing.so",
+                    }
+                ]
+                self.assertEqual(["tracer", "companion"], final_cleanup_roles)
+                for cleanup in cleanup_failures:
+                    self.assertIn(cleanup, diagnostics)
 
     def test_acceptance_runs_bounded_workflow_and_retries_one_read(self):
         from scripts.qtrace_device_acceptance import run_acceptance
 
-        runner = FakeRunner(fail_first_read=True)
+        runner = StagingDeviceRunner(fail_first_read=True)
         with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
             (Path(temporary) / "offset").mkdir()
             (Path(temporary) / "offset" / "fixture.trace.txt").write_text("fixture")
             artifacts = Path(temporary) / "offset" / "artifacts"
@@ -2196,12 +2491,15 @@ class AcceptanceHarnessTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 return SimpleNamespace(termination="stopped", partial=False)
-            self.assertEqual(0, run_acceptance(
-                "SERIAL", Path(temporary), runner=runner, converter=converter,
-                artifact_client_factory=lambda **_kwargs: artifact_client,
-            ))
+            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    patch("scripts.qtrace_device_acceptance.TRACER_PATH", tracer):
+                self.assertEqual(0, run_acceptance(
+                    "SERIAL", Path(temporary), runner=runner, converter=converter,
+                    artifact_client_factory=lambda **_kwargs: artifact_client,
+                ))
             self.assertEqual([("fixture.trace.bin.lz4.metrics", 64 * 1024)], artifact_client.calls)
             self.assertEqual([True], artifact_client.evidence_present_during_retry)
+            tracer_path = str(tracer)
         commands = runner.commands
         self.assertEqual(("./gradlew", "nativeHostTest", "--no-daemon"), commands[0])
         self.assertEqual(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), commands[1])
@@ -2210,32 +2508,33 @@ class AcceptanceHarnessTests(unittest.TestCase):
             commands[2],
         )
         self.assertEqual(("adb", "-s", "SERIAL", "install", "-r", "app/build/outputs/apk/debug/app-debug.apk"), commands[3])
-        self.assertEqual(
-            {"out/arm64-v8a/libqbdi_tracer.so", "out/arm64-v8a/libshadowhook_nothing.so"},
-            {commands[4][4], commands[5][4]},
+        force_stop_index = commands.index(
+            ("adb", "-s", "SERIAL", "shell", "am", "force-stop", "com.aprz.qbdiandroid")
         )
-        self.assertTrue(all(command[:4] == ("adb", "-s", "SERIAL", "push")
-                            for command in commands[4:6]))
-        self.assertTrue(all(command[:7] ==
-                            ("adb", "-s", "SERIAL", "shell", "run-as",
-                             "com.aprz.qbdiandroid", "cp")
-                            for command in commands[6:8]))
-        self.assertEqual("chmod", commands[8][6])
-        self.assertEqual(("adb", "-s", "SERIAL", "shell", "rm", "-f"), commands[9][:6])
-        self.assertEqual(("adb", "-s", "SERIAL", "shell", "am", "force-stop", "com.aprz.qbdiandroid"), commands[10])
-        self.assertEqual(
-            ("adb", "-s", "SERIAL", "shell", "am", "start", "-n", "com.aprz.qbdiandroid/.MainActivity",
-             "--ez", "qtrace_acceptance", "true", "--es", "qtrace_acceptance_mode", "timed",
-             "--el", "qtrace_acceptance_seed", "5855319310239641971", "--el", "qtrace_acceptance_iterations", "30"),
-            commands[11],
-        )
-        self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[12])
-        self.assertEqual(22, len(commands))
+        push_indices = [index for index, command in enumerate(commands)
+                        if command[:4] == ("adb", "-s", "SERIAL", "push")]
+        move_indices = [index for index, command in enumerate(commands)
+                        if len(command) > 6 and command[6] == "mv"]
+        start_index = next(index for index, command in enumerate(commands)
+                           if command[4:6] == ("am", "start"))
+        benchmark_index = next(index for index, command in enumerate(commands)
+                               if "scripts/benchmark_trace.py" in command)
+        self.assertLess(force_stop_index, min(push_indices))
+        self.assertEqual({tracer_path, str(companion)},
+                         {commands[index][4] for index in push_indices})
+        self.assertEqual(["companion", "tracer"],
+                         [StagingDeviceRunner._role(commands[index][-1])
+                          for index in move_indices])
+        self.assertLess(max(move_indices), start_index)
+        self.assertLess(start_index, benchmark_index)
+        candidate_index = commands[benchmark_index].index("--candidate-tracer")
+        self.assertEqual(tracer_path, commands[benchmark_index][candidate_index + 1])
         self.assertEqual(15, runner.reads)  # baseline retry, per-run entry evidence, reports, oracle, pulls
-        self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[17])
-        self.assertIn("--name", commands[19])
-        self.assertIn("fixture.trace.bin.lz4", commands[19])
-        self.assertEqual("--compressed-only", commands[21][-5])
+        self.assertIn(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands)
+        named_pull = next(command for command in commands if "--name" in command)
+        self.assertIn("fixture.trace.bin.lz4", named_pull)
+        compressed_pull = next(command for command in commands if "--compressed-only" in command)
+        self.assertEqual("--compressed-only", compressed_pull[-5])
 
 
 if __name__ == "__main__":
