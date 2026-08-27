@@ -207,10 +207,12 @@ def _report_path(stdout: str, root: Path) -> Path:
         raise RuntimeError("qtrace demo did not publish exactly one report path")
     report = candidates[0]
     try:
-        report.resolve().relative_to(root.resolve())
+        relative = report.relative_to(root) if report.is_absolute() else report
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise ValueError("unsafe report path")
     except ValueError as error:
         raise RuntimeError("qtrace reported a path outside its trusted output directory") from error
-    return report
+    return root / relative
 
 
 def _trusted_output(path: Path, root: Path) -> Path:
