@@ -195,6 +195,11 @@ _SESSION_REPORT_KEYS = frozenset((
     "status", "target", "timeline", "tracer", "warnings",
 ))
 _PULL_REPORT_KEYS = frozenset(("schema", "sessionId", "artifacts", "errors"))
+_PULL_ARTIFACT_KEYS = frozenset((
+    "remote_name", "local_path", "source_size", "destination_size", "sha256", "decoder",
+    "termination", "stop_reason", "metrics_schema", "producer_waits", "producer_wait_ns",
+    "conversion_ms", "native_stop_acknowledged", "host_observed_ack_ms",
+))
 
 
 def _strict_session_report(runner: Runner, root: Path, relative: Path) -> dict[str, object]:
@@ -464,11 +469,41 @@ def _verify_pull_outputs(root: Path) -> None:
 
 def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: str | None = None,
                            compressed_only: bool = False) -> dict[str, object]:
-    report = _strict_pull_report(runner, root, _published_report_path(stdout, root))
+    relative = _published_report_path(stdout, root)
+    report = _strict_pull_report(runner, root, relative)
+    if report["errors"] != []:
+        raise RuntimeError("manual pull report contains errors")
     records = report.get("artifacts")
     if not isinstance(records, list) or not records:
         raise RuntimeError("manual pull report has no artifact records")
-    names = {item.get("remote_name") for item in records if isinstance(item, dict)}
+    names: set[str] = set()
+    for item in records:
+        if not isinstance(item, dict) or set(item) != _PULL_ARTIFACT_KEYS:
+            raise RuntimeError("manual pull report has an invalid artifact record")
+        name, local = item["remote_name"], item["local_path"]
+        local_parts = Path(local).parts if isinstance(local, str) else ()
+        if (not isinstance(name, str) or not name or Path(name).name != name or
+                local_parts != ("artifacts", name)):
+            raise RuntimeError("manual pull report has an unsafe artifact path")
+        if (type(item["source_size"]) not in {int, type(None)} or
+                type(item["destination_size"]) not in {int, type(None)} or
+                any(value is not None and value < 0 for value in
+                    (item["source_size"], item["destination_size"])) or
+                not isinstance(item["sha256"], str) or len(item["sha256"]) != 64 or
+                any(character not in "0123456789abcdef" for character in item["sha256"])):
+            raise RuntimeError("manual pull report has invalid artifact metadata")
+        if any(value is not None and not isinstance(value, str) for value in
+               (item["decoder"], item["termination"], item["stop_reason"])):
+            raise RuntimeError("manual pull report has invalid artifact status")
+        if any(value is not None and type(value) is not int for value in (
+                item["metrics_schema"], item["producer_waits"], item["producer_wait_ns"])) or \
+                any(value is not None and type(value) is not float for value in (
+                    item["conversion_ms"], item["host_observed_ack_ms"])):
+            raise RuntimeError("manual pull report has invalid artifact counters")
+        if item["native_stop_acknowledged"] is not None and type(item["native_stop_acknowledged"]) is not bool:
+            raise RuntimeError("manual pull report has invalid stop acknowledgement")
+        _trusted_output(root / relative.parent / local, root)
+        names.add(name)
     if named is not None and named not in names:
         raise RuntimeError("named pull report omitted the trusted artifact")
     if compressed_only and any(isinstance(name, str) and name.endswith(".trace.txt") for name in names):

@@ -178,7 +178,22 @@ class FakeRunner:
             parent_names = {parent.name for parent in path.parents}
             if parent_names & {"latest", "name", "all", "compressed"}:
                 return json.dumps({"schema": 1, "sessionId": SESSION, "artifacts": [
-                    {"remote_name": "fixture.trace.bin.lz4"}], "errors": []})
+                    {
+                        "remote_name": "fixture.trace.bin.lz4",
+                        "local_path": "artifacts/fixture.trace.bin.lz4",
+                        "source_size": 17,
+                        "destination_size": 17,
+                        "sha256": "0" * 64,
+                        "decoder": "copy",
+                        "termination": None,
+                        "stop_reason": None,
+                        "metrics_schema": None,
+                        "producer_waits": None,
+                        "producer_wait_ns": None,
+                        "conversion_ms": None,
+                        "native_stop_acknowledged": None,
+                        "host_observed_ack_ms": None,
+                    }], "errors": []})
             report_status = "sealed"
             if "exit" in parent_names:
                 report_status = "process_exited"
@@ -584,6 +599,54 @@ class AcceptanceHarnessTests(unittest.TestCase):
             _validated_timed_report(runner, Path("output"), Path("report.json"))
         self.assertEqual([Path("output") / "report.json"], reads)
 
+    def test_pull_report_requires_clean_production_records_and_local_artifacts(self):
+        from scripts.qtrace_device_acceptance import _validated_pull_report
+
+        record = {
+            "remote_name": "fixture.trace.bin.lz4",
+            "local_path": "artifacts/fixture.trace.bin.lz4",
+            "source_size": 17,
+            "destination_size": 17,
+            "sha256": "0" * 64,
+            "decoder": "qtrb",
+            "termination": "completed",
+            "stop_reason": None,
+            "metrics_schema": 3,
+            "producer_waits": 0,
+            "producer_wait_ns": 0,
+            "conversion_ms": 1.25,
+            "native_stop_acknowledged": True,
+            "host_observed_ack_ms": 2.5,
+        }
+
+        class PullRunner:
+            def __init__(self, document):
+                self.document = document
+
+            def read_text_beneath(self, _root, _relative, *, timeout):
+                return json.dumps(self.document)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "pull"
+            artifact = root / SESSION / "artifacts" / record["remote_name"]
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"pulled artifact")
+            good = {"schema": 1, "sessionId": SESSION, "artifacts": [record], "errors": []}
+            _validated_pull_report(PullRunner(good), str(root / SESSION / "report.json"), root)
+            invalid_cases = (
+                ({**good, "errors": [{"code": "artifact.invalid"}]}, "contains errors"),
+                ({**good, "artifacts": [{key: value for key, value in record.items() if key != "sha256"}]},
+                 "invalid artifact record"),
+                ({**good, "artifacts": [{**record, "local_path": "artifacts/../fixture.trace.bin.lz4"}]},
+                 "unsafe artifact path"),
+            )
+            for document, expected in invalid_cases:
+                with self.subTest(expected=expected), self.assertRaisesRegex(RuntimeError, expected):
+                    _validated_pull_report(PullRunner(document), str(root / SESSION / "report.json"), root)
+            artifact.unlink()
+            with self.assertRaisesRegex(RuntimeError, "outside the trusted directory"):
+                _validated_pull_report(PullRunner(good), str(root / SESSION / "report.json"), root)
+
     def test_requires_an_explicit_device(self):
         from scripts.qtrace_device_acceptance import main
 
@@ -625,7 +688,9 @@ class AcceptanceHarnessTests(unittest.TestCase):
             (artifacts / "fixture.trace.bin.lz4.metrics").write_text("metrics")
             artifact_client = FakeArtifactClient(Path(temporary) / "offset")
             for name in ("latest", "name", "all", "compressed"):
-                (Path(temporary) / name).mkdir()
+                artifacts = Path(temporary) / name / SESSION / "artifacts"
+                artifacts.mkdir(parents=True)
+                (artifacts / "fixture.trace.bin.lz4").write_bytes(b"pulled artifact")
             def converter(_source, destination, *, lz4, crash_marked):
                 self.assertEqual("lz4", lz4)
                 self.assertFalse(crash_marked)
