@@ -165,6 +165,14 @@ class FakeRunner:
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_strict_report_rejects_duplicate_keys_and_nonfinite_numbers(self):
+        from scripts.qtrace_device_acceptance import _strict_json
+
+        for payload in ('{"schema":1,"schema":1}', '{"schema":NaN}'):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    _strict_json(payload)
+
     def test_timed_report_selects_one_binary_root_among_sidecars(self):
         from scripts.qtrace_device_acceptance import _validated_timed_report
 
