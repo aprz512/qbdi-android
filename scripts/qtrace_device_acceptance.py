@@ -225,6 +225,40 @@ def _trusted_output(path: Path, root: Path) -> Path:
     return resolved
 
 
+def _read_beneath(root: Path, relative: str, maximum_bytes: int = 1_048_576) -> bytes:
+    """Read one regular file through held no-follow directory descriptors."""
+    candidate = Path(relative)
+    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+        raise RuntimeError("reported output path is unsafe")
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                        getattr(os, "O_NOFOLLOW", 0))
+    try:
+        for part in candidate.parts[:-1]:
+            child = os.open(part, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                            getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(candidate.parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                             dir_fd=directory)
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_size > maximum_bytes:
+                raise RuntimeError("reported output is not a bounded regular file")
+            data = bytearray()
+            while len(data) < details.st_size:
+                block = os.read(descriptor, min(64 * 1024, details.st_size - len(data)))
+                if not block:
+                    raise RuntimeError("reported output changed while being read")
+                data.extend(block)
+            return bytes(data)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise RuntimeError("reported output is outside the trusted directory") from error
+    finally:
+        os.close(directory)
+
+
 def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, object], str]:
     value = _strict_session_report(runner, path)
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or
@@ -305,34 +339,25 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
     if (record.get("termination") != "stopped" or record.get("metrics_schema") != 3 or
             record.get("native_stop_acknowledged") is not True):
         raise RuntimeError("binary TRACE_STOP/metrics-v3 native-stop contract failed")
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".qtrace-acceptance-validate-", suffix=".trace.txt", dir=root,
-    )
-    try:
-        # convert_binary_file intentionally refuses to overwrite, so reserve a
-        # unique sibling then release it before converting.
-        os.close(descriptor)
-        descriptor = -1
-        Path(temporary_name).unlink()
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    converted = Path(temporary_name)
-    try:
-        stats = converter(binary_path, converted,
+    with tempfile.TemporaryDirectory(prefix=".qtrace-acceptance-validate-", dir=root) as staging:
+        snapshot = Path(staging) / binary_path.name
+        snapshot.write_bytes(_read_beneath(root, local_path))
+        Path(str(snapshot) + ".metrics").write_bytes(
+            _read_beneath(root, local_path + ".metrics", MAX_METRICS_BYTES)
+        )
+        converted = Path(staging) / "converted.trace.txt"
+        stats = converter(snapshot, converted,
                           lz4="lz4" if binary_path.name.endswith(".lz4") else None,
                           crash_marked=False)
         if getattr(stats, "termination", None) != "stopped" or getattr(stats, "partial", True):
             raise RuntimeError("timed binary conversion was not a complete stopped trace")
-        text = _read_retry(runner, _trusted_output(converted, root), timeout=5.0)
+        text = _read_beneath(Path(staging), converted.name).decode("utf-8", errors="strict")
         lines = text.splitlines()
         terminals = [line for line in lines if line.startswith("TRACE_END ")]
         if (not lines or not lines[0].startswith("TRACE_BEGIN format=4 ") or len(terminals) != 1 or
                 not terminals[0].startswith(
                     "TRACE_END status=stopped reason=duration_elapsed return_valid=0 ")):
             raise RuntimeError("timed binary does not contain one duration_elapsed TRACE_STOP terminal")
-    finally:
-        converted.unlink(missing_ok=True)
 
 
 def _verify_artifact_read_recovery(device: str, report: dict[str, object], root: Path, *,

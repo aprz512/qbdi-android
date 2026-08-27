@@ -303,6 +303,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
             }, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
         }
         calls: list[tuple[Path, Path, str | None, bool]] = []
+        snapshots: list[bytes] = []
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             artifacts = root / "artifacts"
@@ -314,6 +315,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
             def converter(binary: Path, destination: Path, *, lz4: str | None,
                           crash_marked: bool):
                 calls.append((binary, destination, lz4, crash_marked))
+                snapshots.append(binary.read_bytes())
                 destination.write_text(
                     "TRACE_BEGIN format=4 scene=fixture-entry\n"
                     "TRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n",
@@ -323,9 +325,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
             _validate_timed_artifact_semantics(runner, report, root, converter=converter)
 
-            self.assertEqual([(source, calls[0][1], "lz4", False)], calls)
-            self.assertEqual(root, calls[0][1].parent)
-            self.assertFalse(calls[0][1].exists())
+            self.assertEqual(1, len(calls))
+            self.assertNotEqual(source, calls[0][0])
+            self.assertEqual(source.read_bytes(), snapshots[0])
+            self.assertEqual("lz4", calls[0][2])
+            self.assertFalse(calls[0][3])
+            self.assertFalse(calls[0][0].exists())
 
     def test_timed_semantics_propagates_binary_conversion_failure(self):
         from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
@@ -457,7 +462,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         )
         self.assertEqual(("python3", "scripts/benchmark_trace.py", "--device", "SERIAL", "--profile", "fast", "--runs", "5", "--candidate-tracer", "out/arm64-v8a/libqbdi_tracer.so", "--compare", "docs/benchmarks/binary-trace-baseline.md"), commands[6])
         self.assertEqual(16, len(commands))
-        self.assertEqual(12, runner.reads)  # baseline retry, scenario reports, text/oracle, and four pull reports
+        self.assertEqual(11, runner.reads)  # baseline retry, scenario reports, oracle, and four pull reports
         self.assertEqual(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands[11])
         self.assertIn("--name", commands[13])
         self.assertIn("fixture.trace.bin.lz4", commands[13])
