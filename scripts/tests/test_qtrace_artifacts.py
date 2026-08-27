@@ -386,6 +386,19 @@ class ArtifactTests(unittest.TestCase):
                 "d", "com.example.app", PullSelection(PullMode.ALL), Path(root), 1)
             self.assertEqual({owned, legacy}, {path.name for path in result.files})
 
+    def test_all_excludes_running_single_uuid_but_keeps_legacy_root(self):
+        session = "11111111-1111-4111-8111-111111111111"
+        owned, legacy = f"{session}.trace.txt", "legacy.trace.txt"
+        running = self._status(session, state="running", reason="", stopAcknowledged=False,
+                               artifacts=[owned])
+        client = FakeClient({f"session-{session}.status.json": json.dumps(running).encode(),
+                             owned: COMPLETE_TERMINAL, legacy: COMPLETE_TERMINAL})
+        with tempfile.TemporaryDirectory() as root:
+            result = self._processor(client).pull_manual(
+                "d", "com.example.app", PullSelection(PullMode.ALL), Path(root), 1)
+            self.assertEqual(2, result.exit_code)
+            self.assertEqual([legacy], [path.name for path in result.files])
+
     def test_text_terminal_rejects_unversioned_or_extra_terminal_fields(self):
         invalid = (
             b"TRACE_END status=ok\n",

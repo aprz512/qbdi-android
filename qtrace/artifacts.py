@@ -1212,6 +1212,7 @@ class ArtifactProcessor:
                 except QtraceError as error:
                     raise _error("artifact.status_missing", "matching native status is invalid") from error
                 owned = [root for root in roots if candidate_id in root.lower()]
+                all_owned = len(owned) == len(roots)
                 if any(root not in candidate_status["artifacts"] for root in owned):
                     raise _error("artifact.ownership", "native status does not declare UUID-bearing artifact")
                 if selection.mode is PullMode.ALL and candidate_status["state"] != "sealed":
@@ -1219,7 +1220,7 @@ class ArtifactProcessor:
                     initial_errors.extend({"name": root, "code": "artifact.incomplete",
                                            "detail": f"native session is {candidate_status['state']}; artifact is not sealed"}
                                           for root in owned)
-                if len(owned) == len(roots):
+                if all_owned:
                     status, session_id = candidate_status, candidate_id
         if session_id is None:
             session_id = str(uuid.uuid4())
