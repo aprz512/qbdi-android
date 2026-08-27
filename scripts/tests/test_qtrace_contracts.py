@@ -6,11 +6,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from qtrace.config import load_config
 from qtrace.errors import ConfigError
 from qtrace.status import STATUS_KEYS, validate_status_shape
+from scripts.tests.test_pull_trace import stopped_binary_stream
+from scripts.tests.test_trace_convert import metrics_sidecar
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -174,12 +177,100 @@ class FakeRunner:
                 "timeline": [{"stage": "installing_hooks"}, {"stage": "running"}],
                 "native": {"status": status("sealed")},
                 "outputs": ["fixture.trace.bin.lz4", "fixture.trace.bin.lz4.metrics", str((self.offset_root or Path("/tmp")) / "fixture.trace.txt")],
-                "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
+                "artifacts": [{"remote_name": "fixture.trace.bin.lz4", "local_path": "artifacts/fixture.trace.bin.lz4", "termination": "stopped", "metrics_schema": 3, "native_stop_acknowledged": True}, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
             })
+        if path.exists():
+            return path.read_text(encoding="utf-8")
         return ""
 
 
 class AcceptanceHarnessTests(unittest.TestCase):
+    def test_timed_semantics_reparses_a_real_stopped_qtrb_and_metrics_v3_sidecar(self):
+        from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
+
+        report = {"artifacts": [{
+            "remote_name": "fixture.trace.bin",
+            "local_path": "artifacts/fixture.trace.bin",
+            "termination": "stopped",
+            "metrics_schema": 3,
+            "native_stop_acknowledged": True,
+        }, {"remote_name": "fixture.trace.bin.metrics", "decoder": "sidecar"}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            source = artifacts / "fixture.trace.bin"
+            source.write_bytes(stopped_binary_stream(compression=0))
+            (artifacts / "fixture.trace.bin.metrics").write_text(
+                metrics_sidecar(source, termination="stopped", return_valid=0,
+                                return_value="0x0", instructions=1),
+                encoding="utf-8",
+            )
+
+            _validate_timed_artifact_semantics(FakeRunner(), report, root)
+
+            self.assertEqual([], list(root.glob(".qtrace-acceptance-validate-*.trace.txt")))
+
+    def test_timed_semantics_reconverts_trusted_binary_and_removes_validation_text(self):
+        from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
+
+        runner = FakeRunner()
+        report = {
+            "artifacts": [{
+                "remote_name": "fixture.trace.bin.lz4",
+                "local_path": "artifacts/fixture.trace.bin.lz4",
+                "termination": "stopped",
+                "metrics_schema": 3,
+                "native_stop_acknowledged": True,
+            }, {"remote_name": "fixture.trace.bin.lz4.metrics", "decoder": "sidecar"}],
+        }
+        calls: list[tuple[Path, Path, str | None, bool]] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            source = artifacts / "fixture.trace.bin.lz4"
+            source.write_bytes(b"fixture qtrb bytes")
+            (artifacts / "fixture.trace.bin.lz4.metrics").write_text("metrics")
+
+            def converter(binary: Path, destination: Path, *, lz4: str | None,
+                          crash_marked: bool):
+                calls.append((binary, destination, lz4, crash_marked))
+                destination.write_text(
+                    "TRACE_BEGIN format=4 scene=fixture-entry\n"
+                    "TRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(termination="stopped", partial=False)
+
+            _validate_timed_artifact_semantics(runner, report, root, converter=converter)
+
+            self.assertEqual([(source, calls[0][1], "lz4", False)], calls)
+            self.assertEqual(root, calls[0][1].parent)
+            self.assertFalse(calls[0][1].exists())
+
+    def test_timed_semantics_propagates_binary_conversion_failure(self):
+        from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
+
+        report = {"artifacts": [{
+            "remote_name": "fixture.trace.bin",
+            "local_path": "artifacts/fixture.trace.bin",
+            "termination": "stopped",
+            "metrics_schema": 3,
+            "native_stop_acknowledged": True,
+        }, {"remote_name": "fixture.trace.bin.metrics", "decoder": "sidecar"}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "fixture.trace.bin").write_bytes(b"fixture qtrb bytes")
+            (artifacts / "fixture.trace.bin.metrics").write_text("metrics")
+            with self.assertRaisesRegex(RuntimeError, "invalid qtrb"):
+                _validate_timed_artifact_semantics(
+                    FakeRunner(), report, root,
+                    converter=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("invalid qtrb")),
+                )
+
     def test_one_shot_artifact_read_preserves_evidence_for_retry(self):
         from scripts.qtrace_device_acceptance import OneShotArtifactRead
         class Client:
@@ -239,9 +330,24 @@ class AcceptanceHarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             (Path(temporary) / "offset").mkdir()
             (Path(temporary) / "offset" / "fixture.trace.txt").write_text("fixture")
+            artifacts = Path(temporary) / "offset" / "artifacts"
+            artifacts.mkdir()
+            (artifacts / "fixture.trace.bin.lz4").write_bytes(b"fixture qtrb bytes")
+            (artifacts / "fixture.trace.bin.lz4.metrics").write_text("metrics")
             for name in ("latest", "name", "all", "compressed"):
                 (Path(temporary) / name).mkdir()
-            self.assertEqual(0, run_acceptance("SERIAL", Path(temporary), runner=runner))
+            def converter(_source, destination, *, lz4, crash_marked):
+                self.assertEqual("lz4", lz4)
+                self.assertFalse(crash_marked)
+                destination.write_text(
+                    "TRACE_BEGIN format=4 scene=fixture-entry\n"
+                    "TRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=2000\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(termination="stopped", partial=False)
+            self.assertEqual(0, run_acceptance(
+                "SERIAL", Path(temporary), runner=runner, converter=converter,
+            ))
         commands = runner.commands
         self.assertEqual(("./gradlew", "nativeHostTest", "--no-daemon"), commands[0])
         self.assertEqual(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), commands[1])

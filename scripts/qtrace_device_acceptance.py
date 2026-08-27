@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
 from scripts.bounded_process import BoundedProcessError, capture_bounded
+from scripts.trace_convert import convert_binary_file
 
 
 PACKAGE = "com.aprz.qbdiandroid"
@@ -175,7 +177,9 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
     if not isinstance(artifacts, list):
         raise RuntimeError("timed report has no artifact records")
     roots = [record.get("remote_name") for record in artifacts if isinstance(record, dict) and
-             isinstance(record.get("remote_name"), str) and record["remote_name"].endswith(".trace.bin.lz4")]
+             isinstance(record.get("remote_name"), str) and
+             (record["remote_name"].endswith(".trace.bin") or
+              record["remote_name"].endswith(".trace.bin.lz4"))]
     if len(roots) != 1:
         raise RuntimeError("timed report lacks a trusted binary artifact name")
     artifact = roots[0]
@@ -200,29 +204,62 @@ def _validated_monitor_report(runner: Runner, path: Path, *, status: str) -> dic
     return report
 
 
-def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object], root: Path) -> None:
+def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object], root: Path, *,
+                                       converter=convert_binary_file) -> None:
     records = report.get("artifacts")
-    outputs = report.get("outputs")
-    if not isinstance(records, list) or not isinstance(outputs, list):
+    if not isinstance(records, list):
         raise RuntimeError("timed report has no artifact semantics")
     binary = [record for record in records if isinstance(record, dict) and
-              isinstance(record.get("remote_name"), str) and record["remote_name"].endswith(".trace.bin.lz4")]
+              isinstance(record.get("remote_name"), str) and
+              (record["remote_name"].endswith(".trace.bin") or
+               record["remote_name"].endswith(".trace.bin.lz4"))]
     if len(binary) != 1:
         raise RuntimeError("timed trace must publish exactly one binary artifact")
     record = binary[0]
+    remote_name = record.get("remote_name")
+    local_path = record.get("local_path")
+    if (not isinstance(remote_name, str) or not isinstance(local_path, str) or
+            Path(local_path).name != remote_name):
+        raise RuntimeError("timed binary record has no trusted local artifact identity")
+    binary_path = _trusted_output(root / local_path, root)
+    metrics_name = remote_name + ".metrics"
+    if not any(isinstance(item, dict) and item.get("remote_name") == metrics_name
+               for item in records):
+        raise RuntimeError("timed binary root has no matching metrics sidecar record")
+    metrics_path = _trusted_output(Path(str(binary_path) + ".metrics"), root)
+    if metrics_path.name != metrics_name:
+        raise RuntimeError("timed metrics sidecar does not match binary root")
     if (record.get("termination") != "stopped" or record.get("metrics_schema") != 3 or
             record.get("native_stop_acknowledged") is not True):
         raise RuntimeError("binary TRACE_STOP/metrics-v3 native-stop contract failed")
-    # ArtifactProcessor already parses the sidecar before publishing it; retain
-    # the exact parsed v3 terminal facts in the trusted collector report.
-    if record.get("termination") != "stopped" or record.get("metrics_schema") != 3:
-        raise RuntimeError("metrics-v3 sidecar is not a stopped terminal")
-    text_paths = [Path(item) for item in outputs if isinstance(item, str) and item.endswith(".trace.txt")]
-    if len(text_paths) != 1:
-        raise RuntimeError("timed binary pull did not publish exactly one format-4 text output")
-    text = _read_retry(runner, _trusted_output(text_paths[0], root), timeout=5.0)
-    if not text.startswith("TRACE_BEGIN format=4 ") or text.count("TRACE_END status=stopped reason=duration_elapsed return_valid=0 ") != 1:
-        raise RuntimeError("timed binary does not contain one duration_elapsed TRACE_STOP terminal")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".qtrace-acceptance-validate-", suffix=".trace.txt", dir=root,
+    )
+    try:
+        # convert_binary_file intentionally refuses to overwrite, so reserve a
+        # unique sibling then release it before converting.
+        os.close(descriptor)
+        descriptor = -1
+        Path(temporary_name).unlink()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    converted = Path(temporary_name)
+    try:
+        stats = converter(binary_path, converted,
+                          lz4="lz4" if binary_path.name.endswith(".lz4") else None,
+                          crash_marked=False)
+        if getattr(stats, "termination", None) != "stopped" or getattr(stats, "partial", True):
+            raise RuntimeError("timed binary conversion was not a complete stopped trace")
+        text = _read_retry(runner, _trusted_output(converted, root), timeout=5.0)
+        lines = text.splitlines()
+        terminals = [line for line in lines if line.startswith("TRACE_END ")]
+        if (not lines or not lines[0].startswith("TRACE_BEGIN format=4 ") or len(terminals) != 1 or
+                not terminals[0].startswith(
+                    "TRACE_END status=stopped reason=duration_elapsed return_valid=0 ")):
+            raise RuntimeError("timed binary does not contain one duration_elapsed TRACE_STOP terminal")
+    finally:
+        converted.unlink(missing_ok=True)
 
 
 def _demo_command(device: str, scenario: str, form: str, output: Path) -> tuple[str, ...]:
@@ -256,7 +293,8 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path, *, named: st
     return report
 
 
-def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
+def run_acceptance(device: str, directory: Path, *, runner: Runner,
+                   converter=convert_binary_file) -> int:
     if not device:
         raise ValueError("--device is required for manual acceptance")
     directory.mkdir(parents=True, exist_ok=True)
@@ -281,7 +319,9 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
             raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
     timed, artifact = _validated_timed_report(runner, reports["offset"])
     symbol, _ = _validated_timed_report(runner, reports["symbol"])
-    _validate_timed_artifact_semantics(runner, timed, reports["offset"].parent)
+    _validate_timed_artifact_semantics(
+        runner, timed, reports["offset"].parent, converter=converter,
+    )
     timed_status = timed["native"]["status"]  # validated above
     symbol_status = symbol["native"]["status"]
     if timed_status["normalizedScenes"] != symbol_status["normalizedScenes"]:
