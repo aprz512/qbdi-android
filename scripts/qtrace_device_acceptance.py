@@ -169,7 +169,14 @@ def _validated_timed_report(runner: Runner, path: Path) -> tuple[dict[str, objec
     return value, artifact
 
 
-def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]) -> None:
+def _validated_monitor_report(runner: Runner, path: Path, *, status: str) -> dict[str, object]:
+    report = _strict_report(runner, path)
+    if report.get("schema") != 1 or report.get("package") != PACKAGE or report.get("status") != status:
+        raise RuntimeError("monitor report has an invalid classification")
+    return report
+
+
+def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object], root: Path) -> None:
     records = report.get("artifacts")
     outputs = report.get("outputs")
     if not isinstance(records, list) or not isinstance(outputs, list):
@@ -189,7 +196,7 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
     text_paths = [Path(item) for item in outputs if isinstance(item, str) and item.endswith(".trace.txt")]
     if len(text_paths) != 1:
         raise RuntimeError("timed binary pull did not publish exactly one format-4 text output")
-    text = _read_retry(runner, text_paths[0], timeout=5.0)
+    text = _read_retry(runner, _trusted_output(text_paths[0], root), timeout=5.0)
     if not text.startswith("TRACE_BEGIN format=4 ") or text.count("TRACE_END status=stopped reason=duration_elapsed return_valid=0 ") != 1:
         raise RuntimeError("timed binary does not contain one duration_elapsed TRACE_STOP terminal")
 
@@ -236,15 +243,13 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner) -> int:
             raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
     timed, artifact = _validated_timed_report(runner, reports["offset"])
     symbol, _ = _validated_timed_report(runner, reports["symbol"])
-    _validate_timed_artifact_semantics(runner, timed)
+    _validate_timed_artifact_semantics(runner, timed, reports["offset"].parent)
     timed_status = timed["native"]["status"]  # validated above
     symbol_status = symbol["native"]["status"]
     if timed_status["normalizedScenes"] != symbol_status["normalizedScenes"]:
         raise RuntimeError("offset and symbol timed scenes did not normalize identically")
-    exit_report = _strict_report(runner, reports["exit"])
-    crash_report = _strict_report(runner, reports["crash"])
-    if exit_report.get("status") != "process_exited" or crash_report.get("status") != "crash_recovered":
-        raise RuntimeError("monitor exit and Flight crash recovery were not classified separately")
+    _validated_monitor_report(runner, reports["exit"], status="process_exited")
+    _validated_monitor_report(runner, reports["crash"], status="crash_recovered")
     runner.run(("adb", "-s", device, "shell", "kill", "-0", str(timed["pid"])), timeout=10.0)
     timed_oracle = json.loads(_read_retry(runner, Path(
         f"/data/data/{PACKAGE}/files/qtrace-acceptance-timed.json"), timeout=5.0))
