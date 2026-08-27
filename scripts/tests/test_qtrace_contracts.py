@@ -347,6 +347,37 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 _wait_for_baseline(Runner())
         sleep.assert_called_once_with(0.04999999999999716)
 
+    def test_baseline_retries_a_nonzero_second_adb_read_until_ready(self):
+        from scripts.qtrace_device_acceptance import AcceptanceNotReadyError, _wait_for_baseline
+
+        class Runner:
+            def __init__(self):
+                self.calls = 0
+
+            def read_text(self, _path, *, timeout):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectionError("first injected disconnect")
+                if self.calls == 2:
+                    raise AcceptanceNotReadyError("adb run-as cat exited 1: not published yet")
+                return json.dumps({
+                    "iterations": 30, "seed": 5855319310239641971, "result": "0x42",
+                })
+
+        runner = Runner()
+        self.assertEqual("0x42", _wait_for_baseline(runner)["result"])
+        self.assertEqual(3, runner.calls)
+
+    def test_baseline_adb_failure_is_typed_as_not_ready(self):
+        from scripts.qtrace_device_acceptance import (
+            AcceptanceNotReadyError, BASELINE_PATH, SubprocessRunner,
+        )
+
+        runner = SubprocessRunner("SERIAL", inject_first_read_failure=False)
+        with patch.object(runner, "run", side_effect=RuntimeError("adb exited 1")):
+            with self.assertRaises(AcceptanceNotReadyError):
+                runner.read_text(Path(BASELINE_PATH), timeout=1.0)
+
     def test_timed_semantics_reparses_a_real_stopped_qtrb_and_metrics_v3_sidecar(self):
         from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
 

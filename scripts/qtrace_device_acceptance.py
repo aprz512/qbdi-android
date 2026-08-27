@@ -27,6 +27,10 @@ ITERATIONS = 30
 BASELINE_PATH = f"/data/data/{PACKAGE}/files/qtrace-acceptance-baseline.json"
 
 
+class AcceptanceNotReadyError(RuntimeError):
+    """The fixture has not yet atomically published a pollable result."""
+
+
 @dataclass(frozen=True)
 class CommandResult:
     stdout: str
@@ -67,7 +71,15 @@ class SubprocessRunner:
             self.inject_first_read_failure = False
             raise ConnectionError("injected one-shot ADB read failure")
         if str(path).startswith("/data/data/"):
-            return self.run(("adb", "-s", self.device, "exec-out", "run-as", PACKAGE, "cat", str(path)), timeout=timeout).stdout
+            try:
+                return self.run(
+                    ("adb", "-s", self.device, "exec-out", "run-as", PACKAGE, "cat", str(path)),
+                    timeout=timeout,
+                ).stdout
+            except RuntimeError as error:
+                if str(path) == BASELINE_PATH:
+                    raise AcceptanceNotReadyError("timed baseline is not published") from error
+                raise
         deadline = time.monotonic() + timeout
         if timeout <= 0:
             raise RuntimeError("host report read timeout must be positive")
@@ -222,7 +234,8 @@ def _wait_for_baseline(runner: Runner) -> dict[str, object]:
                     value.get("seed") == SEED and isinstance(value.get("result"), str)):
                 return value
             raise ValueError("baseline has an invalid fixture result")
-        except (ConnectionError, OSError, ValueError, json.JSONDecodeError) as error:
+        except (AcceptanceNotReadyError, ConnectionError, OSError, ValueError,
+                json.JSONDecodeError) as error:
             last_error = error
             remaining = deadline - time.monotonic()
             if remaining > 0:
