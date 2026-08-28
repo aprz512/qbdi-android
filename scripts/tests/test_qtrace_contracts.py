@@ -3860,6 +3860,76 @@ class AcceptanceHarnessTests(unittest.TestCase):
                     for item in report["cleanup_errors"]
                 ))
 
+    def test_late_success_cleanup_recovers_with_open_production_current_snapshot(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "current-source.apk"
+            source.write_bytes(b"production current APK")
+            snapshot_root = Path(tempfile.mkdtemp(
+                prefix="qtrace-current-inputs-", dir=root,
+            ))
+            current = acceptance._snapshot_host_binary(
+                source, snapshot_root / "current.apk",
+                maximum_bytes=1024,
+                deadline=time.monotonic() + 5.0,
+            )
+            tracer = RecordingHeldInput(snapshot_root / "tracer.so", "t" * 64,
+                                        label="tracer")
+            companion = RecordingHeldInput(snapshot_root / "companion.so", "p" * 64,
+                                           label="companion")
+            tracer.path.write_bytes(b"tracer")
+            companion.path.write_bytes(b"companion")
+            tracer.close_failure = "late tracer cleanup failure"
+            pair = RecordingHeldPair(tracer, companion)
+            historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+            historical.path.write_bytes(b"historical")
+            current_installs = []
+            current_verifications = []
+            current_closes = []
+            real_verify = acceptance.HostBinarySnapshot.verify_path
+            real_close = acceptance.HostBinarySnapshot.close
+
+            class LifecycleRunner(FakeRunner):
+                def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                    if (tuple(command[:4]) == ("adb", "-s", "SERIAL", "install") and
+                            Path(command[-1]) == current.path):
+                        current_installs.append(tuple(command))
+                    return super().run(command, timeout=timeout, cwd=cwd,
+                                       allowed=allowed)
+
+            def recording_verify(snapshot):
+                result = real_verify(snapshot)
+                if snapshot is current:
+                    current_verifications.append(len(current_installs))
+                return result
+
+            def recording_close(snapshot):
+                if snapshot is current:
+                    current_closes.append(len(current_installs))
+                return real_close(snapshot)
+
+            with patch.object(acceptance, "_snapshot_current_inputs",
+                              return_value=(current, pair)), \
+                    patch.object(acceptance, "_stage_app_private_binaries"), \
+                    patch.object(acceptance, "_run_current_fixture_phase"), \
+                    patch.object(acceptance.HostBinarySnapshot, "verify_path",
+                                 recording_verify), \
+                    patch.object(acceptance.HostBinarySnapshot, "close",
+                                 recording_close), \
+                    self.assertRaisesRegex(RuntimeError,
+                                           "late tracer cleanup failure"):
+                acceptance.run_acceptance(
+                    "SERIAL", root, runner=LifecycleRunner(),
+                    historical_builder=lambda *_args, **_kwargs: historical,
+                )
+
+            self.assertEqual(2, len(current_installs))
+            self.assertEqual([0, 1, 1, 2], current_verifications)
+            self.assertEqual([2], current_closes)
+            self.assertEqual(-1, current.descriptor)
+
     def test_oversized_builder_report_is_bounded_with_truncation_evidence(self):
         from scripts import qtrace_device_acceptance as acceptance
         from scripts.qtrace_historical_benchmark import HistoricalBenchmarkError

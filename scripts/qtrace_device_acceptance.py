@@ -1620,7 +1620,8 @@ def _finalize_gate_failure(
         device: str, directory: Path, *, runner: Runner,
         state: _HistoricalGateState, primary: BaseException,
         initial_cleanup_errors: Sequence[dict[str, object]] = (),
-        cleanup_resources: bool = True) -> None:
+        cleanup_resources: bool = True,
+        cleanup_after_recovery: Sequence[tuple[str, Callable[[], None]]] = ()) -> None:
     cleanup_errors = list(initial_cleanup_errors)
     if state.recovery_active and state.current is not None:
         cleanup_errors.extend(_collect_gate_cleanup((
@@ -1633,6 +1634,7 @@ def _finalize_gate_failure(
         )))
     if cleanup_resources:
         cleanup_errors.extend(_gate_resource_cleanup(state))
+    cleanup_errors.extend(_collect_gate_cleanup(cleanup_after_recovery))
     try:
         _publish_gate_failure_evidence(directory, state, primary, cleanup_errors)
     except BaseException as error:
@@ -1771,7 +1773,36 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
         )
 
     state.phase = "cleanup-success"
-    cleanup_errors = _gate_resource_cleanup(state)
+    cleanup_errors = _collect_gate_cleanup((
+        ("historical APK close", state.historical.close),
+        ("tracer snapshot close", state.pair.tracer.close),
+        ("companion snapshot close", state.pair.companion.close),
+    ))
+    if cleanup_errors:
+        _finalize_gate_failure(
+            device, directory, runner=runner, state=state,
+            primary=RuntimeError("acceptance resource cleanup failed"),
+            initial_cleanup_errors=cleanup_errors, cleanup_resources=False,
+            cleanup_after_recovery=(
+                ("current APK close", state.current.close),
+                ("current input snapshot tree cleanup",
+                 lambda: _current_snapshot_tree_cleanup(state.current)),
+            ),
+        )
+    cleanup_errors = _collect_gate_cleanup(((
+        "current input snapshot tree cleanup",
+        lambda: _current_snapshot_tree_cleanup(state.current),
+    ),))
+    if cleanup_errors:
+        _finalize_gate_failure(
+            device, directory, runner=runner, state=state,
+            primary=RuntimeError("acceptance resource cleanup failed"),
+            initial_cleanup_errors=cleanup_errors, cleanup_resources=False,
+            cleanup_after_recovery=(("current APK close", state.current.close),),
+        )
+    cleanup_errors = _collect_gate_cleanup((
+        ("current APK close", state.current.close),
+    ))
     if cleanup_errors:
         _finalize_gate_failure(
             device, directory, runner=runner, state=state,
