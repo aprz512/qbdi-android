@@ -1539,6 +1539,74 @@ class AcceptanceHarnessTests(unittest.TestCase):
         pair = RecordingHeldPair(tracer, companion)
         return current, pair
 
+    def _run_real_current_cleanup_recovery(self, root: Path, *, failure: str):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        payload = b"production current APK recovery bytes"
+        source = root / "current-source.apk"
+        source.write_bytes(payload)
+        snapshot_root = Path(tempfile.mkdtemp(
+            prefix="qtrace-current-inputs-", dir=root,
+        ))
+        current = acceptance._snapshot_host_binary(
+            source, snapshot_root / "current.apk", maximum_bytes=1024,
+            deadline=time.monotonic() + 5.0,
+        )
+        tracer = RecordingHeldInput(snapshot_root / "tracer.so", "t" * 64,
+                                    label="tracer")
+        companion = RecordingHeldInput(snapshot_root / "companion.so", "p" * 64,
+                                       label="companion")
+        tracer.path.write_bytes(b"tracer")
+        companion.path.write_bytes(b"companion")
+        pair = RecordingHeldPair(tracer, companion)
+        historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+        historical.path.write_bytes(b"historical")
+        current_installs = []
+        real_close = acceptance.HostBinarySnapshot.close
+        real_tree_cleanup = acceptance._current_snapshot_tree_cleanup
+        close_failed = False
+        tree_calls = 0
+
+        class LifecycleRunner(FakeRunner):
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                if tuple(command[:4]) == ("adb", "-s", "SERIAL", "install"):
+                    installed = Path(command[-1])
+                    if installed.read_bytes() == payload:
+                        current_installs.append((installed, installed.stat().st_ino))
+                return super().run(command, timeout=timeout, cwd=cwd,
+                                   allowed=allowed)
+
+        def failing_close(snapshot):
+            nonlocal close_failed
+            if snapshot is current and failure == "close" and not close_failed:
+                close_failed = True
+                real_close(snapshot)
+                raise OSError("current descriptor close after tree deletion")
+            return real_close(snapshot)
+
+        def failing_tree_cleanup(snapshot):
+            nonlocal tree_calls
+            if snapshot is current:
+                tree_calls += 1
+                if failure == "tree" and tree_calls == 1:
+                    snapshot.path.unlink()
+                    raise OSError("partial tree cleanup removed current APK")
+            return real_tree_cleanup(snapshot)
+
+        with patch.object(acceptance, "_snapshot_current_inputs",
+                          return_value=(current, pair)), \
+                patch.object(acceptance, "_stage_app_private_binaries"), \
+                patch.object(acceptance, "_run_current_fixture_phase"), \
+                patch.object(acceptance.HostBinarySnapshot, "close", failing_close), \
+                patch.object(acceptance, "_current_snapshot_tree_cleanup",
+                             failing_tree_cleanup), \
+                self.assertRaises(RuntimeError):
+            acceptance.run_acceptance(
+                "SERIAL", root, runner=LifecycleRunner(),
+                historical_builder=lambda *_args, **_kwargs: historical,
+            )
+        return current_installs, tree_calls
+
     def test_direct_acceptance_script_loads_repo_packages_without_pythonpath(self):
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
@@ -3850,7 +3918,10 @@ class AcceptanceHarnessTests(unittest.TestCase):
                     if command[4:7] == ("am", "force-stop", acceptance.PACKAGE)
                 ]
                 self.assertEqual(4, len(force_stops))
-                self.assertEqual([historical, current, current], installs)
+                self.assertEqual([historical, current], installs[:2])
+                self.assertIsNot(current, installs[2])
+                self.assertEqual(hashlib.sha256(b"current").hexdigest(),
+                                 installs[2].sha256)
                 report = json.loads(
                     (root / "historical-benchmark-gate.json").read_text(encoding="utf-8")
                 )
@@ -3893,9 +3964,10 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
             class LifecycleRunner(FakeRunner):
                 def run(self, command, *, timeout, cwd=None, allowed=(0,)):
-                    if (tuple(command[:4]) == ("adb", "-s", "SERIAL", "install") and
-                            Path(command[-1]) == current.path):
-                        current_installs.append(tuple(command))
+                    if tuple(command[:4]) == ("adb", "-s", "SERIAL", "install"):
+                        installed = Path(command[-1])
+                        if installed.read_bytes() == b"production current APK":
+                            current_installs.append(tuple(command))
                     return super().run(command, timeout=timeout, cwd=cwd,
                                        allowed=allowed)
 
@@ -3926,9 +3998,36 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 )
 
             self.assertEqual(2, len(current_installs))
-            self.assertEqual([0, 1, 1, 2], current_verifications)
+            self.assertEqual([0, 1], current_verifications[-2:])
             self.assertEqual([2], current_closes)
             self.assertEqual(-1, current.descriptor)
+
+    def test_current_close_failure_recovers_from_independent_held_apk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installs, _tree_calls = self._run_real_current_cleanup_recovery(
+                root, failure="close",
+            )
+
+            self.assertEqual(2, len(installs))
+            self.assertNotEqual(installs[0][0], installs[1][0])
+            self.assertNotEqual(installs[0][1], installs[1][1])
+            self.assertEqual([], list(root.glob("qtrace-current-inputs-*")))
+            self.assertEqual([], list(root.glob("qtrace-current-recovery-*")))
+
+    def test_partial_current_tree_failure_recovers_then_removes_every_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installs, tree_calls = self._run_real_current_cleanup_recovery(
+                root, failure="tree",
+            )
+
+            self.assertEqual(2, len(installs))
+            self.assertNotEqual(installs[0][0], installs[1][0])
+            self.assertNotEqual(installs[0][1], installs[1][1])
+            self.assertEqual(2, tree_calls)
+            self.assertEqual([], list(root.glob("qtrace-current-inputs-*")))
+            self.assertEqual([], list(root.glob("qtrace-current-recovery-*")))
 
     def test_oversized_builder_report_is_bounded_with_truncation_evidence(self):
         from scripts import qtrace_device_acceptance as acceptance

@@ -480,6 +480,51 @@ def _snapshot_current_inputs(*, deadline: float) -> tuple[HostBinarySnapshot, He
         raise
 
 
+def _snapshot_recovery_apk(
+        current: HostBinarySnapshot, *, deadline: float) -> HostBinarySnapshot:
+    """Make a separately held bounded copy for post-cleanup device recovery."""
+    root = Path(tempfile.mkdtemp(
+        prefix="qtrace-current-recovery-", dir=current.path.parent.parent,
+    ))
+    recovery: HostBinarySnapshot | None = None
+    try:
+        os.chmod(root, 0o700)
+        current.verify_path()
+        recovery = _snapshot_host_binary(
+            current.path, root / "current.apk",
+            maximum_bytes=_MAX_CURRENT_APK_BYTES, deadline=deadline,
+        )
+        current.verify_path()
+        if isinstance(current, HostBinarySnapshot) and (
+                recovery.sha256 != current.sha256 or recovery.size != current.size):
+            raise RuntimeError("current recovery APK bytes changed while snapshotting")
+        recovery.verify_path()
+        return recovery
+    except BaseException as primary:
+        failures = []
+        if recovery is not None:
+            try:
+                recovery.close()
+            except BaseException as error:
+                failures.append(("recovery APK close", error))
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
+        except BaseException as error:
+            failures.append(("recovery APK snapshot tree", error))
+        if failures:
+            detail = "; ".join(
+                f"{label}: {type(error).__name__}: {error}"
+                for label, error in failures
+            )
+            raise RuntimeError(
+                f"current recovery APK snapshot failed: {type(primary).__name__}: "
+                f"{primary}; cleanup failed: {detail}"
+            ) from primary
+        raise
+
+
 class Runner(Protocol):
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
@@ -1387,6 +1432,7 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
 class _HistoricalGateState:
     phase: str = "host"
     current: HostBinarySnapshot | None = None
+    recovery_current: HostBinarySnapshot | None = None
     pair: HeldTracerPair | None = None
     historical: HistoricalBenchmarkApk | None = None
     builder_report: dict[str, object] | None = None
@@ -1583,6 +1629,12 @@ def _current_snapshot_tree_cleanup(current: HostBinarySnapshot) -> None:
         shutil.rmtree(root)
 
 
+def _recovery_snapshot_tree_cleanup(recovery: HostBinarySnapshot) -> None:
+    root = recovery.path.parent
+    if root.name.startswith("qtrace-current-recovery-"):
+        shutil.rmtree(root)
+
+
 def _raise_gate_failure(primary: BaseException,
                         cleanup_errors: Sequence[dict[str, object]]) -> None:
     if not cleanup_errors:
@@ -1616,25 +1668,45 @@ def _gate_resource_cleanup(state: _HistoricalGateState) -> list[dict[str, object
     return _collect_gate_cleanup(actions)
 
 
+def _gate_recovery_cleanup(state: _HistoricalGateState) -> list[dict[str, object]]:
+    if state.recovery_current is None:
+        return []
+    return _collect_gate_cleanup((
+        ("recovery current APK close", state.recovery_current.close),
+        ("recovery current snapshot tree cleanup",
+         lambda: _recovery_snapshot_tree_cleanup(state.recovery_current)),
+    ))
+
+
+def _install_gate_recovery_apk(
+        device: str, runner: Runner, state: _HistoricalGateState) -> None:
+    if state.recovery_current is None:
+        raise RuntimeError("recovery current APK is unavailable")
+    _install_held_apk(device, runner, state.recovery_current)
+
+
 def _finalize_gate_failure(
         device: str, directory: Path, *, runner: Runner,
         state: _HistoricalGateState, primary: BaseException,
         initial_cleanup_errors: Sequence[dict[str, object]] = (),
         cleanup_resources: bool = True,
-        cleanup_after_recovery: Sequence[tuple[str, Callable[[], None]]] = ()) -> None:
+        cleanup_after_recovery: Sequence[tuple[str, Callable[[], None]]] = (),
+        cleanup_recovery_resources: bool = True) -> None:
     cleanup_errors = list(initial_cleanup_errors)
     if state.recovery_active and state.current is not None:
         cleanup_errors.extend(_collect_gate_cleanup((
             ("recovery force-stop before current install",
              lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
             ("recovery current APK install",
-             lambda: _install_held_apk(device, runner, state.current)),
+             lambda: _install_gate_recovery_apk(device, runner, state)),
             ("recovery force-stop after current install",
              lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
         )))
     if cleanup_resources:
         cleanup_errors.extend(_gate_resource_cleanup(state))
     cleanup_errors.extend(_collect_gate_cleanup(cleanup_after_recovery))
+    if cleanup_recovery_resources:
+        cleanup_errors.extend(_gate_recovery_cleanup(state))
     try:
         _publish_gate_failure_evidence(directory, state, primary, cleanup_errors)
     except BaseException as error:
@@ -1717,6 +1789,10 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
         state.current, state.pair = _snapshot_current_inputs(
             deadline=time.monotonic() + _HOST_BINARY_SNAPSHOT_SECONDS,
         )
+        state.phase = "snapshot-current-recovery"
+        state.recovery_current = _snapshot_recovery_apk(
+            state.current, deadline=time.monotonic() + _HOST_BINARY_SNAPSHOT_SECONDS,
+        )
         state.phase = "build-historical"
         state.historical = historical_builder(
             Path.cwd(), deadline=time.monotonic() + _HISTORICAL_BUILD_SECONDS,
@@ -1798,7 +1874,11 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             device, directory, runner=runner, state=state,
             primary=RuntimeError("acceptance resource cleanup failed"),
             initial_cleanup_errors=cleanup_errors, cleanup_resources=False,
-            cleanup_after_recovery=(("current APK close", state.current.close),),
+            cleanup_after_recovery=(
+                ("current APK close", state.current.close),
+                ("current input snapshot tree cleanup retry",
+                 lambda: _current_snapshot_tree_cleanup(state.current)),
+            ),
         )
     cleanup_errors = _collect_gate_cleanup((
         ("current APK close", state.current.close),
@@ -1808,6 +1888,14 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             device, directory, runner=runner, state=state,
             primary=RuntimeError("acceptance resource cleanup failed"),
             initial_cleanup_errors=cleanup_errors, cleanup_resources=False,
+        )
+    cleanup_errors = _gate_recovery_cleanup(state)
+    if cleanup_errors:
+        _finalize_gate_failure(
+            device, directory, runner=runner, state=state,
+            primary=RuntimeError("acceptance resource cleanup failed"),
+            initial_cleanup_errors=cleanup_errors, cleanup_resources=False,
+            cleanup_recovery_resources=False,
         )
     state.recovery_active = False
     return 0
