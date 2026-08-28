@@ -1607,6 +1607,83 @@ class AcceptanceHarnessTests(unittest.TestCase):
             )
         return current_installs, tree_calls
 
+    def _run_real_recovery_disposal_failure(self, root: Path, *, failure: str):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        source = root / "disposal-current-source.apk"
+        source.write_bytes(b"disposal current APK")
+        snapshot_root = Path(tempfile.mkdtemp(
+            prefix="qtrace-current-inputs-", dir=root,
+        ))
+        current = acceptance._snapshot_host_binary(
+            source, snapshot_root / "current.apk", maximum_bytes=1024,
+            deadline=time.monotonic() + 5.0,
+        )
+        tracer = RecordingHeldInput(snapshot_root / "tracer.so", "t" * 64,
+                                    label="tracer")
+        companion = RecordingHeldInput(snapshot_root / "companion.so", "p" * 64,
+                                       label="companion")
+        tracer.path.write_bytes(b"tracer")
+        companion.path.write_bytes(b"companion")
+        pair = RecordingHeldPair(tracer, companion)
+        historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+        historical.path.write_bytes(b"historical")
+        real_close = acceptance.HostBinarySnapshot.close
+        real_recovery_tree_cleanup = acceptance._recovery_snapshot_tree_cleanup
+        recovery_close_failed = False
+        recovery_tree_calls = 0
+        installs = []
+
+        class LifecycleRunner(FakeRunner):
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                if tuple(command[:4]) == ("adb", "-s", "SERIAL", "install"):
+                    installs.append(Path(command[-1]))
+                return super().run(command, timeout=timeout, cwd=cwd,
+                                   allowed=allowed)
+
+        def failing_close(snapshot):
+            nonlocal recovery_close_failed
+            if (failure == "close" and
+                    snapshot.path.parent.name.startswith("qtrace-current-recovery-") and
+                    not recovery_close_failed):
+                recovery_close_failed = True
+                real_close(snapshot)
+                raise OSError("recovery snapshot close after descriptor disposal")
+            return real_close(snapshot)
+
+        def failing_recovery_tree_cleanup(recovery):
+            nonlocal recovery_tree_calls
+            recovery_tree_calls += 1
+            if failure == "tree" and recovery_tree_calls == 1:
+                recovery.path.unlink()
+                raise OSError("partial recovery tree cleanup removed APK")
+            if failure == "tree" and recovery_tree_calls == 2:
+                real_recovery_tree_cleanup(recovery)
+                raise OSError("recovery tree cleanup retry diagnostic")
+            return real_recovery_tree_cleanup(recovery)
+
+        runner = LifecycleRunner()
+        with patch.object(acceptance, "_snapshot_current_inputs",
+                          return_value=(current, pair)), \
+                patch.object(acceptance, "_stage_app_private_binaries"), \
+                patch.object(acceptance, "_run_current_fixture_phase"), \
+                patch.object(acceptance.HostBinarySnapshot, "close", failing_close), \
+                patch.object(acceptance, "_recovery_snapshot_tree_cleanup",
+                             failing_recovery_tree_cleanup), \
+                self.assertRaises(RuntimeError):
+            acceptance.run_acceptance(
+                "SERIAL", root, runner=runner,
+                historical_builder=lambda *_args, **_kwargs: historical,
+            )
+        report = json.loads(
+            (root / "historical-benchmark-gate.json").read_text(encoding="utf-8")
+        )
+        force_stops = [
+            command for command in runner.commands
+            if command[4:7] == ("am", "force-stop", acceptance.PACKAGE)
+        ]
+        return installs, force_stops, recovery_tree_calls, report
+
     def test_direct_acceptance_script_loads_repo_packages_without_pythonpath(self):
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
@@ -4027,6 +4104,50 @@ class AcceptanceHarnessTests(unittest.TestCase):
             self.assertNotEqual(installs[0][1], installs[1][1])
             self.assertEqual(2, tree_calls)
             self.assertEqual([], list(root.glob("qtrace-current-inputs-*")))
+            self.assertEqual([], list(root.glob("qtrace-current-recovery-*")))
+
+    def test_recovery_snapshot_close_failure_does_not_reinstall_damaged_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installs, force_stops, tree_calls, report = (
+                self._run_real_recovery_disposal_failure(root, failure="close")
+            )
+
+            self.assertEqual(2, len(installs))
+            self.assertEqual(2, len(force_stops))
+            self.assertEqual(2, tree_calls)
+            self.assertEqual("cleanup-success", report["phase"])
+            self.assertTrue(any(
+                item["message"] ==
+                "recovery snapshot close after descriptor disposal"
+                for item in report["cleanup_errors"]
+            ))
+            self.assertFalse(any(
+                item["label"].startswith("recovery force-stop") or
+                item["label"] == "recovery current APK install"
+                for item in report["cleanup_errors"]
+            ))
+            self.assertEqual([], list(root.glob("qtrace-current-recovery-*")))
+
+    def test_partial_recovery_tree_disposal_is_retried_without_device_reinstall(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installs, force_stops, tree_calls, report = (
+                self._run_real_recovery_disposal_failure(root, failure="tree")
+            )
+
+            self.assertEqual(2, len(installs))
+            self.assertEqual(2, len(force_stops))
+            self.assertEqual(2, tree_calls)
+            self.assertEqual("cleanup-success", report["phase"])
+            messages = [item["message"] for item in report["cleanup_errors"]]
+            self.assertIn("partial recovery tree cleanup removed APK", messages)
+            self.assertIn("recovery tree cleanup retry diagnostic", messages)
+            self.assertFalse(any(
+                item["label"].startswith("recovery force-stop") or
+                item["label"] == "recovery current APK install"
+                for item in report["cleanup_errors"]
+            ))
             self.assertEqual([], list(root.glob("qtrace-current-recovery-*")))
 
     def test_oversized_builder_report_is_bounded_with_truncation_evidence(self):

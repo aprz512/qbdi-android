@@ -1632,7 +1632,10 @@ def _current_snapshot_tree_cleanup(current: HostBinarySnapshot) -> None:
 def _recovery_snapshot_tree_cleanup(recovery: HostBinarySnapshot) -> None:
     root = recovery.path.parent
     if root.name.startswith("qtrace-current-recovery-"):
-        shutil.rmtree(root)
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
 
 
 def _raise_gate_failure(primary: BaseException,
@@ -1691,9 +1694,10 @@ def _finalize_gate_failure(
         initial_cleanup_errors: Sequence[dict[str, object]] = (),
         cleanup_resources: bool = True,
         cleanup_after_recovery: Sequence[tuple[str, Callable[[], None]]] = (),
-        cleanup_recovery_resources: bool = True) -> None:
+        cleanup_recovery_resources: bool = True,
+        attempt_device_recovery: bool = True) -> None:
     cleanup_errors = list(initial_cleanup_errors)
-    if state.recovery_active and state.current is not None:
+    if attempt_device_recovery and state.recovery_active and state.current is not None:
         cleanup_errors.extend(_collect_gate_cleanup((
             ("recovery force-stop before current install",
              lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
@@ -1895,7 +1899,7 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             device, directory, runner=runner, state=state,
             primary=RuntimeError("acceptance resource cleanup failed"),
             initial_cleanup_errors=cleanup_errors, cleanup_resources=False,
-            cleanup_recovery_resources=False,
+            attempt_device_recovery=False,
         )
     state.recovery_active = False
     return 0
