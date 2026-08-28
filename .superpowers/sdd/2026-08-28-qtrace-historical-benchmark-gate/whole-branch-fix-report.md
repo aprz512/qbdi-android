@@ -392,7 +392,7 @@ The command used the previously recorded Android/NDK/Frida/LZ4 environment and
 exited 0. Bounded success evidence was retained at:
 
 ```text
-/home/lyldalek/workspace/qbdi-android/.worktrees/qtrace-infrastructure/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157
+/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157
 ```
 
 The `0700` evidence directory contains the `0600`
