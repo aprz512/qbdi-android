@@ -169,6 +169,18 @@ void writes_the_complete_session_status_schema_atomically() {
     CHECK(has_no_temporary_files(root.path()));
 }
 
+void default_status_path_uses_android_uid_user_directory() {
+    char output[512]{};
+    CHECK(session_status_test_default_output_directory(
+            "com.example.target", 10905, output, sizeof(output)));
+    CHECK(std::string(output) ==
+          "/data/user/0/com.example.target/files/qbdi-traces");
+    CHECK(session_status_test_default_output_directory(
+            "com.example.target", 1010905, output, sizeof(output)));
+    CHECK(std::string(output) ==
+          "/data/user/10/com.example.target/files/qbdi-traces");
+}
+
 // Catches a directory durability failure that leaves a newly renamed first
 // status visible even though no previous valid status existed to recover.
 void directory_sync_failure_without_a_previous_status_leaves_no_status_file() {
@@ -638,6 +650,7 @@ void rejects_non_utf8_snapshot_strings_before_creating_a_status_file() {
 } // namespace
 
 int main() {
+    default_status_path_uses_android_uid_user_directory();
     writes_the_complete_session_status_schema_atomically();
     failed_publications_preserve_the_previous_status_and_latch_first_errno();
     no_previous_rollback_directory_sync_retains_a_recoverable_marker();

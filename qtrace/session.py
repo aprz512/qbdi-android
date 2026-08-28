@@ -320,6 +320,19 @@ def build_native_request(config: UserConfig, resolved: ResolvedTarget, session_i
     }
 
 
+def _collection_proves_crash(records: tuple[Mapping[str, object], ...]) -> bool:
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        classification = record.get("recovery_classification")
+        if (classification == "crash_marker" and record.get("decoder") == "qtrb"):
+            return True
+        if (classification == "flight" and record.get("decoder") == "flight"
+                and record.get("recovery_status") == "complete"):
+            return True
+    return False
+
+
 class SessionOrchestrator:
     def __init__(self, preflight: object, resolver_factory: Callable[[object], object], builder: object,
                  deployer: object, injector_factory: Callable[[object], object], collector: object,
@@ -486,7 +499,8 @@ class SessionOrchestrator:
                 native_request=native, process_exited=True,
             )
             mark(SessionStage.COMPLETED)
-            return publish("crash_recovered" if exit_code == EXIT_PARTIAL else "process_exited", exit_code,
+            recovered = exit_code == EXIT_PARTIAL and _collection_proves_crash(collection_records)
+            return publish("crash_recovered" if recovered else "process_exited", exit_code,
                            outputs=outputs, artifact_records=collection_records,
                            collector_token=collection_token)
         except BaseException as primary:
@@ -516,12 +530,23 @@ class SessionOrchestrator:
             if context is not None and entered:
                 context.__exit__(*sys.exc_info())
 
-    def _status_path(self, package: str, session_id: str) -> str:
-        return f"/data/data/{package}/files/qbdi-traces/session-{session_id}.status.json"
+    def _trace_directory(self, device: object, package: str) -> str:
+        package_data_dir = getattr(device, "package_data_dir", None)
+        bound_package = getattr(device, "package", package)
+        if (bound_package != package or not isinstance(package_data_dir, str)
+                or re.fullmatch(rf"/data/user/[0-9]+/{re.escape(package)}", package_data_dir) is None):
+            raise QtraceError(
+                "session.binding_invalid", "session",
+                "bound device package data directory is missing or inconsistent",
+            )
+        return f"{package_data_dir}/files/qbdi-traces"
+
+    def _status_path(self, device: object, package: str, session_id: str) -> str:
+        return f"{self._trace_directory(device, package)}/session-{session_id}.status.json"
 
     def _snapshot_artifacts(self, device: object, request: RunRequest | MonitorRequest,
                             session_id: str) -> tuple[str, ...]:
-        directory = f"/data/data/{request.config.app.package}/files/qbdi-traces"
+        directory = self._trace_directory(device, request.config.app.package)
         target_shell = getattr(device, "target_shell", None)
         if target_shell is not None:
             try:
@@ -589,7 +614,7 @@ class SessionOrchestrator:
 
     def _read_status(self, device: object, request: RunRequest | MonitorRequest, result: InjectionResult,
                      session_id: str, previous: Mapping[str, object] | None, timeout: float | None = None) -> dict[str, object]:
-        path = self._status_path(request.config.app.package, session_id)
+        path = self._status_path(device, request.config.app.package, session_id)
         target_shell = getattr(device, "target_shell", None)
         timeout = request.adb_timeout if timeout is None else timeout
         raw = (target_shell("cat", path, maximum_bytes=1_048_576, timeout=timeout)
@@ -602,7 +627,7 @@ class SessionOrchestrator:
     def _read_final_status(self, device: object, request: MonitorRequest, result: InjectionResult,
                            session_id: str) -> Mapping[str, object] | None:
         try:
-            path = self._status_path(request.config.app.package, session_id)
+            path = self._status_path(device, request.config.app.package, session_id)
             return self._read_status(device, request, result, session_id, None)
         except BaseException as error:
             if _missing_remote(error, path):
@@ -612,7 +637,7 @@ class SessionOrchestrator:
     def _wait_for_seal(self, device: object, request: RunRequest, result: InjectionResult,
                        session_id: str, on_stopping: Callable[[], None]) -> tuple[Mapping[str, object], bool]:
         deadline = self._clock.monotonic() + request.duration_ms / 1000.0 + request.stop_timeout
-        status_path = self._status_path(request.config.app.package, session_id)
+        status_path = self._status_path(device, request.config.app.package, session_id)
         previous = None
         saw_stop = False
         transient_count = 0

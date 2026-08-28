@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 from unittest.mock import patch
 
 from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceError
@@ -91,6 +92,8 @@ class FakeDevice:
         self.read_paths: list[str] = []
         self.shell_timeouts: list[tuple[str, float]] = []
         self.killed: list[int] = []
+        self.package = PACKAGE
+        self.package_data_dir = "/data/user/0/com.example.app"
 
     def read_file(self, path: str, maximum_bytes: int, *, timeout: float) -> bytes:
         self.read_paths.append(path)
@@ -170,13 +173,17 @@ class FakeInjector:
 
 
 class FakeCollector:
-    def __init__(self, exit_code: int = 0) -> None:
+    def __init__(self, exit_code: int = 0,
+                 records: tuple[Mapping[str, object], ...] = ()) -> None:
         self.exit_code = exit_code
+        self.records = records
         self.calls = []
 
     def collect_session(self, device, package, session_id, status, output, timeout):
         self.calls.append(status)
-        return self.exit_code, ()
+        result = ArtifactResult(Path("."), (), (), self.exit_code)
+        object.__setattr__(result, "_records", self.records)
+        return result
 
 
 def orchestrator(device: FakeDevice, clock: ManualClock, collector: FakeCollector | None = None):
@@ -358,7 +365,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(7, document["native"]["status"]["generation"])
 
     def test_timed_run_retries_only_initial_exact_status_enoent(self) -> None:
-        path = f"/data/data/{PACKAGE}/files/qbdi-traces/session-{SESSION_ID}.status.json"
+        path = f"/data/user/0/{PACKAGE}/files/qbdi-traces/session-{SESSION_ID}.status.json"
         missing = process_failed(1, f"cat: {path}: No such file or directory".encode())
         device = FakeDevice([
             missing,
@@ -376,6 +383,19 @@ class SessionTests(unittest.TestCase):
         runner, _ = orchestrator(disappeared, ManualClock())
         with self.assertRaisesRegex(QtraceError, "process.failed"):
             runner.run(self.run_request())
+
+    def test_session_status_and_snapshot_use_bound_secondary_user_trace_root(self) -> None:
+        device = FakeDevice([
+            status("sealed", transition=1, reason="duration_elapsed", acknowledged=True),
+        ], [4242])
+        device.package_data_dir = "/data/user/10/com.example.app"
+        runner, _ = orchestrator(device, ManualClock())
+
+        self.assertEqual(0, runner.run(self.run_request()).exit_code)
+        self.assertTrue(device.read_paths)
+        self.assertTrue(all(path.startswith(
+            "/data/user/10/com.example.app/files/qbdi-traces/"
+        ) for path in device.read_paths))
 
     def test_installed_action_requires_worker_cleanup_detach_receipt(self) -> None:
         from qtrace.injector import InjectionResult
@@ -599,11 +619,39 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(1, len(injector.requests))
         self.assertEqual([], device.killed)
 
-    def test_monitor_recovery_is_partial_and_does_not_invent_terminal(self) -> None:
+    def test_monitor_partial_without_recovery_evidence_stays_process_exited(self) -> None:
         device = FakeDevice([status("running", transition=1)], [4242, None], [99, 99, None])
         runner, _ = orchestrator(device, ManualClock(), FakeCollector(EXIT_PARTIAL))
         request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
-        self.assertEqual(EXIT_PARTIAL, runner.monitor(request).exit_code)
+        result = runner.monitor(request)
+        self.assertEqual(EXIT_PARTIAL, result.exit_code)
+        self.assertEqual(
+            "process_exited", json.loads(result.report.read_text(encoding="utf-8"))["status"],
+        )
+
+    def test_monitor_partial_is_crash_recovered_only_for_validated_recovery_records(self) -> None:
+        cases = (
+            ({"recovery_classification": "crash_marker", "decoder": "qtrb",
+              "termination": None},),
+            ({"recovery_classification": "flight", "decoder": "flight",
+              "recovery_status": "complete"},),
+        )
+        for records in cases:
+            with self.subTest(classification=records[0]["recovery_classification"]):
+                device = FakeDevice(
+                    [status("running", transition=1)], [4242, None], [99, 99, None],
+                )
+                runner, _ = orchestrator(
+                    device, ManualClock(), FakeCollector(EXIT_PARTIAL, records),
+                )
+                result = runner.monitor(MonitorRequest(
+                    config(), None, Path(self.directory.name), 2.0, 0.5, 1.0,
+                ))
+                self.assertEqual(EXIT_PARTIAL, result.exit_code)
+                self.assertEqual(
+                    "crash_recovered",
+                    json.loads(result.report.read_text(encoding="utf-8"))["status"],
+                )
 
     def test_transient_adb_failures_retry_to_phase_deadline_without_reinjecting(self) -> None:
         device = FakeDevice([OSError("disconnect")] * 100, [4242])

@@ -342,7 +342,7 @@ void accepted_generation_owns_one_runtime_and_private_status_publisher() {
           std::string_view::npos);
     CHECK(runtime_header.find("SessionStatusPublisher status_publisher_;") !=
           std::string::npos);
-    CHECK(status.find("/data/data/%s/files/qbdi-traces") !=
+    CHECK(status.find("/data/user/%u/%.*s/files/qbdi-traces") !=
           std::string::npos);
 }
 

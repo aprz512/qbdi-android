@@ -52,6 +52,7 @@ class FakeDevice:
         su_uid=b"20000\n",
         df=b"Filesystem 1024-blocks Used Available Capacity Mounted on\n/data 1000000 1 999999 1% /data\n",
         package_paths=("/data/app/base.apk",),
+        android_user=b"0\n",
     ):
         self.abi = abi
         self.api = api
@@ -62,6 +63,7 @@ class FakeDevice:
         self.su_uid = su_uid
         self.df = df
         self.package_paths = package_paths
+        self.android_user = android_user
         self.events = []
         self.shell_calls = []
 
@@ -94,7 +96,18 @@ class FakeDevice:
             if isinstance(result, BaseException):
                 raise result
             return result
+        if command == ("cmd", "activity", "get-current-user"):
+            result = self.android_user
+            if isinstance(result, BaseException):
+                raise result
+            return result
         if len(command) == 4 and command[:3] == ("run-as", "com.example.external", "id"):
+            result = self.run_as
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        if (len(command) == 6 and command[:3] == ("run-as", "--user", "10")
+                and command[3:] == ("com.example.external", "id", "-u")):
             result = self.run_as
             if isinstance(result, BaseException):
                 raise result
@@ -133,9 +146,12 @@ class FakeDevice:
         root_strategy,
         package_uid,
         target_strategy,
+        android_user,
+        package_data_dir,
     ):
         self.events.append((
-            "bind", package, access_mode, root_strategy, package_uid, target_strategy
+            "bind", package, access_mode, root_strategy, package_uid, target_strategy,
+            android_user, package_data_dir,
         ))
 
 
@@ -175,7 +191,8 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(("package", "com.example.external"), device.events[0][:2])
         self.assertTrue(0 < device.events[0][2] <= 2.0)
         self.assertEqual(
-            ("bind", "com.example.external", "root", "direct", 20000, "run-as"),
+            ("bind", "com.example.external", "root", "direct", 20000, "run-as", 0,
+             "/data/user/0/com.example.external"),
             device.events[-1],
         )
         self.assertFalse(any(event[0] == "install" for event in device.events))
@@ -208,16 +225,33 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(0 < frida.calls[0][1] <= 9.0)
         self.assertTrue(all(call[1] <= 2.0 for call in device.shell_calls))
         self.assertIn(
-            ("bind", "com.example.external", "root", "direct", 20000, "run-as"),
+            ("bind", "com.example.external", "root", "direct", 20000, "run-as", 0,
+             "/data/user/0/com.example.external"),
             device.events,
         )
+
+    def test_binds_current_secondary_user_and_rejects_uid_user_mismatch(self):
+        device = FakeDevice(android_user=b"10\n", run_as=b"1020000\n")
+        (_selected, identity), _frida = self.run_preflight(device)
+        self.assertEqual(10, identity.android_user)
+        self.assertEqual("/data/user/10/com.example.external", identity.package_data_dir)
+        self.assertIn(
+            ("bind", "com.example.external", "root", "direct", 1020000, "run-as", 10,
+             "/data/user/10/com.example.external"),
+            device.events,
+        )
+
+        mismatch = FakeDevice(android_user=b"10\n", run_as=b"20000\n")
+        with self.assertRaisesRegex(QtraceError, "Android user"):
+            self.run_preflight(mismatch)
 
     def test_uses_run_as_when_root_is_unavailable(self):
         device = FakeDevice(root=QtraceError("device.command_failed", "device.shell", "not root"))
         (_selected, identity), _frida = self.run_preflight(device)
         self.assertEqual("run-as", identity.access_mode)
         self.assertIn(
-            ("bind", "com.example.external", "run-as", "none", 20000, "run-as"),
+            ("bind", "com.example.external", "run-as", "none", 20000, "run-as", 0,
+             "/data/user/0/com.example.external"),
             device.events,
         )
 
@@ -228,7 +262,8 @@ class PreflightTests(unittest.TestCase):
 
         self.assertEqual("root", identity.access_mode)
         self.assertIn(
-            ("bind", "com.example.external", "root", "su", 10905, "run-as"),
+            ("bind", "com.example.external", "root", "su", 10905, "run-as", 0,
+             "/data/user/0/com.example.external"),
             device.events,
         )
 
@@ -246,7 +281,8 @@ class PreflightTests(unittest.TestCase):
 
         self.assertEqual("root", identity.access_mode)
         self.assertIn(
-            ("bind", "com.example.external", "root", "su", 10905, "su-uid"),
+            ("bind", "com.example.external", "root", "su", 10905, "su-uid", 0,
+             "/data/user/0/com.example.external"),
             device.events,
         )
 

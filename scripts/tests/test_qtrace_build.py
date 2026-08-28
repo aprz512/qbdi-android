@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 from scripts.bounded_process import BoundedProcessError
 
-from qtrace.build import ArtifactBuilder, Deployer, TracerArtifacts
+from qtrace.build import (ArtifactBuilder, Deployer, TracerArtifacts,
+                          _snapshot_artifacts)
 from qtrace.errors import QtraceError
 from qtrace.models import TracerConfig
 
@@ -153,16 +154,21 @@ class FakeDeployDevice:
         chmod_error=None,
         hash_error=None,
         load_error=None,
+        staging_cleanup_error=None,
         access_mode="root",
         root_strategy="direct",
         target_strategy="run-as",
         package_uid=20000,
+        replace_before_push=None,
+        android_user=0,
     ):
         self.package = "com.example.external"
         self.access_mode = access_mode
         self.root_strategy = root_strategy
         self.target_strategy = target_strategy
         self.package_uid = package_uid
+        self.android_user = android_user
+        self.package_data_dir = f"/data/user/{android_user}/com.example.external"
         self.private_probe = private_probe
         self.corrupt_hash = corrupt_hash
         self.load_failure = load_failure
@@ -172,8 +178,11 @@ class FakeDeployDevice:
         self.chmod_error = chmod_error
         self.hash_error = hash_error
         self.load_error = load_error
+        self.staging_cleanup_error = staging_cleanup_error
+        self.replace_before_push = dict(replace_before_push or {})
         self.calls = []
         self.host_by_remote = {}
+        self.bytes_by_remote = {}
 
     def _execute(self, channel, args, timeout, maximum_bytes):
         if timeout <= 0 or maximum_bytes <= 0:
@@ -196,11 +205,12 @@ class FakeDeployDevice:
             return b""
         if command[0] == "cp":
             self.host_by_remote[command[2]] = self.host_by_remote[command[1]]
+            self.bytes_by_remote[command[2]] = self.bytes_by_remote[command[1]]
             return b""
         if command[0] == "sha256sum":
             if self.hash_error is not None:
                 raise self.hash_error
-            digest = hashlib.sha256(self.host_by_remote[command[1]].read_bytes()).hexdigest()
+            digest = hashlib.sha256(self.bytes_by_remote[command[1]]).hexdigest()
             if self.corrupt_hash:
                 digest = "0" * 64
             return f"{digest}  {command[1]}\n".encode()
@@ -213,6 +223,9 @@ class FakeDeployDevice:
                 raise QtraceError("device.load_probe_failed", "deploy.probe", "namespace denied")
             return b"libshadowhook_nothing.so => namespace-ok\n"
         if command[0] == "rm":
+            if (self.staging_cleanup_error is not None
+                    and command[:2] == ("rm", "-rf")):
+                raise self.staging_cleanup_error
             return b""
         raise AssertionError(f"unexpected shell call: {args!r}")
 
@@ -229,7 +242,12 @@ class FakeDeployDevice:
         self.calls.append(("push", Path(source), destination, timeout))
         if self.push_error is not None:
             raise self.push_error
-        self.host_by_remote[destination] = Path(source)
+        source = Path(source)
+        replacement = self.replace_before_push.get(source)
+        if replacement is not None:
+            source.write_bytes(replacement)
+        self.host_by_remote[destination] = source
+        self.bytes_by_remote[destination] = source.read_bytes()
 
 
 class DeployerTests(unittest.TestCase):
@@ -256,6 +274,59 @@ class DeployerTests(unittest.TestCase):
         self.assertEqual(2, len(pushed))
         self.assertTrue(any(call[0] == "root" and call[1][0:2] == ("chmod", "0755") for call in device.calls))
         self.assertTrue(any(call[0] == "target" and call[1][0] == "sha256sum" for call in device.calls))
+
+    def test_private_deploy_uses_bound_secondary_user_data_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(android_user=10, package_uid=1_020_000)
+            deployment = Deployer().deploy(
+                device, "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+        self.assertTrue(deployment.remote_dir.startswith(
+            "/data/user/10/com.example.external/cache/qtrace/"
+        ))
+
+    def test_snapshot_construction_cleanup_never_masks_primary_and_removes_private_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = self.make_artifacts(root)
+            read_primary = RuntimeError("snapshot read primary")
+            real_close = os.close
+            real_mkdtemp = tempfile.mkdtemp
+            close_failed = False
+
+            def close_once(descriptor):
+                nonlocal close_failed
+                real_close(descriptor)
+                if not close_failed:
+                    close_failed = True
+                    raise OSError("injected close cleanup failure")
+
+            with patch("qtrace.build.tempfile.mkdtemp", side_effect=lambda **kwargs: real_mkdtemp(
+                    dir=root, **kwargs)), patch(
+                "qtrace.build.os.read", side_effect=read_primary
+            ), patch("qtrace.build.os.close", side_effect=close_once):
+                with self.assertRaises(RuntimeError) as raised:
+                    _snapshot_artifacts(artifacts)
+
+            self.assertIs(read_primary, raised.exception)
+            self.assertTrue(any("cleanup failed" in note
+                                for note in getattr(read_primary, "__notes__", ())))
+            self.assertEqual([], list(root.glob("qtrace-deploy-*")))
+
+    def test_snapshot_root_setup_failure_removes_only_its_owned_empty_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifacts = self.make_artifacts(root)
+            real_mkdtemp = tempfile.mkdtemp
+            setup_primary = OSError("snapshot chmod primary")
+            with patch("qtrace.build.tempfile.mkdtemp", side_effect=lambda **kwargs: real_mkdtemp(
+                    dir=root, **kwargs)), patch("qtrace.build.os.chmod", side_effect=setup_primary):
+                with self.assertRaises(OSError) as raised:
+                    _snapshot_artifacts(artifacts)
+
+            self.assertIs(setup_primary, raised.exception)
+            self.assertEqual([], list(root.glob("qtrace-deploy-*")))
 
     def test_falls_back_only_after_explicit_private_probe_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -335,6 +406,63 @@ class DeployerTests(unittest.TestCase):
             2,
             sum(call[0] == "root" and call[1][0] == "cp" for call in device.calls),
         )
+
+    def test_owned_staging_directory_is_removed_after_success(self):
+        session_id = "123e4567-e89b-42d3-a456-426614174000"
+        staging = f"/data/local/tmp/qtrace-staging/{session_id}"
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(root_strategy="su")
+            Deployer().deploy(device, session_id, self.make_artifacts(Path(directory)))
+
+        removals = [call for call in device.calls
+                    if call[0] == "shell" and call[1][:2] == ("rm", "-rf")]
+        self.assertEqual([("shell", ("rm", "-rf", staging), 30.0, 64 * 1024)], removals)
+        self.assertGreater(device.calls.index(removals[0]),
+                           max(index for index, call in enumerate(device.calls)
+                               if call[0] == "push"))
+
+    def test_owned_staging_directory_is_removed_after_mid_deploy_failure(self):
+        primary = QtraceError("process.timeout", "process", "push transport")
+        session_id = "123e4567-e89b-42d3-a456-426614174000"
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(root_strategy="su", push_error=primary)
+            with self.assertRaises(QtraceError) as caught:
+                Deployer().deploy(device, session_id, self.make_artifacts(Path(directory)))
+
+        self.assertIs(primary, caught.exception)
+        self.assertEqual(1, sum(call[0] == "shell" and call[1] == (
+            "rm", "-rf", f"/data/local/tmp/qtrace-staging/{session_id}")
+            for call in device.calls))
+
+    def test_staging_cleanup_failure_preserves_primary_and_is_never_silent(self):
+        primary = QtraceError("process.timeout", "process", "push transport")
+        cleanup = QtraceError("process.timeout", "process", "cleanup transport")
+        session_id = "123e4567-e89b-42d3-a456-426614174000"
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(
+                root_strategy="su", push_error=primary, staging_cleanup_error=cleanup,
+            )
+            with self.assertRaises(QtraceError) as caught:
+                Deployer().deploy(device, session_id, self.make_artifacts(Path(directory)))
+        self.assertIs(primary, caught.exception)
+        self.assertIn("staging directory cleanup failed", "\n".join(caught.exception.__notes__))
+
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(root_strategy="su", staging_cleanup_error=cleanup)
+            with self.assertRaises(QtraceError) as caught:
+                Deployer().deploy(device, session_id, self.make_artifacts(Path(directory)))
+        self.assertIs(cleanup, caught.exception)
+
+    def test_direct_push_route_never_removes_an_uncreated_staging_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice(root_strategy="direct")
+            Deployer().deploy(
+                device,
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+        self.assertFalse(any(call[1][:2] == ("rm", "-rf")
+                             for call in device.calls if call[0] == "shell"))
 
     def test_su_uid_defers_loadability_without_running_linker_in_magisk_context(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -455,6 +583,36 @@ class DeployerTests(unittest.TestCase):
                 self.assertGreaterEqual(len(removals), 1)
                 self.assertTrue(all(".qtrace-probe-" in call[1][-1] for call in removals))
                 self.assertFalse(any("libqbdi_tracer.so" in call[1][-1] for call in removals))
+
+    def test_deploys_and_hashes_one_validated_host_snapshot_when_source_is_replaced(self):
+        session_id = "123e4567-e89b-42d3-a456-426614174000"
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = self.make_artifacts(Path(directory))
+            validated = {
+                artifacts.tracer_so: artifacts.tracer_so.read_bytes(),
+                artifacts.companion: artifacts.companion.read_bytes(),
+            }
+            attacker = arm64_elf() + b"replacement"
+            device = FakeDeployDevice(replace_before_push={
+                artifacts.tracer_so: attacker,
+                artifacts.companion: attacker,
+            })
+
+            deployment = Deployer().deploy(device, session_id, artifacts)
+
+        for remote, original in zip(
+            (deployment.tracer_so, deployment.companion),
+            (validated[artifacts.tracer_so], validated[artifacts.companion]),
+        ):
+            self.assertEqual(original, device.bytes_by_remote[remote])
+            self.assertEqual(hashlib.sha256(original).hexdigest(), deployment.sha256[remote])
+        pushed_sources = [call[1] for call in device.calls if call[0] == "push"]
+        self.assertNotIn(artifacts.tracer_so, pushed_sources)
+        self.assertNotIn(artifacts.companion, pushed_sources)
+        self.assertTrue(all(
+            str(source).startswith(f"/proc/{os.getpid()}/fd/")
+            for source in pushed_sources
+        ))
 
     def test_rejects_non_uuid4_session_before_device_side_effects(self):
         with tempfile.TemporaryDirectory() as directory:

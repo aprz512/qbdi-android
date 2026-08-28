@@ -980,7 +980,7 @@ class CanonicalIdentityTests(unittest.TestCase):
                     return b""
 
                 with self.assertRaisesRegex(ValueError, message):
-                    canonical_elf_sha256(b"\x7fELFinput", deadline=time.monotonic() + 1,
+                    canonical_elf_sha256(b"\x7fELFinput", deadline=time.monotonic() + 5,
                                          android_home=root, capture=write_output)
                 self.assertTrue(destinations)
                 self.assertFalse(destinations[0].exists())

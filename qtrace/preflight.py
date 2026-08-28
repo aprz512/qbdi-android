@@ -138,9 +138,21 @@ def _discover_package_access(
     device: AdbDevice,
     package: str,
     budget: Callable[[], float],
-) -> tuple[str, str, int, str]:
+) -> tuple[str, str, int, str, int, str]:
     """Discover the target identity shared by run, monitor, and pull."""
     package = _validate_package(package)
+    android_user = _numeric_uid(
+        _external(
+            "preflight.access",
+            lambda: device.shell(
+                "cmd", "activity", "get-current-user",
+                timeout=budget(), maximum_bytes=4096,
+            ),
+        ),
+        field="current Android user",
+        allow_root=True,
+    )
+    package_data_dir = f"/data/user/{android_user}/{package}"
     root_strategy: str | None = None
     try:
         root_uid = _numeric_uid(
@@ -181,10 +193,11 @@ def _discover_package_access(
         package_uid = _numeric_uid(
             _external(
                 "preflight.access",
-                lambda: device.shell(
-                    "run-as", package, "id", "-u",
-                    timeout=budget(), maximum_bytes=4096,
-                ),
+                lambda: device.shell(*(
+                    ("run-as", package, "id", "-u")
+                    if android_user == 0
+                    else ("run-as", "--user", str(android_user), package, "id", "-u")
+                ), timeout=budget(), maximum_bytes=4096),
             ),
             field="run-as identity",
         )
@@ -194,7 +207,7 @@ def _discover_package_access(
             raise
 
     if root_strategy is not None and target_strategy is None:
-        private_data = f"/data/user/0/{package}"
+        private_data = package_data_dir
         try:
             root_stat = device.shell if root_strategy == "direct" else device.su_shell
             package_uid = _numeric_uid(
@@ -241,15 +254,24 @@ def _discover_package_access(
         )
 
     assert root_strategy is not None and package_uid is not None and target_strategy is not None
-    return access_mode, root_strategy, package_uid, target_strategy
+    if package_uid // 100_000 != android_user:
+        _fail(
+            "device.uid_user_mismatch", "preflight.access",
+            "package UID does not belong to the current Android user",
+        )
+    return (
+        access_mode, root_strategy, package_uid, target_strategy,
+        android_user, package_data_dir,
+    )
 
 
 def _bind_discovered_package_access(
     device: AdbDevice,
     package: str,
-    binding: tuple[str, str, int, str],
+    binding: tuple[str, str, int, str, int, str],
 ) -> str:
-    access_mode, root_strategy, package_uid, target_strategy = binding
+    (access_mode, root_strategy, package_uid, target_strategy,
+     android_user, package_data_dir) = binding
     _external(
         "preflight.bind",
         lambda: device.bind_package(
@@ -258,6 +280,8 @@ def _bind_discovered_package_access(
             root_strategy=root_strategy,
             package_uid=package_uid,
             target_strategy=target_strategy,
+            android_user=android_user,
+            package_data_dir=package_data_dir,
         ),
     )
     return access_mode
@@ -422,4 +446,6 @@ class Preflight:
             frida_host_version=host_version,
             frida_server_version=server_version,
             free_bytes=free_bytes,
+            android_user=access_binding[4],
+            package_data_dir=access_binding[5],
         )

@@ -344,7 +344,15 @@ class _BoundDeviceClient:
 
     def __init__(self, device: object, package: str) -> None:
         self.device = device
-        self.directory = f"/data/data/{package}/files/qbdi-traces"
+        package_data_dir = getattr(device, "package_data_dir", None)
+        bound_package = getattr(device, "package", package)
+        if (bound_package != package or not isinstance(package_data_dir, str)
+                or re.fullmatch(rf"/data/user/[0-9]+/{re.escape(package)}", package_data_dir) is None):
+            raise _error(
+                "artifact.binding_invalid",
+                "bound device package data directory is missing or inconsistent",
+            )
+        self.directory = f"{package_data_dir}/files/qbdi-traces"
 
     def list_names(self, *, timeout: float) -> list[str]:
         raw = self.device.target_shell("ls", "-1t", self.directory,
@@ -374,11 +382,16 @@ class _BoundDeviceClient:
 
     def stream_file(self, name: str, output: Any, *, timeout: float) -> None:
         _name(name)
-        data = self.device.target_shell("cat", f"{self.directory}/{name}", timeout=timeout,
-                                        maximum_bytes=_MAX_ARTIFACT_BYTES + 1)
-        if len(data) > _MAX_ARTIFACT_BYTES:
-            raise _error("artifact.truncated", "artifact exceeds maximum size", partial=True)
-        output.write(data)
+        stream = getattr(self.device, "stream_target_file", None)
+        if not callable(stream):
+            raise _error(
+                "artifact.client_invalid",
+                "bound device lacks a streaming transport",
+            )
+        stream(
+            f"{self.directory}/{name}", output,
+            timeout=timeout, maximum_bytes=_MAX_ARTIFACT_BYTES,
+        )
 
 
 def pull_named_artifacts(client: object, package: str, names: Sequence[str], destination: Path,
@@ -1195,6 +1208,8 @@ class ArtifactProcessor:
                         stats = convert_binary_file(local, text, lz4=lz4, crash_marked=crash_marked)
                         record.update(decoder="qtrb", termination=stats.termination,
                                      conversion_ms=round((time.monotonic() - started) * 1000, 3))
+                        if crash_marked:
+                            record["recovery_classification"] = "crash_marker"
                         if not compressed_only:
                             files.append(text)
                         else:
@@ -1215,6 +1230,8 @@ class ArtifactProcessor:
                                      recovery_status=recovery_status(summary))
                         process_exited = (status is not None and
                                           status.get("_process_exited") is True)
+                        if summary["complete"] and process_exited:
+                            record["recovery_classification"] = "flight"
                         if not summary["complete"] or process_exited:
                             failure = {"name": artifact.remote_name, "code": "artifact.incomplete",
                                        "detail": (

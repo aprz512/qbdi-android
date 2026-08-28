@@ -63,6 +63,8 @@ enum class SessionStatusFaultPoint : uint8_t {
 
 void session_status_test_inject_fault(SessionStatusFaultPoint point, int error) noexcept;
 void session_status_test_inject_followup_fault(SessionStatusFaultPoint point, int error) noexcept;
+bool session_status_test_default_output_directory(
+        std::string_view package, uint32_t uid, char *output, size_t capacity) noexcept;
 #endif
 
 bool session_status_artifact_basename_is_valid(std::string_view value) noexcept;

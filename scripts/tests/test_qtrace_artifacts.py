@@ -61,6 +61,9 @@ class ArtifactTests(unittest.TestCase):
         from qtrace.artifacts import _client_for
 
         class BoundDevice:
+            package = "com.example.app"
+            package_data_dir = "/data/user/0/com.example.app"
+
             def __init__(self):
                 self.calls = []
 
@@ -74,10 +77,94 @@ class ArtifactTests(unittest.TestCase):
         self.assertIs(device, client.device)
         self.assertEqual([], client.list_names(timeout=1.5))
         self.assertEqual(
-            [(('ls', '-1t', '/data/data/com.example.app/files/qbdi-traces'),
+            [(('ls', '-1t', '/data/user/0/com.example.app/files/qbdi-traces'),
               1.5, 1024 * 1024)],
             device.calls,
         )
+
+    def test_manual_client_uses_bound_secondary_user_trace_root(self):
+        from qtrace.artifacts import _client_for
+
+        class BoundDevice:
+            package = "com.example.app"
+            package_data_dir = "/data/user/10/com.example.app"
+
+            def __init__(self):
+                self.calls = []
+
+            def target_shell(self, *args, timeout, maximum_bytes):
+                self.calls.append(args)
+                return b""
+
+            def stream_target_file(self, *_args, **_kwargs):
+                raise AssertionError("not used")
+
+        device = BoundDevice()
+        self.assertEqual([], _client_for(device, "com.example.app", None).list_names(timeout=1))
+        self.assertEqual(
+            [("ls", "-1t", "/data/user/10/com.example.app/files/qbdi-traces")],
+            device.calls,
+        )
+
+    def test_bound_client_streams_chunks_and_removes_partial_on_transport_failure(self):
+        from qtrace.artifacts import _client_for
+
+        class BoundDevice:
+            package = "com.example.app"
+            package_data_dir = "/data/user/10/com.example.app"
+
+            def __init__(self, failure=None):
+                self.failure = failure
+                self.stream_calls = []
+
+            def target_shell(self, *args, timeout, maximum_bytes):
+                raise AssertionError("artifact bytes must not use buffered target_shell")
+
+            def stream_target_file(self, path, output, *, maximum_bytes, timeout):
+                self.stream_calls.append((path, maximum_bytes, timeout))
+                output.write(b"first")
+                if self.failure is not None:
+                    raise self.failure
+                output.write(b"second")
+
+        with tempfile.TemporaryDirectory() as root:
+            destination = Path(root) / "ok"
+            device = BoundDevice()
+            pulled = pull_named_artifacts(
+                _client_for(device, "com.example.app", None),
+                "com.example.app", ["run.trace.bin"], destination, timeout=1.5,
+            )
+            self.assertEqual(b"firstsecond", pulled[0].local_path.read_bytes())
+            self.assertEqual(
+                [("/data/user/10/com.example.app/files/qbdi-traces/run.trace.bin",
+                  512 * 1024 * 1024, 1.5)],
+                device.stream_calls,
+            )
+
+        with tempfile.TemporaryDirectory() as root:
+            destination = Path(root) / "failed"
+            device = BoundDevice(TimeoutError("transport timeout"))
+            with self.assertRaisesRegex(QtraceError, "transport timeout"):
+                pull_named_artifacts(
+                    _client_for(device, "com.example.app", None),
+                    "com.example.app", ["run.trace.bin"], destination, timeout=1.5,
+                )
+            self.assertEqual([], list(destination.iterdir()))
+
+    def test_collector_rejects_a_short_stream_against_the_bounded_remote_size(self):
+        class ShortClient(FakeClient):
+            def size(self, name, *, timeout):
+                return len(self.files[name]) + 1
+
+        status = self._status(artifacts=["run.trace.txt"])
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(QtraceError, "artifact.truncated"):
+                self._processor(ShortClient({
+                    "run.trace.txt": COMPLETE_TERMINAL,
+                })).collect_session(
+                    "d", "com.example.app", status["sessionId"], status, Path(root), 1,
+                )
+            self.assertEqual([], list(Path(root).iterdir()))
 
     def test_named_pull_rejects_output_directory_replacement_during_stream(self):
         class ReplacingClient(FakeClient):
@@ -264,8 +351,41 @@ class ArtifactTests(unittest.TestCase):
             flight = next(item for item in report["artifacts"]
                           if item.get("remote_name") == "run.flight.bin")
             self.assertEqual("complete", flight["recovery_status"])
+            self.assertEqual("flight", flight["recovery_classification"])
             self.assertIn("artifact.incomplete", {error["code"] for error in result.errors})
             self.assertTrue((result.output_dir / "artifacts" / "run.flight.json").is_file())
+
+    def test_validated_crash_marker_classifies_only_its_validated_qtrb_root(self):
+        from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
+        from scripts.tests.test_pull_trace import crash_marker
+        from scripts.tests.test_trace_binary import complete_stream
+        from scripts.tests.test_trace_convert import fake_lz4_executable
+
+        name = "run.trace.bin.lz4"
+        partial_binary = complete_stream(compression=1)[:-105]
+        compressed = (
+            uncompressed_lz4_frame(partial_binary)
+            + uncompressed_lz4_frame(b"incomplete-tail")[:-3]
+        )
+        status = self._status(
+            state="running", reason="", stopAcknowledged=False,
+            artifacts=[name], _process_exited=True,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            decoder = fake_lz4_executable(Path(root))
+            with patch("qtrace.artifacts.shutil.which", return_value=str(decoder)):
+                result = self._processor(FakeClient({
+                    name: compressed,
+                    name + ".crash": crash_marker(),
+                })).collect_session(
+                    "d", "com.example.app", status["sessionId"], status, Path(root) / "out", 1,
+                )
+
+            report = json.loads((result.output_dir / "report.json").read_text())
+            record = next(item for item in report["artifacts"]
+                          if item.get("remote_name") == name)
+            self.assertEqual("qtrb", record["decoder"])
+            self.assertEqual("crash_marker", record["recovery_classification"])
 
     def test_confirmed_process_exit_ignores_only_snapshot_owned_old_status_temporary(self):
         old_temporary = "session-22222222-2222-4222-8222-222222222222.status.json.tmp.7.1"

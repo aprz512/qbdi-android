@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import stat
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Mapping, Protocol
@@ -56,6 +58,74 @@ class _PrivateCapabilityFailure(RuntimeError):
     pass
 
 
+@dataclass
+class _HostArtifactSnapshot:
+    path: Path
+    descriptor: int
+    identity: tuple[int, int]
+    sha256: str
+
+    def assert_identity(self) -> None:
+        descriptor = os.fstat(self.descriptor)
+        pathname = os.stat(self.path, follow_symlinks=False)
+        if (not stat.S_ISREG(descriptor.st_mode)
+                or not stat.S_ISREG(pathname.st_mode)
+                or (descriptor.st_dev, descriptor.st_ino) != self.identity
+                or (pathname.st_dev, pathname.st_ino) != self.identity):
+            _fail(
+                "tracer.artifact_replaced",
+                "deploy.snapshot",
+                "private tracer snapshot identity changed during deployment",
+            )
+
+
+@dataclass
+class _HostArtifactSnapshots:
+    root: Path
+    root_descriptor: int
+    root_identity: tuple[int, int]
+    tracer: _HostArtifactSnapshot
+    companion: _HostArtifactSnapshot
+
+    def close(self, primary: BaseException | None = None) -> None:
+        failures: list[tuple[str, BaseException]] = []
+        for label, snapshot in (("tracer", self.tracer), ("companion", self.companion)):
+            descriptor, snapshot.descriptor = snapshot.descriptor, -1
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except BaseException as error:
+                    failures.append((f"{label} descriptor", error))
+            try:
+                os.unlink(snapshot.path.name, dir_fd=self.root_descriptor)
+            except FileNotFoundError:
+                pass
+            except BaseException as error:
+                failures.append((f"{label} path", error))
+        root_descriptor, self.root_descriptor = self.root_descriptor, -1
+        if root_descriptor >= 0:
+            try:
+                os.close(root_descriptor)
+            except BaseException as error:
+                failures.append(("snapshot root descriptor", error))
+        try:
+            details = os.stat(self.root, follow_symlinks=False)
+            if (not stat.S_ISDIR(details.st_mode)
+                    or (details.st_dev, details.st_ino) != self.root_identity):
+                raise RuntimeError("snapshot root identity changed before cleanup")
+            os.rmdir(self.root)
+        except FileNotFoundError:
+            pass
+        except BaseException as error:
+            failures.append(("snapshot root", error))
+        if primary is not None:
+            for label, error in failures:
+                primary.add_note(f"host artifact snapshot cleanup failed for {label}: {error}")
+            return
+        if failures:
+            raise failures[0][1]
+
+
 _PRIVATE_CAPABILITY_CODES = frozenset({
     "device.route_probe_failed",
     "device.load_probe_failed",
@@ -82,6 +152,19 @@ def _timeout(value: float) -> float:
     return float(value)
 
 
+def _valid_arm64_shared_object_header(header: bytes) -> bool:
+    return (
+        len(header) == 64
+        and header[:4] == b"\x7fELF"
+        and header[4] == 2
+        and header[5] == 1
+        and header[6] == 1
+        and int.from_bytes(header[16:18], "little") == 3
+        and int.from_bytes(header[18:20], "little") == 183
+        and int.from_bytes(header[20:24], "little") == 1
+    )
+
+
 def _arm64_shared_object(path: Path, *, stage: str) -> Path:
     candidate = Path(path)
     try:
@@ -105,23 +188,193 @@ def _arm64_shared_object(path: Path, *, stage: str) -> Path:
             header = source.read(64)
     except OSError as error:
         _fail("tracer.artifact_invalid", stage, f"tracer artifact cannot be read: {error}")
-    valid = (
-        len(header) == 64
-        and header[:4] == b"\x7fELF"
-        and header[4] == 2
-        and header[5] == 1
-        and header[6] == 1
-        and int.from_bytes(header[16:18], "little") == 3
-        and int.from_bytes(header[18:20], "little") == 183
-        and int.from_bytes(header[20:24], "little") == 1
-    )
-    if not valid:
+    if not _valid_arm64_shared_object_header(header):
         _fail(
             "tracer.artifact_arch_invalid",
             stage,
             "tracer artifact must be an arm64 little-endian ELF64 shared object",
         )
     return candidate
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        try:
+            written = os.write(descriptor, view)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("short write while creating tracer snapshot")
+        view = view[written:]
+
+
+def _snapshot_one(source_path: Path, root_descriptor: int, name: str) -> _HostArtifactSnapshot:
+    source = -1
+    destination = -1
+    readable = -1
+    try:
+        source = os.open(
+            os.fspath(source_path),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        source_details = os.fstat(source)
+        if (not stat.S_ISREG(source_details.st_mode)
+                or source_details.st_size < 64
+                or source_details.st_size > _MAX_TRACER_ARTIFACT_BYTES):
+            _fail(
+                "tracer.artifact_invalid",
+                "deploy.snapshot",
+                "tracer artifact must be a bounded regular non-symlink file",
+            )
+        destination = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            0o400,
+            dir_fd=root_descriptor,
+        )
+        digest = hashlib.sha256()
+        header = bytearray()
+        total = 0
+        while True:
+            try:
+                chunk = os.read(source, _HASH_CHUNK_BYTES)
+            except InterruptedError:
+                continue
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_TRACER_ARTIFACT_BYTES:
+                _fail(
+                    "tracer.artifact_invalid",
+                    "deploy.snapshot",
+                    "tracer artifact exceeds the supported bound",
+                )
+            if len(header) < 64:
+                header.extend(chunk[:64 - len(header)])
+            digest.update(chunk)
+            _write_all(destination, chunk)
+        if total != source_details.st_size:
+            _fail(
+                "tracer.artifact_replaced",
+                "deploy.snapshot",
+                "tracer artifact changed while it was snapshotted",
+            )
+        if not _valid_arm64_shared_object_header(bytes(header)):
+            _fail(
+                "tracer.artifact_arch_invalid",
+                "deploy.snapshot",
+                "tracer artifact must be an arm64 little-endian ELF64 shared object",
+            )
+        pathname_details = os.stat(source_path, follow_symlinks=False)
+        if (not stat.S_ISREG(pathname_details.st_mode)
+                or (pathname_details.st_dev, pathname_details.st_ino)
+                != (source_details.st_dev, source_details.st_ino)):
+            _fail(
+                "tracer.artifact_replaced",
+                "deploy.snapshot",
+                "tracer artifact pathname changed while it was snapshotted",
+            )
+        os.fsync(destination)
+        held_source, source = source, -1
+        os.close(held_source)
+        readable = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=root_descriptor,
+        )
+        held_destination, destination = destination, -1
+        os.close(held_destination)
+        snapshot_details = os.fstat(readable)
+        snapshot = _HostArtifactSnapshot(
+            Path(f"/proc/{os.getpid()}/fd/{root_descriptor}") / name,
+            readable,
+            (snapshot_details.st_dev, snapshot_details.st_ino),
+            digest.hexdigest(),
+        )
+        readable = -1
+        return snapshot
+    except BaseException as primary:
+        cleanup_failures: list[tuple[str, BaseException]] = []
+        for label, descriptor in (
+            ("source descriptor", source),
+            ("snapshot descriptor", destination),
+            ("readable snapshot descriptor", readable),
+        ):
+            if descriptor < 0:
+                continue
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                cleanup_failures.append((label, error))
+        try:
+            os.unlink(name, dir_fd=root_descriptor)
+        except FileNotFoundError:
+            pass
+        except BaseException as error:
+            cleanup_failures.append(("snapshot path", error))
+        for label, error in cleanup_failures:
+            primary.add_note(f"host artifact snapshot cleanup failed for {label}: {error}")
+        raise
+
+
+def _snapshot_artifacts(artifacts: TracerArtifacts) -> _HostArtifactSnapshots:
+    root = Path(tempfile.mkdtemp(prefix="qtrace-deploy-"))
+    root_descriptor = -1
+    root_identity: tuple[int, int] | None = None
+    snapshots: _HostArtifactSnapshots | None = None
+    try:
+        pathname_details = root.lstat()
+        if stat.S_ISLNK(pathname_details.st_mode) or not stat.S_ISDIR(pathname_details.st_mode):
+            raise OSError("private snapshot root is not a directory")
+        root_identity = (pathname_details.st_dev, pathname_details.st_ino)
+        os.chmod(root, 0o700)
+        root_descriptor = os.open(
+            root,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        details = os.fstat(root_descriptor)
+        if (not stat.S_ISDIR(details.st_mode)
+                or (details.st_dev, details.st_ino) != root_identity):
+            raise OSError("private snapshot root identity changed during setup")
+        empty = _HostArtifactSnapshot(root / "unused", -1, (-1, -1), "")
+        snapshots = _HostArtifactSnapshots(
+            root, root_descriptor, root_identity, empty, empty,
+        )
+        root_descriptor = -1
+        snapshots.tracer = _snapshot_one(
+            Path(artifacts.tracer_so), snapshots.root_descriptor, "libqbdi_tracer.so",
+        )
+        snapshots.companion = _snapshot_one(
+            Path(artifacts.companion), snapshots.root_descriptor, "libshadowhook_nothing.so",
+        )
+        return snapshots
+    except BaseException as primary:
+        if snapshots is not None:
+            snapshots.close(primary)
+        else:
+            held_descriptor, root_descriptor = root_descriptor, -1
+            if held_descriptor >= 0:
+                try:
+                    os.close(held_descriptor)
+                except BaseException as error:
+                    primary.add_note(
+                        f"host artifact snapshot cleanup failed for root descriptor: {error}"
+                    )
+            if root_identity is not None:
+                try:
+                    current = root.lstat()
+                    if (not stat.S_ISDIR(current.st_mode)
+                            or (current.st_dev, current.st_ino) != root_identity):
+                        raise OSError("private snapshot root identity changed before cleanup")
+                    os.rmdir(root)
+                except BaseException as error:
+                    primary.add_note(
+                        f"host artifact snapshot cleanup failed for root: {error}"
+                    )
+        raise
 
 
 class ArtifactBuilder:
@@ -224,20 +477,6 @@ def _diagnostic(output: bytes) -> str:
     if len(encoded) > _PROBE_DETAIL_BYTES:
         text = encoded[:_PROBE_DETAIL_BYTES].decode("utf-8", errors="ignore")
     return text
-
-
-def _host_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as source:
-            while chunk := source.read(_HASH_CHUNK_BYTES):
-                digest.update(chunk)
-    except OSError as error:
-        wrapped = QtraceError(
-            "tracer.artifact_invalid", "deploy.integrity", f"cannot hash tracer artifact: {error}"
-        )
-        raise wrapped from error
-    return digest.hexdigest()
 
 
 def _device_sha256(remote: str, shell) -> str:
@@ -361,7 +600,7 @@ class Deployer:
         route: str,
         remote_dir: str,
         session_id: str,
-        artifacts: TracerArtifacts,
+        artifacts: _HostArtifactSnapshots,
     ) -> Deployment:
         target_shell = device.target_shell
         control_shell = self._control_shell(device, access_mode, route)
@@ -369,9 +608,10 @@ class Deployer:
         tracer_remote = _remote_join(remote_dir, "libqbdi_tracer.so")
         companion_remote = _remote_join(remote_dir, "libshadowhook_nothing.so")
         host_paths = {
-            tracer_remote: artifacts.tracer_so,
+            tracer_remote: artifacts.tracer,
             companion_remote: artifacts.companion,
         }
+        staging_dir: str | None = None
         try:
             self._probe_route_capability(
                 control_shell=control_shell,
@@ -403,7 +643,9 @@ class Deployer:
                 )
                 for remote, host in host_paths.items():
                     staged = _remote_join(staging_dir, f".stage-{PurePosixPath(remote).name}")
-                    _device_operation("deploy.push", lambda: device.push(host, staged))
+                    host.assert_identity()
+                    _device_operation("deploy.push", lambda: device.push(host.path, staged))
+                    host.assert_identity()
                     _device_operation(
                         "deploy.stage",
                         lambda: device.shell(
@@ -415,12 +657,12 @@ class Deployer:
                         lambda: control_shell("cp", staged, remote, maximum_bytes=64 * 1024),
                     )
             else:
-                _device_operation(
-                    "deploy.push", lambda: device.push(artifacts.tracer_so, tracer_remote)
-                )
-                _device_operation(
-                    "deploy.push", lambda: device.push(artifacts.companion, companion_remote)
-                )
+                for remote, host in host_paths.items():
+                    host.assert_identity()
+                    _device_operation(
+                        "deploy.push", lambda remote=remote, host=host: device.push(host.path, remote)
+                    )
+                    host.assert_identity()
             _device_operation(
                 "deploy.permissions",
                 lambda: control_shell("chmod", "0755", tracer_remote, maximum_bytes=64 * 1024),
@@ -432,7 +674,8 @@ class Deployer:
 
             hashes: dict[str, str] = {}
             for remote, host in host_paths.items():
-                host_digest = _host_sha256(host)
+                host.assert_identity()
+                host_digest = host.sha256
                 device_digest = _device_operation(
                     "deploy.integrity", lambda: _device_sha256(remote, target_shell)
                 )
@@ -474,10 +717,29 @@ class Deployer:
                 load_probe=load_probe,
             )
         finally:
+            primary = sys.exc_info()[1]
+            staging_cleanup: BaseException | None = None
+            if staging_dir is not None:
+                try:
+                    _device_operation(
+                        "deploy.cleanup",
+                        lambda: device.shell(
+                            "rm", "-rf", staging_dir, maximum_bytes=64 * 1024
+                        ),
+                    )
+                except BaseException as error:
+                    staging_cleanup = error
             try:
                 control_shell("rm", "-f", probe, maximum_bytes=64 * 1024)
             except (QtraceError, OSError, RuntimeError, TimeoutError, TypeError, ValueError):
                 pass
+            if staging_cleanup is not None:
+                if primary is not None:
+                    primary.add_note(
+                        f"staging directory cleanup failed: {staging_cleanup}"
+                    )
+                else:
+                    raise staging_cleanup
 
     def deploy(
         self, device: AdbDevice, session_id: str, artifacts: TracerArtifacts
@@ -489,6 +751,8 @@ class Deployer:
         root_strategy = device.root_strategy
         package_uid = device.package_uid
         target_strategy = device.target_strategy
+        android_user = getattr(device, "android_user", None)
+        package_data_dir = getattr(device, "package_data_dir", None)
         valid_binding = (
             package is not None
             and access_mode in {"root", "run-as"}
@@ -496,6 +760,11 @@ class Deployer:
             and not isinstance(package_uid, bool)
             and package_uid > 0
             and target_strategy in {"run-as", "su-uid"}
+            and isinstance(android_user, int)
+            and not isinstance(android_user, bool)
+            and android_user >= 0
+            and package_uid // 100_000 == android_user
+            and package_data_dir == f"/data/user/{android_user}/{package}"
             and (
                 (access_mode == "root" and root_strategy in {"direct", "su"})
                 or (
@@ -513,47 +782,51 @@ class Deployer:
                 "device must be bound by successful preflight before deployment",
             )
 
-        validated = TracerArtifacts(
-            tracer_so=_arm64_shared_object(artifacts.tracer_so, stage="deploy.validate"),
-            companion=_arm64_shared_object(artifacts.companion, stage="deploy.validate"),
-        )
-        private_dir = f"/data/user/0/{package}/cache/qtrace/{session_id}"
+        snapshots = _snapshot_artifacts(artifacts)
+        primary: BaseException | None = None
         try:
-            return self._attempt(
-                device,
-                package,
-                access_mode,
-                "app-private",
-                private_dir,
-                session_id,
-                validated,
-            )
-        except _PrivateCapabilityFailure as private_error:
-            fallback_dir = f"/data/local/tmp/qtrace/{session_id}"
             try:
-                deployment = self._attempt(
+                private_dir = f"{package_data_dir}/cache/qtrace/{session_id}"
+                return self._attempt(
                     device,
                     package,
                     access_mode,
-                    "local-tmp",
-                    fallback_dir,
+                    "app-private",
+                    private_dir,
                     session_id,
-                    validated,
+                    snapshots,
                 )
-            except QtraceError as fallback_error:
-                wrapped = QtraceError(
-                    ErrorCode.TRACER_LOAD_FAILED,
-                    "deploy.probe",
-                    f"private route failed: {private_error}; fallback failed: {fallback_error}",
+            except _PrivateCapabilityFailure as private_error:
+                fallback_dir = f"/data/local/tmp/qtrace/{session_id}"
+                try:
+                    deployment = self._attempt(
+                        device,
+                        package,
+                        access_mode,
+                        "local-tmp",
+                        fallback_dir,
+                        session_id,
+                        snapshots,
+                    )
+                except QtraceError as fallback_error:
+                    wrapped = QtraceError(
+                        ErrorCode.TRACER_LOAD_FAILED,
+                        "deploy.probe",
+                        f"private route failed: {private_error}; fallback failed: {fallback_error}",
+                    )
+                    raise wrapped from fallback_error
+                probe = dict(deployment.load_probe)
+                probe["privateFailure"] = str(private_error)
+                return Deployment(
+                    route=deployment.route,
+                    remote_dir=deployment.remote_dir,
+                    tracer_so=deployment.tracer_so,
+                    companion=deployment.companion,
+                    sha256=deployment.sha256,
+                    load_probe=probe,
                 )
-                raise wrapped from fallback_error
-            probe = dict(deployment.load_probe)
-            probe["privateFailure"] = str(private_error)
-            return Deployment(
-                route=deployment.route,
-                remote_dir=deployment.remote_dir,
-                tracer_so=deployment.tracer_so,
-                companion=deployment.companion,
-                sha256=deployment.sha256,
-            load_probe=probe,
-            )
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            snapshots.close(primary)

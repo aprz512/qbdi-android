@@ -706,6 +706,8 @@ def _read_selector_event(
     *,
     maximum_bytes: int,
     output: bytearray,
+    output_size: list[int],
+    output_descriptor: int | None,
     error_output: bytearray,
     status_payload: bytearray,
     primary_error: BaseException | None,
@@ -721,12 +723,16 @@ def _read_selector_event(
         selector.unregister(key.fileobj)
         return primary_error, None
     if key.data == "stdout":
-        if primary_error is None and len(output) + len(chunk) > maximum_bytes:
+        if primary_error is None and output_size[0] + len(chunk) > maximum_bytes:
             return BoundedProcessError(
                 f"subprocess output exceeds {maximum_bytes}-byte size limit"
             ), None
         if primary_error is None:
-            output.extend(chunk)
+            if output_descriptor is None:
+                output.extend(chunk)
+            else:
+                _write_all(output_descriptor, chunk)
+            output_size[0] += len(chunk)
         return primary_error, None
     if key.data == "stderr":
         if len(error_output) < MAX_STDERR_BYTES:
@@ -753,6 +759,7 @@ def _read_selector_event(
 def capture_bounded(
     command: Sequence[str], *, maximum_bytes: int, timeout: float,
     cwd: Path | None = None,
+    _stdout_descriptor: int | None = None,
 ) -> bytes:
     """Capture stdout while a rootless PID namespace contains every descendant.
 
@@ -845,6 +852,7 @@ def capture_bounded(
     target_authorized = False
     primary_error: BaseException | None = None
     output = bytearray()
+    output_size = [0]
     error_output = bytearray()
     status_payload = bytearray()
     cwd_rebind_error: BaseException | None = None
@@ -948,6 +956,8 @@ def capture_bounded(
                             key,
                             maximum_bytes=maximum_bytes,
                             output=output,
+                            output_size=output_size,
+                            output_descriptor=_stdout_descriptor,
                             error_output=error_output,
                             status_payload=status_payload,
                             primary_error=primary_error,
@@ -988,6 +998,8 @@ def capture_bounded(
                     key,
                     maximum_bytes=maximum_bytes,
                     output=output,
+                    output_size=output_size,
+                    output_descriptor=_stdout_descriptor,
                     error_output=error_output,
                     status_payload=status_payload,
                     primary_error=primary_error,
@@ -1138,6 +1150,32 @@ def capture_bounded(
                     active_error.add_note(
                         f"{_BACKEND} cleanup failed: {cleanup_error}"
                     )
+
+
+def stream_bounded(
+    command: Sequence[str], output: object, *, maximum_bytes: int, timeout: float,
+    cwd: Path | None = None,
+) -> None:
+    """Stream bounded stdout directly to one caller-owned regular-file descriptor."""
+    try:
+        descriptor = output.fileno()  # type: ignore[attr-defined]
+    except (AttributeError, OSError, TypeError, ValueError) as error:
+        raise ValueError("output must expose an open file descriptor") from error
+    if isinstance(descriptor, bool) or not isinstance(descriptor, int) or descriptor < 0:
+        raise ValueError("output file descriptor is invalid")
+    try:
+        details = os.fstat(descriptor)
+    except OSError as error:
+        raise ValueError("output file descriptor is unavailable") from error
+    if not stat.S_ISREG(details.st_mode):
+        raise ValueError("output must be an open regular file")
+    capture_bounded(
+        command,
+        maximum_bytes=maximum_bytes,
+        timeout=timeout,
+        cwd=cwd,
+        _stdout_descriptor=descriptor,
+    )
 
 
 def _run_supervisor_from_argv(arguments: Sequence[str]) -> int:

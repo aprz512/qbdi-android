@@ -72,7 +72,9 @@ host/server、Android NDK（设置 `ANDROID_NDK_HOME` 或 `ANDROID_NDK_ROOT`）�
 host `lz4`。外部应用的 APK 构建不在 qtrace 范围内；配置可选的 `app.apk`
 只会安装那个已存在的 APK，绝不会构建它。
 
-对任意外部包，先写严格 JSON 配置，再运行带时长的 session 或无限期 monitor：
+对任意外部包，先写严格 JSON 配置，再运行带时长的 session 或无限期 monitor。配置文件必须是
+不超过 1 MiB 的 UTF-8 regular file；符号链接、special file、重复字段、非有限数字及过深 JSON
+都会在任何设备操作前被拒绝：
 
 ```bash
 python3 -m qtrace run --config target.json --duration 30s --device SERIAL --output results

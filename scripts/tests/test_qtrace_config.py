@@ -1,9 +1,10 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from qtrace.config import load_config, parse_duration_ms
+from qtrace.config import MAX_CONFIG_BYTES, load_config, parse_duration_ms
 from qtrace.errors import ConfigError
 from qtrace.models import OffsetScene, SymbolScene
 
@@ -55,6 +56,44 @@ class ConfigTests(unittest.TestCase):
             "target": {"module": "libexternal.so"},
             "scenes": [{"name": "one", "symbol": "do_work"}],
         }
+
+    def test_accepts_exact_config_byte_limit_and_rejects_one_byte_over(self):
+        encoded = json.dumps(
+            self.valid_payload(), separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        exact = Path(self.directory.name) / "exact.json"
+        exact.write_bytes(encoded + b" " * (MAX_CONFIG_BYTES - len(encoded)))
+        self.assertEqual("com.example.external", load_config(exact).app.package)
+
+        over = Path(self.directory.name) / "over.json"
+        over.write_bytes(encoded + b" " * (MAX_CONFIG_BYTES + 1 - len(encoded)))
+        with self.assertRaisesRegex(ConfigError, "CONFIG_JSON_INVALID"):
+            load_config(over)
+
+    def test_rejects_symlink_and_special_config_inputs_without_following_or_blocking(self):
+        regular = self.write_json("regular.json", self.valid_payload())
+        symlink = Path(self.directory.name) / "link.json"
+        symlink.symlink_to(regular.name)
+        fifo = Path(self.directory.name) / "config.fifo"
+        os.mkfifo(fifo)
+
+        for path in (symlink, fifo):
+            with self.subTest(path=path.name), self.assertRaisesRegex(
+                ConfigError, "CONFIG_JSON_INVALID"
+            ):
+                load_config(path)
+
+    def test_normalizes_deep_json_and_invalid_utf8_to_config_error(self):
+        deep = Path(self.directory.name) / "deep.json"
+        deep.write_text("[" * 20_000 + "0" + "]" * 20_000, encoding="ascii")
+        invalid_utf8 = Path(self.directory.name) / "invalid-utf8.json"
+        invalid_utf8.write_bytes(b"{\xff}")
+
+        for path in (deep, invalid_utf8):
+            with self.subTest(path=path.name), self.assertRaisesRegex(
+                ConfigError, "CONFIG_JSON_INVALID"
+            ):
+                load_config(path)
 
     def test_loads_offset_and_symbol_scenes_with_tracer_defaults(self):
         config = load_config(self.write_json("valid-qtrace.json", {

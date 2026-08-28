@@ -107,6 +107,17 @@ bool package_name_is_safe(std::string_view value) noexcept {
     return value.size() <= kPackageCapacity && trace_package_name_is_valid(value);
 }
 
+bool default_output_directory(std::string_view package, uint32_t uid,
+                              char *output, size_t capacity) noexcept {
+    constexpr uint32_t kAndroidUserRange = 100000;
+    if (!package_name_is_safe(package) || output == nullptr || capacity == 0) return false;
+    const uint32_t android_user = uid / kAndroidUserRange;
+    const int count = std::snprintf(
+            output, capacity, "/data/user/%u/%.*s/files/qbdi-traces", android_user,
+            static_cast<int>(package.size()), package.data());
+    return count > 0 && static_cast<size_t>(count) < capacity;
+}
+
 bool session_id_is_uuid(std::string_view value) noexcept {
     return trace_session_id_is_uuid_v4(value);
 }
@@ -742,9 +753,12 @@ bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation
         record_error(ENAMETOOLONG);
         return false;
     }
-    const int directory_count = output_directory.empty()
-            ? std::snprintf(output_directory_, sizeof(output_directory_), "/data/data/%s/files/qbdi-traces",
-                            config.package_name.c_str())
+    const bool default_directory = output_directory.empty();
+    const int directory_count = default_directory
+            ? (default_output_directory(config.package_name, static_cast<uint32_t>(::getuid()),
+                                        output_directory_, sizeof(output_directory_))
+                       ? static_cast<int>(std::strlen(output_directory_))
+                       : -1)
             : std::snprintf(output_directory_, sizeof(output_directory_), "%.*s",
                             static_cast<int>(output_directory.size()), output_directory.data());
     if (directory_count <= 0 || static_cast<size_t>(directory_count) >= sizeof(output_directory_)) {
@@ -787,6 +801,13 @@ bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation
     opened_ = true;
     return true;
 }
+
+#if defined(QTRACE_HOST_TEST)
+bool session_status_test_default_output_directory(
+        std::string_view package, uint32_t uid, char *output, size_t capacity) noexcept {
+    return default_output_directory(package, uid, output, capacity);
+}
+#endif
 
 bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noexcept {
     if (!opened_ || snapshot.generation != generation_ || snapshot.package != package_ ||

@@ -135,6 +135,42 @@ class BoundedProcessTests(unittest.TestCase):
         pid_text, starttime = path.read_text(encoding="utf-8").split()
         return int(pid_text), starttime
 
+    def test_stream_bounded_writes_multiple_chunks_without_return_buffer(self):
+        from scripts.bounded_process import stream_bounded
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "stream.bin"
+            with output.open("xb") as destination:
+                result = stream_bounded(
+                    [sys.executable, "-c",
+                     "import os; os.write(1, b'a' * 65536); os.write(1, b'b' * 17)"],
+                    destination,
+                    maximum_bytes=65553,
+                    timeout=3.0,
+                )
+            self.assertIsNone(result)
+            self.assertEqual(b"a" * 65536 + b"b" * 17, output.read_bytes())
+
+    def test_stream_bounded_rejects_oversize_timeout_and_failed_partial_output(self):
+        from scripts.bounded_process import stream_bounded
+
+        cases = (
+            ([sys.executable, "-c", "import os; os.write(1, b'x' * 9)"], 8,
+             BoundedProcessError, "exceeds"),
+            ([sys.executable, "-c", "import os,time; os.write(1,b'x'); time.sleep(30)"], 8,
+             subprocess.TimeoutExpired, None),
+            ([sys.executable, "-c", "import os,sys; os.write(1,b'x'); sys.exit(7)"], 8,
+             BoundedProcessError, "subprocess failed"),
+        )
+        for index, (command, maximum, error_type, message) in enumerate(cases):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "partial.bin"
+                with output.open("xb") as destination:
+                    context = self.assertRaisesRegex(error_type, message) if message else self.assertRaises(error_type)
+                    with context:
+                        stream_bounded(command, destination, maximum_bytes=maximum, timeout=0.15)
+                self.assertLessEqual(output.stat().st_size, maximum)
+
     @staticmethod
     def _identity_is_alive(pid: int, starttime: str) -> bool:
         try:

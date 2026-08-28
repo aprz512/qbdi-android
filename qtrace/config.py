@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import stat
 import unicodedata
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -24,6 +26,7 @@ _MIN_DURATION_MS = 100
 _MAX_DURATION_MS = 24 * 60 * 60 * 1000
 _PROFILES = frozenset(("fast", "balanced", "full"))
 _FORBIDDEN_TEXT_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
+MAX_CONFIG_BYTES = 1024 * 1024
 
 
 class _StrictJsonError(ValueError):
@@ -41,6 +44,64 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_json_constant(value: str) -> None:
     raise _StrictJsonError(f"non-finite JSON constant {value}")
+
+
+def _read_config_bytes(path: Path) -> tuple[Path, bytes]:
+    config_path = Path(path).absolute()
+    before_path = config_path.lstat()
+    if stat.S_ISLNK(before_path.st_mode) or not stat.S_ISREG(before_path.st_mode):
+        raise OSError("config must be a regular non-symlink file")
+
+    descriptor = -1
+    primary: BaseException | None = None
+    try:
+        descriptor = os.open(
+            os.fspath(config_path),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode)
+                or (before.st_dev, before.st_ino) != (before_path.st_dev, before_path.st_ino)):
+            raise OSError("config identity changed before open")
+        if before.st_size > MAX_CONFIG_BYTES:
+            raise OSError(f"config exceeds the {MAX_CONFIG_BYTES}-byte limit")
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_CONFIG_BYTES:
+            try:
+                chunk = os.read(descriptor, min(64 * 1024, MAX_CONFIG_BYTES + 1 - total))
+            except InterruptedError:
+                continue
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > MAX_CONFIG_BYTES:
+            raise OSError(f"config exceeds the {MAX_CONFIG_BYTES}-byte limit")
+
+        after = os.fstat(descriptor)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns,
+        )
+        if identity(after) != identity(before) or total != before.st_size:
+            raise OSError("config changed while it was being read")
+        return config_path, b"".join(chunks)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup_error:
+                if primary is not None:
+                    if hasattr(primary, "add_note"):
+                        primary.add_note(f"config descriptor cleanup failed: {cleanup_error}")
+                else:
+                    raise
 
 
 def _fail(code: str, detail: str) -> None:
@@ -253,16 +314,14 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
 
 def load_config(path: Path) -> UserConfig:
     try:
-        config_path = Path(path).resolve()
-    except (OSError, RuntimeError, TypeError, ValueError):
-        _fail("CONFIG_JSON_INVALID", "config path cannot be resolved")
-    try:
+        config_path, raw = _read_config_bytes(path)
         root_value = json.loads(
-            config_path.read_text(encoding="utf-8"),
+            raw.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
             parse_constant=_reject_json_constant,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, _StrictJsonError) as error:
+    except (OSError, RuntimeError, TypeError, ValueError, UnicodeError,
+            json.JSONDecodeError, _StrictJsonError, RecursionError) as error:
         _fail("CONFIG_JSON_INVALID", f"cannot read strict JSON config: {error}")
     root = _expect_object(root_value, "root")
     _check_keys(
@@ -282,7 +341,10 @@ def load_config(path: Path) -> UserConfig:
     if len(set(scene_names)) != len(scene_names):
         _fail("SCENE_NAME_DUPLICATE", "scene names must be unique")
 
-    base = config_path.parent
+    try:
+        base = config_path.parent.resolve()
+    except (OSError, RuntimeError, ValueError):
+        _fail("CONFIG_JSON_INVALID", "config directory cannot be resolved")
     tracer_value = root.get("tracer", {})
     return UserConfig(
         schema_version=1,
