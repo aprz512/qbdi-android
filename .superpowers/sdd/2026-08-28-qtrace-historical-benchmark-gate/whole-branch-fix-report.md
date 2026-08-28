@@ -376,3 +376,47 @@ Result: native 45/45; `BUILD SUCCESSFUL in 49s` (74 tasks: 13 executed,
   to rerun the retained physical workflow.
 - The previously deferred combined-Gradle-before-Python physical-gate ordering
   remains unchanged.
+
+## Controller final physical verification
+
+After the two whole-branch fix waves and a clean final scoped review, the
+controller ran the retained physical gate against implementation HEAD
+`18c81fffacc1925d7b9fd8bbb8fdd67a7f001818`:
+
+```text
+ANDROID_ADB_SERVER_PORT=5039 \
+python3 scripts/qtrace_device_acceptance.py --device 192.168.50.149:5555
+```
+
+The command used the previously recorded Android/NDK/Frida/LZ4 environment and
+exited 0. Bounded success evidence was retained at:
+
+```text
+/home/lyldalek/workspace/qbdi-android/.worktrees/qtrace-infrastructure/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157
+```
+
+The `0700` evidence directory contains the `0600`
+`historical-benchmark-gate.success.json` manifest. Its status is `passed`, its
+exit code is 0, and its `head_commit` exactly matches implementation HEAD
+`18c81fffacc1925d7b9fd8bbb8fdd67a7f001818`. All eight scenario reports are
+bound: timed offset and timed symbol are sealed; the four manual-pull reports
+are present; monitor-exit is `process_exited`; and flight-crash is
+`crash_recovered`.
+
+The controller verified that the manifest hashes match the local final build
+outputs:
+
+```text
+current APK  f85be5636b54084c6ae97e2f27e2958e915054c9dadfd8481cbd59d2d04df114
+tracer       054619124ffa6dd20b01023598bdf6d81518a91a90e9c7c4b89ba173a47c4074
+companion    4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd
+```
+
+The broad whole-branch review's six Important findings were handled across two
+fix waves, and the final scoped review was clean. The Deferred Minor concerning
+host-gate ordering remains recorded and unchanged.
+
+This final documentation commit intentionally follows the verified
+implementation. The retained manifest correctly and immutably binds the code
+that was executed (`18c81fff...`); advancing HEAD only for this report and the
+progress ledger does not require or justify rerunning the physical gate.
