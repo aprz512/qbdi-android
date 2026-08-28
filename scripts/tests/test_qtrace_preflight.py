@@ -106,8 +106,9 @@ class FakeDevice:
             if isinstance(result, BaseException):
                 raise result
             return result
-        if (len(command) == 6 and command[:3] == ("run-as", "--user", "10")
-                and command[3:] == ("com.example.external", "id", "-u")):
+        if (len(command) == 6
+                and command == ("run-as", "com.example.external", "--user", "10",
+                                "id", "-u")):
             result = self.run_as
             if isinstance(result, BaseException):
                 raise result

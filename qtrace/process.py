@@ -28,6 +28,7 @@ class BoundedRunner:
         *,
         maximum_bytes: int = DEFAULT_MAXIMUM_BYTES,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        pass_fds: Sequence[int] = (),
     ) -> bytes:
         if isinstance(command, (str, bytes)) or not isinstance(command, Sequence):
             _fail("process.command_invalid", "command must be an argument sequence")
@@ -47,10 +48,15 @@ class BoundedRunner:
             _fail("process.timeout_invalid", "timeout must be finite and positive")
 
         try:
+            if pass_fds != ():
+                return capture_bounded(
+                    argv,
+                    maximum_bytes=maximum_bytes,
+                    timeout=float(timeout),
+                    pass_fds=pass_fds,
+                )
             return capture_bounded(
-                argv,
-                maximum_bytes=maximum_bytes,
-                timeout=float(timeout),
+                argv, maximum_bytes=maximum_bytes, timeout=float(timeout),
             )
         except QtraceError:
             raise

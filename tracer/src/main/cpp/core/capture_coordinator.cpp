@@ -1,6 +1,7 @@
 #include "core/capture_coordinator.h"
 
 #include "core/qbdi_thread_session.h"
+#include "core/trace_directory.h"
 
 #include <atomic>
 #include <chrono>
@@ -159,6 +160,26 @@ bool resolve_exact_executable_symbol(uintptr_t address,
 std::string_view basename_view(std::string_view path) noexcept {
     const size_t slash = path.find_last_of('/');
     return slash == std::string_view::npos ? path : path.substr(slash + 1U);
+}
+
+bool build_default_flight_path(
+        std::string_view package, std::string_view target,
+        uint32_t uid, uint64_t run_id, uint32_t pid,
+        char *output, size_t capacity) noexcept {
+    if (target.empty() || target.size() > kFlightTargetNameBytes ||
+        output == nullptr || capacity == 0) {
+        return false;
+    }
+    char directory[4096];
+    if (!trace_default_output_directory(
+            package, uid, directory, sizeof(directory))) {
+        return false;
+    }
+    const int count = std::snprintf(
+            output, capacity, "%s/%llu_%u_%.*s.flight.bin", directory,
+            static_cast<unsigned long long>(run_id), pid,
+            static_cast<int>(target.size()), target.data());
+    return count > 0 && static_cast<size_t>(count) < capacity;
 }
 
 #if !defined(QTRACE_HOST_TEST)
@@ -320,11 +341,9 @@ bool CaptureCoordinator::start(TraceConfig config, ModuleRange module,
     const uint64_t run_id = next_run_id();
     const uint32_t pid = static_cast<uint32_t>(::getpid());
     char path[4096];
-    const int count = std::snprintf(
-            path, sizeof(path), "/data/data/%s/files/qbdi-traces/%llu_%u_%.*s.flight.bin",
-            config.package_name.c_str(), static_cast<unsigned long long>(run_id), pid,
-            static_cast<int>(target.size()), target.data());
-    if (count < 0 || static_cast<size_t>(count) >= sizeof(path)) {
+    if (!build_default_flight_path(
+            config.package_name, target, static_cast<uint32_t>(::getuid()),
+            run_id, pid, path, sizeof(path))) {
         delete[] slots;
         incomplete_.store(true, std::memory_order_release);
         return false;
@@ -365,6 +384,16 @@ bool CaptureCoordinator::start(TraceConfig config, ModuleRange module,
     started_.store(true, std::memory_order_release);
     return true;
 }
+
+#if defined(QTRACE_HOST_TEST)
+bool capture_coordinator_test_default_flight_path(
+        std::string_view package, std::string_view target,
+        uint32_t uid, uint64_t run_id, uint32_t pid,
+        char *output, size_t capacity) noexcept {
+    return build_default_flight_path(
+            package, target, uid, run_id, pid, output, capacity);
+}
+#endif
 
 bool CaptureCoordinator::request_stop(TraceStopReason reason) noexcept {
     if (detached()) return false;

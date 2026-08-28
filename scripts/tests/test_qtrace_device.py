@@ -1,5 +1,6 @@
 import math
 import io
+import os
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ class Call:
     command: tuple[str, ...]
     maximum_bytes: int
     timeout: float
+    pass_fds: tuple[int, ...] = ()
 
 
 class FakeRunner:
@@ -29,14 +31,14 @@ class FakeRunner:
         self.outputs = dict(outputs or {})
         self.calls: list[Call] = []
 
-    def capture(self, command, *, maximum_bytes, timeout):
+    def capture(self, command, *, maximum_bytes, timeout, pass_fds=()):
         if isinstance(command, (str, bytes)):
             raise AssertionError("commands must be argument arrays")
         if not isinstance(maximum_bytes, int) or maximum_bytes <= 0:
             raise AssertionError("missing finite output bound")
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise AssertionError("missing finite timeout")
-        call = Call(tuple(command), maximum_bytes, float(timeout))
+        call = Call(tuple(command), maximum_bytes, float(timeout), tuple(pass_fds))
         self.calls.append(call)
         result = self.outputs.get(call.command)
         if isinstance(result, BaseException):
@@ -113,6 +115,57 @@ class DeviceSelectorTests(unittest.TestCase):
 
 
 class AdbDeviceTests(unittest.TestCase):
+    def test_secondary_user_run_as_places_the_package_before_the_user_option(self):
+        path = "/data/user/10/com.example.app/files/qbdi-traces/run.trace.bin"
+        shell_command = (
+            "adb", "-s", "SERIAL", "shell", "run-as", "com.example.app",
+            "--user", "10", "id", "-u",
+        )
+        stream_command = (
+            "adb", "-s", "SERIAL", "exec-out", "run-as", "com.example.app",
+            "--user", "10", "cat", path,
+        )
+        runner = FakeRunner({shell_command: b"1010905\n", stream_command: (b"trace",)})
+        device = AdbDevice("SERIAL", runner)
+        device.bind_package(
+            "com.example.app", "run-as", root_strategy="none", package_uid=1_010_905,
+            target_strategy="run-as", android_user=10,
+            package_data_dir="/data/user/10/com.example.app",
+        )
+
+        self.assertEqual(b"1010905\n", device.target_shell("id", "-u"))
+        output = io.BytesIO()
+        device.stream_target_file(path, output, maximum_bytes=512, timeout=1.5)
+
+        self.assertEqual(b"trace", output.getvalue())
+        self.assertEqual(
+            [Call(shell_command, 1_048_576, 30.0), Call(stream_command, 512, 1.5)],
+            runner.calls,
+        )
+
+    def test_push_open_file_uses_its_own_proc_fd_and_preserves_caller_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "held.so"
+            source.write_bytes(b"held")
+            descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+            destination = "/data/local/tmp/qtrace/held.so"
+            command = (
+                "adb", "-s", "SERIAL", "push",
+                f"/proc/self/fd/{descriptor}", destination,
+            )
+            runner = FakeRunner({command: b"ok\n"})
+            try:
+                AdbDevice("SERIAL", runner).push_open_file(
+                    descriptor, destination, timeout=1.5,
+                )
+
+                self.assertEqual(
+                    [Call(command, 256 * 1024, 1.5, (descriptor,))], runner.calls,
+                )
+                self.assertEqual(source.stat().st_ino, os.fstat(descriptor).st_ino)
+            finally:
+                os.close(descriptor)
+
     def test_bound_target_stream_uses_one_direct_bounded_runner_contract(self):
         path = "/data/user/0/com.example.app/files/qbdi-traces/run.trace.bin"
         command = (

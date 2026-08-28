@@ -239,3 +239,140 @@ the final fresh full run.
   as the specified Deferred Minor.
 - No generic default was reduced: artifact streaming and snapshot input remain
   bounded at 512 MiB, and the generic Flight capacity remains 512 MiB.
+
+## Round 2 scoped rereview repairs
+
+Round 2 started from review HEAD
+`78c11300003bedb96e233b2d1345a48b1ecffe0f` and addressed only the three
+remaining F3/F4 findings. F1, F2, F5, F6 and the Deferred Minor ordering were
+not changed.
+
+### F3 — snapshot FD crosses both containment exec boundaries
+
+The controller's independent real-containment probe established the RED before
+implementation: the held file was readable in the host process, while
+`BoundedRunner` running `cat /proc/<host-python-pid>/fd/<fd>` failed with
+`No such file or directory`. The namespace cannot name the host Python PID.
+
+Behavioral RED commands included:
+
+```text
+python3 -m unittest \
+  scripts.tests.test_qtrace_process.BoundedRunnerTests.test_real_fake_adb_reads_a_caller_owned_descriptor_in_the_target_namespace -v
+
+python3 -m unittest \
+  scripts.tests.test_bounded_process.BoundedProcessTests.test_pass_fds_reject_invalid_or_duplicate_inputs_before_target_spawn \
+  scripts.tests.test_bounded_process.BoundedProcessTests.test_passed_file_identity_change_fails_before_target_spawn \
+  scripts.tests.test_bounded_process.BoundedProcessTests.test_failed_target_does_not_take_ownership_of_passed_file_descriptor \
+  scripts.tests.test_qtrace_device.AdbDeviceTests.test_push_open_file_uses_its_own_proc_fd_and_preserves_caller_ownership \
+  scripts.tests.test_qtrace_build.DeployerTests.test_deployer_passes_each_held_snapshot_descriptor_without_a_path_fallback -v
+```
+
+The first test was RED because `BoundedRunner.capture()` had no `pass_fds`
+contract. The device and deployer slices were RED because the device had no
+descriptor push operation and deployment still passed a host-PID pathname.
+
+GREEN passes each caller-owned snapshot descriptor through the controller's
+`Popen` into the PID-namespace supervisor and through the supervisor's `Popen`
+into the actual `adb` process. The command now opens only
+`/proc/self/fd/<fd>`. Both boundaries use `close_fds=True` plus the exact
+allowlist. Public input rejects non-integers, standard descriptors, duplicates,
+closed descriptors, writable files, non-regular files, and more than 64
+descriptors. Device/inode and read-only regular-file identity are checked before
+the first spawn, after it, in the supervisor, and during cleanup. The caller
+retains ownership on target success, target failure, and setup failure.
+
+The real integration uses the production `BoundedRunner` and an executable
+fake `adb`; it is not an in-process fake. It opens its own
+`/proc/self/fd/<fd>`, reads the held bytes inside the namespace, and leaves the
+caller's descriptor open. Host snapshot pathname checks and cleanup use the
+already-held private-root descriptor plus `dir_fd`; no host PID pathname or
+legacy path fallback remains.
+
+### F4 — canonical secondary-user `run-as` argv
+
+Behavioral RED command:
+
+```text
+python3 -m unittest \
+  scripts.tests.test_qtrace_device.AdbDeviceTests.test_secondary_user_run_as_places_the_package_before_the_user_option \
+  scripts.tests.test_qtrace_preflight.PreflightTests.test_binds_current_secondary_user_and_rejects_uid_user_mismatch -v
+```
+
+RED showed the production argv as `run-as --user 10 PACKAGE ...`, matching the
+Pixel failure `unknown package: --user`. GREEN introduces one validated argv
+builder used by preflight, bounded target shell, and target file streaming:
+user 0 is `run-as PACKAGE ...`; a secondary user is
+`run-as PACKAGE --user USER ...`. Tests assert the complete `adb shell` and
+`adb exec-out` argument arrays, not string fragments, while the existing user-0
+tests preserve its argv contract. Fakes use the same correct order.
+
+### F4 — one UID-derived native trace directory
+
+Native RED command:
+
+```text
+./gradlew nativeHostTest --no-daemon
+```
+
+RED failed to link the newly required normal-trace and Flight test path
+builders. GREEN adds one internal header-only path helper that validates a safe
+package path component, derives Android user as `uid / 100000`, and formats
+`/data/user/<user>/<package>/files/qbdi-traces`. The status publisher, normal
+binary writer and Flight coordinator all call that production helper. The
+normal and Flight sources no longer contain `/data/data/`.
+
+The production-backed native tests cover UID 10905 (user 0) and UID 1010905
+(user 10) for normal traces and Flight paths; the existing status test covers
+the same two users. A production-source contract also proves that all three
+implementations call the shared helper, preventing a test-only helper from
+masking divergent production paths. No public ABI or fixture protocol changed.
+
+### Round 2 verification
+
+Focused host command after the final self-review edit:
+
+```text
+python3 -m compileall -q qtrace scripts && \
+python3 -m unittest \
+  scripts.tests.test_bounded_process \
+  scripts.tests.test_qtrace_process \
+  scripts.tests.test_qtrace_device \
+  scripts.tests.test_qtrace_build \
+  scripts.tests.test_qtrace_preflight
+```
+
+Result: `Ran 97 tests in 13.045s` — `OK`; compileall exited 0.
+
+Fresh full Python command:
+
+```text
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+```
+
+Result: `Ran 797 tests in 56.063s` — `OK (skipped=8)`.
+
+Exact combined Gradle command:
+
+```text
+./gradlew nativeHostTest :app:testDebugUnitTest :app:assembleDebug \
+  :tracer:assembleDebug :tracer:copyTracerDebug --no-daemon
+```
+
+Result: native 45/45; `BUILD SUCCESSFUL in 49s` (74 tasks: 13 executed,
+61 up-to-date). `git diff --check` also exited 0.
+
+### Round 2 design notes and concerns
+
+- This round supersedes the earlier handoff note about opening
+  `/proc/<host-pid>/fd` with real ADB: deployment now deliberately passes an
+  allowlisted held FD and lets the actual `adb` process open
+  `/proc/self/fd/<fd>` inside containment.
+- The descriptor transport intentionally depends on Linux `/proc` and the
+  existing Linux PID-namespace containment backend; unsupported platforms
+  already fail that backend closed.
+- The brief explicitly deferred the physical gate until scoped rereview. No
+  Pixel/device claim is made from this round; the controller must decide when
+  to rerun the retained physical workflow.
+- The previously deferred combined-Gradle-before-Python physical-gate ordering
+  remains unchanged.

@@ -84,3 +84,9 @@ private:
     int facade_error_code_ = 0;
     uint64_t next_call_event_id_ = 1;
 };
+
+#if defined(QTRACE_HOST_TEST)
+bool binary_trace_writer_test_default_output_directory(
+        std::string_view package, uint32_t uid,
+        char *output, size_t capacity) noexcept;
+#endif

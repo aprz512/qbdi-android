@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string_view>
 
 class QbdiThreadSession;
 struct ThreadExecutionControl {
@@ -155,3 +156,10 @@ private:
     bool start_attempted_ = false;
     std::atomic<bool> started_{false};
 };
+
+#if defined(QTRACE_HOST_TEST)
+bool capture_coordinator_test_default_flight_path(
+        std::string_view package, std::string_view target,
+        uint32_t uid, uint64_t run_id, uint32_t pid,
+        char *output, size_t capacity) noexcept;
+#endif

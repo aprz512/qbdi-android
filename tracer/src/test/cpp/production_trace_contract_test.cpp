@@ -329,6 +329,12 @@ void accepted_generation_owns_one_runtime_and_private_status_publisher() {
     const std::string runtime_header =
             read_file(root / "core" / "trace_generation_runtime.h");
     const std::string status = read_file(root / "core" / "session_status.cpp");
+    const std::string trace_directory =
+            read_file(root / "core" / "trace_directory.h");
+    const std::string normal_writer =
+            read_file(root / "events" / "binary_trace_writer.cpp");
+    const std::string flight_writer =
+            read_file(root / "core" / "capture_coordinator.cpp");
     const std::string_view apply = function_source(
             tracer_entry, "static void apply_accepted_configuration(");
 
@@ -342,8 +348,15 @@ void accepted_generation_owns_one_runtime_and_private_status_publisher() {
           std::string_view::npos);
     CHECK(runtime_header.find("SessionStatusPublisher status_publisher_;") !=
           std::string::npos);
-    CHECK(status.find("/data/user/%u/%.*s/files/qbdi-traces") !=
+    CHECK(trace_directory.find("/data/user/%u/%.*s/files/qbdi-traces") !=
           std::string::npos);
+    CHECK(status.find("trace_default_output_directory(") != std::string::npos);
+    CHECK(normal_writer.find("trace_default_output_directory(") !=
+          std::string::npos);
+    CHECK(flight_writer.find("trace_default_output_directory(") !=
+          std::string::npos);
+    CHECK(normal_writer.find("/data/data/") == std::string::npos);
+    CHECK(flight_writer.find("/data/data/") == std::string::npos);
 }
 
 void proxy_admission_precedes_qbdi_and_stop_completes_control_only() {

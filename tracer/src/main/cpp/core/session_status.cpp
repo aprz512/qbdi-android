@@ -1,4 +1,5 @@
 #include "core/session_status.h"
+#include "core/trace_directory.h"
 
 #include <cerrno>
 #include <atomic>
@@ -105,17 +106,6 @@ bool append_issue_array(char *buffer, size_t capacity, size_t *used,
 
 bool package_name_is_safe(std::string_view value) noexcept {
     return value.size() <= kPackageCapacity && trace_package_name_is_valid(value);
-}
-
-bool default_output_directory(std::string_view package, uint32_t uid,
-                              char *output, size_t capacity) noexcept {
-    constexpr uint32_t kAndroidUserRange = 100000;
-    if (!package_name_is_safe(package) || output == nullptr || capacity == 0) return false;
-    const uint32_t android_user = uid / kAndroidUserRange;
-    const int count = std::snprintf(
-            output, capacity, "/data/user/%u/%.*s/files/qbdi-traces", android_user,
-            static_cast<int>(package.size()), package.data());
-    return count > 0 && static_cast<size_t>(count) < capacity;
 }
 
 bool session_id_is_uuid(std::string_view value) noexcept {
@@ -755,8 +745,9 @@ bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation
     }
     const bool default_directory = output_directory.empty();
     const int directory_count = default_directory
-            ? (default_output_directory(config.package_name, static_cast<uint32_t>(::getuid()),
-                                        output_directory_, sizeof(output_directory_))
+            ? (trace_default_output_directory(
+                       config.package_name, static_cast<uint32_t>(::getuid()),
+                       output_directory_, sizeof(output_directory_))
                        ? static_cast<int>(std::strlen(output_directory_))
                        : -1)
             : std::snprintf(output_directory_, sizeof(output_directory_), "%.*s",
@@ -805,7 +796,7 @@ bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation
 #if defined(QTRACE_HOST_TEST)
 bool session_status_test_default_output_directory(
         std::string_view package, uint32_t uid, char *output, size_t capacity) noexcept {
-    return default_output_directory(package, uid, output, capacity);
+    return trace_default_output_directory(package, uid, output, capacity);
 }
 #endif
 

@@ -249,6 +249,17 @@ class FakeDeployDevice:
         self.host_by_remote[destination] = source
         self.bytes_by_remote[destination] = source.read_bytes()
 
+    def push_open_file(self, source_descriptor, destination, *, timeout=30.0):
+        source = Path(f"/proc/self/fd/{source_descriptor}")
+        self.calls.append(("push", source, destination, timeout, source_descriptor))
+        if self.push_error is not None:
+            raise self.push_error
+        replacement = self.replace_before_push.get(source)
+        if replacement is not None:
+            source.write_bytes(replacement)
+        self.host_by_remote[destination] = source
+        self.bytes_by_remote[destination] = source.read_bytes()
+
 
 class DeployerTests(unittest.TestCase):
     def make_artifacts(self, root):
@@ -610,8 +621,25 @@ class DeployerTests(unittest.TestCase):
         self.assertNotIn(artifacts.tracer_so, pushed_sources)
         self.assertNotIn(artifacts.companion, pushed_sources)
         self.assertTrue(all(
-            str(source).startswith(f"/proc/{os.getpid()}/fd/")
+            str(source).startswith("/proc/self/fd/")
             for source in pushed_sources
+        ))
+
+    def test_deployer_passes_each_held_snapshot_descriptor_without_a_path_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            device = FakeDeployDevice()
+            Deployer().deploy(
+                device,
+                "123e4567-e89b-42d3-a456-426614174000",
+                self.make_artifacts(Path(directory)),
+            )
+
+        pushes = [call for call in device.calls if call[0] == "push"]
+        self.assertEqual(2, len(pushes))
+        self.assertTrue(all(len(call) == 5 for call in pushes))
+        self.assertTrue(all(
+            call[1] == Path(f"/proc/self/fd/{call[4]}")
+            for call in pushes
         ))
 
     def test_rejects_non_uuid4_session_before_device_side_effects(self):

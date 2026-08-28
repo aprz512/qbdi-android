@@ -10,7 +10,8 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
-from qtrace.device import AdbDevice, DeviceIdentity, DeviceSelector, _validate_package
+from qtrace.device import (AdbDevice, DeviceIdentity, DeviceSelector,
+                           _run_as_argv, _validate_package)
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.models import UserConfig
 
@@ -193,11 +194,10 @@ def _discover_package_access(
         package_uid = _numeric_uid(
             _external(
                 "preflight.access",
-                lambda: device.shell(*(
-                    ("run-as", package, "id", "-u")
-                    if android_user == 0
-                    else ("run-as", "--user", str(android_user), package, "id", "-u")
-                ), timeout=budget(), maximum_bytes=4096),
+                lambda: device.shell(
+                    *_run_as_argv(package, android_user, "id", "-u"),
+                    timeout=budget(), maximum_bytes=4096,
+                ),
             ),
             field="run-as identity",
         )

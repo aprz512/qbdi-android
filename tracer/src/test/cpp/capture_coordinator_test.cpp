@@ -28,6 +28,20 @@ void check(bool condition, const char *expression, int line) {
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
+void default_flight_path_uses_the_android_uid_user() {
+    char output[1024]{};
+    CHECK(capture_coordinator_test_default_flight_path(
+            "com.example.capture", "libtarget.so", 10905, 17, 42,
+            output, sizeof(output)));
+    CHECK(std::string(output) ==
+          "/data/user/0/com.example.capture/files/qbdi-traces/17_42_libtarget.so.flight.bin");
+    CHECK(capture_coordinator_test_default_flight_path(
+            "com.example.capture", "libtarget.so", 1010905, 17, 42,
+            output, sizeof(output)));
+    CHECK(std::string(output) ==
+          "/data/user/10/com.example.capture/files/qbdi-traces/17_42_libtarget.so.flight.bin");
+}
+
 template <typename Predicate>
 void wait_until(Predicate predicate) {
     for (size_t attempt = 0; attempt < 5000000; ++attempt) {
@@ -785,6 +799,7 @@ void missing_ack_status_json_reports_stop_not_acknowledged() {
 } // namespace
 
 int main() {
+    default_flight_path_uses_the_android_uid_user();
     creates_one_identified_artifact_and_keeps_module_generation_stable();
     reuses_only_same_tid_and_latches_recursive_gap_and_leave();
     child_detach_never_destroys_or_marks_inherited_state();

@@ -1,6 +1,10 @@
 import math
+import os
 import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts.bounded_process import BoundedProcessError
@@ -10,6 +14,40 @@ from qtrace.process import BoundedRunner
 
 
 class BoundedRunnerTests(unittest.TestCase):
+    def test_real_fake_adb_reads_a_caller_owned_descriptor_in_the_target_namespace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "held-snapshot.so"
+            source.write_bytes(b"validated snapshot bytes")
+            fake_adb = root / "adb"
+            fake_adb.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                "descriptor = os.open(sys.argv[-2], os.O_RDONLY)\n"
+                "try:\n"
+                "    os.write(1, os.read(descriptor, 4096))\n"
+                "finally:\n"
+                "    os.close(descriptor)\n",
+                encoding="utf-8",
+            )
+            fake_adb.chmod(0o755)
+            descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+            try:
+                output = BoundedRunner().capture(
+                    [
+                        str(fake_adb), "-s", "SERIAL", "push",
+                        f"/proc/self/fd/{descriptor}", "/data/local/tmp/tracer.so",
+                    ],
+                    maximum_bytes=4096,
+                    timeout=3.0,
+                    pass_fds=(descriptor,),
+                )
+
+                self.assertEqual(b"validated snapshot bytes", output)
+                self.assertEqual(source.stat().st_ino, os.fstat(descriptor).st_ino)
+            finally:
+                os.close(descriptor)
+
     def test_forwards_argument_array_and_explicit_bounds(self):
         with patch("qtrace.process.capture_bounded", return_value=b"ok") as capture:
             output = BoundedRunner().capture(

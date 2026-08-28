@@ -60,14 +60,17 @@ class _PrivateCapabilityFailure(RuntimeError):
 
 @dataclass
 class _HostArtifactSnapshot:
-    path: Path
+    name: str
+    root_descriptor: int
     descriptor: int
     identity: tuple[int, int]
     sha256: str
 
     def assert_identity(self) -> None:
         descriptor = os.fstat(self.descriptor)
-        pathname = os.stat(self.path, follow_symlinks=False)
+        pathname = os.stat(
+            self.name, dir_fd=self.root_descriptor, follow_symlinks=False,
+        )
         if (not stat.S_ISREG(descriptor.st_mode)
                 or not stat.S_ISREG(pathname.st_mode)
                 or (descriptor.st_dev, descriptor.st_ino) != self.identity
@@ -97,7 +100,7 @@ class _HostArtifactSnapshots:
                 except BaseException as error:
                     failures.append((f"{label} descriptor", error))
             try:
-                os.unlink(snapshot.path.name, dir_fd=self.root_descriptor)
+                os.unlink(snapshot.name, dir_fd=self.root_descriptor)
             except FileNotFoundError:
                 pass
             except BaseException as error:
@@ -288,7 +291,8 @@ def _snapshot_one(source_path: Path, root_descriptor: int, name: str) -> _HostAr
         os.close(held_destination)
         snapshot_details = os.fstat(readable)
         snapshot = _HostArtifactSnapshot(
-            Path(f"/proc/{os.getpid()}/fd/{root_descriptor}") / name,
+            name,
+            root_descriptor,
             readable,
             (snapshot_details.st_dev, snapshot_details.st_ino),
             digest.hexdigest(),
@@ -339,7 +343,7 @@ def _snapshot_artifacts(artifacts: TracerArtifacts) -> _HostArtifactSnapshots:
         if (not stat.S_ISDIR(details.st_mode)
                 or (details.st_dev, details.st_ino) != root_identity):
             raise OSError("private snapshot root identity changed during setup")
-        empty = _HostArtifactSnapshot(root / "unused", -1, (-1, -1), "")
+        empty = _HostArtifactSnapshot("unused", root_descriptor, -1, (-1, -1), "")
         snapshots = _HostArtifactSnapshots(
             root, root_descriptor, root_identity, empty, empty,
         )
@@ -644,7 +648,10 @@ class Deployer:
                 for remote, host in host_paths.items():
                     staged = _remote_join(staging_dir, f".stage-{PurePosixPath(remote).name}")
                     host.assert_identity()
-                    _device_operation("deploy.push", lambda: device.push(host.path, staged))
+                    _device_operation(
+                        "deploy.push",
+                        lambda: device.push_open_file(host.descriptor, staged),
+                    )
                     host.assert_identity()
                     _device_operation(
                         "deploy.stage",
@@ -660,7 +667,10 @@ class Deployer:
                 for remote, host in host_paths.items():
                     host.assert_identity()
                     _device_operation(
-                        "deploy.push", lambda remote=remote, host=host: device.push(host.path, remote)
+                        "deploy.push",
+                        lambda remote=remote, host=host: device.push_open_file(
+                            host.descriptor, remote,
+                        ),
                     )
                     host.assert_identity()
             _device_operation(

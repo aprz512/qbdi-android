@@ -47,6 +47,18 @@ void check(bool condition, const char *expression, int line) {
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
+void default_normal_trace_directory_uses_the_android_uid_user() {
+    char output[512]{};
+    CHECK(binary_trace_writer_test_default_output_directory(
+            "com.example.target", 10905, output, sizeof(output)));
+    CHECK(std::string(output) ==
+          "/data/user/0/com.example.target/files/qbdi-traces");
+    CHECK(binary_trace_writer_test_default_output_directory(
+            "com.example.target", 1010905, output, sizeof(output)));
+    CHECK(std::string(output) ==
+          "/data/user/10/com.example.target/files/qbdi-traces");
+}
+
 } // namespace
 
 void *operator new(size_t size) {
@@ -1344,6 +1356,7 @@ void padded_footer_is_total_for_exact_cycle_and_adversarial_prefixes() {
 } // namespace
 
 int main() {
+    default_normal_trace_directory_uses_the_android_uid_user();
     compressed_stream_definitions_footer_and_metrics_v3_are_consistent();
     uncompressed_stream_uses_binary_suffix_and_exact_byte_counts();
     uncompressed_stopped_stream_has_one_terminal_and_v3_metrics();

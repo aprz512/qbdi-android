@@ -287,6 +287,103 @@ class BoundedProcessTests(unittest.TestCase):
             )
         self.assertEqual(str(Path(directory).resolve()), output.decode().strip())
 
+    def test_pass_fds_reject_invalid_or_duplicate_inputs_before_target_spawn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.write_bytes(b"held")
+            marker = root / "target-started"
+            readable = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+            writable = os.open(source, os.O_WRONLY | os.O_CLOEXEC)
+            pipe_read, pipe_write = os.pipe2(os.O_CLOEXEC)
+            command = [
+                sys.executable, "-c",
+                "from pathlib import Path; Path(r'%s').touch()" % marker,
+            ]
+            try:
+                invalid = (
+                    (True,),
+                    (readable, readable),
+                    (writable,),
+                    (pipe_read,),
+                )
+                for descriptors in invalid:
+                    with self.subTest(descriptors=descriptors), self.assertRaises(ValueError):
+                        capture_bounded(
+                            command, maximum_bytes=1, timeout=1,
+                            pass_fds=descriptors,
+                        )
+                    self.assertFalse(marker.exists())
+                    self.assertEqual(source.stat().st_ino, os.fstat(readable).st_ino)
+            finally:
+                os.close(pipe_write)
+                os.close(pipe_read)
+                os.close(writable)
+                os.close(readable)
+
+    def test_passed_file_identity_change_fails_before_target_spawn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            replacement = root / "replacement"
+            marker = root / "target-started"
+            source.write_bytes(b"held")
+            replacement.write_bytes(b"replacement")
+            descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+            original_popen = bounded_process.subprocess.Popen
+            rebound = False
+
+            def rebind_then_spawn(*args, **kwargs):
+                nonlocal rebound
+                if not rebound:
+                    os.close(descriptor)
+                    replacement_descriptor = os.open(
+                        replacement, os.O_RDONLY | os.O_CLOEXEC,
+                    )
+                    self.assertEqual(descriptor, replacement_descriptor)
+                    rebound = True
+                return original_popen(*args, **kwargs)
+
+            try:
+                with patch.object(
+                    bounded_process.subprocess, "Popen", side_effect=rebind_then_spawn,
+                ), self.assertRaisesRegex(
+                    BoundedProcessError, "descriptor identity|backend failed"
+                ):
+                    capture_bounded(
+                        [
+                            sys.executable, "-c",
+                            "from pathlib import Path; Path(r'%s').touch()" % marker,
+                        ],
+                        maximum_bytes=1,
+                        timeout=3,
+                        pass_fds=(descriptor,),
+                    )
+                self.assertFalse(marker.exists())
+                self.assertTrue(rebound)
+            finally:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def test_failed_target_does_not_take_ownership_of_passed_file_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source"
+            source.write_bytes(b"held")
+            descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+            try:
+                with self.assertRaisesRegex(BoundedProcessError, "subprocess failed"):
+                    capture_bounded(
+                        [sys.executable, "-c", "raise SystemExit(7)"],
+                        maximum_bytes=1,
+                        timeout=3,
+                        pass_fds=(descriptor,),
+                    )
+                self.assertEqual(source.stat().st_ino, os.fstat(descriptor).st_ino)
+            finally:
+                os.close(descriptor)
+
     def test_capture_bounded_rejects_missing_file_and_symlink_cwd_before_target_spawn(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

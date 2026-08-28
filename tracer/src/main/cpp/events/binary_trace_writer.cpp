@@ -2,6 +2,7 @@
 
 #include "core/instruction_cache.h"
 #include "core/logging.h"
+#include "core/trace_directory.h"
 #include "core/trace_process_lifecycle.h"
 #include "events/binary_trace_format.h"
 #include "events/trace_number_formatter.h"
@@ -76,16 +77,23 @@ bool write_all(int fd, const char *data, size_t size) {
     return true;
 }
 
-bool build_trace_directory(char *output, size_t capacity, const TraceContext &context) {
-    const int count = context.output_directory.empty()
-                              ? std::snprintf(output, capacity, "/data/data/%s/files/qbdi-traces",
-                                              context.package_name.c_str())
-                              : std::snprintf(output, capacity, "%s",
-                                              context.output_directory.c_str());
-    if (count < 0 || static_cast<size_t>(count) >= capacity) {
+bool build_trace_directory(
+        char *output, size_t capacity,
+        std::string_view output_directory, std::string_view package,
+        uint32_t uid) {
+    if (output_directory.empty()) {
+        if (!trace_default_output_directory(package, uid, output, capacity)) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        return true;
+    }
+    if (output_directory.size() >= capacity) {
         errno = ENAMETOOLONG;
         return false;
     }
+    std::memcpy(output, output_directory.data(), output_directory.size());
+    output[output_directory.size()] = '\0';
     return true;
 }
 
@@ -235,7 +243,11 @@ bool BinaryTraceWriter::prepare(const TraceContext &context) {
     }
     char directory[kPathCapacity];
     char filename[kPathCapacity];
-    if (!build_trace_directory(directory, sizeof(directory), context)) return fail(errno);
+    if (!build_trace_directory(
+            directory, sizeof(directory), context.output_directory,
+            context.package_name, static_cast<uint32_t>(::getuid()))) {
+        return fail(errno);
+    }
     if (faults_ != nullptr) {
         const int injected = faults_->failure(FailurePoint::DirectoryCreation);
         if (injected != 0) return fail(injected);
@@ -257,6 +269,14 @@ bool BinaryTraceWriter::prepare(const TraceContext &context) {
     prepared_ = true;
     return true;
 }
+
+#if defined(QTRACE_HOST_TEST)
+bool binary_trace_writer_test_default_output_directory(
+        std::string_view package, uint32_t uid,
+        char *output, size_t capacity) noexcept {
+    return build_trace_directory(output, capacity, {}, package, uid);
+}
+#endif
 
 bool BinaryTraceWriter::open_prepared() {
     if (!prepared_ || opened_ || close_called_ || metrics_ == nullptr)

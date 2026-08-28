@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fcntl
 import json
 import os
 import select
@@ -29,6 +30,7 @@ _MAX_RESULT_MARGIN_NS = 20_000_000
 _MAX_STATUS_MESSAGE_CHARS = 2048
 _MAX_SURVIVOR_SAMPLES = 32
 _MAX_CHILDREN_BYTES = 1024 * 1024
+_MAX_PASSED_FILE_DESCRIPTORS = 64
 _SUPERVISOR_MARKER = "--_bounded-process-supervisor"
 _BACKEND = "linux-pid-namespace"
 _PR_GET_PDEATHSIG = 2
@@ -49,6 +51,47 @@ class BoundedProcessError(RuntimeError):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+def _validated_pass_fds(
+    descriptors: Sequence[int],
+) -> tuple[tuple[int, int, int], ...]:
+    if isinstance(descriptors, (str, bytes)) or not isinstance(descriptors, Sequence):
+        raise ValueError("pass_fds must be a descriptor sequence")
+    if len(descriptors) > _MAX_PASSED_FILE_DESCRIPTORS:
+        raise ValueError("pass_fds exceeds the descriptor-count bound")
+    identities: list[tuple[int, int, int]] = []
+    seen: set[int] = set()
+    for descriptor in descriptors:
+        if type(descriptor) is not int or descriptor <= 2:
+            raise ValueError("pass_fds entries must be non-standard integer descriptors")
+        if descriptor in seen:
+            raise ValueError("pass_fds entries must be unique")
+        seen.add(descriptor)
+        try:
+            details = os.fstat(descriptor)
+            access_mode = fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE
+        except OSError as error:
+            raise ValueError("pass_fds entry is unavailable") from error
+        if not stat.S_ISREG(details.st_mode) or access_mode != os.O_RDONLY:
+            raise ValueError("pass_fds entries must be open read-only regular files")
+        identities.append((descriptor, details.st_dev, details.st_ino))
+    return tuple(identities)
+
+
+def _verify_pass_fd_identities(
+    identities: Sequence[tuple[int, int, int]],
+) -> None:
+    for descriptor, expected_device, expected_inode in identities:
+        details = os.fstat(descriptor)
+        access_mode = fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE
+        if (not stat.S_ISREG(details.st_mode)
+                or access_mode != os.O_RDONLY
+                or (details.st_dev, details.st_ino)
+                != (expected_device, expected_inode)):
+            raise BoundedProcessError(
+                "passed file descriptor identity changed before target spawn"
+            )
 
 
 def _prctl(option: int, argument: object) -> None:
@@ -439,6 +482,7 @@ def _supervisor_main(
     status_descriptor: int,
     expected_euid: int,
     expected_egid: int,
+    passed_file_descriptors: Sequence[tuple[int, int, int]],
     command: Sequence[str],
 ) -> int:
     global _SUPERVISOR_SIGNAL_CANCELLED, _SUPERVISOR_SIGNAL_FAILURE
@@ -448,6 +492,9 @@ def _supervisor_main(
     os.set_inheritable(status_descriptor, False)
     try:
         _pid_namespace_preflight(expected_euid, expected_egid)
+        _verify_pass_fd_identities(passed_file_descriptors)
+        for descriptor, _device, _inode in passed_file_descriptors:
+            os.set_inheritable(descriptor, False)
     except (BoundedProcessError, OSError) as error:
         _write_status(status_descriptor, {
             "backend": _BACKEND,
@@ -489,7 +536,12 @@ def _supervisor_main(
     try:
         target = subprocess.Popen(
             list(command), stdin=None, stdout=None, stderr=None,
-            shell=False, close_fds=True, start_new_session=True,
+            shell=False, close_fds=True,
+            pass_fds=tuple(
+                descriptor
+                for descriptor, _device, _inode in passed_file_descriptors
+            ),
+            start_new_session=True,
         )
     except OSError as error:
         return _supervisor_result(
@@ -759,13 +811,15 @@ def _read_selector_event(
 def capture_bounded(
     command: Sequence[str], *, maximum_bytes: int, timeout: float,
     cwd: Path | None = None,
+    pass_fds: Sequence[int] = (),
     _stdout_descriptor: int | None = None,
 ) -> bytes:
     """Capture stdout while a rootless PID namespace contains every descendant.
 
     The target keeps the caller's effective uid/gid and HOME.  Supplementary
     groups outside the one-id map are intentionally visible as overflow gids;
-    callers must not depend on supplementary-group authorization.
+    callers must not depend on supplementary-group authorization. ``pass_fds``
+    contains caller-owned read-only regular files; this function never closes them.
     """
     if maximum_bytes < 0:
         raise ValueError("maximum_bytes must not be negative")
@@ -774,6 +828,7 @@ def capture_bounded(
     argv = list(command)
     if not argv:
         raise ValueError("command must not be empty")
+    passed_file_descriptors = _validated_pass_fds(pass_fds)
     try:
         unshare = _resolve_unshare()
     except BoundedProcessError as error:
@@ -856,7 +911,23 @@ def capture_bounded(
     error_output = bytearray()
     status_payload = bytearray()
     cwd_rebind_error: BaseException | None = None
+    pass_fd_rebind_error: BaseException | None = None
     try:
+        _verify_pass_fd_identities(passed_file_descriptors)
+        supervisor_metadata = [str(len(passed_file_descriptors))]
+        for descriptor, device, inode in passed_file_descriptors:
+            supervisor_metadata.extend((str(descriptor), str(device), str(inode)))
+        wrapper_pass_fds = (
+            (control_read, status_write, cwd_descriptor)
+            if cwd_descriptor >= 0 else (control_read, status_write)
+        ) + tuple(
+            descriptor
+            for descriptor, _device, _inode in passed_file_descriptors
+        )
+        if len(set(wrapper_pass_fds)) != len(wrapper_pass_fds):
+            raise BoundedProcessError(
+                "passed file descriptor collided with containment control state"
+            )
         wrapper = subprocess.Popen(
             [
                 unshare,
@@ -874,22 +945,24 @@ def capture_bounded(
                 str(status_write),
                 str(os.geteuid()),
                 str(os.getegid()),
+                *supervisor_metadata,
                 *argv,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
             close_fds=True,
-            pass_fds=(
-                (control_read, status_write, cwd_descriptor)
-                if cwd_descriptor >= 0 else (control_read, status_write)
-            ),
+            pass_fds=wrapper_pass_fds,
             cwd=(
                 f"/proc/self/fd/{cwd_descriptor}"
                 if cwd_descriptor >= 0 else None
             ),
             start_new_session=True,
         )
+        try:
+            _verify_pass_fd_identities(passed_file_descriptors)
+        except BaseException as error:
+            pass_fd_rebind_error = error
         if cwd_path is not None and cwd_identity is not None:
             try:
                 details = os.stat(cwd_path, follow_symlinks=False)
@@ -925,6 +998,8 @@ def capture_bounded(
             raise BoundedProcessError(
                 f"subprocess containment backend failed before target spawn: {message}"
             )
+        if pass_fd_rebind_error is not None:
+            raise pass_fd_rebind_error
         _write_all(
             control_write,
             struct.pack(
@@ -1081,6 +1156,13 @@ def capture_bounded(
     finally:
         active_error = sys.exc_info()[1]
         cleanup_errors: list[BaseException] = []
+        try:
+            _verify_pass_fd_identities(passed_file_descriptors)
+        except BaseException as cleanup_error:
+            if pass_fd_rebind_error is None:
+                pass_fd_rebind_error = cleanup_error
+        if pass_fd_rebind_error is not None:
+            cleanup_errors.append(pass_fd_rebind_error)
         if cwd_path is not None and cwd_identity is not None:
             try:
                 details = os.stat(cwd_path, follow_symlinks=False)
@@ -1179,16 +1261,36 @@ def stream_bounded(
 
 
 def _run_supervisor_from_argv(arguments: Sequence[str]) -> int:
-    if len(arguments) < 6 or arguments[0] != _SUPERVISOR_MARKER:
+    if len(arguments) < 7 or arguments[0] != _SUPERVISOR_MARKER:
         return 126
     try:
         control_descriptor = int(arguments[1])
         status_descriptor = int(arguments[2])
         expected_euid = int(arguments[3])
         expected_egid = int(arguments[4])
+        descriptor_count = int(arguments[5])
     except ValueError:
         return 126
-    command = list(arguments[5:])
+    if descriptor_count < 0 or descriptor_count > _MAX_PASSED_FILE_DESCRIPTORS:
+        return 126
+    command_offset = 6 + descriptor_count * 3
+    if len(arguments) <= command_offset:
+        return 126
+    passed_file_descriptors: list[tuple[int, int, int]] = []
+    seen: set[int] = set()
+    try:
+        for offset in range(6, command_offset, 3):
+            descriptor = int(arguments[offset])
+            device = int(arguments[offset + 1])
+            inode = int(arguments[offset + 2])
+            if (descriptor <= 2 or device < 0 or inode <= 0
+                    or descriptor in seen):
+                return 126
+            seen.add(descriptor)
+            passed_file_descriptors.append((descriptor, device, inode))
+    except ValueError:
+        return 126
+    command = list(arguments[command_offset:])
     if not command:
         return _supervisor_result(
             status_descriptor, kind="spawn-error", message="command is empty",
@@ -1198,6 +1300,7 @@ def _run_supervisor_from_argv(arguments: Sequence[str]) -> int:
         status_descriptor,
         expected_euid,
         expected_egid,
+        tuple(passed_file_descriptors),
         command,
     )
 

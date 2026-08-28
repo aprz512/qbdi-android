@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import math
+import os
 import re
 import stat
 from dataclasses import dataclass
@@ -26,7 +28,8 @@ _MAX_APK_MEMBER_BYTES = 512 * 1024 * 1024
 
 class CommandRunner(Protocol):
     def capture(
-        self, command, *, maximum_bytes: int, timeout: float
+        self, command, *, maximum_bytes: int, timeout: float,
+        pass_fds: tuple[int, ...] = (),
     ) -> bytes: ...
     def stream(
         self, command, output: object, *, maximum_bytes: int, timeout: float
@@ -132,6 +135,19 @@ def _validate_android_user(user: int) -> int:
     return user
 
 
+def _run_as_argv(
+    package: str, android_user: int, *command: str,
+) -> tuple[str, ...]:
+    package = _validate_package(package)
+    android_user = _validate_android_user(android_user)
+    prefix = (
+        ("run-as", package)
+        if android_user == 0
+        else ("run-as", package, "--user", str(android_user))
+    )
+    return _shell_tokens((*prefix, *command))
+
+
 def _decode(output: bytes, *, stage: str) -> str:
     if not isinstance(output, bytes):
         _fail("device.output_malformed", stage, "ADB returned non-byte output")
@@ -150,6 +166,22 @@ def _regular_file(path: Path, *, stage: str) -> Path:
     if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
         _fail("host.file_invalid", stage, "host path must be a regular non-symlink file")
     return candidate
+
+
+def _read_only_regular_descriptor(descriptor: int, *, stage: str) -> int:
+    if type(descriptor) is not int or descriptor <= 2:
+        _fail("host.fd_invalid", stage, "host descriptor must be a non-standard integer")
+    try:
+        details = os.fstat(descriptor)
+        access_mode = fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE
+    except OSError as error:
+        _fail("host.fd_invalid", stage, f"host descriptor is unavailable: {error}")
+    if not stat.S_ISREG(details.st_mode) or access_mode != os.O_RDONLY:
+        _fail(
+            "host.fd_invalid", stage,
+            "host descriptor must be an open read-only regular file",
+        )
+    return descriptor
 
 
 def _validate_limits(maximum_bytes: int, timeout: float, *, stage: str) -> tuple[int, float]:
@@ -297,17 +329,24 @@ class AdbDevice:
         maximum_bytes: int,
         stage: str,
         composed_shell: bool = False,
+        pass_fds: tuple[int, ...] = (),
     ) -> bytes:
         maximum_bytes, timeout = _validate_limits(maximum_bytes, timeout, stage=stage)
         try:
+            command = (
+                self._host_command(*arguments)
+                if composed_shell
+                else self.command(*arguments)
+            )
+            if pass_fds:
+                return self.runner.capture(
+                    command,
+                    maximum_bytes=maximum_bytes,
+                    timeout=timeout,
+                    pass_fds=pass_fds,
+                )
             return self.runner.capture(
-                (
-                    self._host_command(*arguments)
-                    if composed_shell
-                    else self.command(*arguments)
-                ),
-                maximum_bytes=maximum_bytes,
-                timeout=timeout,
+                command, maximum_bytes=maximum_bytes, timeout=timeout,
             )
         except QtraceError:
             raise
@@ -384,13 +423,8 @@ class AdbDevice:
         if self._package is None or self._package_uid is None or self._target_strategy is None:
             _fail("device.unbound", "device.target_shell", "target identity is not bound")
         if self._target_strategy == "run-as":
-            prefix = (
-                ("run-as", self._package)
-                if self._android_user == 0
-                else ("run-as", "--user", str(self._android_user), self._package)
-            )
             return self.shell(
-                *prefix, *args,
+                *_run_as_argv(self._package, self._android_user, *args),
                 timeout=timeout, maximum_bytes=maximum_bytes,
             )
         if self._target_strategy == "su-uid":
@@ -415,12 +449,11 @@ class AdbDevice:
         if self._package is None or self._package_uid is None or self._target_strategy is None:
             _fail("device.unbound", "device.target_stream", "target identity is not bound")
         if self._target_strategy == "run-as":
-            prefix = (
-                ("run-as", self._package)
-                if self._android_user == 0
-                else ("run-as", "--user", str(self._android_user), self._package)
+            arguments = (
+                "exec-out", *_run_as_argv(
+                    self._package, self._android_user, "cat", path,
+                ),
             )
-            arguments = ("exec-out", *prefix, "cat", path)
         elif self._target_strategy == "su-uid":
             command = _compose_su_command(("cat", path))
             arguments = ("exec-out", "su", str(self._package_uid), "-c", command)
@@ -514,6 +547,22 @@ class AdbDevice:
             timeout=timeout,
             maximum_bytes=256 * 1024,
             stage="deploy.push",
+        )
+
+    def push_open_file(
+        self, source_descriptor: int, destination: str, *, timeout: float = 30.0,
+    ) -> None:
+        """Push one held read-only file without taking ownership of its descriptor."""
+        source_descriptor = _read_only_regular_descriptor(
+            source_descriptor, stage="deploy.push",
+        )
+        destination = _validate_remote_path(destination)
+        self._capture(
+            ("push", f"/proc/self/fd/{source_descriptor}", destination),
+            timeout=timeout,
+            maximum_bytes=256 * 1024,
+            stage="deploy.push",
+            pass_fds=(source_descriptor,),
         )
 
     def read_file(
