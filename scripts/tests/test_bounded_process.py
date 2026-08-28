@@ -304,6 +304,52 @@ class BoundedProcessTests(unittest.TestCase):
                 initial_descriptors, len(list(Path("/proc/self/fd").iterdir()))
             )
 
+    def test_capture_bounded_preserves_cwd_validation_error_when_close_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            marker = cwd / "target-started"
+            identity = cwd.stat()
+            changed = type(identity)(
+                (identity.st_mode, identity.st_ino + 1, identity.st_dev,
+                 identity.st_nlink, identity.st_uid, identity.st_gid,
+                 identity.st_size, identity.st_atime, identity.st_mtime,
+                 identity.st_ctime)
+            )
+            original_close = bounded_process.os.close
+            close_failed = False
+            initial_descriptors = len(list(Path("/proc/self/fd").iterdir()))
+
+            def close_then_fail(descriptor):
+                nonlocal close_failed
+                details = os.fstat(descriptor)
+                original_close(descriptor)
+                if (not close_failed and details.st_dev == identity.st_dev
+                        and details.st_ino == identity.st_ino):
+                    close_failed = True
+                    raise OSError("injected cwd validation close failure")
+
+            with patch.object(bounded_process, "_resolve_unshare",
+                              return_value="/usr/bin/unshare"), \
+                 patch.object(bounded_process.os, "stat", return_value=changed), \
+                 patch.object(bounded_process.os, "close", side_effect=close_then_fail), \
+                 self.assertRaisesRegex(
+                     BoundedProcessError, "identity changed"
+                 ) as caught:
+                capture_bounded(
+                    [sys.executable, "-c",
+                     "from pathlib import Path; Path('target-started').touch()"],
+                    maximum_bytes=1, timeout=1, cwd=cwd,
+                )
+            self.assertFalse(marker.exists())
+            self.assertTrue(close_failed)
+            self.assertIn(
+                "injected cwd validation close failure",
+                "\n".join(getattr(caught.exception, "__notes__", ())),
+            )
+            self.assertEqual(
+                initial_descriptors, len(list(Path("/proc/self/fd").iterdir()))
+            )
+
     def test_capture_bounded_holds_cwd_across_path_rebinding_and_aggregates_close_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

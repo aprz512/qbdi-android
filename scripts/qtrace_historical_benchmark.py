@@ -246,11 +246,35 @@ def _parse_historical_archive(archive_bytes: bytes) -> list[dict[str, object]]:
         calculated = sum(header[:148]) + (32 * 8) + sum(header[156:])
         if checksum != calculated:
             raise _historical_error("archive", "historical archive header checksum is invalid")
+        type_flag = header[156:157]
+        size = _tar_number(header[124:136], "size")
+        padded = ((size + 511) // 512) * 512
+        if offset + padded > len(archive_bytes):
+            raise _historical_error("archive", "archive member is truncated")
+        payload = archive_bytes[offset:offset + size]
+        padding = archive_bytes[offset + size:offset + padded]
+        offset += padded
+        if not members:
+            expected = f"comment={HISTORICAL_COMMIT}\n".encode("ascii")
+            separator = payload.find(b" ")
+            length_field = payload[:separator] if separator >= 0 else b""
+            if (type_flag != b"g" or not length_field
+                    or any(byte not in b"0123456789" for byte in length_field)
+                    or length_field != str(len(payload)).encode("ascii")
+                    or payload[separator + 1:] != expected or any(padding)):
+                raise _historical_error(
+                    "archive", "historical archive is missing its exact pinned PAX envelope"
+                )
+            members.append({
+                "type": "global_pax",
+                "size": size,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+            continue
         name = _strict_tar_text(header[:100], "name")
         prefix = _strict_tar_text(header[345:500], "prefix")
         if not name:
             raise _historical_error("archive", "archive name field is empty")
-        type_flag = header[156:157]
         if type_flag in (b"\0", b"0"):
             kind = "file"
         elif type_flag == b"5":
@@ -273,7 +297,6 @@ def _parse_historical_archive(archive_bytes: bytes) -> list[dict[str, object]]:
                 raise _historical_error("archive", f"archive file/child collision: {prior}")
         if kind == "file" and any(prior.startswith(name + "/") for prior in by_path):
             raise _historical_error("archive", f"archive child/file collision: {name}")
-        size = _tar_number(header[124:136], "size")
         if kind == "directory" and size != 0:
             raise _historical_error("archive", f"archive directory has a payload: {name}")
         if size > MAX_ARCHIVE_FILE_BYTES:
@@ -282,11 +305,6 @@ def _parse_historical_archive(archive_bytes: bytes) -> list[dict[str, object]]:
             total_size += size
             if total_size > MAX_ARCHIVE_BYTES:
                 raise _historical_error("archive", "archive regular payload exceeds 8 MiB")
-        padded = ((size + 511) // 512) * 512
-        if offset + padded > len(archive_bytes):
-            raise _historical_error("archive", f"archive member is truncated: {name}")
-        payload = archive_bytes[offset:offset + size]
-        offset += padded
         by_path[name] = kind
         members.append({
             "path": name,
@@ -297,26 +315,9 @@ def _parse_historical_archive(archive_bytes: bytes) -> list[dict[str, object]]:
         })
     if not saw_zero:
         raise _historical_error("archive", "historical archive has no terminator")
+    if not members:
+        raise _historical_error("archive", "historical archive is missing its PAX envelope")
     return members
-
-
-def _strip_pinned_git_archive_metadata(archive_bytes: bytes) -> bytes:
-    """Consume Git's exact commit-id PAX envelope, never a publishable member."""
-    if len(archive_bytes) < 512 or archive_bytes[156:157] != b"g":
-        return archive_bytes
-    header = archive_bytes[:512]
-    checksum = _tar_number(header[148:156], "checksum")
-    calculated = sum(header[:148]) + (32 * 8) + sum(header[156:])
-    name = _strict_tar_text(header[:100], "name")
-    size = _tar_number(header[124:136], "size")
-    expected = f"52 comment={HISTORICAL_COMMIT}\n".encode("ascii")
-    padded = ((size + 511) // 512) * 512
-    if (checksum != calculated or name != "pax_global_header" or size != len(expected)
-            or len(archive_bytes) < 512 + padded
-            or archive_bytes[512:512 + size] != expected
-            or any(archive_bytes[512 + size:512 + padded])):
-        raise _historical_error("archive", "Git archive has unexpected global metadata")
-    return archive_bytes[512 + padded:]
 
 
 def _open_child_directory(parent_descriptor: int, component: str, *, create: bool) -> int:
@@ -358,6 +359,8 @@ def _extract_historical_archive(archive_bytes: bytes, root: Path) -> list[dict[s
     root_descriptor = os.open(root, flags)
     try:
         for member in members:
+            if member["type"] == "global_pax":
+                continue
             path = str(member["path"])
             components = tuple(path.split("/"))
             if member["type"] == "directory":
@@ -388,12 +391,18 @@ def _extract_historical_archive(archive_bytes: bytes, root: Path) -> list[dict[s
         raise _historical_error("archive", f"secure archive extraction failed: {error}") from error
     finally:
         os.close(root_descriptor)
-    return [{key: member[key] for key in ("path", "type", "size", "sha256")}
-            for member in members]
+    return [
+        ({key: member[key] for key in ("type", "size", "sha256")}
+         if member["type"] == "global_pax"
+         else {key: member[key] for key in ("path", "type", "size", "sha256")})
+        for member in members
+    ]
 
 
 def _worker_inspect_path(path: str, held_descriptor: int, sender) -> None:
     pathname_descriptor = -1
+    result: dict[str, object] | None = None
+    failure: str | None = None
     try:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -407,41 +416,61 @@ def _worker_inspect_path(path: str, held_descriptor: int, sender) -> None:
                 raise ValueError("APK is empty")
             if details.st_size > MAX_APK_BYTES:
                 raise ValueError("APK exceeds 128 MiB")
-        digest = hashlib.sha256()
-        offset = 0
-        while offset < held.st_size:
-            chunk = os.pread(held_descriptor, min(1024 * 1024, held.st_size - offset), offset)
-            if not chunk:
-                raise ValueError("APK descriptor became truncated")
-            digest.update(chunk)
-            offset += len(chunk)
-        path_digest = hashlib.sha256()
-        offset = 0
-        while offset < pathname.st_size:
-            chunk = os.pread(pathname_descriptor,
-                             min(1024 * 1024, pathname.st_size - offset), offset)
-            if not chunk:
-                raise ValueError("APK pathname became truncated")
-            path_digest.update(chunk)
-            offset += len(chunk)
-        sender.send((True, {
+
+        def hash_to_eof(descriptor: int, label: str) -> tuple[int, str]:
+            digest = hashlib.sha256()
+            offset = 0
+            while True:
+                chunk = os.pread(
+                    descriptor, min(1024 * 1024, MAX_APK_BYTES - offset + 1), offset
+                )
+                if not chunk:
+                    return offset, digest.hexdigest()
+                offset += len(chunk)
+                if offset > MAX_APK_BYTES:
+                    raise ValueError(f"{label} exceeds 128 MiB")
+                digest.update(chunk)
+
+        descriptor_size, descriptor_sha256 = hash_to_eof(
+            held_descriptor, "APK descriptor"
+        )
+        path_size, path_sha256 = hash_to_eof(pathname_descriptor, "APK pathname")
+        held_after = os.fstat(held_descriptor)
+        pathname_after = os.fstat(pathname_descriptor)
+        for before, after, read_size, label in (
+            (held, held_after, descriptor_size, "APK descriptor"),
+            (pathname, pathname_after, path_size, "APK pathname"),
+        ):
+            if (not stat.S_ISREG(after.st_mode)
+                    or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                    or after.st_size != before.st_size or read_size != after.st_size):
+                raise ValueError(f"{label} changed while hashing")
+        result = {
             "descriptor_identity": (held.st_dev, held.st_ino),
             "path_identity": (pathname.st_dev, pathname.st_ino),
             "descriptor_size": held.st_size,
             "path_size": pathname.st_size,
-            "descriptor_sha256": digest.hexdigest(),
-            "path_sha256": path_digest.hexdigest(),
-        }))
+            "descriptor_sha256": descriptor_sha256,
+            "path_sha256": path_sha256,
+        }
     except BaseException as error:
-        sender.send((False, f"{type(error).__name__}: {error}"))
-    finally:
-        if pathname_descriptor >= 0:
+        failure = f"{type(error).__name__}: {error}"
+    if pathname_descriptor >= 0:
+        try:
             os.close(pathname_descriptor)
+        except BaseException as error:
+            cleanup = f"descriptor cleanup failed: {type(error).__name__}: {error}"
+            failure = f"{failure}; {cleanup}" if failure is not None else cleanup
+    try:
+        sender.send((failure is None, result if failure is None else failure))
+    finally:
         sender.close()
 
 
 def _worker_copy_path(source: str, destination: str, sender) -> None:
     source_descriptor = destination_descriptor = -1
+    result: dict[str, object] | None = None
+    failure: str | None = None
     try:
         read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         read_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -473,13 +502,19 @@ def _worker_copy_path(source: str, destination: str, sender) -> None:
                 view = view[written:]
         if total != details.st_size:
             raise ValueError("historical APK changed size while snapshotting")
-        sender.send((True, {"size": total, "sha256": digest.hexdigest()}))
+        result = {"size": total, "sha256": digest.hexdigest()}
     except BaseException as error:
-        sender.send((False, f"{type(error).__name__}: {error}"))
-    finally:
-        for descriptor in (destination_descriptor, source_descriptor):
-            if descriptor >= 0:
+        failure = f"{type(error).__name__}: {error}"
+    for descriptor in (destination_descriptor, source_descriptor):
+        if descriptor >= 0:
+            try:
                 os.close(descriptor)
+            except BaseException as error:
+                cleanup = f"descriptor cleanup failed: {type(error).__name__}: {error}"
+                failure = f"{failure}; {cleanup}" if failure is not None else cleanup
+    try:
+        sender.send((failure is None, result if failure is None else failure))
+    finally:
         sender.close()
 
 
@@ -515,6 +550,12 @@ def _run_file_worker(target, arguments: tuple[object, ...], timeout: float,
             raise _historical_error(
                 phase, f"{phase} file worker did not exit after publishing a result",
                 worker_pid=process.pid, reaped=not process.is_alive(),
+            )
+        if process.exitcode != 0:
+            raise _historical_error(
+                phase, f"{phase} file worker exited with status {process.exitcode}",
+                worker_pid=process.pid, worker_exitcode=process.exitcode,
+                worker_result=result,
             )
         if not ok:
             raise _historical_error(phase, f"{phase} file worker failed: {result}")
@@ -843,9 +884,7 @@ def build_historical_benchmark_apk(repository: Path, *, deadline: float) -> Hist
         )
         build_root = Path(tempfile.mkdtemp(prefix="qtrace-historical-build-"))
         os.chmod(build_root, 0o700)
-        manifest = _extract_historical_archive(
-            _strip_pinned_git_archive_metadata(archive_bytes), build_root
-        )
+        manifest = _extract_historical_archive(archive_bytes, build_root)
         report["manifest"] = manifest
         report["archive_sha256"] = hashlib.sha256(archive_bytes).hexdigest()
 

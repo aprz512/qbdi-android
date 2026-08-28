@@ -792,14 +792,20 @@ def capture_bounded(
             if cwd_identity != (pathname_details.st_dev, pathname_details.st_ino):
                 raise BoundedProcessError("cwd path identity changed while it was opened")
         except BaseException as error:
+            primary = BoundedProcessError(
+                f"cwd validation failed before target spawn: {error}"
+            )
             if cwd_descriptor >= 0:
                 try:
                     os.close(cwd_descriptor)
+                except OSError as cleanup_error:
+                    if hasattr(primary, "add_note"):
+                        primary.add_note(
+                            f"{_BACKEND} cwd cleanup failed: {cleanup_error}"
+                        )
                 finally:
                     cwd_descriptor = -1
-            raise BoundedProcessError(
-                f"cwd validation failed before target spawn: {error}"
-            ) from error
+            raise primary from error
 
     def close_cwd_before_raise(primary: BaseException) -> None:
         nonlocal cwd_descriptor

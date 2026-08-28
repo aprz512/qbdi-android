@@ -15,6 +15,34 @@ from scripts.qtrace_historical_benchmark import canonical_elf_sha256
 import scripts.qtrace_historical_benchmark as historical_benchmark
 
 
+PINNED_PAX_VALUE = (
+    b"comment=2d6b1022a14ae554804a57e267544c12dea29353\n"
+)
+
+
+def _pax_body(value=PINNED_PAX_VALUE):
+    size = len(value) + 3
+    while True:
+        body = f"{size} ".encode("ascii") + value
+        if len(body) == size:
+            return body
+        size = len(body)
+
+
+def _raw_tar_member(name, *, type_flag=b"0", payload=b"", prefix=b""):
+    header = _raw_tar_header(
+        name, type_flag=type_flag, size=len(payload), prefix=prefix
+    )[:512]
+    return header + payload + b"\0" * ((-len(payload)) % 512)
+
+
+def _with_pax(archive_bytes, *, value=PINNED_PAX_VALUE):
+    body = _pax_body(value)
+    return _raw_tar_member(
+        b"pax_global_header", type_flag=b"g", payload=body
+    ) + archive_bytes
+
+
 def _tar_bytes(members):
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w") as archive:
@@ -48,7 +76,7 @@ def _tar_bytes(members):
 
 
 def _minimal_source_archive():
-    return _tar_bytes([
+    return _with_pax(_tar_bytes([
         ("app", "directory", b""),
         ("app/build.gradle", "file", b"android {}\n"),
         ("build.gradle", "file", b"plugins {}\n"),
@@ -58,7 +86,7 @@ def _minimal_source_archive():
         ("gradle", "directory", b""),
         ("gradle/wrapper", "directory", b""),
         ("gradle/wrapper/gradle-wrapper.properties", "file", b"distributionUrl=file:test\n"),
-    ])
+    ]))
 
 
 def _apk_bytes(target=b"\x7fELFhistorical-target", *, abi="arm64-v8a", extra=()):
@@ -114,6 +142,24 @@ def _result_then_linger_worker(sender):
     time.sleep(10)
 
 
+def _success_then_nonzero_worker(sender):
+    sender.send((True, {"result": "published"}))
+    sender.close()
+    raise SystemExit(7)
+
+
+class _RecordingSender:
+    def __init__(self):
+        self.messages = []
+        self.closed = False
+
+    def send(self, message):
+        self.messages.append(message)
+
+    def close(self):
+        self.closed = True
+
+
 class HistoricalArchiveTests(unittest.TestCase):
     def assert_rejected_without_regular_publication(self, archive_bytes):
         with tempfile.TemporaryDirectory() as directory:
@@ -126,45 +172,59 @@ class HistoricalArchiveTests(unittest.TestCase):
 
     def test_archive_rejects_every_path_type_duplicate_and_collision_boundary(self):
         invalid = [
-            _tar_bytes([(name, "file", b"x")])
+            _with_pax(_tar_bytes([(name, "file", b"x")]))
             for name in (
                 "../escape", "/absolute", "app//empty", "app/./dot",
                 "app\\backslash", "outside.txt", "gradle/not-wrapper.txt",
             )
         ]
         invalid.extend([
-            _tar_bytes([("app/link", kind, b"")])
+            _with_pax(_tar_bytes([("app/link", kind, b"")]))
             for kind in ("symlink", "hardlink", "character", "fifo")
         ])
         invalid.extend([
-            _tar_bytes([("app/build.gradle", "file", b"a"),
-                        ("app/build.gradle", "file", b"b")]),
-            _tar_bytes([("app/node", "file", b"a"),
-                        ("app/node/child", "file", b"b")]),
-            _tar_bytes([("app/node/child", "file", b"b"),
-                        ("app/node", "file", b"a")]),
-            _raw_tar_header(b"app/invalid-\xff"),
-            _raw_tar_header(b"app/nul\0alias"),
-            _raw_tar_header(b"app/sparse", type_flag=b"S"),
-            _raw_tar_header(b"app/file/", type_flag=b"0"),
-            _raw_tar_header(b"", type_flag=b"5", prefix=b"app"),
+            _with_pax(_tar_bytes([("app/build.gradle", "file", b"a"),
+                                  ("app/build.gradle", "file", b"b")])),
+            _with_pax(_tar_bytes([("app/node", "file", b"a"),
+                                  ("app/node/child", "file", b"b")])),
+            _with_pax(_tar_bytes([("app/node/child", "file", b"b"),
+                                  ("app/node", "file", b"a")])),
+            _with_pax(_raw_tar_header(b"app/invalid-\xff")),
+            _with_pax(_raw_tar_header(b"app/nul\0alias")),
+            _with_pax(_raw_tar_header(b"app/sparse", type_flag=b"S")),
+            _with_pax(_raw_tar_header(b"app/file/", type_flag=b"0")),
+            _with_pax(_raw_tar_header(b"", type_flag=b"5", prefix=b"app")),
         ])
         invalid.extend(
-            _raw_tar_header(b"app/other-type", type_flag=kind)
+            _with_pax(_raw_tar_header(b"app/other-type", type_flag=kind))
             for kind in (b"3", b"4", b"7", b"x", b"L", b"K")
         )
         for index, archive_bytes in enumerate(invalid):
             with self.subTest(index=index):
                 self.assert_rejected_without_regular_publication(archive_bytes)
 
-    def test_archive_rejects_257_members_two_mib_plus_one_total_eight_mib_plus_one_513_utf8_bytes_and_33_components(self):
+    def test_archive_counts_pax_in_256_member_limit_and_rejects_every_size_boundary(self):
+        accepted = _with_pax(_tar_bytes([
+            (f"app/directory-{index}", "directory", b"") for index in range(255)
+        ]))
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = historical_benchmark._extract_historical_archive(
+                accepted, Path(directory)
+            )
+        self.assertEqual(256, len(manifest))
+
         cases = [
-            _tar_bytes([(f"app/{index}", "file", b"") for index in range(257)]),
-            _tar_bytes([("app/large", "file", b"x" * (2 * 1024 * 1024 + 1))]),
-            _tar_bytes([(f"app/total-{index}", "file", b"x" * (2 * 1024 * 1024))
-                        for index in range(4)] + [("app/total-last", "file", b"x")]),
-            _tar_bytes([("app/" + "a" * 509, "file", b"")]),
-            _tar_bytes([("app/" + "/".join(["a"] * 32), "file", b"")]),
+            _with_pax(_tar_bytes([(f"app/directory-{index}", "directory", b"")
+                                  for index in range(256)])),
+            _with_pax(_tar_bytes([("app/large", "file",
+                                   b"x" * (2 * 1024 * 1024 + 1))])),
+            _with_pax(_tar_bytes([(f"app/total-{index}", "file",
+                                   b"x" * (2 * 1024 * 1024))
+                                  for index in range(4)]
+                                 + [("app/total-last", "file", b"x")])),
+            _with_pax(_tar_bytes([("app/" + "a" * 509, "file", b"")])),
+            _with_pax(_tar_bytes([("app/" + "/".join(["a"] * 32),
+                                   "file", b"")])),
         ]
         for index, archive_bytes in enumerate(cases):
             with self.subTest(index=index):
@@ -176,34 +236,80 @@ class HistoricalArchiveTests(unittest.TestCase):
             manifest = historical_benchmark._extract_historical_archive(
                 _minimal_source_archive(), root
             )
+            self.assertEqual(
+                {
+                    "type": "global_pax",
+                    "size": len(_pax_body()),
+                    "sha256": hashlib.sha256(_pax_body()).hexdigest(),
+                },
+                {key: manifest[0][key] for key in ("type", "size", "sha256")},
+            )
+            self.assertFalse((root / "pax_global_header").exists())
             self.assertEqual(0o700, stat.S_IMODE(root.stat().st_mode))
             for path in root.rglob("*"):
                 expected = 0o700 if path.is_dir() or path.name == "gradlew" else 0o600
                 self.assertEqual(expected, stat.S_IMODE(path.stat().st_mode), path)
-            self.assertEqual(len(manifest), len({item["path"] for item in manifest}))
+            extracted = [item for item in manifest if item["type"] != "global_pax"]
+            self.assertEqual(len(extracted), len({item["path"] for item in extracted}))
             self.assertEqual(
-                {"path", "type", "size", "sha256"}, set(manifest[0])
+                {"path", "type", "size", "sha256"}, set(extracted[0])
             )
 
-    def test_archive_accepts_only_the_exact_pinned_git_global_metadata_envelope(self):
-        payload = (
-            f"52 comment={historical_benchmark.HISTORICAL_COMMIT}\n".encode("ascii")
-        )
-        header = _raw_tar_header(
-            b"pax_global_header", type_flag=b"g", size=len(payload)
-        )[:512]
-        wrapped = header + payload + b"\0" * (512 - len(payload)) + _minimal_source_archive()
-        stripped = historical_benchmark._strip_pinned_git_archive_metadata(wrapped)
+    def test_archive_requires_one_first_pinned_global_pax_envelope(self):
+        raw_pax_body = _pax_body()
+        wrapped = _minimal_source_archive()
         with tempfile.TemporaryDirectory() as directory:
             manifest = historical_benchmark._extract_historical_archive(
-                stripped, Path(directory)
+                wrapped, Path(directory)
             )
-        self.assertTrue(any(item["path"] == "gradlew" for item in manifest))
+            self.assertFalse((Path(directory) / "pax_global_header").exists())
+        self.assertEqual(
+            {
+                "type": "global_pax",
+                "size": len(raw_pax_body),
+                "sha256": hashlib.sha256(raw_pax_body).hexdigest(),
+            },
+            {key: manifest[0][key] for key in ("type", "size", "sha256")},
+        )
 
-        wrong = wrapped.replace(historical_benchmark.HISTORICAL_COMMIT.encode("ascii"),
-                                b"0" * 40, 1)
-        with self.assertRaises(historical_benchmark.HistoricalBenchmarkError):
-            historical_benchmark._strip_pinned_git_archive_metadata(wrong)
+        renamed = _raw_tar_member(
+            b"metadata-name-is-not-a-path", type_flag=b"g", payload=raw_pax_body
+        ) + _tar_bytes([("app", "directory", b"")])
+        with tempfile.TemporaryDirectory() as directory:
+            renamed_manifest = historical_benchmark._extract_historical_archive(
+                renamed, Path(directory)
+            )
+            self.assertFalse(
+                (Path(directory) / "metadata-name-is-not-a-path").exists()
+            )
+        self.assertEqual("global_pax", renamed_manifest[0]["type"])
+
+        ordinary = _tar_bytes([("app", "directory", b"")])
+        pax_member = _raw_tar_member(
+            b"pax_global_header", type_flag=b"g", payload=raw_pax_body
+        )
+        malformed = _pax_body(PINNED_PAX_VALUE + b"extra=value\n")
+        cases = [
+            b"\0" * 1024,
+            ordinary,
+            pax_member + wrapped,
+            _raw_tar_member(b"app", type_flag=b"5") + pax_member + b"\0" * 1024,
+            _raw_tar_member(b"pax_global_header", type_flag=b"g",
+                            payload=b"51 " + PINNED_PAX_VALUE),
+            _raw_tar_member(b"pax_global_header", type_flag=b"g",
+                            payload=b"9" * 5000 + b" " + PINNED_PAX_VALUE),
+            _raw_tar_member(b"pax_global_header", type_flag=b"g",
+                            payload=raw_pax_body[:-1]),
+            _raw_tar_member(b"pax_global_header", type_flag=b"g", payload=malformed),
+            _with_pax(ordinary, value=b"comment=" + b"0" * 40 + b"\n"),
+        ]
+        cases.extend(
+            pax_member + _raw_tar_header(b"app/forbidden", type_flag=kind)
+            for kind in (b"x", b"g", b"L", b"K", b"S", b"1", b"2", b"3", b"4", b"6", b"7")
+        )
+        for index, archive_bytes in enumerate(cases):
+            with self.subTest(index=index):
+                self.assert_rejected_without_regular_publication(archive_bytes)
 
     def test_builder_uses_exact_commit_allowlist_private_cwd_and_offline_gradle(self):
         target = b"\x7fELFhistorical-target"
@@ -456,6 +562,87 @@ class HistoricalApkTests(unittest.TestCase):
                 _result_then_linger_worker, (), 0.05, phase="linger-probe"
             )
         self.assertLess(time.monotonic() - started, 0.3)
+
+    def test_held_inspection_rejects_growth_and_truncation_during_hash(self):
+        for mutation in ("growth", "truncation"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "held.apk"
+                path.write_bytes(b"ab")
+                descriptor = os.open(path, os.O_RDONLY)
+                sender = _RecordingSender()
+                original_pread = os.pread
+                calls = 0
+
+                def racing_pread(fd, size, offset):
+                    nonlocal calls
+                    data = original_pread(fd, size, offset)
+                    calls += 1
+                    if mutation == "growth" and calls == 1:
+                        with path.open("ab") as output:
+                            output.write(b"c")
+                    if mutation == "truncation" and calls == 2:
+                        os.truncate(path, 1)
+                    return data
+
+                try:
+                    with patch.object(historical_benchmark.os, "pread",
+                                      side_effect=racing_pread):
+                        historical_benchmark._worker_inspect_path(
+                            str(path), descriptor, sender
+                        )
+                finally:
+                    os.close(descriptor)
+                self.assertTrue(sender.closed)
+                self.assertEqual(False, sender.messages[-1][0], sender.messages)
+
+    def test_workers_cleanup_before_success_and_reject_nonzero_exit_after_message(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(
+            historical_benchmark.HistoricalBenchmarkError, "exit"
+        ):
+            historical_benchmark._run_file_worker(
+                _success_then_nonzero_worker, (), 0.5, phase="nonzero-probe"
+            )
+        self.assertLess(time.monotonic() - started, 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.apk"
+            destination = root / "snapshot.apk"
+            source.write_bytes(b"apk")
+            descriptor = os.open(source, os.O_RDONLY)
+            identity = os.fstat(descriptor)
+            os.close(descriptor)
+            original_close = historical_benchmark.os.close
+
+            for worker, arguments in (
+                (historical_benchmark._worker_inspect_path, (str(source), os.open(source, os.O_RDONLY))),
+                (historical_benchmark._worker_copy_path, (str(source), str(destination))),
+            ):
+                with self.subTest(worker=worker.__name__):
+                    sender = _RecordingSender()
+                    failed = False
+
+                    def fail_owned_close(owned_descriptor):
+                        nonlocal failed
+                        details = os.fstat(owned_descriptor)
+                        original_close(owned_descriptor)
+                        if (not failed and details.st_dev == identity.st_dev
+                                and details.st_ino == identity.st_ino):
+                            failed = True
+                            raise OSError("injected worker descriptor cleanup failure")
+
+                    try:
+                        with patch.object(historical_benchmark.os, "close",
+                                          side_effect=fail_owned_close):
+                            worker(*arguments, sender)
+                    finally:
+                        if worker is historical_benchmark._worker_inspect_path:
+                            original_close(arguments[1])
+                        destination.unlink(missing_ok=True)
+                    self.assertTrue(sender.closed)
+                    self.assertEqual(False, sender.messages[-1][0], sender.messages)
+                    self.assertIn("cleanup", sender.messages[-1][1])
 
     def test_apk_primary_validation_and_hold_errors_survive_descriptor_close_failure(self):
         with tempfile.TemporaryDirectory() as directory:
