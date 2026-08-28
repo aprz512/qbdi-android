@@ -16,8 +16,9 @@
 - Canonical identity uses NDK `26.1.10909125` at `$ANDROID_HOME/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy` with `--strip-debug --remove-section=.note.gnu.build-id` in that order.
 - The only accepted canonical target SHA-256 is `0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169`.
 - Historical package, ABI, target entry, and benchmark symbol are exactly `com.aprz.qbdiandroid`, `arm64-v8a`, `lib/arm64-v8a/libdemo_target.so`, and `demo_benchmark_case` at `0x6e828`.
-- `git archive` output is at most 8 MiB; extraction permits at most 256 members, 8 MiB total regular-file content, 2 MiB per file, 512 UTF-8 path bytes, and 32 path components.
-- Archive extraction accepts only directories and regular files below `app/**`, `gradle/wrapper/**`, `build.gradle`, `settings.gradle`, `gradle.properties`, and `gradlew`; reject traversal, duplicate/colliding paths, links, devices, FIFOs, and sparse files.
+- `git archive` output is at most 8 MiB. Record 1 must be the only global PAX `g` record, have valid PAX length framing, and decode byte-for-byte to `comment=2d6b1022a14ae554804a57e267544c12dea29353\n`; it counts toward the 256-member cap, appears in the manifest as `type=global_pax` with its raw payload size/SHA-256, and is never extracted or published.
+- Reject a missing, repeated, reordered, malformed, or different-commit global PAX record and every other PAX/GNU metadata record. After the pinned envelope, accept only directories and regular files below `app/**`, `gradle/wrapper/**`, `build.gradle`, `settings.gradle`, `gradle.properties`, and `gradlew`; reject traversal, duplicate/colliding paths, links, devices, FIFOs, sparse members, and every other record type.
+- The archive permits at most 256 total records including the global PAX envelope, 8 MiB total regular-file content, 2 MiB per regular file, 512 UTF-8 path bytes, and 32 path components.
 - Extraction owns a held mode-0700 root dirfd, creates directories as 0700, regular files as 0600, and `gradlew` as 0700 using no-follow exclusive descriptor-relative operations.
 - Historical Gradle runs exactly `./gradlew :app:assembleDebug --no-daemon --offline` in the private extracted root with a 900-second absolute bound and 4 MiB caps on stdout and stderr.
 - A historical APK is a nonempty no-follow regular file no larger than 128 MiB; ZIP admission permits at most 4096 entries, 512 MiB total uncompressed bytes, and 128 MiB per entry.
@@ -243,6 +244,34 @@ and namespace child is closed/reaped.
 - [ ] **Step 2: Write malicious archive and exact-command RED tests**
 
 Create `HistoricalArchiveTests` with
+`test_archive_requires_one_first_pinned_global_pax_envelope`. Build a valid
+POSIX length-framed global PAX `g` record whose decoded bytes are exactly:
+
+```python
+PINNED_PAX_VALUE = (
+    b"comment=2d6b1022a14ae554804a57e267544c12dea29353\n"
+)
+```
+
+Assert the valid envelope is record 1 and contributes this first manifest
+projection, where `raw_pax_body` includes its POSIX decimal length prefix:
+
+```python
+self.assertEqual({
+    "type": "global_pax",
+    "size": len(raw_pax_body),
+    "sha256": hashlib.sha256(raw_pax_body).hexdigest(),
+}, {key: manifest[0][key] for key in ("type", "size", "sha256")})
+```
+
+Assert no file or directory is created for the PAX header name. Table-drive
+missing envelope, two envelopes, a directory before the envelope, invalid
+length framing, truncated payload, an extra decoded key/line, and commit
+`0` * 40; each raises before extraction. After one valid envelope, reject
+local PAX `x`, another global PAX `g`, GNU longname `L`, GNU longlink `K`, GNU
+sparse `S`, and every type other than directory (`5`) or regular (`0`/NUL).
+
+Add
 `test_archive_rejects_every_path_type_duplicate_and_collision_boundary`.
 Cover literal members `../escape`, `/absolute`, `app//empty`, `app/./dot`,
 `app\\backslash`, an invalid UTF-8 raw name, an embedded-NUL raw header,
@@ -251,13 +280,17 @@ NUL cases as raw 512-byte tar headers so `tarfile` cannot normalize the bytes
 before validation. Cover `app/link` as symlink and hardlink, `app/device` as a
 character device, `app/pipe` as a FIFO, a GNU sparse header, duplicate
 `app/build.gradle`, both file-then-child and child-then-file collision orders,
-and every member type other than directory or regular file. Add
-`test_archive_rejects_257_members_two_mib_plus_one_total_eight_mib_plus_one_513_utf8_bytes_and_33_components`.
+and every post-envelope member type other than directory or regular file. Add
+`test_archive_counts_pax_in_256_member_limit_and_rejects_every_size_boundary`:
+accept the envelope plus 255 allowlisted directories, reject the envelope plus
+256 directories, and reject 2 MiB + 1 single-file, 8 MiB + 1 regular aggregate,
+513 UTF-8 path bytes, and 33 components.
 In each subcase assert extraction raises, no path appears outside the held
 root, and the held root contains no partially published regular file. Add
 `test_archive_extracts_only_the_allowlist_with_canonical_modes`: assert held
 root/directories are 0700, `gradlew` is 0700, every other regular file is
-0600, and the manifest records each path, type, size, and SHA exactly once.
+0600, the PAX header name has no extracted path, and the manifest records the
+global PAX envelope plus each extracted path, type, size, and SHA exactly once.
 
 Add `test_builder_uses_exact_commit_allowlist_private_cwd_and_offline_gradle`. The recording capture double must observe these argv sequences:
 
@@ -269,7 +302,10 @@ Add `test_builder_uses_exact_commit_allowlist_private_cwd_and_offline_gradle`. T
 ]
 ```
 
-Assert the Gradle call's `cwd` is the extracted private root rather than the shared checkout, `timeout <= deadline - time.monotonic()`, and no `fetch`, shell string, branch, or tag is accepted.
+The fake `git archive` response starts with the valid pinned global PAX record
+above. Assert the Gradle call's `cwd` is the extracted private root rather than
+the shared checkout, `timeout <= deadline - time.monotonic()`, and no `fetch`,
+shell string, branch, or tag is accepted.
 
 - [ ] **Step 3: Write historical APK validation and held-lifetime RED tests**
 
@@ -341,18 +377,29 @@ def build_historical_benchmark_apk(repository: Path, *, deadline: float) -> Hist
 
 Validate `repository` as a held no-follow directory; run the exact `cat-file`
 and archive argv from Step 2 with remaining time from the shared deadline and
-an 8 MiB stdout cap. Before creating any member, validate raw tar header name
-bytes as UTF-8 and reject NUL aliases, absolute/empty/dot/dot-dot/backslash
-components, paths over 512 UTF-8 bytes or 32 components, paths outside the
-four root files plus `app/**`/`gradle/wrapper/**` allowlist, more than 256 members,
-individual regular files over 2 MiB, aggregate regular bytes over 8 MiB,
-duplicates, both collision orders, links, devices, FIFOs, sparse members, and
-every type except directory/regular. Parse without
-`extractall()` and extract through held dirfds with `O_NOFOLLOW|O_EXCL`, 0700
-directories, 0600 files, and only `gradlew` at 0700. Run exact offline Gradle
-in the private root through `cwd`, with a 900-second maximum clipped to the
-absolute deadline, a 4 MiB stdout cap, and the existing stricter 64 KiB stderr
-cap (both satisfy the 4 MiB upper bound).
+an 8 MiB stdout cap. Raw-parse record 1 before ordinary path validation:
+require typeflag `g`, valid POSIX PAX length framing, exactly one decoded line,
+and decoded bytes exactly
+`comment=2d6b1022a14ae554804a57e267544c12dea29353\n`. Count it as member 1;
+append manifest type `global_pax`, tar-declared raw payload size, and SHA-256 of
+the raw length-framed payload; skip all directory/file creation for it.
+
+Raw-scan every later header and reject `g`, local PAX `x`, GNU longname `L`,
+GNU longlink `K`, GNU sparse `S`, or any typeflag except directory `5` and
+regular `0`/NUL. Before creating an ordinary member, validate raw tar header
+name bytes as UTF-8 and reject NUL aliases,
+absolute/empty/dot/dot-dot/backslash components, paths over 512 UTF-8 bytes or
+32 components, paths outside the four root files plus
+`app/**`/`gradle/wrapper/**` allowlist, more than 256 total records including
+the envelope, individual regular files over 2 MiB, aggregate regular bytes
+over 8 MiB, duplicates, both collision orders, links, devices, FIFOs, sparse
+members, and every other record type. A missing, repeated, reordered,
+malformed, or different-commit envelope fails before extraction. Parse without
+`extractall()` and extract only ordinary members through held dirfds with
+`O_NOFOLLOW|O_EXCL`, 0700 directories, 0600 files, and only `gradlew` at 0700.
+Run exact offline Gradle in the private root through `cwd`, with a 900-second
+maximum clipped to the absolute deadline, a 4 MiB stdout cap, and the existing
+stricter 64 KiB stderr cap (both satisfy the 4 MiB upper bound).
 
 - [ ] **Step 7: Validate and hold the historical APK**
 
@@ -435,7 +482,7 @@ Add `test_every_post_historical_install_failure_recovers_current_apk_and_force_s
 
 For each boundary assert recovery attempts `force-stop -> install held current APK -> force-stop`, no later fixture/pull event runs after the primary, and the primary label remains the raised cause. Add `test_primary_and_every_recovery_snapshot_descriptor_tree_and_report_failure_are_visible`; inject one compare failure plus failures for all three recovery operations, both pair closes, current APK close, historical APK close, and evidence publication. Assert every unique label occurs once in deterministic diagnostic order and no close action is skipped.
 
-Add `test_failure_report_is_bounded_atomic_and_retained_with_exact_phase_and_hashes`. Parse the retained JSON and assert keys and literal values for commit `2d6b1022a14ae554804a57e267544c12dea29353`, historical/current APK SHA values, raw/canonical target SHA values, both tracer pair SHA values, phase `compare-historical`, and the complete cleanup error array. Assert no partial report name remains.
+Add `test_failure_report_is_bounded_atomic_and_retained_with_exact_phase_and_hashes`. Parse the retained JSON and assert keys and literal values for commit `2d6b1022a14ae554804a57e267544c12dea29353`, historical/current APK SHA values, raw/canonical target SHA values, both tracer pair SHA values, phase `compare-historical`, and the complete cleanup error array. Assert the archive manifest's first entry projects to `{"type": "global_pax", "size": len(raw_pax_body), "sha256": hashlib.sha256(raw_pax_body).hexdigest()}`, the PAX header name is absent from every extracted/published path, and no partial report name remains.
 
 - [ ] **Step 4: Run Task 3 tests and verify RED**
 

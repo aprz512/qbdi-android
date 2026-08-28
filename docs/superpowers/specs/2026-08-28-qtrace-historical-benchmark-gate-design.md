@@ -90,11 +90,22 @@ git archive --format=tar 2d6b1022a14ae554804a57e267544c12dea29353 --
 
 不自动 fetch；shallow clone 缺少对象时 fail closed。Archive 最大 8 MiB。解析后的约束是：
 
-- 最多 256 个成员、所有 regular-file 内容合计最多 8 MiB、单文件最多 2 MiB；
+- `git archive` 的第一个 record 必须是唯一的 global PAX `g` record；其 PAX length framing
+  必须合法，解码后的 payload 必须逐字节等于
+  `comment=2d6b1022a14ae554804a57e267544c12dea29353\n`；
+- 该 global PAX record 计入最多 256 个成员的限制，在 archive manifest/evidence 中记录
+  `type=global_pax`、tar header 声明的 payload size 和原始 member payload SHA-256，但绝不
+  extract 或 publish 它；
+- 缺少、重复、不是第一个、framing/payload malformed、commit 不同的 global PAX record，
+  以及任何其他 PAX/GNU metadata record 均拒绝；
+- 包含上述 global PAX record 在内最多 256 个成员；所有 regular-file 内容合计最多 8 MiB、
+  单文件最多 2 MiB；
 - UTF-8 路径最多 512 bytes、最多 32 个 component；
 - 只允许上面列出的 root 文件、`app/**` 和 `gradle/wrapper/**`；
 - 拒绝 absolute、空 component、`.`、`..`、反斜线、NUL、重复路径和 file/directory collision；
-- 只允许 directory 与 regular file；拒绝 symlink、hardlink、device、FIFO 和 sparse member；
+- 除首个固定 global PAX envelope 外，只允许 directory 与 regular file；拒绝 symlink、
+  hardlink、device、FIFO、sparse、local/额外 global PAX、GNU longname/longlink 和其他
+  non-directory/non-regular record；
 - extraction 通过 held 0700 root dirfd、`openat`、`O_NOFOLLOW|O_EXCL` 完成；目录归一为
   0700，普通文件 0600，只有 `gradlew` 为 0700。
 
