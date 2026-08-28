@@ -16,7 +16,7 @@ import zipfile
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from scripts.tests.test_trace_binary import complete_stream, stream_header
 
 import scripts.benchmark_trace as benchmark_trace
@@ -110,6 +110,93 @@ class HistoricalTargetIdentityTests(unittest.TestCase):
              patch.object(benchmark_trace, "run_once", return_value=run), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(0, benchmark_trace.main())
+
+    def test_baseline_rejects_tampered_pinned_identity_constants(self):
+        text = Path("docs/benchmarks/binary-trace-baseline.md").read_text(encoding="utf-8")
+        for expected, replacement in (
+            ("com.aprz.qbdiandroid", "com.example.other"),
+            ("arm64-v8a", "x86_64"),
+            (self.RAW_SHA, "0" * 64),
+            (self.CANONICAL_SHA, "1" * 64),
+            (self.COMMIT, "0" * 40),
+        ):
+            with self.subTest(expected=expected), self.assertRaises(ValueError):
+                benchmark_trace.parse_baseline_document(text.replace(expected, replacement, 1))
+
+    def test_verifier_accepts_matching_and_rejects_mismatching_expected_apk_sha(self):
+        target = b"\x7fELFtarget"
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as apk:
+            apk.writestr("lib/arm64-v8a/libdemo_target.so", target)
+        apk_bytes = archive.getvalue()
+        package_path = subprocess.CompletedProcess(
+            ["adb", "pm", "path"], 0, stdout="package:/data/app/example/base.apk\n", stderr="",
+        )
+        baseline = {
+            "abi": "arm64-v8a", "package": "com.aprz.qbdiandroid",
+            "target_library_sha256": self.RAW_SHA,
+            "target_library_canonical_sha256": self.CANONICAL_SHA,
+        }
+        common = (
+            patch.object(benchmark_trace, "adb", return_value=package_path),
+            patch.object(benchmark_trace, "capture_bounded", return_value=apk_bytes),
+            patch.object(benchmark_trace, "canonical_elf_sha256", return_value=self.CANONICAL_SHA),
+        )
+        matching = SimpleNamespace(
+            adb="adb", device="serial", package="com.aprz.qbdiandroid", adb_timeout=3,
+            expected_installed_apk_sha256=hashlib.sha256(apk_bytes).hexdigest(),
+        )
+        with common[0], common[1], common[2]:
+            verified = benchmark_trace.verify_installed_target_library(matching, baseline)
+        self.assertEqual(matching.expected_installed_apk_sha256, verified.installed_apk_sha256)
+        mismatching = SimpleNamespace(**{**matching.__dict__, "expected_installed_apk_sha256": "0" * 64})
+        with patch.object(benchmark_trace, "adb", return_value=package_path), \
+             patch.object(benchmark_trace, "capture_bounded", return_value=apk_bytes), \
+             self.assertRaisesRegex(ValueError, "installed base.apk SHA-256"):
+            benchmark_trace.verify_installed_target_library(mismatching, baseline)
+
+    def test_verifier_rejects_noncanonical_package_or_abi_before_adb(self):
+        baseline = {
+            "package": "com.example.other", "abi": "x86_64",
+            "target_library_sha256": self.RAW_SHA,
+            "target_library_canonical_sha256": self.CANONICAL_SHA,
+        }
+        args = SimpleNamespace(adb="adb", device="serial", package="com.example.other", adb_timeout=3)
+        with patch.object(benchmark_trace, "adb", side_effect=AssertionError("must not call adb")):
+            with self.assertRaisesRegex(ValueError, "package"):
+                benchmark_trace.verify_installed_target_library(args, baseline)
+
+    def test_verifier_rejects_streamed_target_actual_over_64_mib_and_expired_deadline(self):
+        info = SimpleNamespace(filename="lib/arm64-v8a/libdemo_target.so", file_size=1)
+        archive = MagicMock()
+        archive.infolist.return_value = [info]
+        archive.open.return_value = io.BytesIO(b"\x7fELF" + b"x" * (64 * 1024 * 1024 - 3))
+        archive_context = MagicMock()
+        archive_context.__enter__.return_value = archive
+        package_path = subprocess.CompletedProcess(
+            ["adb", "pm", "path"], 0, stdout="package:/data/app/example/base.apk\n", stderr="",
+        )
+        args = SimpleNamespace(adb="adb", device="serial", package="com.aprz.qbdiandroid", adb_timeout=3)
+        baseline = {
+            "package": "com.aprz.qbdiandroid", "abi": "arm64-v8a",
+            "target_library_sha256": self.RAW_SHA,
+            "target_library_canonical_sha256": self.CANONICAL_SHA,
+        }
+        with patch.object(benchmark_trace, "adb", return_value=package_path), \
+             patch.object(benchmark_trace, "capture_bounded", return_value=b"apk"), \
+             patch.object(benchmark_trace.zipfile, "ZipFile", return_value=archive_context), \
+             self.assertRaisesRegex(ValueError, "64 MiB"):
+            benchmark_trace.verify_installed_target_library(args, baseline)
+
+        archive.open.return_value = io.BytesIO(b"\x7fELF")
+        args.adb_timeout = 1
+        with patch.object(benchmark_trace, "adb", return_value=package_path), \
+             patch.object(benchmark_trace, "capture_bounded", return_value=b"apk"), \
+             patch.object(benchmark_trace.zipfile, "ZipFile", return_value=archive_context), \
+             patch.object(benchmark_trace.time, "monotonic",
+                          side_effect=[100.0, 100.0, 100.5, 100.6, 101.0]), \
+             self.assertRaisesRegex(ValueError, "deadline"):
+            benchmark_trace.verify_installed_target_library(args, baseline)
 
 
 class LegacyTraceParserTests(unittest.TestCase):
@@ -593,11 +680,12 @@ effective_buffer_bytes=67108864
         with zipfile.ZipFile(archive, "w") as apk:
             apk.writestr("lib/arm64-v8a/libdemo_target.so", target)
         args = SimpleNamespace(
-            adb="adb", device="serial", package="com.example.app",
+            adb="adb", device="serial", package="com.aprz.qbdiandroid",
             adb_timeout=3,
         )
-        baseline = {"abi": "arm64-v8a", "target_library_sha256": target_sha,
-                    "target_library_canonical_sha256": "c" * 64}
+        baseline = {"package": "com.aprz.qbdiandroid", "abi": "arm64-v8a",
+                    "target_library_sha256": "5f1a970825ae8bacb17d8dd656e01bd1fe7172638ba3ddcacd82ffaaad6e62c0",
+                    "target_library_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169"}
         package_path = subprocess.CompletedProcess(
             ["adb", "pm", "path"], 0,
             stdout="package:/data/app/example/base.apk\n", stderr="",
@@ -607,14 +695,16 @@ effective_buffer_bytes=67108864
              patch.object(
                  benchmark_trace, "capture_bounded", return_value=archive.getvalue()
              ) as capture, \
-             patch.object(benchmark_trace, "canonical_elf_sha256", return_value="c" * 64):
+             patch.object(benchmark_trace, "canonical_elf_sha256",
+                          return_value="0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169"):
             verified = benchmark_trace.verify_installed_target_library(
                 args, baseline
             )
 
         self.assertEqual(target_sha, verified.target_library_sha256)
         self.assertEqual(hashlib.sha256(archive.getvalue()).hexdigest(), verified.installed_apk_sha256)
-        self.assertEqual("c" * 64, verified.target_library_canonical_sha256)
+        self.assertEqual("0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+                         verified.target_library_canonical_sha256)
         self.assertTrue(any(
             "/data/app/example/base.apk" in item
             for item in capture.call_args.args[0]

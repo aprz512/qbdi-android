@@ -24,11 +24,13 @@ from typing import Any, Iterable
 
 try:
     from scripts.qtrace_historical_benchmark import (
-        HISTORICAL_COMMIT, MAX_TARGET_BYTES, canonical_elf_sha256,
+        HISTORICAL_CANONICAL_TARGET_SHA256, HISTORICAL_COMMIT,
+        HISTORICAL_RAW_TARGET_SHA256, MAX_TARGET_BYTES, canonical_elf_sha256,
     )
 except ModuleNotFoundError:  # Support direct execution as scripts/benchmark_trace.py.
     from qtrace_historical_benchmark import (  # type: ignore[no-redef]
-        HISTORICAL_COMMIT, MAX_TARGET_BYTES, canonical_elf_sha256,
+        HISTORICAL_CANONICAL_TARGET_SHA256, HISTORICAL_COMMIT,
+        HISTORICAL_RAW_TARGET_SHA256, MAX_TARGET_BYTES, canonical_elf_sha256,
     )
 
 try:
@@ -78,6 +80,9 @@ MAX_METRICS_BYTES = 64 * 1024
 MAX_APK_ENTRIES = 4096
 MAX_APK_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_APK_ENTRY_BYTES = 128 * 1024 * 1024
+HISTORICAL_PACKAGE = "com.aprz.qbdiandroid"
+HISTORICAL_TARGET_ABI = "arm64-v8a"
+HISTORICAL_TARGET_ENTRY = "lib/arm64-v8a/libdemo_target.so"
 ACCEPTANCE_RUN_COUNT = 5
 PROFILE_RATE_TARGETS = {
     "fast": Decimal(1_000_000),
@@ -373,6 +378,14 @@ def parse_baseline_document(document: str) -> dict[str, str]:
             raise ValueError(f"baseline document has invalid {key}")
     if identity["historical_target_commit"] != HISTORICAL_COMMIT:
         raise ValueError("baseline document has invalid historical_target_commit")
+    if identity["package"] != HISTORICAL_PACKAGE:
+        raise ValueError("baseline document has invalid package")
+    if identity["abi"] != HISTORICAL_TARGET_ABI:
+        raise ValueError("baseline document has invalid ABI")
+    if identity["target_library_sha256"] != HISTORICAL_RAW_TARGET_SHA256:
+        raise ValueError("baseline document has invalid target_library_sha256")
+    if identity["target_library_canonical_sha256"] != HISTORICAL_CANONICAL_TARGET_SHA256:
+        raise ValueError("baseline document has invalid target_library_canonical_sha256")
     return identity
 
 
@@ -778,6 +791,22 @@ def verify_installed_target_library(
     args: argparse.Namespace, baseline: dict[str, str]
 ) -> InstalledTargetIdentity:
     """Hash the target ELF inside the exact base APK installed on the device."""
+    if args.package != HISTORICAL_PACKAGE or baseline.get("package") != HISTORICAL_PACKAGE:
+        raise ValueError("historical benchmark package must be com.aprz.qbdiandroid")
+    if baseline.get("abi") != HISTORICAL_TARGET_ABI:
+        raise ValueError("historical benchmark ABI must be arm64-v8a")
+    if baseline.get("target_library_sha256") != HISTORICAL_RAW_TARGET_SHA256:
+        raise ValueError("historical benchmark raw target SHA-256 is invalid")
+    if baseline.get("target_library_canonical_sha256") != HISTORICAL_CANONICAL_TARGET_SHA256:
+        raise ValueError("historical benchmark canonical target SHA-256 is invalid")
+    deadline = time.monotonic() + getattr(args, "adb_timeout", 30.0)
+
+    def remaining() -> float:
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            raise ValueError("installed target extraction deadline expired")
+        return timeout
+
     completed = adb(
         args, "shell", "pm", "path", args.package, text=True
     )
@@ -798,13 +827,13 @@ def verify_installed_target_library(
             f"cat {apk_path}",
         ],
         maximum_bytes=512 * 1024 * 1024,
-        timeout=getattr(args, "adb_timeout", 30.0),
+        timeout=remaining(),
     )
     installed_apk_sha256 = hashlib.sha256(apk_bytes).hexdigest()
     expected_apk_sha = getattr(args, "expected_installed_apk_sha256", None)
-    if expected_apk_sha is not None and installed_apk_sha != expected_apk_sha:
+    if expected_apk_sha is not None and installed_apk_sha256 != expected_apk_sha:
         raise ValueError("installed base.apk SHA-256 does not match --expected-installed-apk-sha256")
-    entry = f"lib/{baseline['abi']}/libdemo_target.so"
+    entry = HISTORICAL_TARGET_ENTRY
     try:
         with zipfile.ZipFile(io.BytesIO(apk_bytes)) as archive:
             members = archive.infolist()
@@ -829,17 +858,29 @@ def verify_installed_target_library(
             info = target_infos[0]
             if info.file_size <= 0 or info.file_size > MAX_TARGET_BYTES:
                 raise ValueError("installed target library exceeds 64 MiB")
-            target = archive.read(info)
+            target_parts: list[bytes] = []
+            target_size = 0
+            with archive.open(info) as source:
+                while True:
+                    remaining()
+                    chunk = source.read(min(1024 * 1024, MAX_TARGET_BYTES + 1 - target_size))
+                    if not chunk:
+                        break
+                    target_size += len(chunk)
+                    if target_size > MAX_TARGET_BYTES:
+                        raise ValueError("installed target library exceeds 64 MiB")
+                    target_parts.append(chunk)
+            remaining()
+            target = b"".join(target_parts)
     except (KeyError, zipfile.BadZipFile) as error:
         raise ValueError(
             f"installed base.apk has no readable {entry}"
         ) from error
     target_library_sha256 = hashlib.sha256(target).hexdigest()
     target_library_canonical_sha256 = canonical_elf_sha256(
-        target, deadline=time.monotonic() + getattr(args, "adb_timeout", 30.0)
+        target, deadline=deadline
     )
-    expected_canonical = baseline["target_library_canonical_sha256"]
-    if target_library_canonical_sha256 != expected_canonical:
+    if target_library_canonical_sha256 != HISTORICAL_CANONICAL_TARGET_SHA256:
         raise ValueError("canonical target SHA-256 does not match the historical benchmark build")
     return InstalledTargetIdentity(
         installed_apk_sha256, target_library_sha256, target_library_canonical_sha256
@@ -1473,10 +1514,10 @@ def main() -> int:
                 re.fullmatch(r"[0-9a-f]{64}", args.expected_installed_apk_sha256) is None):
             raise ValueError("--expected-installed-apk-sha256 must be one lowercase 64-hex value")
         baseline_document = Path(args.compare).read_text(encoding="utf-8")
-        identity = live_device_identity(args)
         if "## Current format-2 artifact baselines" in baseline_document:
             profile_baseline = parse_profile_baseline(baseline_document, args.profile)
             baseline_identity = parse_baseline_document(baseline_document)
+            identity = live_device_identity(args)
             ensure_same_format_two_device(baseline_identity, identity)
             baseline_candidate_tracer_sha256 = baseline_identity[
                 "candidate_tracer_sha256"
@@ -1486,6 +1527,7 @@ def main() -> int:
                 args, baseline_identity
             )
         else:
+            identity = live_device_identity(args)
             require_balanced_comparison(args.profile)
             baseline = parse_baseline_report(baseline_document)
             ensure_same_device(baseline, identity)

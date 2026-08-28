@@ -31,9 +31,13 @@ def _remaining(deadline: float) -> float:
 
 
 def _pinned_objcopy(android_home: Path | None) -> Path:
-    root = android_home or Path(os.environ.get("ANDROID_HOME", ""))
-    if not str(root):
-        raise ValueError("ANDROID_HOME is required for canonicalization")
+    if android_home is None:
+        configured = os.environ.get("ANDROID_HOME")
+        if not configured:
+            raise ValueError("ANDROID_HOME is required for canonicalization")
+        root = Path(configured)
+    else:
+        root = android_home
     return root / "ndk" / NDK_VERSION / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin" / "llvm-objcopy"
 
 

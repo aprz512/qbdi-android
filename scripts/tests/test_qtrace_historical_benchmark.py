@@ -4,8 +4,10 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from scripts.qtrace_historical_benchmark import canonical_elf_sha256
+import scripts.qtrace_historical_benchmark as historical_benchmark
 
 
 class CanonicalIdentityTests(unittest.TestCase):
@@ -71,3 +73,56 @@ class CanonicalIdentityTests(unittest.TestCase):
                 with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                     canonical_elf_sha256(value, deadline=deadline, android_home=root,
                                          capture=no_output)
+
+    def test_missing_android_home_does_not_select_a_cwd_relative_tool(self):
+        with patch.dict(os.environ, {"ANDROID_HOME": ""}, clear=False), \
+             self.assertRaisesRegex(ValueError, "ANDROID_HOME is required"):
+            historical_benchmark._pinned_objcopy(None)
+
+    def test_invalid_canonical_outputs_raise_and_cleanup_the_temporary_directory(self):
+        for output, message in (
+                (b"", "empty"), (b"not elf", "ELF"),
+                (b"\x7fELF" + b"x" * (64 * 1024 * 1024 - 3), "64 MiB")):
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tool = (root / "ndk" / "26.1.10909125" / "toolchains" / "llvm" /
+                        "prebuilt" / "linux-x86_64" / "bin" / "llvm-objcopy")
+                tool.parent.mkdir(parents=True)
+                tool.write_text("#! /bin/sh\n", encoding="utf-8")
+                tool.chmod(0o700)
+                destinations: list[Path] = []
+
+                def write_output(argv, **_kwargs):
+                    destination = Path(argv[-1])
+                    destinations.append(destination.parent)
+                    destination.write_bytes(output)
+                    return b""
+
+                with self.assertRaisesRegex(ValueError, message):
+                    canonical_elf_sha256(b"\x7fELFinput", deadline=time.monotonic() + 1,
+                                         android_home=root, capture=write_output)
+                self.assertTrue(destinations)
+                self.assertFalse(destinations[0].exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tool = (root / "ndk" / "26.1.10909125" / "toolchains" / "llvm" /
+                    "prebuilt" / "linux-x86_64" / "bin" / "llvm-objcopy")
+            tool.parent.mkdir(parents=True)
+            tool.write_text("#! /bin/sh\n", encoding="utf-8")
+            tool.chmod(0o700)
+            destinations: list[Path] = []
+
+            def valid_output(argv, **_kwargs):
+                destination = Path(argv[-1])
+                destinations.append(destination.parent)
+                destination.write_bytes(b"\x7fELFcanonical")
+                return b""
+
+            with patch.object(historical_benchmark.time, "monotonic",
+                              side_effect=[100.0, 100.0, 101.0]), \
+                 self.assertRaisesRegex(ValueError, "deadline"):
+                canonical_elf_sha256(b"\x7fELFinput", deadline=101.0,
+                                     android_home=root, capture=valid_output)
+            self.assertTrue(destinations)
+            self.assertFalse(destinations[0].exists())
