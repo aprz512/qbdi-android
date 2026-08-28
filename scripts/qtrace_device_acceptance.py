@@ -31,6 +31,11 @@ if __package__ in {None, ""}:
 
 from scripts.bounded_process import BoundedProcessError, capture_bounded
 from scripts.pull_trace import AdbArtifactClient, MAX_METRICS_BYTES
+from scripts.qtrace_historical_benchmark import (
+    HISTORICAL_COMMIT,
+    HistoricalBenchmarkApk,
+    build_historical_benchmark_apk,
+)
 from qtrace.status import load_strict_json, validate_status_shape
 
 
@@ -38,6 +43,7 @@ PACKAGE = "com.aprz.qbdiandroid"
 ACTIVITY = "com.aprz.qbdiandroid/.MainActivity"
 TRACER_PATH = Path("out/arm64-v8a/libqbdi_tracer.so")
 COMPANION_PATH = Path("out/arm64-v8a/libshadowhook_nothing.so")
+_CURRENT_APK_PATH = Path("app/build/outputs/apk/debug/app-debug.apk")
 _APP_PRIVATE_BINARIES = (
     (TRACER_PATH, "files/libqbdi_tracer.so"),
     (COMPANION_PATH, "files/libshadowhook_nothing.so"),
@@ -102,10 +108,38 @@ class HostBinarySnapshot:
             self.descriptor = -1
 
 
+@dataclass
+class HeldTracerPair:
+    tracer: HostBinarySnapshot
+    companion: HostBinarySnapshot
+
+    def verify_paths(self) -> None:
+        self.tracer.verify_path()
+        self.companion.verify_path()
+
+    def close(self) -> None:
+        """Attempt both closes and preserve their deterministic order."""
+        failures: list[tuple[str, BaseException]] = []
+        for label, snapshot in (("tracer", self.tracer),
+                                ("companion", self.companion)):
+            try:
+                snapshot.close()
+            except BaseException as error:
+                failures.append((label, error))
+        if failures:
+            detail = "; ".join(
+                f"{label}: {type(error).__name__}: {error}"
+                for label, error in failures
+            )
+            raise RuntimeError(f"held tracer pair cleanup failed: {detail}")
+
+
 _LOCAL_READ_TIMEOUT_SECONDS = 15.0
 _WORKER_CLEANUP_SECONDS = 0.05
 _MAX_HOST_BINARY_BYTES = 64 * 1024 * 1024
+_MAX_CURRENT_APK_BYTES = 128 * 1024 * 1024
 _HOST_BINARY_SNAPSHOT_SECONDS = 30.0
+_HISTORICAL_BUILD_SECONDS = 1200.0
 
 
 def _kill_and_reap(pid: int, *, cleanup_deadline: float | None = None) -> None:
@@ -395,6 +429,57 @@ def _snapshot_host_binary(
     return result
 
 
+def _snapshot_current_inputs(*, deadline: float) -> tuple[HostBinarySnapshot, HeldTracerPair]:
+    """Snapshot the current APK and tracer pair into one private held tree."""
+    root = Path(tempfile.mkdtemp(prefix="qtrace-current-inputs-"))
+    current: HostBinarySnapshot | None = None
+    tracer: HostBinarySnapshot | None = None
+    companion: HostBinarySnapshot | None = None
+    try:
+        os.chmod(root, 0o700)
+        current = _snapshot_host_binary(
+            _CURRENT_APK_PATH, root / "current.apk",
+            maximum_bytes=_MAX_CURRENT_APK_BYTES, deadline=deadline,
+        )
+        tracer = _snapshot_host_binary(
+            TRACER_PATH, root / TRACER_PATH.name,
+            maximum_bytes=_MAX_HOST_BINARY_BYTES, deadline=deadline,
+        )
+        companion = _snapshot_host_binary(
+            COMPANION_PATH, root / COMPANION_PATH.name,
+            maximum_bytes=_MAX_HOST_BINARY_BYTES, deadline=deadline,
+        )
+        pair = HeldTracerPair(tracer, companion)
+        pair.verify_paths()
+        current.verify_path()
+        return current, pair
+    except BaseException as primary:
+        failures: list[tuple[str, BaseException]] = []
+        for label, snapshot in (("current APK", current), ("tracer", tracer),
+                                ("companion", companion)):
+            if snapshot is not None:
+                try:
+                    snapshot.close()
+                except BaseException as error:
+                    failures.append((label, error))
+        try:
+            shutil.rmtree(root)
+        except FileNotFoundError:
+            pass
+        except BaseException as error:
+            failures.append(("current input snapshot tree", error))
+        if failures:
+            detail = "; ".join(
+                f"{label}: {type(error).__name__}: {error}"
+                for label, error in failures
+            )
+            raise RuntimeError(
+                f"current input snapshot failed: {type(primary).__name__}: {primary}; "
+                f"cleanup failed: {detail}"
+            ) from primary
+        raise
+
+
 class Runner(Protocol):
     def run(self, command: Sequence[str], *, timeout: float, cwd: Path | None = None,
             allowed: tuple[int, ...] = (0,)) -> CommandResult: ...
@@ -402,11 +487,22 @@ class Runner(Protocol):
     def read_text_beneath(self, root: Path | RootedReader, relative: Path, *, timeout: float) -> str: ...
 
 
+def _install_held_apk(
+    device: str,
+    runner: Runner,
+    apk: HostBinarySnapshot | HistoricalBenchmarkApk,
+) -> None:
+    apk.verify_path()
+    runner.run(("adb", "-s", device, "install", "-r", str(apk.path)), timeout=120.0)
+    apk.verify_path()
+
+
 def _stage_app_private_binaries(
     device: str,
     runner: Runner,
     *,
     token: str,
+    pair: HeldTracerPair,
     package: str = PACKAGE,
 ) -> None:
     """Install the freshly built tracer pair without trusting persistent app data."""
@@ -421,8 +517,7 @@ def _stage_app_private_binaries(
         for _source, destination in _APP_PRIVATE_BINARIES
     )
     final_paths = tuple(destination for _source, destination in _APP_PRIVATE_BINARIES)
-    local_staging = tempfile.TemporaryDirectory(prefix=".qtrace-acceptance-host-")
-    snapshots: list[HostBinarySnapshot] = []
+    snapshots = (pair.tracer, pair.companion)
     app_parent_trusted = False
 
     def validate(remote: str, expected_hash: str) -> None:
@@ -433,6 +528,15 @@ def _stage_app_private_binaries(
         ).stdout.strip()
         if kind != "regular file":
             raise RuntimeError(f"app-private tracer path is not a regular file: {remote}")
+        mode = runner.run(
+            ("adb", "-s", device, "shell", "run-as", package,
+             "stat", "-c", "%a", remote),
+            timeout=30.0,
+        ).stdout.strip()
+        if mode != "700":
+            raise RuntimeError(
+                f"app-private tracer path does not have canonical mode 700: {remote}"
+            )
         output = runner.run(
             ("adb", "-s", device, "shell", "run-as", package, "sha256sum", remote),
             timeout=30.0,
@@ -478,32 +582,18 @@ def _stage_app_private_binaries(
         for remote in final_paths
     )
 
-    def local_snapshot_cleanup() -> Sequence[tuple[str, Callable[[], None]]]:
-        return tuple(
-            (f"local snapshot {snapshot.path}", snapshot.close)
-            for snapshot in snapshots
-        ) + ((f"local snapshot directory {local_staging.name}", local_staging.cleanup),)
-
     def scratch_cleanup() -> Sequence[tuple[str, Callable[[], None]]]:
         if app_parent_trusted:
-            return app_scratch_cleanup + host_scratch_cleanup + local_snapshot_cleanup()
-        return host_scratch_cleanup + local_snapshot_cleanup()
+            return app_scratch_cleanup + host_scratch_cleanup
+        return host_scratch_cleanup
 
     def failure_cleanup() -> Sequence[tuple[str, Callable[[], None]]]:
         if app_parent_trusted:
-            return (final_cleanup + app_scratch_cleanup + host_scratch_cleanup +
-                    local_snapshot_cleanup())
-        return host_scratch_cleanup + local_snapshot_cleanup()
+            return final_cleanup + app_scratch_cleanup + host_scratch_cleanup
+        return host_scratch_cleanup
 
     try:
-        snapshot_deadline = time.monotonic() + _HOST_BINARY_SNAPSHOT_SECONDS
-        for source, _destination in _APP_PRIVATE_BINARIES:
-            snapshots.append(_snapshot_host_binary(
-                source,
-                Path(local_staging.name) / source.name,
-                maximum_bytes=_MAX_HOST_BINARY_BYTES,
-                deadline=snapshot_deadline,
-            ))
+        pair.verify_paths()
         expected_hashes = [snapshot.sha256 for snapshot in snapshots]
         runner.run(
             ("adb", "-s", device, "shell", "run-as", package,
@@ -1293,30 +1383,129 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
     return report
 
 
-def run_acceptance(device: str, directory: Path, *, runner: Runner,
-                   converter=None, artifact_client_factory=AdbArtifactClient) -> int:
-    if not device:
-        raise ValueError("--device is required for manual acceptance")
-    directory.mkdir(parents=True, exist_ok=True)
-    runner.run(("./gradlew", "nativeHostTest", "--no-daemon"), timeout=900.0)
-    runner.run(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), timeout=300.0)
-    runner.run(("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"), timeout=900.0)
-    runner.run(("adb", "-s", device, "install", "-r", "app/build/outputs/apk/debug/app-debug.apk"), timeout=120.0)
-    runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)
-    _stage_app_private_binaries(
-        device, runner, token=uuid.uuid4().hex, package=PACKAGE,
+@dataclass
+class _HistoricalGateState:
+    phase: str = "host"
+    current: HostBinarySnapshot | None = None
+    pair: HeldTracerPair | None = None
+    historical: HistoricalBenchmarkApk | None = None
+    builder_report: dict[str, object] | None = None
+    recovery_active: bool = False
+
+
+def _failure_record(label: str, error: BaseException) -> dict[str, str]:
+    return {"label": label, "type": type(error).__name__, "message": str(error)}
+
+
+def _gate_evidence(state: _HistoricalGateState, primary: BaseException,
+                   cleanup_errors: Sequence[dict[str, str]]) -> dict[str, object]:
+    historical = state.historical
+    report = state.builder_report or {}
+    if historical is not None:
+        candidate = getattr(historical, "report", None)
+        if isinstance(candidate, dict):
+            report = candidate
+    pair, current = state.pair, state.current
+    return {
+        "schema": 1, "phase": state.phase,
+        "historical_commit": HISTORICAL_COMMIT,
+        "historical_apk_sha256": historical.apk_sha256 if historical else None,
+        "current_apk_sha256": current.sha256 if current else None,
+        "target_raw_sha256": historical.target_raw_sha256 if historical else None,
+        "target_canonical_sha256": historical.target_canonical_sha256 if historical else None,
+        "tracer_sha256": pair.tracer.sha256 if pair else None,
+        "companion_sha256": pair.companion.sha256 if pair else None,
+        "archive_manifest": report.get("manifest", []),
+        "archive_sha256": report.get("archive_sha256"),
+        "command": report.get("command"),
+        "primary_error": {"type": type(primary).__name__, "message": str(primary)},
+        "cleanup_errors": list(cleanup_errors),
+    }
+
+
+def _publish_gate_failure_evidence(directory: Path, state: _HistoricalGateState,
+                                   primary: BaseException,
+                                   cleanup_errors: Sequence[dict[str, str]]) -> None:
+    payload = json.dumps(
+        _gate_evidence(state, primary, cleanup_errors), allow_nan=False,
+        ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    if len(payload) > 1024 * 1024:
+        raise RuntimeError("historical benchmark gate evidence exceeds 1 MiB")
+    temporary = directory / f".historical-benchmark-gate.{uuid.uuid4().hex}.tmp"
+    destination = directory / "historical-benchmark-gate.json"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("historical benchmark gate evidence write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, destination)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _collect_gate_cleanup(actions: Sequence[tuple[str, Callable[[], None]]],
+                          ) -> list[dict[str, str]]:
+    failures = []
+    for label, action in actions:
+        try:
+            action()
+        except BaseException as error:
+            failures.append(_failure_record(label, error))
+    return failures
+
+
+def _current_snapshot_tree_cleanup(current: HostBinarySnapshot) -> None:
+    root = current.path.parent
+    if root.name.startswith("qtrace-current-inputs-"):
+        shutil.rmtree(root)
+
+
+def _raise_gate_failure(primary: BaseException,
+                        cleanup_errors: Sequence[dict[str, str]]) -> None:
+    if not cleanup_errors:
+        raise primary
+    detail = "; ".join(
+        f"{item['label']}: {item['type']}: {item['message']}"
+        for item in cleanup_errors
     )
+    raise RuntimeError(
+        f"qtrace historical benchmark gate failed: {type(primary).__name__}: "
+        f"{primary}; cleanup failed: {detail}"
+    ) from primary
+
+
+def _run_current_fixture_phase(device: str, directory: Path, *, runner: Runner,
+                               state: _HistoricalGateState, converter=None,
+                               artifact_client_factory=AdbArtifactClient) -> None:
+    state.phase = "start-timed-baseline"
     runner.run(("adb", "-s", device, "shell", "am", "start", "-n", ACTIVITY,
                 "--ez", "qtrace_acceptance", "true", "--es", "qtrace_acceptance_mode", "timed",
                 "--el", "qtrace_acceptance_seed", str(SEED), "--el", "qtrace_acceptance_iterations", str(ITERATIONS)), timeout=30.0)
+    state.phase = "wait-timed-baseline"
     baseline = _wait_for_baseline(runner)
-    runner.run(("python3", "scripts/benchmark_trace.py", "--device", device, "--profile", "fast", "--runs", "5",
-                "--candidate-tracer", str(TRACER_PATH), "--compare", "docs/benchmarks/binary-trace-baseline.md"), timeout=900.0)
     with ExitStack() as held_roots:
         reports: dict[str, tuple[RootedReader, Path]] = {}
         timed_reports: dict[str, tuple[dict[str, object], str]] = {}
         timed_evidence: dict[str, tuple[str, str]] = {}
         for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
+            state.phase = f"{scenario}-{form}"
             output = directory / name
             published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
                                    allowed=(0, 2) if scenario == "flight-crash" else (0,))
@@ -1353,12 +1542,111 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
         raise RuntimeError("long timed target did not return the baseline oracle value")
     pulls = (("latest", ("--latest",), None, False), ("name", ("--name", artifact), artifact, False), ("all", ("--all",), None, False), ("compressed", ("--all", "--compressed-only"), None, True))
     for name, selector, expected, compressed in pulls:
+        state.phase = f"pull-{name}"
         output = directory / name
         result = runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, *selector, "--device", device, "--output", str(output)), timeout=180.0)
         with RootedReader(output) as held:
             _validated_pull_report(runner, result.stdout, held, named=expected,
                                    compressed_only=compressed)
     _verify_pull_outputs(directory)
+
+
+def run_acceptance(device: str, directory: Path, *, runner: Runner,
+                   converter=None, artifact_client_factory=AdbArtifactClient,
+                   historical_builder=build_historical_benchmark_apk) -> int:
+    if not device:
+        raise ValueError("--device is required for manual acceptance")
+    directory.mkdir(parents=True, exist_ok=True)
+    state = _HistoricalGateState()
+    try:
+        runner.run(("./gradlew", "nativeHostTest", "--no-daemon"), timeout=900.0)
+        runner.run(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), timeout=300.0)
+        runner.run(("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"), timeout=900.0)
+        state.phase = "snapshot-current"
+        state.current, state.pair = _snapshot_current_inputs(
+            deadline=time.monotonic() + _HOST_BINARY_SNAPSHOT_SECONDS,
+        )
+        state.phase = "build-historical"
+        state.historical = historical_builder(
+            Path.cwd(), deadline=time.monotonic() + _HISTORICAL_BUILD_SECONDS,
+        )
+        historical, current, pair = state.historical, state.current, state.pair
+
+        state.phase = "install-historical"
+        _install_held_apk(device, runner, historical)
+        state.recovery_active = True
+        state.phase = "force-stop-historical"
+        runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)
+        state.phase = "stage-historical"
+        _stage_app_private_binaries(
+            device, runner, token=uuid.uuid4().hex, pair=pair, package=PACKAGE,
+        )
+        state.phase = "compare-historical"
+        runner.run((
+            "python3", "scripts/benchmark_trace.py", "--device", device,
+            "--profile", "fast", "--runs", "5", "--candidate-tracer",
+            str(pair.tracer.path), "--expected-installed-apk-sha256",
+            historical.apk_sha256, "--compare",
+            "docs/benchmarks/binary-trace-baseline.md",
+        ), timeout=900.0)
+        state.phase = "install-current"
+        _install_held_apk(device, runner, current)
+        state.phase = "force-stop-current"
+        runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)
+        state.phase = "restage-current"
+        _stage_app_private_binaries(
+            device, runner, token=uuid.uuid4().hex, pair=pair, package=PACKAGE,
+        )
+        _run_current_fixture_phase(
+            device, directory, runner=runner, state=state, converter=converter,
+            artifact_client_factory=artifact_client_factory,
+        )
+    except BaseException as primary:
+        if state.historical is None and hasattr(primary, "report"):
+            candidate = getattr(primary, "report")
+            if isinstance(candidate, dict):
+                state.builder_report = candidate
+        cleanup_errors: list[dict[str, str]] = []
+        if state.recovery_active and state.current is not None:
+            cleanup_errors.extend(_collect_gate_cleanup((
+                ("recovery force-stop before current install",
+                 lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
+                ("recovery current APK install",
+                 lambda: _install_held_apk(device, runner, state.current)),
+                ("recovery force-stop after current install",
+                 lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
+            )))
+        cleanup_actions: list[tuple[str, Callable[[], None]]] = []
+        if state.historical is not None:
+            cleanup_actions.append(("historical APK close", state.historical.close))
+        if state.current is not None:
+            cleanup_actions.append(("current APK close", state.current.close))
+        if state.pair is not None:
+            cleanup_actions.extend((
+                ("tracer snapshot close", state.pair.tracer.close),
+                ("companion snapshot close", state.pair.companion.close),
+            ))
+        if state.current is not None:
+            cleanup_actions.append(("current input snapshot tree cleanup",
+                                    lambda: _current_snapshot_tree_cleanup(state.current)))
+        cleanup_errors.extend(_collect_gate_cleanup(cleanup_actions))
+        try:
+            _publish_gate_failure_evidence(directory, state, primary, cleanup_errors)
+        except BaseException as error:
+            cleanup_errors.append(_failure_record("failure evidence publication", error))
+        _raise_gate_failure(primary, cleanup_errors)
+
+    cleanup_errors = _collect_gate_cleanup((
+        ("historical APK close", state.historical.close),
+        ("current APK close", state.current.close),
+        ("tracer snapshot close", state.pair.tracer.close),
+        ("companion snapshot close", state.pair.companion.close),
+        ("current input snapshot tree cleanup",
+         lambda: _current_snapshot_tree_cleanup(state.current)),
+    ))
+    if cleanup_errors:
+        _raise_gate_failure(RuntimeError("acceptance resource cleanup failed"), cleanup_errors)
+    state.recovery_active = False
     return 0
 
 

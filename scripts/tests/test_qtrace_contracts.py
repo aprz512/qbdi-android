@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -36,6 +37,35 @@ from scripts.tests.test_trace_convert import metrics_sidecar
 
 ROOT = Path(__file__).resolve().parents[2]
 SESSION = "123e4567-e89b-42d3-a456-426614174000"
+
+
+@contextmanager
+def held_tracer_pair(binaries):
+    from scripts.qtrace_device_acceptance import (
+        HeldTracerPair,
+        _snapshot_host_binary,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="qtrace-test-held-pair-") as temporary:
+        root = Path(temporary)
+        deadline = time.monotonic() + 2.0
+        tracer = _snapshot_host_binary(
+            binaries[0][0], root / "libqbdi_tracer.so",
+            maximum_bytes=64 * 1024 * 1024, deadline=deadline,
+        )
+        try:
+            companion = _snapshot_host_binary(
+                binaries[1][0], root / "libshadowhook_nothing.so",
+                maximum_bytes=64 * 1024 * 1024, deadline=deadline,
+            )
+        except BaseException:
+            tracer.close()
+            raise
+        pair = HeldTracerPair(tracer, companion)
+        try:
+            yield pair
+        finally:
+            pair.close()
 
 
 class ProjectSchemaValidationError(ValueError):
@@ -1228,6 +1258,7 @@ class StagingDeviceRunner(FakeRunner):
                  forged_stale_companion: bool = False,
                  wrong_types: frozenset[str] = frozenset(),
                  wrong_hashes: frozenset[str] = frozenset(),
+                 wrong_modes: frozenset[str] = frozenset(),
                  before_first_push=None,
                  app_parent_kind: str | None = "directory",
                  app_parent_mode: int = 0o777,
@@ -1246,6 +1277,7 @@ class StagingDeviceRunner(FakeRunner):
         self.forged_stale_companion = forged_stale_companion
         self.wrong_types = wrong_types
         self.wrong_hashes = wrong_hashes
+        self.wrong_modes = wrong_modes
         self.before_first_push = before_first_push
 
     @staticmethod
@@ -1258,7 +1290,7 @@ class StagingDeviceRunner(FakeRunner):
 
     def _label(self, operation: str, path: str) -> str:
         role = self._role(path)
-        if operation in {"stat", "hash"}:
+        if operation in {"stat", "hash", "mode"}:
             phase = "stage" if self._is_app_stage(path) else "final"
             return f"{operation}:{phase}:{role}"
         if operation == "rm":
@@ -1382,6 +1414,10 @@ class StagingDeviceRunner(FakeRunner):
                     return self._result(self.app_parent_kind + "\n")
                 self._fail_if_requested("stat-mode:files")
                 return self._result(f"{self.app_parent_mode:o}\n")
+            if arguments[1] == "%a":
+                label = self._label("mode", path)
+                mode = 0o777 if label in self.wrong_modes else self.app_modes[path]
+                return self._result(f"{mode:o}\n")
             if arguments[1] != "%F":
                 raise RuntimeError(f"unexpected app-private stat arguments: {arguments}")
             if self.app_parent_kind != "directory":
@@ -1434,7 +1470,68 @@ class FakeArtifactClient:
         return path.read_bytes()
 
 
+class RecordingHeldInput:
+    def __init__(self, path: Path, sha256: str, *, label: str = "held"):
+        self.path = path
+        self.sha256 = sha256
+        self.label = label
+        self.verify_calls = 0
+        self.close_calls = 0
+        self.close_failure: str | None = None
+
+    def verify_path(self):
+        self.verify_calls += 1
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_failure is not None:
+            raise RuntimeError(self.close_failure)
+
+
+class RecordingHistoricalInput(RecordingHeldInput):
+    def __init__(self, path: Path, apk_sha256: str, *, report=None):
+        super().__init__(path, apk_sha256, label="historical APK")
+        self.apk_sha256 = apk_sha256
+        self.target_raw_sha256 = "5" * 64
+        self.target_canonical_sha256 = "0" * 64
+        self.report = {} if report is None else report
+
+
+class RecordingHeldPair:
+    def __init__(self, tracer, companion):
+        self.tracer = tracer
+        self.companion = companion
+
+    def verify_paths(self):
+        self.tracer.verify_path()
+        self.companion.verify_path()
+
+    def close(self):
+        failures = []
+        for held in (self.tracer, self.companion):
+            try:
+                held.close()
+            except BaseException as error:
+                failures.append(error)
+        if failures:
+            raise RuntimeError("; ".join(str(error) for error in failures))
+
+
 class AcceptanceHarnessTests(unittest.TestCase):
+    @staticmethod
+    def _recording_acceptance_inputs(root: Path):
+        current = RecordingHeldInput(root / "held-current.apk", "c" * 64,
+                                     label="current APK")
+        tracer = RecordingHeldInput(root / "held-tracer.so", "t" * 64,
+                                    label="tracer")
+        companion = RecordingHeldInput(root / "held-companion.so", "p" * 64,
+                                       label="companion")
+        for held, payload in ((current, b"current"), (tracer, b"tracer"),
+                              (companion, b"companion")):
+            held.path.write_bytes(payload)
+        pair = RecordingHeldPair(tracer, companion)
+        return current, pair
+
     def test_direct_acceptance_script_loads_repo_packages_without_pythonpath(self):
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
@@ -2297,10 +2394,19 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         for failure in ("command", "path", "evidence"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                current, pair = self._recording_acceptance_inputs(root)
+                historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+                historical.path.write_bytes(b"historical")
                 before = descriptor_count()
-                with self.assertRaises(RuntimeError):
+                with patch("scripts.qtrace_device_acceptance._snapshot_current_inputs",
+                           return_value=(current, pair)), \
+                        patch("scripts.qtrace_device_acceptance._install_held_apk"), \
+                        patch("scripts.qtrace_device_acceptance._stage_app_private_binaries"), \
+                        self.assertRaises(RuntimeError):
                     run_acceptance(
-                        "SERIAL", Path(temporary), runner=FailureRunner(failure),
+                        "SERIAL", root, runner=FailureRunner(failure),
+                        historical_builder=lambda *_args, **_kwargs: historical,
                     )
                 self.assertEqual(before, descriptor_count())
 
@@ -2609,8 +2715,11 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 companion.write_bytes(b"attacker companion")
 
             runner = StagingDeviceRunner(before_first_push=replace_build_outputs)
-            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
-                _stage_app_private_binaries("SERIAL", runner, token="f" * 32)
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="f" * 32, pair=pair,
+                )
 
         self.assertEqual(("regular file", b"fresh tracer"),
                          runner.app_files["files/libqbdi_tracer.so"])
@@ -2644,9 +2753,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 snapshot.write_bytes(b"replacement during push")
 
             runner.before_first_push = replace_snapshot
-            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
                     self.assertRaisesRegex(RuntimeError, "snapshot identity changed"):
-                _stage_app_private_binaries("SERIAL", runner, token="4" * 32)
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="4" * 32, pair=pair,
+                )
 
         self.assertNotIn("files/libqbdi_tracer.so", runner.app_files)
         self.assertNotIn("files/libshadowhook_nothing.so", runner.app_files)
@@ -2664,8 +2776,11 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 (companion, "files/libshadowhook_nothing.so"),
             )
             runner = StagingDeviceRunner(app_parent_kind=None)
-            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
-                _stage_app_private_binaries("SERIAL", runner, token="1" * 32)
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="1" * 32, pair=pair,
+                )
 
         self.assertEqual("directory", runner.app_parent_kind)
         self.assertEqual(0o771, runner.app_parent_mode)
@@ -2689,9 +2804,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
             )
             runner = StagingDeviceRunner(app_parent_kind="symbolic link")
             runner.app_files["outside/victim"] = ("regular file", b"victim")
-            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
                     self.assertRaisesRegex(RuntimeError, "not a real directory"):
-                _stage_app_private_binaries("SERIAL", runner, token="2" * 32)
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="2" * 32, pair=pair,
+                )
 
         self.assertEqual(("regular file", b"victim"), runner.app_files["outside/victim"])
         self.assertFalse(any(command[6] in {"cp", "chmod", "mv"}
@@ -2710,9 +2828,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 (companion, "files/libshadowhook_nothing.so"),
             )
             runner = StagingDeviceRunner(parent_chmod_result_mode=0o777)
-            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
                     self.assertRaisesRegex(RuntimeError, "canonical mode 771"):
-                _stage_app_private_binaries("SERIAL", runner, token="5" * 32)
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="5" * 32, pair=pair,
+                )
 
         self.assertFalse(any(command[6] in {"cp", "mv"}
                              for command in runner.commands if len(command) > 6))
@@ -2738,9 +2859,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
                     primary_failure=primary,
                     cleanup_failures=cleanup_failures,
                 )
-                with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                with held_tracer_pair(binaries) as pair, \
+                        patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
                         self.assertRaisesRegex(RuntimeError, primary) as caught:
-                    _stage_app_private_binaries("SERIAL", runner, token="3" * 32)
+                    _stage_app_private_binaries(
+                        "SERIAL", runner, token="3" * 32, pair=pair,
+                    )
 
                 diagnostics = str(caught.exception)
                 for cleanup in cleanup_failures:
@@ -2770,8 +2894,11 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 "files/tracer-victim": ("regular file", b"tracer victim"),
                 "files/companion-victim": ("regular file", b"companion victim"),
             })
-            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
-                _stage_app_private_binaries("SERIAL", runner, token="a" * 32)
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries):
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="a" * 32, pair=pair,
+                )
 
         self.assertEqual(("regular file", b"fresh tracer"),
                          runner.app_files["files/libqbdi_tracer.so"])
@@ -2818,9 +2945,37 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 (companion, "files/libshadowhook_nothing.so"),
             )
             runner = StagingDeviceRunner(forged_stale_companion=True)
-            with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
                     self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
-                _stage_app_private_binaries("SERIAL", runner, token="c" * 32)
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="c" * 32, pair=pair,
+                )
+
+        self.assertNotIn("files/libqbdi_tracer.so", runner.app_files)
+        self.assertNotIn("files/libshadowhook_nothing.so", runner.app_files)
+
+    def test_final_pair_mode_is_revalidated_after_activation(self):
+        from scripts.qtrace_device_acceptance import _stage_app_private_binaries
+
+        with tempfile.TemporaryDirectory() as temporary:
+            tracer = Path(temporary) / "libqbdi_tracer.so"
+            companion = Path(temporary) / "libshadowhook_nothing.so"
+            tracer.write_bytes(b"fresh tracer")
+            companion.write_bytes(b"fresh companion")
+            binaries = (
+                (tracer, "files/libqbdi_tracer.so"),
+                (companion, "files/libshadowhook_nothing.so"),
+            )
+            runner = StagingDeviceRunner(
+                wrong_modes=frozenset(("mode:final:companion",)),
+            )
+            with held_tracer_pair(binaries) as pair, \
+                    patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    self.assertRaisesRegex(RuntimeError, "canonical mode 700"):
+                _stage_app_private_binaries(
+                    "SERIAL", runner, token="9" * 32, pair=pair,
+                )
 
         self.assertNotIn("files/libqbdi_tracer.so", runner.app_files)
         self.assertNotIn("files/libshadowhook_nothing.so", runner.app_files)
@@ -2869,9 +3024,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
                     "files/libqbdi_tracer.so": ("regular file", b"stale tracer"),
                     "files/libshadowhook_nothing.so": ("regular file", b"stale companion"),
                 })
-                with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                with held_tracer_pair(binaries) as pair, \
+                        patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
                         self.assertRaises(RuntimeError):
-                    _stage_app_private_binaries("SERIAL", runner, token="d" * 32)
+                    _stage_app_private_binaries(
+                        "SERIAL", runner, token="d" * 32, pair=pair,
+                    )
                 self.assertNotIn("files/libqbdi_tracer.so", runner.app_files)
                 self.assertNotIn("files/libshadowhook_nothing.so", runner.app_files)
                 self.assertFalse(any(path.startswith("files/.qtrace-acceptance-")
@@ -2890,10 +3048,22 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 (tracer, "files/libqbdi_tracer.so"),
                 (companion, "files/libshadowhook_nothing.so"),
             )
+            current_apk = Path(temporary) / "app-debug.apk"
+            current_apk.write_bytes(b"current APK")
+            historical = RecordingHistoricalInput(
+                Path(temporary) / "historical.apk", "h" * 64,
+            )
+            historical.path.write_bytes(b"historical APK")
             runner = StagingDeviceRunner(primary_failure="copy:companion")
             with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                    patch("scripts.qtrace_device_acceptance.TRACER_PATH", tracer), \
+                    patch("scripts.qtrace_device_acceptance.COMPANION_PATH", companion), \
+                    patch("scripts.qtrace_device_acceptance._CURRENT_APK_PATH", current_apk), \
                     self.assertRaisesRegex(RuntimeError, "copy:companion"):
-                run_acceptance("SERIAL", Path(temporary) / "results", runner=runner)
+                run_acceptance(
+                    "SERIAL", Path(temporary) / "results", runner=runner,
+                    historical_builder=lambda *_args, **_kwargs: historical,
+                )
 
         push_index = next(index for index, command in enumerate(runner.commands)
                           if command[:4] == ("adb", "-s", "SERIAL", "push"))
@@ -2929,9 +3099,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
                     primary_failure=primary,
                     cleanup_failures=cleanup_failures,
                 )
-                with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
+                with held_tracer_pair(binaries) as pair, \
+                        patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
                         self.assertRaisesRegex(RuntimeError, primary) as caught:
-                    _stage_app_private_binaries("SERIAL", runner, token="e" * 32)
+                    _stage_app_private_binaries(
+                        "SERIAL", runner, token="e" * 32, pair=pair,
+                    )
 
                 diagnostics = str(caught.exception)
                 self.assertIsNotNone(caught.exception.__cause__)
@@ -2962,6 +3135,12 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 (tracer, "files/libqbdi_tracer.so"),
                 (companion, "files/libshadowhook_nothing.so"),
             )
+            current_apk = Path(temporary) / "app-debug.apk"
+            current_apk.write_bytes(b"current APK")
+            historical = RecordingHistoricalInput(
+                Path(temporary) / "historical.apk", "h" * 64,
+            )
+            historical.path.write_bytes(b"historical APK")
             (Path(temporary) / "offset").mkdir()
             (Path(temporary) / "offset" / "fixture.trace.txt").write_text("fixture")
             artifacts = Path(temporary) / "offset" / "artifacts"
@@ -2983,14 +3162,16 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 )
                 return SimpleNamespace(termination="stopped", partial=False)
             with patch("scripts.qtrace_device_acceptance._APP_PRIVATE_BINARIES", binaries), \
-                    patch("scripts.qtrace_device_acceptance.TRACER_PATH", tracer):
+                    patch("scripts.qtrace_device_acceptance.TRACER_PATH", tracer), \
+                    patch("scripts.qtrace_device_acceptance.COMPANION_PATH", companion), \
+                    patch("scripts.qtrace_device_acceptance._CURRENT_APK_PATH", current_apk):
                 self.assertEqual(0, run_acceptance(
                     "SERIAL", Path(temporary), runner=runner, converter=converter,
                     artifact_client_factory=lambda **_kwargs: artifact_client,
+                    historical_builder=lambda *_args, **_kwargs: historical,
                 ))
             self.assertEqual([("fixture.trace.bin.lz4.metrics", 64 * 1024)], artifact_client.calls)
             self.assertEqual([True], artifact_client.evidence_present_during_retry)
-            tracer_path = str(tracer)
         commands = runner.commands
         self.assertEqual(("./gradlew", "nativeHostTest", "--no-daemon"), commands[0])
         self.assertEqual(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), commands[1])
@@ -2998,7 +3179,11 @@ class AcceptanceHarnessTests(unittest.TestCase):
             ("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"),
             commands[2],
         )
-        self.assertEqual(("adb", "-s", "SERIAL", "install", "-r", "app/build/outputs/apk/debug/app-debug.apk"), commands[3])
+        installs = [command for command in commands
+                    if command[:4] == ("adb", "-s", "SERIAL", "install")]
+        self.assertEqual(2, len(installs))
+        self.assertEqual(str(historical.path), installs[0][-1])
+        self.assertNotEqual(str(current_apk), installs[1][-1])
         force_stop_index = commands.index(
             ("adb", "-s", "SERIAL", "shell", "am", "force-stop", "com.aprz.qbdiandroid")
         )
@@ -3014,22 +3199,547 @@ class AcceptanceHarnessTests(unittest.TestCase):
         pushed_sources = [Path(commands[index][4]) for index in push_indices]
         self.assertEqual({"libqbdi_tracer.so", "libshadowhook_nothing.so"},
                          {source.name for source in pushed_sources})
-        self.assertNotIn(Path(tracer_path), pushed_sources)
+        self.assertNotIn(tracer, pushed_sources)
         self.assertNotIn(companion, pushed_sources)
         self.assertTrue(all(not source.exists() for source in pushed_sources))
-        self.assertEqual(["companion", "tracer"],
+        self.assertEqual(["companion", "tracer", "companion", "tracer"],
                          [StagingDeviceRunner._role(commands[index][-1])
                           for index in move_indices])
         self.assertLess(max(move_indices), start_index)
-        self.assertLess(start_index, benchmark_index)
+        self.assertLess(benchmark_index, start_index)
         candidate_index = commands[benchmark_index].index("--candidate-tracer")
-        self.assertEqual(tracer_path, commands[benchmark_index][candidate_index + 1])
+        candidate_path = Path(commands[benchmark_index][candidate_index + 1])
+        self.assertNotEqual(tracer, candidate_path)
+        self.assertEqual("libqbdi_tracer.so", candidate_path.name)
         self.assertEqual(15, runner.reads)  # baseline retry, per-run entry evidence, reports, oracle, pulls
         self.assertIn(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands)
         named_pull = next(command for command in commands if "--name" in command)
         self.assertIn("fixture.trace.bin.lz4", named_pull)
         compressed_pull = next(command for command in commands if "--compressed-only" in command)
         self.assertEqual("--compressed-only", compressed_pull[-5])
+
+    def test_acceptance_installs_historical_then_current_and_reuses_one_held_pair(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        events = []
+        stage_calls = []
+        compare_commands = []
+
+        class RecordingRunner(FakeRunner):
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                command = tuple(command)
+                if command == ("./gradlew", "nativeHostTest", "--no-daemon"):
+                    events.append("nativeHostTest")
+                elif command[:5] == ("python3", "-m", "unittest", "discover", "-s"):
+                    events.append("full-python")
+                elif command[:3] == ("./gradlew", ":app:assembleDebug",
+                                      ":tracer:copyTracerDebug"):
+                    events.append("build-current")
+                elif command[4:7] == ("am", "force-stop", acceptance.PACKAGE):
+                    events.append("force-stop-historical" if events[-1] == "install-historical"
+                                  else "force-stop-current")
+                elif command[4:6] == ("am", "start"):
+                    events.append("start-timed-baseline")
+                elif command[:2] == ("python3", "scripts/benchmark_trace.py"):
+                    events.append("compare-historical")
+                    compare_commands.append(command)
+                elif "qtrace" in command and "demo" in command:
+                    scenario = command[command.index("--scenario") + 1]
+                    if scenario == "timed":
+                        form = command[command.index("--scene-form") + 1]
+                        events.append(f"timed-{form}")
+                    else:
+                        events.append(scenario)
+                elif "qtrace" in command and "pull" in command:
+                    output = Path(command[command.index("--output") + 1])
+                    output.mkdir()
+                    (output / SESSION).mkdir()
+                    if "--latest" in command:
+                        events.append("pull-latest")
+                    elif "--name" in command:
+                        events.append("pull-name")
+                    elif "--compressed-only" in command:
+                        events.append("pull-all-compressed-only")
+                    else:
+                        events.append("pull-all")
+                return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current, pair = self._recording_acceptance_inputs(root)
+            historical = RecordingHistoricalInput(root / "held-historical.apk", "h" * 64)
+            historical.path.write_bytes(b"historical")
+            runner = RecordingRunner()
+
+            def snapshot_current_inputs(*, deadline):
+                self.assertGreater(deadline, time.monotonic())
+                events.append("snapshot-current-apk-and-pair")
+                return current, pair
+
+            def historical_builder(repository, *, deadline):
+                self.assertEqual(ROOT, repository)
+                self.assertGreater(deadline, time.monotonic())
+                events.append("build-historical-2d6b1022a14ae554804a57e267544c12dea29353")
+                return historical
+
+            def install(_device, _runner, apk):
+                events.append("install-historical" if apk is historical else "install-current")
+
+            def stage(_device, _runner, *, token, pair: object, package):
+                self.assertRegex(token, r"[0-9a-f]{32}\Z")
+                stage_calls.append((pair, pair.tracer.sha256, pair.companion.sha256))
+                events.append("stage-historical-held-pair" if len(stage_calls) == 1
+                              else "restage-current-same-held-pair")
+
+            def wait_baseline(_runner):
+                events.append("wait-timed-baseline")
+                return {"iterations": 30, "seed": 5855319310239641971,
+                        "result": "0x42"}
+
+            expected_compare = (
+                "python3", "scripts/benchmark_trace.py", "--device", "SERIAL",
+                "--profile", "fast", "--runs", "5", "--candidate-tracer",
+                str(pair.tracer.path), "--expected-installed-apk-sha256",
+                historical.apk_sha256, "--compare",
+                "docs/benchmarks/binary-trace-baseline.md",
+            )
+            with patch.object(acceptance, "_snapshot_current_inputs",
+                              side_effect=snapshot_current_inputs, create=True), \
+                    patch.object(acceptance, "_install_held_apk", side_effect=install,
+                                 create=True), \
+                    patch.object(acceptance, "_stage_app_private_binaries",
+                                 side_effect=stage), \
+                    patch.object(acceptance, "_wait_for_baseline",
+                                 side_effect=wait_baseline), \
+                    patch.object(acceptance, "_validated_timed_report",
+                                 side_effect=[({"native": {"status": {"normalizedScenes": []}},
+                                                "pid": 4242}, "fixture.trace.bin.lz4"),
+                                              ({"native": {"status": {"normalizedScenes": []}},
+                                                "pid": 4242}, "fixture.trace.bin.lz4")]), \
+                    patch.object(acceptance, "_wait_for_timed_fixture_evidence",
+                                 return_value=("receipt", "entry")), \
+                    patch.object(acceptance, "_validate_timed_fixture_receipt"), \
+                    patch.object(acceptance, "_validate_timed_artifact_semantics"), \
+                    patch.object(acceptance, "_verify_artifact_read_recovery"), \
+                    patch.object(acceptance, "_validated_monitor_report"), \
+                    patch.object(acceptance, "_wait_for_timed_result",
+                                 return_value={"iterations": 30,
+                                               "seed": 5855319310239641971,
+                                               "result": "0x42"}), \
+                    patch.object(acceptance, "_validated_pull_report"), \
+                    patch.object(acceptance, "_verify_pull_outputs"):
+                try:
+                    result = acceptance.run_acceptance(
+                        "SERIAL", root, runner=runner,
+                        historical_builder=historical_builder,
+                    )
+                except TypeError as error:
+                    self.fail(f"run_acceptance lacks the two-phase contract: {error}")
+
+        self.assertEqual(0, result)
+        self.assertEqual([
+            "nativeHostTest", "full-python", "build-current",
+            "snapshot-current-apk-and-pair",
+            "build-historical-2d6b1022a14ae554804a57e267544c12dea29353",
+            "install-historical", "force-stop-historical",
+            "stage-historical-held-pair", "compare-historical", "install-current",
+            "force-stop-current", "restage-current-same-held-pair",
+            "start-timed-baseline", "wait-timed-baseline", "timed-offset",
+            "timed-symbol", "monitor-exit", "flight-crash", "pull-latest",
+            "pull-name", "pull-all", "pull-all-compressed-only",
+        ], events)
+        self.assertEqual([(pair, "t" * 64, "p" * 64),
+                          (pair, "t" * 64, "p" * 64)], stage_calls)
+        self.assertIs(stage_calls[0][0], stage_calls[1][0])
+        self.assertEqual([expected_compare], compare_commands)
+        self._two_phase_current_commands = [
+            command for command in runner.commands
+            if ((len(command) > 5 and command[4:6] == ("am", "start")) or
+                ("qtrace" in command and ("demo" in command or "pull" in command)))
+        ]
+
+    def test_current_apk_and_tracer_pair_are_snapshotted_before_historical_build(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        events = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current, pair = self._recording_acceptance_inputs(root)
+            historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+            historical.path.write_bytes(b"historical")
+
+            def snapshot(*, deadline):
+                events.append("snapshot")
+                return current, pair
+
+            def build(_repository, *, deadline):
+                events.append("build-historical")
+                raise RuntimeError("stop after ordering probe")
+
+            with patch.object(acceptance, "_snapshot_current_inputs", side_effect=snapshot,
+                              create=True):
+                try:
+                    acceptance.run_acceptance("SERIAL", root, runner=FakeRunner(),
+                                              historical_builder=build)
+                except TypeError as error:
+                    self.fail(f"run_acceptance lacks historical_builder injection: {error}")
+                except RuntimeError as error:
+                    self.assertIn("stop after ordering probe", str(error))
+        self.assertEqual(["snapshot", "build-historical"], events)
+
+    def test_each_adb_install_revalidates_the_same_held_apk_before_and_after_path_use(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        class MutatingInstallRunner(FakeRunner):
+            def __init__(self, held):
+                super().__init__()
+                self.held = held
+
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                result = super().run(command, timeout=timeout, cwd=cwd,
+                                     allowed=allowed)
+                if tuple(command[:4]) == ("adb", "-s", "SERIAL", "install"):
+                    self.held.path.unlink()
+                    self.held.path.write_bytes(b"rebound")
+                return result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.apk"
+            source.write_bytes(b"original")
+            snapshot = acceptance._snapshot_host_binary(
+                source, root / "held.apk", maximum_bytes=128,
+                deadline=time.monotonic() + 1.0,
+            )
+            runner = MutatingInstallRunner(snapshot)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                    try:
+                        acceptance._install_held_apk("SERIAL", runner, snapshot)
+                    except AttributeError as error:
+                        self.fail(f"missing held APK installer: {error}")
+            finally:
+                snapshot.close()
+        self.assertEqual(2, len(runner.commands) + 1)
+
+    def test_second_stage_uses_held_pair_after_mutable_build_outputs_are_rebound(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tracer = root / "libqbdi_tracer.so"
+            companion = root / "libshadowhook_nothing.so"
+            current_apk = root / "app-debug.apk"
+            tracer.write_bytes(b"held tracer")
+            companion.write_bytes(b"held companion")
+            current_apk.write_bytes(b"held current")
+            with patch.object(acceptance, "TRACER_PATH", tracer), \
+                    patch.object(acceptance, "COMPANION_PATH", companion), \
+                    patch.object(acceptance, "_CURRENT_APK_PATH", current_apk,
+                                 create=True):
+                try:
+                    current, pair = acceptance._snapshot_current_inputs(
+                        deadline=time.monotonic() + 2.0,
+                    )
+                except AttributeError as error:
+                    self.fail(f"missing current input snapshot contract: {error}")
+            try:
+                tracer.write_bytes(b"rebound tracer")
+                companion.write_bytes(b"rebound companion")
+                current_apk.write_bytes(b"rebound current")
+                runner = StagingDeviceRunner()
+                acceptance._stage_app_private_binaries(
+                    "SERIAL", runner, token="7" * 32, pair=pair,
+                )
+                acceptance._stage_app_private_binaries(
+                    "SERIAL", runner, token="8" * 32, pair=pair,
+                )
+                self.assertEqual(("regular file", b"held tracer"),
+                                 runner.app_files["files/libqbdi_tracer.so"])
+                self.assertEqual(("regular file", b"held companion"),
+                                 runner.app_files["files/libshadowhook_nothing.so"])
+            finally:
+                current.close()
+                pair.close()
+                __import__("shutil").rmtree(current.path.parent, ignore_errors=True)
+
+    def test_historical_compare_failure_never_starts_current_fixture_or_semantic_fallback(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        class CompareFailureRunner(FakeRunner):
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                if tuple(command[:2]) == ("python3", "scripts/benchmark_trace.py"):
+                    self.commands.append(tuple(command))
+                    raise RuntimeError("compare-historical")
+                return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current, pair = self._recording_acceptance_inputs(root)
+            historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+            historical.path.write_bytes(b"historical")
+            runner = CompareFailureRunner()
+            with patch.object(acceptance, "_snapshot_current_inputs",
+                              return_value=(current, pair), create=True), \
+                    patch.object(acceptance, "_install_held_apk", create=True), \
+                    patch.object(acceptance, "_stage_app_private_binaries"):
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "compare-historical"):
+                        acceptance.run_acceptance(
+                            "SERIAL", root, runner=runner,
+                            historical_builder=lambda *_args, **_kwargs: historical,
+                        )
+                except TypeError as error:
+                    self.fail(f"run_acceptance lacks historical_builder injection: {error}")
+        self.assertFalse(any(command[4:6] == ("am", "start")
+                             for command in runner.commands))
+        compares = [command for command in runner.commands
+                    if "scripts/benchmark_trace.py" in command]
+        self.assertEqual(1, len(compares))
+        self.assertIn("--compare", compares[0])
+
+    def test_current_qtrace_start_and_pull_commands_receive_no_historical_arguments(self):
+        self.test_acceptance_installs_historical_then_current_and_reuses_one_held_pair()
+        recorded = self._two_phase_current_commands
+        forbidden = {"historical", "2d6b1022a14ae554804a57e267544c12dea29353",
+                     "--expected-installed-apk-sha256"}
+        self.assertEqual(9, len(recorded))  # one start, four demos, four pulls
+        self.assertTrue(all(not (set(command) & forbidden) for command in recorded))
+
+    def test_every_post_historical_install_failure_recovers_current_apk_and_force_stops(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        boundaries = (
+            "force-stop-historical", "stage-historical", "compare-historical",
+            "install-current", "force-stop-current", "restage-current",
+            "start-timed-baseline",
+        )
+        for boundary in boundaries:
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                current, pair = self._recording_acceptance_inputs(root)
+                historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+                historical.path.write_bytes(b"historical")
+                events = []
+                force_stops = 0
+                stages = 0
+                normal_force_stops = (2 if boundary in {
+                    "force-stop-current", "restage-current", "start-timed-baseline",
+                } else 1)
+
+                class BoundaryRunner(FakeRunner):
+                    def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                        nonlocal force_stops
+                        command = tuple(command)
+                        if command[4:7] == ("am", "force-stop", acceptance.PACKAGE):
+                            force_stops += 1
+                            if force_stops <= normal_force_stops:
+                                label = ("force-stop-historical" if force_stops == 1
+                                         else "force-stop-current")
+                            else:
+                                label = (f"recovery-force-stop-"
+                                         f"{force_stops - normal_force_stops}")
+                            events.append(label)
+                            if label == boundary:
+                                raise RuntimeError(boundary)
+                        elif command[:2] == ("python3", "scripts/benchmark_trace.py"):
+                            events.append("compare-historical")
+                            if boundary == "compare-historical":
+                                raise RuntimeError(boundary)
+                        elif command[4:6] == ("am", "start"):
+                            events.append("start-timed-baseline")
+                            if boundary == "start-timed-baseline":
+                                raise RuntimeError(boundary)
+                        return super().run(command, timeout=timeout, cwd=cwd,
+                                           allowed=allowed)
+
+                runner = BoundaryRunner()
+
+                def install(_device, _runner, apk):
+                    label = ("install-historical" if apk is historical
+                             else "recovery-install-current"
+                             if force_stops > normal_force_stops
+                             else "install-current")
+                    events.append(label)
+                    if ((boundary == "install-current" and label == "install-current") or
+                            (label == "install-historical" and False)):
+                        raise RuntimeError(boundary)
+
+                def stage(_device, _runner, *, token, pair, package):
+                    nonlocal stages
+                    stages += 1
+                    label = "stage-historical" if stages == 1 else "restage-current"
+                    events.append(label)
+                    if label == boundary:
+                        raise RuntimeError(boundary)
+
+                with patch.object(acceptance, "_snapshot_current_inputs",
+                                  return_value=(current, pair), create=True), \
+                        patch.object(acceptance, "_install_held_apk",
+                                     side_effect=install, create=True), \
+                        patch.object(acceptance, "_stage_app_private_binaries",
+                                     side_effect=stage):
+                    try:
+                        with self.assertRaises(RuntimeError) as caught:
+                            acceptance.run_acceptance(
+                                "SERIAL", root, runner=runner,
+                                historical_builder=lambda *_args, **_kwargs: historical,
+                            )
+                    except TypeError as error:
+                        self.fail(f"run_acceptance lacks recovery contract: {error}")
+                primary = caught.exception.__cause__ or caught.exception
+                self.assertIn(boundary, str(primary))
+                primary_index = next(index for index, event in enumerate(events)
+                                     if event == boundary)
+                self.assertEqual(
+                    ["recovery-force-stop-1", "recovery-install-current",
+                     "recovery-force-stop-2"],
+                    events[primary_index + 1:primary_index + 4],
+                )
+                self.assertFalse(any(event.startswith(("timed-", "pull-"))
+                                     for event in events[primary_index + 1:]))
+
+    def test_primary_and_every_recovery_snapshot_descriptor_tree_and_report_failure_are_visible(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current, pair = self._recording_acceptance_inputs(root)
+            historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+            historical.path.write_bytes(b"historical")
+            current.close_failure = "current-apk-close"
+            pair.tracer.close_failure = "tracer-close"
+            pair.companion.close_failure = "companion-close"
+            historical.close_failure = "historical-apk-close"
+            recovery_calls = 0
+
+            class FailureRunner(FakeRunner):
+                def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                    nonlocal recovery_calls
+                    if tuple(command[:2]) == ("python3", "scripts/benchmark_trace.py"):
+                        raise RuntimeError("compare-primary")
+                    if command[4:7] == ("am", "force-stop", acceptance.PACKAGE):
+                        recovery_calls += 1
+                        if recovery_calls > 1:
+                            raise RuntimeError(f"recovery-force-stop-{recovery_calls - 1}")
+                    return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+
+            installs = 0
+
+            def install(_device, _runner, _apk):
+                nonlocal installs
+                installs += 1
+                if installs > 1:
+                    raise RuntimeError("recovery-install-current")
+
+            with patch.object(acceptance, "_snapshot_current_inputs",
+                              return_value=(current, pair), create=True), \
+                    patch.object(acceptance, "_install_held_apk", side_effect=install,
+                                 create=True), \
+                    patch.object(acceptance, "_stage_app_private_binaries"), \
+                    patch.object(acceptance, "_publish_gate_failure_evidence",
+                                 side_effect=RuntimeError("evidence-publication"),
+                                 create=True):
+                try:
+                    with self.assertRaises(RuntimeError) as caught:
+                        acceptance.run_acceptance(
+                            "SERIAL", root, runner=FailureRunner(),
+                            historical_builder=lambda *_args, **_kwargs: historical,
+                        )
+                except TypeError as error:
+                    self.fail(f"run_acceptance lacks exhaustive failure contract: {error}")
+
+        diagnostics = str(caught.exception)
+        labels = (
+            "compare-primary", "recovery-force-stop-1", "recovery-install-current",
+            "recovery-force-stop-2", "historical-apk-close", "current-apk-close",
+            "tracer-close", "companion-close", "evidence-publication",
+        )
+        positions = []
+        for label in labels:
+            self.assertEqual(1, diagnostics.count(label), diagnostics)
+            positions.append(diagnostics.index(label))
+        self.assertEqual(sorted(positions), positions)
+        self.assertEqual(1, historical.close_calls)
+        self.assertEqual(1, current.close_calls)
+        self.assertEqual(1, pair.tracer.close_calls)
+        self.assertEqual(1, pair.companion.close_calls)
+
+    def test_failure_report_is_bounded_atomic_and_retained_with_exact_phase_and_hashes(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        raw_pax_body = b"52 comment=2d6b1022a14ae554804a57e267544c12dea29353\n"
+        manifest = [{
+            "type": "global_pax", "size": len(raw_pax_body),
+            "sha256": hashlib.sha256(raw_pax_body).hexdigest(),
+        }, {"path": "app/build.gradle", "type": "file", "size": 1,
+            "sha256": "a" * 64}]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current, pair = self._recording_acceptance_inputs(root)
+            historical = RecordingHistoricalInput(
+                root / "historical.apk", "h" * 64,
+                report={"manifest": manifest, "archive_sha256": "a" * 64},
+            )
+            historical.path.write_bytes(b"historical")
+            historical.close_failure = "historical-close-evidence"
+            current.close_failure = "current-close-evidence"
+            pair.tracer.close_failure = "tracer-close-evidence"
+            pair.companion.close_failure = "companion-close-evidence"
+
+            class CompareFailureRunner(FakeRunner):
+                def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                    if tuple(command[:2]) == ("python3", "scripts/benchmark_trace.py"):
+                        raise RuntimeError("compare-primary")
+                    return super().run(command, timeout=timeout, cwd=cwd,
+                                       allowed=allowed)
+
+            with patch.object(acceptance, "_snapshot_current_inputs",
+                              return_value=(current, pair), create=True), \
+                    patch.object(acceptance, "_install_held_apk", create=True), \
+                    patch.object(acceptance, "_stage_app_private_binaries"):
+                try:
+                    with self.assertRaises(RuntimeError):
+                        acceptance.run_acceptance(
+                            "SERIAL", root, runner=CompareFailureRunner(),
+                            historical_builder=lambda *_args, **_kwargs: historical,
+                        )
+                except TypeError as error:
+                    self.fail(f"run_acceptance lacks retained evidence contract: {error}")
+
+            report_path = root / "historical-benchmark-gate.json"
+            self.assertTrue(report_path.is_file())
+            self.assertLessEqual(report_path.stat().st_size, 1024 * 1024)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual("compare-historical", report["phase"])
+            self.assertEqual("2d6b1022a14ae554804a57e267544c12dea29353",
+                             report["historical_commit"])
+            self.assertEqual("h" * 64, report["historical_apk_sha256"])
+            self.assertEqual("c" * 64, report["current_apk_sha256"])
+            self.assertEqual("5" * 64, report["target_raw_sha256"])
+            self.assertEqual("0" * 64, report["target_canonical_sha256"])
+            self.assertEqual("t" * 64, report["tracer_sha256"])
+            self.assertEqual("p" * 64, report["companion_sha256"])
+            self.assertEqual(manifest, report["archive_manifest"])
+            self.assertEqual([
+                {"label": "historical APK close", "type": "RuntimeError",
+                 "message": "historical-close-evidence"},
+                {"label": "current APK close", "type": "RuntimeError",
+                 "message": "current-close-evidence"},
+                {"label": "tracer snapshot close", "type": "RuntimeError",
+                 "message": "tracer-close-evidence"},
+                {"label": "companion snapshot close", "type": "RuntimeError",
+                 "message": "companion-close-evidence"},
+            ], report["cleanup_errors"])
+            self.assertEqual(
+                {"type": "global_pax", "size": len(raw_pax_body),
+                 "sha256": hashlib.sha256(raw_pax_body).hexdigest()},
+                {key: report["archive_manifest"][0][key]
+                 for key in ("type", "size", "sha256")},
+            )
+            self.assertFalse(any(item.get("path") == "pax_global_header"
+                                 for item in report["archive_manifest"]))
+            self.assertEqual([], list(root.glob(".historical-benchmark-gate.*.tmp")))
 
 
 if __name__ == "__main__":
