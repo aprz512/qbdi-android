@@ -55,6 +55,63 @@ from scripts.benchmark_trace import (
 )
 
 
+class HistoricalTargetIdentityTests(unittest.TestCase):
+    RAW_SHA = "5f1a970825ae8bacb17d8dd656e01bd1fe7172638ba3ddcacd82ffaaad6e62c0"
+    CANONICAL_SHA = "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169"
+    COMMIT = "2d6b1022a14ae554804a57e267544c12dea29353"
+
+    def test_baseline_preserves_raw_identity_and_requires_canonical_identity(self):
+        text = Path("docs/benchmarks/binary-trace-baseline.md").read_text(encoding="utf-8")
+        identity = benchmark_trace.parse_baseline_document(text)
+        self.assertEqual(
+            (self.RAW_SHA, self.CANONICAL_SHA, self.COMMIT),
+            (identity["target_library_sha256"],
+             identity["target_library_canonical_sha256"],
+             identity["historical_target_commit"]),
+        )
+
+    def test_expected_installed_apk_sha_requires_lowercase_64_hex(self):
+        with patch.object(sys, "argv", ["benchmark_trace.py", "--expected-installed-apk-sha256", "A" * 64]):
+            with self.assertRaises(SystemExit):
+                benchmark_trace.parse_args()
+        with patch.object(sys, "argv", ["benchmark_trace.py", "--expected-installed-apk-sha256", "a" * 64]):
+            self.assertEqual("a" * 64, benchmark_trace.parse_args().expected_installed_apk_sha256)
+
+    def test_compare_rejects_expected_apk_or_canonical_mismatch_before_warmup(self):
+        args = SimpleNamespace(
+            runs=5, test_fail_setup=False,
+            compare="docs/benchmarks/binary-trace-baseline.md", profile="balanced",
+            legacy=False, candidate_tracer="candidate.so", expected_installed_apk_sha256="1" * 64,
+        )
+        identity = {
+            "model": "Pixel 6", "device": "oriole", "android": "16", "abi": "arm64-v8a",
+            "android_build_type": "user", "app_build_type": "Debug",
+            "build_fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+            "selinux": "Enforcing", "package": "com.aprz.qbdiandroid",
+        }
+        for message in ("installed base.apk SHA-256", "canonical target SHA-256"):
+            with self.subTest(message=message), \
+                 patch.object(benchmark_trace, "parse_args", return_value=args), \
+                 patch.object(benchmark_trace, "live_device_identity", return_value=identity), \
+                 patch.object(benchmark_trace, "verify_candidate_tracer", return_value="a" * 64), \
+                 patch.object(benchmark_trace, "verify_installed_target_library",
+                              side_effect=ValueError(message)), \
+                 patch.object(benchmark_trace, "run_once", side_effect=AssertionError("must not warm up")) as run, \
+                 self.assertRaisesRegex(ValueError, message):
+                benchmark_trace.main()
+            self.assertEqual(0, run.call_count)
+
+    def test_manual_non_compare_run_does_not_require_expected_apk_sha(self):
+        args = SimpleNamespace(
+            runs=1, test_fail_setup=False, compare=None, profile="fast", legacy=True,
+        )
+        run = {"return": "0x42", "elapsed_ms": 1, "instructions": 1, "raw_bytes": 1}
+        with patch.object(benchmark_trace, "parse_args", return_value=args), \
+             patch.object(benchmark_trace, "run_once", return_value=run), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, benchmark_trace.main())
+
+
 class LegacyTraceParserTests(unittest.TestCase):
     def test_legacy_trace_metrics_and_median(self):
         trace = b"""TRACE_BEGIN scene=benchmark
@@ -529,8 +586,8 @@ effective_buffer_bytes=67108864
                     {"candidate_tracer_sha256": local_sha},
                 )
 
-    def test_installed_apk_target_library_must_match_the_historical_build(self):
-        target = b"historical benchmark target"
+    def test_installed_apk_target_library_reports_raw_and_canonical_identity(self):
+        target = b"\x7fELFhistorical benchmark target"
         target_sha = hashlib.sha256(target).hexdigest()
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as apk:
@@ -539,7 +596,8 @@ effective_buffer_bytes=67108864
             adb="adb", device="serial", package="com.example.app",
             adb_timeout=3,
         )
-        baseline = {"abi": "arm64-v8a", "target_library_sha256": target_sha}
+        baseline = {"abi": "arm64-v8a", "target_library_sha256": target_sha,
+                    "target_library_canonical_sha256": "c" * 64}
         package_path = subprocess.CompletedProcess(
             ["adb", "pm", "path"], 0,
             stdout="package:/data/app/example/base.apk\n", stderr="",
@@ -548,23 +606,19 @@ effective_buffer_bytes=67108864
         with patch.object(benchmark_trace, "adb", return_value=package_path), \
              patch.object(
                  benchmark_trace, "capture_bounded", return_value=archive.getvalue()
-             ) as capture:
+             ) as capture, \
+             patch.object(benchmark_trace, "canonical_elf_sha256", return_value="c" * 64):
             verified = benchmark_trace.verify_installed_target_library(
                 args, baseline
             )
 
-        self.assertEqual(target_sha, verified)
+        self.assertEqual(target_sha, verified.target_library_sha256)
+        self.assertEqual(hashlib.sha256(archive.getvalue()).hexdigest(), verified.installed_apk_sha256)
+        self.assertEqual("c" * 64, verified.target_library_canonical_sha256)
         self.assertTrue(any(
             "/data/app/example/base.apk" in item
             for item in capture.call_args.args[0]
         ))
-        with patch.object(benchmark_trace, "adb", return_value=package_path), \
-             patch.object(
-                 benchmark_trace, "capture_bounded", return_value=archive.getvalue()
-             ), self.assertRaisesRegex(ValueError, "installed target library SHA-256"):
-            benchmark_trace.verify_installed_target_library(
-                args, {**baseline, "target_library_sha256": "0" * 64}
-            )
 
     def test_acceptance_rejects_warmup_oracle_drift_before_measured_runs(self):
         baseline_run = {
@@ -598,7 +652,8 @@ effective_buffer_bytes=67108864
              patch.object(benchmark_trace, "live_device_identity", return_value=identity), \
              patch.object(benchmark_trace, "verify_candidate_tracer", return_value="a" * 64), \
              patch.object(benchmark_trace, "verify_installed_target_library",
-                          return_value="b" * 64), \
+                          return_value=benchmark_trace.InstalledTargetIdentity(
+                              "1" * 64, "2" * 64, "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169")), \
              patch.object(benchmark_trace, "run_once",
                           return_value=drifted_warmup) as run:
             with self.assertRaisesRegex(ValueError, "oracle mismatch.*first_instruction"):
@@ -631,7 +686,8 @@ effective_buffer_bytes=67108864
              patch.object(benchmark_trace, "live_device_identity", return_value=identity), \
              patch.object(benchmark_trace, "verify_candidate_tracer", return_value="a" * 64), \
              patch.object(benchmark_trace, "verify_installed_target_library",
-                          return_value="b" * 64), \
+                          return_value=benchmark_trace.InstalledTargetIdentity(
+                              "1" * 64, "2" * 64, "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169")), \
              patch.object(benchmark_trace, "run_once", side_effect=[run] * 6), \
              contextlib.redirect_stdout(output):
             status = benchmark_trace.main()
@@ -646,6 +702,16 @@ effective_buffer_bytes=67108864
         self.assertEqual(
             baseline_identity["candidate_tracer_sha256"],
             report["baseline_candidate_tracer_sha256"],
+        )
+        self.assertEqual(
+            ["1" * 64, "2" * 64,
+             "5f1a970825ae8bacb17d8dd656e01bd1fe7172638ba3ddcacd82ffaaad6e62c0",
+             "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+             "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169"],
+            [report[key] for key in ("installed_apk_sha256", "target_library_sha256",
+                                     "baseline_target_library_sha256",
+                                     "target_library_canonical_sha256",
+                                     "baseline_target_library_canonical_sha256")],
         )
         self.assertFalse(report["comparison"]["meets_rate_target"])
         self.assertFalse(report["comparison"]["meets_size_target"])

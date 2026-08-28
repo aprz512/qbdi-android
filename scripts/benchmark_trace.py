@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import io
 from importlib.resources import files
@@ -20,6 +21,15 @@ import zipfile
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
+
+try:
+    from scripts.qtrace_historical_benchmark import (
+        HISTORICAL_COMMIT, MAX_TARGET_BYTES, canonical_elf_sha256,
+    )
+except ModuleNotFoundError:  # Support direct execution as scripts/benchmark_trace.py.
+    from qtrace_historical_benchmark import (  # type: ignore[no-redef]
+        HISTORICAL_COMMIT, MAX_TARGET_BYTES, canonical_elf_sha256,
+    )
 
 try:
     from scripts.bounded_process import BoundedProcessError, capture_bounded
@@ -65,6 +75,9 @@ TRACE_SUFFIXES = (TEXT_TRACE_SUFFIX, BINARY_TRACE_SUFFIX, BINARY_RAW_SUFFIX)
 OPTIMIZED_INTEGER_FIELDS = V1_INTEGER_FIELDS
 OPTIMIZED_RATE_FIELDS = V1_RATE_FIELDS
 MAX_METRICS_BYTES = 64 * 1024
+MAX_APK_ENTRIES = 4096
+MAX_APK_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_APK_ENTRY_BYTES = 128 * 1024 * 1024
 ACCEPTANCE_RUN_COUNT = 5
 PROFILE_RATE_TARGETS = {
     "fast": Decimal(1_000_000),
@@ -347,11 +360,19 @@ def parse_baseline_document(document: str) -> dict[str, str]:
         ("Package", "package"),
         ("Candidate tracer SHA-256", "candidate_tracer_sha256"),
         ("Target library SHA-256", "target_library_sha256"),
+        ("Target library canonical SHA-256", "target_library_canonical_sha256"),
+        ("Historical target commit", "historical_target_commit"),
     ):
         match = re.search(rf"^\| {re.escape(label)} \|\s*(.*?)\s*\|$", document, re.MULTILINE)
         if match is None or not match.group(1).strip():
             raise ValueError(f"baseline document has no {label}")
         identity[key] = match.group(1).strip().strip("`")
+    for key in ("candidate_tracer_sha256", "target_library_sha256",
+                "target_library_canonical_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", identity[key]) is None:
+            raise ValueError(f"baseline document has invalid {key}")
+    if identity["historical_target_commit"] != HISTORICAL_COMMIT:
+        raise ValueError("baseline document has invalid historical_target_commit")
     return identity
 
 
@@ -746,9 +767,16 @@ def verify_candidate_tracer(args: argparse.Namespace, baseline: dict[str, str]) 
     return local_sha
 
 
+@dataclasses.dataclass(frozen=True)
+class InstalledTargetIdentity:
+    installed_apk_sha256: str
+    target_library_sha256: str
+    target_library_canonical_sha256: str
+
+
 def verify_installed_target_library(
     args: argparse.Namespace, baseline: dict[str, str]
-) -> str:
+) -> InstalledTargetIdentity:
     """Hash the target ELF inside the exact base APK installed on the device."""
     completed = adb(
         args, "shell", "pm", "path", args.package, text=True
@@ -772,22 +800,50 @@ def verify_installed_target_library(
         maximum_bytes=512 * 1024 * 1024,
         timeout=getattr(args, "adb_timeout", 30.0),
     )
+    installed_apk_sha256 = hashlib.sha256(apk_bytes).hexdigest()
+    expected_apk_sha = getattr(args, "expected_installed_apk_sha256", None)
+    if expected_apk_sha is not None and installed_apk_sha != expected_apk_sha:
+        raise ValueError("installed base.apk SHA-256 does not match --expected-installed-apk-sha256")
     entry = f"lib/{baseline['abi']}/libdemo_target.so"
     try:
         with zipfile.ZipFile(io.BytesIO(apk_bytes)) as archive:
-            target = archive.read(entry)
+            members = archive.infolist()
+            if len(members) > MAX_APK_ENTRIES:
+                raise ValueError("installed base.apk has too many ZIP entries")
+            total_size = 0
+            names: set[str] = set()
+            target_infos: list[zipfile.ZipInfo] = []
+            for info in members:
+                if info.filename in names:
+                    raise ValueError("installed base.apk has duplicate ZIP entries")
+                names.add(info.filename)
+                if info.file_size > MAX_APK_ENTRY_BYTES:
+                    raise ValueError("installed base.apk ZIP entry exceeds 128 MiB")
+                total_size += info.file_size
+                if total_size > MAX_APK_UNCOMPRESSED_BYTES:
+                    raise ValueError("installed base.apk ZIP entries exceed 512 MiB")
+                if re.fullmatch(r"lib/[^/]+/libdemo_target\.so", info.filename):
+                    target_infos.append(info)
+            if len(target_infos) != 1 or target_infos[0].filename != entry:
+                raise ValueError("installed base.apk has invalid target ABI entries")
+            info = target_infos[0]
+            if info.file_size <= 0 or info.file_size > MAX_TARGET_BYTES:
+                raise ValueError("installed target library exceeds 64 MiB")
+            target = archive.read(info)
     except (KeyError, zipfile.BadZipFile) as error:
         raise ValueError(
             f"installed base.apk has no readable {entry}"
         ) from error
-    installed_sha = hashlib.sha256(target).hexdigest()
-    expected_sha = baseline["target_library_sha256"].lower()
-    if installed_sha != expected_sha:
-        raise ValueError(
-            "installed target library SHA-256 does not match the historical "
-            f"benchmark build: expected={expected_sha} installed={installed_sha}"
-        )
-    return installed_sha
+    target_library_sha256 = hashlib.sha256(target).hexdigest()
+    target_library_canonical_sha256 = canonical_elf_sha256(
+        target, deadline=time.monotonic() + getattr(args, "adb_timeout", 30.0)
+    )
+    expected_canonical = baseline["target_library_canonical_sha256"]
+    if target_library_canonical_sha256 != expected_canonical:
+        raise ValueError("canonical target SHA-256 does not match the historical benchmark build")
+    return InstalledTargetIdentity(
+        installed_apk_sha256, target_library_sha256, target_library_canonical_sha256
+    )
 
 
 def newest_legacy_trace(
@@ -1363,6 +1419,11 @@ def parse_args() -> argparse.Namespace:
         "--candidate-tracer",
         help="exact staged libqbdi_tracer.so; required for binary acceptance comparison",
     )
+    def lowercase_sha256(value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise argparse.ArgumentTypeError("must be one lowercase 64-hex value")
+        return value
+    parser.add_argument("--expected-installed-apk-sha256", type=lowercase_sha256)
     parser.add_argument("--legacy", action="store_true", help="require uncompressed .trace.txt files")
     parser.add_argument(
         "--test-buffer-bytes", type=int,
@@ -1406,8 +1467,11 @@ def main() -> int:
     profile_baseline: dict[str, int | str] | None = None
     candidate_tracer_sha256: str | None = None
     baseline_candidate_tracer_sha256: str | None = None
-    target_library_sha256: str | None = None
+    installed_target_identity: InstalledTargetIdentity | None = None
     if args.compare:
+        if (getattr(args, "expected_installed_apk_sha256", None) is not None and
+                re.fullmatch(r"[0-9a-f]{64}", args.expected_installed_apk_sha256) is None):
+            raise ValueError("--expected-installed-apk-sha256 must be one lowercase 64-hex value")
         baseline_document = Path(args.compare).read_text(encoding="utf-8")
         identity = live_device_identity(args)
         if "## Current format-2 artifact baselines" in baseline_document:
@@ -1418,7 +1482,7 @@ def main() -> int:
                 "candidate_tracer_sha256"
             ].lower()
             candidate_tracer_sha256 = verify_candidate_tracer(args, baseline_identity)
-            target_library_sha256 = verify_installed_target_library(
+            installed_target_identity = verify_installed_target_library(
                 args, baseline_identity
             )
         else:
@@ -1438,8 +1502,12 @@ def main() -> int:
         report["baseline_candidate_tracer_sha256"] = (
             baseline_candidate_tracer_sha256
         )
-    if target_library_sha256 is not None:
-        report["target_library_sha256"] = target_library_sha256
+    if installed_target_identity is not None:
+        report["installed_apk_sha256"] = installed_target_identity.installed_apk_sha256
+        report["target_library_sha256"] = installed_target_identity.target_library_sha256
+        report["baseline_target_library_sha256"] = baseline_identity["target_library_sha256"]
+        report["target_library_canonical_sha256"] = installed_target_identity.target_library_canonical_sha256
+        report["baseline_target_library_canonical_sha256"] = baseline_identity["target_library_canonical_sha256"]
     report["runs"] = (
         [{**run, **throughput_metrics(run)} for run in runs] if args.legacy else runs
     )
