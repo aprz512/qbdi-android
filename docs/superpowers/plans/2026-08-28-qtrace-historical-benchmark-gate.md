@@ -25,13 +25,13 @@
 - The APK contains exactly one `lib/arm64-v8a/libdemo_target.so`, no other ABI's `libdemo_target.so`, and a nonempty target no larger than 64 MiB whose CRC and size validate.
 - `aapt2` is pinned to `$ANDROID_HOME/build-tools/35.0.0/aapt2`; a missing/unexecutable pinned tool, package mismatch, ABI mismatch, canonical mismatch, or APK binding mismatch fails before warmup.
 - Host order is `nativeHostTest -> full Python tests -> build current APK/tracer/companion -> snapshot current APK and one current tracer/companion pair -> build/validate historical APK`.
-- Device order is `install historical APK -> force-stop -> stage held current tracer/companion pair -> historical --compare -> install current APK -> force-stop -> restage the same pair -> start/wait timed baseline -> timed offset -> timed symbol -> monitor-exit -> flight-crash -> pull latest -> pull name -> pull all -> pull all --compressed-only`.
+- Device order is `install historical APK -> force-stop -> stage held current tracer/companion pair -> historical --compare -> install current APK -> force-stop -> restage the same pair -> start/wait timed baseline -> timed offset -> timed symbol -> pull latest -> pull name -> pull all -> pull all --compressed-only -> monitor-exit -> flight-crash`. The four manual pulls deliberately consume the latest sealed timed artifact before the process-exit and crash fixtures create non-sealed native status.
 - The first and second tracer staging operations consume the same held descriptors, bytes, and SHA-256 values; neither rereads mutable Gradle output.
 - Historical build, identity, install, or compare failure is fail-closed; never use semantic-only fallback, rewrite the immutable baseline, or substitute an app-private historical SO for the historical APK.
 - After historical APK installation, every failure attempts bounded recovery by force-stopping, installing the held current APK, and force-stopping again; cleanup errors append without replacing the primary error.
 - Every subprocess uses the PID-namespace containment backend and one absolute monotonic deadline; every archive/APK/ELF read is no-follow, byte-capped, deadline-bounded, and cleanup-bounded.
 - Failure evidence is a bounded atomically published JSON document containing phase, historical commit, archive manifest/hash, command status/stderr, host/device APK SHA values, raw/canonical target SHA values, held tracer pair SHA values, and every cleanup error.
-- Success exhaustively closes and unlinks private resources; failure retains the acceptance evidence directory and prints its exact path.
+- Success exhaustively closes private resources and atomically retains a bounded manifest plus all eight scenario reports beneath `qtrace-acceptance-evidence/<uuid>`; failure retains the acceptance evidence directory beneath `qtrace-acceptance-failures/<uuid>`. Both outcomes print the exact retained path and never silently delete it.
 - Do not modify `qtrace` config, session orchestration, external APK installer, Task 7 adapter, or generic artifact paths; historical commit/package/fixture knowledge stays in `scripts/benchmark_trace.py`, `scripts/qtrace_historical_benchmark.py`, and `scripts/qtrace_device_acceptance.py`.
 - The rooted-device gate remains explicit and manual; ordinary CI must not start it automatically.
 
@@ -615,7 +615,7 @@ With Pixel 6 `192.168.50.149:5555` online, rooted, arm64-v8a, paired with matchi
 python3 scripts/qtrace_device_acceptance.py --device 192.168.50.149:5555
 ```
 
-Expected: exit 0. The historical phase reports the installed whole-APK SHA, raw target SHA, canonical target SHA `0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169`, passes the existing warmup oracle and exactly five fast measured runs, then the current phase passes timed offset/symbol normalization, distinct exit/crash classification, and all four pull modes. If the device or a pinned dependency is unavailable, report this step as `pending`; do not reinterpret it as a pass or weaken the gate.
+Expected: exit 0. The historical phase reports the installed whole-APK SHA, raw target SHA, canonical target SHA `0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169`, passes the existing warmup oracle and exactly five fast measured runs, then the current phase passes timed offset/symbol normalization, all four pull modes over the sealed timed artifact, and distinct exit/crash classification. If the device or a pinned dependency is unavailable, report this step as `pending`; do not reinterpret it as a pass or weaken the gate.
 
 - [ ] **Step 6: Commit documentation after the complete gate**
 
