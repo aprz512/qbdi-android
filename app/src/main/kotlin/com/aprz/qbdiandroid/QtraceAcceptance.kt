@@ -8,7 +8,10 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
@@ -29,6 +32,7 @@ object QtraceAcceptance {
     private const val maximumStatusBytes = 64 * 1024
     private const val entryStatusWaitNs = 1_000_000_000L
     private const val entryStatusPollNs = 25_000_000L
+    private const val exitTaskWaitNs = 1_000_000_000L
     private val uuid4 = Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
     private val started = AtomicBoolean(false)
 
@@ -83,6 +87,56 @@ object QtraceAcceptance {
             entryReceiptJson(it, entryMonotonicNs)
         }
         return QtraceTimedInvocation(result, receipt)
+    }
+
+    internal fun completeExitInvocation(
+        request: QtraceAcceptanceRequest,
+        invokeNative: () -> Long,
+        publishResult: (String) -> Unit,
+        prepareExit: () -> Unit,
+        terminate: (Int) -> Unit,
+    ) {
+        val result = invokeNative()
+        publishResult(resultJson(request, result))
+        prepareExit()
+        terminate(0)
+    }
+
+    internal fun completeTracedTimedInvocation(
+        evidence: QtraceAcceptanceEvidence,
+        statusFile: File,
+        invokeNative: () -> Long,
+        readNativeEntryMonotonicNs: () -> Long,
+        publishEntryStatus: (String) -> Unit,
+    ): QtraceTimedInvocation {
+        val observerReady = CountDownLatch(1)
+        val observedStatus = AtomicReference<String?>()
+        val observationFailure = AtomicReference<Throwable?>()
+        val observer = thread(name = "qtrace-acceptance-entry-status", isDaemon = false) {
+            val started = System.nanoTime()
+            val deadline = if (started > Long.MAX_VALUE - entryStatusWaitNs) {
+                Long.MAX_VALUE
+            } else {
+                started + entryStatusWaitNs
+            }
+            observerReady.countDown()
+            try {
+                observedStatus.set(awaitRunningEntryStatus(statusFile, evidence.sessionId, deadline))
+            } catch (error: Throwable) {
+                observationFailure.set(error)
+            }
+        }
+        observerReady.await()
+        val invocation = try {
+            completeTimedInvocation(evidence, invokeNative, readNativeEntryMonotonicNs)
+        } finally {
+            observer.join()
+        }
+        observationFailure.get()?.let { throw it }
+        val snapshot = observedStatus.get()
+            ?: throw IllegalStateException("native running status observer returned no snapshot")
+        publishEntryStatus(snapshot)
+        return invocation
     }
 
     internal fun awaitRunningEntryStatus(
@@ -177,37 +231,39 @@ object QtraceAcceptance {
         thread(name = "qtrace-acceptance-${request.mode}", isDaemon = false) {
             when (request.mode) {
                 "timed" -> {
-                    if (evidence != null) {
-                        val started = System.nanoTime()
-                        val deadline = if (started > Long.MAX_VALUE - entryStatusWaitNs) {
-                            Long.MAX_VALUE
-                        } else {
-                            started + entryStatusWaitNs
-                        }
+                    val invocation = if (evidence != null) {
                         val statusFile = File(
                             activity.filesDir,
                             "qbdi-traces/session-${evidence.sessionId}.status.json",
                         )
-                        val entryStatus = awaitRunningEntryStatus(
+                        completeTracedTimedInvocation(
+                            evidence,
                             statusFile,
-                            evidence.sessionId,
-                            deadline,
+                            invokeNative = {
+                                NativeDemo.runTimedAcceptance(request.iterations, request.seed)
+                            },
+                            readNativeEntryMonotonicNs = {
+                                NativeDemo.getLastTimedAcceptanceEntryMonotonicNs()
+                            },
+                            publishEntryStatus = { entryStatus ->
+                                writeAtomic(
+                                    activity.filesDir,
+                                    "qtrace-acceptance-entry-status.json",
+                                    entryStatus,
+                                )
+                            },
                         )
-                        writeAtomic(
-                            activity.filesDir,
-                            "qtrace-acceptance-entry-status.json",
-                            entryStatus,
+                    } else {
+                        completeTimedInvocation(
+                            null,
+                            invokeNative = {
+                            NativeDemo.runTimedAcceptance(request.iterations, request.seed)
+                            },
+                            readNativeEntryMonotonicNs = {
+                                NativeDemo.getLastTimedAcceptanceEntryMonotonicNs()
+                            },
                         )
                     }
-                    val invocation = completeTimedInvocation(
-                        evidence,
-                        invokeNative = {
-                            NativeDemo.runTimedAcceptance(request.iterations, request.seed)
-                        },
-                        readNativeEntryMonotonicNs = {
-                            NativeDemo.getLastTimedAcceptanceEntryMonotonicNs()
-                        },
-                    )
                     invocation.receipt?.let { receipt ->
                         writeAtomic(
                             activity.filesDir,
@@ -219,8 +275,29 @@ object QtraceAcceptance {
                     writeAtomic(activity.filesDir, name, resultJson(request, invocation.result))
                 }
                 "exit" -> {
-                    writeAtomic(activity.filesDir, "qtrace-acceptance-exit.json", resultJson(request, 0L))
-                    exitProcess(0)
+                    completeExitInvocation(
+                        request,
+                        invokeNative = {
+                            NativeDemo.runTimedAcceptance(request.iterations, request.seed)
+                        },
+                        publishResult = { result ->
+                            writeAtomic(activity.filesDir, "qtrace-acceptance-exit.json", result)
+                        },
+                        prepareExit = {
+                            val taskFinished = CountDownLatch(1)
+                            activity.runOnUiThread {
+                                try {
+                                    activity.finishAndRemoveTask()
+                                } finally {
+                                    taskFinished.countDown()
+                                }
+                            }
+                            if (!taskFinished.await(exitTaskWaitNs, TimeUnit.NANOSECONDS)) {
+                                throw IllegalStateException("fixture task did not finish before process exit")
+                            }
+                        },
+                        terminate = ::exitProcess,
+                    )
                 }
                 "flight-crash" -> NativeDemo.runFlightAcceptance(request.seed, 2, 0)
             }

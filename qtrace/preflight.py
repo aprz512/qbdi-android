@@ -8,9 +8,9 @@ import shutil
 import stat
 import time
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
-from qtrace.device import AdbDevice, DeviceIdentity, DeviceSelector
+from qtrace.device import AdbDevice, DeviceIdentity, DeviceSelector, _validate_package
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.models import UserConfig
 
@@ -134,6 +134,155 @@ def _external(stage: str, operation):
         raise wrapped from error
 
 
+def _discover_package_access(
+    device: AdbDevice,
+    package: str,
+    budget: Callable[[], float],
+) -> tuple[str, str, int, str]:
+    """Discover the target identity shared by run, monitor, and pull."""
+    package = _validate_package(package)
+    root_strategy: str | None = None
+    try:
+        root_uid = _numeric_uid(
+            _external(
+                "preflight.access",
+                lambda: device.shell("id", "-u", timeout=budget(), maximum_bytes=4096),
+            ),
+            field="root identity",
+            allow_root=True,
+        )
+        if root_uid == 0:
+            root_strategy = "direct"
+    except QtraceError as error:
+        if error.code == "preflight.timeout":
+            raise
+
+    if root_strategy is None:
+        try:
+            su_uid = _numeric_uid(
+                _external(
+                    "preflight.access",
+                    lambda: device.su_shell(
+                        "id", "-u", timeout=budget(), maximum_bytes=4096
+                    ),
+                ),
+                field="su root identity",
+                allow_root=True,
+            )
+            if su_uid == 0:
+                root_strategy = "su"
+        except QtraceError as error:
+            if error.code == "preflight.timeout":
+                raise
+
+    package_uid: int | None = None
+    target_strategy: str | None = None
+    try:
+        package_uid = _numeric_uid(
+            _external(
+                "preflight.access",
+                lambda: device.shell(
+                    "run-as", package, "id", "-u",
+                    timeout=budget(), maximum_bytes=4096,
+                ),
+            ),
+            field="run-as identity",
+        )
+        target_strategy = "run-as"
+    except QtraceError as error:
+        if error.code == "preflight.timeout":
+            raise
+
+    if root_strategy is not None and target_strategy is None:
+        private_data = f"/data/user/0/{package}"
+        try:
+            root_stat = device.shell if root_strategy == "direct" else device.su_shell
+            package_uid = _numeric_uid(
+                _external(
+                    "preflight.access",
+                    lambda: root_stat(
+                        "stat", "-c", "%u", private_data,
+                        timeout=budget(), maximum_bytes=4096,
+                    ),
+                ),
+                field="package data owner",
+            )
+            proven_uid = _numeric_uid(
+                _external(
+                    "preflight.access",
+                    lambda: device.su_uid_shell(
+                        package_uid, "id", "-u",
+                        timeout=budget(), maximum_bytes=4096,
+                    ),
+                ),
+                field="su package identity",
+            )
+            if proven_uid != package_uid:
+                _fail(
+                    "device.access_malformed",
+                    "preflight.access",
+                    "su package identity does not match the package data owner",
+                )
+            target_strategy = "su-uid"
+        except QtraceError as error:
+            if error.code == "preflight.timeout":
+                raise
+
+    if root_strategy is not None and package_uid is not None and target_strategy is not None:
+        access_mode = "root"
+    elif package_uid is not None and target_strategy == "run-as":
+        access_mode = "run-as"
+        root_strategy = "none"
+    else:
+        _fail(
+            "device.access_denied",
+            "preflight.access",
+            "neither a complete root nor run-as package identity is available",
+        )
+
+    assert root_strategy is not None and package_uid is not None and target_strategy is not None
+    return access_mode, root_strategy, package_uid, target_strategy
+
+
+def _bind_discovered_package_access(
+    device: AdbDevice,
+    package: str,
+    binding: tuple[str, str, int, str],
+) -> str:
+    access_mode, root_strategy, package_uid, target_strategy = binding
+    _external(
+        "preflight.bind",
+        lambda: device.bind_package(
+            package,
+            access_mode,
+            root_strategy=root_strategy,
+            package_uid=package_uid,
+            target_strategy=target_strategy,
+        ),
+    )
+    return access_mode
+
+
+def bind_package_access(device: AdbDevice, package: str, *, timeout: float) -> str:
+    """Bind one installed package without config, build, Frida, or app launch work."""
+    timeout = _positive_finite(timeout, "timeout")
+    deadline = time.monotonic() + timeout
+
+    def budget() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _fail("preflight.timeout", "preflight", "package access time budget was exhausted")
+        return remaining
+
+    package = _validate_package(package)
+    _external(
+        "preflight.package",
+        lambda: device.package_apk_paths(package, timeout=budget()),
+    )
+    binding = _discover_package_access(device, package, budget)
+    return _bind_discovered_package_access(device, package, binding)
+
+
 class Preflight:
     def __init__(self, selector: DeviceSelector, frida_probe: FridaProbe):
         self._selector = selector
@@ -210,104 +359,8 @@ class Preflight:
         if api_level < _MIN_API_LEVEL:
             _fail("device.api_unsupported", "preflight.api", "device API level must be at least 24")
 
-        root_strategy: str | None = None
-        try:
-            root_uid = _numeric_uid(
-                _external(
-                    "preflight.access",
-                    lambda: device.shell("id", "-u", timeout=budget(), maximum_bytes=4096),
-                ),
-                field="root identity",
-                allow_root=True,
-            )
-            if root_uid == 0:
-                root_strategy = "direct"
-        except QtraceError as error:
-            if error.code == "preflight.timeout":
-                raise
-
-        if root_strategy is None:
-            try:
-                su_uid = _numeric_uid(
-                    _external(
-                        "preflight.access",
-                        lambda: device.su_shell(
-                            "id", "-u", timeout=budget(), maximum_bytes=4096
-                        ),
-                    ),
-                    field="su root identity",
-                    allow_root=True,
-                )
-                if su_uid == 0:
-                    root_strategy = "su"
-            except QtraceError as error:
-                if error.code == "preflight.timeout":
-                    raise
-
-        package_uid: int | None = None
-        target_strategy: str | None = None
-        try:
-            package_uid = _numeric_uid(
-                _external(
-                    "preflight.access",
-                    lambda: device.shell(
-                        "run-as", package, "id", "-u",
-                        timeout=budget(), maximum_bytes=4096,
-                    ),
-                ),
-                field="run-as identity",
-            )
-            target_strategy = "run-as"
-        except QtraceError as error:
-            if error.code == "preflight.timeout":
-                raise
-
-        if root_strategy is not None and target_strategy is None:
-            private_data = f"/data/user/0/{package}"
-            try:
-                root_stat = device.shell if root_strategy == "direct" else device.su_shell
-                package_uid = _numeric_uid(
-                    _external(
-                        "preflight.access",
-                        lambda: root_stat(
-                            "stat", "-c", "%u", private_data,
-                            timeout=budget(), maximum_bytes=4096,
-                        ),
-                    ),
-                    field="package data owner",
-                )
-                proven_uid = _numeric_uid(
-                    _external(
-                        "preflight.access",
-                        lambda: device.su_uid_shell(
-                            package_uid, "id", "-u",
-                            timeout=budget(), maximum_bytes=4096,
-                        ),
-                    ),
-                    field="su package identity",
-                )
-                if proven_uid != package_uid:
-                    _fail(
-                        "device.access_malformed",
-                        "preflight.access",
-                        "su package identity does not match the package data owner",
-                    )
-                target_strategy = "su-uid"
-            except QtraceError as error:
-                if error.code == "preflight.timeout":
-                    raise
-
-        if root_strategy is not None and package_uid is not None and target_strategy is not None:
-            access_mode = "root"
-        elif package_uid is not None and target_strategy == "run-as":
-            access_mode = "run-as"
-            root_strategy = "none"
-        else:
-            _fail(
-                "device.access_denied",
-                "preflight.access",
-                "neither a complete root nor run-as package identity is available",
-            )
+        access_binding = _discover_package_access(device, package, budget)
+        access_mode = access_binding[0]
 
         free_bytes = _parse_free_bytes(
             _external(
@@ -359,17 +412,8 @@ class Preflight:
 
         # Deployment is allowed only after every prerequisite succeeds. The one-time
         # binding prevents a selected device from being silently reused for another app.
-        assert root_strategy is not None and package_uid is not None and target_strategy is not None
-        _external(
-            "preflight.bind",
-            lambda: device.bind_package(
-                package,
-                access_mode,
-                root_strategy=root_strategy,
-                package_uid=package_uid,
-                target_strategy=target_strategy,
-            ),
-        )
+        _bind_discovered_package_access(device, package, access_binding)
+
         return device, DeviceIdentity(
             serial=device.serial,
             abi=abi,

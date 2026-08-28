@@ -1,9 +1,11 @@
 import hashlib
 import math
+import os
 import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.bounded_process import BoundedProcessError
 
@@ -116,13 +118,21 @@ class ArtifactBuilderTests(unittest.TestCase):
                 companion.write_bytes(arm64_elf())
 
             runner = BuildRunner(build_outputs)
-            artifacts = ArtifactBuilder(runner, root).select_or_build(
-                tracer_config(), timeout=12.5
-            )
+            with patch.dict(os.environ, {"GRADLE_OPTS": "-Dbuild.existing=true"}):
+                artifacts = ArtifactBuilder(runner, root).select_or_build(
+                    tracer_config(), timeout=12.5
+                )
 
             self.assertEqual(TracerArtifacts(tracer, companion), artifacts)
             self.assertEqual(
-                (str(gradlew), ":tracer:copyTracerDebug"), runner.calls[0].command
+                (
+                    "/usr/bin/env",
+                    "GRADLE_OPTS=-Dbuild.existing=true -Dorg.gradle.daemon.idletimeout=1000",
+                    str(gradlew),
+                    ":tracer:copyTracerDebug",
+                    "--no-daemon",
+                ),
+                runner.calls[0].command,
             )
             self.assertNotIn("demo", " ".join(runner.calls[0].command).lower())
             self.assertEqual(12.5, runner.calls[0].timeout)

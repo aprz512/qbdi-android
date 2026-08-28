@@ -163,12 +163,13 @@ class _RecordingSender:
 class HistoricalArchiveTests(unittest.TestCase):
     def assert_rejected_without_regular_publication(self, archive_bytes):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            parent_before = {path.name for path in root.parent.iterdir()}
+            sandbox = Path(directory)
+            root = sandbox / "extract"
+            root.mkdir()
             with self.assertRaises(historical_benchmark.HistoricalBenchmarkError):
                 historical_benchmark._extract_historical_archive(archive_bytes, root)
-            self.assertEqual(parent_before, {path.name for path in root.parent.iterdir()})
-            self.assertFalse(any(path.is_file() for path in root.rglob("*")))
+            self.assertEqual({"extract"}, {path.name for path in sandbox.iterdir()})
+            self.assertFalse(any(path.is_file() for path in sandbox.rglob("*")))
 
     def test_archive_rejects_every_path_type_duplicate_and_collision_boundary(self):
         invalid = [

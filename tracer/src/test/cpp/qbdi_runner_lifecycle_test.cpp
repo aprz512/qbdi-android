@@ -375,7 +375,7 @@ TraceAdmission admit_runner(
     return result.admission;
 }
 
-void normal_stop_lifecycle_seals_and_acknowledges_the_exact_admission_once() {
+void normal_stop_lifecycle_acknowledges_only_after_artifact_finalization() {
     RunnerDeadline deadline;
     auto runtime = TraceGenerationRuntime::create(
             71, runner_timed_session(),
@@ -425,9 +425,14 @@ void normal_stop_lifecycle_seals_and_acknowledges_the_exact_admission_once() {
     CHECK(lifecycle.sealed());
     CHECK(lifecycle.seal_calls() == 1);
     CHECK(lifecycle.acknowledge_calls() == 1);
-    CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+    CHECK(!lifecycle.admission_finished());
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopRequested);
     CHECK(!writer.end(0x44, true, 38));
     CHECK(writer.close());
+    lifecycle.finish(true);
+    lifecycle.finish(true);
+    CHECK(lifecycle.admission_finished());
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
     const std::vector<char> bytes = read_file(path);
     const std::string trace(bytes.begin(), bytes.end());
     const size_t stop = find_record(trace, BinaryRecordType::TraceStop);
@@ -486,8 +491,13 @@ void normal_stop_lifecycle_reports_a_failed_seal_once() {
     CHECK(!lifecycle.sealed());
     CHECK(lifecycle.seal_calls() == 1);
     CHECK(lifecycle.acknowledge_calls() == 1);
-    CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopIncomplete);
+    CHECK(!lifecycle.admission_finished());
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopRequested);
     CHECK(!writer.close());
+    lifecycle.finish(false);
+    lifecycle.finish(false);
+    CHECK(lifecycle.admission_finished());
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopIncomplete);
     CHECK(::unlink(path.c_str()) == 0);
     CHECK(::rmdir(directory) == 0);
 }
@@ -612,7 +622,7 @@ void traced_fork_child_detaches_writer_and_parent_completes_artifact() {
 int main() {
     normal_writer_publishes_created_artifact_and_stable_error_to_status();
     stopped_writer_closes_without_a_completed_terminal();
-    normal_stop_lifecycle_seals_and_acknowledges_the_exact_admission_once();
+    normal_stop_lifecycle_acknowledges_only_after_artifact_finalization();
     normal_stop_lifecycle_reports_a_failed_seal_once();
     traced_fork_child_detaches_writer_and_parent_completes_artifact();
 }

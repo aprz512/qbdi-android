@@ -1,6 +1,7 @@
 "use strict";
 
 const RESPONSE_CAPACITY = 64 * 1024;
+const PATH_CAPACITY = 4096;
 const POLL_INTERVAL_MS = 50;
 const MAX_DETAIL_CHARS = 512;
 
@@ -267,12 +268,65 @@ function exportFrom(module, name) {
   }
 }
 
+function canonicalFile(realpathCall, path, stage, code, label) {
+  const output = Memory.alloc(PATH_CAPACITY);
+  let result;
+  try {
+    result = realpathCall(Memory.allocUtf8String(path), output);
+  } catch (error) {
+    fail(stage, code, `${label} staged path canonicalization failed: ${error}`);
+  }
+  if (result.isNull()) {
+    fail(stage, code, `${label} staged path cannot be canonicalized`);
+  }
+  let canonical;
+  try {
+    canonical = output.readUtf8String();
+  } catch (error) {
+    fail(stage, code, `${label} canonical path is not UTF-8: ${error}`);
+  }
+  if (typeof canonical !== "string" || !canonical.startsWith("/") ||
+      canonical.indexOf("\u0000") !== -1) {
+    fail(stage, code, `${label} canonical path is invalid`);
+  }
+  return canonical;
+}
+
+function parentDirectory(path) {
+  const separator = path.lastIndexOf("/");
+  return separator > 0 ? path.slice(0, separator) : null;
+}
+
 function start(rawEnvelope) {
   const envelope = validateEnvelope(rawEnvelope);
   const deadline = Date.now() + envelope.setupTimeoutMs;
+  let realpathCall;
+  try {
+    realpathCall = new NativeFunction(
+      Module.getGlobalExportByName("realpath"),
+      "pointer",
+      ["pointer", "pointer"],
+    );
+  } catch (error) {
+    fail("load", "TRACER_LOAD_FAILED", `realpath is unavailable: ${error}`);
+  }
+  const tracerPath = canonicalFile(
+    realpathCall, envelope.tracerSo, "load", "TRACER_LOAD_FAILED", "tracer",
+  );
+  const companionPath = canonicalFile(
+    realpathCall, envelope.companion, "companion", "COMPANION_CONFIG_FAILED", "companion",
+  );
+  if (parentDirectory(tracerPath) === null ||
+      parentDirectory(tracerPath) !== parentDirectory(companionPath)) {
+    fail(
+      "companion",
+      "COMPANION_CONFIG_FAILED",
+      "canonical staged libraries do not share a directory",
+    );
+  }
   let tracer;
   try {
-    tracer = Module.load(envelope.tracerSo);
+    tracer = Module.load(tracerPath);
   } catch (error) {
     fail("load", "TRACER_LOAD_FAILED", `authoritative tracer load failed: ${error}`);
   }
@@ -293,8 +347,8 @@ function start(rawEnvelope) {
     ["uint64", "pointer", "uint64", "pointer"],
   );
 
-  const companionPath = Memory.allocUtf8String(envelope.companion);
-  if (setCompanion(companionPath) !== 0) {
+  const companionPathAllocation = Memory.allocUtf8String(companionPath);
+  if (setCompanion(companionPathAllocation) !== 0) {
     fail("companion", "COMPANION_CONFIG_FAILED", "native companion path was rejected");
   }
 

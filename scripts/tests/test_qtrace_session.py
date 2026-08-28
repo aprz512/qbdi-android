@@ -18,7 +18,7 @@ from qtrace.models import (
 )
 from qtrace.session import (
     InstalledActionReceipt, MonitorRequest, RunRequest, SessionOrchestrator, _strict_json,
-    build_native_request, parse_status,
+    _parse_process_identity, build_native_request, parse_status,
 )
 from qtrace.lock import TargetLock
 from scripts.bounded_process import BoundedProcessError
@@ -84,8 +84,10 @@ class ManualClock:
 class FakeDevice:
     serial = "device-1"
 
-    def __init__(self, statuses: list[object], pids: list[int | None]) -> None:
+    def __init__(self, statuses: list[object], pids: list[int | None],
+                 starttimes: list[int | None] | None = None) -> None:
         self.statuses, self.pids = list(statuses), list(pids)
+        self.starttimes = list(starttimes) if starttimes is not None else [99, None]
         self.read_paths: list[str] = []
         self.shell_timeouts: list[tuple[str, float]] = []
         self.killed: list[int] = []
@@ -106,6 +108,13 @@ class FakeDevice:
         if args[:2] == ("ls", "-1"):
             return b"old.trace.bin.lz4\n"
         if args[0] == "cat":
+            if args[1].startswith("/proc/"):
+                starttime = self.starttimes.pop(0) if self.starttimes else None
+                if starttime is None:
+                    raise process_failed(1, f"cat: {args[1]}: No such file or directory".encode())
+                pid = int(args[1].split("/")[2])
+                fields = ["S", *(["0"] * 18), str(starttime)]
+                return f"{pid} (fake app) {' '.join(fields)}\n".encode("ascii")
             return self.read_file(args[1], maximum_bytes, timeout=timeout)
         if args[0] == "pidof":
             current = self.pid(args[1])
@@ -186,6 +195,10 @@ class NativeRequestTests(unittest.TestCase):
         self.assertEqual(250, request["session"]["durationMs"])
         self.assertEqual({"packageName", "targetModule", "trace", "flight", "scenes", "session", "schemaVersion"}, set(request))
         self.assertEqual({"name": "work", "location": {"offset": "0x120", "endOffset": "0x180"}}, request["scenes"][0])
+        self.assertEqual(512, request["flight"]["capacityMb"])
+        self.assertEqual(64, build_native_request(
+            config(), target(), SESSION_ID, 250, flight_capacity_mb=64,
+        )["flight"]["capacityMb"])
 
     def test_monitor_request_omits_duration(self) -> None:
         self.assertNotIn("durationMs", build_native_request(config(), target(), SESSION_ID, None)["session"])
@@ -344,6 +357,26 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(document["native"]["request"])
         self.assertEqual(7, document["native"]["status"]["generation"])
 
+    def test_timed_run_retries_only_initial_exact_status_enoent(self) -> None:
+        path = f"/data/data/{PACKAGE}/files/qbdi-traces/session-{SESSION_ID}.status.json"
+        missing = process_failed(1, f"cat: {path}: No such file or directory".encode())
+        device = FakeDevice([
+            missing,
+            status("running", transition=1),
+            status("sealed", transition=2, reason="duration_elapsed", acknowledged=True),
+        ], [4242])
+        runner, _ = orchestrator(device, ManualClock())
+
+        self.assertEqual(0, runner.run(self.run_request()).exit_code)
+
+        disappeared = FakeDevice([
+            status("running", transition=1),
+            missing,
+        ], [4242])
+        runner, _ = orchestrator(disappeared, ManualClock())
+        with self.assertRaisesRegex(QtraceError, "process.failed"):
+            runner.run(self.run_request())
+
     def test_installed_action_requires_worker_cleanup_detach_receipt(self) -> None:
         from qtrace.injector import InjectionResult
 
@@ -429,14 +462,136 @@ class SessionTests(unittest.TestCase):
             runner.run(self.run_request())
 
     def test_monitor_waits_for_owned_pid_exit_and_classifies_normal_collection(self) -> None:
-        device = FakeDevice([status("running", transition=1)], [4242, None])
-        runner, _ = orchestrator(device, ManualClock())
+        device = FakeDevice([status("running", transition=1)], [4242, None], [99, 99, None])
+        collector = FakeCollector()
+        runner, _ = orchestrator(device, ManualClock(), collector)
         request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
         result = runner.monitor(request)
         self.assertEqual(0, result.exit_code)
+        self.assertTrue(collector.calls[0]["_process_exited"])
+
+    def test_monitor_verifies_owned_process_identity_after_pidof_false_negative(self) -> None:
+        device = FakeDevice(
+            [status("running", transition=1)],
+            [None, 4242, None],
+            [99, 99, 99, None],
+        )
+        runner, _ = orchestrator(device, ManualClock())
+        request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
+
+        self.assertEqual(0, runner.monitor(request).exit_code)
+        self.assertEqual([], device.pids)
+        self.assertEqual([], device.starttimes)
+
+    def test_monitor_keeps_owned_pid_when_pidof_also_reports_crash_helper(self) -> None:
+        device = FakeDevice(
+            [status("running", transition=1)],
+            [],
+            [99, 99, None],
+        )
+        original_shell = device.target_shell
+        pidof_outputs = iter((b"9000 4242\n", b""))
+
+        def shell(*args, **kwargs):
+            if args[0] == "pidof":
+                return next(pidof_outputs)
+            return original_shell(*args, **kwargs)
+
+        device.target_shell = shell  # type: ignore[method-assign]
+        runner, _ = orchestrator(device, ManualClock())
+        request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
+
+        self.assertEqual(0, runner.monitor(request).exit_code)
+        self.assertEqual([], device.starttimes)
+
+    def test_monitor_rejects_pidof_list_without_owned_pid(self) -> None:
+        device = FakeDevice([status("running", transition=1)], [], [99])
+        original_shell = device.target_shell
+
+        def shell(*args, **kwargs):
+            if args[0] == "pidof":
+                return b"9000 9001\n"
+            return original_shell(*args, **kwargs)
+
+        device.target_shell = shell  # type: ignore[method-assign]
+        runner, _ = orchestrator(device, ManualClock())
+        request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
+
+        with self.assertRaisesRegex(QtraceError, "session.pid_replaced"):
+            runner.monitor(request)
+
+    def test_pidof_list_still_rejects_non_pid_tokens(self) -> None:
+        device = FakeDevice([], [])
+        original_shell = device.target_shell
+
+        def shell(*args, **kwargs):
+            if args[0] == "pidof":
+                return b"4242 crash_dump64\n"
+            return original_shell(*args, **kwargs)
+
+        device.target_shell = shell  # type: ignore[method-assign]
+        runner, _ = orchestrator(device, ManualClock())
+
+        with self.assertRaisesRegex(QtraceError, "session.pid_invalid"):
+            runner._current_pid(device, PACKAGE, 0.5, 4242)
+
+    def test_monitor_rejects_reused_owned_pid_after_pidof_absence(self) -> None:
+        device = FakeDevice(
+            [status("running", transition=1)],
+            [None],
+            [99, 100],
+        )
+        runner, _ = orchestrator(device, ManualClock())
+        request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
+
+        with self.assertRaisesRegex(QtraceError, "session.pid_replaced"):
+            runner.monitor(request)
+
+    def test_monitor_rejects_same_numeric_pid_reused_by_package(self) -> None:
+        device = FakeDevice([status("running", transition=1)], [], [])
+        original_shell = device.target_shell
+        identities = iter((99, 100))
+        pidof_calls = 0
+
+        def shell(*args, **kwargs):
+            nonlocal pidof_calls
+            if args[0] == "pidof":
+                pidof_calls += 1
+                if pidof_calls > 1:
+                    raise AssertionError("same-PID reuse was not checked immediately")
+                return b"4242\n"
+            if args[:2] == ("cat", "/proc/4242/stat"):
+                fields = ["S", *(["0"] * 18), str(next(identities))]
+                return f"4242 (replacement app) {' '.join(fields)}\n".encode("ascii")
+            return original_shell(*args, **kwargs)
+
+        device.target_shell = shell  # type: ignore[method-assign]
+        runner, _ = orchestrator(device, ManualClock())
+        request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
+
+        with self.assertRaisesRegex(QtraceError, "session.pid_replaced"):
+            runner.monitor(request)
+        self.assertEqual(1, pidof_calls)
+
+    def test_owned_process_stat_parser_handles_parentheses_and_rejects_bad_identity(self) -> None:
+        fields = ["S", *(["0"] * 18), "99"]
+        parsed = _parse_process_identity(
+            f"4242 (fake ) app) {' '.join(fields)}\n".encode("ascii"),
+            4242,
+        )
+        self.assertEqual(99, parsed.starttime_ticks)
+        self.assertEqual("S", parsed.state)
+        for raw in (
+            b"4243 (fake) S 0",
+            b"4242 fake S 0",
+            b"4242 (fake) ? 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 nope",
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(QtraceError, "pid_identity_invalid"):
+                    _parse_process_identity(raw, 4242)
 
     def test_monitor_pid_replacement_fails_without_new_injection(self) -> None:
-        device = FakeDevice([status("running", transition=1)], [4242, 9000])
+        device = FakeDevice([status("running", transition=1)], [4242, 9000], [99, 99])
         runner, injector = orchestrator(device, ManualClock())
         request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
         with self.assertRaisesRegex(QtraceError, "session.pid_replaced"):
@@ -445,7 +600,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual([], device.killed)
 
     def test_monitor_recovery_is_partial_and_does_not_invent_terminal(self) -> None:
-        device = FakeDevice([status("running", transition=1)], [4242, None])
+        device = FakeDevice([status("running", transition=1)], [4242, None], [99, 99, None])
         runner, _ = orchestrator(device, ManualClock(), FakeCollector(EXIT_PARTIAL))
         request = MonitorRequest(config(), None, Path(self.directory.name), 2.0, 0.5, 1.0)
         self.assertEqual(EXIT_PARTIAL, runner.monitor(request).exit_code)
@@ -678,10 +833,10 @@ class SessionTests(unittest.TestCase):
             parse_status(malformed, SESSION_ID, PACKAGE, 7, 4242, SCENES, None)
 
     def test_wrapped_enoent_snapshot_and_final_status_are_absent_only(self) -> None:
-        device = FakeDevice([], [4242, None])
+        device = FakeDevice([], [4242, None], [99, 99, None])
         original_shell = device.target_shell
         def shell(*args, **kwargs):
-            if args[0] == "ls" or args[0] == "cat":
+            if args[0] == "ls" or (args[0] == "cat" and not args[1].startswith("/proc/")):
                 raise process_failed(1, f"{args[-1]}: No such file or directory".encode())
             return original_shell(*args, **kwargs)
         device.target_shell = shell  # type: ignore[method-assign]
@@ -715,10 +870,11 @@ class SessionTests(unittest.TestCase):
         device = FakeDevice([], [4242])
         device.pids = [process_timeout()] * 2
         # target_shell uses pid(), so make each pid query a production timeout.
+        original_shell = device.target_shell
         def shell(*args, **kwargs):
             if args[0] == "ls": return b""
             if args[0] == "pidof": raise process_timeout()
-            raise AssertionError(args)
+            return original_shell(*args, **kwargs)
         device.target_shell = shell  # type: ignore[method-assign]
         clock = ManualClock(); runner, _ = orchestrator(device, clock)
         with self.assertRaisesRegex(QtraceError, ErrorCode.ADB_UNAVAILABLE.value):
@@ -793,7 +949,7 @@ class SessionTests(unittest.TestCase):
 
     def test_monitor_has_no_total_runtime_deadline_and_reads_final_status(self) -> None:
         device = FakeDevice([status("sealed", transition=4, reason="duration_elapsed", acknowledged=True)],
-                            [4242] * 25 + [None])
+                            [4242] * 25 + [None], [99] * 26 + [None])
         clock, collector = ManualClock(), FakeCollector()
         runner, _ = orchestrator(device, clock, collector)
         result = runner.monitor(MonitorRequest(config(), None, Path(self.directory.name), 0.2, 0.5, 1.0))

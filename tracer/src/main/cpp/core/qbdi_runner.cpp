@@ -39,6 +39,13 @@ struct RunnerState {
         state->stop.acknowledge(sealed);
     }
 
+    static void snapshot_cache_metrics(void *opaque) noexcept {
+        auto *state = static_cast<RunnerState *>(opaque);
+        if (state->qbdi != nullptr) {
+            state->qbdi->copy_cache_metrics(&state->metrics);
+        }
+    }
+
     static long elapsed_stopped(void *opaque) noexcept {
         const auto *state = static_cast<const RunnerState *>(opaque);
         return elapsed_ms_since(state->started);
@@ -46,7 +53,10 @@ struct RunnerState {
 
     QbdiStopControl stop_control() noexcept {
         if (!stop.enabled()) return {};
-        return {stop.token(), this, seal_stopped, acknowledge_stopped};
+        QbdiStopControl control{
+                stop.token(), this, seal_stopped, acknowledge_stopped};
+        control.before_seal = snapshot_cache_metrics;
+        return control;
     }
 
     TraceContext context;
@@ -55,6 +65,7 @@ struct RunnerState {
     TraceRunSessionOutcome session;
     CrashMarkerSession crash_marker;
     QbdiNormalStopLifecycle stop;
+    QbdiThreadSession *qbdi = nullptr;
     std::chrono::steady_clock::time_point started{};
 };
 
@@ -118,6 +129,7 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
                 state->stop_control()));
     }
     const bool execution_setup_ok = qbdi != nullptr && qbdi->ready();
+    state->qbdi = qbdi.get();
     if (!execution_setup_ok && trace_setup_ok) {
         (void)state->writer.error("create QBDI thread session failed");
         record_qbdi_normal_error(invocation.runtime,
@@ -144,6 +156,7 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         target.return_value = call.value;
     }
     if (qbdi != nullptr) qbdi->copy_cache_metrics(&state->metrics);
+    state->qbdi = nullptr;
 
     state->session.observe_target_call(target, state->writer.failed());
     TraceRunFinalization finalization{};
@@ -174,6 +187,8 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         record_qbdi_normal_error(invocation.runtime,
                                  QbdiNormalError::CrashMarkerFinish);
     }
+    state->stop.finish(finalization.completion_success &&
+                       crash_marker_finished);
     if (finalization.should_log_success && crash_marker_finished) {
         QTRACE_I("trace %s %s path=%.*s", invocation.scene->name.c_str(),
                  state->stop.stop_observed() ? "stopped" : "complete",

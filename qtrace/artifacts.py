@@ -33,6 +33,13 @@ _SIDE_SUFFIXES = (".metrics", ".crash")
 _MAX_NAME_BYTES = 255
 _MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 _MAX_STATUS_BYTES = 64 * 1024
+_STATUS_TRANSACTION_SUFFIXES = (
+    ".status.json.backup.prepare",
+    ".status.json.backup",
+    ".status.json.restore",
+    ".status.json.rollback",
+    ".status.json.commit",
+)
 _FORMAT4_COMPLETED_TERMINAL = re.compile(
     r"TRACE_END status=completed return_valid=1 return=0x[0-9a-fA-F]+ elapsed_ms=\d+ "
     r"instructions=\d+ encoded_bytes=\d+ compressed_bytes=\d+ cache_hits=\d+ "
@@ -454,11 +461,45 @@ def _status_name(name: str) -> str | None:
     return value if _UUID4.fullmatch(value) else None
 
 
+def _status_transaction_name(name: str) -> str | None:
+    for suffix in _STATUS_TRANSACTION_SUFFIXES:
+        if name.endswith(suffix):
+            return _status_name(name[:-len(suffix)] + ".status.json")
+    return None
+
+
 def _temporary_name(name: str) -> bool:
     return (name.startswith(".") or name.endswith((".tmp", ".partial", ".current", ".writer"))
             or re.search(r"\.tmp\.\d+\.\d+\Z", name) is not None
             or re.search(r"\.writing\.\d+\Z", name) is not None
             or ".qtrace-stage-" in name)
+
+
+def _temporary_status_session(name: str) -> str | None:
+    if not _temporary_name(name) or not name.startswith("session-"):
+        return None
+    remainder = name[len("session-"):]
+    session_id = remainder[:36]
+    return (session_id if _UUID4.fullmatch(session_id) is not None and
+            remainder[36:].startswith(".status.json.") else None)
+
+
+def _relevant_manual_temporaries(
+    temporary_names: Sequence[str],
+    selection: PullSelection,
+    roots: Sequence[str],
+    session_id: str | None,
+) -> list[str]:
+    if selection.mode is PullMode.ALL:
+        return list(temporary_names)
+    sessions = ({session_id} if session_id is not None else set())
+    sessions.update(found.lower() for root in roots for found in re.findall(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        root, flags=re.IGNORECASE,
+    ))
+    return [name for name in temporary_names
+            if _temporary_status_session(name) in sessions or
+            any(name.startswith(root + ".") for root in roots)]
 
 
 def _json_status(raw: bytes, session_id: str, package: str | None) -> Mapping[str, object]:
@@ -503,6 +544,11 @@ def _validate_listing(names: Sequence[str]) -> list[str]:
     validated: list[str] = []
     for raw in names:
         name = _name(raw)
+        if _status_transaction_name(name) is not None:
+            continue
+        if name.endswith(_STATUS_TRANSACTION_SUFFIXES):
+            raise _error("artifact.status_invalid",
+                         f"invalid native status transaction name: {name}")
         if not (name.endswith(_TRACE_SUFFIXES) or name.endswith(_SIDE_SUFFIXES)
                 or name.endswith(".status.json")):
             raise _error("artifact.name_invalid", f"unexpected artifact suffix: {name}")
@@ -1071,6 +1117,7 @@ class ArtifactProcessor:
 
         try:
             active = (status is not None and status.get("_native_present", True)
+                      and not status.get("_process_exited", False)
                       and status.get("state") not in {"sealed", "stop_incomplete"})
             if status is not None and status.get("state") == "stop_incomplete":
                 errors.append({"name": "", "code": "artifact.incomplete",
@@ -1166,9 +1213,15 @@ class ArtifactProcessor:
                             raise ValueError("flight recovery summary is malformed")
                         record.update(decoder="flight", termination=summary.get("termination"),
                                      recovery_status=recovery_status(summary))
-                        if not summary["complete"]:
+                        process_exited = (status is not None and
+                                          status.get("_process_exited") is True)
+                        if not summary["complete"] or process_exited:
                             failure = {"name": artifact.remote_name, "code": "artifact.incomplete",
-                                       "detail": "flight recovery reports damage or incomplete committed data"}
+                                       "detail": (
+                                           "flight recorder was recovered after monitored process exit"
+                                           if process_exited else
+                                           "flight recovery reports damage or incomplete committed data"
+                                       )}
                             errors.append(failure)
                             records.append(failure)
                         files.extend(derived)
@@ -1236,16 +1289,18 @@ class ArtifactProcessor:
             host_context: Mapping[str, object] = {}
             if status is not None and status.get("_native_present", True):
                 native_status = {key: value for key, value in status.items()
-                                 if key not in {"_native_present", "snapshot", "effectiveConfig", "device", "hostAckMs", "_hostAckMs"}}
+                                 if key not in {"_native_present", "_process_exited", "snapshot", "effectiveConfig", "device", "hostAckMs", "_hostAckMs"}}
                 host_context = {"snapshot": status.get("snapshot", []),
                                 "effectiveConfig": status.get("effectiveConfig"),
                                 "device": status.get("device"),
-                                "hostAckMs": status.get("_hostAckMs")}
+                                "hostAckMs": status.get("_hostAckMs"),
+                                "processExited": status.get("_process_exited", False)}
             elif status is not None:
                 host_context = {"snapshot": status.get("snapshot", []),
                                 "effectiveConfig": status.get("effectiveConfig"),
                                 "device": status.get("device"),
-                                "hostAckMs": status.get("_hostAckMs")}
+                                "hostAckMs": status.get("_hostAckMs"),
+                                "processExited": status.get("_process_exited", False)}
             _write_json(stage_root / "session.json", {"schema": 1, "sessionId": session_id, "packageName": package,
                                                         "status": native_status, "host": host_context})
             effective = status.get("effectiveConfig") if status is not None else None
@@ -1378,9 +1433,13 @@ class ArtifactProcessor:
         native_present = status.get("_native_present", True)
         if type(native_present) is not bool:
             raise _error("artifact.status_invalid", "native presence marker is invalid")
+        process_exited = status.get("_process_exited", False)
+        if type(process_exited) is not bool:
+            raise _error("artifact.status_invalid", "process exit marker is invalid")
         if native_present and (status.get("sessionId") != session_id or status.get("packageName") != package):
             raise _error("artifact.status_identity", "native status identity does not match")
-        if native_present and status.get("state") not in {"sealed", "stop_incomplete"}:
+        if (native_present and status.get("state") not in {"sealed", "stop_incomplete"} and
+                not (process_exited and status.get("state") == "running")):
             raise _error("artifact.incomplete", "native status is not terminal")
         declared = status.get("artifacts")
         if not native_present:
@@ -1401,9 +1460,12 @@ class ArtifactProcessor:
         snapshot_set = set(snapshot)
         selected: list[str] = []
         initial_errors: list[Mapping[str, str]] = []
+        if native_present and process_exited and status.get("state") == "running" and not declared:
+            initial_errors.append({"name": "", "code": "artifact.incomplete",
+                                   "detail": "process exited without a declared trace artifact"})
         initial_errors.extend({"name": name, "code": "artifact.incomplete",
                                "detail": "temporary/current-writer artifact was not eligible for pull"}
-                              for name in temporary_names)
+                              for name in temporary_names if name not in snapshot_set)
         if not native_present:
             initial_errors.append({"name": "", "code": "artifact.status_missing",
                                    "detail": "native status unavailable; recovered listing is partial"})
@@ -1439,11 +1501,7 @@ class ArtifactProcessor:
             raise _error("artifact.duplicate", "device listing contains duplicate names")
         temporary_names = [_name(item) for item in listing if _temporary_name(_name(item))]
         listing = _validate_listing([_name(item) for item in listing if not _temporary_name(_name(item))])
-        initial_errors: list[Mapping[str, str]] = [
-            {"name": name, "code": "artifact.incomplete",
-             "detail": "temporary/current-writer artifact was not eligible for pull"}
-            for name in temporary_names
-        ]
+        initial_errors: list[Mapping[str, str]] = []
         status: Mapping[str, object] | None = None
         manual_root_statuses: Mapping[str, Mapping[str, object]] = {}
         session_id: str | None = None
@@ -1552,6 +1610,13 @@ class ArtifactProcessor:
                     manual_root_statuses = {root: candidate_status for root in owned}
         if session_id is None:
             session_id = str(uuid.uuid4())
+        initial_errors[0:0] = [
+            {"name": name, "code": "artifact.incomplete",
+             "detail": "temporary/current-writer artifact was not eligible for pull"}
+            for name in _relevant_manual_temporaries(
+                temporary_names, selection, roots, session_id,
+            )
+        ]
         selected = list(roots)
         for root in roots:
             for side in (root + ".metrics", root + ".crash"):

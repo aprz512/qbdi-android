@@ -60,8 +60,10 @@ void record_qbdi_normal_error(
 using QbdiElapsedMillis = long (*)(void *opaque) noexcept;
 
 // Owns the normal-runner half of cooperative stop. QBDI only observes the token;
-// the runner thread seals the writer after vm.run() unwinds, then acknowledges
-// the exact admission. Both operations are idempotent.
+// the runner thread seals the writer after vm.run() unwinds. The QBDI callback
+// records that outcome, but the exact admission is acknowledged only after the
+// runner has closed the writer and finished its crash marker. All operations
+// are idempotent.
 class QbdiNormalStopLifecycle final {
 public:
     QbdiNormalStopLifecycle(BinaryTraceWriter *writer,
@@ -73,6 +75,7 @@ public:
     const TraceStopToken *token() const noexcept;
     bool seal(TraceStopReason reason) noexcept;
     void acknowledge(bool sealed) noexcept;
+    void finish(bool artifacts_finalized) noexcept;
     bool stop_observed() const noexcept;
     bool sealed() const noexcept;
     bool admission_finished() const noexcept;
@@ -90,6 +93,8 @@ private:
     QbdiElapsedMillis elapsed_ = nullptr;
     bool seal_called_ = false;
     bool acknowledge_called_ = false;
+    bool acknowledged_sealed_ = false;
+    bool finish_called_ = false;
     bool stop_observed_ = false;
     bool sealed_ = false;
     size_t seal_calls_ = 0;

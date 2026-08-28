@@ -5,6 +5,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.Executors
 
 class QtraceAcceptanceTest {
@@ -110,6 +111,43 @@ class QtraceAcceptanceTest {
         assertEquals(IllegalStateException::class, failure!!::class)
     }
 
+    @Test fun traced_timed_invocation_observes_running_while_native_call_is_active() {
+        val evidence = QtraceAcceptanceEvidence(
+            "123e4567-e89b-42d3-a456-426614174000",
+            "223e4567-e89b-42d3-a456-426614174001",
+        )
+        val status = Files.createTempFile("qtrace-concurrent-entry-status", ".json").toFile()
+        status.writeText(runningStatus(evidence.sessionId, "installed"))
+        var published: String? = null
+
+        val invocation = QtraceAcceptance.completeTracedTimedInvocation(
+            evidence,
+            status,
+            invokeNative = {
+                val statusParent = checkNotNull(status.toPath().parent)
+                val replacement = Files.createTempFile(
+                    statusParent,
+                    "qtrace-concurrent-entry-status-replacement",
+                    ".json",
+                )
+                Files.write(replacement, runningStatus(evidence.sessionId).toByteArray())
+                Files.move(
+                    replacement,
+                    status.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+                Thread.sleep(100)
+                42L
+            },
+            readNativeEntryMonotonicNs = { 123L },
+            publishEntryStatus = { published = it },
+        )
+
+        assertEquals(42L, invocation.result)
+        assertTrue(published!!.contains("\"state\":\"running\""))
+    }
+
     @Test fun running_entry_snapshot_is_selected_before_absolute_deadline() {
         val session = "123e4567-e89b-42d3-a456-426614174000"
         val directory = Files.createTempDirectory("qtrace-entry-status").toFile()
@@ -163,6 +201,26 @@ class QtraceAcceptanceTest {
         assertEquals(
             "{\"iterations\":1,\"seed\":1,\"result\":\"0x8000000000000000\"}",
             QtraceAcceptance.resultJson(QtraceAcceptanceRequest("timed", 1L, 1L), Long.MIN_VALUE),
+        )
+    }
+
+    @Test fun exit_invocation_traces_before_publishing_the_real_result_and_terminating() {
+        val request = QtraceAcceptanceRequest("exit", 7L, 3L)
+        val calls = mutableListOf<String>()
+        var payload: String? = null
+
+        QtraceAcceptance.completeExitInvocation(
+            request,
+            invokeNative = { calls += "native"; 42L },
+            publishResult = { calls += "publish"; payload = it },
+            prepareExit = { calls += "finish-task" },
+            terminate = { code -> calls += "exit:$code" },
+        )
+
+        assertEquals(listOf("native", "publish", "finish-task", "exit:0"), calls)
+        assertEquals(
+            "{\"iterations\":3,\"seed\":7,\"result\":\"0x2a\"}",
+            payload,
         )
     }
 

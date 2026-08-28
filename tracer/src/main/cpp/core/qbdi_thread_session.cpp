@@ -837,6 +837,9 @@ void QbdiThreadSession::mark_coverage_gap(uintptr_t pc) noexcept {
 bool QbdiThreadSession::seal_observed_stop(TraceStopReason reason) noexcept {
     if (stop_handled_ || trace_process_child_detached()) return stop_sealed_;
     stop_handled_ = true;
+    if (stop_control_.before_seal != nullptr) {
+        stop_control_.before_seal(stop_control_.opaque);
+    }
     stop_sealed_ = stop_control_.seal != nullptr &&
                    stop_control_.seal(stop_control_.opaque, reason);
     if (stop_control_.acknowledge != nullptr) {

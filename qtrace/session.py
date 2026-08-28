@@ -84,6 +84,12 @@ class SessionResult:
     outputs: tuple[Path, ...]
 
 
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    starttime_ticks: int
+    state: str
+
+
 def _artifact_basename(value: object) -> bool:
     try:
         return (isinstance(value, str) and value not in {"", ".", ".."} and
@@ -91,6 +97,33 @@ def _artifact_basename(value: object) -> bool:
                 not any(unicodedata.category(character).startswith("C") for character in value))
     except UnicodeEncodeError:
         return False
+
+
+def _parse_process_identity(raw: object, pid: int) -> _ProcessIdentity:
+    if not isinstance(raw, bytes) or len(raw) == 0 or len(raw) > 4096:
+        raise QtraceError("session.pid_identity_invalid", "session.monitor",
+                          "owned process stat has an invalid size")
+    try:
+        text = raw.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise QtraceError("session.pid_identity_invalid", "session.monitor",
+                          "owned process stat is not ASCII") from error
+    prefix = f"{pid} ("
+    close = text.rfind(")")
+    if not text.startswith(prefix) or close < len(prefix) or close + 2 > len(text):
+        raise QtraceError("session.pid_identity_invalid", "session.monitor",
+                          "owned process stat has an invalid header")
+    fields = text[close + 2:].split()
+    valid_states = frozenset(("R", "S", "D", "Z", "T", "t", "X", "x", "K", "W", "P", "I"))
+    if (len(fields) < 20 or fields[0] not in valid_states or
+            not fields[19].isascii() or not fields[19].isdigit()):
+        raise QtraceError("session.pid_identity_invalid", "session.monitor",
+                          "owned process stat has invalid identity fields")
+    starttime = int(fields[19])
+    if starttime <= 0:
+        raise QtraceError("session.pid_identity_invalid", "session.monitor",
+                          "owned process starttime is invalid")
+    return _ProcessIdentity(starttime, fields[0])
 
 
 def _process_failure(error: BaseException) -> BoundedProcessError | None:
@@ -260,7 +293,11 @@ def _validate_request(request: object, timed: bool, session_id: str) -> RunReque
 
 
 def build_native_request(config: UserConfig, resolved: ResolvedTarget, session_id: str,
-                         duration_ms: int | None) -> dict[str, object]:
+                         duration_ms: int | None, *,
+                         flight_capacity_mb: int = 512) -> dict[str, object]:
+    if type(flight_capacity_mb) is not int or not 64 <= flight_capacity_mb <= 2048:
+        raise QtraceError("session.request_invalid", "session.request",
+                          "flight capacity must be 64 through 2048 MiB")
     session: dict[str, object] = {"id": session_id}
     if duration_ms is not None:
         if type(duration_ms) is not int or not 100 <= duration_ms <= 86_400_000:
@@ -273,7 +310,8 @@ def build_native_request(config: UserConfig, resolved: ResolvedTarget, session_i
         "trace": {"profile": config.tracer.profile, "compression": config.tracer.compression,
                   "lz4Level": 2, "autoBuffer": True, "bufferMb": 0, "hexdumpLimit": 32},
         "flight": {"enabled": config.tracer.flight_enabled,
-                   "entryScene": config.tracer.flight_entry_scene or "", "capacityMb": 512,
+                   "entryScene": config.tracer.flight_entry_scene or "",
+                   "capacityMb": flight_capacity_mb,
                    "chunkKb": 256, "maxThreads": 256, "protectedChunks": 4},
         "scenes": [{"name": scene.name, "location": {"offset": f"0x{scene.start_offset:x}",
                                                            "endOffset": f"0x{scene.end_offset:x}"}}
@@ -286,11 +324,16 @@ class SessionOrchestrator:
     def __init__(self, preflight: object, resolver_factory: Callable[[object], object], builder: object,
                  deployer: object, injector_factory: Callable[[object], object], collector: object,
                  clock: Clock, uuid_factory: Callable[[], str], *, report_writer: ReportWriter | None = None,
-                 lock: TargetLock | None = None, device_selector: Callable[[str | None, float], object]) -> None:
+                 lock: TargetLock | None = None, device_selector: Callable[[str | None, float], object],
+                 flight_capacity_mb: int = 512) -> None:
         self._preflight, self._resolver_factory, self._builder, self._deployer = preflight, resolver_factory, builder, deployer
         self._injector_factory, self._collector, self._clock, self._uuid_factory = injector_factory, collector, clock, uuid_factory
         self._report_writer, self._lock = report_writer or ReportWriter(), lock or TargetLock()
         self._device_selector = device_selector
+        if type(flight_capacity_mb) is not int or not 64 <= flight_capacity_mb <= 2048:
+            raise QtraceError("session.request_invalid", "session.request",
+                              "flight capacity must be 64 through 2048 MiB")
+        self._flight_capacity_mb = flight_capacity_mb
 
     def run(self, request: RunRequest) -> SessionResult:
         return self._execute("run", request, None)
@@ -379,7 +422,10 @@ class SessionOrchestrator:
             mark(SessionStage.DEPLOYING)
             deployment = self._deployer.deploy(device, session_id, artifacts)
             snapshot = self._snapshot_artifacts(device, request, session_id)
-            native = build_native_request(request.config, resolved, session_id, duration_ms)
+            native = build_native_request(
+                request.config, resolved, session_id, duration_ms,
+                flight_capacity_mb=self._flight_capacity_mb,
+            )
             mark(SessionStage.INJECTING)
             mark(SessionStage.INSTALLING_HOOKS)
             result: InjectionResult = self._injector_factory(device).install(InjectionRequest(
@@ -392,6 +438,14 @@ class SessionOrchestrator:
                 raise QtraceError("session.detach_unverified", "session.injecting",
                                   "injector returned before Frida cleanup/detach completed")
             timeline[-1] = {**timeline[-1], "cleanup_detached": True}
+            monitored_identity = None
+            if mode == "monitor":
+                monitored_identity = self._read_process_identity(
+                    device, pid, request.adb_timeout,
+                )
+                if monitored_identity is None or monitored_identity.state in {"Z", "X", "x"}:
+                    raise QtraceError("session.process_exited", "session.monitor",
+                                      "injected process exited before monitoring")
             if request.installed_action is not None:
                 receipt = request.installed_action(device, pid, session_id)
                 if receipt is not None:
@@ -422,12 +476,15 @@ class SessionOrchestrator:
                 return publish("sealed", exit_code, outputs=outputs, artifact_records=collection_records,
                                collector_token=collection_token)
             mark(SessionStage.MONITORING)
-            self._wait_for_exit(device, request, pid)
+            assert monitored_identity is not None
+            self._wait_for_exit(device, request, pid, monitored_identity)
             mark(SessionStage.PULLING)
             final_status = self._read_final_status(device, request, result, session_id)
             status = final_status
-            exit_code, outputs, collection_records, collection_token = self._collect(device, request, session_id, snapshot, final_status,
-                                                                                      native_request=native)
+            exit_code, outputs, collection_records, collection_token = self._collect(
+                device, request, session_id, snapshot, final_status,
+                native_request=native, process_exited=True,
+            )
             mark(SessionStage.COMPLETED)
             return publish("crash_recovered" if exit_code == EXIT_PARTIAL else "process_exited", exit_code,
                            outputs=outputs, artifact_records=collection_records,
@@ -486,7 +543,8 @@ class SessionOrchestrator:
             raise QtraceError("session.snapshot_invalid", "session.snapshot", "artifact snapshot has unsafe names")
         return names
 
-    def _current_pid(self, device: object, package: str, timeout: float) -> int | None:
+    def _current_pid(self, device: object, package: str, timeout: float,
+                     expected_pid: int | None = None) -> int | None:
         target_shell = getattr(device, "target_shell", None)
         if target_shell is None:
             return device.pid(package)
@@ -503,9 +561,31 @@ class SessionOrchestrator:
             raise QtraceError("session.pid_invalid", "session.pid", "pidof output is malformed") from error
         if not text:
             return None
-        if not text.isdigit() or int(text) <= 0:
+        parts = text.split()
+        if (not parts or any(not part.isdigit() or int(part) <= 0 for part in parts)
+                or len(set(parts)) != len(parts)):
             raise QtraceError("session.pid_invalid", "session.pid", "pidof output is malformed")
-        return int(text)
+        pids = tuple(int(part) for part in parts)
+        if expected_pid is not None and expected_pid in pids:
+            return expected_pid
+        if len(pids) != 1 and expected_pid is None:
+            raise QtraceError("session.pid_invalid", "session.pid", "pidof output is malformed")
+        return pids[0]
+
+    def _read_process_identity(self, device: object, pid: int,
+                               timeout: float) -> _ProcessIdentity | None:
+        path = f"/proc/{pid}/stat"
+        target_shell = getattr(device, "target_shell", None)
+        if target_shell is None:
+            raise QtraceError("session.pid_identity_unavailable", "session.monitor",
+                              "bound target identity cannot inspect the owned process")
+        try:
+            raw = target_shell("cat", path, maximum_bytes=4096, timeout=timeout)
+        except BaseException as error:
+            if _missing_remote(error, path):
+                return None
+            raise
+        return _parse_process_identity(raw, pid)
 
     def _read_status(self, device: object, request: RunRequest | MonitorRequest, result: InjectionResult,
                      session_id: str, previous: Mapping[str, object] | None, timeout: float | None = None) -> dict[str, object]:
@@ -532,6 +612,7 @@ class SessionOrchestrator:
     def _wait_for_seal(self, device: object, request: RunRequest, result: InjectionResult,
                        session_id: str, on_stopping: Callable[[], None]) -> tuple[Mapping[str, object], bool]:
         deadline = self._clock.monotonic() + request.duration_ms / 1000.0 + request.stop_timeout
+        status_path = self._status_path(request.config.app.package, session_id)
         previous = None
         saw_stop = False
         transient_count = 0
@@ -542,7 +623,9 @@ class SessionOrchestrator:
                 timeout = min(request.adb_timeout, remaining)
                 if timeout <= 0:
                     break
-                current_pid = self._current_pid(device, request.config.app.package, timeout)
+                current_pid = self._current_pid(
+                    device, request.config.app.package, timeout, result.pid,
+                )
                 if current_pid is None:
                     raise QtraceError("session.process_exited", "session.running", "injected process exited before seal")
                 if current_pid != result.pid:
@@ -567,9 +650,12 @@ class SessionOrchestrator:
                     current = {**current, "_hostAckMs": None}
                     return current, False
             except QtraceError as error:
-                if not _transient_adb(error):
+                if previous is None and _missing_remote(error, status_path):
+                    pass
+                elif not _transient_adb(error):
                     raise
-                transient_count += 1
+                else:
+                    transient_count += 1
             except (OSError, TimeoutError):
                 transient_count += 1
             if transient_count >= 3 and self._clock.monotonic() + 0.1 > deadline:
@@ -582,7 +668,8 @@ class SessionOrchestrator:
         assert previous is not None
         return previous, True
 
-    def _wait_for_exit(self, device: object, request: MonitorRequest, pid: int) -> None:
+    def _wait_for_exit(self, device: object, request: MonitorRequest, pid: int,
+                       identity: _ProcessIdentity) -> None:
         outage_deadline: float | None = None
         transient_count = 0
         while True:
@@ -592,12 +679,26 @@ class SessionOrchestrator:
                 remaining = deadline - self._clock.monotonic()
                 if remaining <= 0:
                     raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.monitor", "ADB process polling deadline exhausted")
-                current = self._current_pid(device, request.config.app.package, min(request.adb_timeout, remaining))
+                current = self._current_pid(
+                    device, request.config.app.package,
+                    min(request.adb_timeout, remaining), pid,
+                )
                 transient_count, outage_deadline = 0, None
-                if current is None:
+                if current is not None and current != pid:
+                    raise QtraceError("session.pid_replaced", "session.monitor",
+                                      "package PID changed after injection")
+                remaining = deadline - self._clock.monotonic()
+                if remaining <= 0:
+                    raise QtraceError(ErrorCode.ADB_UNAVAILABLE, "session.monitor",
+                                      "ADB process polling deadline exhausted")
+                observed = self._read_process_identity(
+                    device, pid, min(request.adb_timeout, remaining),
+                )
+                if observed is None or observed.state in {"Z", "X", "x"}:
                     return
-                if current != pid:
-                    raise QtraceError("session.pid_replaced", "session.monitor", "package PID changed after injection")
+                if observed.starttime_ticks != identity.starttime_ticks:
+                    raise QtraceError("session.pid_replaced", "session.monitor",
+                                      "owned PID identity changed after injection")
             except QtraceError as error:
                 if not _transient_adb(error):
                     raise
@@ -616,10 +717,12 @@ class SessionOrchestrator:
 
     def _collect(self, device: object, request: RunRequest | MonitorRequest, session_id: str,
                  snapshot: tuple[str, ...], status: Mapping[str, object] | None,
-                 *, native_request: Mapping[str, object] | None = None
+                 *, native_request: Mapping[str, object] | None = None,
+                 process_exited: bool = False,
                  ) -> tuple[int, tuple[Path, ...], tuple[Mapping[str, object], ...], object | None]:
         owned = ({**status} if status is not None else {})
         owned.update({"_native_present": status is not None,
+        "_process_exited": process_exited,
         "artifacts": [] if status is None else list(status.get("artifacts", [])),
         "snapshot": list(snapshot),
         "effectiveConfig": native_request if native_request is not None else {

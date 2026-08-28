@@ -3,6 +3,7 @@ import json
 import math
 import multiprocessing
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -952,6 +953,108 @@ class FridaProviderTests(unittest.TestCase):
 
 
 class AgentSourceTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for GumJS emulation")
+    def test_agent_canonicalizes_staged_pair_together_and_never_preloads_companion(self):
+        source = AGENT_PATH.read_text(encoding="utf-8")
+        harness = r"""
+const vm = require('vm');
+const source = JSON.parse(process.argv[1]);
+
+function runCase(root, canonicalRoot) {
+  const state = {loads: [], helperPaths: [], messages: []};
+  let startup = null;
+  const tracer = {getExportByName: symbol => symbol};
+
+  function NativeFunction(address) {
+    if (address === 'realpath') {
+      return (input, output) => {
+        output.text = input.replace(root, canonicalRoot);
+        return {isNull: () => false};
+      };
+    }
+    if (address === 'qbdi_tracer_set_shadowhook_helper_path') {
+      return path => {
+        state.helperPaths.push(path);
+        throw new Error('stop-after-companion');
+      };
+    }
+    if (address === 'qbdi_tracer_configure_json' ||
+        address === 'qbdi_tracer_get_status_json') {
+      return () => { throw new Error('unexpected native call: ' + address); };
+    }
+    throw new Error('unexpected native function: ' + address);
+  }
+
+  const sandbox = {
+    BigInt,
+    Date,
+    Object,
+    JSON,
+    Number,
+    String,
+    Error,
+    NativeFunction,
+    Module: {
+      getGlobalExportByName: symbol => symbol,
+      load: path => { state.loads.push(path); return tracer; }
+    },
+    Memory: {
+      allocUtf8String: value => value,
+      alloc: () => ({text: '', readUtf8String() { return this.text; }})
+    },
+    recv: (_type, handler) => { startup = handler; },
+    send: message => state.messages.push(message),
+    setTimeout: () => { throw new Error('unexpected poll'); }
+  };
+  vm.runInNewContext(source, sandbox, {filename: 'agent.js'});
+  const tracerPath = root + '/qtrace/session/libqbdi_tracer.so';
+  const companionPath = root + '/qtrace/session/libshadowhook_nothing.so';
+  startup({type: 'qtrace-startup', payload: {
+    package: 'com.example.external',
+    sessionId: '7d5807cf-cf09-4f21-92de-1ad92802610a',
+    tracerSo: tracerPath,
+    companion: companionPath,
+    setupTimeoutMs: 5000,
+    nativeRequest: {
+      packageName: 'com.example.external',
+      targetModule: 'libexternal_target.so',
+      scenes: [{name: 'entry', location: {offset: '0x100', endOffset: '0x140'}}],
+      session: {id: '7d5807cf-cf09-4f21-92de-1ad92802610a', durationMs: 500}
+    }
+  }});
+  return state;
+}
+
+process.stdout.write(JSON.stringify([
+  runCase('/data/user/0/com.example.external/cache', '/data/data/com.example.external/cache'),
+  runCase('/data/user/10/com.example.external/cache', '/data/user/10/com.example.external/cache')
+]));
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness, json.dumps(source)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        user_zero, secondary_user = json.loads(completed.stdout)
+        for state, root in (
+            (user_zero, "/data/data/com.example.external/cache/qtrace/session"),
+            (secondary_user, "/data/user/10/com.example.external/cache/qtrace/session"),
+        ):
+            with self.subTest(root=root):
+                tracer = f"{root}/libqbdi_tracer.so"
+                companion = f"{root}/libshadowhook_nothing.so"
+                self.assertEqual([tracer], state["loads"])
+                self.assertEqual([companion], state["helperPaths"])
+                self.assertNotIn(companion, state["loads"])
+                self.assertEqual(
+                    os.path.dirname(state["loads"][0]),
+                    os.path.dirname(state["helperPaths"][0]),
+                )
+
     def test_agent_is_static_startup_only_and_names_the_native_abi(self):
         source = AGENT_PATH.read_text(encoding="utf-8")
 

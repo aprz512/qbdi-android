@@ -88,6 +88,7 @@ private:
     char output_directory_[kPathCapacity]{};
     char path_[kPathCapacity]{};
     char backup_path_[kPathCapacity]{};
+    char backup_prepare_path_[kPathCapacity]{};
     char restore_path_[kPathCapacity]{};
     char rollback_path_[kPathCapacity]{};
     char commit_path_[kPathCapacity]{};

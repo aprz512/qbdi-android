@@ -627,6 +627,9 @@ void uncompressed_stopped_stream_has_one_terminal_and_v3_metrics() {
     CHECK(writer.open(context));
     CHECK(writer.begin(context));
     CHECK(writer.instruction(context, instruction(1, &decoded)));
+    metrics.cache_hits = 671;
+    metrics.cache_misses = 29;
+    metrics.cache_collisions = 3;
     CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
     CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
     CHECK(!writer.end(0x55, true, 18));
@@ -639,6 +642,9 @@ void uncompressed_stopped_stream_has_one_terminal_and_v3_metrics() {
     CHECK(sidecar.find("metrics_version=3\n") != std::string::npos);
     CHECK(sidecar.find("termination=stopped\n") != std::string::npos);
     CHECK(sidecar.find("return_valid=0\nreturn=0x0\n") != std::string::npos);
+    CHECK(metric_value(sidecar, "cache_hits") == "671");
+    CHECK(metric_value(sidecar, "cache_misses") == "29");
+    CHECK(metric_value(sidecar, "cache_collisions") == "3");
 
     CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
     CHECK(::unlink(artifact_path(writer).c_str()) == 0);
@@ -660,6 +666,9 @@ void compressed_stopped_stream_has_one_terminal_and_v3_metrics() {
     CHECK(writer.open(context));
     CHECK(writer.begin(context));
     CHECK(writer.instruction(context, instruction(1, &decoded)));
+    metrics.cache_hits = 671;
+    metrics.cache_misses = 29;
+    metrics.cache_collisions = 3;
     CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
     CHECK(writer.stop(TraceStopReason::DurationElapsed, 17));
     CHECK(!writer.end(0x55, true, 18));
@@ -675,6 +684,9 @@ void compressed_stopped_stream_has_one_terminal_and_v3_metrics() {
     CHECK(sidecar.find("metrics_version=3\n") != std::string::npos);
     CHECK(sidecar.find("termination=stopped\n") != std::string::npos);
     CHECK(sidecar.find("return_valid=0\nreturn=0x0\n") != std::string::npos);
+    CHECK(metric_value(sidecar, "cache_hits") == "671");
+    CHECK(metric_value(sidecar, "cache_misses") == "29");
+    CHECK(metric_value(sidecar, "cache_collisions") == "3");
 
     CHECK(::unlink(sidecar_path(writer).c_str()) == 0);
     CHECK(::unlink(artifact_path(writer).c_str()) == 0);

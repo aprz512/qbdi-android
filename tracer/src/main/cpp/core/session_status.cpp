@@ -200,6 +200,83 @@ bool write_all(int fd, const char *data, size_t size) noexcept {
     return true;
 }
 
+bool sync_file(int fd, bool directory) noexcept;
+
+bool copy_regular_file(const char *source, const char *destination) noexcept {
+    const int source_fd = ::open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (source_fd < 0) return false;
+    struct stat source_status{};
+    if (::fstat(source_fd, &source_status) != 0) {
+        const int error = errno;
+        (void)::close(source_fd);
+        errno = error;
+        return false;
+    }
+    if (!S_ISREG(source_status.st_mode) || source_status.st_size <= 0 ||
+        static_cast<uint64_t>(source_status.st_size) > kJsonCapacity) {
+        (void)::close(source_fd);
+        errno = EINVAL;
+        return false;
+    }
+    const int destination_fd = ::open(destination,
+                                      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                                      0600);
+    if (destination_fd < 0) {
+        const int error = errno;
+        (void)::close(source_fd);
+        errno = error;
+        return false;
+    }
+
+    bool success = true;
+    off_t remaining = source_status.st_size;
+    char buffer[4096];
+    while (success && remaining > 0) {
+        const size_t requested = static_cast<size_t>(
+                remaining < static_cast<off_t>(sizeof(buffer))
+                        ? remaining
+                        : static_cast<off_t>(sizeof(buffer)));
+        ssize_t count = 0;
+        do {
+            count = ::read(source_fd, buffer, requested);
+        } while (count < 0 && errno == EINTR);
+        if (count <= 0 || !write_all(destination_fd, buffer,
+                                     static_cast<size_t>(count))) {
+            if (count == 0) errno = EIO;
+            success = false;
+            break;
+        }
+        remaining -= count;
+    }
+    if (success) {
+        char extra = 0;
+        ssize_t count = 0;
+        do {
+            count = ::read(source_fd, &extra, 1);
+        } while (count < 0 && errno == EINTR);
+        if (count != 0) {
+            if (count > 0) errno = EFBIG;
+            success = false;
+        }
+    }
+    if (success && !sync_file(destination_fd, false)) success = false;
+    const int operation_error = success ? 0 : (errno == 0 ? EIO : errno);
+    if (::close(destination_fd) != 0 && success) {
+        success = false;
+        errno = errno == 0 ? EIO : errno;
+    }
+    if (::close(source_fd) != 0 && success) {
+        success = false;
+        errno = errno == 0 ? EIO : errno;
+    }
+    if (!success) {
+        const int error = operation_error == 0 ? errno : operation_error;
+        (void)::unlink(destination);
+        errno = error;
+    }
+    return success;
+}
+
 bool sync_file(int fd, bool directory) noexcept {
 #if defined(QTRACE_HOST_TEST)
     int fault = 0;
@@ -465,10 +542,12 @@ bool SessionStatusPublisher::recover_pending_transaction() noexcept {
     };
     bool main_exists = false;
     bool backup_exists = false;
+    bool backup_prepare_exists = false;
     bool restore_exists = false;
     bool rollback_exists = false;
     bool commit_exists = false;
     if (!inspect(path_, &main_exists) || !inspect(backup_path_, &backup_exists) ||
+        !inspect(backup_prepare_path_, &backup_prepare_exists) ||
         !inspect(restore_path_, &restore_exists) || !inspect(rollback_path_, &rollback_exists) ||
         !inspect(commit_path_, &commit_exists)) {
         (void)::close(directory_fd);
@@ -478,6 +557,18 @@ bool SessionStatusPublisher::recover_pending_transaction() noexcept {
         record_recovery_error(EINVAL);
         (void)::close(directory_fd);
         return false;
+    }
+
+    // The live status remains authoritative until the completed backup copy is
+    // renamed away from this prepare name. A crash residue here is therefore
+    // never rollback evidence and must not block the next bounded copy.
+    if (backup_prepare_exists) {
+        if (!rollback_unlink(backup_prepare_path_) ||
+            !rollback_directory_sync(directory_fd)) {
+            record_recovery_error(errno);
+            (void)::close(directory_fd);
+            return false;
+        }
     }
 
     // Migrate marker-less states written by an older publisher. A retained
@@ -543,29 +634,19 @@ bool SessionStatusPublisher::recover_pending_transaction() noexcept {
             return true;
         }
 
-        // Restore through a temporary hard link so backup remains durable across
-        // the restore rename and its directory fsync. Every failed retry still
-        // has rollback + backup and can repeat the same sequence.
+        // Restore through an independently fsynced copy. Android app SELinux
+        // domains may not create hard links even between their own app-data
+        // files. Every failed retry keeps rollback + backup and can discard and
+        // rebuild this copy before repeating the same rename sequence.
         if (restore_exists) {
-            struct stat backup_status{};
-            struct stat restore_status{};
-            if (::stat(backup_path_, &backup_status) != 0 ||
-                ::stat(restore_path_, &restore_status) != 0) {
+            if (!rollback_unlink(restore_path_)) {
                 record_recovery_error(errno);
                 (void)::close(directory_fd);
                 return false;
             }
-            if (backup_status.st_dev != restore_status.st_dev ||
-                backup_status.st_ino != restore_status.st_ino) {
-                if (!rollback_unlink(restore_path_)) {
-                    record_recovery_error(errno);
-                    (void)::close(directory_fd);
-                    return false;
-                }
-                restore_exists = false;
-            }
+            restore_exists = false;
         }
-        if (!restore_exists && ::link(backup_path_, restore_path_) != 0) {
+        if (!copy_regular_file(backup_path_, restore_path_)) {
             record_recovery_error(errno);
             (void)::close(directory_fd);
             return false;
@@ -678,10 +759,15 @@ bool SessionStatusPublisher::open(const TraceConfig &config, uint64_t generation
     }
     path_size_ = static_cast<size_t>(path_count);
     const int backup_count = std::snprintf(backup_path_, sizeof(backup_path_), "%s.backup", path_);
+    const int backup_prepare_count = std::snprintf(
+            backup_prepare_path_, sizeof(backup_prepare_path_), "%s.prepare",
+            backup_path_);
     const int restore_count = std::snprintf(restore_path_, sizeof(restore_path_), "%s.restore", path_);
     const int rollback_count = std::snprintf(rollback_path_, sizeof(rollback_path_), "%s.rollback", path_);
     const int commit_count = std::snprintf(commit_path_, sizeof(commit_path_), "%s.commit", path_);
     if (backup_count <= 0 || static_cast<size_t>(backup_count) >= sizeof(backup_path_) ||
+        backup_prepare_count <= 0 ||
+        static_cast<size_t>(backup_prepare_count) >= sizeof(backup_prepare_path_) ||
         restore_count <= 0 || static_cast<size_t>(restore_count) >= sizeof(restore_path_) ||
         rollback_count <= 0 || static_cast<size_t>(rollback_count) >= sizeof(rollback_path_) ||
         commit_count <= 0 || static_cast<size_t>(commit_count) >= sizeof(commit_path_)) {
@@ -769,9 +855,17 @@ bool SessionStatusPublisher::publish(const SessionStatusSnapshot &snapshot) noex
             record_error(error);
             return false;
         }
-        if (::link(path_, backup_path_) != 0) {
+        if (!copy_regular_file(path_, backup_prepare_path_)) {
             const int error = errno == 0 ? EIO : errno;
             (void)::close(directory_fd);
+            (void)::unlink(temporary);
+            record_error(error);
+            return false;
+        }
+        if (::rename(backup_prepare_path_, backup_path_) != 0) {
+            const int error = errno == 0 ? EIO : errno;
+            (void)::close(directory_fd);
+            (void)::unlink(backup_prepare_path_);
             (void)::unlink(temporary);
             record_error(error);
             return false;

@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+import ctypes
+from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import math
@@ -18,7 +21,7 @@ import tempfile
 import time
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
@@ -32,6 +35,7 @@ if __package__ in {None, ""}:
 from scripts.bounded_process import BoundedProcessError, capture_bounded
 from scripts.pull_trace import AdbArtifactClient, MAX_METRICS_BYTES
 from scripts.qtrace_historical_benchmark import (
+    HISTORICAL_CANONICAL_TARGET_SHA256,
     HISTORICAL_COMMIT,
     HistoricalBenchmarkApk,
     build_historical_benchmark_apk,
@@ -41,6 +45,8 @@ from qtrace.status import load_strict_json, validate_status_shape
 
 PACKAGE = "com.aprz.qbdiandroid"
 ACTIVITY = "com.aprz.qbdiandroid/.MainActivity"
+_DEMO_TRACE_DIRECTORY = "files/qbdi-traces"
+_DEMO_TRACE_BACKUP_PREFIX = _DEMO_TRACE_DIRECTORY + ".pre-acceptance-"
 TRACER_PATH = Path("out/arm64-v8a/libqbdi_tracer.so")
 COMPANION_PATH = Path("out/arm64-v8a/libshadowhook_nothing.so")
 _CURRENT_APK_PATH = Path("app/build/outputs/apk/debug/app-debug.apk")
@@ -61,6 +67,20 @@ _UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_GIT_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_SAFE_COMPONENT = re.compile(r"[A-Za-z0-9_.-]+\Z")
+_SUCCESS_MANIFEST_NAME = "historical-benchmark-gate.success.json"
+_SUCCESS_REPORT_DIRECTORIES = {
+    "timed-offset": "offset",
+    "timed-symbol": "symbol",
+    "pull-latest": "latest",
+    "pull-name": "name",
+    "pull-all": "all",
+    "pull-compressed": "compressed",
+    "monitor-exit": "exit",
+    "flight-crash": "crash",
+}
+_MAX_SUCCESS_EVIDENCE_BYTES = 64 * 1024
 
 
 class AcceptanceNotReadyError(RuntimeError):
@@ -133,6 +153,12 @@ class HeldTracerPair:
                 for label, error in failures
             )
             raise RuntimeError(f"held tracer pair cleanup failed: {detail}")
+
+
+@dataclass(frozen=True)
+class DemoTraceIsolation:
+    existed: bool
+    backup_path: str | None
 
 
 _LOCAL_READ_TIMEOUT_SECONDS = 15.0
@@ -541,6 +567,82 @@ def _install_held_apk(
     apk.verify_path()
     runner.run(("adb", "-s", device, "install", "-r", str(apk.path)), timeout=120.0)
     apk.verify_path()
+
+
+def _isolate_demo_trace_directory(
+    device: str,
+    runner: Runner,
+    *,
+    token: str,
+) -> DemoTraceIsolation:
+    """Recoverably isolate only the fixed acceptance fixture's trace directory."""
+    if re.fullmatch(r"[0-9a-f]{32}", token) is None:
+        raise ValueError("acceptance trace isolation token must be 32 lowercase hex characters")
+    source = _DEMO_TRACE_DIRECTORY
+    backup = _DEMO_TRACE_BACKUP_PREFIX + token
+
+    def lstat(remote: str) -> tuple[int, int, str] | None:
+        result = runner.run(
+            ("adb", "-s", device, "shell", "run-as", PACKAGE,
+             "stat", "-c", "%d:%i:%F", remote),
+            timeout=30.0,
+            allowed=(0, 1),
+        )
+        if result.returncode == 1:
+            missing = {
+                f"stat: '{remote}': No such file or directory\n",
+                f"stat: {remote}: No such file or directory\n",
+            }
+            if result.stdout != "" or result.stderr not in missing:
+                raise RuntimeError(
+                    f"app-private demo trace stat failed unexpectedly: {remote}"
+                )
+            return None
+        if result.returncode != 0 or result.stderr != "" or not result.stdout.endswith("\n"):
+            raise RuntimeError(f"app-private demo trace stat is malformed: {remote}")
+        record = result.stdout[:-1]
+        if "\n" in record or "\r" in record:
+            raise RuntimeError(f"app-private demo trace stat is malformed: {remote}")
+        fields = record.split(":", 2)
+        if (len(fields) != 3 or
+                re.fullmatch(r"0|[1-9][0-9]*", fields[0]) is None or
+                re.fullmatch(r"[1-9][0-9]*", fields[1]) is None or
+                not fields[2]):
+            raise RuntimeError(f"app-private demo trace stat is malformed: {remote}")
+        return int(fields[0]), int(fields[1]), fields[2]
+
+    original = lstat(source)
+    if original is None:
+        isolation = DemoTraceIsolation(existed=False, backup_path=None)
+    else:
+        if original[2] != "directory":
+            raise RuntimeError("app-private demo trace path is not a directory")
+        if lstat(backup) is not None:
+            raise RuntimeError("app-private demo trace backup path already exists")
+        moved = runner.run(
+            ("adb", "-s", device, "shell", "run-as", PACKAGE,
+             "mv", "-n", source, backup),
+            timeout=30.0,
+        )
+        if moved.returncode != 0 or moved.stdout != "" or moved.stderr != "":
+            raise RuntimeError("app-private demo trace atomic rename failed")
+        if lstat(source) is not None:
+            raise RuntimeError("app-private demo trace source remained after atomic rename")
+        if lstat(backup) != original:
+            raise RuntimeError("app-private demo trace backup identity changed during rename")
+        isolation = DemoTraceIsolation(existed=True, backup_path=backup)
+
+    created = runner.run(
+        ("adb", "-s", device, "shell", "run-as", PACKAGE,
+         "mkdir", source),
+        timeout=30.0,
+    )
+    if created.returncode != 0 or created.stdout != "" or created.stderr != "":
+        raise RuntimeError("app-private demo trace directory creation failed")
+    fresh = lstat(source)
+    if fresh is None or fresh[2] != "directory":
+        raise RuntimeError("fresh app-private demo trace path is not a directory")
+    return isolation
 
 
 def _stage_app_private_binaries(
@@ -1068,6 +1170,17 @@ def _read_root(root: Path | RootedReader, relative: str, maximum_bytes: int = 1_
     return _read_beneath(root, relative, maximum_bytes, deadline=deadline)
 
 
+def _session_output_relative(report: dict[str, object], local_path: str) -> Path:
+    """Anchor a report-local artifact beneath its validated session directory."""
+    session_id = report.get("session_id")
+    candidate = Path(local_path)
+    if (not isinstance(session_id, str) or _UUID4.fullmatch(session_id) is None or
+            candidate.is_absolute() or candidate.parts[:1] != ("artifacts",) or
+            len(candidate.parts) < 2 or ".." in candidate.parts):
+        raise RuntimeError("timed report has an unsafe session artifact path")
+    return Path(session_id) / candidate
+
+
 def _validated_timed_report(runner: Runner, root: Path | RootedReader, relative: Path) -> tuple[dict[str, object], str]:
     value = _strict_session_report(runner, root, relative)
     if (type(value) is not dict or value.get("schema") != 1 or value.get("status") != "sealed" or
@@ -1257,13 +1370,15 @@ def _validate_timed_artifact_semantics(runner: Runner, report: dict[str, object]
     if (not isinstance(remote_name, str) or not isinstance(local_path, str) or
             Path(local_path).name != remote_name):
         raise RuntimeError("timed binary record has no trusted local artifact identity")
-    binary_bytes = _read_root(root, local_path, deadline=deadline)
+    binary_relative = _session_output_relative(report, local_path)
+    binary_bytes = _read_root(root, str(binary_relative), deadline=deadline)
     metrics_name = remote_name + ".metrics"
     if not any(isinstance(item, dict) and item.get("remote_name") == metrics_name
                for item in records):
         raise RuntimeError("timed binary root has no matching metrics sidecar record")
-    metrics_relative = local_path + ".metrics"
-    metrics_bytes = _read_root(root, metrics_relative, MAX_METRICS_BYTES, deadline=deadline)
+    metrics_relative = Path(str(binary_relative) + ".metrics")
+    metrics_bytes = _read_root(root, str(metrics_relative), MAX_METRICS_BYTES,
+                               deadline=deadline)
     if (record.get("termination") != "stopped" or record.get("metrics_schema") != 3 or
             record.get("native_stop_acknowledged") is not True):
         raise RuntimeError("binary TRACE_STOP/metrics-v3 native-stop contract failed")
@@ -1304,7 +1419,7 @@ def _verify_artifact_read_recovery(device: str, report: dict[str, object], root:
                record["remote_name"].endswith(".trace.bin.lz4"))]
     if len(binary) != 1 or not isinstance(binary[0].get("local_path"), str):
         raise RuntimeError("timed report has no trusted binary identity for recovery verification")
-    local_path = Path(binary[0]["local_path"])
+    local_path = _session_output_relative(report, binary[0]["local_path"])
     metrics_name = str(binary[0]["remote_name"]) + ".metrics"
     metrics_relative = Path(str(local_path) + ".metrics")
     before = _read_root(root, str(metrics_relative), MAX_METRICS_BYTES,
@@ -1439,6 +1554,9 @@ class _HistoricalGateState:
     builder_report: dict[str, object] | None = None
     archive_manifest: tuple[tuple[tuple[str, object], ...], ...] = ()
     archive_sha256: str | None = None
+    trace_backup_path: str | None = None
+    trace_backup_existed: bool | None = None
+    scenario_reports: dict[str, str] = field(default_factory=dict)
     recovery_active: bool = False
 
 
@@ -1540,6 +1658,8 @@ def _gate_evidence(state: _HistoricalGateState, primary: BaseException,
         "archive_manifest": manifest,
         "archive_sha256": archive_sha256,
         "command": report.get("command"),
+        "trace_backup_path": state.trace_backup_path,
+        "trace_backup_existed": state.trace_backup_existed,
         "primary_error": primary_error,
         "cleanup_errors": list(cleanup_errors),
     }
@@ -1549,6 +1669,284 @@ def _gate_evidence(state: _HistoricalGateState, primary: BaseException,
     if not isinstance(bounded, dict):
         raise RuntimeError("historical benchmark gate evidence has invalid shape")
     return bounded
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _head_commit() -> str:
+    raw = capture_bounded(
+        ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+        maximum_bytes=128,
+        timeout=10.0,
+    )
+    try:
+        value = raw.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimeError("acceptance HEAD is not ASCII") from error
+    if _GIT_COMMIT.fullmatch(value) is None:
+        raise RuntimeError("acceptance HEAD is not one lowercase commit hash")
+    return value
+
+
+def _success_gate_document(
+    state: _HistoricalGateState,
+    *,
+    device: str,
+    head_commit: str,
+    started_at: str,
+    completed_at: str,
+) -> dict[str, object]:
+    historical, current, pair = state.historical, state.current, state.pair
+    if historical is None or current is None or pair is None:
+        raise RuntimeError("successful gate identity is incomplete")
+    if set(state.scenario_reports) != set(_SUCCESS_REPORT_DIRECTORIES):
+        raise RuntimeError("successful gate scenario evidence is incomplete")
+    return {
+        "schema": 1,
+        "status": "passed",
+        "exit_code": 0,
+        "head_commit": head_commit,
+        "device": device,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "historical_commit": HISTORICAL_COMMIT,
+        "target_canonical_sha256": historical.target_canonical_sha256,
+        "target_raw_sha256": historical.target_raw_sha256,
+        "historical_apk_sha256": historical.apk_sha256,
+        "current_apk_sha256": current.sha256,
+        "tracer_sha256": pair.tracer.sha256,
+        "companion_sha256": pair.companion.sha256,
+        "scenario_reports": dict(sorted(state.scenario_reports.items())),
+        "trace_backup_path": state.trace_backup_path,
+        "trace_backup_existed": state.trace_backup_existed,
+    }
+
+
+def _validate_success_gate_document(directory: Path,
+                                    document: dict[str, object]) -> None:
+    expected_keys = {
+        "schema", "status", "exit_code", "head_commit", "device",
+        "started_at", "completed_at", "historical_commit",
+        "target_canonical_sha256", "target_raw_sha256",
+        "historical_apk_sha256", "current_apk_sha256", "tracer_sha256",
+        "companion_sha256", "scenario_reports", "trace_backup_path",
+        "trace_backup_existed",
+    }
+    if set(document) != expected_keys:
+        raise RuntimeError("successful gate evidence has unexpected fields")
+    if (document["schema"] != 1 or type(document["schema"]) is not int or
+            document["status"] != "passed" or document["exit_code"] != 0 or
+            type(document["exit_code"]) is not int):
+        raise RuntimeError("successful gate evidence has an invalid terminal status")
+    if (type(document["head_commit"]) is not str or
+            _GIT_COMMIT.fullmatch(document["head_commit"]) is None):
+        raise RuntimeError("successful gate evidence has an invalid HEAD")
+    device = document["device"]
+    if (type(device) is not str or not device or len(device.encode("utf-8")) > 256 or
+            re.fullmatch(r"[A-Za-z0-9_.:-]+", device) is None):
+        raise RuntimeError("successful gate evidence has an invalid device serial")
+    timestamps = (document["started_at"], document["completed_at"])
+    if (any(type(value) is not str or
+            re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", value) is None
+            for value in timestamps) or timestamps[1] < timestamps[0]):
+        raise RuntimeError("successful gate evidence has invalid timestamps")
+    if document["historical_commit"] != HISTORICAL_COMMIT:
+        raise RuntimeError("successful gate evidence has the wrong historical commit")
+    for name in ("target_raw_sha256", "historical_apk_sha256", "current_apk_sha256",
+                 "tracer_sha256", "companion_sha256"):
+        if type(document[name]) is not str or _SHA256.fullmatch(document[name]) is None:
+            raise RuntimeError(f"successful gate evidence has an invalid {name}")
+    if document["target_canonical_sha256"] != HISTORICAL_CANONICAL_TARGET_SHA256:
+        raise RuntimeError("successful gate evidence has the wrong canonical target")
+    backup_existed = document["trace_backup_existed"]
+    backup_path = document["trace_backup_path"]
+    if type(backup_existed) is not bool:
+        raise RuntimeError("successful gate evidence has invalid trace isolation")
+    if backup_existed:
+        if (type(backup_path) is not str or
+                re.fullmatch(re.escape(_DEMO_TRACE_BACKUP_PREFIX) + r"[0-9a-f]{32}",
+                             backup_path) is None):
+            raise RuntimeError("successful gate evidence has invalid trace isolation")
+    elif backup_path is not None:
+        raise RuntimeError("successful gate evidence has invalid trace isolation")
+    reports = document["scenario_reports"]
+    if type(reports) is not dict or set(reports) != set(_SUCCESS_REPORT_DIRECTORIES):
+        raise RuntimeError("successful gate evidence has invalid scenario reports")
+    with RootedReader(directory) as held:
+        for label, expected_directory in _SUCCESS_REPORT_DIRECTORIES.items():
+            relative = reports[label]
+            parts = Path(relative).parts if type(relative) is str else ()
+            if (len(parts) != 3 or parts[0] != expected_directory or
+                    _UUID4.fullmatch(parts[1]) is None or parts[2] != "report.json"):
+                raise RuntimeError("successful gate evidence has an unsafe scenario report")
+            held.stat_regular(Path(relative))
+
+
+def _open_strict_private_directory(path: Path, *, create: bool) -> int:
+    if not path.is_absolute():
+        raise RuntimeError("acceptance evidence directory must be absolute")
+    if create:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+    try:
+        named = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"acceptance evidence directory is unavailable: {path}") from error
+    if (not stat.S_ISDIR(named.st_mode) or stat.S_IMODE(named.st_mode) != 0o700 or
+            named.st_uid != os.geteuid()):
+        raise RuntimeError(f"acceptance evidence directory is unsafe: {path}")
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+            getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+    except OSError as error:
+        raise RuntimeError(f"acceptance evidence directory is unsafe: {path}") from error
+    opened = os.fstat(descriptor)
+    if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or
+            not stat.S_ISDIR(opened.st_mode) or stat.S_IMODE(opened.st_mode) != 0o700 or
+            opened.st_uid != os.geteuid()):
+        os.close(descriptor)
+        raise RuntimeError(f"acceptance evidence directory identity changed: {path}")
+    return descriptor
+
+
+def _rename_evidence_noreplace(source_parent: int, source: str,
+                               destination_parent: int, destination: str) -> None:
+    if (os.name != "posix" or _SAFE_COMPONENT.fullmatch(source) is None or
+            _SAFE_COMPONENT.fullmatch(destination) is None):
+        raise RuntimeError("atomic acceptance evidence publication is unavailable")
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("atomic acceptance evidence publication is unavailable")
+    renameat2.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(source_parent, source.encode("ascii"), destination_parent,
+                 destination.encode("ascii"), 1) != 0:
+        failure = ctypes.get_errno()
+        if failure == errno.EEXIST:
+            raise RuntimeError("acceptance evidence destination already exists")
+        raise OSError(failure, os.strerror(failure))
+
+
+def _fsync_directory(descriptor: int) -> None:
+    os.fsync(descriptor)
+
+
+class _SuccessPublicationError(RuntimeError):
+    def __init__(self, message: str, retained_path: Path) -> None:
+        super().__init__(message)
+        self.retained_path = retained_path
+
+
+def _write_success_manifest(directory: Path, document: dict[str, object]) -> None:
+    _validate_success_gate_document(directory, document)
+    payload = json.dumps(
+        document, allow_nan=False, ensure_ascii=False,
+        separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    if len(payload) > _MAX_SUCCESS_EVIDENCE_BYTES:
+        raise RuntimeError("successful gate evidence exceeds 64 KiB")
+    root = _open_strict_private_directory(directory.resolve(), create=False)
+    temporary = f".{_SUCCESS_MANIFEST_NAME}.{uuid.uuid4().hex}.tmp"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) |
+            getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=root,
+        )
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("successful gate evidence write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        closing, descriptor = descriptor, -1
+        os.close(closing)
+        _rename_evidence_noreplace(root, temporary, root, _SUCCESS_MANIFEST_NAME)
+        _fsync_directory(root)
+    except BaseException:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.unlink(temporary, dir_fd=root)
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        os.close(root)
+
+
+def _publish_success_directory(scratch: Path, evidence_parent: Path, *, token: str) -> Path:
+    if _UUID4.fullmatch(token) is None:
+        raise ValueError("acceptance evidence token must be lowercase UUIDv4")
+    scratch = scratch.absolute()
+    evidence_parent = evidence_parent.absolute()
+    source_parent = _open_strict_private_directory(scratch.parent, create=False)
+    source_descriptor = -1
+    destination_parent = -1
+    renamed = False
+    destination = evidence_parent / token
+    try:
+        source = os.stat(scratch.name, dir_fd=source_parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(source.st_mode) or stat.S_IMODE(source.st_mode) != 0o700 or
+                source.st_uid != os.geteuid()):
+            raise RuntimeError("acceptance scratch directory is unsafe")
+        source_descriptor = os.open(
+            scratch.name,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+            getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=source_parent,
+        )
+        held_source = os.fstat(source_descriptor)
+        if (held_source.st_dev, held_source.st_ino) != (source.st_dev, source.st_ino):
+            raise RuntimeError("acceptance scratch directory identity changed")
+        destination_parent = _open_strict_private_directory(evidence_parent, create=True)
+        _rename_evidence_noreplace(source_parent, scratch.name,
+                                   destination_parent, token)
+        renamed = True
+        published = os.stat(token, dir_fd=destination_parent, follow_symlinks=False)
+        if ((published.st_dev, published.st_ino) !=
+                (held_source.st_dev, held_source.st_ino)):
+            raise RuntimeError("acceptance scratch directory identity changed")
+        _fsync_directory(destination_parent)
+        _fsync_directory(source_parent)
+    except BaseException as error:
+        if renamed:
+            raise _SuccessPublicationError(
+                f"successful evidence publication failed: {type(error).__name__}: {error}",
+                destination,
+            ) from error
+        raise
+    finally:
+        close_failures = []
+        for descriptor in (source_descriptor, destination_parent, source_parent):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError as error:
+                    close_failures.append(error)
+        if close_failures and sys.exception() is None:
+            target = destination if renamed else scratch
+            raise _SuccessPublicationError(
+                f"successful evidence directory close failed: {close_failures[0]}", target,
+            )
+    return destination.resolve()
 
 
 def _publish_gate_failure_evidence(directory: Path, state: _HistoricalGateState,
@@ -1731,26 +2129,31 @@ def _run_current_fixture_phase(device: str, directory: Path, *, runner: Runner,
     with ExitStack() as held_roots:
         reports: dict[str, tuple[RootedReader, Path]] = {}
         timed_reports: dict[str, tuple[dict[str, object], str]] = {}
-        timed_evidence: dict[str, tuple[str, str]] = {}
-        for scenario, form, name in (("timed", "offset", "offset"), ("timed", "symbol", "symbol"), ("monitor-exit", "offset", "exit"), ("flight-crash", "offset", "crash")):
-            state.phase = f"{scenario}-{form}"
+        for form, name in (("offset", "offset"), ("symbol", "symbol")):
+            state.phase = f"timed-{form}"
             output = directory / name
-            published = runner.run(_demo_command(device, scenario, form, output), timeout=180.0,
-                                   allowed=(0, 2) if scenario == "flight-crash" else (0,))
+            published = runner.run(
+                _demo_command(device, "timed", form, output), timeout=180.0,
+            )
             held = held_roots.enter_context(RootedReader(output))
             reports[name] = (held, _published_report_path(published.stdout, held))
-            if scenario == "timed":
-                preview, preview_artifact = _validated_timed_report(runner, *reports[name])
-                timed_reports[name] = preview, preview_artifact
-                timed_evidence[name] = _wait_for_timed_fixture_evidence(
-                    runner, preview, timeout=5.0,
-                )
-            if scenario == "flight-crash" and published.returncode != 2:
-                raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
+            preview, preview_artifact = _validated_timed_report(runner, *reports[name])
+            state.scenario_reports[f"timed-{form}"] = str(Path(name) / reports[name][1])
+            timed_reports[name] = preview, preview_artifact
+            receipt, entry_status = _wait_for_timed_fixture_evidence(
+                runner, preview, timeout=5.0,
+            )
+            _validate_timed_fixture_receipt(preview, receipt, entry_status)
+            if name == "offset":
+                runner.run(("adb", "-s", device, "shell", "su", "-c",
+                            f"kill -0 {preview['pid']}"), timeout=10.0)
+                timed_oracle = _wait_for_timed_result(runner, timeout=5.0)
+                if timed_oracle != baseline:
+                    raise RuntimeError(
+                        "long timed target did not return the baseline oracle value"
+                    )
         timed, artifact = timed_reports["offset"]
-        _validate_timed_fixture_receipt(timed, *timed_evidence["offset"])
         symbol, _ = timed_reports["symbol"]
-        _validate_timed_fixture_receipt(symbol, *timed_evidence["symbol"])
         _validate_timed_artifact_semantics(
             runner, timed, reports["offset"][0], converter=converter,
         )
@@ -1762,34 +2165,58 @@ def _run_current_fixture_phase(device: str, directory: Path, *, runner: Runner,
         symbol_status = symbol["native"]["status"]
         if timed_status["normalizedScenes"] != symbol_status["normalizedScenes"]:
             raise RuntimeError("offset and symbol timed scenes did not normalize identically")
-        _validated_monitor_report(runner, *reports["exit"], status="process_exited")
-        _validated_monitor_report(runner, *reports["crash"], status="crash_recovered")
-    runner.run(("adb", "-s", device, "shell", "kill", "-0", str(timed["pid"])), timeout=10.0)
-    timed_oracle = _wait_for_timed_result(runner, timeout=5.0)
-    if timed_oracle != baseline:
-        raise RuntimeError("long timed target did not return the baseline oracle value")
-    pulls = (("latest", ("--latest",), None, False), ("name", ("--name", artifact), artifact, False), ("all", ("--all",), None, False), ("compressed", ("--all", "--compressed-only"), None, True))
-    for name, selector, expected, compressed in pulls:
-        state.phase = f"pull-{name}"
-        output = directory / name
-        result = runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE, *selector, "--device", device, "--output", str(output)), timeout=180.0)
-        with RootedReader(output) as held:
-            _validated_pull_report(runner, result.stdout, held, named=expected,
-                                   compressed_only=compressed)
-    _verify_pull_outputs(directory)
+
+        pulls = (("latest", ("--latest",), None, False),
+                 ("name", ("--name", artifact), artifact, False),
+                 ("all", ("--all",), None, False),
+                 ("compressed", ("--all", "--compressed-only"), None, True))
+        for name, selector, expected, compressed in pulls:
+            state.phase = f"pull-{name}"
+            output = directory / name
+            result = runner.run(("python3", "-m", "qtrace", "pull", "--package", PACKAGE,
+                                 *selector, "--device", device, "--output", str(output)),
+                                timeout=180.0)
+            with RootedReader(output) as held:
+                relative = _published_report_path(result.stdout, held)
+                _validated_pull_report(runner, result.stdout, held, named=expected,
+                                       compressed_only=compressed)
+                state.scenario_reports[f"pull-{name}"] = str(Path(name) / relative)
+        _verify_pull_outputs(directory)
+
+        for scenario, name, expected_status in (
+                ("monitor-exit", "exit", "process_exited"),
+                ("flight-crash", "crash", "crash_recovered")):
+            state.phase = f"{scenario}-offset"
+            output = directory / name
+            published = runner.run(
+                _demo_command(device, scenario, "offset", output), timeout=180.0,
+                allowed=(0, 2) if scenario == "flight-crash" else (0,),
+            )
+            held = held_roots.enter_context(RootedReader(output))
+            report = (held, _published_report_path(published.stdout, held))
+            _validated_monitor_report(runner, *report, status=expected_status)
+            state.scenario_reports[scenario] = str(Path(name) / report[1])
+            if scenario == "flight-crash" and published.returncode != 2:
+                raise RuntimeError("flight-crash must publish crash recovery with exit code 2")
 
 
 def run_acceptance(device: str, directory: Path, *, runner: Runner,
                    converter=None, artifact_client_factory=AdbArtifactClient,
-                   historical_builder=build_historical_benchmark_apk) -> int:
+                   historical_builder=build_historical_benchmark_apk,
+                   success_evidence: dict[str, object] | None = None,
+                   gate_started_at: str | None = None,
+                   head_commit: str | None = None) -> int:
     if not device:
         raise ValueError("--device is required for manual acceptance")
     directory.mkdir(parents=True, exist_ok=True)
     state = _HistoricalGateState()
     try:
-        runner.run(("./gradlew", "nativeHostTest", "--no-daemon"), timeout=900.0)
+        runner.run((
+            "./gradlew", "nativeHostTest", ":app:testDebugUnitTest",
+            ":app:assembleDebug", ":tracer:assembleDebug",
+            ":tracer:copyTracerDebug", "--no-daemon",
+        ), timeout=900.0)
         runner.run(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), timeout=300.0)
-        runner.run(("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"), timeout=900.0)
         state.phase = "snapshot-current"
         state.current, state.pair = _snapshot_current_inputs(
             deadline=time.monotonic() + _HOST_BINARY_SNAPSHOT_SECONDS,
@@ -1827,6 +2254,14 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
         _install_held_apk(device, runner, current)
         state.phase = "force-stop-current"
         runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)
+        state.phase = "isolate-current-traces"
+        isolation_token = uuid.uuid4().hex
+        state.trace_backup_path = _DEMO_TRACE_BACKUP_PREFIX + isolation_token
+        isolation = _isolate_demo_trace_directory(
+            device, runner, token=isolation_token,
+        )
+        state.trace_backup_existed = isolation.existed
+        state.trace_backup_path = isolation.backup_path
         state.phase = "restage-current"
         _stage_app_private_binaries(
             device, runner, token=uuid.uuid4().hex, pair=pair, package=PACKAGE,
@@ -1903,6 +2338,17 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             attempt_device_recovery=False,
         )
     state.recovery_active = False
+    if success_evidence is not None:
+        if (type(gate_started_at) is not str or type(head_commit) is not str or
+                success_evidence):
+            raise RuntimeError("successful gate evidence output is invalid")
+        success_evidence.update(_success_gate_document(
+            state,
+            device=device,
+            head_commit=head_commit,
+            started_at=gate_started_at,
+            completed_at=_utc_timestamp(),
+        ))
     return 0
 
 
@@ -1913,22 +2359,62 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments = parser.parse_args(argv)
     except SystemExit as error:
         return int(error.code)
-    parent = Path.cwd() / "qtrace-acceptance-failures"
+    workspace = Path.cwd().absolute()
+    parent = workspace / "qtrace-acceptance-failures"
     parent.mkdir(mode=0o700, exist_ok=True)
-    if parent.is_symlink() or not parent.is_dir():
-        raise RuntimeError("acceptance failure parent is unsafe")
-    temporary = tempfile.TemporaryDirectory(prefix=".qtrace-device-acceptance-", dir=parent)
-    root = Path(temporary.name)
+    parent_descriptor = _open_strict_private_directory(parent, create=False)
+    os.close(parent_descriptor)
+    root = Path(tempfile.mkdtemp(prefix=".qtrace-device-acceptance-", dir=parent))
+    retained_success: Path | None = None
     try:
-        result = run_acceptance(arguments.device, root, runner=SubprocessRunner(arguments.device))
+        started_at = _utc_timestamp()
+        head_commit = _head_commit()
+        success_evidence: dict[str, object] = {}
+        result = run_acceptance(
+            arguments.device,
+            root,
+            runner=SubprocessRunner(arguments.device),
+            success_evidence=success_evidence,
+            gate_started_at=started_at,
+            head_commit=head_commit,
+        )
+        if result != 0:
+            raise RuntimeError("acceptance returned a nonzero success result")
+        if _head_commit() != head_commit:
+            raise RuntimeError("acceptance HEAD changed during the physical gate")
+        _write_success_manifest(root, success_evidence)
+        retained_success = _publish_success_directory(
+            root,
+            workspace / "qtrace-acceptance-evidence",
+            token=str(uuid.uuid4()),
+        )
     except BaseException as error:
-        retained = parent / uuid.uuid4().hex
-        root.rename(retained)
-        temporary.cleanup()
+        source = getattr(error, "retained_path", None)
+        if not isinstance(source, Path):
+            source = root
+        retained = source
+        preservation_error: BaseException | None = None
+        if source.exists():
+            try:
+                retained = _publish_success_directory(
+                    source, parent, token=str(uuid.uuid4()),
+                )
+            except BaseException as failed:
+                preservation_error = failed
+                failed_retained = getattr(failed, "retained_path", None)
+                if isinstance(failed_retained, Path):
+                    retained = failed_retained
         print(f"qtrace acceptance failed; generated reports remain at: {retained}", file=sys.stderr)
         print(str(error), file=sys.stderr)
+        if preservation_error is not None:
+            print(
+                "qtrace failure evidence could not be renamed but remains at its held path: "
+                f"{type(preservation_error).__name__}: {preservation_error}",
+                file=sys.stderr,
+            )
         return 1
-    temporary.cleanup()
+    assert retained_success is not None
+    print(f"qtrace acceptance passed; evidence remains at: {retained_success}")
     return result
 
 

@@ -41,11 +41,15 @@ class ShadowHookCompanionContractTests(unittest.TestCase):
         self.assertIn("static void module_constructor_pre(", tracer)
         self.assertIn("install_hooks_for_module(module, 0, true)", tracer)
 
-    def test_application_injectors_configure_but_never_preload_apk_companion(self):
-        for name in ("benchmark_trace.js", "signal_probe.js"):
+    def test_application_injectors_configure_but_never_preload_companion(self):
+        expected_roots = {
+            "benchmark_trace.js": "application.getFilesDir().getCanonicalPath()",
+            "signal_probe.js": "applicationInfo.nativeLibraryDir",
+        }
+        for name, expected_root in expected_roots.items():
             source = (ROOT / "scripts" / name).read_text()
             with self.subTest(injector=name):
-                self.assertIn("applicationInfo.nativeLibraryDir", source)
+                self.assertIn(expected_root, source)
                 self.assertIn(HELPER, source)
                 self.assertNotIn("application.getClass(), companionPath)", source)
                 self.assertNotIn("Module.load(companionPath)", source)

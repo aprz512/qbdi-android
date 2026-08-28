@@ -114,10 +114,9 @@ function loadTracerThroughApplicationLoader() {
     if (application === null) {
       throw new Error('application is not ready for tracer loading');
     }
-    const applicationInfo = application.getApplicationInfo();
-    companionPath = String(applicationInfo.nativeLibraryDir.value) +
-      '/' + config.shadowhookCompanion;
-    const tracerPath = String(application.getFilesDir().getAbsolutePath()) + '/' + config.tracer;
+    const privateDirectory = String(application.getFilesDir().getCanonicalPath());
+    companionPath = privateDirectory + '/' + config.shadowhookCompanion;
+    const tracerPath = privateDirectory + '/' + config.tracer;
     const Runtime = Java.use('java.lang.Runtime');
     Runtime.getRuntime().load0.overload('java.lang.Class', 'java.lang.String').call(
       Runtime.getRuntime(), application.getClass(), tracerPath);

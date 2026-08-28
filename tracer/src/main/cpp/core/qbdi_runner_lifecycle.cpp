@@ -124,8 +124,15 @@ void QbdiNormalStopLifecycle::acknowledge(bool sealed) noexcept {
     if (acknowledge_called_) return;
     acknowledge_called_ = true;
     ++acknowledge_calls_;
+    acknowledged_sealed_ = seal_called_ && sealed_ && sealed;
+}
+
+void QbdiNormalStopLifecycle::finish(bool artifacts_finalized) noexcept {
+    if (finish_called_) return;
+    finish_called_ = true;
     if (!enabled()) return;
-    if (seal_called_ && sealed_ && sealed) {
+    if (acknowledge_called_ && acknowledged_sealed_ &&
+        artifacts_finalized) {
         runtime_->acknowledge_sealed(admission_);
     } else {
         runtime_->finish_call(admission_, false);
@@ -139,7 +146,7 @@ bool QbdiNormalStopLifecycle::stop_observed() const noexcept {
 bool QbdiNormalStopLifecycle::sealed() const noexcept { return sealed_; }
 
 bool QbdiNormalStopLifecycle::admission_finished() const noexcept {
-    return acknowledge_called_;
+    return finish_called_;
 }
 
 #if defined(QTRACE_HOST_TEST)

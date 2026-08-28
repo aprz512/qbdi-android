@@ -161,6 +161,27 @@ class PreflightTests(unittest.TestCase):
             )
         return result, frida
 
+    def test_manual_package_binder_reuses_bound_target_identity_without_session_prerequisites(self):
+        from qtrace.preflight import bind_package_access
+
+        device = FakeDevice()
+        self.assertEqual(
+            "root",
+            bind_package_access(
+                device, "com.example.external", timeout=2.0,
+            ),
+        )
+
+        self.assertEqual(("package", "com.example.external"), device.events[0][:2])
+        self.assertTrue(0 < device.events[0][2] <= 2.0)
+        self.assertEqual(
+            ("bind", "com.example.external", "root", "direct", 20000, "run-as"),
+            device.events[-1],
+        )
+        self.assertFalse(any(event[0] == "install" for event in device.events))
+        self.assertFalse(any(call[0][:1] == ("getprop",) or call[0][:1] == ("df",)
+                             for call in device.shell_calls))
+
     def test_installs_existing_apk_before_package_checks_and_records_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             apk = Path(directory) / "external.apk"

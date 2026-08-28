@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 from contextlib import contextmanager
 import hashlib
+import io
 import json
 import math
 import os
@@ -1169,9 +1171,29 @@ class FakeRunner:
         self.fail_first_read = fail_first_read
         self.reads = 0
         self.offset_root: Path | None = None
+        self.trace_directory_exists = False
 
     def run(self, command, *, timeout, cwd=None, allowed=(0,)):
         self.commands.append(tuple(command))
+        if tuple(command[4:]) == (
+            "run-as", "com.aprz.qbdiandroid", "mkdir", "files/qbdi-traces",
+        ):
+            self.trace_directory_exists = True
+            return __import__(
+                "scripts.qtrace_device_acceptance", fromlist=["CommandResult"],
+            ).CommandResult("", "", 0)
+        if (tuple(command[4:9]) ==
+                ("run-as", "com.aprz.qbdiandroid", "stat", "-c", "%d:%i:%F") and
+                str(command[-1]).startswith("files/qbdi-traces")):
+            if command[-1] == "files/qbdi-traces" and self.trace_directory_exists:
+                return __import__(
+                    "scripts.qtrace_device_acceptance", fromlist=["CommandResult"],
+                ).CommandResult("65082:900:directory\n", "", 0)
+            return __import__(
+                "scripts.qtrace_device_acceptance", fromlist=["CommandResult"],
+            ).CommandResult(
+                "", f"stat: '{command[-1]}': No such file or directory\n", 1,
+            )
         if "--output" in command and "qtrace" in command and "demo" in command:
             output = Path(command[command.index("--output") + 1])
             output.mkdir(parents=True, exist_ok=True)
@@ -1247,6 +1269,51 @@ class FakeRunner:
 
     def read_text_beneath(self, root: Path, relative: Path, *, timeout: float) -> str:
         return self.read_text(getattr(root, "path", root) / relative, timeout=timeout)
+
+
+class TraceIsolationRunner:
+    """Stateful fake for the fixed demo app-private trace directory."""
+
+    def __init__(self, nodes=None, *, rename_failure: bool = False,
+                 mkdir_failure: bool = False):
+        self.nodes = dict(nodes or {})
+        self.rename_failure = rename_failure
+        self.mkdir_failure = mkdir_failure
+        self.next_inode = 900
+        self.commands: list[tuple[tuple[str, ...], tuple[int, ...]]] = []
+
+    def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+        from scripts.qtrace_device_acceptance import CommandResult
+
+        command = tuple(command)
+        self.commands.append((command, allowed))
+        operation = command[6]
+        if operation == "stat":
+            path = command[-1]
+            node = self.nodes.get(path)
+            if node is None:
+                return CommandResult(
+                    "", f"stat: '{path}': No such file or directory\n", 1,
+                )
+            device, inode, kind = node
+            return CommandResult(f"{device}:{inode}:{kind}\n", "", 0)
+        if operation == "mv":
+            source, destination = command[-2:]
+            if self.rename_failure:
+                raise RuntimeError("injected app-private trace rename failure")
+            if destination not in self.nodes and source in self.nodes:
+                self.nodes[destination] = self.nodes.pop(source)
+            return CommandResult("", "", 0)
+        if operation == "mkdir":
+            path = command[-1]
+            if self.mkdir_failure:
+                raise RuntimeError("injected app-private trace mkdir failure")
+            if path in self.nodes:
+                raise RuntimeError("injected app-private trace mkdir collision")
+            self.nodes[path] = (65082, self.next_inode, "directory")
+            self.next_inode += 1
+            return CommandResult("", "", 0)
+        raise AssertionError(f"unexpected trace isolation command: {command!r}")
 
 
 class StagingDeviceRunner(FakeRunner):
@@ -1360,6 +1427,9 @@ class StagingDeviceRunner(FakeRunner):
             return self._result()
         operation, arguments = arguments[2], arguments[3:]
         if operation == "mkdir":
+            if arguments == ("files/qbdi-traces",):
+                self.trace_directory_exists = True
+                return self._result()
             self._fail_if_requested("mkdir:files")
             if arguments != ("-p", "files"):
                 raise RuntimeError(f"unexpected app-private mkdir arguments: {arguments}")
@@ -1404,6 +1474,15 @@ class StagingDeviceRunner(FakeRunner):
             return self._result()
         if operation == "stat":
             path = arguments[-1]
+            if (arguments[:-1] == ("-c", "%d:%i:%F") and
+                    path.startswith("files/qbdi-traces")):
+                if path == "files/qbdi-traces" and self.trace_directory_exists:
+                    return self._result("65082:900:directory\n")
+                return __import__(
+                    "scripts.qtrace_device_acceptance", fromlist=["CommandResult"],
+                ).CommandResult(
+                    "", f"stat: '{path}': No such file or directory\n", 1,
+                )
             if arguments[:-1] not in (("-c", "%F"), ("-c", "%a")):
                 raise RuntimeError(f"unexpected app-private stat arguments: {arguments}")
             if path == "files":
@@ -1713,6 +1792,164 @@ class AcceptanceHarnessTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("--device DEVICE", completed.stdout)
 
+    def test_demo_trace_isolation_records_absence_without_renaming(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        self.assertTrue(hasattr(acceptance, "_isolate_demo_trace_directory"))
+        runner = TraceIsolationRunner()
+
+        result = acceptance._isolate_demo_trace_directory(
+            "SERIAL", runner, token="a" * 32,
+        )
+
+        self.assertFalse(result.existed)
+        self.assertIsNone(result.backup_path)
+        self.assertIn("files/qbdi-traces", runner.nodes)
+        self.assertEqual((65082, 900, "directory"), runner.nodes["files/qbdi-traces"])
+        self.assertFalse(any(command[0][6] == "mv" for command in runner.commands))
+
+    def test_demo_trace_isolation_atomically_renames_only_the_fixed_directory(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        self.assertTrue(hasattr(acceptance, "_isolate_demo_trace_directory"))
+        source = "files/qbdi-traces"
+        backup = f"{source}.pre-acceptance-{'b' * 32}"
+        original = (65082, 153076, "directory")
+        runner = TraceIsolationRunner({source: original})
+
+        result = acceptance._isolate_demo_trace_directory(
+            "SERIAL", runner, token="b" * 32,
+        )
+
+        self.assertTrue(result.existed)
+        self.assertEqual(backup, result.backup_path)
+        self.assertIn(source, runner.nodes)
+        self.assertEqual((65082, 900, "directory"), runner.nodes[source])
+        self.assertEqual(original, runner.nodes[backup])
+        self.assertEqual([
+            (("adb", "-s", "SERIAL", "shell", "run-as", acceptance.PACKAGE,
+              "stat", "-c", "%d:%i:%F", source), (0, 1)),
+            (("adb", "-s", "SERIAL", "shell", "run-as", acceptance.PACKAGE,
+              "stat", "-c", "%d:%i:%F", backup), (0, 1)),
+            (("adb", "-s", "SERIAL", "shell", "run-as", acceptance.PACKAGE,
+              "mv", "-n", source, backup), (0,)),
+            (("adb", "-s", "SERIAL", "shell", "run-as", acceptance.PACKAGE,
+              "stat", "-c", "%d:%i:%F", source), (0, 1)),
+            (("adb", "-s", "SERIAL", "shell", "run-as", acceptance.PACKAGE,
+              "stat", "-c", "%d:%i:%F", backup), (0, 1)),
+            (("adb", "-s", "SERIAL", "shell", "run-as", acceptance.PACKAGE,
+              "mkdir", source), (0,)),
+            (("adb", "-s", "SERIAL", "shell", "run-as", acceptance.PACKAGE,
+              "stat", "-c", "%d:%i:%F", source), (0, 1)),
+        ], runner.commands)
+
+    def test_repeated_demo_trace_isolation_retains_each_unique_backup(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        self.assertTrue(hasattr(acceptance, "_isolate_demo_trace_directory"))
+        source = "files/qbdi-traces"
+        first = (65082, 101, "directory")
+        second = (65082, 202, "directory")
+        runner = TraceIsolationRunner({source: first})
+
+        initial = acceptance._isolate_demo_trace_directory(
+            "SERIAL", runner, token="c" * 32,
+        )
+        runner.nodes[source] = second
+        repeated = acceptance._isolate_demo_trace_directory(
+            "SERIAL", runner, token="d" * 32,
+        )
+
+        self.assertEqual(first, runner.nodes[initial.backup_path])
+        self.assertEqual(second, runner.nodes[repeated.backup_path])
+        self.assertNotEqual(initial.backup_path, repeated.backup_path)
+        self.assertIn(source, runner.nodes)
+        self.assertEqual((65082, 901, "directory"), runner.nodes[source])
+
+    def test_demo_trace_isolation_rejects_a_symlink_without_renaming(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        self.assertTrue(hasattr(acceptance, "_isolate_demo_trace_directory"))
+        source = "files/qbdi-traces"
+        runner = TraceIsolationRunner({source: (65082, 303, "symbolic link")})
+
+        with self.assertRaisesRegex(RuntimeError, "not a directory"):
+            acceptance._isolate_demo_trace_directory(
+                "SERIAL", runner, token="e" * 32,
+            )
+
+        self.assertIn(source, runner.nodes)
+        self.assertFalse(any(command[0][6] == "mv" for command in runner.commands))
+
+    def test_demo_trace_isolation_fails_closed_on_backup_collision(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        self.assertTrue(hasattr(acceptance, "_isolate_demo_trace_directory"))
+        source = "files/qbdi-traces"
+        backup = f"{source}.pre-acceptance-{'f' * 32}"
+        runner = TraceIsolationRunner({
+            source: (65082, 404, "directory"),
+            backup: (65082, 405, "directory"),
+        })
+
+        with self.assertRaisesRegex(RuntimeError, "backup path already exists"):
+            acceptance._isolate_demo_trace_directory(
+                "SERIAL", runner, token="f" * 32,
+            )
+
+        self.assertIn(source, runner.nodes)
+        self.assertFalse(any(command[0][6] == "mv" for command in runner.commands))
+
+    def test_demo_trace_isolation_rename_failure_retains_the_source(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        self.assertTrue(hasattr(acceptance, "_isolate_demo_trace_directory"))
+        source = "files/qbdi-traces"
+        runner = TraceIsolationRunner(
+            {source: (65082, 505, "directory")}, rename_failure=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "injected app-private trace rename"):
+            acceptance._isolate_demo_trace_directory(
+                "SERIAL", runner, token="1" * 32,
+            )
+
+        self.assertEqual((65082, 505, "directory"), runner.nodes[source])
+
+    def test_demo_trace_isolation_mkdir_failure_retains_the_recoverable_backup(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        source = "files/qbdi-traces"
+        backup = f"{source}.pre-acceptance-{'2' * 32}"
+        original = (65082, 606, "directory")
+        runner = TraceIsolationRunner(
+            {source: original}, mkdir_failure=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "injected app-private trace mkdir"):
+            acceptance._isolate_demo_trace_directory(
+                "SERIAL", runner, token="2" * 32,
+            )
+
+        self.assertNotIn(source, runner.nodes)
+        self.assertEqual(original, runner.nodes[backup])
+
+    def test_gate_evidence_records_recoverable_demo_trace_backup(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        state = acceptance._HistoricalGateState(phase="current-fixtures")
+        state.trace_backup_path = (
+            "files/qbdi-traces.pre-acceptance-1234567890abcdef1234567890abcdef"
+        )
+        state.trace_backup_existed = True
+
+        evidence = acceptance._gate_evidence(
+            state, RuntimeError("fixture failure"), [],
+        )
+
+        self.assertEqual(state.trace_backup_path, evidence["trace_backup_path"])
+        self.assertIs(True, evidence["trace_backup_existed"])
+
     def test_timed_entry_evidence_requires_running_native_snapshot_before_entry(self):
         from scripts.qtrace_device_acceptance import _validate_timed_fixture_receipt
 
@@ -1996,7 +2233,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
     def test_timed_semantics_reparses_a_real_stopped_qtrb_and_metrics_v3_sidecar(self):
         from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
 
-        report = {"artifacts": [{
+        report = {"session_id": SESSION, "artifacts": [{
             "remote_name": "fixture.trace.bin",
             "local_path": "artifacts/fixture.trace.bin",
             "termination": "stopped",
@@ -2005,8 +2242,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
         }, {"remote_name": "fixture.trace.bin.metrics", "decoder": "sidecar"}]}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            artifacts = root / "artifacts"
-            artifacts.mkdir()
+            artifacts = root / SESSION / "artifacts"
+            artifacts.mkdir(parents=True)
             source = artifacts / "fixture.trace.bin"
             source.write_bytes(stopped_binary_stream(compression=0))
             (artifacts / "fixture.trace.bin.metrics").write_text(
@@ -2024,6 +2261,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         runner = FakeRunner()
         report = {
+            "session_id": SESSION,
             "artifacts": [{
                 "remote_name": "fixture.trace.bin.lz4",
                 "local_path": "artifacts/fixture.trace.bin.lz4",
@@ -2036,8 +2274,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
         snapshots: list[bytes] = []
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            artifacts = root / "artifacts"
-            artifacts.mkdir()
+            artifacts = root / SESSION / "artifacts"
+            artifacts.mkdir(parents=True)
             source = artifacts / "fixture.trace.bin.lz4"
             source.write_bytes(b"fixture qtrb bytes")
             (artifacts / "fixture.trace.bin.lz4.metrics").write_text("metrics")
@@ -2065,7 +2303,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
     def test_timed_semantics_propagates_binary_conversion_failure(self):
         from scripts.qtrace_device_acceptance import _validate_timed_artifact_semantics
 
-        report = {"artifacts": [{
+        report = {"session_id": SESSION, "artifacts": [{
             "remote_name": "fixture.trace.bin",
             "local_path": "artifacts/fixture.trace.bin",
             "termination": "stopped",
@@ -2074,8 +2312,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
         }, {"remote_name": "fixture.trace.bin.metrics", "decoder": "sidecar"}]}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            artifacts = root / "artifacts"
-            artifacts.mkdir()
+            artifacts = root / SESSION / "artifacts"
+            artifacts.mkdir(parents=True)
             (artifacts / "fixture.trace.bin").write_bytes(b"fixture qtrb bytes")
             (artifacts / "fixture.trace.bin.metrics").write_text("metrics")
             with self.assertRaisesRegex(RuntimeError, "invalid qtrb"):
@@ -2101,7 +2339,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
     def test_artifact_recovery_uses_rooted_bounded_reads_for_local_metrics(self):
         from scripts.qtrace_device_acceptance import _verify_artifact_read_recovery
 
-        report = {"artifacts": [{
+        report = {"session_id": SESSION, "artifacts": [{
             "remote_name": "fixture.trace.bin.lz4",
             "local_path": "artifacts/fixture.trace.bin.lz4",
         }]}
@@ -2113,8 +2351,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            artifacts = root / "artifacts"
-            artifacts.mkdir()
+            artifacts = root / SESSION / "artifacts"
+            artifacts.mkdir(parents=True)
             (artifacts / "fixture.trace.bin.lz4").write_bytes(b"binary")
             (artifacts / "fixture.trace.bin.lz4.metrics").write_bytes(b"metrics")
             with patch.object(Path, "read_bytes", side_effect=AssertionError("unbounded read")):
@@ -2583,16 +2821,18 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
-            actual_temporary_directory = tempfile.TemporaryDirectory
             captured: dict[str, object] = {}
+            real_mkdtemp = tempfile.mkdtemp
 
-            def tracked_temporary_directory(*args, **kwargs):
+            def tracked_mkdtemp(*args, **kwargs):
                 captured.update(kwargs)
-                return actual_temporary_directory(*args, **kwargs)
+                return real_mkdtemp(*args, **kwargs)
 
             with patch("scripts.qtrace_device_acceptance.Path.cwd", return_value=workspace), \
-                    patch("scripts.qtrace_device_acceptance.tempfile.TemporaryDirectory",
-                          side_effect=tracked_temporary_directory), \
+                    patch("scripts.qtrace_device_acceptance.tempfile.mkdtemp",
+                          side_effect=tracked_mkdtemp), \
+                    patch("scripts.qtrace_device_acceptance._head_commit",
+                          return_value="a" * 40), \
                     patch("scripts.qtrace_device_acceptance.run_acceptance",
                           side_effect=RuntimeError("fixture failure")):
                 self.assertEqual(1, main(["--device", "SERIAL"]))
@@ -2600,6 +2840,249 @@ class AcceptanceHarnessTests(unittest.TestCase):
             self.assertEqual(1, len(retained))
             self.assertTrue(retained[0].is_dir())
             self.assertEqual(workspace / "qtrace-acceptance-failures", captured["dir"])
+
+    @staticmethod
+    def _successful_gate_document() -> dict[str, object]:
+        reports = {
+            "timed-offset": f"offset/{SESSION}/report.json",
+            "timed-symbol": f"symbol/{SESSION}/report.json",
+            "pull-latest": f"latest/{SESSION}/report.json",
+            "pull-name": f"name/{SESSION}/report.json",
+            "pull-all": f"all/{SESSION}/report.json",
+            "pull-compressed": f"compressed/{SESSION}/report.json",
+            "monitor-exit": f"exit/{SESSION}/report.json",
+            "flight-crash": f"crash/{SESSION}/report.json",
+        }
+        return {
+            "schema": 1,
+            "status": "passed",
+            "exit_code": 0,
+            "head_commit": "a" * 40,
+            "device": "SERIAL",
+            "started_at": "2026-08-29T01:00:00.000Z",
+            "completed_at": "2026-08-29T01:05:00.000Z",
+            "historical_commit": "2d6b1022a14ae554804a57e267544c12dea29353",
+            "target_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+            "target_raw_sha256": "b" * 64,
+            "historical_apk_sha256": "d" * 64,
+            "current_apk_sha256": "a" * 64,
+            "tracer_sha256": "e" * 64,
+            "companion_sha256": "f" * 64,
+            "scenario_reports": reports,
+            "trace_backup_path": "files/qbdi-traces.pre-acceptance-" + "f" * 32,
+            "trace_backup_existed": True,
+        }
+
+    def test_success_retains_manifest_and_prints_absolute_evidence_path(self):
+        from scripts.qtrace_device_acceptance import main
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            document = self._successful_gate_document()
+
+            def succeed(_device, directory, *, success_evidence, **_kwargs):
+                for relative in document["scenario_reports"].values():
+                    report = directory / relative
+                    report.parent.mkdir(parents=True, exist_ok=True)
+                    report.write_text("{}", encoding="utf-8")
+                success_evidence.update(document)
+                return 0
+
+            output = io.StringIO()
+            with patch("scripts.qtrace_device_acceptance.Path.cwd", return_value=workspace), \
+                    patch("scripts.qtrace_device_acceptance._head_commit",
+                          return_value="a" * 40), \
+                    patch("scripts.qtrace_device_acceptance.run_acceptance",
+                          side_effect=succeed), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(0, main(["--device", "SERIAL"]))
+
+            retained = list((workspace / "qtrace-acceptance-evidence").iterdir())
+            self.assertEqual(1, len(retained))
+            self.assertRegex(retained[0].name, r"[0-9a-f-]{36}\Z")
+            manifest = retained[0] / "historical-benchmark-gate.success.json"
+            self.assertEqual(document, json.loads(manifest.read_text(encoding="utf-8")))
+            self.assertEqual(
+                f"qtrace acceptance passed; evidence remains at: {retained[0].resolve()}",
+                output.getvalue().strip(),
+            )
+            self.assertEqual([], list((workspace / "qtrace-acceptance-failures").iterdir()))
+
+    def test_success_publish_collision_keeps_both_directories(self):
+        from scripts.qtrace_device_acceptance import _publish_success_directory
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            failures, evidence = root / "qtrace-acceptance-failures", root / "qtrace-acceptance-evidence"
+            failures.mkdir(mode=0o700)
+            evidence.mkdir(mode=0o700)
+            scratch = Path(tempfile.mkdtemp(prefix=".qtrace-device-acceptance-", dir=failures))
+            (scratch / "scratch").write_text("held", encoding="utf-8")
+            collision = evidence / SESSION
+            collision.mkdir()
+            (collision / "owner").write_text("other", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                _publish_success_directory(scratch, evidence, token=SESSION)
+            self.assertEqual("held", (scratch / "scratch").read_text(encoding="utf-8"))
+            self.assertEqual("other", (collision / "owner").read_text(encoding="utf-8"))
+
+    def test_success_publish_rename_failure_keeps_scratch(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            failures = root / "qtrace-acceptance-failures"
+            failures.mkdir(mode=0o700)
+            scratch = Path(tempfile.mkdtemp(prefix=".qtrace-device-acceptance-", dir=failures))
+            evidence = root / "qtrace-acceptance-evidence"
+
+            with patch.object(acceptance, "_rename_evidence_noreplace",
+                              side_effect=OSError("rename failure")), \
+                    self.assertRaisesRegex(OSError, "rename failure"):
+                acceptance._publish_success_directory(scratch, evidence, token=SESSION)
+            self.assertTrue(scratch.is_dir())
+            self.assertFalse((evidence / SESSION).exists())
+
+    def test_success_publish_rejects_scratch_identity_swap_before_rename(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            failures = root / "qtrace-acceptance-failures"
+            failures.mkdir(mode=0o700)
+            scratch = Path(tempfile.mkdtemp(prefix=".qtrace-device-acceptance-", dir=failures))
+            (scratch / "owner").write_text("gate", encoding="utf-8")
+            evidence = root / "qtrace-acceptance-evidence"
+            original = failures / "held-original"
+            real_rename = acceptance._rename_evidence_noreplace
+
+            def swap_then_rename(source_parent, source, destination_parent, destination):
+                scratch.rename(original)
+                scratch.mkdir(mode=0o700)
+                (scratch / "owner").write_text("attacker", encoding="utf-8")
+                real_rename(source_parent, source, destination_parent, destination)
+
+            with patch.object(acceptance, "_rename_evidence_noreplace",
+                              side_effect=swap_then_rename), \
+                    self.assertRaisesRegex(RuntimeError, "identity changed") as caught:
+                acceptance._publish_success_directory(scratch, evidence, token=SESSION)
+            self.assertEqual(evidence / SESSION, caught.exception.retained_path)
+            self.assertEqual("gate", (original / "owner").read_text(encoding="utf-8"))
+            self.assertEqual(
+                "attacker",
+                (evidence / SESSION / "owner").read_text(encoding="utf-8"),
+            )
+
+    def test_success_publish_fsync_failure_exposes_retained_destination(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            failures = root / "qtrace-acceptance-failures"
+            failures.mkdir(mode=0o700)
+            scratch = Path(tempfile.mkdtemp(prefix=".qtrace-device-acceptance-", dir=failures))
+            evidence = root / "qtrace-acceptance-evidence"
+
+            with patch.object(acceptance, "_fsync_directory",
+                              side_effect=OSError("directory fsync failure")), \
+                    self.assertRaisesRegex(RuntimeError, "directory fsync failure") as caught:
+                acceptance._publish_success_directory(scratch, evidence, token=SESSION)
+            destination = evidence / SESSION
+            self.assertEqual(destination, caught.exception.retained_path)
+            self.assertTrue(destination.is_dir())
+            self.assertFalse(scratch.exists())
+
+    def test_success_manifest_failure_is_retained_as_gate_failure(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            document = self._successful_gate_document()
+
+            def succeed(_device, directory, *, success_evidence, **_kwargs):
+                (directory / "run.marker").write_text("retained", encoding="utf-8")
+                success_evidence.update(document)
+                return 0
+
+            with patch.object(acceptance.Path, "cwd", return_value=workspace), \
+                    patch.object(acceptance, "_head_commit", return_value="a" * 40), \
+                    patch.object(acceptance, "run_acceptance", side_effect=succeed), \
+                    patch.object(acceptance, "_write_success_manifest",
+                                 side_effect=OSError("manifest failure")):
+                self.assertEqual(1, acceptance.main(["--device", "SERIAL"]))
+            retained = list((workspace / "qtrace-acceptance-failures").iterdir())
+            self.assertEqual(1, len(retained))
+            self.assertEqual("retained", (retained[0] / "run.marker").read_text(encoding="utf-8"))
+            self.assertFalse((workspace / "qtrace-acceptance-evidence").exists())
+
+    def test_success_publication_occurs_only_after_gate_cleanup_returns(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            events: list[str] = []
+            document = self._successful_gate_document()
+
+            def succeed(_device, _directory, *, success_evidence, **_kwargs):
+                events.append("gate-cleanup-complete")
+                success_evidence.update(document)
+                return 0
+
+            def manifest(*_args, **_kwargs):
+                events.append("manifest")
+
+            def publish(_scratch, parent, *, token):
+                events.append("publish")
+                return parent / token
+
+            with patch.object(acceptance.Path, "cwd", return_value=workspace), \
+                    patch.object(acceptance, "_head_commit", return_value="a" * 40), \
+                    patch.object(acceptance, "run_acceptance", side_effect=succeed), \
+                    patch.object(acceptance, "_write_success_manifest",
+                                 side_effect=manifest), \
+                    patch.object(acceptance, "_publish_success_directory",
+                                 side_effect=publish):
+                self.assertEqual(0, acceptance.main(["--device", "SERIAL"]))
+            self.assertEqual(["gate-cleanup-complete", "manifest", "publish"], events)
+
+    def test_failure_preservation_reports_post_rename_retained_path(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            success_path = workspace / "qtrace-acceptance-evidence" / SESSION
+            failure_path = workspace / "qtrace-acceptance-failures" / SESSION
+
+            def succeed(_device, _directory, *, success_evidence, **_kwargs):
+                success_evidence.update(self._successful_gate_document())
+                return 0
+
+            calls = 0
+
+            def publish(source, parent, *, token):
+                nonlocal calls
+                calls += 1
+                destination = success_path if calls == 1 else failure_path
+                destination.parent.mkdir(mode=0o700, exist_ok=True)
+                source.rename(destination)
+                raise acceptance._SuccessPublicationError(
+                    "directory fsync failure", destination,
+                )
+
+            errors = io.StringIO()
+            with patch.object(acceptance.Path, "cwd", return_value=workspace), \
+                    patch.object(acceptance, "_head_commit", return_value="a" * 40), \
+                    patch.object(acceptance, "run_acceptance", side_effect=succeed), \
+                    patch.object(acceptance, "_write_success_manifest"), \
+                    patch.object(acceptance, "_publish_success_directory",
+                                 side_effect=publish), \
+                    contextlib.redirect_stderr(errors):
+                self.assertEqual(1, acceptance.main(["--device", "SERIAL"]))
+            self.assertEqual(2, calls)
+            self.assertTrue(failure_path.is_dir())
+            self.assertFalse(success_path.exists())
+            self.assertIn(str(failure_path), errors.getvalue())
 
     def test_host_binary_snapshot_is_bounded_nofollow_and_path_swap_safe(self):
         from scripts.qtrace_device_acceptance import _snapshot_host_binary
@@ -3288,7 +3771,23 @@ class AcceptanceHarnessTests(unittest.TestCase):
     def test_acceptance_runs_bounded_workflow_and_retries_one_read(self):
         from scripts.qtrace_device_acceptance import run_acceptance
 
-        runner = StagingDeviceRunner(fail_first_read=True)
+        ordering: list[str] = []
+
+        class OrderingRunner(StagingDeviceRunner):
+            def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                command = tuple(command)
+                if "qtrace" in command and "demo" in command:
+                    ordering.append(f"demo:{command[command.index('--scenario') + 1]}")
+                elif command[4:7] == ("su", "-c", f"kill -0 {4242}"):
+                    ordering.append(f"alive:{4242}")
+                return super().run(command, timeout=timeout, cwd=cwd, allowed=allowed)
+
+            def read_text(self, path: Path, *, timeout: float) -> str:
+                if path.name == "qtrace-acceptance-timed.json":
+                    ordering.append("timed-result")
+                return super().read_text(path, timeout=timeout)
+
+        runner = OrderingRunner(fail_first_read=True)
         with tempfile.TemporaryDirectory() as temporary:
             tracer = Path(temporary) / "libqbdi_tracer.so"
             companion = Path(temporary) / "libshadowhook_nothing.so"
@@ -3306,11 +3805,11 @@ class AcceptanceHarnessTests(unittest.TestCase):
             historical.path.write_bytes(b"historical APK")
             (Path(temporary) / "offset").mkdir()
             (Path(temporary) / "offset" / "fixture.trace.txt").write_text("fixture")
-            artifacts = Path(temporary) / "offset" / "artifacts"
-            artifacts.mkdir()
+            artifacts = Path(temporary) / "offset" / SESSION / "artifacts"
+            artifacts.mkdir(parents=True)
             (artifacts / "fixture.trace.bin.lz4").write_bytes(b"fixture qtrb bytes")
             (artifacts / "fixture.trace.bin.lz4.metrics").write_text("metrics")
-            artifact_client = FakeArtifactClient(Path(temporary) / "offset")
+            artifact_client = FakeArtifactClient(Path(temporary) / "offset" / SESSION)
             for name in ("latest", "name", "all", "compressed"):
                 artifacts = Path(temporary) / name / SESSION / "artifacts"
                 artifacts.mkdir(parents=True)
@@ -3335,13 +3834,27 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 ))
             self.assertEqual([("fixture.trace.bin.lz4.metrics", 64 * 1024)], artifact_client.calls)
             self.assertEqual([True], artifact_client.evidence_present_during_retry)
+        self.assertLess(ordering.index(f"alive:{4242}"), ordering.index("demo:timed", 1))
+        self.assertLess(ordering.index("timed-result"), ordering.index("demo:timed", 1))
         commands = runner.commands
-        self.assertEqual(("./gradlew", "nativeHostTest", "--no-daemon"), commands[0])
-        self.assertEqual(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), commands[1])
-        self.assertEqual(
-            ("./gradlew", ":app:assembleDebug", ":tracer:copyTracerDebug", "--no-daemon"),
-            commands[2],
+        self.assertIn(
+            ("adb", "-s", "SERIAL", "shell", "su", "-c", "kill -0 4242"),
+            commands,
         )
+        self.assertNotIn(
+            ("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"),
+            commands,
+        )
+        self.assertEqual(
+            (
+                "./gradlew", "nativeHostTest", ":app:testDebugUnitTest",
+                ":app:assembleDebug", ":tracer:assembleDebug",
+                ":tracer:copyTracerDebug", "--no-daemon",
+            ),
+            commands[0],
+        )
+        self.assertEqual(("python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py"), commands[1])
+        self.assertNotEqual("./gradlew", commands[2][0])
         installs = [command for command in commands
                     if command[:4] == ("adb", "-s", "SERIAL", "install")]
         self.assertEqual(2, len(installs))
@@ -3375,7 +3888,10 @@ class AcceptanceHarnessTests(unittest.TestCase):
         self.assertNotEqual(tracer, candidate_path)
         self.assertEqual("libqbdi_tracer.so", candidate_path.name)
         self.assertEqual(15, runner.reads)  # baseline retry, per-run entry evidence, reports, oracle, pulls
-        self.assertIn(("adb", "-s", "SERIAL", "shell", "kill", "-0", "4242"), commands)
+        self.assertIn(
+            ("adb", "-s", "SERIAL", "shell", "su", "-c", "kill -0 4242"),
+            commands,
+        )
         named_pull = next(command for command in commands if "--name" in command)
         self.assertIn("fixture.trace.bin.lz4", named_pull)
         compressed_pull = next(command for command in commands if "--compressed-only" in command)
@@ -3391,13 +3907,14 @@ class AcceptanceHarnessTests(unittest.TestCase):
         class RecordingRunner(FakeRunner):
             def run(self, command, *, timeout, cwd=None, allowed=(0,)):
                 command = tuple(command)
-                if command == ("./gradlew", "nativeHostTest", "--no-daemon"):
-                    events.append("nativeHostTest")
+                if command == (
+                    "./gradlew", "nativeHostTest", ":app:testDebugUnitTest",
+                    ":app:assembleDebug", ":tracer:assembleDebug",
+                    ":tracer:copyTracerDebug", "--no-daemon",
+                ):
+                    events.append("complete-host-gradle")
                 elif command[:5] == ("python3", "-m", "unittest", "discover", "-s"):
                     events.append("full-python")
-                elif command[:3] == ("./gradlew", ":app:assembleDebug",
-                                      ":tracer:copyTracerDebug"):
-                    events.append("build-current")
                 elif command[4:7] == ("am", "force-stop", acceptance.PACKAGE):
                     events.append("force-stop-historical" if events[-1] == "install-historical"
                                   else "force-stop-current")
@@ -3454,6 +3971,14 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 events.append("stage-historical-held-pair" if len(stage_calls) == 1
                               else "restage-current-same-held-pair")
 
+            def isolate(_device, _runner, *, token):
+                self.assertRegex(token, r"[0-9a-f]{32}\Z")
+                events.append("isolate-current-traces")
+                return SimpleNamespace(
+                    existed=True,
+                    backup_path=f"files/qbdi-traces.pre-acceptance-{token}",
+                )
+
             def wait_baseline(_runner):
                 events.append("wait-timed-baseline")
                 return {"iterations": 30, "seed": 5855319310239641971,
@@ -3472,6 +3997,8 @@ class AcceptanceHarnessTests(unittest.TestCase):
                                  create=True), \
                     patch.object(acceptance, "_stage_app_private_binaries",
                                  side_effect=stage), \
+                    patch.object(acceptance, "_isolate_demo_trace_directory",
+                                 side_effect=isolate, create=True), \
                     patch.object(acceptance, "_wait_for_baseline",
                                  side_effect=wait_baseline), \
                     patch.object(acceptance, "_validated_timed_report",
@@ -3501,15 +4028,16 @@ class AcceptanceHarnessTests(unittest.TestCase):
 
         self.assertEqual(0, result)
         self.assertEqual([
-            "nativeHostTest", "full-python", "build-current",
+            "complete-host-gradle", "full-python",
             "snapshot-current-apk-and-pair",
             "build-historical-2d6b1022a14ae554804a57e267544c12dea29353",
             "install-historical", "force-stop-historical",
             "stage-historical-held-pair", "compare-historical", "install-current",
-            "force-stop-current", "restage-current-same-held-pair",
+            "force-stop-current", "isolate-current-traces",
+            "restage-current-same-held-pair",
             "start-timed-baseline", "wait-timed-baseline", "timed-offset",
-            "timed-symbol", "monitor-exit", "flight-crash", "pull-latest",
-            "pull-name", "pull-all", "pull-all-compressed-only",
+            "timed-symbol", "pull-latest", "pull-name", "pull-all",
+            "pull-all-compressed-only", "monitor-exit", "flight-crash",
         ], events)
         self.assertEqual([(pair, "t" * 64, "p" * 64),
                           (pair, "t" * 64, "p" * 64)], stage_calls)

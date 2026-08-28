@@ -2,16 +2,20 @@ import contextlib
 import builtins
 import io
 import json
+import multiprocessing
 import os
+import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from qtrace.artifacts import ArtifactResult, PullMode
 from qtrace.demo import (DemoFixture, _TARGET_MEMBER, _extract_target,
-                         make_demo_action, make_demo_config)
+                         build_demo_fixture, make_demo_action, make_demo_config)
 from qtrace.errors import QtraceError
 from qtrace.models import AppConfig, OffsetScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.session import SessionResult
@@ -28,6 +32,143 @@ def config() -> UserConfig:
 
 
 class QtraceCliTests(unittest.TestCase):
+    def test_generic_orchestrator_keeps_default_flight_capacity(self):
+        from qtrace import cli
+
+        with patch.object(cli, "SessionOrchestrator", return_value=Mock()) as constructor:
+            cli._make_orchestrator(Path.cwd(), Mock())
+
+        self.assertEqual(512, constructor.call_args.kwargs["flight_capacity_mb"])
+
+    def test_blocked_frida_version_probe_is_killed_and_reaped_at_the_deadline(self):
+        from qtrace import cli
+
+        blocked_read, blocked_write = os.pipe()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                observed_pid = Path(directory) / "blocked-frida-probe.pid"
+
+                class Remote:
+                    def query_system_parameters(self):
+                        observed_pid.write_text(str(os.getpid()), encoding="ascii")
+                        os.read(blocked_read, 1)
+                        return {"version": "17.17.0"}
+
+                runtime = cli._FridaRuntime()
+                started = time.monotonic()
+                with patch.object(runtime, "get_device", return_value=Remote()), patch.dict(
+                    sys.modules, {"frida": SimpleNamespace(__version__="17.17.0")}
+                ), self.assertRaisesRegex(QtraceError, "exceeded the setup deadline"):
+                    runtime.versions(object(), 0.05)
+
+                self.assertLess(time.monotonic() - started, 0.5)
+                worker_pid = int(observed_pid.read_text(encoding="ascii"))
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(worker_pid, 0)
+                self.assertFalse(any(
+                    child.name == "qtrace-frida-version-probe"
+                    for child in multiprocessing.active_children()
+                ))
+        finally:
+            os.close(blocked_read)
+            os.close(blocked_write)
+
+    def test_frida_version_handshake_does_not_initialize_frida_in_the_parent(self):
+        from qtrace import cli
+
+        with tempfile.TemporaryDirectory() as directory:
+            observed_pid = Path(directory) / "frida-probe.pid"
+
+            class Remote:
+                def query_system_parameters(self):
+                    observed_pid.write_text(str(os.getpid()), encoding="ascii")
+                    return {"version": "17.17.0"}
+
+            runtime = cli._FridaRuntime()
+            with patch.object(runtime, "get_device", return_value=Remote()), patch.dict(
+                sys.modules, {"frida": SimpleNamespace(__version__="17.17.0")}
+            ):
+                self.assertEqual(("17.17.0", "17.17.0"), runtime.versions(object(), 5.0))
+
+            self.assertNotEqual(os.getpid(), int(observed_pid.read_text(encoding="ascii")))
+
+    def test_frida_17_runtime_reads_server_version_from_a_clean_system_probe(self):
+        from qtrace import cli
+
+        events = []
+
+        class Script:
+            def on(self, signal, callback):
+                self.callback = callback
+                events.append(("on", signal))
+
+            def load(self):
+                events.append(("load",))
+                self.callback({
+                    "type": "send",
+                    "payload": {"type": "qtrace-frida-version", "version": "17.17.0"},
+                }, None)
+
+            def unload(self):
+                events.append(("unload",))
+
+        class Session:
+            def create_script(self, source):
+                events.append(("create", source))
+                return Script()
+
+            def detach(self):
+                events.append(("detach",))
+
+        class Remote:
+            def query_system_parameters(self):
+                return {"arch": "arm64", "os": {"id": "android"}}
+
+            def attach(self, pid):
+                events.append(("attach", pid))
+                return Session()
+
+        runtime = cli._FridaRuntime()
+        with patch.object(runtime, "get_device", return_value=Remote()), patch.dict(
+            sys.modules, {"frida": SimpleNamespace(__version__="17.17.0")}
+        ):
+            self.assertEqual(
+                ("17.17.0", "17.17.0"),
+                cli._query_frida_versions(runtime, object(), 5.0),
+            )
+
+        self.assertEqual(("attach", 0), events[0])
+        self.assertEqual(("on", "message"), events[2])
+        self.assertEqual(("unload",), events[-2])
+        self.assertEqual(("detach",), events[-1])
+
+    def test_demo_build_bounds_gradle_daemon_lifetime_inside_bounded_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gradlew = root / "gradlew"
+            gradlew.write_text("#!/bin/sh\n", encoding="utf-8")
+            apk = root / "app/build/outputs/apk/debug/app-debug.apk"
+            apk.parent.mkdir(parents=True)
+            with zipfile.ZipFile(apk, "w") as archive:
+                archive.writestr(_TARGET_MEMBER, b"fixture-target")
+            runner = Mock()
+            runner.capture.return_value = b""
+
+            with patch.dict(os.environ, {"GRADLE_OPTS": "-Ddemo.existing=true"}):
+                build_demo_fixture(root, runner, 12.5)
+
+            self.assertEqual(
+                (
+                    "/usr/bin/env",
+                    "GRADLE_OPTS=-Ddemo.existing=true -Dorg.gradle.daemon.idletimeout=1000",
+                    str(gradlew),
+                    ":app:assembleDebug",
+                    "--no-daemon",
+                ),
+                runner.capture.call_args.args[0],
+            )
+            self.assertEqual(12.5, runner.capture.call_args.kwargs["timeout"])
+
     def test_run_parses_duration_and_explicit_timeouts_into_run_request(self):
         from qtrace import cli
 
@@ -93,6 +234,7 @@ class QtraceCliTests(unittest.TestCase):
                 raise AssertionError("pull must not start an app")
 
         selected = SelectedDevice()
+        selected.bound = False
         result = ArtifactResult(Path("out/session"), (Path("out/session/artifacts/run.trace.bin"),), (), 0)
         real_import = builtins.__import__
 
@@ -108,12 +250,21 @@ class QtraceCliTests(unittest.TestCase):
                 patch.object(cli, "build_demo_fixture", side_effect=AssertionError("must not build fixture")) as fixture, \
                 patch.object(cli, "make_demo_config", side_effect=AssertionError("must not configure fixture")) as demo_config, \
                 patch.object(cli, "make_demo_action", side_effect=AssertionError("must not start fixture")) as demo_action, \
+                patch.object(cli, "bind_package_access") as binder, \
                 patch.object(cli, "ArtifactProcessor") as processor, \
                 patch("builtins.__import__", side_effect=reject_runtime_import):
-            processor.return_value.pull_manual.return_value = result
+            binder.side_effect = lambda device, _package, *, timeout: setattr(device, "bound", True)
+
+            def pull_manual(device, *_args, **_kwargs):
+                self.assertIs(selected, device)
+                self.assertTrue(device.bound)
+                return result
+
+            processor.return_value.pull_manual.side_effect = pull_manual
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(0, cli.main(["pull", "--package", "com.example.app", "--output", "out"]))
 
+        binder.assert_called_once_with(selected, "com.example.app", timeout=30.0)
         selection = processor.return_value.pull_manual.call_args.args[2]
         self.assertIs(PullMode.LATEST, selection.mode)
         self.assertFalse(selection.compressed_only)
@@ -123,6 +274,28 @@ class QtraceCliTests(unittest.TestCase):
         demo_config.assert_not_called()
         demo_action.assert_not_called()
         self.assertEqual([], selected.forbidden_calls)
+
+    def test_pull_binding_failure_publishes_nothing_and_never_constructs_processor(self):
+        from qtrace import cli
+
+        selected = SimpleNamespace(serial="serial")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "pull-output"
+            with patch.object(cli, "_select_device", return_value=selected), \
+                    patch.object(cli, "bind_package_access", side_effect=QtraceError(
+                        "device.access_denied", "preflight.access", "no package identity",
+                    )), \
+                    patch.object(cli, "ArtifactProcessor") as processor, \
+                    patch.object(cli, "_emit_result") as emit, \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertNotEqual(0, cli.main([
+                    "pull", "--package", "com.example.app", "--output", str(output),
+                ]))
+
+            processor.assert_not_called()
+            emit.assert_not_called()
+            self.assertFalse(output.exists())
 
     def test_pull_selection_is_exclusive_but_compressed_only_is_orthogonal(self):
         from qtrace import cli
@@ -208,7 +381,7 @@ class QtraceCliTests(unittest.TestCase):
                         patch.object(cli, "_make_inspector", return_value=Mock()), \
                         patch.object(cli, "make_demo_config", return_value=config()) as make_config, \
                         patch.object(cli, "make_demo_action", return_value=action) as make_action, \
-                        patch.object(cli, "_make_orchestrator", return_value=orchestrator), \
+                        patch.object(cli, "_make_orchestrator", return_value=orchestrator) as make_orchestrator, \
                         contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(0, cli.main(["demo", "--scenario", scenario, "--adb-timeout", "17"]))
                 orchestrator.run.assert_not_called()
@@ -219,6 +392,10 @@ class QtraceCliTests(unittest.TestCase):
                 self.assertEqual(scenario, make_config.call_args.args[3])
                 self.assertEqual(scenario, make_action.call_args.args[0])
                 self.assertEqual(17.0, make_action.call_args.kwargs["adb_timeout"])
+                self.assertEqual(
+                    {"flight_capacity_mb": 64} if scenario == "flight-crash" else {},
+                    make_orchestrator.call_args.kwargs,
+                )
 
     def test_demo_action_uses_configured_adb_timeout(self):
         device = Mock()
@@ -242,6 +419,15 @@ class QtraceCliTests(unittest.TestCase):
                 arguments = device.shell.call_args.args
                 mode_index = arguments.index("qtrace_acceptance_mode")
                 self.assertEqual(expected_mode, arguments[mode_index + 1])
+                self.assertIn("--activity-clear-task", arguments)
+                self.assertNotIn("--activity-new-task", arguments)
+
+        timed = Mock()
+        make_demo_action("timed", 7)(
+            timed, 42, "123e4567-e89b-42d3-a456-426614174000",
+        )
+        self.assertNotIn("--activity-clear-task", timed.shell.call_args.args)
+        self.assertNotIn("--activity-new-task", timed.shell.call_args.args)
 
     def test_demo_target_extraction_rejects_symlink_parent_without_writing_escape_target(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:

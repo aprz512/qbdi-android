@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
+import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -18,6 +20,7 @@ from qtrace.models import TracerConfig
 
 
 _BUILD_OUTPUT_BYTES = 4 * 1024 * 1024
+_GRADLE_IDLE_BOUND = "-Dorg.gradle.daemon.idletimeout=1000"
 _UUID4 = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -155,9 +158,34 @@ class ArtifactBuilder:
                 "build.gradle",
                 "Gradle wrapper must be an executable regular non-symlink file",
             )
+        environment_executable = shutil.which("env")
+        if environment_executable is None or not os.path.isabs(environment_executable):
+            _fail("build.gradle_invalid", "build.gradle", "env executable is unavailable")
+        try:
+            environment_mode = Path(environment_executable).lstat().st_mode
+        except OSError as error:
+            _fail("build.gradle_invalid", "build.gradle", f"env executable is unavailable: {error}")
+        if (not stat.S_ISREG(environment_mode) or stat.S_ISLNK(environment_mode) or
+                environment_mode & 0o111 == 0):
+            _fail(
+                "build.gradle_invalid",
+                "build.gradle",
+                "env executable must be an executable regular non-symlink file",
+            )
+        inherited_gradle_options = os.environ.get("GRADLE_OPTS", "")
+        gradle_options = (
+            f"{inherited_gradle_options} {_GRADLE_IDLE_BOUND}"
+            if inherited_gradle_options else _GRADLE_IDLE_BOUND
+        )
         try:
             self._runner.capture(
-                (str(gradlew), ":tracer:copyTracerDebug"),
+                (
+                    environment_executable,
+                    f"GRADLE_OPTS={gradle_options}",
+                    str(gradlew),
+                    ":tracer:copyTracerDebug",
+                    "--no-daemon",
+                ),
                 maximum_bytes=_BUILD_OUTPUT_BYTES,
                 timeout=timeout,
             )

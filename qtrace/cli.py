@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing
 import os
 import sys
 import time
@@ -19,6 +20,7 @@ from qtrace.demo import build_demo_fixture, make_demo_action, make_demo_config
 from qtrace.device import DeviceSelector
 from qtrace.elf import ElfInspector, TargetResolver
 from qtrace.errors import EXIT_INTERRUPTED, QtraceError
+from qtrace.preflight import bind_package_access
 from qtrace.process import BoundedRunner
 from qtrace.session import MonitorRequest, RunRequest, SessionOrchestrator
 
@@ -134,6 +136,65 @@ class _Clock:
         return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _query_frida_versions(runtime: "_FridaRuntime", device: object,
+                          timeout: float) -> tuple[str, str]:
+    try:
+        import frida  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise QtraceError("frida.python_missing", "preflight.frida",
+                          "Frida Python bindings are required for injection") from error
+    remote = runtime.get_device(device, timeout)
+    try:
+        parameters = remote.query_system_parameters()
+        if not isinstance(parameters, dict):
+            raise TypeError("Frida system parameters are not a dictionary")
+        server = parameters.get("version")
+        if server is None:
+            messages: list[object] = []
+            session = remote.attach(0)
+            script = None
+            try:
+                script = session.create_script(
+                    "send({type: 'qtrace-frida-version', version: Frida.version});"
+                )
+                script.on("message", lambda message, _data: messages.append(message))
+                script.load()
+                if len(messages) != 1 or not isinstance(messages[0], dict):
+                    raise RuntimeError("Frida system version probe returned no unique message")
+                message = messages[0]
+                payload = message.get("payload")
+                if (message.get("type") != "send" or not isinstance(payload, dict) or
+                        set(payload) != {"type", "version"} or
+                        payload.get("type") != "qtrace-frida-version" or
+                        not isinstance(payload.get("version"), str)):
+                    raise RuntimeError("Frida system version probe returned an invalid message")
+                server = payload["version"]
+            finally:
+                if script is not None:
+                    script.unload()
+                session.detach()
+        host = frida.__version__
+    except (AttributeError, KeyError, TypeError, RuntimeError) as error:
+        raise QtraceError("frida.handshake_failed", "preflight.frida",
+                          f"cannot query Frida server version: {error}") from error
+    return str(host), str(server)
+
+
+def _frida_version_worker(runtime: "_FridaRuntime", device: object,
+                          timeout: float, channel: object) -> None:
+    try:
+        host, server = _query_frida_versions(runtime, device, timeout)
+        payload: tuple[object, ...] = ("result", host, server)
+    except QtraceError as error:
+        payload = ("qtrace-error", error.code, error.stage, error.detail, error.exit_code)
+    except BaseException as error:
+        payload = ("error", type(error).__name__, str(error))
+    try:
+        channel.send(payload)
+    finally:
+        channel.close()
+
+
 class _FridaRuntime:
     """Lazy bridge shared by preflight and the post-preflight injector."""
 
@@ -143,20 +204,73 @@ class _FridaRuntime:
         return FridaProvider().get_device(device, timeout)
 
     def versions(self, device: object, timeout: float) -> tuple[str, str]:
-        try:
-            import frida  # type: ignore[import-not-found]
-        except ImportError as error:
-            raise QtraceError("frida.python_missing", "preflight.frida",
-                              "Frida Python bindings are required for injection") from error
-        remote = self.get_device(device, timeout)
-        try:
-            parameters = remote.query_system_parameters()
-            server = parameters["version"]
-            host = frida.__version__
-        except (AttributeError, KeyError, TypeError, RuntimeError) as error:
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or
+                not math.isfinite(timeout) or timeout <= 0):
             raise QtraceError("frida.handshake_failed", "preflight.frida",
-                              f"cannot query Frida server version: {error}") from error
-        return str(host), str(server)
+                              "Frida version probe timeout must be finite and positive")
+        if (not hasattr(multiprocessing, "get_context") or
+                "fork" not in multiprocessing.get_all_start_methods()):
+            raise QtraceError("frida.handshake_failed", "preflight.frida",
+                              "isolated Frida version probing requires POSIX fork")
+        deadline = time.monotonic() + float(timeout)
+        context = multiprocessing.get_context("fork")
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_frida_version_worker,
+            args=(self, device, float(timeout), sender),
+            name="qtrace-frida-version-probe",
+        )
+        started = False
+        message: object = None
+        timed_out = False
+        try:
+            process.start()
+            started = True
+            sender.close()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not receiver.poll(remaining):
+                timed_out = True
+            else:
+                try:
+                    message = receiver.recv()
+                except EOFError:
+                    message = None
+            remaining = max(0.0, deadline - time.monotonic())
+            process.join(remaining)
+            if process.is_alive():
+                timed_out = True
+                process.kill()
+                process.join(0.2)
+            if process.is_alive():
+                raise QtraceError("frida.handshake_failed", "preflight.frida",
+                                  "Frida version probe worker could not be reaped")
+            if timed_out:
+                raise QtraceError("frida.handshake_failed", "preflight.frida",
+                                  "Frida version probe exceeded the setup deadline")
+            if process.exitcode != 0:
+                raise QtraceError("frida.handshake_failed", "preflight.frida",
+                                  f"Frida version probe exited with status {process.exitcode}")
+        finally:
+            receiver.close()
+            sender.close()
+            if started and not process.is_alive():
+                process.close()
+        if type(message) is not tuple or not message:
+            raise QtraceError("frida.handshake_failed", "preflight.frida",
+                              "Frida version probe returned an invalid result")
+        if (len(message) == 3 and message[0] == "result" and
+                isinstance(message[1], str) and isinstance(message[2], str)):
+            return message[1], message[2]
+        if (len(message) == 5 and message[0] == "qtrace-error" and
+                all(isinstance(value, str) for value in message[1:4]) and
+                type(message[4]) is int):
+            raise QtraceError(message[1], message[2], message[3], exit_code=message[4])
+        if (len(message) == 3 and message[0] == "error" and
+                isinstance(message[1], str) and isinstance(message[2], str)):
+            raise QtraceError("frida.handshake_failed", "preflight.frida",
+                              f"Frida version probe failed: {message[1]}: {message[2]}")
+        raise QtraceError("frida.handshake_failed", "preflight.frida",
+                          "Frida version probe returned an invalid result")
 
 
 def _ndk_bin() -> Path:
@@ -177,7 +291,8 @@ def _make_inspector(runner: BoundedRunner) -> ElfInspector:
     return ElfInspector(runner, _ndk_bin())
 
 
-def _make_orchestrator(repo_root: Path, inspector: ElfInspector | None = None) -> SessionOrchestrator:
+def _make_orchestrator(repo_root: Path, inspector: ElfInspector | None = None, *,
+                       flight_capacity_mb: int = 512) -> SessionOrchestrator:
     # These imports intentionally stay behind run/monitor construction.  Manual
     # pull needs neither Gradle nor Frida's Python package.
     from qtrace.build import ArtifactBuilder, Deployer
@@ -198,6 +313,7 @@ def _make_orchestrator(repo_root: Path, inspector: ElfInspector | None = None) -
         _Clock(),
         lambda: str(uuid.uuid4()),
         device_selector=selector,
+        flight_capacity_mb=flight_capacity_mb,
     )
 
 
@@ -249,6 +365,7 @@ def _pull(arguments: argparse.Namespace) -> int:
     _progress("collecting artifacts")
     runner = BoundedRunner()
     device = _select_device(arguments.device, runner, arguments.adb_timeout)
+    bind_package_access(device, arguments.package, timeout=arguments.adb_timeout)
     result = ArtifactProcessor().pull_manual(device, arguments.package, _selection(arguments),
                                              arguments.output, arguments.pull_timeout)
     _emit_result(result.output_dir / "report.json", result.files, result.exit_code, arguments.json)
@@ -271,7 +388,11 @@ def _demo(arguments: argparse.Namespace, repo_root: Path) -> int:
     config = make_demo_config(fixture, inspector, arguments.scene_form, arguments.scenario)
     action = make_demo_action(arguments.scenario, 5855319310239641971,
                               adb_timeout=arguments.adb_timeout)
-    orchestrator = _make_orchestrator(repo_root, inspector)
+    orchestrator = _make_orchestrator(
+        repo_root, inspector,
+        **({"flight_capacity_mb": 64}
+           if arguments.scenario == "flight-crash" else {}),
+    )
     if is_timed:
         assert duration is not None
         result = orchestrator.run(RunRequest(config, arguments.device, arguments.output, duration,

@@ -272,8 +272,9 @@ void rollback_state_is_reentrant_until_a_publication_commits() {
     session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
 }
 
-// Catches an update that creates an old-status hard link but performs the
-// dangerous replacement rename before that recovery evidence is durable.
+// Catches an update that depends on hard-link permission unavailable to an
+// Android app domain, or performs the dangerous replacement rename before an
+// independent old-status backup is durable.
 void old_status_backup_is_durable_before_replacement() {
     TemporaryDirectory root;
     SessionStatusPublisher publisher;
@@ -287,12 +288,64 @@ void old_status_backup_is_durable_before_replacement() {
     CHECK(publisher.error_code() == EBUSY);
     CHECK(read_text(publisher.path()) == before);
     CHECK(::access(std::string(publisher.backup_path()).c_str(), F_OK) == 0);
+    struct stat status_file{};
+    struct stat backup_file{};
+    CHECK(::stat(std::string(publisher.path()).c_str(), &status_file) == 0);
+    CHECK(::stat(std::string(publisher.backup_path()).c_str(), &backup_file) == 0);
+    CHECK(status_file.st_dev == backup_file.st_dev);
+    CHECK(status_file.st_ino != backup_file.st_ino);
+    CHECK(read_text(publisher.backup_path()) == before);
 
     session_status_test_inject_fault(SessionStatusFaultPoint::None, 0);
     SessionStatusPublisher recovered;
     CHECK(recovered.open(configured_trace(), 3, root.path()));
     CHECK(read_text(recovered.path()) == before);
     CHECK(::access(std::string(recovered.backup_path()).c_str(), F_OK) != 0);
+}
+
+// Catches a crash during backup copy permanently blocking later status
+// transitions with EEXIST, or recovery mistaking the incomplete copy for
+// rollback evidence.
+void incomplete_backup_prepare_is_discarded_before_the_next_update() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    CHECK(publisher.publish(sealed_snapshot()));
+    const std::string prepare =
+            std::string(publisher.backup_path()) + ".prepare";
+    const int fd = ::open(prepare.c_str(),
+                          O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    CHECK(fd >= 0);
+    constexpr char partial[] = "partial";
+    CHECK(::write(fd, partial, sizeof(partial) - 1) ==
+          static_cast<ssize_t>(sizeof(partial) - 1));
+    CHECK(::fsync(fd) == 0);
+    CHECK(::close(fd) == 0);
+
+    SessionStatusPublisher recovered;
+    CHECK(recovered.open(configured_trace(), 3, root.path()));
+    SessionStatusSnapshot next = sealed_snapshot();
+    next.state = "running";
+    CHECK(recovered.publish(next));
+    CHECK(read_text(recovered.path()).find("\"state\":\"running\"") !=
+          std::string::npos);
+    CHECK(::access(prepare.c_str(), F_OK) != 0);
+}
+
+// Catches invalid backup input inheriting an unrelated prior errno after a
+// successful fstat instead of reporting the structural validation failure.
+void invalid_backup_source_reports_einval_not_stale_errno() {
+    TemporaryDirectory root;
+    SessionStatusPublisher publisher;
+    CHECK(publisher.open(configured_trace(), 3, root.path()));
+    CHECK(publisher.publish(sealed_snapshot()));
+    CHECK(::truncate(std::string(publisher.path()).c_str(), 0) == 0);
+
+    errno = EPERM;
+    SessionStatusSnapshot next = sealed_snapshot();
+    next.state = "running";
+    CHECK(!publisher.publish(next));
+    CHECK(publisher.error_code() == EINVAL);
 }
 
 // Catches backup cleanup ambiguity restoring the old JSON after the replacement
@@ -427,6 +480,14 @@ void failed_rollback_retains_the_old_backup_until_the_next_open_recovers_it() {
     CHECK(publisher.error_code() == EIO);
     CHECK(publisher.recovery_error() == EPERM);
     CHECK(read_text(publisher.backup_path()) == before);
+    const std::string restore_path = std::string(publisher.path()) + ".restore";
+    struct stat backup_file{};
+    struct stat restore_file{};
+    CHECK(::stat(std::string(publisher.backup_path()).c_str(), &backup_file) == 0);
+    CHECK(::stat(restore_path.c_str(), &restore_file) == 0);
+    CHECK(backup_file.st_dev == restore_file.st_dev);
+    CHECK(backup_file.st_ino != restore_file.st_ino);
+    CHECK(read_text(restore_path) == before);
     CHECK(has_no_temporary_files(root.path()));
 
     SessionStatusPublisher recovered;
@@ -583,6 +644,8 @@ int main() {
     committed_state_does_not_depend_on_cleanup_recreation();
     rollback_state_is_reentrant_until_a_publication_commits();
     old_status_backup_is_durable_before_replacement();
+    incomplete_backup_prepare_is_discarded_before_the_next_update();
+    invalid_backup_source_reports_einval_not_stale_errno();
     committed_update_cleanup_failure_keeps_the_new_status_on_reentry();
     commit_state_directory_sync_failure_is_reentrant();
     commit_state_is_durable_before_backup_cleanup();

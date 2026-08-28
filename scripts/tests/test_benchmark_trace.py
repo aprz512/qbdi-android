@@ -1226,7 +1226,7 @@ effective_buffer_bytes=67108864
         self.assertLess(response_check, call)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for GumJS emulation")
-    def test_benchmark_agent_rejects_malformed_accepted_responses_before_execution(self):
+    def test_benchmark_agent_uses_staged_pair_and_rejects_malformed_responses_before_execution(self):
         source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(
             encoding="utf-8"
         )
@@ -1289,7 +1289,7 @@ class U64 {
 }
 
 function runCase(configureResponse) {
-  const state = {installs: 0, calls: 0, messages: []};
+  const state = {installs: 0, calls: 0, messages: [], tracerPaths: [], helperPaths: []};
   const benchmark = {sub: () => new U64(0x40)};
   const target = {
     base: new U64(0x1000),
@@ -1300,7 +1300,9 @@ function runCase(configureResponse) {
   const tracer = {getExportByName: symbol => symbol};
 
   function NativeFunction(address) {
-    if (address === 'qbdi_tracer_set_shadowhook_helper_path') return () => 0;
+    if (address === 'qbdi_tracer_set_shadowhook_helper_path') {
+      return path => { state.helperPaths.push(path); return 0; };
+    }
     if (address === 'qbdi_tracer_install_module') {
       return () => { state.installs += 1; };
     }
@@ -1351,11 +1353,16 @@ function runCase(configureResponse) {
       use: name => name === 'android.app.ActivityThread' ? {
         currentApplication: () => ({
           getApplicationInfo: () => ({nativeLibraryDir: {value: '/data/app/lib'}}),
-          getFilesDir: () => ({getAbsolutePath: () => '/data/user/0/files'}),
+          getFilesDir: () => ({
+            getAbsolutePath: () => '/data/user/0/com.example.app/files',
+            getCanonicalPath: () => '/data/data/com.example.app/files'
+          }),
           getClass: () => ({})
         })
       } : {
-        getRuntime: () => ({load0: {overload: () => ({call: () => {}})}})
+        getRuntime: () => ({load0: {overload: () => ({
+          call: (_runtime, _applicationClass, path) => state.tracerPaths.push(path)
+        })}})
       }
     }
   };
@@ -1392,6 +1399,14 @@ process.stdout.write(JSON.stringify(responses.map(runCase)));
         self.assertEqual(1, accepted_result["installs"])
         self.assertEqual(1, accepted_result["calls"])
         self.assertEqual("benchmark-result", accepted_result["messages"][0]["type"])
+        self.assertEqual(
+            ["/data/data/com.example.app/files/libqbdi_tracer.so"],
+            accepted_result["tracerPaths"],
+        )
+        self.assertEqual(
+            ["/data/data/com.example.app/files/libshadowhook_nothing.so"],
+            accepted_result["helperPaths"],
+        )
 
     def test_benchmark_agent_loads_the_tracer_through_the_application_loader(self):
         source = Path(__file__).parents[1].joinpath("benchmark_trace.js").read_text(

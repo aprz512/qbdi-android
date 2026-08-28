@@ -198,6 +198,7 @@ struct CooperativeStopExecution {
     QbdiStopObservation observation{};
     size_t execution_calls = 0;
     size_t continuation_calls = 0;
+    size_t before_seal_calls = 0;
     size_t seal_calls = 0;
     size_t acknowledge_calls = 0;
     size_t collector_calls = 0;
@@ -209,12 +210,20 @@ struct CooperativeStopExecution {
     QbdiTargetPreDecision repeated_pre{};
     bool repeat_pre = false;
     bool seal_success = true;
+    bool metrics_snapshotted = false;
+    bool seal_saw_metrics_snapshot = false;
     bool seal_attempted = false;
     bool sealed = false;
     bool acknowledged_sealed = false;
     bool continuation_saw_seal_attempt = false;
     bool continuation_saw_sealed = false;
 };
+
+void snapshot_cooperative_stop_metrics(void *opaque) noexcept {
+    auto *execution = static_cast<CooperativeStopExecution *>(opaque);
+    ++execution->before_seal_calls;
+    execution->metrics_snapshotted = true;
+}
 
 bool cooperative_stop_lifecycle(
         void *opaque, uint32_t tid, bool begin, uint32_t creator_tid,
@@ -266,6 +275,7 @@ bool seal_cooperative_stop(void *opaque, TraceStopReason reason) noexcept {
     auto *execution = static_cast<CooperativeStopExecution *>(opaque);
     CHECK(reason == TraceStopReason::DurationElapsed);
     ++execution->seal_calls;
+    execution->seal_saw_metrics_snapshot = execution->metrics_snapshotted;
     execution->seal_thread = std::this_thread::get_id();
     execution->seal_attempted = true;
     execution->sealed = execution->seal_success;
@@ -283,6 +293,7 @@ QbdiThreadSession *cooperative_stop_session(CooperativeStopExecution *execution)
             nullptr, execution, seal_cooperative_stop,
             acknowledge_cooperative_stop};
     execution->control.token = &execution->token;
+    execution->control.before_seal = snapshot_cooperative_stop_metrics;
     return QbdiThreadSession::create_for_test(
             771, 51, execute_cooperative_stop, execution,
             nullptr, nullptr, nullptr, nullptr,
@@ -303,6 +314,7 @@ void no_stop_preserves_the_direct_target_return_path() {
     CHECK(execution.execution_calls == 1);
     CHECK(execution.first_pre.action == QbdiTargetPreAction::Collect);
     CHECK(execution.collector_calls == 1);
+    CHECK(execution.before_seal_calls == 0);
     CHECK(execution.seal_calls == 0);
     CHECK(execution.acknowledge_calls == 0);
     CHECK(execution.continuation_calls == 0);
@@ -326,7 +338,9 @@ void stop_before_first_collected_instruction_seals_before_continuation() {
     CHECK(execution.first_pre.action == QbdiTargetPreAction::Stop);
     CHECK(execution.first_pre.stop_latched);
     CHECK(execution.collector_calls == 0);
+    CHECK(execution.before_seal_calls == 1);
     CHECK(execution.seal_calls == 1);
+    CHECK(execution.seal_saw_metrics_snapshot);
     CHECK(execution.acknowledge_calls == 1);
     CHECK(execution.execution_thread == execution.seal_thread);
     CHECK(execution.acknowledged_sealed);
@@ -355,6 +369,7 @@ void repeated_stop_observation_never_reseals_or_reenters_the_target() {
     CHECK(execution.repeated_pre.action == QbdiTargetPreAction::Stop);
     CHECK(!execution.repeated_pre.stop_latched);
     CHECK(execution.collector_calls == 0);
+    CHECK(execution.before_seal_calls == 1);
     CHECK(execution.seal_calls == 1);
     CHECK(execution.acknowledge_calls == 1);
     CHECK(execution.continuation_calls == 1);
@@ -375,6 +390,7 @@ void failed_stop_seal_marks_incomplete_without_restarting_the_target() {
     CHECK(result.target_returned);
     CHECK(result.value == 0x44);
     CHECK(execution.execution_calls == 1);
+    CHECK(execution.before_seal_calls == 1);
     CHECK(execution.seal_calls == 1);
     CHECK(execution.acknowledge_calls == 1);
     CHECK(!execution.acknowledged_sealed);

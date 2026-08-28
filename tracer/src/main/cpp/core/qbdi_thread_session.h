@@ -27,6 +27,7 @@ class QbdiThreadSession;
 using QbdiSealStopped = bool (*)(void *, TraceStopReason) noexcept;
 using QbdiStopAcknowledged = void (*)(void *, bool sealed) noexcept;
 using QbdiFlightCommitted = void (*)(void *) noexcept;
+using QbdiBeforeSeal = void (*)(void *) noexcept;
 
 struct QbdiStopControl {
     const TraceStopToken *token = nullptr;
@@ -34,6 +35,7 @@ struct QbdiStopControl {
     QbdiSealStopped seal = nullptr;
     QbdiStopAcknowledged acknowledge = nullptr;
     QbdiFlightCommitted committed = nullptr;
+    QbdiBeforeSeal before_seal = nullptr;
 };
 
 using QbdiFlightWriterSeal = bool (*)(void *, TraceStopReason) noexcept;

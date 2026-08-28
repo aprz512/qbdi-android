@@ -157,15 +157,34 @@ python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
 下列验收是发布前的手动门禁，**不会**在普通 host CI 中自动运行。它需要明确
 指定一台 rooted arm64 设备，以及可用的 ADB、匹配的 Frida host/server、NDK 和 host
-`lz4`；脚本拒绝选择默认设备，并以有界的子进程和读操作执行。
+`lz4`；脚本拒绝选择默认设备，并以有界的子进程和读操作执行。历史 benchmark 还固定
+使用 Android NDK 26.1.10909125 和 build-tools 35.0.0；缺少固定版本工具、历史提交或离线
+Gradle 依赖时会直接关闭门禁，不会退化成仅检查语义。
 
 ```bash
 python3 scripts/qtrace_device_acceptance.py --device SERIAL
 ```
 
-该门禁会构建、安装 fixture，等待最多 15 秒的无追踪 timed oracle，再运行 binary
-baseline、timed offset/symbol、monitor-exit、flight-crash 和四种手动 pull。失败时会打印
-生成的 qtrace report 路径，以便保留设备/主机证据进行复查。
+该门禁先构建并持有本次候选 APK、tracer 和 companion，再从提交
+`2d6b1022a14ae554804a57e267544c12dea29353` 私有归档目标源码，以 `--offline` 在隔离目录
+构建历史 APK。第一阶段安装历史 APK，并用同一份候选 tracer 执行 binary benchmark
+`--compare`；第二阶段重新安装当前 APK、重新部署同一对 tracer/companion，等待最多 15 秒
+的无追踪 timed oracle，再完成 timed offset/symbol 和四种手动 pull，最后验证 monitor-exit
+与预期返回 2 的 flight-crash recovery。任一历史构建、身份或 benchmark 失败都属于发布门禁
+失败，绝不会回退为仅检查语义。
+全部验证和清理成功后，门禁才会将本轮目录原子发布到
+`qtrace-acceptance-evidence/<uuid>`，写入一个不超过 64 KiB 的成功 manifest，并打印最终绝对
+路径。manifest 绑定本次 HEAD、设备 serial、历史 commit/canonical SHA、当前 APK、tracer、
+companion 哈希、八个场景 report、trace 备份路径和 gate 起止时间；任一 manifest、rename 或
+目录 fsync 失败都会令门禁失败并保留等价诊断。失败证据保留在
+`qtrace-acceptance-failures/<uuid>`。这两个目录均被 Git 忽略，脚本不会自动删除其中内容。
+
+进入当前 fixture 场景前，门禁会先 force-stop 固定 demo 包，严格确认已有的
+`files/qbdi-traces` 是真实目录而非 symlink，再将它原子重命名为同级且唯一的
+`files/qbdi-traces.pre-acceptance-<uuid>`，随后创建并验证一个全新的 trace 目录，再部署和
+运行本轮场景。这样 native status publisher 启动时已有可写根目录，四种 pull 也只验证本轮
+fixture 数据；旧目录作为可恢复备份保留，成功或失败后都不会自动删除。该隔离只作用于固定
+demo 包，不会访问用户指定的外部 package 路径。
 
 Frida/GumJS adapter 的 host 测试是显式 opt-in；它要求可用的 Frida Python package 和
 本机 attach 能力，不属于默认 Python 套件：
@@ -491,7 +510,22 @@ python3 scripts/benchmark_trace.py --package com.aprz.qbdiandroid \
   --compare docs/benchmarks/binary-trace-baseline.md
 ```
 
-带 `--compare` 才是验收模式，而且必须使用生成历史基线的同一 APK/target build。工具会在预热前从设备已安装的 `base.apk` 提取 `lib/arm64-v8a/libdemo_target.so`，核对历史 target SHA-256；预热完成后立即核对 complete footer、事件数、返回值及首尾指令，只有严格匹配才会进入五次 measured runs。APK 重建可能改变 scene offset、指令数或返回值，不能把这种漂移当作 tracer 性能变化，也不能据此改写历史基线。工具还会检查设备/系统身份、SELinux，以及本地候选与 app-private tracer 哈希。没有 `--compare` 的运行仅用于诊断。
+带 `--compare` 才是验收模式，而且必须安装由历史提交
+`2d6b1022a14ae554804a57e267544c12dea29353` 构建的 APK。基线保留原始 target SHA-256
+`5f1a970825ae8bacb17d8dd656e01bd1fe7172638ba3ddcacd82ffaaad6e62c0` 作为审计证据；跨工作树
+准入使用 canonical SHA-256
+`0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169`。canonical 内容由固定的
+Android NDK 26.1.10909125 `llvm-objcopy --strip-debug --remove-section=.note.gnu.build-id`
+去除调试信息与 build ID 后生成，运行时字节发生变化仍会导致拒绝。
+
+工具会在预热前校验设备已安装的整个 `base.apk`、从中提取的唯一
+`lib/arm64-v8a/libdemo_target.so`、canonical target 身份、本地候选与 app-private tracer
+哈希，以及设备/系统身份和 SELinux。预热完成后立即核对 complete footer、事件数、返回值
+及首尾指令，只有严格匹配才会进入恰好五次 measured runs。发布门禁始终传入
+`--expected-installed-apk-sha256`，把已安装 APK 绑定到其持有的历史构建；直接手动运行
+`benchmark_trace.py` 时可以省略该参数，便于诊断，但这不等同于发布验收。APK 重建可能
+改变 scene offset、指令数或返回值，不能把这种漂移当作 tracer 性能变化，也不能据此改写
+历史基线。没有 `--compare` 的运行仅用于诊断。
 
 Flight Recorder 的多线程崩溃压力结果见 [Flight Recorder 验收报告](docs/benchmarks/flight-recorder-acceptance.md)。
 

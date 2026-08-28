@@ -8,6 +8,8 @@
 out/
 traces/
 artifacts/
+qtrace-acceptance-evidence/
+qtrace-acceptance-failures/
 __pycache__/
 *.py[cod]
 local.properties

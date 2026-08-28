@@ -8,6 +8,7 @@ turns the repository fixture into a normal ``UserConfig`` and an
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import uuid
 import zipfile
@@ -30,6 +31,7 @@ _MODULE = "libdemo_target.so"
 _ACTIVITY = "com.aprz.qbdiandroid/.MainActivity"
 _MAX_MEMBER_BYTES = 512 * 1024 * 1024
 _BUILD_OUTPUT_BYTES = 4 * 1024 * 1024
+_GRADLE_IDLE_BOUND = "-Dorg.gradle.daemon.idletimeout=1000"
 
 
 @dataclass(frozen=True)
@@ -156,9 +158,24 @@ def build_demo_fixture(repo_root: Path, runner: BoundedRunner, timeout: float) -
     """Build the fixture APK and atomically expose its stable arm64 target ELF."""
     root = Path(repo_root).resolve()
     gradlew = _regular(root / "gradlew", "demo.build")
+    environment_executable = shutil.which("env")
+    if environment_executable is None or not os.path.isabs(environment_executable):
+        raise QtraceError("demo.build_failed", "demo.build", "env executable is unavailable")
+    environment_executable = str(_regular(Path(environment_executable), "demo.build"))
+    inherited_gradle_options = os.environ.get("GRADLE_OPTS", "")
+    gradle_options = (
+        f"{inherited_gradle_options} {_GRADLE_IDLE_BOUND}"
+        if inherited_gradle_options else _GRADLE_IDLE_BOUND
+    )
     try:
-        runner.capture((str(gradlew), ":app:assembleDebug"), maximum_bytes=_BUILD_OUTPUT_BYTES,
-                       timeout=timeout)
+        runner.capture((
+            environment_executable,
+            f"GRADLE_OPTS={gradle_options}",
+            str(gradlew),
+            ":app:assembleDebug",
+            "--no-daemon",
+        ),
+                       maximum_bytes=_BUILD_OUTPUT_BYTES, timeout=timeout)
     except QtraceError:
         raise
     except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
@@ -249,12 +266,14 @@ def make_demo_action(mode: str, seed: int, iterations: int = 30, worker: int = 0
         raise QtraceError("demo.action_invalid", "demo.action", "ADB timeout must be finite and positive")
 
     nonce = str(uuid.uuid4())
+    activity_flags = (("--activity-clear-task",)
+                      if mode in {"monitor-exit", "flight-crash"} else ())
 
     def action(device: object, _pid: int, session_id: str) -> InstalledActionReceipt:
         shell = getattr(device, "shell", None)
         if not callable(shell):
             raise QtraceError("demo.device_invalid", "demo.action", "device cannot start the fixture activity")
-        shell("am", "start", "-n", _ACTIVITY,
+        shell("am", "start", "-n", _ACTIVITY, *activity_flags,
               "--ez", "qtrace_acceptance", "true",
               "--es", "qtrace_acceptance_mode", intents[mode],
               "--el", "qtrace_acceptance_seed", str(seed),

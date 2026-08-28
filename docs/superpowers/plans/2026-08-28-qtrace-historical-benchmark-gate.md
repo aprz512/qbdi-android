@@ -625,3 +625,20 @@ git commit -m "docs: explain historical benchmark gate"
 ```
 
 Before handoff, run `git status --short`; expected output is empty. Report all four commit hashes and the retained evidence path from the successful Pixel run.
+
+#### Task 4 implementation deviation / approved waiver
+
+The strict physical gate exposed correctness defects that made the documented gate impossible to
+complete on the real Pixel 6. Task 4 therefore includes test-first prerequisite fixes in the seven
+generic qtrace files (`agent.js`, `artifacts.py`, `build.py`, `cli.py`, `demo.py`, `preflight.py`, and
+`session.py`), their host tests, the native tracer lifecycle/status implementation and tests, and the
+fixed demo acceptance app adapter and tests. Each deviation must be mapped from physical failure to
+regression test, minimal fix, and retained evidence in `task-4-report.md`.
+
+This waiver does not authorize a demo branch in a generic external-package path, does not change the
+generic SessionOrchestrator/CLI flight capacity default of 512 MiB, and does not weaken any identity,
+package-access, artifact-completeness, status, crash-recovery, pull-selector, or historical benchmark
+boundary. The demo-only flight-crash adapter explicitly supplies 64 MiB while preserving 16 workers,
+at least five rotations, complete record validation, and crash-recovery oracles. The existing
+`/data/user/0` package-access binding limitation remains documented as a secondary-user concern, not
+silently expanded in this repair.
