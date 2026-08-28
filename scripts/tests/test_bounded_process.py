@@ -241,6 +241,131 @@ class BoundedProcessTests(unittest.TestCase):
 
             self.assertFalse(marker.exists())
 
+    def test_capture_bounded_runs_target_in_requested_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = capture_bounded(
+                [sys.executable, "-c", "import os; print(os.getcwd())"],
+                maximum_bytes=4096,
+                timeout=3.0,
+                cwd=Path(directory),
+            )
+        self.assertEqual(str(Path(directory).resolve()), output.decode().strip())
+
+    def test_capture_bounded_rejects_missing_file_and_symlink_cwd_before_target_spawn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            regular = root / "regular"
+            regular.write_text("not a directory", encoding="utf-8")
+            symlink = root / "symlink"
+            symlink.symlink_to(root)
+            marker = root / "target-started"
+            initial_descriptors = len(list(Path("/proc/self/fd").iterdir()))
+            for invalid in (root / "missing", regular, symlink):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    BoundedProcessError, "cwd.*before target spawn"
+                ):
+                    capture_bounded(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()",
+                            str(marker),
+                        ],
+                        maximum_bytes=1,
+                        timeout=1,
+                        cwd=invalid,
+                    )
+                self.assertFalse(marker.exists())
+                self.assertEqual(
+                    initial_descriptors, len(list(Path("/proc/self/fd").iterdir()))
+                )
+
+    def test_capture_bounded_closes_cwd_on_immediate_deadline_and_first_pipe_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory)
+            initial_descriptors = len(list(Path("/proc/self/fd").iterdir()))
+            with self.assertRaises(subprocess.TimeoutExpired):
+                capture_bounded(
+                    [sys.executable, "-c", "raise SystemExit(0)"],
+                    maximum_bytes=1, timeout=1e-12, cwd=cwd,
+                )
+            self.assertEqual(
+                initial_descriptors, len(list(Path("/proc/self/fd").iterdir()))
+            )
+
+            with patch.object(bounded_process.os, "pipe2",
+                              side_effect=OSError("first pipe failure")), \
+                 self.assertRaisesRegex(OSError, "first pipe failure"):
+                capture_bounded(
+                    [sys.executable, "-c", "raise SystemExit(0)"],
+                    maximum_bytes=1, timeout=1, cwd=cwd,
+                )
+            self.assertEqual(
+                initial_descriptors, len(list(Path("/proc/self/fd").iterdir()))
+            )
+
+    def test_capture_bounded_holds_cwd_across_path_rebinding_and_aggregates_close_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            requested = root / "requested"
+            held = root / "held"
+            requested.mkdir()
+            (requested / "identity").write_text("held", encoding="utf-8")
+            original_popen = bounded_process.subprocess.Popen
+            original_close = bounded_process.os.close
+            rebound = False
+            close_failed = False
+            initial_descriptors = len(list(Path("/proc/self/fd").iterdir()))
+
+            def rebind_then_spawn(*args, **kwargs):
+                nonlocal rebound
+                if not rebound:
+                    requested.rename(held)
+                    requested.mkdir()
+                    (requested / "identity").write_text("replacement", encoding="utf-8")
+                    rebound = True
+                return original_popen(*args, **kwargs)
+
+            held_identity = requested.stat()
+
+            def close_with_one_failure(descriptor):
+                nonlocal close_failed
+                try:
+                    details = os.fstat(descriptor)
+                except OSError:
+                    return original_close(descriptor)
+                if (not close_failed and details.st_dev == held_identity.st_dev
+                        and details.st_ino == held_identity.st_ino):
+                    close_failed = True
+                    original_close(descriptor)
+                    raise OSError("injected cwd close failure")
+                return original_close(descriptor)
+
+            with patch.object(
+                bounded_process.subprocess, "Popen", side_effect=rebind_then_spawn
+            ), patch.object(
+                bounded_process.os, "close", side_effect=close_with_one_failure
+            ), self.assertRaisesRegex(BoundedProcessError, "subprocess failed") as caught:
+                capture_bounded(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; print(Path('identity').read_text()); raise SystemExit(7)",
+                    ],
+                    maximum_bytes=64,
+                    timeout=3,
+                    cwd=requested,
+                )
+
+            self.assertEqual(b"held\n", caught.exception.stdout)
+            diagnostics = "\n".join(getattr(caught.exception, "__notes__", ()))
+            self.assertIn("cwd path identity changed", diagnostics)
+            self.assertIn("injected cwd close failure", diagnostics)
+            self.assertTrue(close_failed)
+            self.assertEqual(
+                initial_descriptors, len(list(Path("/proc/self/fd").iterdir()))
+            )
+
     def test_denied_unshare_fails_before_spawning_target(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "target-started"

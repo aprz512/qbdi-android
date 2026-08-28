@@ -10,11 +10,13 @@ import select
 import selectors
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 
 READ_CHUNK_BYTES = 64 * 1024
@@ -749,7 +751,8 @@ def _read_selector_event(
 
 
 def capture_bounded(
-    command: Sequence[str], *, maximum_bytes: int, timeout: float
+    command: Sequence[str], *, maximum_bytes: int, timeout: float,
+    cwd: Path | None = None,
 ) -> bytes:
     """Capture stdout while a rootless PID namespace contains every descendant.
 
@@ -770,16 +773,63 @@ def capture_bounded(
         raise BoundedProcessError(
             f"{_BACKEND} containment failed before target spawn: {error}"
         ) from error
+    cwd_descriptor = -1
+    cwd_path: str | None = None
+    cwd_identity: tuple[int, int] | None = None
+    if cwd is not None:
+        cwd_path = os.path.abspath(os.fspath(cwd))
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            cwd_descriptor = os.open(cwd_path, flags)
+            details = os.fstat(cwd_descriptor)
+            if not stat.S_ISDIR(details.st_mode):
+                raise NotADirectoryError(errno.ENOTDIR, "not a directory", cwd_path)
+            pathname_details = os.stat(cwd_path, follow_symlinks=False)
+            if not stat.S_ISDIR(pathname_details.st_mode):
+                raise NotADirectoryError(errno.ENOTDIR, "not a directory", cwd_path)
+            cwd_identity = (details.st_dev, details.st_ino)
+            if cwd_identity != (pathname_details.st_dev, pathname_details.st_ino):
+                raise BoundedProcessError("cwd path identity changed while it was opened")
+        except BaseException as error:
+            if cwd_descriptor >= 0:
+                try:
+                    os.close(cwd_descriptor)
+                finally:
+                    cwd_descriptor = -1
+            raise BoundedProcessError(
+                f"cwd validation failed before target spawn: {error}"
+            ) from error
+
+    def close_cwd_before_raise(primary: BaseException) -> None:
+        nonlocal cwd_descriptor
+        if cwd_descriptor < 0:
+            return
+        try:
+            os.close(cwd_descriptor)
+        except OSError as cleanup_error:
+            if hasattr(primary, "add_note"):
+                primary.add_note(f"{_BACKEND} cwd cleanup failed: {cleanup_error}")
+        finally:
+            cwd_descriptor = -1
+
     work_deadline_ns, cleanup_deadline_ns, deadline_ns = _capture_deadlines(timeout)
     if deadline_ns <= time.monotonic_ns():
-        raise subprocess.TimeoutExpired(argv, timeout)
+        timeout_error = subprocess.TimeoutExpired(argv, timeout)
+        close_cwd_before_raise(timeout_error)
+        raise timeout_error
     pipe_flags = getattr(os, "O_CLOEXEC", 0)
-    control_read, control_write = os.pipe2(pipe_flags)
+    try:
+        control_read, control_write = os.pipe2(pipe_flags)
+    except BaseException as error:
+        close_cwd_before_raise(error)
+        raise
     try:
         status_read, status_write = os.pipe2(pipe_flags)
-    except BaseException:
+    except BaseException as error:
         os.close(control_read)
         os.close(control_write)
+        close_cwd_before_raise(error)
         raise
     wrapper: subprocess.Popen[bytes] | None = None
     wrapper_pidfd = -1
@@ -791,6 +841,7 @@ def capture_bounded(
     output = bytearray()
     error_output = bytearray()
     status_payload = bytearray()
+    cwd_rebind_error: BaseException | None = None
     try:
         wrapper = subprocess.Popen(
             [
@@ -815,9 +866,24 @@ def capture_bounded(
             stderr=subprocess.PIPE,
             shell=False,
             close_fds=True,
-            pass_fds=(control_read, status_write),
+            pass_fds=(
+                (control_read, status_write, cwd_descriptor)
+                if cwd_descriptor >= 0 else (control_read, status_write)
+            ),
+            cwd=(
+                f"/proc/self/fd/{cwd_descriptor}"
+                if cwd_descriptor >= 0 else None
+            ),
             start_new_session=True,
         )
+        if cwd_path is not None and cwd_identity is not None:
+            try:
+                details = os.stat(cwd_path, follow_symlinks=False)
+                if (not stat.S_ISDIR(details.st_mode)
+                        or (details.st_dev, details.st_ino) != cwd_identity):
+                    raise BoundedProcessError("cwd path identity changed after wrapper spawn")
+            except BaseException as error:
+                cwd_rebind_error = error
         identity = _process_identity(wrapper.pid)
         if identity is not None and identity[0] == os.getpid():
             wrapper_starttime = identity[1]
@@ -997,6 +1063,17 @@ def capture_bounded(
     finally:
         active_error = sys.exc_info()[1]
         cleanup_errors: list[BaseException] = []
+        if cwd_path is not None and cwd_identity is not None:
+            try:
+                details = os.stat(cwd_path, follow_symlinks=False)
+                if (not stat.S_ISDIR(details.st_mode)
+                        or (details.st_dev, details.st_ino) != cwd_identity):
+                    raise BoundedProcessError("cwd path identity changed before cleanup")
+            except BaseException as cleanup_error:
+                if cwd_rebind_error is None:
+                    cwd_rebind_error = cleanup_error
+        if cwd_rebind_error is not None:
+            cleanup_errors.append(cwd_rebind_error)
         if wrapper is not None and not wrapper_reaped:
             if target_authorized:
                 _send_cancel(control_write)
@@ -1042,6 +1119,11 @@ def capture_bounded(
                     os.close(descriptor)
                 except OSError as cleanup_error:
                     cleanup_errors.append(cleanup_error)
+        if cwd_descriptor >= 0:
+            try:
+                os.close(cwd_descriptor)
+            except OSError as cleanup_error:
+                cleanup_errors.append(cleanup_error)
         if cleanup_errors:
             if active_error is None:
                 raise cleanup_errors[0]
