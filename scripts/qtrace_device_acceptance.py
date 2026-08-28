@@ -104,8 +104,9 @@ class HostBinarySnapshot:
 
     def close(self) -> None:
         if self.descriptor >= 0:
-            os.close(self.descriptor)
+            descriptor = self.descriptor
             self.descriptor = -1
+            os.close(descriptor)
 
 
 @dataclass

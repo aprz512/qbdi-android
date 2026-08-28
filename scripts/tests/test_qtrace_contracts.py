@@ -1628,9 +1628,11 @@ class AcceptanceHarnessTests(unittest.TestCase):
         pair = RecordingHeldPair(tracer, companion)
         historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
         historical.path.write_bytes(b"historical")
-        real_close = acceptance.HostBinarySnapshot.close
+        unrelated_path = root / "unrelated-open-fd"
+        unrelated_path.write_bytes(b"unrelated")
+        real_os_close = acceptance.os.close
         real_recovery_tree_cleanup = acceptance._recovery_snapshot_tree_cleanup
-        recovery_close_failed = False
+        unrelated_descriptors = []
         recovery_tree_calls = 0
         installs = []
 
@@ -1641,15 +1643,21 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 return super().run(command, timeout=timeout, cwd=cwd,
                                    allowed=allowed)
 
-        def failing_close(snapshot):
-            nonlocal recovery_close_failed
-            if (failure == "close" and
-                    snapshot.path.parent.name.startswith("qtrace-current-recovery-") and
-                    not recovery_close_failed):
-                recovery_close_failed = True
-                real_close(snapshot)
+        def failing_os_close(descriptor):
+            try:
+                held_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+            except OSError:
+                held_path = Path()
+            if (failure == "close" and not unrelated_descriptors and
+                    held_path.parent.name.startswith("qtrace-current-recovery-")):
+                real_os_close(descriptor)
+                reused = os.open(unrelated_path, os.O_RDWR)
+                if reused != descriptor:
+                    os.dup2(reused, descriptor)
+                    real_os_close(reused)
+                unrelated_descriptors.append(descriptor)
                 raise OSError("recovery snapshot close after descriptor disposal")
-            return real_close(snapshot)
+            return real_os_close(descriptor)
 
         def failing_recovery_tree_cleanup(recovery):
             nonlocal recovery_tree_calls
@@ -1667,7 +1675,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
                           return_value=(current, pair)), \
                 patch.object(acceptance, "_stage_app_private_binaries"), \
                 patch.object(acceptance, "_run_current_fixture_phase"), \
-                patch.object(acceptance.HostBinarySnapshot, "close", failing_close), \
+                patch.object(acceptance.os, "close", failing_os_close), \
                 patch.object(acceptance, "_recovery_snapshot_tree_cleanup",
                              failing_recovery_tree_cleanup), \
                 self.assertRaises(RuntimeError):
@@ -1682,7 +1690,10 @@ class AcceptanceHarnessTests(unittest.TestCase):
             command for command in runner.commands
             if command[4:7] == ("am", "force-stop", acceptance.PACKAGE)
         ]
-        return installs, force_stops, recovery_tree_calls, report
+        unrelated_descriptor = (
+            unrelated_descriptors[0] if unrelated_descriptors else None
+        )
+        return installs, force_stops, recovery_tree_calls, report, unrelated_descriptor
 
     def test_direct_acceptance_script_loads_repo_packages_without_pythonpath(self):
         environment = os.environ.copy()
@@ -4109,33 +4120,47 @@ class AcceptanceHarnessTests(unittest.TestCase):
     def test_recovery_snapshot_close_failure_does_not_reinstall_damaged_backup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            installs, force_stops, tree_calls, report = (
+            installs, force_stops, tree_calls, report, unrelated_descriptor = (
                 self._run_real_recovery_disposal_failure(root, failure="close")
             )
 
-            self.assertEqual(2, len(installs))
-            self.assertEqual(2, len(force_stops))
-            self.assertEqual(2, tree_calls)
-            self.assertEqual("cleanup-success", report["phase"])
-            self.assertTrue(any(
-                item["message"] ==
-                "recovery snapshot close after descriptor disposal"
-                for item in report["cleanup_errors"]
-            ))
-            self.assertFalse(any(
-                item["label"].startswith("recovery force-stop") or
-                item["label"] == "recovery current APK install"
-                for item in report["cleanup_errors"]
-            ))
-            self.assertEqual([], list(root.glob("qtrace-current-recovery-*")))
+            try:
+                self.assertIsNotNone(unrelated_descriptor)
+                try:
+                    os.fstat(unrelated_descriptor)
+                except OSError as error:
+                    self.fail(f"cleanup retry closed unrelated reused fd: {error}")
+                os.write(unrelated_descriptor, b" still-open")
+                self.assertEqual(2, len(installs))
+                self.assertEqual(2, len(force_stops))
+                self.assertEqual(2, tree_calls)
+                self.assertEqual("cleanup-success", report["phase"])
+                self.assertTrue(any(
+                    item["message"] ==
+                    "recovery snapshot close after descriptor disposal"
+                    for item in report["cleanup_errors"]
+                ))
+                self.assertFalse(any(
+                    item["label"].startswith("recovery force-stop") or
+                    item["label"] == "recovery current APK install"
+                    for item in report["cleanup_errors"]
+                ))
+                self.assertEqual([], list(root.glob("qtrace-current-recovery-*")))
+            finally:
+                if unrelated_descriptor is not None:
+                    try:
+                        os.close(unrelated_descriptor)
+                    except OSError:
+                        pass
 
     def test_partial_recovery_tree_disposal_is_retried_without_device_reinstall(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            installs, force_stops, tree_calls, report = (
+            installs, force_stops, tree_calls, report, unrelated_descriptor = (
                 self._run_real_recovery_disposal_failure(root, failure="tree")
             )
 
+            self.assertIsNone(unrelated_descriptor)
             self.assertEqual(2, len(installs))
             self.assertEqual(2, len(force_stops))
             self.assertEqual(2, tree_calls)
