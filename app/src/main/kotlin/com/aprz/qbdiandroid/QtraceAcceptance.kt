@@ -32,6 +32,7 @@ object QtraceAcceptance {
     private const val maximumStatusBytes = 64 * 1024
     private const val entryStatusWaitNs = 1_000_000_000L
     private const val entryStatusPollNs = 25_000_000L
+    private const val exitStatusWaitNs = 1_000_000_000L
     private const val exitTaskWaitNs = 1_000_000_000L
     private val uuid4 = Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
     private val started = AtomicBoolean(false)
@@ -165,6 +166,32 @@ object QtraceAcceptance {
         throw IllegalStateException("native running status was not available before entry deadline")
     }
 
+    internal fun awaitQuiescentExitStatus(
+        statusFile: File,
+        expectedSessionId: String,
+        deadlineMonotonicNs: Long,
+        nowMonotonicNs: () -> Long = System::nanoTime,
+        pause: (Long) -> Unit = { nanoseconds ->
+            Thread.sleep(
+                nanoseconds / 1_000_000L,
+                (nanoseconds % 1_000_000L).toInt(),
+            )
+        },
+    ) {
+        while (nowMonotonicNs() < deadlineMonotonicNs) {
+            val snapshot = try {
+                readBoundedUtf8(statusFile)
+            } catch (_: IOException) {
+                null
+            }
+            val afterRead = nowMonotonicNs()
+            if (afterRead >= deadlineMonotonicNs) break
+            if (snapshot != null && isQuiescentExitStatus(snapshot, expectedSessionId)) return
+            pause(minOf(entryStatusPollNs, deadlineMonotonicNs - afterRead))
+        }
+        throw IllegalStateException("native exit status did not quiesce before process exit")
+    }
+
     private fun readBoundedUtf8(statusFile: File): String {
         val bytes = FileInputStream(statusFile).use { input ->
             val result = ByteArray(maximumStatusBytes + 1)
@@ -212,15 +239,21 @@ object QtraceAcceptance {
         return single("sessionId") == expectedSessionId && single("state") == "running"
     }
 
+    private fun isQuiescentExitStatus(snapshot: String, expectedSessionId: String): Boolean =
+        isRunningStatus(snapshot, expectedSessionId) &&
+            Regex("\\\"activeScenes\\\"\\s*:\\s*\\[\\s*\\]").containsMatchIn(snapshot) &&
+            Regex("\\\"artifacts\\\"\\s*:\\s*\\[\\s*\\\"[^\\\"]+\\\"").containsMatchIn(snapshot)
+
     fun start(activity: MainActivity, request: QtraceAcceptanceRequest) {
         val traced = activity.intent.hasExtra(worker)
-        val evidence = if (request.mode == "timed" && traced) {
+        val tracedEvidence = if (traced) {
             parseTracedEvidence(mapOf(
                 worker to activity.intent.getIntExtra(worker, -1),
                 sessionId to activity.intent.getStringExtra(sessionId),
                 nonce to activity.intent.getStringExtra(nonce),
             )) ?: return
         } else null
+        val evidence = if (request.mode == "timed") tracedEvidence else null
         if (!started.compareAndSet(false, true)) return
         if (request.mode == "timed" && !traced) {
             clearStaleTimedResults { name ->
@@ -284,6 +317,22 @@ object QtraceAcceptance {
                             writeAtomic(activity.filesDir, "qtrace-acceptance-exit.json", result)
                         },
                         prepareExit = {
+                            tracedEvidence?.let { exitEvidence ->
+                                val started = System.nanoTime()
+                                val deadline = if (started > Long.MAX_VALUE - exitStatusWaitNs) {
+                                    Long.MAX_VALUE
+                                } else {
+                                    started + exitStatusWaitNs
+                                }
+                                awaitQuiescentExitStatus(
+                                    File(
+                                        activity.filesDir,
+                                        "qbdi-traces/session-${exitEvidence.sessionId}.status.json",
+                                    ),
+                                    exitEvidence.sessionId,
+                                    deadline,
+                                )
+                            }
                             val taskFinished = CountDownLatch(1)
                             activity.runOnUiThread {
                                 try {

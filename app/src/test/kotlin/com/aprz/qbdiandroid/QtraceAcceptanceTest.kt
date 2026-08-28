@@ -9,12 +9,17 @@ import java.nio.file.StandardCopyOption
 import java.util.concurrent.Executors
 
 class QtraceAcceptanceTest {
-    private fun runningStatus(session: String, state: String = "running"): String =
+    private fun runningStatus(
+        session: String,
+        state: String = "running",
+        activeScenes: String = "[]",
+        artifacts: String = "[]",
+    ): String =
         "{\"schemaVersion\":1,\"sessionId\":\"$session\",\"generation\":1," +
             "\"packageName\":\"com.aprz.qbdiandroid\",\"pid\":4242,\"state\":\"$state\"," +
             "\"reason\":\"\",\"transitionMonotonicNs\":100," +
             "\"deadlineMonotonicNs\":2000000000,\"normalizedScenes\":[]," +
-            "\"activeScenes\":[],\"artifacts\":[],\"stopAcknowledged\":false," +
+            "\"activeScenes\":$activeScenes,\"artifacts\":$artifacts,\"stopAcknowledged\":false," +
             "\"warnings\":[],\"errors\":[]}"
 
     @Test fun parses_only_explicit_supported_fixture_intents() {
@@ -222,6 +227,36 @@ class QtraceAcceptanceTest {
             "{\"iterations\":3,\"seed\":7,\"result\":\"0x2a\"}",
             payload,
         )
+    }
+
+    @Test fun exit_readiness_waits_for_committed_inactive_scene_status() {
+        val session = "123e4567-e89b-42d3-a456-426614174000"
+        val status = Files.createTempFile("qtrace-exit-status", ".json").toFile()
+        status.writeText(runningStatus(
+            session,
+            activeScenes = "[{\"sceneIndex\":0,\"tid\":7,\"sealed\":false}]",
+            artifacts = "[\"run.trace.bin.lz4\"]",
+        ))
+        var now = 0L
+        var pauses = 0
+
+        QtraceAcceptance.awaitQuiescentExitStatus(
+            status,
+            session,
+            deadlineMonotonicNs = 1_000_000_000L,
+            nowMonotonicNs = { now },
+            pause = {
+                pauses += 1
+                now += it
+                status.writeText(runningStatus(
+                    session,
+                    activeScenes = "[]",
+                    artifacts = "[\"run.trace.bin.lz4\"]",
+                ))
+            },
+        )
+
+        assertEquals(1, pauses)
     }
 
     @Test fun process_gate_allows_only_one_concurrent_claim() {
