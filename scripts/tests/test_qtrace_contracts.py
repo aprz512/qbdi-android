@@ -2040,6 +2040,41 @@ class AcceptanceHarnessTests(unittest.TestCase):
         self.assertEqual(expected_nonce, json.loads(receipt)["nonce"])
         self.assertEqual("running", json.loads(entry)["state"])
 
+    def test_timed_entry_evidence_retries_one_bounded_adb_timeout(self):
+        from scripts.qtrace_device_acceptance import (
+            SubprocessRunner,
+            _wait_for_timed_fixture_evidence,
+        )
+
+        nonce = "123e4567-e89b-42d3-a456-426614174000"
+        report = {
+            "session_id": SESSION,
+            "package": "com.aprz.qbdiandroid",
+            "pid": 4242,
+            "timeline": [{
+                "stage": "installing_hooks", "cleanup_detached": True,
+                "action_nonce": nonce,
+            }],
+            "native": {"status": status("sealed")},
+        }
+        receipt = json.dumps({
+            "sessionId": SESSION, "nonce": nonce, "entryMonotonicNs": 101,
+        }).encode("utf-8")
+        entry = json.dumps(status("running")).encode("utf-8")
+        runner = SubprocessRunner("SERIAL", inject_first_read_failure=False)
+
+        with patch(
+            "scripts.qtrace_device_acceptance.capture_bounded",
+            side_effect=(subprocess.TimeoutExpired(["adb"], 1.0), receipt, entry),
+        ) as bounded:
+            receipt_raw, entry_raw = _wait_for_timed_fixture_evidence(
+                runner, report, timeout=1.0,
+            )
+
+        self.assertEqual(3, bounded.call_count)
+        self.assertEqual(nonce, json.loads(receipt_raw)["nonce"])
+        self.assertEqual("running", json.loads(entry_raw)["state"])
+
     def test_report_path_returns_only_a_lexical_token(self):
         from scripts.qtrace_device_acceptance import _published_report_path, _report_path
 

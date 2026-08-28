@@ -938,6 +938,8 @@ class SubprocessRunner:
             raise ValueError("bounded acceptance commands do not support a working directory")
         try:
             output = capture_bounded(command, maximum_bytes=1_048_576, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(str(error)) from error
         except BoundedProcessError as error:
             if error.returncode in allowed:
                 return CommandResult(
