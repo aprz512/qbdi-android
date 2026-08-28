@@ -95,7 +95,37 @@ def test_baseline_preserves_raw_identity_and_requires_canonical_identity(self):
          identity["historical_target_commit"]))
 ```
 
-Add `test_compare_binds_whole_apk_and_reports_raw_and_canonical_identities`; after the existing mocked-main pattern captures JSON, assert the five keys in interface order equal `["1" * 64, "2" * 64, RAW_SHA, CANONICAL_SHA, CANONICAL_SHA]`. Also add `test_compare_rejects_expected_apk_or_canonical_mismatch_before_warmup`: patch `run_once` with an assertion-raising fake, run `main()`, assert `installed base.apk SHA-256` or `canonical target SHA-256`, and assert zero warmup calls. Add `test_expected_installed_apk_sha_requires_lowercase_64_hex` and `test_manual_non_compare_run_does_not_require_expected_apk_sha`.
+Add `test_compare_binds_whole_apk_and_reports_raw_and_canonical_identities`.
+Patch `parse_args()` with a complete `argparse.Namespace`, patch
+`live_device_identity()`, `verify_candidate_tracer()`,
+`verify_installed_target_library()`, and six `run_once()` results, capture
+stdout with `contextlib.redirect_stdout()`, and assert this literal projection
+of the parsed JSON:
+
+```python
+self.assertEqual({
+    "installed_apk_sha256": "1" * 64,
+    "target_library_sha256": "2" * 64,
+    "baseline_target_library_sha256": RAW_SHA,
+    "target_library_canonical_sha256": CANONICAL_SHA,
+    "baseline_target_library_canonical_sha256": CANONICAL_SHA,
+}, {key: report[key] for key in (
+    "installed_apk_sha256", "target_library_sha256",
+    "baseline_target_library_sha256", "target_library_canonical_sha256",
+    "baseline_target_library_canonical_sha256",
+)})
+```
+
+Add `test_compare_rejects_expected_apk_or_canonical_mismatch_before_warmup`:
+patch `run_once` with an assertion-raising fake, run `main()`, assert distinct
+`installed base.apk SHA-256` or `canonical target SHA-256` errors, and assert
+zero warmup calls. Add
+`test_installed_apk_rejects_multiple_base_paths_duplicate_target_other_abi_bad_crc_and_every_zip_size_bound_before_warmup`,
+with literal cases for two `pm path` base entries, two arm64 target entries,
+an `armeabi-v7a` target, a corrupted target payload, 4097 entries, 512 MiB + 1
+aggregate metadata, a 128 MiB + 1 entry, and a 64 MiB + 1 target. Add
+`test_expected_installed_apk_sha_requires_lowercase_64_hex` and
+`test_manual_non_compare_run_does_not_require_expected_apk_sha`.
 
 - [ ] **Step 3: Run the focused tests and verify RED**
 
@@ -138,7 +168,7 @@ class InstalledTargetIdentity:
     target_library_canonical_sha256: str
 ```
 
-Extend `parse_baseline_document()` with `Target library canonical SHA-256 -> target_library_canonical_sha256` and `Historical target commit -> historical_target_commit`; require lowercase 64-hex SHA values and the exact 40-hex commit. In `verify_installed_target_library()`, keep the 512 MiB bounded device read, compute whole-APK SHA first, validate an optional `args.expected_installed_apk_sha256`, enforce the ZIP/target limits from Global Constraints, compute raw and canonical target SHA values, require the canonical value to match the baseline, and return `InstalledTargetIdentity`. Raw mismatch no longer rejects; raw baseline identity remains report evidence.
+Extend `parse_baseline_document()` with `Target library canonical SHA-256 -> target_library_canonical_sha256` and `Historical target commit -> historical_target_commit`; require lowercase 64-hex SHA values and require the commit value to equal `HISTORICAL_COMMIT`, not merely match a 40-hex pattern. In `verify_installed_target_library()`, keep the 512 MiB bounded device read, compute whole-APK SHA first, validate an optional `args.expected_installed_apk_sha256`, require exactly one safe `pm path` base APK, at most 4096 unique ZIP entries, at most 512 MiB declared aggregate uncompressed bytes, at most 128 MiB per entry, one nonempty arm64 target no larger than 64 MiB, no target under another ABI, and matching target CRC/size. Compute raw and canonical target SHA values, require the canonical value to match the baseline, and return `InstalledTargetIdentity`. Raw mismatch no longer rejects; raw baseline identity remains report evidence.
 
 Parse `--expected-installed-apk-sha256` without a default transformation. In compare mode validate it before any ADB call when supplied. In `main()`, perform device identity, tracer identity, whole-APK binding, and canonical target checks before the first `run_once()`, then render all five fixed identity keys. Keep `require_profile_warmup_oracle()` immediately after the one warmup and before the five measured runs.
 
@@ -182,7 +212,7 @@ git commit -m "feat: bind benchmark to canonical target"
 **Interfaces:**
 - Consumes: Task 1 constants and `canonical_elf_sha256()`, plus the existing PID-namespace containment semantics.
 - Produces: `capture_bounded(command: Sequence[str], *, maximum_bytes: int, timeout: float, cwd: Path | None = None) -> bytes`; callers omitting `cwd` retain identical behavior.
-- Produces: `HistoricalBenchmarkApk(path: Path, apk_sha256: str, target_raw_sha256: str, target_canonical_sha256: str)` with `verify_path() -> None` and idempotent `close() -> None`.
+- Produces: `HistoricalBenchmarkApk(path: Path, apk_sha256: str, target_raw_sha256: str, target_canonical_sha256: str)` with private non-init `_descriptor`, `_snapshot_root`, and `_closed` ownership fields, `verify_path() -> None`, and idempotent `close() -> None`.
 - Produces: `build_historical_benchmark_apk(repository: Path, *, deadline: float) -> HistoricalBenchmarkApk` and `HistoricalBenchmarkError.report: dict[str, object]`.
 
 - [ ] **Step 1: Write a failing contained-cwd test**
@@ -199,9 +229,35 @@ def test_capture_bounded_runs_target_in_requested_directory(self):
 
 Retain the existing timeout, nonzero exit, descendant containment, and maximum-byte tests to prove the new keyword does not weaken process semantics.
 
+Add
+`test_capture_bounded_rejects_missing_file_and_symlink_cwd_before_target_spawn`.
+For each invalid cwd, pass a command that would create a marker; assert a
+cwd-specific `BoundedProcessError`, no marker, and the pre-opened directory FD
+count returns to its initial value. Add
+`test_capture_bounded_holds_cwd_across_path_rebinding_and_aggregates_close_failure`:
+rebind the original directory after its FD is opened, assert the target prints
+the held directory rather than the replacement, inject one cwd-FD close
+failure, and assert the primary plus cleanup diagnostic while every other FD
+and namespace child is closed/reaped.
+
 - [ ] **Step 2: Write malicious archive and exact-command RED tests**
 
-Create `HistoricalArchiveTests` with `test_archive_rejects_traversal_links_special_sparse_duplicate_and_collision_members` covering literal members `../escape`, `/absolute`, `app/link` as symlink and hardlink, `app/device` as character device, `app/pipe` as FIFO, a sparse member, duplicate `app/build.gradle`, and `app` as a file followed by `app/src/Main.kt`. Add `test_archive_rejects_257_members_two_mib_plus_one_total_eight_mib_plus_one_long_path_and_33_components`. In each subcase assert extraction raises, no path appears outside the held root, and the held root contains no partially published regular file.
+Create `HistoricalArchiveTests` with
+`test_archive_rejects_every_path_type_duplicate_and_collision_boundary`.
+Cover literal members `../escape`, `/absolute`, `app//empty`, `app/./dot`,
+`app\\backslash`, an invalid UTF-8 raw name, an embedded-NUL raw header,
+`outside.txt`, and `gradle/not-wrapper.txt`; construct the invalid UTF-8 and
+NUL cases as raw 512-byte tar headers so `tarfile` cannot normalize the bytes
+before validation. Cover `app/link` as symlink and hardlink, `app/device` as a
+character device, `app/pipe` as a FIFO, a GNU sparse header, duplicate
+`app/build.gradle`, both file-then-child and child-then-file collision orders,
+and every member type other than directory or regular file. Add
+`test_archive_rejects_257_members_two_mib_plus_one_total_eight_mib_plus_one_513_utf8_bytes_and_33_components`.
+In each subcase assert extraction raises, no path appears outside the held
+root, and the held root contains no partially published regular file. Add
+`test_archive_extracts_only_the_allowlist_with_canonical_modes`: assert held
+root/directories are 0700, `gradlew` is 0700, every other regular file is
+0600, and the manifest records each path, type, size, and SHA exactly once.
 
 Add `test_builder_uses_exact_commit_allowlist_private_cwd_and_offline_gradle`. The recording capture double must observe these argv sequences:
 
@@ -217,9 +273,19 @@ Assert the Gradle call's `cwd` is the extracted private root rather than the sha
 
 - [ ] **Step 3: Write historical APK validation and held-lifetime RED tests**
 
-Create `HistoricalApkTests` methods `test_validator_accepts_exact_package_arm64_entry_and_canonical_identity`, `test_validator_rejects_wrong_package_missing_or_extra_abi_duplicate_target_bad_crc_and_runtime_mutation`, `test_validator_rejects_4097_entries_512_mib_plus_one_entry_128_mib_plus_one_and_target_64_mib_plus_one`, `test_held_apk_rejects_path_rebind_growth_symlink_empty_and_nonregular_files`, `test_builder_preserves_primary_and_all_descriptor_tree_and_command_cleanup_failures`, and `test_missing_commit_tool_or_offline_dependency_fails_without_installable_result`.
+Create `HistoricalApkTests` methods
+`test_validator_accepts_exact_pinned_aapt2_package_arm64_entry_and_canonical_identity`,
+`test_validator_rejects_wrong_package_missing_or_extra_abi_duplicate_target_bad_crc_and_runtime_mutation`,
+`test_validator_rejects_4097_entries_512_mib_plus_one_entry_128_mib_plus_one_and_target_64_mib_plus_one`,
+`test_held_apk_rejects_path_rebind_growth_symlink_empty_and_nonregular_files`,
+`test_held_apk_blocking_open_and_read_hit_deadline_and_reap_workers`,
+`test_builder_preserves_primary_and_all_descriptor_tree_and_command_cleanup_failures`,
+and `test_missing_commit_pinned_tools_or_offline_dependency_fails_without_installable_result`.
+The accepted case records exact argv
+`[str(aapt2), "dump", "badging", str(apk_path)]`; wrong build-tools or NDK
+version paths are rejected rather than searched on `PATH`.
 
-The accepted fixture must return `HistoricalBenchmarkApk.apk_sha256 == hashlib.sha256(apk_bytes).hexdigest()`, `target_raw_sha256 == hashlib.sha256(raw_target).hexdigest()`, and `target_canonical_sha256 == "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169"`. Rebinding `result.path` while its descriptor is held must make `verify_path()` fail, and `close()` must remove the private snapshot tree on both the first and second call.
+The accepted fixture must return `HistoricalBenchmarkApk.apk_sha256 == hashlib.sha256(apk_bytes).hexdigest()`, `target_raw_sha256 == hashlib.sha256(raw_target).hexdigest()`, and `target_canonical_sha256 == "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169"`. Rebinding `result.path` while its descriptor is held must make `verify_path()` fail. The first `close()` removes the private snapshot tree; the second returns without error and the tree remains absent.
 
 - [ ] **Step 4: Run Task 2 tests and verify RED**
 
@@ -243,7 +309,7 @@ def capture_bounded(command: Sequence[str], *, maximum_bytes: int,
                     timeout: float, cwd: Path | None = None) -> bytes:
 ```
 
-Import `Path`; resolve/open cwd as a no-follow directory before target authorization, verify its held identity, and start outer `unshare` with `cwd=f"/proc/self/fd/{descriptor}"`. A preflight/cwd failure proves the target was not spawned. Existing deadlines, PID namespace, wrapper pidfd identity, output caps, return mapping, and emergency kill/reap remain unchanged.
+Import `Path`; resolve/open cwd as a no-follow directory before target authorization, verify its held identity, and start outer `unshare` with `cwd=f"/proc/self/fd/{descriptor}"`. Keep that FD open through `Popen` cwd resolution, then close it independently with the other owned descriptors. Reject missing, symlink, and non-directory cwd before authorizing the target. Preserve the primary exception and append cwd close/rebind diagnostics without skipping selector, stream, pidfd, control, or status cleanup. Existing deadlines, PID namespace, wrapper pidfd identity, output caps, return mapping, and emergency kill/reap remain unchanged.
 
 - [ ] **Step 6: Implement safe archive extraction and the isolated build**
 
@@ -262,6 +328,9 @@ class HistoricalBenchmarkApk:
     apk_sha256: str
     target_raw_sha256: str
     target_canonical_sha256: str
+    _descriptor: int = field(init=False, repr=False, compare=False)
+    _snapshot_root: Path = field(init=False, repr=False, compare=False)
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
     def verify_path(self) -> None:
         """Require the held fd and pathname to retain type, identity, size, and SHA."""
     def close(self) -> None:
@@ -270,13 +339,26 @@ def build_historical_benchmark_apk(repository: Path, *, deadline: float) -> Hist
     """Build, validate, snapshot, and hold the fixed historical benchmark APK."""
 ```
 
-Validate `repository` as a held directory; run the exact `cat-file` and archive argv from Step 2 with remaining time from the shared deadline. Parse tar bytes without `extractall()`, enforce every Global Constraint before creating a member, and extract through held dirfds with `O_NOFOLLOW|O_EXCL`. Run exact offline Gradle in the private root through the new `cwd` keyword, with a 900-second maximum clipped to the absolute deadline and 4 MiB output caps.
+Validate `repository` as a held no-follow directory; run the exact `cat-file`
+and archive argv from Step 2 with remaining time from the shared deadline and
+an 8 MiB stdout cap. Before creating any member, validate raw tar header name
+bytes as UTF-8 and reject NUL aliases, absolute/empty/dot/dot-dot/backslash
+components, paths over 512 UTF-8 bytes or 32 components, paths outside the
+four root files plus `app/**`/`gradle/wrapper/**` allowlist, more than 256 members,
+individual regular files over 2 MiB, aggregate regular bytes over 8 MiB,
+duplicates, both collision orders, links, devices, FIFOs, sparse members, and
+every type except directory/regular. Parse without
+`extractall()` and extract through held dirfds with `O_NOFOLLOW|O_EXCL`, 0700
+directories, 0600 files, and only `gradlew` at 0700. Run exact offline Gradle
+in the private root through `cwd`, with a 900-second maximum clipped to the
+absolute deadline, a 4 MiB stdout cap, and the existing stricter 64 KiB stderr
+cap (both satisfy the 4 MiB upper bound).
 
 - [ ] **Step 7: Validate and hold the historical APK**
 
 Require pinned build-tools `35.0.0/aapt2`, run `[str(aapt2), "dump", "badging", str(apk.path)]` with bounded output, and require package `com.aprz.qbdiandroid`. Inspect ZIP metadata before payloads, reject unsafe/duplicate/link entries and every bound, stream the arm64 target through CRC/size checks, reject another ABI's target, and require Task 1's full canonical value.
 
-Copy the APK once into a separate mode-0700 held snapshot root using a bounded worker, retain an open descriptor, record descriptor identity/size/SHA, and remove the extracted build tree before returning. `verify_path()` must recheck fd/path identity, type, size, and SHA before and after each pathname consumer. On failure, raise `HistoricalBenchmarkError` whose bounded `report` preserves phase, commit, manifest/hash, command return/stderr, all computed identities, and all cleanup failures.
+Copy the APK once into a separate mode-0700 held snapshot root using a bounded worker, retain an open descriptor, record descriptor identity/size/SHA, and remove the extracted build tree before returning. `verify_path()` must recheck fd/path identity, type, size, and SHA in a killable worker with its own fixed 30-second deadline before and after each pathname consumer. Blocking open/read, growth, rebind, and timeout must kill/reap the worker. On failure, raise `HistoricalBenchmarkError` whose bounded `report` preserves phase, commit, manifest/hash, command argv/return/stderr, all computed identities, and all cleanup failures.
 
 - [ ] **Step 8: Run Task 2 focused and full containment tests GREEN**
 
