@@ -595,6 +595,8 @@ class HistoricalBenchmarkApk:
     apk_sha256: str
     target_raw_sha256: str
     target_canonical_sha256: str
+    archive_manifest: tuple[tuple[tuple[str, object], ...], ...] = ()
+    archive_sha256: str = ""
     _descriptor: int = field(init=False, repr=False, compare=False)
     _snapshot_root: Path = field(init=False, repr=False, compare=False)
     _closed: bool = field(default=False, init=False, repr=False, compare=False)
@@ -922,6 +924,8 @@ def build_historical_benchmark_apk(repository: Path, *, deadline: float) -> Hist
             str(validated["apk_sha256"]),
             str(validated["target_raw_sha256"]),
             str(validated["target_canonical_sha256"]),
+            archive_manifest=tuple(tuple(item.items()) for item in manifest),
+            archive_sha256=str(report["archive_sha256"]),
         )
         result.verify_path()
         shutil.rmtree(build_root)

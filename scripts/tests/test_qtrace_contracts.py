@@ -1477,7 +1477,7 @@ class RecordingHeldInput:
         self.label = label
         self.verify_calls = 0
         self.close_calls = 0
-        self.close_failure: str | None = None
+        self.close_failure: str | BaseException | None = None
 
     def verify_path(self):
         self.verify_calls += 1
@@ -1485,6 +1485,8 @@ class RecordingHeldInput:
     def close(self):
         self.close_calls += 1
         if self.close_failure is not None:
+            if isinstance(self.close_failure, BaseException):
+                raise self.close_failure
             raise RuntimeError(self.close_failure)
 
 
@@ -1495,6 +1497,11 @@ class RecordingHistoricalInput(RecordingHeldInput):
         self.target_raw_sha256 = "5" * 64
         self.target_canonical_sha256 = "0" * 64
         self.report = {} if report is None else report
+        manifest = self.report.get("manifest", [])
+        self.archive_manifest = tuple(
+            tuple(item.items()) for item in manifest if isinstance(item, dict)
+        )
+        self.archive_sha256 = self.report.get("archive_sha256", "")
 
 
 class RecordingHeldPair:
@@ -3218,7 +3225,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         compressed_pull = next(command for command in commands if "--compressed-only" in command)
         self.assertEqual("--compressed-only", compressed_pull[-5])
 
-    def test_acceptance_installs_historical_then_current_and_reuses_one_held_pair(self):
+    def _recorded_two_phase_workflow(self):
         from scripts import qtrace_device_acceptance as acceptance
 
         events = []
@@ -3352,11 +3359,10 @@ class AcceptanceHarnessTests(unittest.TestCase):
                           (pair, "t" * 64, "p" * 64)], stage_calls)
         self.assertIs(stage_calls[0][0], stage_calls[1][0])
         self.assertEqual([expected_compare], compare_commands)
-        self._two_phase_current_commands = [
-            command for command in runner.commands
-            if ((len(command) > 5 and command[4:6] == ("am", "start")) or
-                ("qtrace" in command and ("demo" in command or "pull" in command)))
-        ]
+        return runner.commands
+
+    def test_acceptance_installs_historical_then_current_and_reuses_one_held_pair(self):
+        self._recorded_two_phase_workflow()
 
     def test_current_apk_and_tracer_pair_are_snapshotted_before_historical_build(self):
         from scripts import qtrace_device_acceptance as acceptance
@@ -3499,8 +3505,11 @@ class AcceptanceHarnessTests(unittest.TestCase):
         self.assertIn("--compare", compares[0])
 
     def test_current_qtrace_start_and_pull_commands_receive_no_historical_arguments(self):
-        self.test_acceptance_installs_historical_then_current_and_reuses_one_held_pair()
-        recorded = self._two_phase_current_commands
+        recorded = [
+            command for command in self._recorded_two_phase_workflow()
+            if ((len(command) > 5 and command[4:6] == ("am", "start")) or
+                ("qtrace" in command and ("demo" in command or "pull" in command)))
+        ]
         forbidden = {"historical", "2d6b1022a14ae554804a57e267544c12dea29353",
                      "--expected-installed-apk-sha256"}
         self.assertEqual(9, len(recorded))  # one start, four demos, four pulls
@@ -3739,6 +3748,227 @@ class AcceptanceHarnessTests(unittest.TestCase):
             )
             self.assertFalse(any(item.get("path") == "pax_global_header"
                                  for item in report["archive_manifest"]))
+            self.assertEqual([], list(root.glob(".historical-benchmark-gate.*.tmp")))
+
+    def test_production_historical_result_retains_provenance_on_compare_failure(self):
+        from scripts import qtrace_device_acceptance as acceptance
+        from scripts.qtrace_historical_benchmark import HistoricalBenchmarkApk
+
+        manifest = (
+            (("type", "global_pax"), ("size", 52), ("sha256", "a" * 64)),
+            (("path", "app/build.gradle"), ("type", "file"), ("size", 1),
+             ("sha256", "b" * 64)),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "historical-snapshot"
+            snapshot.mkdir()
+            apk_path = snapshot / "historical.apk"
+            apk_bytes = b"historical APK"
+            apk_path.write_bytes(apk_bytes)
+            try:
+                historical = HistoricalBenchmarkApk(
+                    apk_path, hashlib.sha256(apk_bytes).hexdigest(), "5" * 64,
+                    "0" * 64, archive_manifest=manifest,
+                    archive_sha256="d" * 64,
+                )
+            except TypeError as error:
+                self.fail(f"successful historical result lacks provenance: {error}")
+            current, pair = self._recording_acceptance_inputs(root)
+
+            class CompareFailureRunner(FakeRunner):
+                def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                    if tuple(command[:2]) == ("python3", "scripts/benchmark_trace.py"):
+                        raise RuntimeError("production-shaped compare failure")
+                    return super().run(command, timeout=timeout, cwd=cwd,
+                                       allowed=allowed)
+
+            with patch.object(acceptance, "_snapshot_current_inputs",
+                              return_value=(current, pair)), \
+                    patch.object(acceptance, "_install_held_apk"), \
+                    patch.object(acceptance, "_stage_app_private_binaries"), \
+                    self.assertRaisesRegex(RuntimeError, "production-shaped compare failure"):
+                acceptance.run_acceptance(
+                    "SERIAL", root, runner=CompareFailureRunner(),
+                    historical_builder=lambda *_args, **_kwargs: historical,
+                )
+
+            report = json.loads(
+                (root / "historical-benchmark-gate.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual([dict(item) for item in manifest], report["archive_manifest"])
+            self.assertEqual("d" * 64, report["archive_sha256"])
+
+    def test_every_success_cleanup_failure_recovers_and_publishes_evidence(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        boundaries = ("historical", "current", "tracer", "companion", "tree")
+        for boundary in boundaries:
+            with self.subTest(boundary=boundary), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                current, pair = self._recording_acceptance_inputs(root)
+                historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+                historical.path.write_bytes(b"historical")
+                held = {
+                    "historical": historical,
+                    "current": current,
+                    "tracer": pair.tracer,
+                    "companion": pair.companion,
+                }
+                if boundary in held:
+                    held[boundary].close_failure = f"success-cleanup-{boundary}"
+                installs = []
+
+                def install(_device, _runner, apk):
+                    installs.append(apk)
+
+                tree_patch = patch.object(
+                    acceptance, "_current_snapshot_tree_cleanup",
+                    side_effect=RuntimeError("success-cleanup-tree"),
+                ) if boundary == "tree" else patch.object(
+                    acceptance, "_current_snapshot_tree_cleanup",
+                    return_value=None,
+                )
+                runner = FakeRunner()
+                with patch.object(acceptance, "_snapshot_current_inputs",
+                                  return_value=(current, pair)), \
+                        patch.object(acceptance, "_install_held_apk",
+                                     side_effect=install), \
+                        patch.object(acceptance, "_stage_app_private_binaries"), \
+                        patch.object(acceptance, "_run_current_fixture_phase"), \
+                        tree_patch, self.assertRaises(RuntimeError) as caught:
+                    acceptance.run_acceptance(
+                        "SERIAL", root, runner=runner,
+                        historical_builder=lambda *_args, **_kwargs: historical,
+                    )
+
+                primary = caught.exception.__cause__ or caught.exception
+                self.assertIn("acceptance resource cleanup failed", str(primary))
+                force_stops = [
+                    command for command in runner.commands
+                    if command[4:7] == ("am", "force-stop", acceptance.PACKAGE)
+                ]
+                self.assertEqual(4, len(force_stops))
+                self.assertEqual([historical, current, current], installs)
+                report = json.loads(
+                    (root / "historical-benchmark-gate.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual("cleanup-success", report["phase"])
+                self.assertTrue(any(
+                    item["message"] == f"success-cleanup-{boundary}"
+                    for item in report["cleanup_errors"]
+                ))
+
+    def test_oversized_builder_report_is_bounded_with_truncation_evidence(self):
+        from scripts import qtrace_device_acceptance as acceptance
+        from scripts.qtrace_historical_benchmark import HistoricalBenchmarkError
+
+        raw = "x" * (4 * 1024 * 1024)
+        primary = HistoricalBenchmarkError(
+            "builder failed",
+            report={
+                "phase": "gradle", "commit": "2" * 40,
+                "manifest": [{"type": "global_pax", "size": 52,
+                              "sha256": "a" * 64}],
+                "archive_sha256": "b" * 64,
+                "command": {"argv": ["./gradlew"], "stdout": raw,
+                            "stderr": raw},
+                "details": {"diagnostic": raw},
+            },
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = acceptance._HistoricalGateState(
+                phase="build-historical", builder_report=primary.report,
+            )
+            try:
+                acceptance._publish_gate_failure_evidence(root, state, primary, [])
+            except RuntimeError as error:
+                self.fail(f"oversized structured evidence was rejected: {error}")
+            path = root / "historical-benchmark-gate.json"
+            self.assertLessEqual(path.stat().st_size, 1024 * 1024)
+            report = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual("build-historical", report["phase"])
+            self.assertEqual("a" * 64, report["archive_manifest"][0]["sha256"])
+            truncated = report["historical_report"]["command"]["stdout"]
+            self.assertEqual(True, truncated["truncated"])
+            self.assertEqual(len(raw.encode("utf-8")), truncated["original_bytes"])
+            self.assertEqual(hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+                             truncated["sha256"])
+
+    def test_historical_cleanup_error_retains_structured_multi_failure_report(self):
+        from scripts import qtrace_device_acceptance as acceptance
+        from scripts.qtrace_historical_benchmark import HistoricalBenchmarkError
+
+        structured = {
+            "phase": "close-apk",
+            "cleanup_failures": ["descriptor close failed", "snapshot tree failed"],
+            "details": {"descriptor": 17, "tree": "/private/snapshot"},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            current, pair = self._recording_acceptance_inputs(root)
+            historical = RecordingHistoricalInput(root / "historical.apk", "h" * 64)
+            historical.path.write_bytes(b"historical")
+            historical.close_failure = HistoricalBenchmarkError(
+                "historical APK cleanup failed", report=structured,
+            )
+
+            class CompareFailureRunner(FakeRunner):
+                def run(self, command, *, timeout, cwd=None, allowed=(0,)):
+                    if tuple(command[:2]) == ("python3", "scripts/benchmark_trace.py"):
+                        raise RuntimeError("compare failure before structured cleanup")
+                    return super().run(command, timeout=timeout, cwd=cwd,
+                                       allowed=allowed)
+
+            with patch.object(acceptance, "_snapshot_current_inputs",
+                              return_value=(current, pair)), \
+                    patch.object(acceptance, "_install_held_apk"), \
+                    patch.object(acceptance, "_stage_app_private_binaries"), \
+                    self.assertRaises(RuntimeError):
+                acceptance.run_acceptance(
+                    "SERIAL", root, runner=CompareFailureRunner(),
+                    historical_builder=lambda *_args, **_kwargs: historical,
+                )
+            report = json.loads(
+                (root / "historical-benchmark-gate.json").read_text(encoding="utf-8")
+            )
+            cleanup = next(item for item in report["cleanup_errors"]
+                           if item["label"] == "historical APK close")
+            self.assertEqual(structured, cleanup.get("report"))
+
+    def test_evidence_temp_close_and_unlink_failures_are_both_visible_and_no_partial_remains(self):
+        from scripts import qtrace_device_acceptance as acceptance
+
+        real_close = acceptance.os.close
+        real_unlink = Path.unlink
+
+        def close_then_fail(descriptor):
+            real_close(descriptor)
+            raise OSError("evidence descriptor close failure")
+
+        def unlink_then_fail(path, *args, **kwargs):
+            real_unlink(path, *args, **kwargs)
+            raise OSError("evidence temp unlink failure")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = acceptance._HistoricalGateState(phase="compare-historical")
+            with patch.object(acceptance.os, "write",
+                              side_effect=OSError("evidence write primary")), \
+                    patch.object(acceptance.os, "close",
+                                 side_effect=close_then_fail), \
+                    patch.object(Path, "unlink", autospec=True,
+                                 side_effect=unlink_then_fail), \
+                    self.assertRaises(BaseException) as caught:
+                acceptance._publish_gate_failure_evidence(
+                    root, state, RuntimeError("compare primary"), [],
+                )
+            diagnostics = str(caught.exception)
+            self.assertIn("evidence write primary", diagnostics)
+            self.assertIn("evidence descriptor close failure", diagnostics)
+            self.assertIn("evidence temp unlink failure", diagnostics)
             self.assertEqual([], list(root.glob(".historical-benchmark-gate.*.tmp")))
 
 

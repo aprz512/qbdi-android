@@ -352,6 +352,19 @@ class HistoricalArchiveTests(unittest.TestCase):
             try:
                 self.assertEqual(hashlib.sha256(apk).hexdigest(), result.apk_sha256)
                 self.assertEqual(hashlib.sha256(target).hexdigest(), result.target_raw_sha256)
+                expected_root = Path(directory) / "expected-manifest"
+                expected_root.mkdir()
+                expected_manifest = historical_benchmark._extract_historical_archive(
+                    _minimal_source_archive(), expected_root,
+                )
+                self.assertEqual(
+                    tuple(tuple(item.items()) for item in expected_manifest),
+                    getattr(result, "archive_manifest", None),
+                )
+                self.assertEqual(
+                    hashlib.sha256(_minimal_source_archive()).hexdigest(),
+                    getattr(result, "archive_sha256", None),
+                )
                 result.verify_path()
             finally:
                 result.close()

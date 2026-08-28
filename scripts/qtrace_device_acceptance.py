@@ -1390,23 +1390,98 @@ class _HistoricalGateState:
     pair: HeldTracerPair | None = None
     historical: HistoricalBenchmarkApk | None = None
     builder_report: dict[str, object] | None = None
+    archive_manifest: tuple[tuple[tuple[str, object], ...], ...] = ()
+    archive_sha256: str | None = None
     recovery_active: bool = False
 
 
-def _failure_record(label: str, error: BaseException) -> dict[str, str]:
-    return {"label": label, "type": type(error).__name__, "message": str(error)}
+_MAX_EVIDENCE_BYTES = 1024 * 1024
+_MAX_EVIDENCE_STRING_BYTES = 4096
+_MAX_EVIDENCE_ITEMS = 512
+
+
+def _bounded_evidence_value(value: object, *, depth: int = 0) -> object:
+    if isinstance(value, str):
+        encoded = value.encode("utf-8")
+        if len(encoded) <= _MAX_EVIDENCE_STRING_BYTES:
+            return value
+        prefix = encoded[:_MAX_EVIDENCE_STRING_BYTES]
+        while True:
+            try:
+                decoded = prefix.decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                prefix = prefix[:-1]
+        return {
+            "truncated": True,
+            "original_bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "prefix": decoded,
+        }
+    if value is None or type(value) in {bool, int, float}:
+        return value
+    if depth >= 12:
+        encoded = repr(value).encode("utf-8", errors="replace")
+        return {
+            "truncated": True, "reason": "maximum depth",
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        }
+    if isinstance(value, dict):
+        items = list(value.items())
+        bounded = {
+            str(key): _bounded_evidence_value(item, depth=depth + 1)
+            for key, item in items[:_MAX_EVIDENCE_ITEMS]
+        }
+        if len(items) > _MAX_EVIDENCE_ITEMS:
+            encoded = repr(items[_MAX_EVIDENCE_ITEMS:]).encode(
+                "utf-8", errors="replace",
+            )
+            bounded["__truncation__"] = {
+                "truncated": True,
+                "omitted_items": len(items) - _MAX_EVIDENCE_ITEMS,
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+        return bounded
+    if isinstance(value, (list, tuple)):
+        bounded = [
+            _bounded_evidence_value(item, depth=depth + 1)
+            for item in value[:_MAX_EVIDENCE_ITEMS]
+        ]
+        if len(value) > _MAX_EVIDENCE_ITEMS:
+            encoded = repr(value[_MAX_EVIDENCE_ITEMS:]).encode(
+                "utf-8", errors="replace",
+            )
+            bounded.append({
+                "truncated": True,
+                "omitted_items": len(value) - _MAX_EVIDENCE_ITEMS,
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            })
+        return bounded
+    return _bounded_evidence_value(repr(value), depth=depth + 1)
+
+
+def _failure_record(label: str, error: BaseException) -> dict[str, object]:
+    record: dict[str, object] = {
+        "label": label, "type": type(error).__name__, "message": str(error),
+    }
+    report = getattr(error, "report", None)
+    if isinstance(report, dict):
+        record["report"] = _bounded_evidence_value(report)
+    return record
 
 
 def _gate_evidence(state: _HistoricalGateState, primary: BaseException,
-                   cleanup_errors: Sequence[dict[str, str]]) -> dict[str, object]:
+                   cleanup_errors: Sequence[dict[str, object]]) -> dict[str, object]:
     historical = state.historical
     report = state.builder_report or {}
-    if historical is not None:
-        candidate = getattr(historical, "report", None)
-        if isinstance(candidate, dict):
-            report = candidate
+    manifest = [dict(item) for item in state.archive_manifest]
+    if not manifest and isinstance(report.get("manifest"), list):
+        manifest = report["manifest"]
+    archive_sha256 = state.archive_sha256 or report.get("archive_sha256")
     pair, current = state.pair, state.current
-    return {
+    primary_error = _failure_record("primary", primary)
+    primary_error.pop("label")
+    evidence = {
         "schema": 1, "phase": state.phase,
         "historical_commit": HISTORICAL_COMMIT,
         "historical_apk_sha256": historical.apk_sha256 if historical else None,
@@ -1415,22 +1490,28 @@ def _gate_evidence(state: _HistoricalGateState, primary: BaseException,
         "target_canonical_sha256": historical.target_canonical_sha256 if historical else None,
         "tracer_sha256": pair.tracer.sha256 if pair else None,
         "companion_sha256": pair.companion.sha256 if pair else None,
-        "archive_manifest": report.get("manifest", []),
-        "archive_sha256": report.get("archive_sha256"),
+        "archive_manifest": manifest,
+        "archive_sha256": archive_sha256,
         "command": report.get("command"),
-        "primary_error": {"type": type(primary).__name__, "message": str(primary)},
+        "primary_error": primary_error,
         "cleanup_errors": list(cleanup_errors),
     }
+    if report:
+        evidence["historical_report"] = report
+    bounded = _bounded_evidence_value(evidence)
+    if not isinstance(bounded, dict):
+        raise RuntimeError("historical benchmark gate evidence has invalid shape")
+    return bounded
 
 
 def _publish_gate_failure_evidence(directory: Path, state: _HistoricalGateState,
                                    primary: BaseException,
-                                   cleanup_errors: Sequence[dict[str, str]]) -> None:
+                                   cleanup_errors: Sequence[dict[str, object]]) -> None:
     payload = json.dumps(
         _gate_evidence(state, primary, cleanup_errors), allow_nan=False,
         ensure_ascii=False, separators=(",", ":"), sort_keys=True,
     ).encode("utf-8")
-    if len(payload) > 1024 * 1024:
+    if len(payload) > _MAX_EVIDENCE_BYTES:
         raise RuntimeError("historical benchmark gate evidence exceeds 1 MiB")
     temporary = directory / f".historical-benchmark-gate.{uuid.uuid4().hex}.tmp"
     destination = directory / "historical-benchmark-gate.json"
@@ -1448,12 +1529,37 @@ def _publish_gate_failure_evidence(directory: Path, state: _HistoricalGateState,
                 raise RuntimeError("historical benchmark gate evidence write failed")
             view = view[written:]
         os.fsync(descriptor)
-        os.close(descriptor)
+        closing = descriptor
         descriptor = -1
+        os.close(closing)
         os.replace(temporary, destination)
-    finally:
+    except BaseException as primary_failure:
+        cleanup_failures = []
         if descriptor >= 0:
-            os.close(descriptor)
+            closing = descriptor
+            descriptor = -1
+            try:
+                os.close(closing)
+            except BaseException as error:
+                cleanup_failures.append(("descriptor close", error))
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except BaseException as error:
+            cleanup_failures.append(("temporary unlink", error))
+        if cleanup_failures:
+            details = "; ".join(
+                f"{label}: {type(error).__name__}: {error}"
+                for label, error in cleanup_failures
+            )
+            raise RuntimeError(
+                f"historical benchmark gate evidence publication failed: "
+                f"{type(primary_failure).__name__}: {primary_failure}; "
+                f"cleanup failed: {details}"
+            ) from primary_failure
+        raise
+    else:
         try:
             temporary.unlink()
         except FileNotFoundError:
@@ -1461,7 +1567,7 @@ def _publish_gate_failure_evidence(directory: Path, state: _HistoricalGateState,
 
 
 def _collect_gate_cleanup(actions: Sequence[tuple[str, Callable[[], None]]],
-                          ) -> list[dict[str, str]]:
+                          ) -> list[dict[str, object]]:
     failures = []
     for label, action in actions:
         try:
@@ -1478,7 +1584,7 @@ def _current_snapshot_tree_cleanup(current: HostBinarySnapshot) -> None:
 
 
 def _raise_gate_failure(primary: BaseException,
-                        cleanup_errors: Sequence[dict[str, str]]) -> None:
+                        cleanup_errors: Sequence[dict[str, object]]) -> None:
     if not cleanup_errors:
         raise primary
     detail = "; ".join(
@@ -1489,6 +1595,49 @@ def _raise_gate_failure(primary: BaseException,
         f"qtrace historical benchmark gate failed: {type(primary).__name__}: "
         f"{primary}; cleanup failed: {detail}"
     ) from primary
+
+
+def _gate_resource_cleanup(state: _HistoricalGateState) -> list[dict[str, object]]:
+    actions: list[tuple[str, Callable[[], None]]] = []
+    if state.historical is not None:
+        actions.append(("historical APK close", state.historical.close))
+    if state.current is not None:
+        actions.append(("current APK close", state.current.close))
+    if state.pair is not None:
+        actions.extend((
+            ("tracer snapshot close", state.pair.tracer.close),
+            ("companion snapshot close", state.pair.companion.close),
+        ))
+    if state.current is not None:
+        actions.append((
+            "current input snapshot tree cleanup",
+            lambda: _current_snapshot_tree_cleanup(state.current),
+        ))
+    return _collect_gate_cleanup(actions)
+
+
+def _finalize_gate_failure(
+        device: str, directory: Path, *, runner: Runner,
+        state: _HistoricalGateState, primary: BaseException,
+        initial_cleanup_errors: Sequence[dict[str, object]] = (),
+        cleanup_resources: bool = True) -> None:
+    cleanup_errors = list(initial_cleanup_errors)
+    if state.recovery_active and state.current is not None:
+        cleanup_errors.extend(_collect_gate_cleanup((
+            ("recovery force-stop before current install",
+             lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
+            ("recovery current APK install",
+             lambda: _install_held_apk(device, runner, state.current)),
+            ("recovery force-stop after current install",
+             lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
+        )))
+    if cleanup_resources:
+        cleanup_errors.extend(_gate_resource_cleanup(state))
+    try:
+        _publish_gate_failure_evidence(directory, state, primary, cleanup_errors)
+    except BaseException as error:
+        cleanup_errors.append(_failure_record("failure evidence publication", error))
+    _raise_gate_failure(primary, cleanup_errors)
 
 
 def _run_current_fixture_phase(device: str, directory: Path, *, runner: Runner,
@@ -1571,6 +1720,8 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             Path.cwd(), deadline=time.monotonic() + _HISTORICAL_BUILD_SECONDS,
         )
         historical, current, pair = state.historical, state.current, state.pair
+        state.archive_manifest = historical.archive_manifest
+        state.archive_sha256 = historical.archive_sha256
 
         state.phase = "install-historical"
         _install_held_apk(device, runner, historical)
@@ -1606,46 +1757,27 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             candidate = getattr(primary, "report")
             if isinstance(candidate, dict):
                 state.builder_report = candidate
-        cleanup_errors: list[dict[str, str]] = []
-        if state.recovery_active and state.current is not None:
-            cleanup_errors.extend(_collect_gate_cleanup((
-                ("recovery force-stop before current install",
-                 lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
-                ("recovery current APK install",
-                 lambda: _install_held_apk(device, runner, state.current)),
-                ("recovery force-stop after current install",
-                 lambda: runner.run(("adb", "-s", device, "shell", "am", "force-stop", PACKAGE), timeout=30.0)),
-            )))
-        cleanup_actions: list[tuple[str, Callable[[], None]]] = []
-        if state.historical is not None:
-            cleanup_actions.append(("historical APK close", state.historical.close))
-        if state.current is not None:
-            cleanup_actions.append(("current APK close", state.current.close))
-        if state.pair is not None:
-            cleanup_actions.extend((
-                ("tracer snapshot close", state.pair.tracer.close),
-                ("companion snapshot close", state.pair.companion.close),
-            ))
-        if state.current is not None:
-            cleanup_actions.append(("current input snapshot tree cleanup",
-                                    lambda: _current_snapshot_tree_cleanup(state.current)))
-        cleanup_errors.extend(_collect_gate_cleanup(cleanup_actions))
-        try:
-            _publish_gate_failure_evidence(directory, state, primary, cleanup_errors)
-        except BaseException as error:
-            cleanup_errors.append(_failure_record("failure evidence publication", error))
-        _raise_gate_failure(primary, cleanup_errors)
+                manifest = candidate.get("manifest")
+                if isinstance(manifest, list):
+                    state.archive_manifest = tuple(
+                        tuple(item.items()) for item in manifest
+                        if isinstance(item, dict)
+                    )
+                archive_sha256 = candidate.get("archive_sha256")
+                if isinstance(archive_sha256, str):
+                    state.archive_sha256 = archive_sha256
+        _finalize_gate_failure(
+            device, directory, runner=runner, state=state, primary=primary,
+        )
 
-    cleanup_errors = _collect_gate_cleanup((
-        ("historical APK close", state.historical.close),
-        ("current APK close", state.current.close),
-        ("tracer snapshot close", state.pair.tracer.close),
-        ("companion snapshot close", state.pair.companion.close),
-        ("current input snapshot tree cleanup",
-         lambda: _current_snapshot_tree_cleanup(state.current)),
-    ))
+    state.phase = "cleanup-success"
+    cleanup_errors = _gate_resource_cleanup(state)
     if cleanup_errors:
-        _raise_gate_failure(RuntimeError("acceptance resource cleanup failed"), cleanup_errors)
+        _finalize_gate_failure(
+            device, directory, runner=runner, state=state,
+            primary=RuntimeError("acceptance resource cleanup failed"),
+            initial_cleanup_errors=cleanup_errors, cleanup_resources=False,
+        )
     state.recovery_active = False
     return 0
 
