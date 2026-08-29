@@ -96,6 +96,6 @@ python3 -m unittest scripts.tests.test_qtrace_session scripts.tests.test_qtrace_
 
 Output: `Ran 170 tests in 1.915s`, `OK`; `git diff --check` produced no output.
 
-Fix-round commit SHA: pending
+Fix-round implementation commit SHA: `008a9bf`
 
 Concerns: none.
