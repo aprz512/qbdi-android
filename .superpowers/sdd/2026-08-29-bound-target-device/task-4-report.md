@@ -68,4 +68,4 @@ output from existing tests but passes.
 
 ## Commit
 
-Commit SHA: pending
+Implementation commit SHA: `565d1d4`
