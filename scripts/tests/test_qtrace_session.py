@@ -343,6 +343,22 @@ class SessionTests(unittest.TestCase):
     def run_request(self) -> RunRequest:
         return RunRequest(config(), None, Path(self.directory.name), 250, 2.0, 2.0, 0.5, 1.0)
 
+    def test_collect_reports_exact_bound_secondary_user_metadata(self) -> None:
+        device = FakeDevice([
+            status("sealed", transition=1, reason="duration_elapsed", acknowledged=True),
+        ], [4242], android_user=10)
+        collector = FakeCollector()
+        runner, _ = orchestrator(device, ManualClock(), collector)
+
+        self.assertEqual(0, runner.run(self.run_request()).exit_code)
+        self.assertEqual(1, len(collector.calls))
+        self.assertEqual({
+            "serial": "device-1",
+            "access_mode": "root",
+            "target_strategy": "run-as",
+            "package_uid": 1_020_000,
+        }, collector.calls[0]["device"])
+
     def test_timed_run_polls_native_seal_once_and_never_stops_app(self) -> None:
         device = FakeDevice([status("running", transition=1), status("stopping", transition=2),
                              status("sealed", transition=3, reason="duration_elapsed", acknowledged=True)], [4242])

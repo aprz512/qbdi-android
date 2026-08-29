@@ -69,3 +69,33 @@ output from existing tests but passes.
 ## Commit
 
 Implementation commit SHA: `565d1d4`
+
+## Fix round 1
+
+Finding addressed: the session tests did not assert the exact `_collect()`
+`status["device"]` payload. Added a focused test that retains `FakeCollector`
+and verifies serial, access mode, target strategy, and the secondary-user UID
+(`1_020_000`) captured by the collector.
+
+The new test passed immediately because the existing production implementation
+already reads bound metadata correctly; no production code change was needed.
+
+Focused regression command:
+
+```text
+python3 -m unittest scripts.tests.test_qtrace_session.SessionTests.test_collect_reports_exact_bound_secondary_user_metadata
+```
+
+Output: `Ran 1 test in 0.021s`, `OK`.
+
+Complete focused suite and diff check:
+
+```text
+python3 -m unittest scripts.tests.test_qtrace_session scripts.tests.test_qtrace_cli scripts.tests.test_qtrace_build scripts.tests.test_qtrace_injector scripts.tests.test_qtrace_preflight scripts.tests.test_qtrace_device && git diff --check
+```
+
+Output: `Ran 170 tests in 1.915s`, `OK`; `git diff --check` produced no output.
+
+Fix-round commit SHA: pending
+
+Concerns: none.
