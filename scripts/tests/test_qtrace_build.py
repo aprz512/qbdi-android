@@ -650,21 +650,18 @@ class DeployerTests(unittest.TestCase):
                     Deployer().deploy(device, session_id, self.make_artifacts(Path(directory)))
             self.assertEqual([], device.calls)
 
-    def test_rejects_an_unbound_device_before_device_side_effects(self):
+    def test_deployer_does_not_revalidate_identity_owned_by_bound_device(self):
+        session_id = "123e4567-e89b-42d3-a456-426614174000"
         with tempfile.TemporaryDirectory() as directory:
             device = FakeDeployDevice()
-            device.package = None
-            device.access_mode = None
-            device.root_strategy = None
-            device.target_strategy = None
-            device.package_uid = None
-            with self.assertRaisesRegex(QtraceError, "device.unbound"):
-                Deployer().deploy(
-                    device,
-                    "123e4567-e89b-42d3-a456-426614174000",
-                    self.make_artifacts(Path(directory)),
-                )
-            self.assertEqual([], device.calls)
+            del device.android_user
+
+            deployment = Deployer().deploy(
+                device, session_id, self.make_artifacts(Path(directory))
+            )
+
+        self.assertEqual("app-private", deployment.route)
+        self.assertTrue(deployment.remote_dir.startswith(device.package_data_dir))
 
 
 if __name__ == "__main__":

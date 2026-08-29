@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from qtrace.device import AdbDevice
+from qtrace.device import AdbDevice, BoundTargetDevice
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.models import ResolvedScene
 
@@ -229,16 +229,15 @@ class _ValidatedRequest:
     request: InjectionRequest
     native_request: dict[str, object]
     expected_scenes: tuple[ResolvedScene, ...]
-    request_device: AdbDevice
+    request_device: BoundTargetDevice
 
 
-def _validate_request(request: InjectionRequest, device: AdbDevice) -> _ValidatedRequest:
+def _validate_request(request: InjectionRequest, device: BoundTargetDevice) -> _ValidatedRequest:
     if not isinstance(request, InjectionRequest):
         _fail("inject.request_invalid", "inject.validate", "request must be an InjectionRequest")
     if not isinstance(request.package, str) or _PACKAGE.fullmatch(request.package) is None:
         _fail("inject.request_invalid", "inject.validate", "package name is invalid")
-    bound_package = getattr(device, "package", None)
-    if bound_package is not None and bound_package != request.package:
+    if device.package != request.package:
         _fail("inject.request_invalid", "inject.validate", "package does not match the selected device binding")
     if not isinstance(request.session_id, str) or _UUID4.fullmatch(request.session_id) is None:
         _fail("inject.request_invalid", "inject.validate", "session ID must be a lowercase UUIDv4")
@@ -808,7 +807,7 @@ def _kill_and_reap_worker(worker: Any, graceful_timeout: float) -> bool:
 
 
 class FridaInjector:
-    def __init__(self, device: AdbDevice, frida_provider: FridaProvider):
+    def __init__(self, device: BoundTargetDevice, frida_provider: FridaProvider):
         self._device = device
         self._frida_provider: FridaProvider | None = frida_provider
 

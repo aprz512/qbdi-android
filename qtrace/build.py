@@ -16,7 +16,7 @@ from typing import Mapping, Protocol
 
 from scripts.bounded_process import BoundedProcessError
 
-from qtrace.device import AdbDevice
+from qtrace.device import AdbDevice, BoundTargetDevice
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.models import TracerConfig
 
@@ -520,7 +520,7 @@ def _device_operation(stage: str, operation):
 
 
 class Deployer:
-    def _control_shell(self, device: AdbDevice, access_mode: str, route: str):
+    def _control_shell(self, device: BoundTargetDevice, access_mode: str, route: str):
         if access_mode == "root":
             return device.root_shell
         if route == "app-private":
@@ -598,7 +598,7 @@ class Deployer:
 
     def _attempt(
         self,
-        device: AdbDevice,
+        device: BoundTargetDevice,
         package: str,
         access_mode: str,
         route: str,
@@ -752,45 +752,13 @@ class Deployer:
                     raise staging_cleanup
 
     def deploy(
-        self, device: AdbDevice, session_id: str, artifacts: TracerArtifacts
+        self, device: BoundTargetDevice, session_id: str, artifacts: TracerArtifacts
     ) -> Deployment:
         if not isinstance(session_id, str) or _UUID4.fullmatch(session_id) is None:
             _fail("session.id_invalid", "deploy", "session ID must be a lowercase UUIDv4")
         package = device.package
         access_mode = device.access_mode
-        root_strategy = device.root_strategy
-        package_uid = device.package_uid
-        target_strategy = device.target_strategy
-        android_user = getattr(device, "android_user", None)
-        package_data_dir = getattr(device, "package_data_dir", None)
-        valid_binding = (
-            package is not None
-            and access_mode in {"root", "run-as"}
-            and isinstance(package_uid, int)
-            and not isinstance(package_uid, bool)
-            and package_uid > 0
-            and target_strategy in {"run-as", "su-uid"}
-            and isinstance(android_user, int)
-            and not isinstance(android_user, bool)
-            and android_user >= 0
-            and package_uid // 100_000 == android_user
-            and package_data_dir == f"/data/user/{android_user}/{package}"
-            and (
-                (access_mode == "root" and root_strategy in {"direct", "su"})
-                or (
-                    access_mode == "run-as"
-                    and root_strategy == "none"
-                    and target_strategy == "run-as"
-                )
-            )
-            and (target_strategy != "su-uid" or access_mode == "root")
-        )
-        if not valid_binding:
-            _fail(
-                "device.unbound",
-                "deploy",
-                "device must be bound by successful preflight before deployment",
-            )
+        package_data_dir = device.package_data_dir
 
         snapshots = _snapshot_artifacts(artifacts)
         primary: BaseException | None = None

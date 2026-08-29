@@ -482,6 +482,16 @@ class FridaInjectorTests(unittest.TestCase):
             harness.install(harness.request(native_request=oversized))
         self.assertEqual([], harness.events.snapshot())
 
+    def test_rejects_request_package_that_differs_from_bound_device(self):
+        harness = InjectorHarness()
+        harness.adb.package = "com.example.other"
+
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+
+        self.assertEqual("inject.request_invalid", caught.exception.code)
+        self.assertEqual([], harness.events.snapshot())
+
     def test_module_load_is_authoritative_for_ok_and_deferred_deployments(self):
         for load_probe_status in ("ok", "deferred"):
             scenario = Scenario()
