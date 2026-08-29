@@ -117,3 +117,87 @@ One initial full-suite run hit the unrelated timing-sensitive `test_runtime_byte
 ## Commit
 
 `fbac540eb50c99854dd24c44cc2b57588bd7b965` — `refactor(qtrace): use bound device for artifacts`
+
+## Fix round 1
+
+### Findings addressed
+
+- Removed the default `artifact_client` and duck-typed artifact-client fallbacks from `_client_for()`. The explicit, validated `client_factory` remains the only internal seam; every default path now constructs `_BoundDeviceClient`, which enforces bound-package identity and uses `trace_directory`.
+- Added a regression test covering both removed bypass shapes (`artifact_client` and duck-typed `list_names`/`read_file`/`stream_file`) with a mismatched bound package. Both now return `artifact.binding_invalid` before either legacy capability can run.
+- Expanded the device-report metadata test to assert serial, package, access mode, root strategy, target strategy, and package UID.
+
+### RED
+
+Command:
+
+```bash
+python3 -m unittest scripts.tests.test_qtrace_artifacts.ArtifactTests.test_default_client_rejects_package_mismatch_despite_legacy_client_capabilities scripts.tests.test_qtrace_artifacts.ArtifactTests.test_artifact_report_uses_actual_device_metadata
+```
+
+Output:
+
+```text
+FAIL: test_default_client_rejects_package_mismatch_despite_legacy_client_capabilities (device='ArtifactClientDevice')
+AssertionError: legacy artifact client must not be selected
+
+FAIL: test_default_client_rejects_package_mismatch_despite_legacy_client_capabilities (device='DuckClientDevice')
+AssertionError: QtraceError not raised
+
+Ran 2 tests in 0.033s
+FAILED (failures=2)
+```
+
+The failure is expected: the old default branches selected `artifact_client` and the duck-typed device before `_BoundDeviceClient` could enforce the package mismatch.
+
+### GREEN and focused regressions
+
+Commands:
+
+```bash
+python3 -m unittest scripts.tests.test_qtrace_artifacts.ArtifactTests.test_default_client_rejects_package_mismatch_despite_legacy_client_capabilities scripts.tests.test_qtrace_artifacts.ArtifactTests.test_artifact_report_uses_actual_device_metadata
+python3 -m unittest scripts.tests.test_qtrace_artifacts
+python3 -m unittest scripts.tests.test_qtrace_contracts
+python3 -m unittest scripts.tests.test_qtrace_artifacts scripts.tests.test_qtrace_session scripts.tests.test_qtrace_cli scripts.tests.test_qtrace_preflight scripts.tests.test_qtrace_device scripts.tests.test_qtrace_build scripts.tests.test_qtrace_injector
+```
+
+Output:
+
+```text
+Ran 2 tests in 0.039s
+OK
+
+Ran 82 tests in 2.379s
+OK
+
+Ran 98 tests in 8.356s
+OK
+
+Ran 252 tests in 4.193s
+OK
+```
+
+### Full gate
+
+Commands:
+
+```bash
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+python3 -m compileall -q qtrace
+git diff --check
+```
+
+Output:
+
+```text
+Ran 801 tests in 52.207s
+OK (skipped=8)
+
+# compileall: no output, exit 0
+# git diff --check: no output, exit 0
+```
+
+The full suite again emitted its expected child-process usage text and deprecation warnings. The prior historical-benchmark deadline flake did not recur in this run.
+
+### Commit
+
+`759236de154e4c596c289fee2382e720e9a441d1` — `refactor(qtrace): require bound artifact clients`
