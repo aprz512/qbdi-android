@@ -62,4 +62,4 @@ Reviewed the final diff. The only source change is the corrected comment; the tw
 
 ## Concerns
 
-None. Commit SHA is recorded after the required non-amended commit.
+None. Code/test commit SHA: `7cfb6e28d8ea4ddf2fb3a77877d3f9c17d881f33`.
