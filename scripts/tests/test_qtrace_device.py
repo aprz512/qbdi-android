@@ -3,13 +3,27 @@ import io
 import os
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 
 from scripts.bounded_process import BoundedProcessError
 
-from qtrace.device import AdbDevice, DeviceSelector
+from qtrace.device import AdbDevice, BoundTargetDevice, DeviceSelector, TargetBinding
 from qtrace.errors import ErrorCode, QtraceError
+
+
+def target_binding(**changes):
+    values = {
+        "package": "com.example.one",
+        "access_mode": "root",
+        "root_strategy": "su",
+        "package_uid": 10905,
+        "target_strategy": "run-as",
+        "android_user": 0,
+        "package_data_dir": "/data/user/0/com.example.one",
+    }
+    values.update(changes)
+    return TargetBinding(**values)
 
 
 PIXEL_BASE_APK = (
@@ -115,6 +129,49 @@ class DeviceSelectorTests(unittest.TestCase):
 
 
 class AdbDeviceTests(unittest.TestCase):
+    def test_bind_target_returns_a_new_bound_device_without_mutating_selected_device(self):
+        selected = AdbDevice("SERIAL", FakeRunner())
+
+        bound = selected.bind_target(target_binding())
+
+        self.assertIsInstance(bound, BoundTargetDevice)
+        self.assertIsNot(selected, bound)
+        self.assertIs(selected.runner, bound.runner)
+        self.assertFalse(hasattr(selected, "package"))
+        self.assertFalse(hasattr(selected, "target_shell"))
+        self.assertEqual("com.example.one", bound.package)
+        self.assertEqual("root", bound.access_mode)
+        self.assertEqual("su", bound.root_strategy)
+        self.assertEqual(10905, bound.package_uid)
+        self.assertEqual("run-as", bound.target_strategy)
+        self.assertEqual(0, bound.android_user)
+        self.assertEqual("/data/user/0/com.example.one", bound.package_data_dir)
+        self.assertEqual(
+            "/data/user/0/com.example.one/files/qbdi-traces",
+            bound.trace_directory,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            bound.binding.package = "com.example.other"
+
+    def test_target_binding_rejects_inconsistent_identity_fields_with_stable_codes(self):
+        cases = (
+            ({"access_mode": "invalid"}, "device.access_mode_invalid"),
+            ({"root_strategy": "invalid"}, "device.root_strategy_invalid"),
+            ({"target_strategy": "invalid"}, "device.target_strategy_invalid"),
+            ({"access_mode": "run-as"}, "device.binding_invalid"),
+            ({"root_strategy": "none"}, "device.binding_invalid"),
+            ({"target_strategy": "su-uid", "access_mode": "run-as", "root_strategy": "none"},
+             "device.binding_invalid"),
+            ({"android_user": 1}, "device.data_dir_invalid"),
+            ({"package_uid": 10000, "android_user": 1,
+              "package_data_dir": "/data/user/1/com.example.one"},
+             "device.uid_user_mismatch"),
+        )
+        for changes, code in cases:
+            with self.subTest(changes=changes), self.assertRaises(QtraceError) as caught:
+                target_binding(**changes)
+            self.assertEqual(code, caught.exception.code)
+
     def test_secondary_user_run_as_places_the_package_before_the_user_option(self):
         path = "/data/user/10/com.example.app/files/qbdi-traces/run.trace.bin"
         shell_command = (
@@ -126,12 +183,12 @@ class AdbDeviceTests(unittest.TestCase):
             "--user", "10", "cat", path,
         )
         runner = FakeRunner({shell_command: b"1010905\n", stream_command: (b"trace",)})
-        device = AdbDevice("SERIAL", runner)
-        device.bind_package(
-            "com.example.app", "run-as", root_strategy="none", package_uid=1_010_905,
+        selected = AdbDevice("SERIAL", runner)
+        device = selected.bind_target(TargetBinding(
+            package="com.example.app", access_mode="run-as", root_strategy="none", package_uid=1_010_905,
             target_strategy="run-as", android_user=10,
             package_data_dir="/data/user/10/com.example.app",
-        )
+        ))
 
         self.assertEqual(b"1010905\n", device.target_shell("id", "-u"))
         output = io.BytesIO()
@@ -173,12 +230,12 @@ class AdbDeviceTests(unittest.TestCase):
             "com.example.app", "cat", path,
         )
         runner = FakeRunner({command: (b"first", b"second")})
-        device = AdbDevice("SERIAL", runner)
-        device.bind_package(
-            "com.example.app", "run-as", root_strategy="none", package_uid=10_905,
+        selected = AdbDevice("SERIAL", runner)
+        device = selected.bind_target(TargetBinding(
+            package="com.example.app", access_mode="run-as", root_strategy="none", package_uid=10_905,
             target_strategy="run-as", android_user=0,
             package_data_dir="/data/user/0/com.example.app",
-        )
+        ))
         output = io.BytesIO()
 
         device.stream_target_file(path, output, maximum_bytes=512, timeout=1.5)
@@ -345,51 +402,6 @@ class AdbDeviceTests(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(QtraceError):
                     device.push(source, path)
 
-    def test_validated_package_binding_is_idempotent_but_cannot_be_retargeted(self):
-        device = AdbDevice("SERIAL", FakeRunner())
-        binding = {
-            "root_strategy": "su",
-            "package_uid": 10905,
-            "target_strategy": "run-as",
-            "android_user": 0,
-            "package_data_dir": "/data/user/0/com.example.one",
-        }
-        device.bind_package("com.example.one", "root", **binding)
-        device.bind_package("com.example.one", "root", **binding)
-
-        for package, access_mode, overrides in (
-            ("com.example.two", "root", {}),
-            ("com.example.one", "run-as", {"root_strategy": "none"}),
-            ("com.example.one", "root", {"package_uid": 10906}),
-            ("com.example.one", "root", {"target_strategy": "su-uid"}),
-        ):
-            candidate = dict(binding)
-            candidate["package_data_dir"] = f"/data/user/0/{package}"
-            candidate.update(overrides)
-            with self.subTest(package=package, access_mode=access_mode), self.assertRaisesRegex(
-                QtraceError, "device.binding_conflict"
-            ):
-                device.bind_package(package, access_mode, **candidate)
-        self.assertEqual("com.example.one", device.package)
-        self.assertEqual("root", device.access_mode)
-        self.assertEqual("su", device.root_strategy)
-        self.assertEqual(10905, device.package_uid)
-        self.assertEqual("run-as", device.target_strategy)
-
-        fresh = AdbDevice("SERIAL", FakeRunner())
-        for user, uid, directory in (
-            (1, 10905, "/data/user/1/com.example.one"),
-            (0, 10905, "/data/user/1/com.example.one"),
-        ):
-            with self.subTest(user=user, uid=uid, directory=directory), self.assertRaises(
-                QtraceError
-            ):
-                fresh.bind_package(
-                    "com.example.one", "root", root_strategy="su", package_uid=uid,
-                    target_strategy="run-as", android_user=user,
-                    package_data_dir=directory,
-                )
-
     def test_root_and_target_shells_use_the_bound_validated_identity_strategy(self):
         prefix = ("adb", "-s", "SERIAL", "shell")
         runner = FakeRunner({
@@ -401,20 +413,20 @@ class AdbDeviceTests(unittest.TestCase):
         device = AdbDevice("SERIAL", runner)
 
         self.assertEqual(b"0\n", device.su_shell("id", "-u"))
-        device.bind_package(
-            "com.example.one", "root",
+        device = device.bind_target(TargetBinding(
+            package="com.example.one", access_mode="root",
             root_strategy="su", package_uid=10905, target_strategy="run-as",
             android_user=0, package_data_dir="/data/user/0/com.example.one",
-        )
+        ))
         device.root_shell("mkdir", "-p", "/data/local/tmp/qtrace")
         self.assertEqual(b"10905\n", device.target_shell("id", "-u"))
 
         uid_device = AdbDevice("SERIAL", runner)
-        uid_device.bind_package(
-            "com.example.one", "root",
+        uid_device = uid_device.bind_target(TargetBinding(
+            package="com.example.one", access_mode="root",
             root_strategy="su", package_uid=10905, target_strategy="su-uid",
             android_user=0, package_data_dir="/data/user/0/com.example.one",
-        )
+        ))
         self.assertEqual(b"10905\n", uid_device.target_shell("id", "-u"))
 
         with self.assertRaises(QtraceError):

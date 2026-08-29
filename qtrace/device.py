@@ -135,6 +135,43 @@ def _validate_android_user(user: int) -> int:
     return user
 
 
+@dataclass(frozen=True)
+class TargetBinding:
+    package: str
+    access_mode: str
+    root_strategy: str
+    package_uid: int
+    target_strategy: str
+    android_user: int
+    package_data_dir: str
+
+    def __post_init__(self) -> None:
+        package = _validate_package(self.package)
+        if self.access_mode not in {"root", "run-as"}:
+            _fail("device.access_mode_invalid", "device.bind", "access mode is invalid")
+        uid = _validate_package_uid(self.package_uid)
+        user = _validate_android_user(self.android_user)
+        expected_data_dir = f"/data/user/{user}/{package}"
+        if self.package_data_dir != expected_data_dir or not _is_valid_remote_path(self.package_data_dir):
+            _fail("device.data_dir_invalid", "device.bind", "package data directory does not match the bound Android user")
+        if uid // 100_000 != user:
+            _fail("device.uid_user_mismatch", "device.bind", "package UID does not belong to the bound Android user")
+        if self.root_strategy not in {"direct", "su", "none"}:
+            _fail("device.root_strategy_invalid", "device.bind", "root strategy is invalid")
+        if self.target_strategy not in {"run-as", "su-uid"}:
+            _fail("device.target_strategy_invalid", "device.bind", "target strategy is invalid")
+        if self.access_mode == "run-as" and (self.root_strategy != "none" or self.target_strategy != "run-as"):
+            _fail("device.binding_invalid", "device.bind", "run-as access cannot carry a root or su-uid strategy")
+        if self.access_mode == "root" and self.root_strategy == "none":
+            _fail("device.binding_invalid", "device.bind", "root access requires a root strategy")
+        if self.target_strategy == "su-uid" and self.access_mode != "root":
+            _fail("device.binding_invalid", "device.bind", "su-uid requires root access")
+        object.__setattr__(self, "package", package)
+        object.__setattr__(self, "package_uid", uid)
+        object.__setattr__(self, "android_user", user)
+        object.__setattr__(self, "package_data_dir", expected_data_dir)
+
+
 def _run_as_argv(
     package: str, android_user: int, *command: str,
 ) -> tuple[str, ...]:
@@ -201,114 +238,11 @@ class AdbDevice:
     def __init__(self, serial: str, runner: CommandRunner):
         self.serial = _validate_serial(serial)
         self.runner = runner
-        self._package: str | None = None
-        self._access_mode: str | None = None
-        self._root_strategy: str | None = None
-        self._package_uid: int | None = None
-        self._target_strategy: str | None = None
-        self._android_user: int | None = None
-        self._package_data_dir: str | None = None
 
-    @property
-    def package(self) -> str | None:
-        return self._package
-
-    @property
-    def access_mode(self) -> str | None:
-        return self._access_mode
-
-    @property
-    def root_strategy(self) -> str | None:
-        return self._root_strategy
-
-    @property
-    def package_uid(self) -> int | None:
-        return self._package_uid
-
-    @property
-    def target_strategy(self) -> str | None:
-        return self._target_strategy
-
-    @property
-    def android_user(self) -> int | None:
-        return self._android_user
-
-    @property
-    def package_data_dir(self) -> str | None:
-        return self._package_data_dir
-
-    def bind_package(
-        self,
-        package: str,
-        access_mode: str,
-        *,
-        root_strategy: str,
-        package_uid: int,
-        target_strategy: str,
-        android_user: int,
-        package_data_dir: str,
-    ) -> None:
-        """Bind control and target identities once; conflicting reuse is forbidden."""
-        validated = _validate_package(package)
-        if access_mode not in {"root", "run-as"}:
-            _fail("device.access_mode_invalid", "device.bind", "access mode is invalid")
-        uid = _validate_package_uid(package_uid)
-        user = _validate_android_user(android_user)
-        expected_data_dir = f"/data/user/{user}/{validated}"
-        if package_data_dir != expected_data_dir or not _is_valid_remote_path(package_data_dir):
-            _fail(
-                "device.data_dir_invalid", "device.bind",
-                "package data directory does not match the bound Android user",
-            )
-        if uid // 100_000 != user:
-            _fail(
-                "device.uid_user_mismatch", "device.bind",
-                "package UID does not belong to the bound Android user",
-            )
-        if root_strategy not in {"direct", "su", "none"}:
-            _fail("device.root_strategy_invalid", "device.bind", "root strategy is invalid")
-        if target_strategy not in {"run-as", "su-uid"}:
-            _fail("device.target_strategy_invalid", "device.bind", "target strategy is invalid")
-        if access_mode == "run-as" and (root_strategy != "none" or target_strategy != "run-as"):
-            _fail(
-                "device.binding_invalid",
-                "device.bind",
-                "run-as access cannot carry a root or su-uid strategy",
-            )
-        if access_mode == "root" and root_strategy == "none":
-            _fail("device.binding_invalid", "device.bind", "root access requires a root strategy")
-        if target_strategy == "su-uid" and access_mode != "root":
-            _fail("device.binding_invalid", "device.bind", "su-uid requires root access")
-        binding = (
-            validated, access_mode, root_strategy, uid, target_strategy, user,
-            expected_data_dir,
-        )
-        current = (
-            self._package,
-            self._access_mode,
-            self._root_strategy,
-            self._package_uid,
-            self._target_strategy,
-            self._android_user,
-            self._package_data_dir,
-        )
-        if all(value is None for value in current):
-            (
-                self._package,
-                self._access_mode,
-                self._root_strategy,
-                self._package_uid,
-                self._target_strategy,
-                self._android_user,
-                self._package_data_dir,
-            ) = binding
-            return
-        if current != binding:
-            _fail(
-                "device.binding_conflict",
-                "device.bind",
-                "device is already bound to a different identity strategy",
-            )
+    def bind_target(self, binding: TargetBinding) -> "BoundTargetDevice":
+        if not isinstance(binding, TargetBinding):
+            _fail("device.binding_invalid", "device.bind", "target binding is invalid")
+        return BoundTargetDevice(self.serial, self.runner, binding)
 
     def _host_command(self, *args: str) -> list[str]:
         if any(not isinstance(argument, str) or not argument or "\0" in argument for argument in args):
@@ -399,82 +333,6 @@ class AdbDevice:
             stage="device.shell",
             composed_shell=True,
         )
-
-    def root_shell(
-        self,
-        *args: str,
-        timeout: float = 30.0,
-        maximum_bytes: int = 1_048_576,
-    ) -> bytes:
-        if self._access_mode != "root" or self._root_strategy is None:
-            _fail("device.unbound", "device.root_shell", "root identity is not bound")
-        if self._root_strategy == "direct":
-            return self.shell(*args, timeout=timeout, maximum_bytes=maximum_bytes)
-        if self._root_strategy == "su":
-            return self.su_shell(*args, timeout=timeout, maximum_bytes=maximum_bytes)
-        _fail("device.binding_invalid", "device.root_shell", "bound root strategy is invalid")
-
-    def target_shell(
-        self,
-        *args: str,
-        timeout: float = 30.0,
-        maximum_bytes: int = 1_048_576,
-    ) -> bytes:
-        if self._package is None or self._package_uid is None or self._target_strategy is None:
-            _fail("device.unbound", "device.target_shell", "target identity is not bound")
-        if self._target_strategy == "run-as":
-            return self.shell(
-                *_run_as_argv(self._package, self._android_user, *args),
-                timeout=timeout, maximum_bytes=maximum_bytes,
-            )
-        if self._target_strategy == "su-uid":
-            return self.su_uid_shell(
-                self._package_uid, *args,
-                timeout=timeout, maximum_bytes=maximum_bytes,
-            )
-        _fail("device.binding_invalid", "device.target_shell", "bound target strategy is invalid")
-
-    def stream_target_file(
-        self,
-        path: str,
-        output: object,
-        *,
-        maximum_bytes: int,
-        timeout: float,
-    ) -> None:
-        path = _validate_remote_path(path)
-        maximum_bytes, timeout = _validate_limits(
-            maximum_bytes, timeout, stage="device.target_stream"
-        )
-        if self._package is None or self._package_uid is None or self._target_strategy is None:
-            _fail("device.unbound", "device.target_stream", "target identity is not bound")
-        if self._target_strategy == "run-as":
-            arguments = (
-                "exec-out", *_run_as_argv(
-                    self._package, self._android_user, "cat", path,
-                ),
-            )
-        elif self._target_strategy == "su-uid":
-            command = _compose_su_command(("cat", path))
-            arguments = ("exec-out", "su", str(self._package_uid), "-c", command)
-        else:
-            _fail("device.binding_invalid", "device.target_stream", "bound target strategy is invalid")
-        stream = getattr(self.runner, "stream", None)
-        if not callable(stream):
-            _fail("device.streaming_unavailable", "device.target_stream", "bounded streaming transport is unavailable")
-        try:
-            stream(
-                self._host_command(*arguments), output,
-                maximum_bytes=maximum_bytes, timeout=timeout,
-            )
-        except QtraceError:
-            raise
-        except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
-            wrapped = QtraceError(
-                "device.command_failed", "device.target_stream",
-                f"ADB stream failed: {error}",
-            )
-            raise wrapped from error
 
     def package_apk_paths(
         self, package: str, *, timeout: float = 30.0
@@ -619,6 +477,80 @@ class AdbDevice:
             )
             raise wrapped from error
         return destination
+
+
+class BoundTargetDevice(AdbDevice):
+    def __init__(self, serial: str, runner: CommandRunner, binding: TargetBinding) -> None:
+        super().__init__(serial, runner)
+        if not isinstance(binding, TargetBinding):
+            _fail("device.binding_invalid", "device.bind", "target binding is invalid")
+        self._binding = binding
+
+    @property
+    def binding(self) -> TargetBinding:
+        return self._binding
+
+    @property
+    def package(self) -> str:
+        return self._binding.package
+
+    @property
+    def access_mode(self) -> str:
+        return self._binding.access_mode
+
+    @property
+    def root_strategy(self) -> str:
+        return self._binding.root_strategy
+
+    @property
+    def package_uid(self) -> int:
+        return self._binding.package_uid
+
+    @property
+    def target_strategy(self) -> str:
+        return self._binding.target_strategy
+
+    @property
+    def android_user(self) -> int:
+        return self._binding.android_user
+
+    @property
+    def package_data_dir(self) -> str:
+        return self._binding.package_data_dir
+
+    @property
+    def trace_directory(self) -> str:
+        return f"{self.package_data_dir}/files/qbdi-traces"
+
+    def root_shell(self, *args: str, timeout: float = 30.0, maximum_bytes: int = 1_048_576) -> bytes:
+        if self.root_strategy == "direct":
+            return self.shell(*args, timeout=timeout, maximum_bytes=maximum_bytes)
+        if self.root_strategy == "su":
+            return self.su_shell(*args, timeout=timeout, maximum_bytes=maximum_bytes)
+        _fail("device.unbound", "device.root_shell", "root identity is not bound")
+
+    def target_shell(self, *args: str, timeout: float = 30.0, maximum_bytes: int = 1_048_576) -> bytes:
+        if self.target_strategy == "run-as":
+            return self.shell(*_run_as_argv(self.package, self.android_user, *args), timeout=timeout, maximum_bytes=maximum_bytes)
+        return self.su_uid_shell(self.package_uid, *args, timeout=timeout, maximum_bytes=maximum_bytes)
+
+    def stream_target_file(self, path: str, output: object, *, maximum_bytes: int, timeout: float) -> None:
+        path = _validate_remote_path(path)
+        maximum_bytes, timeout = _validate_limits(maximum_bytes, timeout, stage="device.target_stream")
+        if self.target_strategy == "run-as":
+            arguments = ("exec-out", *_run_as_argv(self.package, self.android_user, "cat", path))
+        else:
+            command = _compose_su_command(("cat", path))
+            arguments = ("exec-out", "su", str(self.package_uid), "-c", command)
+        stream = getattr(self.runner, "stream", None)
+        if not callable(stream):
+            _fail("device.streaming_unavailable", "device.target_stream", "bounded streaming transport is unavailable")
+        try:
+            stream(self._host_command(*arguments), output, maximum_bytes=maximum_bytes, timeout=timeout)
+        except QtraceError:
+            raise
+        except (OSError, RuntimeError, TimeoutError, TypeError, ValueError) as error:
+            raise QtraceError("device.command_failed", "device.target_stream", f"ADB stream failed: {error}") from error
 
 
 class DeviceSelector:
