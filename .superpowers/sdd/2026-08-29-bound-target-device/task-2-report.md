@@ -54,4 +54,4 @@ Binding remains the final preflight state transition, CLI output/error handling 
 
 ## Commit
 
-To be filled with the fix-round commit SHA after commit.
+`796495cdd1d0ff73e58cf2ca0c404824e8ecc544`

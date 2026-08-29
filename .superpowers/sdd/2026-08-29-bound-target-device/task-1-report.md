@@ -129,6 +129,6 @@ Ran 52 tests in 0.176s
 OK
 ```
 
-Commit: recorded below after committing this fix round.
+Commit: `796495cdd1d0ff73e58cf2ca0c404824e8ecc544`.
 
 Remaining concern: later deploy/inject/session/artifact migrations remain outside this fix round.
