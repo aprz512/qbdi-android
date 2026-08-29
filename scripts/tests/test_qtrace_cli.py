@@ -234,7 +234,7 @@ class QtraceCliTests(unittest.TestCase):
                 raise AssertionError("pull must not start an app")
 
         selected = SelectedDevice()
-        selected.bound = False
+        bound = SimpleNamespace(serial="serial", package="com.example.app")
         result = ArtifactResult(Path("out/session"), (Path("out/session/artifacts/run.trace.bin"),), (), 0)
         real_import = builtins.__import__
 
@@ -253,11 +253,10 @@ class QtraceCliTests(unittest.TestCase):
                 patch.object(cli, "bind_package_access") as binder, \
                 patch.object(cli, "ArtifactProcessor") as processor, \
                 patch("builtins.__import__", side_effect=reject_runtime_import):
-            binder.side_effect = lambda device, _package, *, timeout: setattr(device, "bound", True)
+            binder.return_value = bound
 
             def pull_manual(device, *_args, **_kwargs):
-                self.assertIs(selected, device)
-                self.assertTrue(device.bound)
+                self.assertIs(bound, device)
                 return result
 
             processor.return_value.pull_manual.side_effect = pull_manual

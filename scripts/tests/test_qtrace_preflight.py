@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qtrace.errors import ErrorCode, QtraceError
+from qtrace.device import TargetBinding
 from qtrace.models import AppConfig, TargetConfig, TracerConfig, UserConfig
 from qtrace.preflight import Preflight
 
@@ -139,21 +140,32 @@ class FakeDevice:
             raise self.su_uid
         return self.su_uid
 
-    def bind_package(
-        self,
-        package,
-        access_mode,
-        *,
-        root_strategy,
-        package_uid,
-        target_strategy,
-        android_user,
-        package_data_dir,
-    ):
-        self.events.append((
-            "bind", package, access_mode, root_strategy, package_uid, target_strategy,
-            android_user, package_data_dir,
-        ))
+    def bind_target(self, binding):
+        self.events.append(("bind", binding))
+        return FakeBoundDevice(self, binding)
+
+
+class FakeBoundDevice:
+    def __init__(self, selected, binding):
+        self.selected = selected
+        self.binding = binding
+        self.serial = selected.serial
+
+    @property
+    def package(self):
+        return self.binding.package
+
+    @property
+    def access_mode(self):
+        return self.binding.access_mode
+
+    @property
+    def android_user(self):
+        return self.binding.android_user
+
+    @property
+    def package_data_dir(self):
+        return self.binding.package_data_dir
 
 
 class FakeFridaProbe:
@@ -182,18 +194,24 @@ class PreflightTests(unittest.TestCase):
         from qtrace.preflight import bind_package_access
 
         device = FakeDevice()
-        self.assertEqual(
-            "root",
-            bind_package_access(
-                device, "com.example.external", timeout=2.0,
-            ),
-        )
+        bound = bind_package_access(device, "com.example.external", timeout=2.0)
+        self.assertIsInstance(bound, FakeBoundDevice)
+        self.assertIs(device, bound.selected)
+        self.assertEqual("root", bound.binding.access_mode)
+        self.assertEqual("direct", bound.binding.root_strategy)
+        self.assertEqual(20000, bound.binding.package_uid)
+        self.assertEqual("run-as", bound.binding.target_strategy)
+        self.assertEqual(0, bound.binding.android_user)
+        self.assertEqual("/data/user/0/com.example.external", bound.binding.package_data_dir)
 
         self.assertEqual(("package", "com.example.external"), device.events[0][:2])
         self.assertTrue(0 < device.events[0][2] <= 2.0)
         self.assertEqual(
-            ("bind", "com.example.external", "root", "direct", 20000, "run-as", 0,
-             "/data/user/0/com.example.external"),
+            ("bind", TargetBinding(
+                package="com.example.external", access_mode="root", root_strategy="direct",
+                package_uid=20000, target_strategy="run-as", android_user=0,
+                package_data_dir="/data/user/0/com.example.external",
+            )),
             device.events[-1],
         )
         self.assertFalse(any(event[0] == "install" for event in device.events))
@@ -211,7 +229,11 @@ class PreflightTests(unittest.TestCase):
                 frida=FakeFridaProbe((" 16.3.3+host ", "16.3.3-android.1")),
             )
 
-        self.assertIs(device, selected)
+        self.assertIsInstance(selected, FakeBoundDevice)
+        self.assertIs(device, selected.selected)
+        self.assertEqual(identity.access_mode, selected.binding.access_mode)
+        self.assertEqual(identity.android_user, selected.binding.android_user)
+        self.assertEqual(identity.package_data_dir, selected.binding.package_data_dir)
         self.assertLess(
             next(i for i, event in enumerate(device.events) if event[0] == "install"),
             next(i for i, event in enumerate(device.events) if event[0] == "package"),
@@ -226,8 +248,11 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(0 < frida.calls[0][1] <= 9.0)
         self.assertTrue(all(call[1] <= 2.0 for call in device.shell_calls))
         self.assertIn(
-            ("bind", "com.example.external", "root", "direct", 20000, "run-as", 0,
-             "/data/user/0/com.example.external"),
+            ("bind", TargetBinding(
+                package="com.example.external", access_mode="root", root_strategy="direct",
+                package_uid=20000, target_strategy="run-as", android_user=0,
+                package_data_dir="/data/user/0/com.example.external",
+            )),
             device.events,
         )
 
@@ -237,8 +262,11 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(10, identity.android_user)
         self.assertEqual("/data/user/10/com.example.external", identity.package_data_dir)
         self.assertIn(
-            ("bind", "com.example.external", "root", "direct", 1020000, "run-as", 10,
-             "/data/user/10/com.example.external"),
+            ("bind", TargetBinding(
+                package="com.example.external", access_mode="root", root_strategy="direct",
+                package_uid=1020000, target_strategy="run-as", android_user=10,
+                package_data_dir="/data/user/10/com.example.external",
+            )),
             device.events,
         )
 
@@ -251,8 +279,11 @@ class PreflightTests(unittest.TestCase):
         (_selected, identity), _frida = self.run_preflight(device)
         self.assertEqual("run-as", identity.access_mode)
         self.assertIn(
-            ("bind", "com.example.external", "run-as", "none", 20000, "run-as", 0,
-             "/data/user/0/com.example.external"),
+            ("bind", TargetBinding(
+                package="com.example.external", access_mode="run-as", root_strategy="none",
+                package_uid=20000, target_strategy="run-as", android_user=0,
+                package_data_dir="/data/user/0/com.example.external",
+            )),
             device.events,
         )
 
@@ -263,8 +294,11 @@ class PreflightTests(unittest.TestCase):
 
         self.assertEqual("root", identity.access_mode)
         self.assertIn(
-            ("bind", "com.example.external", "root", "su", 10905, "run-as", 0,
-             "/data/user/0/com.example.external"),
+            ("bind", TargetBinding(
+                package="com.example.external", access_mode="root", root_strategy="su",
+                package_uid=10905, target_strategy="run-as", android_user=0,
+                package_data_dir="/data/user/0/com.example.external",
+            )),
             device.events,
         )
 
@@ -282,8 +316,11 @@ class PreflightTests(unittest.TestCase):
 
         self.assertEqual("root", identity.access_mode)
         self.assertIn(
-            ("bind", "com.example.external", "root", "su", 10905, "su-uid", 0,
-             "/data/user/0/com.example.external"),
+            ("bind", TargetBinding(
+                package="com.example.external", access_mode="root", root_strategy="su",
+                package_uid=10905, target_strategy="su-uid", android_user=0,
+                package_data_dir="/data/user/0/com.example.external",
+            )),
             device.events,
         )
 

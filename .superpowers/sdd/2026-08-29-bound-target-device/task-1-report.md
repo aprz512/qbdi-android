@@ -70,3 +70,65 @@ Reviewed the diff for the requested API boundary, immutable binding, validation 
 ## Concerns
 
 Existing callers outside this task still reference the removed mutable `bind_package()` API; those consumers are expected to migrate in subsequent tasks.
+
+## Fix round 1
+
+### Finding addressed
+
+Migrated `qtrace.preflight` and manual pull CLI flow from removed `AdbDevice.bind_package()` to `TargetBinding` plus `bind_target()`. Full preflight and manual pull now return and consume the distinct `BoundTargetDevice` object.
+
+### Files changed
+
+- `qtrace/preflight.py`
+- `qtrace/cli.py`
+- `scripts/tests/test_qtrace_preflight.py`
+- `scripts/tests/test_qtrace_cli.py`
+- this report and `task-2-report.md`
+
+### RED
+
+Command:
+
+```text
+python3 -m unittest scripts.tests.test_qtrace_preflight.PreflightTests.test_manual_package_binder_reuses_bound_target_identity_without_session_prerequisites scripts.tests.test_qtrace_preflight.PreflightTests.test_installs_existing_apk_before_package_checks_and_records_identity
+```
+
+Exact result: `Ran 2 tests in 0.000s`, `FAILED (errors=2)`; both raised `AttributeError: 'FakeDevice' object has no attribute 'bind_package'`, proving the old preflight mutation path was still active.
+
+### GREEN and verification
+
+```text
+python3 -m unittest scripts.tests.test_qtrace_preflight scripts.tests.test_qtrace_cli
+...................qtrace: building fixture artifacts
+qtrace: building fixture artifacts
+..qtrace: building fixture artifacts
+......qtrace: starting monitor session
+..qtrace: collecting artifacts
+..qtrace: starting timed session
+.
+----------------------------------------------------------------------
+Ran 32 tests in 0.134s
+
+OK
+```
+
+Amended focused suite and diff check:
+
+```text
+python3 -m unittest scripts.tests.test_qtrace_device scripts.tests.test_qtrace_preflight scripts.tests.test_qtrace_cli && git diff --check
+.......................................qtrace: building fixture artifacts
+qtrace: building fixture artifacts
+..qtrace: building fixture artifacts
+......qtrace: starting monitor session
+..qtrace: collecting artifacts
+..qtrace: starting timed session
+.
+----------------------------------------------------------------------
+Ran 52 tests in 0.176s
+
+OK
+```
+
+Commit: recorded below after committing this fix round.
+
+Remaining concern: later deploy/inject/session/artifact migrations remain outside this fix round.

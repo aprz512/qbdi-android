@@ -365,7 +365,7 @@ def _pull(arguments: argparse.Namespace) -> int:
     _progress("collecting artifacts")
     runner = BoundedRunner()
     device = _select_device(arguments.device, runner, arguments.adb_timeout)
-    bind_package_access(device, arguments.package, timeout=arguments.adb_timeout)
+    device = bind_package_access(device, arguments.package, timeout=arguments.adb_timeout)
     result = ArtifactProcessor().pull_manual(device, arguments.package, _selection(arguments),
                                              arguments.output, arguments.pull_timeout)
     _emit_result(result.output_dir / "report.json", result.files, result.exit_code, arguments.json)

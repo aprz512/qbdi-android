@@ -10,8 +10,10 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
-from qtrace.device import (AdbDevice, DeviceIdentity, DeviceSelector,
-                           _run_as_argv, _validate_package)
+from qtrace.device import (
+    AdbDevice, BoundTargetDevice, DeviceIdentity, DeviceSelector, TargetBinding,
+    _run_as_argv, _validate_package,
+)
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.models import UserConfig
 
@@ -139,7 +141,7 @@ def _discover_package_access(
     device: AdbDevice,
     package: str,
     budget: Callable[[], float],
-) -> tuple[str, str, int, str, int, str]:
+) -> TargetBinding:
     """Discover the target identity shared by run, monitor, and pull."""
     package = _validate_package(package)
     android_user = _numeric_uid(
@@ -259,36 +261,21 @@ def _discover_package_access(
             "device.uid_user_mismatch", "preflight.access",
             "package UID does not belong to the current Android user",
         )
-    return (
-        access_mode, root_strategy, package_uid, target_strategy,
-        android_user, package_data_dir,
+    return TargetBinding(
+        package=package,
+        access_mode=access_mode,
+        root_strategy=root_strategy,
+        package_uid=package_uid,
+        target_strategy=target_strategy,
+        android_user=android_user,
+        package_data_dir=package_data_dir,
     )
 
 
-def _bind_discovered_package_access(
-    device: AdbDevice,
-    package: str,
-    binding: tuple[str, str, int, str, int, str],
-) -> str:
-    (access_mode, root_strategy, package_uid, target_strategy,
-     android_user, package_data_dir) = binding
-    _external(
-        "preflight.bind",
-        lambda: device.bind_package(
-            package,
-            access_mode,
-            root_strategy=root_strategy,
-            package_uid=package_uid,
-            target_strategy=target_strategy,
-            android_user=android_user,
-            package_data_dir=package_data_dir,
-        ),
-    )
-    return access_mode
-
-
-def bind_package_access(device: AdbDevice, package: str, *, timeout: float) -> str:
-    """Bind one installed package without config, build, Frida, or app launch work."""
+def bind_package_access(
+    device: AdbDevice, package: str, *, timeout: float
+) -> BoundTargetDevice:
+    """Return one package-bound device without config, build, Frida, or app launch work."""
     timeout = _positive_finite(timeout, "timeout")
     deadline = time.monotonic() + timeout
 
@@ -304,7 +291,7 @@ def bind_package_access(device: AdbDevice, package: str, *, timeout: float) -> s
         lambda: device.package_apk_paths(package, timeout=budget()),
     )
     binding = _discover_package_access(device, package, budget)
-    return _bind_discovered_package_access(device, package, binding)
+    return _external("preflight.bind", lambda: device.bind_target(binding))
 
 
 class Preflight:
@@ -319,7 +306,7 @@ class Preflight:
         *,
         setup_timeout: float,
         adb_timeout: float,
-    ) -> tuple[AdbDevice, DeviceIdentity]:
+    ) -> tuple[BoundTargetDevice, DeviceIdentity]:
         setup_timeout = _positive_finite(setup_timeout, "setup_timeout")
         adb_timeout = _positive_finite(adb_timeout, "adb_timeout")
         deadline = time.monotonic() + setup_timeout
@@ -384,7 +371,7 @@ class Preflight:
             _fail("device.api_unsupported", "preflight.api", "device API level must be at least 24")
 
         access_binding = _discover_package_access(device, package, budget)
-        access_mode = access_binding[0]
+        access_mode = access_binding.access_mode
 
         free_bytes = _parse_free_bytes(
             _external(
@@ -436,16 +423,15 @@ class Preflight:
 
         # Deployment is allowed only after every prerequisite succeeds. The one-time
         # binding prevents a selected device from being silently reused for another app.
-        _bind_discovered_package_access(device, package, access_binding)
-
-        return device, DeviceIdentity(
-            serial=device.serial,
+        bound_device = _external("preflight.bind", lambda: device.bind_target(access_binding))
+        return bound_device, DeviceIdentity(
+            serial=bound_device.serial,
             abi=abi,
             api_level=api_level,
             access_mode=access_mode,
             frida_host_version=host_version,
             frida_server_version=server_version,
             free_bytes=free_bytes,
-            android_user=access_binding[4],
-            package_data_dir=access_binding[5],
+            android_user=access_binding.android_user,
+            package_data_dir=access_binding.package_data_dir,
         )
