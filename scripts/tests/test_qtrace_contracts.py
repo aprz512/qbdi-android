@@ -30,7 +30,7 @@ from qtrace.models import ResolvedScene
 from qtrace.session import parse_status
 from qtrace.status import STATUS_KEYS, validate_status_shape
 from scripts.tests.test_pull_trace import stopped_binary_stream
-from scripts.tests.test_qtrace_artifacts import COMPLETE_TERMINAL, FakeClient
+from scripts.tests.test_qtrace_artifacts import BOUND_DEVICE, COMPLETE_TERMINAL, FakeClient
 from scripts.tests.test_trace_convert import fake_lz4_executable
 from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
 from scripts.tests.test_pull_trace import recoverable_flight_artifact
@@ -2643,7 +2643,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 })
                 output = parent / label
                 result = ArtifactProcessor(client_factory=lambda _d, _p, c=client: c).pull_manual(
-                    "SERIAL", package, selection, output, 1.0,
+                    BOUND_DEVICE, package, selection, output, 1.0,
                 )
                 self.assertEqual(0, result.exit_code)
                 with RootedReader(output) as held:
@@ -2669,7 +2669,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 result = ArtifactProcessor(
                     client_factory=lambda _d, _p: compressed_client,
                 ).pull_manual(
-                    "SERIAL", package,
+                    BOUND_DEVICE, package,
                     PullSelection(PullMode.ALL, compressed_only=True),
                     output, 1.0,
                 )
@@ -2693,7 +2693,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "flight"
             result = ArtifactProcessor(client_factory=lambda _d, _p: client).pull_manual(
-                "SERIAL", "com.example.app",
+                BOUND_DEVICE, "com.example.app",
                 PullSelection(PullMode.NAME, "run.flight.bin"), output, 1.0,
             )
             self.assertEqual(0, result.exit_code)

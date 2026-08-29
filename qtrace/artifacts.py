@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from qtrace.device import BoundTargetDevice
 from qtrace.errors import EXIT_PARTIAL, QtraceError
 from qtrace.report import ConditionalReplaceRecoveryError, conditional_replace_at
 from qtrace.status import (NativeStatusValidationError, StrictJsonLoadError,
@@ -322,7 +323,7 @@ def _call(method: Any, *args: Any, timeout: float | None = None, **kwargs: Any) 
     return method(*args, **kwargs)
 
 
-def _client_for(device: object, package: str, factory: Any | None) -> object:
+def _client_for(device: BoundTargetDevice, package: str, factory: Any | None) -> object:
     if factory is not None:
         if not callable(factory):
             raise _error("artifact.client_invalid", "artifact client factory is not callable")
@@ -342,17 +343,14 @@ def _client_for(device: object, package: str, factory: Any | None) -> object:
 class _BoundDeviceClient:
     """Adapter that retains the AdbDevice's already-bound run-as/root identity."""
 
-    def __init__(self, device: object, package: str) -> None:
+    def __init__(self, device: BoundTargetDevice, package: str) -> None:
         self.device = device
-        package_data_dir = getattr(device, "package_data_dir", None)
-        bound_package = getattr(device, "package", package)
-        if (bound_package != package or not isinstance(package_data_dir, str)
-                or re.fullmatch(rf"/data/user/[0-9]+/{re.escape(package)}", package_data_dir) is None):
+        if device.package != package:
             raise _error(
                 "artifact.binding_invalid",
-                "bound device package data directory is missing or inconsistent",
+                "bound device package does not match artifact package",
             )
-        self.directory = f"{package_data_dir}/files/qbdi-traces"
+        self.directory = device.trace_directory
 
     def list_names(self, *, timeout: float) -> list[str]:
         raw = self.device.target_shell("ls", "-1t", self.directory,
@@ -382,13 +380,7 @@ class _BoundDeviceClient:
 
     def stream_file(self, name: str, output: Any, *, timeout: float) -> None:
         _name(name)
-        stream = getattr(self.device, "stream_target_file", None)
-        if not callable(stream):
-            raise _error(
-                "artifact.client_invalid",
-                "bound device lacks a streaming transport",
-            )
-        stream(
+        self.device.stream_target_file(
             f"{self.directory}/{name}", output,
             timeout=timeout, maximum_bytes=_MAX_ARTIFACT_BYTES,
         )
@@ -1088,7 +1080,7 @@ class ArtifactProcessor:
                 os.close(parent)
         return final
 
-    def _collect(self, device: object, package: str, session_id: str, names: list[str],
+    def _collect(self, device: BoundTargetDevice, package: str, session_id: str, names: list[str],
                  output: Path, timeout: float, status: Mapping[str, object] | None,
                  *, initial_errors: Sequence[Mapping[str, str]] = (), compressed_only: bool = False,
                  create_token: bool = False,
@@ -1325,12 +1317,12 @@ class ArtifactProcessor:
                 effective = None
             _write_json(stage_root / "effective-config.json", effective)
             device_metadata = {
-                "serial": getattr(device, "serial", None),
+                "serial": device.serial,
                 "package": package,
-                "access_mode": getattr(device, "access_mode", None),
-                "root_strategy": getattr(device, "root_strategy", None),
-                "target_strategy": getattr(device, "target_strategy", None),
-                "package_uid": getattr(device, "package_uid", None),
+                "access_mode": device.access_mode,
+                "root_strategy": device.root_strategy,
+                "target_strategy": device.target_strategy,
+                "package_uid": device.package_uid,
             }
             if status is not None and isinstance(status.get("device"), Mapping):
                 device_metadata.update(status["device"])
@@ -1438,7 +1430,7 @@ class ArtifactProcessor:
                 actions.append(("collector unreturned token", token.close))
             _cleanup_exhaustively(actions, primary)
 
-    def collect_session(self, device: object, package: str, session_id: str, status: Mapping[str, object] | None,
+    def collect_session(self, device: BoundTargetDevice, package: str, session_id: str, status: Mapping[str, object] | None,
                         output: Path, timeout: float) -> ArtifactResult:
         _package(package)
         if type(session_id) is not str or not _UUID4.fullmatch(session_id):
@@ -1503,7 +1495,7 @@ class ArtifactProcessor:
         return self._collect(device, package, session_id, selected, output, timeout, status,
                              initial_errors=initial_errors, create_token=True)
 
-    def pull_manual(self, device: object, package: str, selection: PullSelection, output: Path,
+    def pull_manual(self, device: BoundTargetDevice, package: str, selection: PullSelection, output: Path,
                     timeout: float) -> ArtifactResult:
         _package(package)
         if type(selection) is not PullSelection or type(selection.mode) is not PullMode:
