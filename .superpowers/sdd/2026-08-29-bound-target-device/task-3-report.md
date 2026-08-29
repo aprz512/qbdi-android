@@ -57,4 +57,4 @@ Existing test doubles are structural and are not runtime-checked with `isinstanc
 
 ## Commit SHA
 
-Implementation commit: to be recorded after commit.
+Implementation commit: `c82f3b6`.
