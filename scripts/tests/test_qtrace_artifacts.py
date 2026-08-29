@@ -97,6 +97,35 @@ class ArtifactTests(unittest.TestCase):
             device.calls,
         )
 
+    def test_default_client_rejects_package_mismatch_despite_legacy_client_capabilities(self):
+        from qtrace.artifacts import _client_for
+
+        class ArtifactClientDevice:
+            package = "com.other.app"
+            trace_directory = "/data/user/0/com.other.app/files/qbdi-traces"
+
+            def artifact_client(self, _package):
+                raise AssertionError("legacy artifact client must not be selected")
+
+        class DuckClientDevice:
+            package = "com.other.app"
+            trace_directory = "/data/user/0/com.other.app/files/qbdi-traces"
+
+            def list_names(self, *, timeout):
+                raise AssertionError("duck client must not be selected")
+
+            def read_file(self, _name, *, timeout):
+                raise AssertionError("duck client must not be selected")
+
+            def stream_file(self, _name, _output, *, timeout):
+                raise AssertionError("duck client must not be selected")
+
+        for device in (ArtifactClientDevice(), DuckClientDevice()):
+            with self.subTest(device=type(device).__name__):
+                with self.assertRaises(QtraceError) as raised:
+                    _client_for(device, "com.example.app", None)
+                self.assertEqual("artifact.binding_invalid", raised.exception.code)
+
     def test_manual_client_uses_bound_secondary_user_trace_root(self):
         from qtrace.artifacts import _client_for
 
@@ -563,7 +592,11 @@ class ArtifactTests(unittest.TestCase):
                                                          PullSelection(PullMode.NAME, "run.trace.txt"), Path(root), 1)
             document = json.loads((result.output_dir / "device.json").read_text())
             self.assertEqual("SERIAL", document["serial"])
+            self.assertEqual("com.example.app", document["package"])
+            self.assertEqual("root", document["access_mode"])
+            self.assertEqual("su", document["root_strategy"])
             self.assertEqual("su-uid", document["target_strategy"])
+            self.assertEqual(10905, document["package_uid"])
 
     def test_unicode_legacy_basename_is_accepted_by_client(self):
         client = FakeClient({"合法.trace.txt": COMPLETE_TERMINAL})

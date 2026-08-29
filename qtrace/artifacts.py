@@ -331,13 +331,7 @@ def _client_for(device: BoundTargetDevice, package: str, factory: Any | None) ->
         if not hasattr(client, "list_names") or not (hasattr(client, "stream_file") or hasattr(client, "read_file")):
             raise _error("artifact.client_invalid", "artifact client lacks bounded capabilities")
         return client
-    if hasattr(device, "artifact_client"):
-        return device.artifact_client(package)
-    if all(hasattr(device, name) for name in ("list_names", "read_file", "stream_file")):
-        return device
-    if hasattr(device, "target_shell"):
-        return _BoundDeviceClient(device, package)
-    raise _error("artifact.client_invalid", "device has no bound artifact client")
+    return _BoundDeviceClient(device, package)
 
 
 class _BoundDeviceClient:
