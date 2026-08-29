@@ -86,14 +86,19 @@ class FakeDevice:
     serial = "device-1"
 
     def __init__(self, statuses: list[object], pids: list[int | None],
-                 starttimes: list[int | None] | None = None) -> None:
+                 starttimes: list[int | None] | None = None, *,
+                 android_user: int = 0) -> None:
         self.statuses, self.pids = list(statuses), list(pids)
         self.starttimes = list(starttimes) if starttimes is not None else [99, None]
         self.read_paths: list[str] = []
         self.shell_timeouts: list[tuple[str, float]] = []
         self.killed: list[int] = []
         self.package = PACKAGE
-        self.package_data_dir = "/data/user/0/com.example.app"
+        self.access_mode = "root"
+        self.root_strategy = "direct"
+        self.target_strategy = "run-as"
+        self.package_uid = android_user * 100_000 + 20_000
+        self.trace_directory = f"/data/user/{android_user}/{PACKAGE}/files/qbdi-traces"
 
     def read_file(self, path: str, maximum_bytes: int, *, timeout: float) -> bytes:
         self.read_paths.append(path)
@@ -387,8 +392,7 @@ class SessionTests(unittest.TestCase):
     def test_session_status_and_snapshot_use_bound_secondary_user_trace_root(self) -> None:
         device = FakeDevice([
             status("sealed", transition=1, reason="duration_elapsed", acknowledged=True),
-        ], [4242])
-        device.package_data_dir = "/data/user/10/com.example.app"
+        ], [4242], android_user=10)
         runner, _ = orchestrator(device, ManualClock())
 
         self.assertEqual(0, runner.run(self.run_request()).exit_code)

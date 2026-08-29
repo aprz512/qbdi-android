@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
 from qtrace.errors import EXIT_PARTIAL, EXIT_STOP_INCOMPLETE, ErrorCode, QtraceError
+from qtrace.device import BoundTargetDevice
 from qtrace.artifacts import publish_collector_report
 from scripts.bounded_process import BoundedProcessError
 from qtrace.injector import InjectionRequest, InjectionResult
@@ -530,51 +531,36 @@ class SessionOrchestrator:
             if context is not None and entered:
                 context.__exit__(*sys.exc_info())
 
-    def _trace_directory(self, device: object, package: str) -> str:
-        package_data_dir = getattr(device, "package_data_dir", None)
-        bound_package = getattr(device, "package", package)
-        if (bound_package != package or not isinstance(package_data_dir, str)
-                or re.fullmatch(rf"/data/user/[0-9]+/{re.escape(package)}", package_data_dir) is None):
-            raise QtraceError(
-                "session.binding_invalid", "session",
-                "bound device package data directory is missing or inconsistent",
-            )
-        return f"{package_data_dir}/files/qbdi-traces"
+    def _trace_directory(self, device: BoundTargetDevice) -> str:
+        return device.trace_directory
 
-    def _status_path(self, device: object, package: str, session_id: str) -> str:
-        return f"{self._trace_directory(device, package)}/session-{session_id}.status.json"
+    def _status_path(self, device: BoundTargetDevice, session_id: str) -> str:
+        return f"{device.trace_directory}/session-{session_id}.status.json"
 
-    def _snapshot_artifacts(self, device: object, request: RunRequest | MonitorRequest,
+    def _snapshot_artifacts(self, device: BoundTargetDevice, request: RunRequest | MonitorRequest,
                             session_id: str) -> tuple[str, ...]:
-        directory = self._trace_directory(device, request.config.app.package)
-        target_shell = getattr(device, "target_shell", None)
-        if target_shell is not None:
-            try:
-                raw = target_shell("ls", "-1", directory, maximum_bytes=1_048_576,
-                                   timeout=request.adb_timeout)
-            except BaseException as error:
-                if _missing_remote(error, directory):
-                    return ()
-                raise
-            try:
-                names = tuple(line for line in raw.decode("utf-8").splitlines() if line)
-            except (AttributeError, UnicodeDecodeError) as error:
-                raise QtraceError("session.snapshot_invalid", "session.snapshot", "artifact snapshot is not UTF-8") from error
-        else:
-            raise QtraceError("session.snapshot_invalid", "session.snapshot", "bound target identity cannot list tracer artifacts")
+        directory = self._trace_directory(device)
+        try:
+            raw = device.target_shell("ls", "-1", directory, maximum_bytes=1_048_576,
+                                      timeout=request.adb_timeout)
+        except BaseException as error:
+            if _missing_remote(error, directory):
+                return ()
+            raise
+        try:
+            names = tuple(line for line in raw.decode("utf-8").splitlines() if line)
+        except (AttributeError, UnicodeDecodeError) as error:
+            raise QtraceError("session.snapshot_invalid", "session.snapshot", "artifact snapshot is not UTF-8") from error
         if len(names) > 256 or len(set(names)) != len(names) or any(
             not _artifact_basename(name) for name in names
         ):
             raise QtraceError("session.snapshot_invalid", "session.snapshot", "artifact snapshot has unsafe names")
         return names
 
-    def _current_pid(self, device: object, package: str, timeout: float,
+    def _current_pid(self, device: BoundTargetDevice, package: str, timeout: float,
                      expected_pid: int | None = None) -> int | None:
-        target_shell = getattr(device, "target_shell", None)
-        if target_shell is None:
-            return device.pid(package)
         try:
-            raw = target_shell("pidof", package, maximum_bytes=4096, timeout=timeout)
+            raw = device.target_shell("pidof", package, maximum_bytes=4096, timeout=timeout)
         except BaseException as error:
             failure = _process_failure(error)
             if failure is not None and failure.returncode == 1 and failure.stderr == b"":
@@ -597,47 +583,40 @@ class SessionOrchestrator:
             raise QtraceError("session.pid_invalid", "session.pid", "pidof output is malformed")
         return pids[0]
 
-    def _read_process_identity(self, device: object, pid: int,
+    def _read_process_identity(self, device: BoundTargetDevice, pid: int,
                                timeout: float) -> _ProcessIdentity | None:
         path = f"/proc/{pid}/stat"
-        target_shell = getattr(device, "target_shell", None)
-        if target_shell is None:
-            raise QtraceError("session.pid_identity_unavailable", "session.monitor",
-                              "bound target identity cannot inspect the owned process")
         try:
-            raw = target_shell("cat", path, maximum_bytes=4096, timeout=timeout)
+            raw = device.target_shell("cat", path, maximum_bytes=4096, timeout=timeout)
         except BaseException as error:
             if _missing_remote(error, path):
                 return None
             raise
         return _parse_process_identity(raw, pid)
 
-    def _read_status(self, device: object, request: RunRequest | MonitorRequest, result: InjectionResult,
+    def _read_status(self, device: BoundTargetDevice, request: RunRequest | MonitorRequest, result: InjectionResult,
                      session_id: str, previous: Mapping[str, object] | None, timeout: float | None = None) -> dict[str, object]:
-        path = self._status_path(device, request.config.app.package, session_id)
-        target_shell = getattr(device, "target_shell", None)
+        path = self._status_path(device, session_id)
         timeout = request.adb_timeout if timeout is None else timeout
-        raw = (target_shell("cat", path, maximum_bytes=1_048_576, timeout=timeout)
-               if target_shell is not None else
-               device.read_file(path, 1_048_576, timeout=timeout))
+        raw = device.target_shell("cat", path, maximum_bytes=1_048_576, timeout=timeout)
         decoded = _strict_json(raw)
         return parse_status(decoded, session_id, request.config.app.package, result.generation, result.pid,
                             result.normalized_scenes, previous)
 
-    def _read_final_status(self, device: object, request: MonitorRequest, result: InjectionResult,
+    def _read_final_status(self, device: BoundTargetDevice, request: MonitorRequest, result: InjectionResult,
                            session_id: str) -> Mapping[str, object] | None:
         try:
-            path = self._status_path(device, request.config.app.package, session_id)
+            path = self._status_path(device, session_id)
             return self._read_status(device, request, result, session_id, None)
         except BaseException as error:
             if _missing_remote(error, path):
                 return None
             raise
 
-    def _wait_for_seal(self, device: object, request: RunRequest, result: InjectionResult,
+    def _wait_for_seal(self, device: BoundTargetDevice, request: RunRequest, result: InjectionResult,
                        session_id: str, on_stopping: Callable[[], None]) -> tuple[Mapping[str, object], bool]:
         deadline = self._clock.monotonic() + request.duration_ms / 1000.0 + request.stop_timeout
-        status_path = self._status_path(device, request.config.app.package, session_id)
+        status_path = self._status_path(device, session_id)
         previous = None
         saw_stop = False
         transient_count = 0
@@ -693,7 +672,7 @@ class SessionOrchestrator:
         assert previous is not None
         return previous, True
 
-    def _wait_for_exit(self, device: object, request: MonitorRequest, pid: int,
+    def _wait_for_exit(self, device: BoundTargetDevice, request: MonitorRequest, pid: int,
                        identity: _ProcessIdentity) -> None:
         outage_deadline: float | None = None
         transient_count = 0
@@ -740,7 +719,7 @@ class SessionOrchestrator:
             sleep = 0.1 if outage_deadline is None else min(0.1, max(0.0, outage_deadline - self._clock.monotonic()))
             self._clock.sleep(sleep)
 
-    def _collect(self, device: object, request: RunRequest | MonitorRequest, session_id: str,
+    def _collect(self, device: BoundTargetDevice, request: RunRequest | MonitorRequest, session_id: str,
                  snapshot: tuple[str, ...], status: Mapping[str, object] | None,
                  *, native_request: Mapping[str, object] | None = None,
                  process_exited: bool = False,
@@ -760,10 +739,10 @@ class SessionOrchestrator:
             "scenes": [dataclasses.asdict(scene) for scene in request.config.scenes],
         },
         "device": {
-            "serial": getattr(device, "serial", None),
-            "access_mode": getattr(device, "access_mode", None),
-            "target_strategy": getattr(device, "target_strategy", None),
-            "package_uid": getattr(device, "package_uid", None),
+            "serial": device.serial,
+            "access_mode": device.access_mode,
+            "target_strategy": device.target_strategy,
+            "package_uid": device.package_uid,
         }})
         value = self._collector.collect_session(device, request.config.app.package, session_id, owned,
                                                 Path(request.output), request.pull_timeout)
