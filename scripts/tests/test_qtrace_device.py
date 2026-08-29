@@ -242,6 +242,44 @@ class AdbDeviceTests(unittest.TestCase):
 
         self.assertEqual(b"firstsecond", output.getvalue())
         self.assertEqual([Call(command, 512, 1.5)], runner.calls)
+
+    def test_direct_root_shell_uses_the_direct_bounded_command_tuple(self):
+        command = (
+            "adb", "-s", "SERIAL", "shell", "mkdir", "-p", "/data/local/tmp/qtrace",
+        )
+        runner = FakeRunner({command: b""})
+        device = AdbDevice("SERIAL", runner).bind_target(TargetBinding(
+            package="com.example.app", access_mode="root", root_strategy="direct",
+            package_uid=10_905, target_strategy="run-as", android_user=0,
+            package_data_dir="/data/user/0/com.example.app",
+        ))
+
+        self.assertEqual(
+            b"", device.root_shell(
+                "mkdir", "-p", "/data/local/tmp/qtrace", maximum_bytes=512, timeout=1.5,
+            ),
+        )
+
+        self.assertEqual([Call(command, 512, 1.5)], runner.calls)
+
+    def test_su_uid_target_stream_uses_the_bounded_command_tuple(self):
+        path = "/data/user/0/com.example.app/files/qbdi-traces/run.trace.bin"
+        command = (
+            "adb", "-s", "SERIAL", "exec-out", "su", "10905", "-c", f"'cat {path}'",
+        )
+        runner = FakeRunner({command: (b"trace",)})
+        device = AdbDevice("SERIAL", runner).bind_target(TargetBinding(
+            package="com.example.app", access_mode="root", root_strategy="su",
+            package_uid=10_905, target_strategy="su-uid", android_user=0,
+            package_data_dir="/data/user/0/com.example.app",
+        ))
+        output = io.BytesIO()
+
+        device.stream_target_file(path, output, maximum_bytes=512, timeout=1.5)
+
+        self.assertEqual(b"trace", output.getvalue())
+        self.assertEqual([Call(command, 512, 1.5)], runner.calls)
+
     def test_accepts_literal_tildes_in_normalized_absolute_pixel_apk_path(self):
         command = (
             "adb", "-s", "SERIAL", "shell", "pm", "path", "com.aprz.qbdiandroid"

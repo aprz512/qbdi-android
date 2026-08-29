@@ -421,8 +421,8 @@ class Preflight:
                 f"Frida host {host_version} does not match server {server_version}",
             )
 
-        # Deployment is allowed only after every prerequisite succeeds. The one-time
-        # binding prevents a selected device from being silently reused for another app.
+        # Deployment is allowed only after every prerequisite succeeds. Bind only after
+        # discovery, yielding a new wrapper with an immutable target identity.
         bound_device = _external("preflight.bind", lambda: device.bind_target(access_binding))
         return bound_device, DeviceIdentity(
             serial=bound_device.serial,
