@@ -1,0 +1,30 @@
+[package]
+name = "qtrace-provider-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.85"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+qtrace-provider = { path = "../crates/qtrace-provider" }
+
+[[bin]]
+name = "qtrb"
+path = "fuzz_targets/qtrb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flight"
+path = "fuzz_targets/flight.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -7,6 +7,7 @@ members = [
   "crates/qtrace-service",
   "src-tauri",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"

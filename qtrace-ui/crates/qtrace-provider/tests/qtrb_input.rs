@@ -183,6 +183,22 @@ fn independent_and_linked_compressed_blocks_decode() {
 }
 
 #[test]
+fn concatenated_linked_frames_reset_history_between_frames() {
+    let dictionary = b"frame one dictionary phrase frame one dictionary phrase";
+    let payload = b"frame one dictionary phrase";
+    let first = test_frame(&[raw_block(dictionary)], FrameOptions::default());
+    let dependent = TestBlock {
+        encoded: lz4_flex::block::compress_with_dict(payload, dictionary),
+        decoded: payload.to_vec(),
+        raw: false,
+    };
+    let second = test_frame(&[dependent], FrameOptions::default());
+    let error = decode(Cursor::new([first, second].concat()), &AllowAll).unwrap_err();
+
+    assert!(error.starts_with("source.qtrb.compression"), "{error}");
+}
+
+#[test]
 fn dictionary_id_accepts_self_contained_blocks_and_rejects_required_unknown_dictionary() {
     let self_contained = test_frame(
         &[compressed_block(b"self-contained self-contained")],

@@ -58,6 +58,7 @@ impl QtrbProvider {
         mode: OpenMode,
         guard: &dyn WorkGuard,
     ) -> Result<Self, ProviderError> {
+        let source_bytes = source.len();
         let mut bytes = [0_u8; STREAM_HEADER_BYTES];
         guard.consume(WorkDelta {
             input_bytes: STREAM_HEADER_BYTES as u64,
@@ -70,6 +71,7 @@ impl QtrbProvider {
         let header = StreamHeader::parse(&bytes)?;
         identity.format_major = MAJOR_VERSION;
         identity.format_minor = header.minor;
+        identity.source_bytes = source_bytes;
         Ok(Self {
             source,
             identity,
@@ -464,6 +466,18 @@ impl QtrbEventCursor {
     }
 
     fn finish_stream(&mut self) -> Result<Option<EventRecord>, ProviderError> {
+        if self.source.len() != self.identity.source_bytes {
+            return Err(ProviderError::new(
+                "source.identity_changed",
+                "qtrb.identity",
+                Some(SourceCoordinate {
+                    offset: self.offset,
+                    record_ordinal: Some(self.next_ordinal),
+                }),
+                false,
+                "QTRB source length changed while parsing",
+            ));
+        }
         if self.pending.is_some() {
             return Err(self.error_at_current(
                 "source.incomplete_fragment",
