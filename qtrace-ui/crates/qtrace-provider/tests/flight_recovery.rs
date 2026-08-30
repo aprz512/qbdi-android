@@ -50,6 +50,55 @@ struct CancelPassAfterSecondCheckpoint {
     checkpoints: AtomicUsize,
 }
 
+struct ProofJoinCancelGuard {
+    phase: Arc<AtomicBool>,
+    marker_seen: AtomicBool,
+    armed: AtomicBool,
+    checkpoints: AtomicUsize,
+}
+
+impl ProofJoinCancelGuard {
+    fn new(phase: Arc<AtomicBool>) -> Self {
+        Self {
+            phase,
+            marker_seen: AtomicBool::new(false),
+            armed: AtomicBool::new(false),
+            checkpoints: AtomicUsize::new(0),
+        }
+    }
+
+    fn checkpoints(&self) -> usize {
+        self.checkpoints.load(Ordering::SeqCst)
+    }
+}
+
+impl WorkGuard for ProofJoinCancelGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        let retained_range_charge = (size_of::<qtrace_provider::CompletenessRange>() as u64) * 4;
+        if self.phase.load(Ordering::SeqCst)
+            && delta.resident_bytes == retained_range_charge
+            && delta.nodes == 0
+            && delta.events == 0
+            && !self.marker_seen.swap(true, Ordering::SeqCst)
+        {
+            self.armed.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        if !self.armed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if delta == WorkDelta::default() {
+            let checkpoint = self.checkpoints.fetch_add(1, Ordering::SeqCst);
+            if checkpoint == 3 {
+                return Err(OperationAbort::Cancelled);
+            }
+        } else if delta.nodes != 0 {
+            self.armed.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
 impl CancelPassAfterSecondCheckpoint {
     fn new(arm_nodes: u64) -> Self {
         Self {
@@ -739,6 +788,16 @@ fn many_final_state_artifact(thread_count: u32) -> Vec<u8> {
         sequence += 2;
     }
     artifact(&directories, &chunks, &[], 0)
+}
+
+fn many_retained_fact_artifact(fact_count: u32) -> Vec<u8> {
+    let mut directories = Vec::with_capacity(usize::try_from(fact_count).unwrap());
+    directories.push(directory(1, 1, 1, 0, 1, 1));
+    for tid in 2..=fact_count {
+        directories.push(directory(tid, 1, 1, INVALID_INDEX, 0, 1));
+    }
+    let records = [record(1, 1, b"", 0, 1, true)];
+    artifact(&directories, &[chunk(0, 1, 1, &records, 2, b"")], &[], 0)
 }
 
 fn many_damage_ranges_artifact(damage_count: u32, retained_count: u32) -> Vec<u8> {
@@ -1887,6 +1946,25 @@ fn public_open_can_cancel_final_register_map_after_4096_items() {
         .expect_err("public open ignored final-register conversion cancellation");
 
     assert_eq!(error.code(), "control.cancelled");
+}
+
+#[test]
+fn public_open_can_cancel_proof_join_with_more_than_4096_retained_facts() {
+    let phase = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(PhaseSource::new(
+        many_retained_fact_artifact(8_193),
+        phase.clone(),
+        Some(2),
+        None,
+    ));
+    let guard = ProofJoinCancelGuard::new(phase);
+
+    let error = FlightProvider::open(source.clone(), identity(0), &guard)
+        .expect_err("proof join ignored cancellation while missing ranges were empty");
+
+    assert_eq!(error.code(), "control.cancelled");
+    assert_eq!(guard.checkpoints(), 4);
+    assert_eq!(source.len_calls(), 2);
 }
 
 #[test]

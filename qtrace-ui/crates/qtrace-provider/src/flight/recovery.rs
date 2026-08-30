@@ -1497,6 +1497,10 @@ fn add_missing_proofs(
     let mut first_candidate = 0_usize;
     let mut steps = 0_usize;
     for fact in facts {
+        guard_checkpoint(context.guard, steps)?;
+        steps = steps
+            .checked_add(1)
+            .ok_or_else(|| allocation_error("sequence proof work overflow"))?;
         while missing
             .get(first_candidate)
             .is_some_and(|range| range.range.last < fact.range.first)

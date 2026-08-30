@@ -265,7 +265,7 @@ bounded oracle schema; no hidden kind is inferred from Rust output.
 ### Fresh verification
 
 - `cargo test -p qtrace-provider --test flight_events --test flight_differential --test flight_recovery`
-  — exit 0; 42 passed.
+  — exit 0; 44 passed.
 - `cargo test -p qtrace-provider` — exit 0; 106 passed.
 - `cargo clippy -p qtrace-provider --all-targets -- -D warnings` — exit 0.
 - `cargo fmt --all -- --check` — exit 0.
@@ -307,6 +307,59 @@ follow-up Important findings. After exact per-TID one-to-one comparison and publ
 cancellation seams were added, it reported 0 Critical / 0 Important / 0 Minor and `Ready: Yes`.
 
 ### Fix-round concerns
+
+- No blocking concern. Keep the Python fixture compatibility suite serialized with Rust fixture
+  consumers.
+
+---
+
+## Fix round 2: full identity and proof-join cancellation
+
+### Closed findings
+
+- Extended every bounded Python physical and logical Flight row with an independently assigned
+  `record_ordinal`. Logical fragment rows use the first contributor's physical ordinal; emergency
+  rows continue after regular physical records. The oracle also exposes the next physical ordinal
+  so synthetic discontinuity keys remain deterministic.
+- The Rust differential calculates SHA-256 from each fixture's bytes and verifies it against the
+  checked manifest before opening the provider. Oracle-derived keys use that digest, the normative
+  merged `TimelineId(0)`, and the oracle ordinal/offset/sequence/TID. Merged and per-TID projections
+  now compare complete `EventKey` values directly without looking keys back up in actual rows.
+- `add_missing_proofs` checkpoints and checked-increments work for every outer `SequenceFact`, even
+  when missing ranges are empty or exhausted. This preserves O(H + M + output) behavior and adds
+  only one cheap checkpoint predicate per fact, with WorkGuard calls at most every 4,096 steps.
+
+### RED/GREEN evidence
+
+- `projection_key_comparison_rejects_wrong_ordinal_artifact_and_timeline` was a real behavioral RED:
+  the former TID/sequence/source predicate accepted a key with the wrong record ordinal, artifact
+  digest, or timeline. Complete independently constructed `EventKey` equality made all three
+  mutations GREEN.
+- `public_open_can_cancel_proof_join_with_more_than_4096_retained_facts` was a real public-seam RED:
+  8,193 retained directory facts with no missing interval completed `FlightProvider::open` instead
+  of observing cancellation. The outer fact checkpoint made it cancel on the fourth observable
+  post-marker checkpoint (the third proof-join checkpoint), with exactly two source-length reads.
+
+### Fix-round-2 verification
+
+- `cargo test -p qtrace-provider --test flight_events --test flight_differential --test flight_recovery`
+  — exit 0; 46 passed.
+- `cargo test -p qtrace-provider` — exit 0; 108 passed.
+- `cargo clippy -p qtrace-provider --all-targets -- -D warnings` — exit 0.
+- `cargo fmt --all -- --check` — exit 0.
+- `python3 -m unittest scripts.tests.test_qtrace_ui_fixtures scripts.tests.test_trace_binary scripts.tests.test_flight_trace`
+  — exit 0; 89 passed.
+- `python3 qtrace-ui/tools/export_contract_fixtures.py --check` — exit 0.
+- `git diff --check` — exit 0.
+
+Rust fixture consumers and the Python fixture-mutating compatibility suite were run serially.
+
+### Fix-round-2 commit
+
+- This report's containing commit: `fix(qtrace-ui): verify flight event identity` (final hash
+  reported in the task handoff).
+
+### Fix-round-2 concerns
 
 - No blocking concern. Keep the Python fixture compatibility suite serialized with Rust fixture
   consumers.

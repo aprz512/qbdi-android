@@ -7,10 +7,11 @@ use std::{
 };
 
 use qtrace_provider::{
-    ArtifactDigest, ByteSource, CompletenessCause, EventPayload, FlightProvider, OperationAbort,
-    RangeBounds, SourceIdentity, TraceProvider, WorkDelta, WorkGuard,
+    ArtifactDigest, ByteSource, CompletenessCause, EventKey, EventPayload, FlightProvider,
+    OperationAbort, RangeBounds, SourceIdentity, TimelineId, TraceProvider, WorkDelta, WorkGuard,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 struct AllowAll;
 
@@ -44,6 +45,7 @@ fn oracle(path: &Path) -> Value {
 }
 
 struct Collected {
+    artifact: ArtifactDigest,
     projections: Vec<qtrace_provider::FlightProjectionDescriptor>,
     recovery: qtrace_provider::FlightRecoverySummary,
     events: Vec<qtrace_provider::EventRecord>,
@@ -53,10 +55,29 @@ struct Collected {
 fn collect(name: &str) -> Collected {
     let bytes = fs::read(fixture_path(name)).expect("read Flight fixture");
     let size = bytes.len() as u64;
+    let calculated = ArtifactDigest::new(Sha256::digest(&bytes).into());
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/manifest.json"))
+            .expect("read fixture manifest"),
+    )
+    .expect("parse fixture manifest");
+    let relative = format!("flight/{name}");
+    let manifest_digest = manifest["fixtures"]
+        .as_array()
+        .expect("fixture manifest entries")
+        .iter()
+        .find(|entry| entry["path"] == relative)
+        .and_then(|entry| entry["sha256"].as_str())
+        .and_then(ArtifactDigest::from_hex)
+        .expect("Flight fixture digest in manifest");
+    assert_eq!(
+        calculated, manifest_digest,
+        "fixture digest drift for {name}"
+    );
     let provider = FlightProvider::open(
         Arc::new(ByteSource::new(bytes)),
         SourceIdentity {
-            artifact: ArtifactDigest::new([0x72; 32]),
+            artifact: calculated,
             format: "Flight".to_owned(),
             format_major: 0,
             format_minor: 0,
@@ -74,6 +95,7 @@ fn collect(name: &str) -> Collected {
     }
     let summary = cursor.finish().expect("Flight summary");
     Collected {
+        artifact: calculated,
         projections: snapshots,
         recovery,
         events,
@@ -139,6 +161,9 @@ fn typed_events(events: &[qtrace_provider::EventRecord]) -> Vec<Value> {
                 _ => return None,
             };
             Some(json!({
+                "artifact": event.key.artifact,
+                "timeline": event.key.timeline.0,
+                "record_ordinal": event.key.record_ordinal,
                 "global_seq": event.key.sequence,
                 "tid": event.key.tid,
                 "kind": kind,
@@ -151,12 +176,74 @@ fn typed_events(events: &[qtrace_provider::EventRecord]) -> Vec<Value> {
         .collect()
 }
 
-fn canonical_oracle_typed_events(expected: &Value) -> Vec<Value> {
+fn projection_key_matches_row(key: &EventKey, row: &Value) -> bool {
+    event_key_from_row(row).as_ref() == Some(key)
+}
+
+fn event_key_from_row(row: &Value) -> Option<EventKey> {
+    Some(EventKey::new(
+        ArtifactDigest::from_hex(row["artifact"].as_str()?)?,
+        TimelineId(row["timeline"].as_u64()?),
+        row["record_ordinal"].as_u64()?,
+        row["source_offset"].as_u64()?,
+        row["global_seq"].as_u64(),
+        row["tid"].as_u64().and_then(|tid| u32::try_from(tid).ok()),
+    ))
+}
+
+#[test]
+fn projection_key_comparison_rejects_wrong_ordinal_artifact_and_timeline() {
+    let row = json!({
+        "artifact": ArtifactDigest::new([1; 32]), "timeline": 0,
+        "record_ordinal": 3, "tid": 7, "global_seq": 11, "source_offset": 4096,
+    });
+    let correct = EventKey::new(
+        ArtifactDigest::new([1; 32]),
+        TimelineId(0),
+        3,
+        4096,
+        Some(11),
+        Some(7),
+    );
+    for wrong in [
+        EventKey::new(
+            ArtifactDigest::new([1; 32]),
+            TimelineId(0),
+            4,
+            4096,
+            Some(11),
+            Some(7),
+        ),
+        EventKey::new(
+            ArtifactDigest::new([2; 32]),
+            TimelineId(0),
+            3,
+            4096,
+            Some(11),
+            Some(7),
+        ),
+        EventKey::new(
+            ArtifactDigest::new([1; 32]),
+            TimelineId(9),
+            3,
+            4096,
+            Some(11),
+            Some(7),
+        ),
+    ] {
+        assert!(
+            !projection_key_matches_row(&wrong, &row),
+            "wrong full EventKey was accepted against {correct:?}"
+        );
+    }
+}
+
+fn canonical_oracle_typed_events(expected: &Value, artifact: ArtifactDigest) -> Vec<Value> {
     let mut output = expected["events"]
         .as_array()
         .expect("oracle events")
         .iter()
-        .map(canonical_oracle_event)
+        .map(|event| canonical_oracle_event(event, artifact))
         .collect::<Vec<_>>();
     let semantic = expected["events"].as_array().expect("oracle events");
     for record in expected["summary"]["physical_records"]
@@ -261,6 +348,9 @@ fn canonical_oracle_typed_events(expected: &Value) -> Vec<Value> {
             _ => unreachable!(),
         };
         output.push(json!({
+            "artifact": artifact,
+            "timeline": 0,
+            "record_ordinal": record["record_ordinal"],
             "global_seq": record["global_seq"],
             "tid": record["tid"],
             "kind": name,
@@ -271,6 +361,9 @@ fn canonical_oracle_typed_events(expected: &Value) -> Vec<Value> {
         }));
     }
     output.sort_by_key(|event| event["global_seq"].as_u64().expect("global sequence"));
+    let mut record_ordinal = expected["summary"]["next_record_ordinal"]
+        .as_u64()
+        .expect("next oracle record ordinal");
     for range in expected_completeness(expected) {
         if range["domain"] != "source_bytes" || range["cause"] == "retained" {
             continue;
@@ -278,6 +371,9 @@ fn canonical_oracle_typed_events(expected: &Value) -> Vec<Value> {
         let first = range["first"].as_u64().unwrap();
         let last = range["last"].as_u64().unwrap();
         output.push(json!({
+            "artifact": artifact,
+            "timeline": 0,
+            "record_ordinal": record_ordinal,
             "global_seq": Value::Null,
             "tid": Value::Null,
             "kind": "discontinuity",
@@ -290,11 +386,15 @@ fn canonical_oracle_typed_events(expected: &Value) -> Vec<Value> {
                 range["cause"].as_str().unwrap(),
             ),
         }));
+        record_ordinal += 1;
     }
     for proof in expected_sequence_proofs_ordered(expected) {
         let first = proof["first"].as_u64().unwrap();
         let last = proof["last"].as_u64().unwrap();
         output.push(json!({
+            "artifact": artifact,
+            "timeline": 0,
+            "record_ordinal": record_ordinal,
             "global_seq": Value::Null,
             "tid": Value::Null,
             "kind": "discontinuity",
@@ -307,6 +407,7 @@ fn canonical_oracle_typed_events(expected: &Value) -> Vec<Value> {
                 proof["cause"].as_str().unwrap(),
             ),
         }));
+        record_ordinal += 1;
     }
     output
 }
@@ -349,7 +450,7 @@ fn capture(value: &Value) -> Value {
     }
 }
 
-fn canonical_oracle_event(event: &Value) -> Value {
+fn canonical_oracle_event(event: &Value, artifact: ArtifactDigest) -> Value {
     let kind = event["kind"].as_str().expect("event kind");
     let tid = event["tid"].as_u64().expect("event tid");
     let source_offset = event["source_offset"]
@@ -512,6 +613,8 @@ fn canonical_oracle_event(event: &Value) -> Value {
         _ => panic!("unexpected oracle event kind {kind}"),
     };
     json!({
+        "artifact": artifact, "timeline": 0,
+        "record_ordinal": event["record_ordinal"],
         "global_seq": event["global_seq"], "tid": tid, "kind": kind,
         "source_offset": source_offset, "provenance": provenance,
         "fragment_source_offsets": fragment_offsets, "data": data,
@@ -1019,7 +1122,18 @@ fn every_flight_fixture_matches_the_python_recovery_oracle() {
         let expected = oracle(&fixture_path(name));
         let actual = collect(name);
         let actual_events = typed_events(&actual.events);
-        let expected_events = canonical_oracle_typed_events(&expected);
+        let expected_events = canonical_oracle_typed_events(&expected, actual.artifact);
+        assert_eq!(
+            actual_events
+                .iter()
+                .map(|event| event_key_from_row(event).expect("actual canonical EventKey"))
+                .collect::<Vec<_>>(),
+            expected_events
+                .iter()
+                .map(|event| event_key_from_row(event).expect("oracle canonical EventKey"))
+                .collect::<Vec<_>>(),
+            "merged EventKeys for {name}"
+        );
         assert_eq!(
             actual_events, expected_events,
             "merged typed order mismatch for {name}"
@@ -1072,33 +1186,20 @@ fn every_flight_fixture_matches_the_python_recovery_oracle() {
             );
         }
         for projection in &actual.projections {
-            let expected_thread_events = expected_events
+            let expected_thread_keys = expected_events
                 .iter()
                 .filter(|event| event["tid"] == projection.tid)
+                .map(|event| event_key_from_row(event).expect("oracle projection EventKey"))
                 .collect::<Vec<_>>();
             assert_eq!(
                 projection.event_keys.len(),
-                expected_thread_events.len(),
+                expected_thread_keys.len(),
                 "exact projection row count for {name} TID {}",
                 projection.tid
             );
             assert_eq!(
-                projection
-                    .event_keys
-                    .iter()
-                    .map(|key| {
-                        actual_events
-                            .iter()
-                            .find(|event| {
-                                event["tid"] == projection.tid
-                                    && event["global_seq"].as_u64() == key.sequence
-                                    && event["source_offset"].as_u64() == Some(key.source_offset)
-                            })
-                            .expect("every projection key maps to one typed event")
-                    })
-                    .collect::<Vec<_>>(),
-                expected_thread_events,
-                "oracle-derived per-TID typed projection for {name}"
+                projection.event_keys, expected_thread_keys,
+                "oracle-derived per-TID EventKeys for {name}"
             );
             assert!(
                 projection

@@ -83,6 +83,7 @@ class FlightEvent:
     kind: str
     data: dict[str, object]
     source_offset: int | None = None
+    record_ordinal: int | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -138,6 +139,7 @@ class _WireRecord:
     sequence: int
     payload: bytes
     source_offset: int
+    record_ordinal: int
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -153,6 +155,7 @@ class _FragmentValue:
     fixed: tuple[str, ...]
     detail: bytes
     source_offset: int
+    record_ordinal: int
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -380,7 +383,8 @@ def _valid_flags(kind: int, flags: int) -> bool:
     return flags == 0
 
 
-def _decode_wire_record(data: bytes, offset: int, generation: int, base_offset: int, *,
+def _decode_wire_record(data: bytes, offset: int, generation: int, base_offset: int,
+                        record_ordinal: int, *,
                         active: bool) -> tuple[_WireRecord, int] | None:
     remaining = len(data) - offset
     if remaining < RECORD_HEADER_BYTES:
@@ -407,19 +411,23 @@ def _decode_wire_record(data: bytes, offset: int, generation: int, base_offset: 
         raise FlightTraceError("record has zero global sequence")
     if any(data[offset + total:offset + storage]):
         raise FlightTraceError("nonzero record alignment padding")
-    return _WireRecord(kind, flags, sequence, payload, base_offset + offset), offset + storage
+    return (_WireRecord(kind, flags, sequence, payload, base_offset + offset,
+                        record_ordinal), offset + storage)
 
 
 def _raise(message: str):
     raise FlightTraceError(message)
 
 
-def _scan_chunk_data(data: bytes, generation: int, base_offset: int, *,
-                     active: bool) -> list[_WireRecord]:
+def _scan_chunk_data(data: bytes, generation: int, base_offset: int,
+                     record_ordinal_base: int, *, active: bool) -> list[_WireRecord]:
     records = []
     offset = 0
     while offset < len(data):
-        decoded = _decode_wire_record(data, offset, generation, base_offset, active=active)
+        decoded = _decode_wire_record(
+            data, offset, generation, base_offset,
+            record_ordinal_base + len(records), active=active
+        )
         if decoded is None:
             break
         record, offset = decoded
@@ -635,19 +643,20 @@ def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
             cursor.finish()
             events.append(FlightEvent(record.sequence, tid, "register_delta", {
                 "changed": changed, "pc": values[32], "sp": values[31], "nzcv": values[33],
-            }, record.source_offset))
+            }, record.source_offset, record.record_ordinal))
             continue
         if record.kind == 4:
             data = _instruction_event(record.payload, definitions, module_base,
                                       pointer_maximum)
             data.update({"scene": scene, "target_offset": target_offset})
             events.append(FlightEvent(record.sequence, tid, "instruction", data,
-                                      record.source_offset))
+                                      record.source_offset, record.record_ordinal))
             continue
         if record.kind == 5:
             events.append(FlightEvent(record.sequence, tid, "memory",
                                       _memory_event(record.payload, module_base,
-                                                    pointer_maximum), record.source_offset))
+                                                    pointer_maximum), record.source_offset,
+                                      record.record_ordinal))
             continue
         if record.kind in (6, 7, 8):
             field_count = 3 if record.kind == 6 else 2
@@ -671,7 +680,8 @@ def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
                 fixed = tuple(_utf8(item, "event field") for item in fixed_raw)
                 fragments.append(_FragmentValue(
                     record.sequence, tid, chunk_index, record.kind, event_id,
-                    total, index, count, fixed, raw_fields[-1], record.source_offset
+                    total, index, count, fixed, raw_fields[-1], record.source_offset,
+                    record.record_ordinal
                 ))
                 continue
             if record.flags != 0 or len(record.payload) != field_count * 4:
@@ -688,7 +698,7 @@ def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
             else:
                 data = {"name": fields[0], "detail": fields[1]}
             events.append(FlightEvent(record.sequence, tid, RECORD_NAMES[record.kind], data,
-                                      record.source_offset))
+                                      record.source_offset, record.record_ordinal))
             continue
         data = {"payload_hex": record.payload.hex()}
         if ((record.kind == 2 and
@@ -699,7 +709,7 @@ def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
                   struct.unpack("<I", record.payload)[0] != tid))):
             data["typed_damage"] = True
         events.append(FlightEvent(record.sequence, tid, RECORD_NAMES[record.kind], data,
-                                  record.source_offset))
+                                  record.source_offset, record.record_ordinal))
     return FlightRegisters.from_values(values), records[-1].sequence, checkpoint_pc
 
 
@@ -748,15 +758,18 @@ def _decode_fragments(
         data["fragment_source_offsets"] = [item.source_offset for item in contributors]
         events.append(FlightEvent(max(item.sequence for item in values), first.tid,
                                   RECORD_NAMES[kind], data,
-                                  contributors[0].source_offset))
+                                  contributors[0].source_offset,
+                                  contributors[0].record_ordinal))
     return events, incomplete
 
 
-def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[FlightEvent]:
+def _parse_emergencies(source: BinaryIO, superblock: _Superblock,
+                       first_record_ordinal: int) -> tuple[list[FlightEvent], int]:
     raw = _read_at(source, superblock.emergency_offset,
                    superblock.emergency_count * superblock.emergency_record_bytes,
                    "emergency slots")
     events = []
+    next_record_ordinal = first_record_ordinal
     for index in range(superblock.emergency_count):
         slot = raw[index * superblock.emergency_record_bytes:
                    (index + 1) * superblock.emergency_record_bytes]
@@ -843,8 +856,9 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
                 data["reason_flags"] = flags
                 data["dropped_gap_count"] = code
             events.append(FlightEvent(sequence, tid, RECORD_NAMES[kind], data,
-                                      source_offset))
-    return events
+                                      source_offset, next_record_ordinal))
+            next_record_ordinal += 1
+    return events, next_record_ordinal
 
 
 def _termination_intended_signal(values: tuple[int, ...]) -> int | None:
@@ -904,6 +918,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     sealed_ranges: list[tuple[int, int, int]] = []
     decoded_chunks: list[_DecodedChunk] = []
     active_chunk_indexes: list[int] = []
+    next_record_ordinal = 0
 
     for index in range(superblock.chunk_count):
         offset = superblock.chunk_offset + index * superblock.chunk_bytes
@@ -943,6 +958,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             try:
                 records = _scan_chunk_data(data, generation,
                                            offset + CHUNK_HEADER_BYTES,
+                                           next_record_ordinal,
                                            active=False)
                 if len(records) != count:
                     raise FlightTraceError("sealed chunk record count mismatch")
@@ -964,7 +980,9 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                             f"active chunk {index} data")
             records = _scan_chunk_data(data, generation,
                                        offset + CHUNK_HEADER_BYTES,
+                                       next_record_ordinal,
                                        active=True)
+        next_record_ordinal += len(records)
         if not records:
             if state == 2:
                 damage.append(f"empty sealed chunk {index}")
@@ -1042,7 +1060,9 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                 decoded.last_state_sequence, decoded.registers
             )
     events.extend(fragment_events)
-    emergency_events = _parse_emergencies(source, superblock)
+    emergency_events, next_record_ordinal = _parse_emergencies(
+        source, superblock, next_record_ordinal
+    )
     for event in emergency_events:
         if event.global_seq in observed:
             raise FlightTraceError(f"duplicate global sequence {event.global_seq}")
@@ -1210,6 +1230,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                 "flags": record.flags,
                 "payload_hex": record.payload.hex(),
                 "source_offset": record.source_offset,
+                "record_ordinal": record.record_ordinal,
                 "chunk_index": decoded.index,
                 "generation": chunk_headers[decoded.index][1],
                 "chunk_state": decoded.state,
@@ -1232,5 +1253,6 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             for tid, thread in threads.items()
         },
         "projection_tids": sorted({entry.tid for entry in directories} | set(threads)),
+        "next_record_ordinal": next_record_ordinal,
     }
     return FlightRecovery(tuple(events), threads, summary)
