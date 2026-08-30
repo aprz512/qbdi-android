@@ -2452,7 +2452,13 @@ dependencies = [
 name = "qtrace-store"
 version = "0.1.0"
 dependencies = [
+ "lz4_flex",
  "qtrace-provider",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
