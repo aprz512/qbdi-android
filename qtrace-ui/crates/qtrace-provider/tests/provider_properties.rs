@@ -1,17 +1,21 @@
 use std::{
+    env,
     panic::{AssertUnwindSafe, catch_unwind},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
+    thread,
     time::{Duration, Instant},
 };
 
 use proptest::prelude::*;
 use qtrace_provider::{
-    ArtifactDigest, BudgetDimension, ByteSource, EventRecord, FlightProvider, OpenMode,
-    OperationAbort, Provenance, ProviderError, ProviderSummary, QtrbInput, QtrbProvider,
-    ReadAtSource, SourceIdentity, TraceProvider, WorkDelta, WorkGuard,
+    ArtifactDigest, BudgetDimension, ByteSource, CompletenessCause, EventKind, EventRecord,
+    FlightProvider, OpenMode, OperationAbort, Provenance, ProviderError, ProviderSummary,
+    QtrbInput, QtrbProvider, RangeDomain, ReadAtSource, SourceIdentity, TraceProvider, WorkDelta,
+    WorkGuard,
 };
 
 const VALID_QTRB: &[u8] = include_bytes!(concat!(
@@ -34,6 +38,9 @@ const NODE_LIMIT: u64 = 100_000;
 const ROW_LIMIT: u64 = 100_000;
 const RESIDENT_LIMIT: u64 = 32 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(1);
+const ISOLATED_CASE_ENV: &str = "QTRACE_PROVIDER_PROPERTY_CASE";
+const ISOLATED_BYTES_ENV: &str = "QTRACE_PROVIDER_PROPERTY_BYTES";
+const ISOLATED_EXPECTED_ENV: &str = "QTRACE_PROVIDER_PROPERTY_EXPECTED";
 
 #[derive(Clone, Debug)]
 struct BoundedOutput {
@@ -229,6 +236,88 @@ fn assert_bounded_result(
     guard.assert_within_limits();
 }
 
+#[derive(Clone, Copy, Debug)]
+enum IsolatedCase {
+    ArbitraryQtrb,
+    ArbitraryLz4,
+    ArbitraryFlight,
+    TruncatedQtrb,
+    TruncatedFlight,
+    QtrbMutation,
+    FlightMutation,
+    BlockForever,
+}
+
+impl IsolatedCase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ArbitraryQtrb => "arbitrary-qtrb",
+            Self::ArbitraryLz4 => "arbitrary-lz4",
+            Self::ArbitraryFlight => "arbitrary-flight",
+            Self::TruncatedQtrb => "truncated-qtrb",
+            Self::TruncatedFlight => "truncated-flight",
+            Self::QtrbMutation => "qtrb-mutation",
+            Self::FlightMutation => "flight-mutation",
+            Self::BlockForever => "block-forever",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IsolatedOutcome {
+    Completed,
+    TimedOut,
+}
+
+fn run_isolated_case(case: IsolatedCase, bytes: &[u8], expected: Option<&str>) -> IsolatedOutcome {
+    let executable = env::current_exe().expect("current provider property test executable");
+    let mut command = Command::new(executable);
+    command
+        .args(["--ignored", "--exact", "isolated_provider_case_child"])
+        .env(ISOLATED_CASE_ENV, case.label())
+        .env(ISOLATED_BYTES_ENV, hex::encode(bytes))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(expected) = expected {
+        command.env(ISOLATED_EXPECTED_ENV, expected);
+    }
+    let mut child = command
+        .spawn()
+        .expect("spawn isolated provider property case");
+    let started = Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .expect("poll isolated provider property case")
+        {
+            Some(status) => {
+                assert!(
+                    status.success(),
+                    "isolated {} case failed with {status}",
+                    case.label()
+                );
+                return IsolatedOutcome::Completed;
+            }
+            None if started.elapsed() >= DEADLINE => {
+                child.kill().expect("kill timed-out provider property case");
+                child.wait().expect("reap timed-out provider property case");
+                return IsolatedOutcome::TimedOut;
+            }
+            None => thread::sleep(Duration::from_millis(2)),
+        }
+    }
+}
+
+fn assert_isolated_case(case: IsolatedCase, bytes: &[u8], expected: Option<&str>) {
+    assert_eq!(
+        run_isolated_case(case, bytes, expected),
+        IsolatedOutcome::Completed,
+        "isolated {} case exceeded the one-second deadline",
+        case.label()
+    );
+}
+
 #[derive(Clone, Copy)]
 struct QtrbRecord {
     kind: u16,
@@ -323,7 +412,7 @@ fn assert_required_mutation_rejected(bytes: &[u8], expected: &str) {
     assert_bounded_result(Err(error), &guard, "source.");
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct FlightRecord {
     offset: usize,
     chunk: usize,
@@ -331,6 +420,95 @@ struct FlightRecord {
     flags: u16,
     total: usize,
     generation: u32,
+    sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FlightMutationKind {
+    Version,
+    RegionOffset,
+    DirectoryCount,
+    SuperblockFlags,
+    TargetUtf8,
+    ChunkChecksum,
+    CommitToken,
+    RecordLength,
+    FragmentOrder,
+    StringReference,
+    TerminalChecksum,
+    TerminalPlacement,
+}
+
+impl FlightMutationKind {
+    const ALL: [Self; 12] = [
+        Self::Version,
+        Self::RegionOffset,
+        Self::DirectoryCount,
+        Self::SuperblockFlags,
+        Self::TargetUtf8,
+        Self::ChunkChecksum,
+        Self::CommitToken,
+        Self::RecordLength,
+        Self::FragmentOrder,
+        Self::StringReference,
+        Self::TerminalChecksum,
+        Self::TerminalPlacement,
+    ];
+
+    const fn code(self) -> u8 {
+        match self {
+            Self::Version => 0,
+            Self::RegionOffset => 1,
+            Self::DirectoryCount => 2,
+            Self::SuperblockFlags => 3,
+            Self::TargetUtf8 => 4,
+            Self::ChunkChecksum => 5,
+            Self::CommitToken => 6,
+            Self::RecordLength => 7,
+            Self::FragmentOrder => 8,
+            Self::StringReference => 9,
+            Self::TerminalChecksum => 10,
+            Self::TerminalPlacement => 11,
+        }
+    }
+
+    fn from_code(code: u8) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.code() == code)
+            .expect("known Flight mutation kind")
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TerminalExpectation {
+    NotEvaluated,
+    Captured { sequence: u64, source_offset: u64 },
+    Absent,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FlightMutationTarget {
+    chunk_index: Option<u32>,
+    sequence: Option<u64>,
+    source_offset: u64,
+    cause: Option<CompletenessCause>,
+    terminal: TerminalExpectation,
+    require_sequence_damage: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FlightMutationOutcome {
+    RequiredError(&'static str),
+    RecoverableDamage,
+}
+
+#[derive(Debug)]
+struct FlightMutation {
+    kind: FlightMutationKind,
+    bytes: Vec<u8>,
+    target: FlightMutationTarget,
+    outcome: FlightMutationOutcome,
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
@@ -380,6 +558,7 @@ fn flight_records(bytes: &[u8]) -> Vec<FlightRecord> {
                 flags,
                 total,
                 generation,
+                sequence: read_u64(bytes, offset + 8),
             });
             offset += (total + 7) & !7;
         }
@@ -399,25 +578,137 @@ fn refresh_chunk_checksum(bytes: &mut [u8], chunk: usize) {
     write_u32(bytes, chunk + 48, checksum);
 }
 
-fn flight_mutation(class: u8, value: u8) -> (Vec<u8>, bool) {
-    let mut bytes = VALID_FLIGHT.to_vec();
-    match class {
-        0 => bytes[4..6].copy_from_slice(&(3_u16 + u16::from(value)).to_le_bytes()),
-        1 => write_u64(&mut bytes, 24, u64::MAX - u64::from(value)),
-        2 => write_u32(&mut bytes, 36, u32::MAX - u32::from(value)),
-        3 => write_u32(&mut bytes, 72, 0x8000_0000 | u32::from(value)),
-        4 => bytes[98] = 0xff,
-        5 => {
-            let chunk = flight_records(&bytes)[0].chunk;
-            bytes[chunk + 48] ^= 1;
+fn terminal_cell(bytes: &[u8]) -> FlightRecord {
+    let emergency_offset = read_u64(bytes, 56) as usize;
+    let emergency_count = read_u32(bytes, 68) as usize;
+    for index in 0..emergency_count.saturating_mul(2) {
+        let offset = emergency_offset + index * 64;
+        if read_u32(bytes, offset) == 14 {
+            return FlightRecord {
+                offset,
+                chunk: offset - offset % 128,
+                kind: 14,
+                flags: 0,
+                total: 64,
+                generation: 0,
+                sequence: read_u64(bytes, offset + 8),
+            };
         }
-        6 => {
+    }
+    panic!("checked Flight fixture has no termination cell");
+}
+
+fn preserved_terminal(bytes: &[u8]) -> TerminalExpectation {
+    let terminal = terminal_cell(bytes);
+    TerminalExpectation::Captured {
+        sequence: terminal.sequence,
+        source_offset: terminal.offset as u64,
+    }
+}
+
+fn chunk_index(bytes: &[u8], chunk: usize) -> u32 {
+    let chunks = read_u64(bytes, 40) as usize;
+    let chunk_bytes = read_u32(bytes, 48) as usize;
+    u32::try_from((chunk - chunks) / chunk_bytes).expect("checked Flight chunk index")
+}
+
+fn record_damage_target(
+    bytes: &[u8],
+    record: FlightRecord,
+    cause: CompletenessCause,
+    source_offset: u64,
+) -> FlightMutationTarget {
+    FlightMutationTarget {
+        chunk_index: Some(chunk_index(bytes, record.chunk)),
+        sequence: Some(record.sequence),
+        source_offset,
+        cause: Some(cause),
+        terminal: preserved_terminal(bytes),
+        require_sequence_damage: true,
+    }
+}
+
+fn required_flight_mutation(kind: FlightMutationKind, bytes: Vec<u8>) -> FlightMutation {
+    FlightMutation {
+        kind,
+        bytes,
+        target: FlightMutationTarget {
+            chunk_index: None,
+            sequence: None,
+            source_offset: 0,
+            cause: None,
+            terminal: TerminalExpectation::NotEvaluated,
+            require_sequence_damage: false,
+        },
+        outcome: FlightMutationOutcome::RequiredError("source.flight.superblock"),
+    }
+}
+
+fn flight_mutation(kind: FlightMutationKind, value: u8) -> FlightMutation {
+    let mut bytes = VALID_FLIGHT.to_vec();
+    match kind {
+        FlightMutationKind::Version => {
+            bytes[4..6].copy_from_slice(&(3_u16 + u16::from(value)).to_le_bytes());
+            required_flight_mutation(kind, bytes)
+        }
+        FlightMutationKind::RegionOffset => {
+            write_u64(&mut bytes, 24, u64::MAX - u64::from(value));
+            required_flight_mutation(kind, bytes)
+        }
+        FlightMutationKind::DirectoryCount => {
+            write_u32(&mut bytes, 36, u32::MAX - u32::from(value));
+            required_flight_mutation(kind, bytes)
+        }
+        FlightMutationKind::SuperblockFlags => {
+            write_u32(&mut bytes, 72, 0x8000_0000 | u32::from(value));
+            required_flight_mutation(kind, bytes)
+        }
+        FlightMutationKind::TargetUtf8 => {
+            bytes[98] = 0xff;
+            required_flight_mutation(kind, bytes)
+        }
+        FlightMutationKind::ChunkChecksum => {
             let record = flight_records(&bytes)[0];
+            let target = record_damage_target(
+                &bytes,
+                record,
+                CompletenessCause::Checksum,
+                record.chunk as u64,
+            );
+            let chunk = record.chunk;
+            bytes[chunk + 48] ^= 1;
+            FlightMutation {
+                kind,
+                bytes,
+                target,
+                outcome: FlightMutationOutcome::RecoverableDamage,
+            }
+        }
+        FlightMutationKind::CommitToken => {
+            let record = flight_records(&bytes)[0];
+            let target = record_damage_target(
+                &bytes,
+                record,
+                CompletenessCause::Incomplete,
+                record.chunk as u64,
+            );
             bytes[record.offset + 20] ^= 1;
             refresh_chunk_checksum(&mut bytes, record.chunk);
+            FlightMutation {
+                kind,
+                bytes,
+                target,
+                outcome: FlightMutationOutcome::RecoverableDamage,
+            }
         }
-        7 => {
+        FlightMutationKind::RecordLength => {
             let record = flight_records(&bytes)[0];
+            let target = record_damage_target(
+                &bytes,
+                record,
+                CompletenessCause::Incomplete,
+                record.chunk as u64,
+            );
             write_u32(&mut bytes, record.offset + 4, u32::MAX);
             write_u32(
                 &mut bytes,
@@ -425,60 +716,191 @@ fn flight_mutation(class: u8, value: u8) -> (Vec<u8>, bool) {
                 0x5143_4d54 ^ u32::MAX ^ record.generation,
             );
             refresh_chunk_checksum(&mut bytes, record.chunk);
+            FlightMutation {
+                kind,
+                bytes,
+                target,
+                outcome: FlightMutationOutcome::RecoverableDamage,
+            }
         }
-        8 => {
+        FlightMutationKind::FragmentOrder => {
             let record = flight_records(&bytes)
                 .into_iter()
                 .filter(|record| matches!(record.kind, 6..=8) && record.flags == 4)
                 .nth(1)
                 .expect("complete fixture second fragment reference");
+            let target = record_damage_target(
+                &bytes,
+                record,
+                CompletenessCause::Incomplete,
+                record.offset as u64,
+            );
             bytes[record.offset + 24 + 12..record.offset + 24 + 14]
                 .copy_from_slice(&0_u16.to_le_bytes());
             refresh_record_checksum(&mut bytes, record);
             refresh_chunk_checksum(&mut bytes, record.chunk);
+            FlightMutation {
+                kind,
+                bytes,
+                target,
+                outcome: FlightMutationOutcome::RecoverableDamage,
+            }
         }
-        _ => {
+        FlightMutationKind::StringReference => {
             let record = flight_records(&bytes)
                 .into_iter()
                 .find(|record| matches!(record.kind, 6..=8) && record.flags == 0)
                 .expect("complete fixture semantic reference");
+            let target = record_damage_target(
+                &bytes,
+                record,
+                CompletenessCause::Incomplete,
+                record.offset as u64,
+            );
             write_u32(&mut bytes, record.offset + 24, u32::MAX);
             refresh_record_checksum(&mut bytes, record);
             refresh_chunk_checksum(&mut bytes, record.chunk);
-        }
-    }
-    (bytes, class < 5)
-}
-
-fn assert_flight_mutation_is_bounded(bytes: &[u8], required_error: bool) {
-    let guard = StrictGuard::new();
-    let observed = catch_unwind(AssertUnwindSafe(|| drain_flight(bytes, &guard)));
-    assert!(observed.is_ok(), "Flight mutation panicked");
-    match observed.unwrap() {
-        Err(error) => {
-            if required_error {
-                assert_eq!(error.code(), "source.flight.superblock");
-            } else {
-                assert!(error.code().starts_with("source.flight."));
+            FlightMutation {
+                kind,
+                bytes,
+                target,
+                outcome: FlightMutationOutcome::RecoverableDamage,
             }
         }
-        Ok(output) => {
-            assert!(
-                !required_error,
-                "invalid required Flight evidence was accepted"
-            );
+        FlightMutationKind::TerminalChecksum => {
+            let terminal = terminal_cell(&bytes);
+            let target = FlightMutationTarget {
+                chunk_index: None,
+                sequence: Some(terminal.sequence),
+                source_offset: terminal.offset as u64,
+                cause: Some(CompletenessCause::Checksum),
+                terminal: TerminalExpectation::Absent,
+                require_sequence_damage: false,
+            };
+            bytes[terminal.offset + 52] ^= 1;
+            FlightMutation {
+                kind,
+                bytes,
+                target,
+                outcome: FlightMutationOutcome::RecoverableDamage,
+            }
+        }
+        FlightMutationKind::TerminalPlacement => {
+            let terminal = terminal_cell(&bytes);
+            let duplicate = terminal.offset + 64;
+            bytes.copy_within(terminal.offset..terminal.offset + 64, duplicate);
+            FlightMutation {
+                kind,
+                bytes,
+                target: FlightMutationTarget {
+                    chunk_index: None,
+                    sequence: Some(terminal.sequence),
+                    source_offset: duplicate as u64,
+                    cause: Some(CompletenessCause::Incomplete),
+                    terminal: TerminalExpectation::Absent,
+                    require_sequence_damage: false,
+                },
+                outcome: FlightMutationOutcome::RecoverableDamage,
+            }
+        }
+    }
+}
+
+fn assert_terminal_outcome(output: &BoundedOutput, expected: TerminalExpectation) {
+    match expected {
+        TerminalExpectation::NotEvaluated => {}
+        TerminalExpectation::Captured {
+            sequence,
+            source_offset,
+        } => {
+            let event = output
+                .events
+                .iter()
+                .find(|event| event.kind() == EventKind::Termination)
+                .expect("expected retained Flight termination event");
+            assert_eq!(event.key.sequence, Some(sequence));
+            assert_eq!(event.key.source_offset, source_offset);
+            assert_eq!(event.provenance, Provenance::Captured);
+            assert!(output.summary.termination.is_some());
+        }
+        TerminalExpectation::Absent => {
+            assert!(output.summary.termination.is_none());
             assert!(
                 output
                     .events
                     .iter()
-                    .any(|event| event.provenance == Provenance::Damaged)
-                    || output
-                        .summary
-                        .completeness
-                        .iter()
-                        .any(|range| range.provenance() == Provenance::Damaged),
-                "damaged Flight evidence was reported as captured"
+                    .all(|event| event.kind() != EventKind::Termination)
             );
+        }
+    }
+}
+
+fn assert_target_damage(output: &BoundedOutput, target: FlightMutationTarget) {
+    let cause = target.cause.expect("recoverable mutation damage cause");
+    let source_damage = output.summary.completeness.iter().any(|range| {
+        range.domain() == RangeDomain::SourceBytes
+            && range.contains(target.source_offset)
+            && range.provenance() == Provenance::Damaged
+            && range.cause() == cause
+    }) || output.events.iter().any(|event| {
+        event.key.source_offset == target.source_offset
+            && event.provenance == Provenance::Damaged
+            && (event.kind() != EventKind::Discontinuity
+                || matches!(
+                    &event.payload,
+                    qtrace_provider::EventPayload::Discontinuity(value)
+                        if value.evidence.provenance() == Provenance::Damaged
+                            && value.evidence.cause() == cause
+                ))
+    });
+    assert!(
+        source_damage,
+        "target source coordinate {} was not {cause:?} damage in chunk {:?}: {:?}",
+        target.source_offset, target.chunk_index, output.summary.completeness
+    );
+    if target.require_sequence_damage {
+        let sequence = target.sequence.expect("target sequence");
+        assert!(
+            output.summary.completeness.iter().any(|range| {
+                range.domain() == RangeDomain::CapturedSequence
+                    && range.contains(sequence)
+                    && range.provenance() == Provenance::Damaged
+                    && range.cause() == cause
+            }),
+            "target sequence {sequence} was not {cause:?} damage in chunk {:?}",
+            target.chunk_index
+        );
+        if let Some(event) = output.events.iter().find(|event| {
+            event.key.sequence == Some(sequence) && event.key.source_offset == target.source_offset
+        }) {
+            assert_eq!(event.provenance, Provenance::Damaged);
+        }
+    }
+    assert_terminal_outcome(output, target.terminal);
+}
+
+fn assert_flight_mutation_is_bounded(mutation: FlightMutation) {
+    let guard = StrictGuard::new();
+    let observed = catch_unwind(AssertUnwindSafe(|| drain_flight(&mutation.bytes, &guard)));
+    assert!(observed.is_ok(), "Flight mutation panicked");
+    match (mutation.outcome, observed.unwrap()) {
+        (FlightMutationOutcome::RequiredError(expected), Err(error)) => {
+            assert_eq!(error.code(), expected, "{:?}", mutation.kind);
+        }
+        (FlightMutationOutcome::RequiredError(_), Ok(_)) => {
+            panic!("required {:?} mutation was accepted", mutation.kind);
+        }
+        (FlightMutationOutcome::RecoverableDamage, Err(error)) => {
+            panic!(
+                "recoverable {:?} mutation returned {}",
+                mutation.kind,
+                error.code()
+            );
+        }
+        (FlightMutationOutcome::RecoverableDamage, Ok(output)) => {
+            assert_target_damage(&output, mutation.target);
+            assert_bounded_result(Ok(output), &guard, "source.");
+            return;
         }
     }
     guard.assert_within_limits();
@@ -567,57 +989,178 @@ fn qtrb_rejects_a_source_length_change_before_publishing_summary() {
     assert_eq!(error.code(), "source.identity_changed");
 }
 
+struct MutableLengthSource {
+    bytes: ByteSource,
+    delta: Arc<AtomicI64>,
+}
+
+impl ReadAtSource for MutableLengthSource {
+    fn len(&self) -> u64 {
+        self.bytes
+            .len()
+            .checked_add_signed(self.delta.load(Ordering::SeqCst))
+            .expect("test source length")
+    }
+
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), ProviderError> {
+        self.bytes.read_exact_at(offset, output)
+    }
+}
+
+fn assert_finish_rechecks_source_length(delta: i64, repeat_eof: bool) {
+    let changed = Arc::new(AtomicI64::new(0));
+    let source = Arc::new(MutableLengthSource {
+        bytes: ByteSource::new(VALID_QTRB.to_vec()),
+        delta: Arc::clone(&changed),
+    });
+    let guard = StrictGuard::new();
+    let provider = QtrbProvider::open(source, identity(0), OpenMode::Sealed, &guard).unwrap();
+    let mut cursor = Box::new(provider).into_cursor().unwrap();
+    while cursor.next_event(&guard).unwrap().is_some() {}
+
+    changed.store(delta, Ordering::SeqCst);
+    if repeat_eof {
+        assert!(cursor.next_event(&guard).unwrap().is_none());
+    }
+    let error = cursor.finish().unwrap_err();
+    assert_eq!(error.code(), "source.identity_changed");
+    assert_eq!(error.stage(), "qtrb.identity");
+}
+
+#[test]
+fn qtrb_finish_rejects_source_shrink_after_eof() {
+    assert_finish_rechecks_source_length(-1, true);
+}
+
+#[test]
+fn qtrb_finish_rejects_source_growth_after_eof() {
+    assert_finish_rechecks_source_length(1, false);
+}
+
+struct BlockingSource;
+
+impl ReadAtSource for BlockingSource {
+    fn len(&self) -> u64 {
+        VALID_QTRB.len() as u64
+    }
+
+    fn read_exact_at(&self, _offset: u64, _output: &mut [u8]) -> Result<(), ProviderError> {
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+#[test]
+fn blocking_source_cannot_escape_the_property_deadline() {
+    assert_eq!(
+        run_isolated_case(IsolatedCase::BlockForever, &[], None),
+        IsolatedOutcome::TimedOut,
+    );
+}
+
+#[test]
+#[ignore = "launched only by the isolated property-case parent"]
+fn isolated_provider_case_child() {
+    let Ok(case) = env::var(ISOLATED_CASE_ENV) else {
+        return;
+    };
+    let bytes = hex::decode(env::var(ISOLATED_BYTES_ENV).expect("isolated case bytes"))
+        .expect("hex-encoded isolated case bytes");
+    match case.as_str() {
+        "arbitrary-qtrb" => {
+            let guard = StrictGuard::new();
+            let observed = catch_unwind(AssertUnwindSafe(|| drain_qtrb(&bytes, &guard)));
+            assert!(observed.is_ok(), "QTRB parser panicked");
+            assert_bounded_result(observed.unwrap(), &guard, "source.");
+        }
+        "arbitrary-lz4" => {
+            let guard = StrictGuard::new();
+            let observed = catch_unwind(AssertUnwindSafe(|| drain_lz4_qtrb(&bytes, &guard)));
+            assert!(observed.is_ok(), "LZ4/QTRB parser panicked");
+            assert_bounded_result(observed.unwrap(), &guard, "source.qtrb.");
+        }
+        "arbitrary-flight" => {
+            let guard = StrictGuard::new();
+            let observed = catch_unwind(AssertUnwindSafe(|| drain_flight(&bytes, &guard)));
+            assert!(observed.is_ok(), "Flight parser panicked");
+            assert_bounded_result(observed.unwrap(), &guard, "source.");
+        }
+        "truncated-qtrb" => {
+            let guard = StrictGuard::new();
+            let error = drain_qtrb(&bytes, &guard).expect_err("truncated sealed QTRB was accepted");
+            assert!(error.code().starts_with("source.") || error.code().starts_with("control."));
+            guard.assert_within_limits();
+        }
+        "truncated-flight" => {
+            let guard = StrictGuard::new();
+            let error = drain_flight(&bytes, &guard).expect_err("truncated Flight was accepted");
+            assert!(error.code().starts_with("source.") || error.code().starts_with("control."));
+            guard.assert_within_limits();
+        }
+        "qtrb-mutation" => {
+            let expected = env::var(ISOLATED_EXPECTED_ENV).expect("QTRB mutation error code");
+            assert_required_mutation_rejected(&bytes, &expected);
+        }
+        "flight-mutation" => {
+            let [kind, value] = bytes.as_slice() else {
+                panic!("isolated Flight mutation requires kind and value");
+            };
+            assert_flight_mutation_is_bounded(flight_mutation(
+                FlightMutationKind::from_code(*kind),
+                *value,
+            ));
+        }
+        "block-forever" => {
+            let guard = StrictGuard::new();
+            let _ = QtrbProvider::open(
+                Arc::new(BlockingSource),
+                identity(VALID_QTRB.len() as u64),
+                OpenMode::Sealed,
+                &guard,
+            );
+            panic!("blocking source returned instead of being terminated");
+        }
+        other => panic!("unknown isolated provider case {other}"),
+    }
+}
+
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn arbitrary_qtrb_bytes_return_a_bounded_result_or_typed_error(
         bytes in proptest::collection::vec(any::<u8>(), 0..16_384)
     ) {
-        let guard = StrictGuard::new();
-        let observed = catch_unwind(AssertUnwindSafe(|| drain_qtrb(&bytes, &guard)));
-        prop_assert!(observed.is_ok(), "QTRB parser panicked");
-        assert_bounded_result(observed.unwrap(), &guard, "source.");
+        assert_isolated_case(IsolatedCase::ArbitraryQtrb, &bytes, None);
     }
 
     #[test]
     fn arbitrary_lz4_bytes_return_a_bounded_result_or_typed_error(
         bytes in proptest::collection::vec(any::<u8>(), 0..16_384)
     ) {
-        let guard = StrictGuard::new();
-        let observed = catch_unwind(AssertUnwindSafe(|| drain_lz4_qtrb(&bytes, &guard)));
-        prop_assert!(observed.is_ok(), "LZ4/QTRB parser panicked");
-        assert_bounded_result(observed.unwrap(), &guard, "source.qtrb.");
+        assert_isolated_case(IsolatedCase::ArbitraryLz4, &bytes, None);
     }
 
     #[test]
     fn arbitrary_flight_bytes_return_a_bounded_result_or_typed_error(
         bytes in proptest::collection::vec(any::<u8>(), 0..16_384)
     ) {
-        let guard = StrictGuard::new();
-        let observed = catch_unwind(AssertUnwindSafe(|| drain_flight(&bytes, &guard)));
-        prop_assert!(observed.is_ok(), "Flight parser panicked");
-        assert_bounded_result(observed.unwrap(), &guard, "source.");
+        assert_isolated_case(IsolatedCase::ArbitraryFlight, &bytes, None);
     }
 
     #[test]
     fn truncating_qtrb_at_any_byte_never_panics(cut in 0usize..VALID_QTRB.len()) {
-        let guard = StrictGuard::new();
-        let observed = catch_unwind(AssertUnwindSafe(|| drain_qtrb(&VALID_QTRB[..cut], &guard)));
-        prop_assert!(observed.is_ok(), "truncated QTRB panicked");
-        let error = observed.unwrap().expect_err("truncated sealed QTRB was accepted");
-        prop_assert!(error.code().starts_with("source.") || error.code().starts_with("control."));
-        guard.assert_within_limits();
+        assert_isolated_case(IsolatedCase::TruncatedQtrb, &VALID_QTRB[..cut], None);
     }
 
     #[test]
     fn truncating_flight_at_any_byte_never_panics(cut in 0usize..VALID_FLIGHT.len()) {
-        let guard = StrictGuard::new();
-        let observed = catch_unwind(AssertUnwindSafe(|| drain_flight(&VALID_FLIGHT[..cut], &guard)));
-        prop_assert!(observed.is_ok(), "truncated Flight panicked");
-        let error = observed.unwrap().expect_err("truncated Flight was accepted");
-        prop_assert!(error.code().starts_with("source.") || error.code().starts_with("control."));
-        guard.assert_within_limits();
+        assert_isolated_case(IsolatedCase::TruncatedFlight, &VALID_FLIGHT[..cut], None);
     }
 
     #[test]
@@ -626,16 +1169,15 @@ proptest! {
         value in any::<u8>(),
     ) {
         let (bytes, expected) = qtrb_mutation(class, value);
-        assert_required_mutation_rejected(&bytes, expected);
+        assert_isolated_case(IsolatedCase::QtrbMutation, &bytes, Some(expected));
     }
 
     #[test]
     fn flight_offset_chunk_mutations_are_bounded_and_fail_closed(
-        class in 0_u8..10,
+        kind in proptest::sample::select(FlightMutationKind::ALL.to_vec()),
         value in any::<u8>(),
     ) {
-        let (bytes, required_error) = flight_mutation(class, value);
-        assert_flight_mutation_is_bounded(&bytes, required_error);
+        assert_isolated_case(IsolatedCase::FlightMutation, &[kind.code(), value], None);
     }
 }
 

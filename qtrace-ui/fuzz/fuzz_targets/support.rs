@@ -1,13 +1,15 @@
 #![allow(dead_code)]
 
 use std::{
+    io::Write,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+use lz4_flex::frame::{BlockMode, BlockSize, FrameEncoder, FrameInfo};
 use qtrace_provider::{
     ArtifactDigest, BudgetDimension, ByteSource, FlightProvider, OpenMode, OperationAbort,
-    QtrbInput, QtrbProvider, SourceIdentity, TraceProvider, WorkDelta, WorkGuard,
+    QtrbInput, QtrbProvider, ReadAtSource, SourceIdentity, TraceProvider, WorkDelta, WorkGuard,
 };
 
 const INPUT_LIMIT: u64 = 16 * 1024 * 1024;
@@ -17,6 +19,10 @@ const NODE_LIMIT: u64 = 100_000;
 const ROW_LIMIT: u64 = 100_000;
 const RESIDENT_LIMIT: u64 = 32 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(1);
+const VALID_QTRB_SEED: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../fixtures/qtrb/v1.2-completed.bin"
+));
 
 #[derive(Default)]
 struct Totals {
@@ -111,18 +117,17 @@ fn identity(source_bytes: u64) -> SourceIdentity {
     }
 }
 
-fn drain(provider: Box<dyn TraceProvider>, guard: &dyn WorkGuard) {
+fn drain(provider: Box<dyn TraceProvider>, guard: &dyn WorkGuard) -> bool {
     let Ok(mut cursor) = provider.into_cursor() else {
-        return;
+        return false;
     };
     loop {
         match cursor.next_event(guard) {
             Ok(Some(_)) => {}
             Ok(None) => {
-                let _ = cursor.finish();
-                return;
+                return cursor.finish().is_ok();
             }
-            Err(_) => return,
+            Err(_) => return false,
         }
     }
 }
@@ -139,7 +144,7 @@ pub fn fuzz_qtrb(data: &[u8]) {
         OpenMode::Sealed,
         &guard,
     ) {
-        drain(Box::new(provider), &guard);
+        let _ = drain(Box::new(provider), &guard);
     }
 
     let guard = StrictGuard::new();
@@ -151,7 +156,7 @@ pub fn fuzz_qtrb(data: &[u8]) {
             &guard,
         )
     {
-        drain(Box::new(provider), &guard);
+        let _ = drain(Box::new(provider), &guard);
     }
 }
 
@@ -166,11 +171,38 @@ pub fn fuzz_flight(data: &[u8]) {
         identity(bytes.len() as u64),
         &guard,
     ) {
-        drain(Box::new(provider), &guard);
+        let _ = drain(Box::new(provider), &guard);
     }
 }
 
+pub fn expand_qtrb_seed(data: &[u8]) -> Vec<u8> {
+    if data.len() > INPUT_LIMIT as usize {
+        return Vec::new();
+    }
+    qtrb_seed(data)
+}
+
+pub fn qtrb_lz4_seed_fully_drains(data: &[u8]) -> bool {
+    if data.len() > INPUT_LIMIT as usize {
+        return false;
+    }
+    let bytes = qtrb_seed(data);
+    let guard = StrictGuard::new();
+    let Ok(source) = QtrbInput::lz4(std::io::Cursor::new(bytes)).into_source(&guard) else {
+        return false;
+    };
+    let source_bytes = source.len();
+    let Ok(provider) = QtrbProvider::open(source, identity(source_bytes), OpenMode::Sealed, &guard)
+    else {
+        return false;
+    };
+    drain(Box::new(provider), &guard)
+}
+
 fn qtrb_seed(data: &[u8]) -> Vec<u8> {
+    if let Some(seed) = compressed_qtrb_seed(data) {
+        return seed;
+    }
     let seeds: &[(&[u8], &[u8])] = &[
         (
             b"qtrb:v1.0-completed\n",
@@ -186,13 +218,7 @@ fn qtrb_seed(data: &[u8]) -> Vec<u8> {
                 "/../fixtures/qtrb/v1.1-chunked.bin"
             )),
         ),
-        (
-            b"qtrb:v1.2-completed\n",
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../fixtures/qtrb/v1.2-completed.bin"
-            )),
-        ),
+        (b"qtrb:v1.2-completed\n", VALID_QTRB_SEED),
         (
             b"qtrb:v1.2-partial\n",
             include_bytes!(concat!(
@@ -258,6 +284,62 @@ fn qtrb_seed(data: &[u8]) -> Vec<u8> {
         ),
     ];
     expand_seed(data, seeds).unwrap_or_else(|| data.to_vec())
+}
+
+fn compressed_qtrb_seed(data: &[u8]) -> Option<Vec<u8>> {
+    let (prefix, mut output) = if data.starts_with(b"qtrb-lz4:standard\n") {
+        (
+            &b"qtrb-lz4:standard\n"[..],
+            encode_frame(VALID_QTRB_SEED, BlockMode::Independent, false)?,
+        )
+    } else if data.starts_with(b"qtrb-lz4:linked-blocks\n") {
+        (
+            &b"qtrb-lz4:linked-blocks\n"[..],
+            encode_frame(VALID_QTRB_SEED, BlockMode::Linked, true)?,
+        )
+    } else if data.starts_with(b"qtrb-lz4:concatenated-frames\n") {
+        let prefix = &b"qtrb-lz4:concatenated-frames\n"[..];
+        let split = VALID_QTRB_SEED.len() / 2;
+        let mut first = encode_frame(&VALID_QTRB_SEED[..split], BlockMode::Independent, false)?;
+        first.extend(encode_frame(
+            &VALID_QTRB_SEED[split..],
+            BlockMode::Independent,
+            false,
+        )?);
+        (prefix, first)
+    } else {
+        return None;
+    };
+    apply_patches(&mut output, data.strip_prefix(prefix)?);
+    Some(output)
+}
+
+fn encode_frame(payload: &[u8], mode: BlockMode, split_blocks: bool) -> Option<Vec<u8>> {
+    let content_size = u64::try_from(payload.len()).ok()?;
+    let frame = FrameInfo::new()
+        .block_mode(mode)
+        .block_size(BlockSize::Max64KB)
+        .content_size(Some(content_size));
+    let mut encoder = FrameEncoder::with_frame_info(frame, Vec::new());
+    if split_blocks {
+        let split = payload.len() / 2;
+        encoder.write_all(&payload[..split]).ok()?;
+        encoder.flush().ok()?;
+        encoder.write_all(&payload[split..]).ok()?;
+    } else {
+        encoder.write_all(payload).ok()?;
+    }
+    encoder.finish().ok()
+}
+
+fn apply_patches(output: &mut [u8], patches: &[u8]) {
+    if output.is_empty() {
+        return;
+    }
+    for patch in patches.chunks_exact(3) {
+        let offset = usize::from(u16::from_le_bytes([patch[0], patch[1]])) % output.len();
+        output[offset] ^= patch[2];
+    }
 }
 
 fn flight_seed(data: &[u8]) -> Vec<u8> {
@@ -328,10 +410,7 @@ fn expand_seed(data: &[u8], seeds: &[(&[u8], &[u8])]) -> Option<Vec<u8>> {
             continue;
         };
         let mut output = fixture.to_vec();
-        for patch in patches.chunks_exact(3) {
-            let offset = usize::from(u16::from_le_bytes([patch[0], patch[1]])) % output.len();
-            output[offset] ^= patch[2];
-        }
+        apply_patches(&mut output, patches);
         return Some(output);
     }
     None

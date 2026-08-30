@@ -14,10 +14,11 @@
 - Added standalone `cargo-fuzz` targets for both public provider open/cursor paths, plus the public
   linked-LZ4 input path. The fuzz package has its own workspace and is excluded from the release
   workspace.
-- Seeded all 12 checked QTRB fixtures and all 8 checked Flight fixtures. Each named corpus seed is
-  a bounded selector expanded by `include_bytes!` to the real checked fixture; libFuzzer suffixes
-  are interpreted as `(u16 offset, xor byte)` patches, so mutations exercise actual fixture wire
-  bytes. Inputs without a selector go directly to the parsers. No fuzz target invokes Python.
+- Seeded all 12 checked QTRB fixtures and all 8 checked Flight fixtures, plus deterministic valid
+  standard-LZ4, linked-block-LZ4, and concatenated-frame-LZ4 QTRB selectors. Each fixture selector
+  expands to bounded real fixture bytes; LZ4 selectors expand to real compressed wire bytes.
+  LibFuzzer suffixes are interpreted as `(u16 offset, xor byte)` patches. Inputs without a selector
+  go directly to the parsers. No fuzz target invokes Python.
 
 ## Scope and files
 
@@ -29,6 +30,7 @@
 - `qtrace-ui/crates/qtrace-provider/tests/qtrb_input.rs`
 - `qtrace-ui/fuzz/{Cargo.toml,.gitignore}`
 - `qtrace-ui/fuzz/fuzz_targets/{support,qtrb,flight}.rs`
+- `qtrace-ui/fuzz/tests/seed_paths.rs`
 - `qtrace-ui/fuzz/corpus/{qtrb,flight}/*`
 
 No Task 9 product work was started. Task 24's length-aware raw-input performance optimization was
@@ -126,4 +128,85 @@ Rust fixture consumers and the fixture-mutating Python compatibility suite were 
 - No blocking Task 8 concern remains.
 - Keep Python fixture-mutating tests serialized with Rust fixture consumers in later tasks.
 - Generated libFuzzer hash corpus entries, artifacts, coverage, target output, and the standalone
-  fuzz lockfile are intentionally ignored; the 20 stable named seeds remain tracked.
+  fuzz lockfile are intentionally ignored; the 23 stable named seeds remain tracked.
+
+## Review fix round 1
+
+Independent review found 0 Critical, 4 Important, and 2 Minor issues. This section records the
+follow-up implementation and supersedes the earlier verification totals where they differ.
+
+### Findings mapped to fixes
+
+1. `QtrbCursor::finish()` now performs a final `ReadAtSource::len()` comparison immediately before
+   publishing the summary. Both shrink and growth between EOF and `finish()` return the stable
+   typed code `source.identity_changed`; repeated EOF observation does not weaken the check.
+2. Every generated arbitrary-byte property case now runs in a fresh self-exec child process. The
+   parent polls for at most one second, kills and reaps a timed-out child, and fails that property
+   case. An exact ignored child entry point prevents recursive test spawning. A deliberately
+   permanent-blocking `ReadAtSource` proves timeout termination without leaving a process or
+   blocked thread in the parent.
+3. Flight mutation cases are represented by a named `FlightMutationKind` and a structured target
+   oracle carrying chunk, sequence, source offset, completeness cause, and expected terminal
+   outcome. The oracle checks evidence at that exact target rather than accepting unrelated
+   damage. Required-evidence corruption returns `source.flight.superblock`; recoverable corruption
+   is `Damaged`, never `Captured`. Dedicated terminal-checksum and terminal-placement mutations
+   cover terminal loss and duplicate placement.
+4. Three tracked QTRB selectors deterministically expand into real standard LZ4, a linked frame
+   with at least two blocks, and two concatenated frames. A behavior test validates their wire
+   shape and fully drains each through `QtrbInput::lz4`, `QtrbProvider`, and the public cursor.
+   The 16 MiB input gate remains before copying or expansion.
+
+The numeric/bool Flight mutation Minor finding is resolved by the named enum and structured
+outcome. The duplicated budget constants Minor finding is deliberately deferred: the provider
+integration test and standalone fuzz workspace cannot share a private test-support module without
+either exposing production API or using brittle cross-workspace source inclusion. The values are
+kept identical and explicit in both harnesses.
+
+### Review-fix RED/GREEN evidence
+
+- EOF-to-finish identity RED:
+  `cargo test -p qtrace-provider --test provider_properties qtrb_finish_rejects_source -- --nocapture`
+  exited 101; both shrink and growth tests received `Ok(ProviderSummary)` instead of an error.
+  The same command is GREEN with 2 passed.
+- Killable deadline RED:
+  `timeout 3s cargo test -p qtrace-provider --test provider_properties blocking_source_cannot_escape_the_property_deadline -- --exact --nocapture`
+  exited 124 because the same-process implementation remained blocked. The subprocess version is
+  GREEN in 1.00 seconds; `pgrep -af '/provider_properties-[[:xdigit:]]+'` returned no child.
+- Target-specific Flight oracle RED:
+  `cargo test -p qtrace-provider --test provider_properties flight_offset_chunk_mutations_are_bounded_and_fail_closed -- --exact --nocapture`
+  exited 101 on `ChunkChecksum`: the old broad oracle did not prove damage at the mutated physical
+  source. The structured 12-kind oracle is GREEN for all 64 generated cases.
+- Compressed seed RED:
+  `cargo test --manifest-path fuzz/Cargo.toml --test seed_paths -- --nocapture` exited 101 because
+  the selector expanded to raw `qtrb` bytes rather than LZ4 magic. It is GREEN after adding real
+  standard, linked-block, and concatenated-frame expansion.
+
+### Final bounds and verification
+
+- Generator input: 64 cases per property, each `0..<16,384` bytes. All seven generated properties
+  use subprocess isolation; a representative 64-case property completed in 0.41 seconds and the
+  complete property test binary completed in about 1.00 second including the deliberate timeout.
+- Provider guards: 16 MiB input, 16 MiB decompressed, 100,000 events/nodes/rows, 32 MiB charged
+  resident bytes, and one second. These limits are independent of generator size.
+- `cargo test -p qtrace-provider --test provider_properties -- --nocapture` — exit 0; 13 passed,
+  1 ignored child entry point.
+- `cargo test -p qtrace-provider --no-fail-fast` — exit 0; 121 passed, 0 failed, 1 ignored.
+- `cargo fmt --all -- --check` and standalone fuzz `cargo fmt --all -- --check` — exit 0.
+- `cargo clippy -p qtrace-provider --all-targets -- -D warnings` — exit 0.
+- `cargo check --manifest-path fuzz/Cargo.toml --all-targets` and standalone fuzz Clippy with
+  `--all-targets -- -D warnings` — exit 0.
+- `cargo test --manifest-path fuzz/Cargo.toml --test seed_paths` — exit 0; 1 passed.
+- `cargo +nightly fuzz run qtrb --fuzz-dir fuzz -- -runs=10000 -timeout=1` — exit 0;
+  `#10000 DONE`, coverage 1750, features 3270, final process RSS 162 MiB.
+- `cargo +nightly fuzz run flight --fuzz-dir fuzz -- -runs=10000 -timeout=1` — exit 0;
+  `#10000 DONE`, coverage 3008, features 5782, final process RSS 160 MiB.
+- The fuzz RSS figures are process observations, not the provider's 32 MiB charged-resident guard.
+  Neither target reported a crash, timeout, OOM, abort, or panic.
+- Serial fixture verification: exporter `--check` passed before and after the Python suite; the
+  three Python fixture modules passed all 89 tests in 16.353 seconds. No Rust fixture consumer ran
+  concurrently with fixture-mutating Python.
+
+Review-fix files are `qtrb/mod.rs`, `provider_properties.rs`, the standalone fuzz manifest and
+support module, `fuzz/tests/seed_paths.rs`, the three new QTRB corpus selectors, and this report.
+The containing fix commit hash is supplied in the handoff because a commit cannot embed its own
+hash.

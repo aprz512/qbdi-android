@@ -387,6 +387,7 @@ impl EventCursor for QtrbEventCursor {
         if !self.drained || self.poisoned {
             return Err(ProviderError::stream_not_drained());
         }
+        self.validate_source_identity()?;
         let tid = self.tid;
         Ok(ProviderSummary {
             timelines: vec![TimelineDescriptor {
@@ -466,18 +467,7 @@ impl QtrbEventCursor {
     }
 
     fn finish_stream(&mut self) -> Result<Option<EventRecord>, ProviderError> {
-        if self.source.len() != self.identity.source_bytes {
-            return Err(ProviderError::new(
-                "source.identity_changed",
-                "qtrb.identity",
-                Some(SourceCoordinate {
-                    offset: self.offset,
-                    record_ordinal: Some(self.next_ordinal),
-                }),
-                false,
-                "QTRB source length changed while parsing",
-            ));
-        }
+        self.validate_source_identity()?;
         if self.pending.is_some() {
             return Err(self.error_at_current(
                 "source.incomplete_fragment",
@@ -523,6 +513,22 @@ impl QtrbEventCursor {
         }
         self.drained = true;
         Ok(None)
+    }
+
+    fn validate_source_identity(&self) -> Result<(), ProviderError> {
+        if self.source.len() != self.identity.source_bytes {
+            return Err(ProviderError::new(
+                "source.identity_changed",
+                "qtrb.identity",
+                Some(SourceCoordinate {
+                    offset: self.offset,
+                    record_ordinal: Some(self.next_ordinal),
+                }),
+                false,
+                "QTRB source length changed while parsing",
+            ));
+        }
+        Ok(())
     }
 
     fn read_record(&mut self, guard: &dyn WorkGuard) -> Result<PhysicalRecord, ProviderError> {
