@@ -1,0 +1,532 @@
+use std::{
+    collections::HashSet,
+    fs::{File, Metadata},
+    os::unix::fs::{FileExt, MetadataExt},
+    sync::Arc,
+};
+
+use qtrace_provider::{EventKey, EventKind, OperationAbort, WorkDelta, WorkGuard};
+use rustix::{
+    fs::{Mode, OFlags, openat},
+    io::Errno,
+};
+use sha2::{Digest, Sha256};
+
+use crate::layout::{
+    CacheHeader, EVENT_KEY_BYTES, EVENT_KEYS_SECTION, EVENT_KINDS_SECTION, HEADER_BYTES,
+    decode_event_key, decode_event_kind,
+};
+
+use super::{
+    CacheDirectory, CacheError, CacheIdentity, CacheManifest, ObjectIdentity, RebuildReason,
+    StoreView,
+    manifest::{MAX_MANIFEST_BYTES, canonical_json},
+};
+
+const FINAL_NAME: &str = "index.qtc";
+const READ_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+const CHECKSUM_CHUNK_BYTES: usize = 64_000;
+
+#[derive(Debug)]
+pub enum CacheOpen {
+    Missing,
+    Ready(MappedStoreView),
+    Rebuild(RebuildReason),
+}
+
+pub struct CacheReader;
+
+impl CacheReader {
+    pub fn open(
+        root: &std::path::Path,
+        expected: &CacheIdentity,
+        guard: &dyn WorkGuard,
+    ) -> Result<CacheOpen, CacheError> {
+        expected.validate()?;
+        guard.consume(WorkDelta {
+            resident_bytes: 512,
+            ..WorkDelta::default()
+        })?;
+        let key = expected.cache_key();
+        let Some(directory) = CacheDirectory::open(root, &key, false, guard)? else {
+            return Ok(CacheOpen::Missing);
+        };
+        let Some((file, _)) = open_final(&directory)? else {
+            return Ok(CacheOpen::Missing);
+        };
+        let proof = file
+            .try_clone()
+            .map_err(|error| CacheError::io(format!("cannot clone cache descriptor: {error}")))?;
+        let stamp = FileStamp::from_metadata(
+            &proof
+                .metadata()
+                .map_err(|error| CacheError::io(error.to_string()))?,
+        );
+        match validate_file(file, &directory, expected, guard) {
+            Ok(view) => Ok(CacheOpen::Ready(view)),
+            Err(ValidationFailure::Rebuild(reason)) => {
+                directory.verify()?;
+                stamp.verify(&proof)?;
+                Ok(CacheOpen::Rebuild(reason))
+            }
+            Err(ValidationFailure::Fatal(error)) => Err(error),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MappedStoreView {
+    file: Arc<File>,
+    stamp: FileStamp,
+    event_count: usize,
+    event_keys_offset: u64,
+    event_kinds_offset: u64,
+}
+
+impl MappedStoreView {
+    fn checked_read<const N: usize>(&self, offset: u64) -> Result<[u8; N], CacheError> {
+        self.stamp.verify(&self.file)?;
+        let mut output = [0_u8; N];
+        read_exact_at(&self.file, offset, &mut output, None)?;
+        self.stamp.verify(&self.file)?;
+        Ok(output)
+    }
+}
+
+impl StoreView for MappedStoreView {
+    fn event_count(&self) -> usize {
+        self.event_count
+    }
+
+    fn event_key(&self, row: usize) -> Result<EventKey, CacheError> {
+        if row >= self.event_count {
+            return Err(CacheError::access("event row is out of range"));
+        }
+        let relative = row
+            .checked_mul(EVENT_KEY_BYTES)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| CacheError::access("event key offset overflow"))?;
+        let offset = self
+            .event_keys_offset
+            .checked_add(relative)
+            .ok_or_else(|| CacheError::access("event key offset overflow"))?;
+        decode_event_key(&self.checked_read(offset)?)
+    }
+
+    fn event_kind(&self, row: usize) -> Result<EventKind, CacheError> {
+        if row >= self.event_count {
+            return Err(CacheError::access("event row is out of range"));
+        }
+        let offset = self
+            .event_kinds_offset
+            .checked_add(row as u64)
+            .ok_or_else(|| CacheError::access("event kind offset overflow"))?;
+        decode_event_kind(self.checked_read::<1>(offset)?[0])
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileStamp {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+impl FileStamp {
+    fn from_metadata(metadata: &Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+
+    fn verify(self, file: &File) -> Result<(), CacheError> {
+        let actual = FileStamp::from_metadata(
+            &file
+                .metadata()
+                .map_err(|error| CacheError::io(error.to_string()))?,
+        );
+        if actual != self {
+            return Err(CacheError::identity(
+                "cache identity changed during validation or access",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) enum ValidationFailure {
+    Rebuild(RebuildReason),
+    Fatal(CacheError),
+}
+
+impl From<CacheError> for ValidationFailure {
+    fn from(error: CacheError) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl From<OperationAbort> for ValidationFailure {
+    fn from(error: OperationAbort) -> Self {
+        Self::Fatal(CacheError::from(error))
+    }
+}
+
+pub(crate) fn open_final(
+    directory: &CacheDirectory,
+) -> Result<Option<(File, ObjectIdentity)>, CacheError> {
+    let descriptor = match openat(&*directory.file, FINAL_NAME, READ_FLAGS, Mode::empty()) {
+        Ok(descriptor) => descriptor,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(error) => {
+            return Err(CacheError::path(format!(
+                "cannot open cache leaf without following: {error}"
+            )));
+        }
+    };
+    let file = File::from(descriptor);
+    let identity = ObjectIdentity::regular_file(&file)?;
+    Ok(Some((file, identity)))
+}
+
+pub(crate) fn validate_file(
+    file: File,
+    directory: &CacheDirectory,
+    expected: &CacheIdentity,
+    guard: &dyn WorkGuard,
+) -> Result<MappedStoreView, ValidationFailure> {
+    let stamp = FileStamp::from_metadata(
+        &file
+            .metadata()
+            .map_err(|error| CacheError::io(error.to_string()))?,
+    );
+    if stamp.size < HEADER_BYTES as u64 {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Header(
+            "truncated",
+        )));
+    }
+    let mut header_bytes = [0_u8; HEADER_BYTES];
+    read_exact_at(&file, 0, &mut header_bytes, Some(guard))?;
+    let header = CacheHeader::decode(&header_bytes).map_err(ValidationFailure::Rebuild)?;
+    if header.schema != expected.cache_schema {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Header("schema")));
+    }
+    let manifest_end = header
+        .manifest_offset
+        .checked_add(header.manifest_length)
+        .ok_or(ValidationFailure::Rebuild(RebuildReason::Manifest(
+            "range overflow",
+        )))?;
+    if header.manifest_offset < HEADER_BYTES as u64
+        || header.manifest_length == 0
+        || header.manifest_length > MAX_MANIFEST_BYTES
+        || manifest_end != stamp.size
+    {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Manifest("range")));
+    }
+    guard.consume(WorkDelta {
+        resident_bytes: header.manifest_length,
+        ..WorkDelta::default()
+    })?;
+    let manifest_length = usize::try_from(header.manifest_length)
+        .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("length")))?;
+    let mut manifest_bytes = Vec::new();
+    manifest_bytes
+        .try_reserve_exact(manifest_length)
+        .map_err(|_| CacheError::io("cache manifest allocation failed"))?;
+    manifest_bytes.resize(manifest_length, 0);
+    read_exact_at(
+        &file,
+        header.manifest_offset,
+        &mut manifest_bytes,
+        Some(guard),
+    )?;
+    if Sha256::digest(&manifest_bytes).as_slice() != header.manifest_checksum {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Manifest(
+            "checksum",
+        )));
+    }
+    let manifest: CacheManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
+    let canonical = canonical_json(&manifest)?;
+    if canonical != manifest_bytes {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Manifest(
+            "canonical JSON",
+        )));
+    }
+    if let Some(field) = manifest.identity.mismatch(expected) {
+        return Err(ValidationFailure::Rebuild(RebuildReason::IdentityMismatch(
+            field,
+        )));
+    }
+    manifest
+        .validate_shape()
+        .map_err(ValidationFailure::Rebuild)?;
+    validate_sections(&file, &manifest, header.manifest_offset, guard)?;
+    directory.verify()?;
+    stamp.verify(&file)?;
+
+    let keys = manifest
+        .sections
+        .iter()
+        .find(|section| section.name == EVENT_KEYS_SECTION)
+        .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+            "missing event keys",
+        )))?;
+    let kinds = manifest
+        .sections
+        .iter()
+        .find(|section| section.name == EVENT_KINDS_SECTION)
+        .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+            "missing event kinds",
+        )))?;
+    if keys.element_size as usize != EVENT_KEY_BYTES || kinds.element_size != 1 {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+            "known element size",
+        )));
+    }
+    let key_count = keys.length / u64::from(keys.element_size);
+    let kind_count = kinds.length;
+    if key_count != kind_count {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+            "event count",
+        )));
+    }
+    let event_count = usize::try_from(key_count)
+        .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("event count")))?;
+    Ok(MappedStoreView {
+        file: Arc::new(file),
+        stamp,
+        event_count,
+        event_keys_offset: keys.offset,
+        event_kinds_offset: kinds.offset,
+    })
+}
+
+fn validate_sections(
+    file: &File,
+    manifest: &CacheManifest,
+    manifest_offset: u64,
+    guard: &dyn WorkGuard,
+) -> Result<(), ValidationFailure> {
+    let mut names = HashSet::new();
+    names
+        .try_reserve(manifest.sections.len())
+        .map_err(|_| CacheError::io("section-name set allocation failed"))?;
+    let mut previous_end = HEADER_BYTES as u64;
+    for section in &manifest.sections {
+        guard.consume(WorkDelta {
+            nodes: 1,
+            ..WorkDelta::default()
+        })?;
+        if !names.insert(section.name.as_str()) {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "duplicate name",
+            )));
+        }
+        let alignment = u64::from(section.alignment);
+        if alignment == 0 || !alignment.is_power_of_two() || alignment > 4096 {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "alignment",
+            )));
+        }
+        if section.offset % alignment != 0 {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "misaligned offset",
+            )));
+        }
+        if section.element_size == 0 || section.length % u64::from(section.element_size) != 0 {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "element size",
+            )));
+        }
+        let end = section
+            .offset
+            .checked_add(section.length)
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "range overflow",
+            )))?;
+        if section.offset < previous_end || end > manifest_offset {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section("range")));
+        }
+        validate_zero_padding(file, previous_end, section.offset, guard)?;
+        checksum_section(file, section, &manifest.identity, guard)?;
+        previous_end = end;
+    }
+    validate_zero_padding(file, previous_end, manifest_offset, guard)?;
+    Ok(())
+}
+
+fn validate_zero_padding(
+    file: &File,
+    start: u64,
+    end: u64,
+    guard: &dyn WorkGuard,
+) -> Result<(), ValidationFailure> {
+    let length = end
+        .checked_sub(start)
+        .ok_or(ValidationFailure::Rebuild(RebuildReason::Section("range")))?;
+    let mut buffer = [0_u8; CHECKSUM_CHUNK_BYTES];
+    let mut consumed = 0_u64;
+    while consumed < length {
+        let count = usize::try_from((length - consumed).min(CHECKSUM_CHUNK_BYTES as u64))
+            .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("padding")))?;
+        read_exact_at(file, start + consumed, &mut buffer[..count], Some(guard))?;
+        if buffer[..count].iter().any(|byte| *byte != 0) {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "padding",
+            )));
+        }
+        consumed += count as u64;
+    }
+    Ok(())
+}
+
+fn checksum_section(
+    file: &File,
+    section: &super::SectionDescriptor,
+    identity: &CacheIdentity,
+    guard: &dyn WorkGuard,
+) -> Result<(), ValidationFailure> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; CHECKSUM_CHUNK_BYTES];
+    let mut consumed = 0_u64;
+    while consumed < section.length {
+        let count = usize::try_from((section.length - consumed).min(CHECKSUM_CHUNK_BYTES as u64))
+            .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("length")))?;
+        read_exact_at(
+            file,
+            section.offset + consumed,
+            &mut buffer[..count],
+            Some(guard),
+        )?;
+        validate_known_payload(section.name.as_str(), &buffer[..count], identity)?;
+        digest.update(&buffer[..count]);
+        consumed += count as u64;
+    }
+    if digest.finalize().as_slice() != section.checksum {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+            "checksum",
+        )));
+    }
+    Ok(())
+}
+
+fn validate_known_payload(
+    name: &str,
+    bytes: &[u8],
+    identity: &CacheIdentity,
+) -> Result<(), ValidationFailure> {
+    if name == EVENT_KINDS_SECTION {
+        for value in bytes {
+            decode_event_kind(*value)
+                .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?;
+        }
+    } else if name == EVENT_KEYS_SECTION {
+        let mut rows = bytes.chunks_exact(EVENT_KEY_BYTES);
+        for row in &mut rows {
+            let encoded: &[u8; EVENT_KEY_BYTES] = row
+                .try_into()
+                .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?;
+            let key = decode_event_key(encoded)
+                .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?;
+            if key.artifact.as_bytes() != &identity.artifact_digest {
+                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                    "payload",
+                )));
+            }
+        }
+        if !rows.remainder().is_empty() {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "payload",
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn read_exact_at(
+    file: &File,
+    offset: u64,
+    output: &mut [u8],
+    guard: Option<&dyn WorkGuard>,
+) -> Result<(), CacheError> {
+    if let Some(guard) = guard {
+        guard.consume(WorkDelta {
+            input_bytes: output.len() as u64,
+            ..WorkDelta::default()
+        })?;
+    }
+    let mut filled = 0_usize;
+    while filled < output.len() {
+        let current = offset
+            .checked_add(filled as u64)
+            .ok_or_else(|| CacheError::access("cache read offset overflow"))?;
+        match file.read_at(&mut output[filled..], current) {
+            Ok(0) => return Err(CacheError::access("cache became shorter during read")),
+            Ok(count) if count <= output.len() - filled => filled += count,
+            Ok(_) => return Err(CacheError::access("cache read over-reported bytes")),
+            Err(error) => return Err(CacheError::io(error.to_string())),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn probe_identity(
+    file: &File,
+    guard: &dyn WorkGuard,
+) -> Result<CacheIdentity, ValidationFailure> {
+    let size = file
+        .metadata()
+        .map_err(|error| CacheError::io(error.to_string()))?
+        .len();
+    if size < HEADER_BYTES as u64 {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Header(
+            "truncated",
+        )));
+    }
+    let mut header_bytes = [0_u8; HEADER_BYTES];
+    read_exact_at(file, 0, &mut header_bytes, Some(guard))?;
+    let header = CacheHeader::decode(&header_bytes).map_err(ValidationFailure::Rebuild)?;
+    let end = header
+        .manifest_offset
+        .checked_add(header.manifest_length)
+        .ok_or(ValidationFailure::Rebuild(RebuildReason::Manifest(
+            "range overflow",
+        )))?;
+    if header.manifest_length == 0 || header.manifest_length > MAX_MANIFEST_BYTES || end != size {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Manifest("range")));
+    }
+    guard.consume(WorkDelta {
+        resident_bytes: header.manifest_length,
+        ..WorkDelta::default()
+    })?;
+    let length = usize::try_from(header.manifest_length)
+        .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("length")))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| CacheError::io("cache manifest allocation failed"))?;
+    bytes.resize(length, 0);
+    read_exact_at(file, header.manifest_offset, &mut bytes, Some(guard))?;
+    if Sha256::digest(&bytes).as_slice() != header.manifest_checksum {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Manifest(
+            "checksum",
+        )));
+    }
+    let manifest: CacheManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
+    Ok(manifest.identity)
+}

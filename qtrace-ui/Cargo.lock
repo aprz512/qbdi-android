@@ -2452,6 +2452,8 @@ dependencies = [
 name = "qtrace-store"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
+ "hex",
  "lz4_flex",
  "qtrace-provider",
  "rustix",
