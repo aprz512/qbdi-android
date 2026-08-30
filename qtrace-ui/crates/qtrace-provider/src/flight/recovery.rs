@@ -44,6 +44,18 @@ struct SequenceRange {
 }
 
 #[derive(Clone, Copy)]
+struct SequenceFact {
+    range: SequenceRange,
+    coordinate: ProofCoordinate,
+}
+
+#[derive(Clone, Copy)]
+struct MissingRange {
+    range: SequenceRange,
+    cause: CompletenessCause,
+}
+
+#[derive(Clone, Copy)]
 struct SequenceProof {
     range: SequenceRange,
     cause: CompletenessCause,
@@ -167,9 +179,12 @@ pub(super) fn recover(
             if entry.range_reliable && entry.first_sequence != 0 {
                 guarded_push(
                     &mut hints,
-                    SequenceRange {
-                        first: entry.first_sequence,
-                        last: entry.last_sequence,
+                    SequenceFact {
+                        range: SequenceRange {
+                            first: entry.first_sequence,
+                            last: entry.last_sequence,
+                        },
+                        coordinate: ProofCoordinate::Source(offset),
                     },
                     &context,
                 )?;
@@ -253,7 +268,14 @@ pub(super) fn recover(
         if header.state == 2 {
             let header_range = valid_sealed_range(&header);
             if let Some(range) = header_range {
-                guarded_push(&mut hints, range, &context)?;
+                guarded_push(
+                    &mut hints,
+                    SequenceFact {
+                        range,
+                        coordinate: ProofCoordinate::Source(offset),
+                    },
+                    &context,
+                )?;
             }
             let committed = u64::from(header.committed_bytes);
             if committed > capacity || committed % 8 != 0 {
@@ -516,6 +538,7 @@ pub(super) fn recover(
     }
 
     damage_ranges = guarded_radix_sort(damage_ranges, 16, sequence_range_byte, &context)?;
+    hints = guarded_radix_sort(hints, 8, sequence_fact_byte, &context)?;
     add_sequence_completeness(
         &events,
         &hints,
@@ -527,22 +550,43 @@ pub(super) fn recover(
             has_incomplete,
         },
         &mut completeness,
+        &mut sequence_proofs,
         &context,
     )?;
     let decoded = super::events::decode(events, &superblock, &chunks, artifact, context.guard)?;
     events = decoded.events;
+    let decoded_damage_count = decoded.damaged_sequences.len();
+    let decoded_damage_bytes = decoded_damage_count
+        .checked_mul(
+            size_of::<CompletenessRange>()
+                .checked_add(size_of::<SequenceProof>())
+                .and_then(|bytes| bytes.checked_mul(4))
+                .ok_or_else(|| allocation_error("decoded damage element size overflow"))?,
+        )
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("decoded damage evidence size overflow"))?;
+    context.guard.consume(WorkDelta {
+        resident_bytes: decoded_damage_bytes,
+        ..WorkDelta::default()
+    })?;
+    completeness
+        .try_reserve_exact(decoded_damage_count)
+        .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
+    sequence_proofs
+        .try_reserve_exact(decoded_damage_count)
+        .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
     for (index, sequence) in decoded.damaged_sequences.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
-        push_sequence_range(
-            &mut completeness,
+        let evidence = CompletenessRange::captured_sequence_with_cause(
             sequence,
             sequence,
             Provenance::Damaged,
             CompletenessCause::Incomplete,
-            &context,
-        )?;
+        )
+        .ok_or_else(|| allocation_error("invalid decoded damage sequence range"))?;
+        guarded_push_without_charge(&mut completeness, evidence)?;
         if let Some(source_offset) = decoded.damaged_source_offsets.get(index).copied() {
-            guarded_push(
+            guarded_push_without_charge(
                 &mut sequence_proofs,
                 SequenceProof {
                     range: SequenceRange {
@@ -553,7 +597,6 @@ pub(super) fn recover(
                     provenance: Provenance::Damaged,
                     coordinate: ProofCoordinate::Source(source_offset),
                 },
-                &context,
             )?;
         }
     }
@@ -664,33 +707,40 @@ fn add_discontinuity_events(
         resident_bytes: (evidence_capacity as u64).saturating_mul(256),
         ..WorkDelta::default()
     })?;
-    let mut proof_domains = fallible_hash_map(sequence_proofs.len(), context)?;
+    let mut proof_ranges = fallible_vec(sequence_proofs.len())?;
     for (index, proof) in sequence_proofs.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
-        proof_domains.insert((proof.cause, proof.provenance), ());
+        let evidence = CompletenessRange::captured_sequence_with_cause(
+            proof.range.first,
+            proof.range.last,
+            proof.provenance,
+            proof.cause,
+        )
+        .ok_or_else(|| allocation_error("invalid discontinuity proof range"))?;
+        proof_ranges.push(evidence);
     }
-    let original_event_count = events.len();
+    normalize_completeness(&mut proof_ranges, context)?;
+    let mut proof_coverage = fallible_hash_map(proof_ranges.len(), context)?;
+    for (index, range) in proof_ranges.into_iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        proof_coverage.insert(range, ());
+    }
     for (index, evidence) in completeness.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
         if evidence.cause() == CompletenessCause::Retained {
             continue;
         }
         if matches!(evidence.bounds(), RangeBounds::InclusiveSequence { .. })
-            && proof_domains.contains_key(&(evidence.cause(), evidence.provenance()))
+            && proof_coverage.contains_key(&evidence)
         {
             continue;
         }
         let source_offset = match evidence.bounds() {
             RangeBounds::HalfOpen { start, .. } => start,
-            RangeBounds::InclusiveSequence { last, .. } => {
-                let retained = &events[..original_event_count];
-                let position = retained.partition_point(|event| {
-                    event.key.sequence.is_some_and(|sequence| sequence <= last)
-                });
-                retained
-                    .get(position)
-                    .map(|event| event.key.source_offset)
-                    .unwrap_or(artifact_bytes)
+            RangeBounds::InclusiveSequence { .. } => {
+                return Err(allocation_error(
+                    "sequence discontinuity lacks a physical proof coordinate",
+                ));
             }
         };
         push_discontinuity(events, evidence, source_offset, artifact, context)?;
@@ -1227,10 +1277,11 @@ fn emergency_legacy_checksum(cell: &EmergencyCell) -> u32 {
 
 fn add_sequence_completeness(
     events: &[EventRecord],
-    hints: &[SequenceRange],
+    hints: &[SequenceFact],
     damage_ranges: &[SequenceRange],
     status: RecoveryStatus,
     completeness: &mut Vec<CompletenessRange>,
+    sequence_proofs: &mut Vec<SequenceProof>,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
     if events.is_empty() && hints.is_empty() {
@@ -1246,8 +1297,8 @@ fn add_sequence_completeness(
         .unwrap_or(0);
     for (index, hint) in hints.iter().enumerate() {
         guard_checkpoint(context.guard, index)?;
-        first = first.min(hint.first);
-        last = last.max(hint.last);
+        first = first.min(hint.range.first);
+        last = last.max(hint.range.last);
     }
     if first == u64::MAX && last == 0 {
         return Ok(());
@@ -1307,6 +1358,7 @@ fn add_sequence_completeness(
     let mut cursor = Some(first);
     let mut damage_index = 0_usize;
     let mut damage_steps = 0_usize;
+    let mut missing_ranges = Vec::new();
     for (index, event) in events.iter().enumerate() {
         guard_checkpoint(context.guard, index)?;
         let sequence = event.key.sequence.unwrap_or(0);
@@ -1325,6 +1377,7 @@ fn add_sequence_completeness(
                 &mut damage_steps,
                 missing_cause,
                 completeness,
+                &mut missing_ranges,
                 context,
             )?;
         }
@@ -1340,11 +1393,12 @@ fn add_sequence_completeness(
                 &mut damage_steps,
                 missing_cause,
                 completeness,
+                &mut missing_ranges,
                 context,
             )?;
         }
     }
-    Ok(())
+    add_missing_proofs(&missing_ranges, hints, sequence_proofs, context)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1356,6 +1410,7 @@ fn add_missing_without_damage(
     damage_steps: &mut usize,
     cause: CompletenessCause,
     completeness: &mut Vec<CompletenessRange>,
+    missing_ranges: &mut Vec<MissingRange>,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
     let mut cursor = Some(first);
@@ -1377,12 +1432,12 @@ fn add_missing_without_damage(
             break;
         }
         if damage.first > current {
-            push_sequence_range(
+            push_missing_range(
                 completeness,
                 current,
                 damage.first - 1,
-                Provenance::Unknown,
                 cause,
+                missing_ranges,
                 context,
             )?;
         }
@@ -1400,12 +1455,78 @@ fn add_missing_without_damage(
     }
     if let Some(current) = cursor {
         if current <= last {
-            push_sequence_range(
-                completeness,
-                current,
-                last,
-                Provenance::Unknown,
-                cause,
+            push_missing_range(completeness, current, last, cause, missing_ranges, context)?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_missing_range(
+    completeness: &mut Vec<CompletenessRange>,
+    first: u64,
+    last: u64,
+    cause: CompletenessCause,
+    missing_ranges: &mut Vec<MissingRange>,
+    context: &RecoveryContext<'_>,
+) -> Result<(), ProviderError> {
+    push_sequence_range(
+        completeness,
+        first,
+        last,
+        Provenance::Unknown,
+        cause,
+        context,
+    )?;
+    guarded_push(
+        missing_ranges,
+        MissingRange {
+            range: SequenceRange { first, last },
+            cause,
+        },
+        context,
+    )
+}
+
+fn add_missing_proofs(
+    missing: &[MissingRange],
+    facts: &[SequenceFact],
+    output: &mut Vec<SequenceProof>,
+    context: &RecoveryContext<'_>,
+) -> Result<(), ProviderError> {
+    let mut first_candidate = 0_usize;
+    let mut steps = 0_usize;
+    for fact in facts {
+        while missing
+            .get(first_candidate)
+            .is_some_and(|range| range.range.last < fact.range.first)
+        {
+            guard_checkpoint(context.guard, steps)?;
+            steps = steps
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("sequence proof work overflow"))?;
+            first_candidate = first_candidate
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("sequence proof index overflow"))?;
+        }
+        for range in &missing[first_candidate..] {
+            guard_checkpoint(context.guard, steps)?;
+            steps = steps
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("sequence proof work overflow"))?;
+            if range.range.first > fact.range.last {
+                break;
+            }
+            let first = range.range.first.max(fact.range.first);
+            let last = range.range.last.min(fact.range.last);
+            guarded_push(
+                output,
+                SequenceProof {
+                    range: SequenceRange { first, last },
+                    cause: range.cause,
+                    provenance: Provenance::Unknown,
+                    coordinate: fact.coordinate,
+                },
                 context,
             )?;
         }
@@ -1681,6 +1802,10 @@ fn sequence_range_byte(range: &SequenceRange, pass: usize) -> Result<u8, Provide
     } else {
         byte_at(&range.first.to_le_bytes(), pass - 8)
     }
+}
+
+fn sequence_fact_byte(fact: &SequenceFact, pass: usize) -> Result<u8, ProviderError> {
+    byte_at(&fact.range.first.to_le_bytes(), pass)
 }
 
 fn completeness_byte(range: &CompletenessRange, pass: usize) -> Result<u8, ProviderError> {
@@ -2106,5 +2231,68 @@ impl RecoveryContext<'_> {
                 .ok_or_else(|| allocation_error("checksum cursor overflow"))?;
         }
         Ok(checksum)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ArtifactDigest, ByteSource, OperationAbort};
+
+    struct AllowAll;
+
+    impl WorkGuard for AllowAll {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn proof_for_one_range_does_not_cover_an_unproved_range_in_the_same_domain() {
+        let source = ByteSource::new(Vec::<u8>::new());
+        let guard = AllowAll;
+        let mut context = RecoveryContext {
+            source: &source,
+            guard: &guard,
+            counters: ProviderCounters::default(),
+            next_ordinal: 0,
+        };
+        let completeness = vec![
+            CompletenessRange::captured_sequence_with_cause(
+                10,
+                11,
+                Provenance::Unknown,
+                CompletenessCause::Lost,
+            )
+            .expect("valid range"),
+            CompletenessRange::captured_sequence_with_cause(
+                20,
+                21,
+                Provenance::Unknown,
+                CompletenessCause::Lost,
+            )
+            .expect("valid range"),
+        ];
+        let proofs = [SequenceProof {
+            range: SequenceRange {
+                first: 10,
+                last: 11,
+            },
+            cause: CompletenessCause::Lost,
+            provenance: Provenance::Unknown,
+            coordinate: ProofCoordinate::Source(4096),
+        }];
+
+        let error = add_discontinuity_events(
+            &mut Vec::new(),
+            &completeness,
+            &proofs,
+            ArtifactDigest::new([0; 32]),
+            8192,
+            &mut context,
+        )
+        .expect_err("the unrelated range has no physical proof");
+
+        assert_eq!(error.code(), "source.flight.resource");
     }
 }

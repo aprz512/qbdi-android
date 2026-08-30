@@ -124,11 +124,7 @@ impl FlightProvider {
                 tid,
                 timeline,
                 event_keys: Vec::new(),
-                final_registers: recovered
-                    .final_registers
-                    .get(&tid)
-                    .cloned()
-                    .or_else(|| RegisterSnapshot::new(vec![0; crate::RegisterSlot::COUNT])),
+                final_registers: recovered.final_registers.get(&tid).cloned(),
             });
             if projection_by_tid.insert(tid, index).is_some() {
                 return Err(resource_error("duplicate Flight projection TID"));

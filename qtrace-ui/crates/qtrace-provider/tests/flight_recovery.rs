@@ -1,6 +1,6 @@
 use std::{
     fs,
-    mem::size_of,
+    mem::{size_of, size_of_val},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -42,6 +42,38 @@ impl WorkGuard for RejectAll {
 
 struct RejectAfterCalls {
     remaining: Mutex<usize>,
+}
+
+struct CancelPassAfterSecondCheckpoint {
+    arm_nodes: u64,
+    armed: AtomicBool,
+    checkpoints: AtomicUsize,
+}
+
+impl CancelPassAfterSecondCheckpoint {
+    fn new(arm_nodes: u64) -> Self {
+        Self {
+            arm_nodes,
+            armed: AtomicBool::new(false),
+            checkpoints: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl WorkGuard for CancelPassAfterSecondCheckpoint {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.nodes == self.arm_nodes {
+            self.armed.store(true, Ordering::SeqCst);
+            return Ok(());
+        }
+        if self.armed.load(Ordering::SeqCst) && delta == WorkDelta::default() {
+            let checkpoint = self.checkpoints.fetch_add(1, Ordering::SeqCst);
+            if checkpoint == 1 {
+                return Err(OperationAbort::Cancelled);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl RejectAfterCalls {
@@ -352,6 +384,7 @@ struct Collected {
     identity: SourceIdentity,
     capabilities: ProviderCapabilities,
     projections: Vec<(u32, Vec<EventKey>)>,
+    final_registers: Vec<(u32, Option<qtrace_provider::RegisterSnapshot>)>,
     events: Vec<EventRecord>,
     summary: ProviderSummary,
 }
@@ -378,6 +411,11 @@ fn collect_source(
         .iter()
         .map(|projection| (projection.tid, projection.event_keys.clone()))
         .collect();
+    let final_registers = provider
+        .projections()
+        .iter()
+        .map(|projection| (projection.tid, projection.final_registers.clone()))
+        .collect();
     let mut cursor = Box::new(provider).into_cursor()?;
     let mut events = Vec::new();
     while let Some(event) = cursor.next_event(guard)? {
@@ -388,9 +426,18 @@ fn collect_source(
         identity,
         capabilities,
         projections,
+        final_registers,
         events,
         summary,
     })
+}
+
+fn final_registers(parsed: &Collected, tid: u32) -> Option<&qtrace_provider::RegisterSnapshot> {
+    parsed
+        .final_registers
+        .iter()
+        .find(|(candidate, _)| *candidate == tid)
+        .and_then(|(_, registers)| registers.as_ref())
 }
 
 fn collect_bytes(bytes: Vec<u8>) -> Result<Collected, ProviderError> {
@@ -482,6 +529,15 @@ fn checkpoint_payload(pc: u64) -> Vec<u8> {
     output.extend_from_slice(&0x7fff_0000_u64.to_le_bytes());
     output.extend_from_slice(&pc.to_le_bytes());
     output.extend_from_slice(&0x6000_0000_u64.to_le_bytes());
+    output
+}
+
+fn delta_payload(mask: u64, values: &[u64]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(8 + size_of_val(values));
+    output.extend_from_slice(&mask.to_le_bytes());
+    for value in values {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
     output
 }
 
@@ -656,6 +712,31 @@ fn many_thread_artifact(thread_count: u32, records_per_thread: u64) -> Vec<u8> {
         }
         directories.push(directory(tid, first, sequence - 1, index, 1, 1));
         chunks.push(chunk(index, tid, 1, &records, 2, b""));
+    }
+    artifact(&directories, &chunks, &[], 0)
+}
+
+fn many_final_state_artifact(thread_count: u32) -> Vec<u8> {
+    let capacity = usize::try_from(thread_count).expect("thread count");
+    let mut directories = Vec::with_capacity(capacity);
+    let mut chunks = Vec::with_capacity(capacity);
+    let mut sequence = 1_u64;
+    for index in 0..thread_count {
+        let tid = index + 1;
+        let records = vec![
+            record(1, sequence, &chunk_begin_payload(tid), 0, 1, true),
+            record(
+                9,
+                sequence + 1,
+                &checkpoint_payload(0x7100_1000 + u64::from(index)),
+                1,
+                1,
+                true,
+            ),
+        ];
+        directories.push(directory(tid, sequence, sequence + 1, index, 1, 1));
+        chunks.push(chunk(index, tid, 1, &records, 2, b""));
+        sequence += 2;
     }
     artifact(&directories, &chunks, &[], 0)
 }
@@ -878,6 +959,177 @@ fn a_second_checkpoint_after_the_required_prefix_is_damaged() {
                 RangeBounds::InclusiveSequence { first: 3, last: 3 }
             )
     }));
+}
+
+#[test]
+fn bad_delta_clears_final_state_but_later_physical_delta_stays_typed_damage() {
+    let tid = 77_u32;
+    let generation = 1;
+    let records = vec![
+        record(1, 1, &chunk_begin_payload(tid), 0, generation, true),
+        record(9, 2, &checkpoint_payload(0x7100_1000), 1, generation, true),
+        record(
+            9,
+            3,
+            &delta_payload(1 << 34, &[0xdead]),
+            0,
+            generation,
+            true,
+        ),
+        record(9, 4, &delta_payload(1, &[0xbeef]), 0, generation, true),
+    ];
+    let parsed = collect_bytes(artifact(
+        &[directory(tid, 1, 4, 0, generation, 1)],
+        &[chunk(0, tid, generation, &records, 2, b"")],
+        &[],
+        0,
+    ))
+    .expect("recover damaged delta ancestry");
+
+    assert!(final_registers(&parsed, tid).is_none());
+    let later = parsed
+        .events
+        .iter()
+        .find(|event| event.key.sequence == Some(4))
+        .expect("later physical delta");
+    assert_eq!(later.provenance, Provenance::Damaged);
+    assert!(matches!(
+        &later.payload,
+        EventPayload::RegisterDelta(delta) if !delta.ancestry_reliable
+    ));
+}
+
+#[test]
+fn emergency_only_tid_has_unknown_final_registers() {
+    let generation = 1;
+    let tid = 7;
+    let records = vec![
+        record(1, 1, &chunk_begin_payload(tid), 0, generation, true),
+        record(9, 2, &checkpoint_payload(0x7100_1000), 1, generation, true),
+    ];
+    let emergency_tid = 99;
+    let emergency = emergency_cell(14, emergency_tid, 3, 0x7100_9999, 0, 0, 2, true);
+    let parsed = collect_bytes(artifact(
+        &[directory(tid, 1, 2, 0, generation, 1)],
+        &[chunk(0, tid, generation, &records, 2, b"")],
+        &[emergency_slot(
+            emergency,
+            [0; FLIGHT_EMERGENCY_RECORD_BYTES],
+        )],
+        0,
+    ))
+    .expect("recover emergency-only thread");
+
+    assert!(final_registers(&parsed, tid).is_some());
+    assert!(
+        parsed
+            .final_registers
+            .iter()
+            .any(|(candidate, registers)| *candidate == emergency_tid && registers.is_none())
+    );
+}
+
+#[test]
+fn invalid_prefix_is_irreversible_for_the_chunk_generation() {
+    let tid = 77_u32;
+    let generation = 1;
+    for records in [
+        vec![
+            record(2, 1, b"junk", 0, generation, true),
+            record(1, 2, &chunk_begin_payload(tid), 0, generation, true),
+            record(9, 3, &checkpoint_payload(0x7100_1000), 1, generation, true),
+        ],
+        vec![
+            record(1, 1, b"malformed", 0, generation, true),
+            record(1, 2, &chunk_begin_payload(tid), 0, generation, true),
+            record(9, 3, &checkpoint_payload(0x7100_1000), 1, generation, true),
+        ],
+        vec![
+            record(1, 1, &chunk_begin_payload(tid), 0, generation, true),
+            record(2, 2, b"not-checkpoint", 0, generation, true),
+            record(9, 3, &checkpoint_payload(0x7100_1000), 1, generation, true),
+        ],
+    ] {
+        let parsed = collect_bytes(artifact(
+            &[directory(tid, 1, 3, 0, generation, 1)],
+            &[chunk(0, tid, generation, &records, 2, b"")],
+            &[],
+            0,
+        ))
+        .expect("recover permanently broken prefix");
+
+        assert!(final_registers(&parsed, tid).is_none());
+        for sequence in [2, 3] {
+            let physical = parsed
+                .events
+                .iter()
+                .find(|event| event.key.sequence == Some(sequence))
+                .expect("broken-prefix record");
+            assert_eq!(physical.provenance, Provenance::Damaged);
+            assert!(parsed.events.iter().any(|event| {
+                event.key.source_offset == physical.key.source_offset
+                    && matches!(&event.payload, EventPayload::Discontinuity(value)
+                        if value.evidence.provenance() == Provenance::Damaged
+                            && value.evidence.cause() == CompletenessCause::Incomplete
+                            && matches!(value.evidence.bounds(), RangeBounds::InclusiveSequence {
+                                first, last
+                            } if first == sequence && last == sequence))
+            }));
+        }
+    }
+}
+
+#[test]
+fn duplicate_checkpoint_permanently_breaks_following_records() {
+    let tid = 77_u32;
+    let generation = 1;
+    let records = vec![
+        record(1, 1, &chunk_begin_payload(tid), 0, generation, true),
+        record(9, 2, &checkpoint_payload(0x7100_1000), 1, generation, true),
+        record(9, 3, &checkpoint_payload(0x7100_2000), 1, generation, true),
+        record(9, 4, &delta_payload(1, &[0xbeef]), 0, generation, true),
+    ];
+    let parsed = collect_bytes(artifact(
+        &[directory(tid, 1, 4, 0, generation, 1)],
+        &[chunk(0, tid, generation, &records, 2, b"")],
+        &[],
+        0,
+    ))
+    .expect("recover duplicate checkpoint");
+
+    assert!(final_registers(&parsed, tid).is_none());
+    for sequence in [3, 4] {
+        let event = parsed
+            .events
+            .iter()
+            .find(|event| event.key.sequence == Some(sequence))
+            .expect("broken-prefix evidence");
+        assert_eq!(event.provenance, Provenance::Damaged);
+        if sequence == 3 {
+            assert!(matches!(event.payload, EventPayload::OpaqueOptional(_)));
+        } else {
+            assert!(matches!(
+                &event.payload,
+                EventPayload::RegisterDelta(delta) if !delta.ancestry_reliable
+            ));
+        }
+        assert!(parsed.events.iter().any(|candidate| {
+            candidate.key.source_offset == event.key.source_offset
+                && matches!(&candidate.payload, EventPayload::Discontinuity(value)
+                    if value.evidence.provenance() == Provenance::Damaged
+                        && value.evidence.cause() == CompletenessCause::Incomplete
+                        && matches!(value.evidence.bounds(), RangeBounds::InclusiveSequence {
+                            first, last
+                        } if first == sequence && last == sequence))
+        }));
+    }
+    assert!(
+        parsed
+            .summary
+            .completeness
+            .iter()
+            .any(|range| { range.provenance() == Provenance::Damaged && range.contains(4) })
+    );
 }
 
 #[test]
@@ -1233,6 +1485,46 @@ fn clean_missing_ranges_are_overwritten_and_flagged_ranges_are_lost() {
 }
 
 #[test]
+fn merged_missing_range_keeps_each_directory_and_chunk_header_proof() {
+    let generation = 1;
+    let records = vec![
+        record(1, 1, b"", 0, generation, true),
+        record(1, 4, b"", 0, generation, true),
+    ];
+    let bytes = artifact(
+        &[directory(7, 1, 4, 0, generation, 1)],
+        &[chunk(0, 7, generation, &records, 2, b"")],
+        &[],
+        0,
+    );
+    let expected_chunk_offset = chunk_offset(&bytes) as u64;
+    let parsed = collect_bytes(bytes).expect("recover missing range proofs");
+
+    assert_eq!(
+        sequence_ranges(&parsed.summary, CompletenessCause::Overwritten),
+        vec![(2, 3)]
+    );
+    let mut proof_offsets = parsed
+        .events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventPayload::Discontinuity(value)
+                if value.evidence.cause() == CompletenessCause::Overwritten
+                    && matches!(
+                        value.evidence.bounds(),
+                        RangeBounds::InclusiveSequence { first: 2, last: 3 }
+                    ) =>
+            {
+                Some(event.key.source_offset)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    proof_offsets.sort_unstable();
+    assert_eq!(proof_offsets, vec![4096, expected_chunk_offset]);
+}
+
+#[test]
 fn inclusive_lost_union_handles_u64_max_without_overflow() {
     let generation = 1;
     let records = vec![
@@ -1570,6 +1862,31 @@ fn high_cardinality_projection_and_merge_work_stays_checkpoint_bounded() {
         "post-validation work used {} guard operations for {expected_events} events",
         guard.calls()
     );
+}
+
+#[test]
+fn public_open_can_cancel_chunk_state_initialization_after_4096_items() {
+    let thread_count = 4_097_u32;
+    let bytes = many_thread_artifact(thread_count, 1);
+    let physical_count = u64::from(thread_count);
+    let guard = CancelPassAfterSecondCheckpoint::new(physical_count * 8);
+
+    let error = FlightProvider::open(Arc::new(ByteSource::new(bytes)), identity(0), &guard)
+        .expect_err("public open ignored state initialization cancellation");
+
+    assert_eq!(error.code(), "control.cancelled");
+}
+
+#[test]
+fn public_open_can_cancel_final_register_map_after_4096_items() {
+    let thread_count = 4_097_u32;
+    let bytes = many_final_state_artifact(thread_count);
+    let guard = CancelPassAfterSecondCheckpoint::new(u64::from(thread_count));
+
+    let error = FlightProvider::open(Arc::new(ByteSource::new(bytes)), identity(0), &guard)
+        .expect_err("public open ignored final-register conversion cancellation");
+
+    assert_eq!(error.code(), "control.cancelled");
 }
 
 #[test]

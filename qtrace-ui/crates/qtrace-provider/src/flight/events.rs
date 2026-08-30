@@ -28,11 +28,18 @@ pub(super) struct DecodedFlight {
     pub(super) damaged_source_offsets: Vec<u64>,
 }
 
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum PrefixState {
+    #[default]
+    ExpectBegin,
+    ExpectCheckpoint,
+    Ready,
+    Broken,
+}
+
 #[derive(Default)]
 struct ChunkState {
-    valid_prefix: bool,
-    has_checkpoint: bool,
-    prefix_broken: bool,
+    prefix: PrefixState,
     prefix_damage_recorded: bool,
     module_base: u64,
     strings: HashMap<u32, Arc<[u8]>>,
@@ -65,14 +72,18 @@ pub(super) fn decode(
             .saturating_add(payload_bytes.saturating_mul(4)),
         ..WorkDelta::default()
     })?;
-    let mut states: Vec<ChunkState> = (0..chunks.len()).map(|_| ChunkState::default()).collect();
-    let mut output = Vec::with_capacity(physical.len());
-    let mut fragments = Vec::new();
+    let mut states = initialize_states(chunks.len(), guard)?;
+    let mut output = reserved_vec(physical.len(), "Flight typed output allocation failed")?;
+    let mut fragments = reserved_vec(physical.len(), "Flight fragment allocation failed")?;
     let mut final_state: HashMap<u32, (u64, RegisterSnapshot)> = HashMap::new();
-    let mut target_pcs = Vec::new();
+    final_state
+        .try_reserve(chunks.len())
+        .map_err(|_| allocation_error("Flight final-state allocation failed"))?;
+    let mut target_pcs = reserved_vec(physical.len(), "Flight PC allocation failed")?;
     let mut termination = None;
-    let mut damaged_sequences = Vec::new();
-    let mut damaged_source_offsets = Vec::new();
+    let mut damaged_sequences = reserved_vec(physical.len(), "Flight damage allocation failed")?;
+    let mut damaged_source_offsets =
+        reserved_vec(physical.len(), "Flight damage-offset allocation failed")?;
 
     for (position, event) in physical.into_iter().enumerate() {
         if position as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
@@ -92,9 +103,21 @@ pub(super) fn decode(
                 continue;
             };
             let state = &mut states[index as usize];
-            if raw.record_type == 1 && raw.flags == 0 {
-                if state.valid_prefix {
-                    state.prefix_broken = true;
+            if matches!((raw.record_type, raw.flags), (4, 1)) {
+                state
+                    .definitions
+                    .try_reserve(1)
+                    .map_err(|_| allocation_error("Flight definition-state allocation failed"))?;
+            }
+            if matches!((raw.record_type, raw.flags), (6, 3)) {
+                state
+                    .strings
+                    .try_reserve(1)
+                    .map_err(|_| allocation_error("Flight string-state allocation failed"))?;
+            }
+            if state.prefix == PrefixState::ExpectBegin {
+                if raw.record_type != 1 || raw.flags != 0 {
+                    state.prefix = PrefixState::Broken;
                     record_prefix_damage(
                         state,
                         sequence,
@@ -107,7 +130,7 @@ pub(super) fn decode(
                 }
                 match decode_begin(&raw.bytes, superblock, identity, index, coordinate) {
                     Ok(begin) => {
-                        state.valid_prefix = true;
+                        state.prefix = PrefixState::ExpectCheckpoint;
                         state.module_base = begin.module_base;
                         output.push(EventRecord::new(
                             event.key,
@@ -116,7 +139,7 @@ pub(super) fn decode(
                         ));
                     }
                     Err(_) => {
-                        state.prefix_broken = true;
+                        state.prefix = PrefixState::Broken;
                         record_prefix_damage(
                             state,
                             sequence,
@@ -129,7 +152,10 @@ pub(super) fn decode(
                 }
                 continue;
             }
-            if !state.valid_prefix {
+            if state.prefix == PrefixState::ExpectCheckpoint
+                && !matches!((raw.record_type, raw.flags), (9, 1))
+            {
+                state.prefix = PrefixState::Broken;
                 record_prefix_damage(
                     state,
                     sequence,
@@ -138,6 +164,47 @@ pub(super) fn decode(
                     &mut damaged_source_offsets,
                 );
                 output.push(rewrap(event.key, Provenance::Damaged, raw));
+                continue;
+            }
+            if state.prefix == PrefixState::Ready && matches!((raw.record_type, raw.flags), (9, 1))
+            {
+                state.prefix = PrefixState::Broken;
+                state.registers = None;
+                final_state.remove(&tid);
+                record_prefix_damage(
+                    state,
+                    sequence,
+                    event.key.source_offset,
+                    &mut damaged_sequences,
+                    &mut damaged_source_offsets,
+                );
+                output.push(rewrap(event.key, Provenance::Damaged, raw));
+                continue;
+            }
+            if state.prefix == PrefixState::Broken {
+                let damage_was_recorded = state.prefix_damage_recorded;
+                record_prefix_damage(
+                    state,
+                    sequence,
+                    event.key.source_offset,
+                    &mut damaged_sequences,
+                    &mut damaged_source_offsets,
+                );
+                if damage_was_recorded {
+                    damaged_sequences.push(sequence);
+                    damaged_source_offsets.push(event.key.source_offset);
+                }
+                if matches!((raw.record_type, raw.flags), (9, 0))
+                    && let Ok(delta) = decode_delta(&raw.bytes, superblock.pointer_width, None)
+                {
+                    output.push(EventRecord::new(
+                        event.key,
+                        Provenance::Damaged,
+                        EventPayload::RegisterDelta(delta),
+                    ));
+                } else {
+                    output.push(rewrap(event.key, Provenance::Damaged, raw));
+                }
                 continue;
             }
             let decoded = decode_chunk_record(
@@ -159,8 +226,7 @@ pub(super) fn decode(
                             *item = (sequence, snapshot.clone());
                         }
                     }
-                    if matches!(&typed.payload, EventPayload::RegisterDelta(value) if !value.ancestry_reliable)
-                    {
+                    if typed.provenance == Provenance::Damaged {
                         damaged_sequences.push(sequence);
                         damaged_source_offsets.push(event.key.source_offset);
                     }
@@ -170,8 +236,7 @@ pub(super) fn decode(
                 Err(original) => {
                     if original.record_type == 9 {
                         state.registers = None;
-                        state.has_checkpoint = false;
-                        state.prefix_broken = true;
+                        state.prefix = PrefixState::Broken;
                         final_state.remove(&tid);
                     }
                     damaged_sequences.push(sequence);
@@ -211,21 +276,81 @@ pub(super) fn decode(
         &mut output,
         &mut damaged_sequences,
         &mut damaged_source_offsets,
+        superblock,
+        chunks,
         guard,
     )?;
     output = guarded_sort_events(output, guard)?;
     target_pcs = guarded_sort_u64(target_pcs, guard)?;
+    let final_registers = finalize_registers(final_state, guard)?;
     Ok(DecodedFlight {
         events: output,
-        final_registers: final_state
-            .into_iter()
-            .map(|(tid, (_, state))| (tid, state))
-            .collect(),
+        final_registers,
         target_pcs,
         termination,
         damaged_sequences,
         damaged_source_offsets,
     })
+}
+
+fn initialize_states(
+    count: usize,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<ChunkState>, ProviderError> {
+    let mut states = reserved_vec(count, "Flight chunk-state allocation failed")?;
+    for index in 0..count {
+        if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        states.push(ChunkState::default());
+    }
+    Ok(states)
+}
+
+fn finalize_registers(
+    states: HashMap<u32, (u64, RegisterSnapshot)>,
+    guard: &dyn WorkGuard,
+) -> Result<HashMap<u32, RegisterSnapshot>, ProviderError> {
+    let resident_bytes = states
+        .len()
+        .checked_mul(std::mem::size_of::<(u32, RegisterSnapshot)>())
+        .and_then(|bytes| bytes.checked_mul(4))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight final-register size overflow"))?;
+    guard.consume(WorkDelta {
+        nodes: states.len() as u64,
+        resident_bytes,
+        ..WorkDelta::default()
+    })?;
+    let mut output = HashMap::new();
+    output
+        .try_reserve(states.len())
+        .map_err(|_| allocation_error("Flight final-register allocation failed"))?;
+    for (index, (tid, (_, state))) in states.into_iter().enumerate() {
+        if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        output.insert(tid, state);
+    }
+    Ok(output)
+}
+
+fn reserved_vec<T>(capacity: usize, message: &'static str) -> Result<Vec<T>, ProviderError> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| allocation_error(message))?;
+    Ok(output)
+}
+
+fn allocation_error(message: &'static str) -> ProviderError {
+    ProviderError::new(
+        "source.flight.allocation",
+        "flight.events",
+        None,
+        false,
+        message,
+    )
 }
 
 fn record_prefix_damage(
@@ -259,19 +384,12 @@ fn decode_chunk_record(
         record_ordinal: Some(key.record_ordinal),
     };
     let tid = identity.tid;
-    if !state.has_checkpoint && !matches!((raw.record_type, raw.flags), (9, 0 | 1)) {
-        state.prefix_broken = true;
-        return Err(raw);
-    }
-    if raw.record_type == 9 && raw.flags == 1 && (state.prefix_broken || state.has_checkpoint) {
-        return Err(raw);
-    }
     let result = match (raw.record_type, raw.flags) {
         (9, 1) => decode_checkpoint(&raw.bytes, superblock.pointer_width)
             .map(|(checkpoint, snapshot)| {
                 push_pc(target_pcs, snapshot.value(RegisterSlot::Pc).unwrap_or(0));
                 state.registers = Some(snapshot);
-                state.has_checkpoint = true;
+                state.prefix = PrefixState::Ready;
                 EventPayload::RegisterCheckpoint(checkpoint)
             })
             .map_err(|_| payload_error(coordinate, "invalid register checkpoint")),
@@ -281,9 +399,6 @@ fn decode_chunk_record(
             state.registers.as_mut(),
         )
         .map(|delta| {
-            if !state.has_checkpoint {
-                state.prefix_broken = true;
-            }
             if let Some(snapshot) = &state.registers {
                 push_pc(target_pcs, snapshot.value(RegisterSlot::Pc).unwrap_or(0));
             }

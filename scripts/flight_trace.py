@@ -82,13 +82,14 @@ class FlightEvent:
     tid: int
     kind: str
     data: dict[str, object]
+    source_offset: int | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class FlightThread:
     tid: int
     events: tuple[FlightEvent, ...]
-    registers: FlightRegisters
+    registers: FlightRegisters | None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -136,6 +137,7 @@ class _WireRecord:
     flags: int
     sequence: int
     payload: bytes
+    source_offset: int
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -150,6 +152,7 @@ class _FragmentValue:
     count: int
     fixed: tuple[str, ...]
     detail: bytes
+    source_offset: int
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -377,7 +380,7 @@ def _valid_flags(kind: int, flags: int) -> bool:
     return flags == 0
 
 
-def _decode_wire_record(data: bytes, offset: int, generation: int, *,
+def _decode_wire_record(data: bytes, offset: int, generation: int, base_offset: int, *,
                         active: bool) -> tuple[_WireRecord, int] | None:
     remaining = len(data) - offset
     if remaining < RECORD_HEADER_BYTES:
@@ -404,18 +407,19 @@ def _decode_wire_record(data: bytes, offset: int, generation: int, *,
         raise FlightTraceError("record has zero global sequence")
     if any(data[offset + total:offset + storage]):
         raise FlightTraceError("nonzero record alignment padding")
-    return _WireRecord(kind, flags, sequence, payload), offset + storage
+    return _WireRecord(kind, flags, sequence, payload, base_offset + offset), offset + storage
 
 
 def _raise(message: str):
     raise FlightTraceError(message)
 
 
-def _scan_chunk_data(data: bytes, generation: int, *, active: bool) -> list[_WireRecord]:
+def _scan_chunk_data(data: bytes, generation: int, base_offset: int, *,
+                     active: bool) -> list[_WireRecord]:
     records = []
     offset = 0
     while offset < len(data):
-        decoded = _decode_wire_record(data, offset, generation, active=active)
+        decoded = _decode_wire_record(data, offset, generation, base_offset, active=active)
         if decoded is None:
             break
         record, offset = decoded
@@ -631,18 +635,19 @@ def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
             cursor.finish()
             events.append(FlightEvent(record.sequence, tid, "register_delta", {
                 "changed": changed, "pc": values[32], "sp": values[31], "nzcv": values[33],
-            }))
+            }, record.source_offset))
             continue
         if record.kind == 4:
             data = _instruction_event(record.payload, definitions, module_base,
                                       pointer_maximum)
             data.update({"scene": scene, "target_offset": target_offset})
-            events.append(FlightEvent(record.sequence, tid, "instruction", data))
+            events.append(FlightEvent(record.sequence, tid, "instruction", data,
+                                      record.source_offset))
             continue
         if record.kind == 5:
             events.append(FlightEvent(record.sequence, tid, "memory",
                                       _memory_event(record.payload, module_base,
-                                                    pointer_maximum)))
+                                                    pointer_maximum), record.source_offset))
             continue
         if record.kind in (6, 7, 8):
             field_count = 3 if record.kind == 6 else 2
@@ -666,7 +671,7 @@ def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
                 fixed = tuple(_utf8(item, "event field") for item in fixed_raw)
                 fragments.append(_FragmentValue(
                     record.sequence, tid, chunk_index, record.kind, event_id,
-                    total, index, count, fixed, raw_fields[-1]
+                    total, index, count, fixed, raw_fields[-1], record.source_offset
                 ))
                 continue
             if record.flags != 0 or len(record.payload) != field_count * 4:
@@ -682,11 +687,19 @@ def _decode_chunk(records: list[_WireRecord], tid: int, chunk_index: int,
                 data = {"category": fields[0], "name": fields[1], "detail": fields[2]}
             else:
                 data = {"name": fields[0], "detail": fields[1]}
-            events.append(FlightEvent(record.sequence, tid, RECORD_NAMES[record.kind], data))
+            events.append(FlightEvent(record.sequence, tid, RECORD_NAMES[record.kind], data,
+                                      record.source_offset))
             continue
-        events.append(FlightEvent(record.sequence, tid, RECORD_NAMES[record.kind], {
-            "payload_hex": record.payload.hex(),
-        }))
+        data = {"payload_hex": record.payload.hex()}
+        if ((record.kind == 2 and
+             (len(record.payload) != 24 or
+              struct.unpack_from("<I", record.payload, 4)[0] != tid)) or
+                (record.kind == 3 and
+                 (len(record.payload) != 4 or
+                  struct.unpack("<I", record.payload)[0] != tid))):
+            data["typed_damage"] = True
+        events.append(FlightEvent(record.sequence, tid, RECORD_NAMES[record.kind], data,
+                                  record.source_offset))
     return FlightRegisters.from_values(values), records[-1].sequence, checkpoint_pc
 
 
@@ -731,8 +744,11 @@ def _decode_fragments(
         else:
             data = {"name": first.fixed[0], "detail": detail}
         data["fragment_sequences"] = [by_index[index].sequence for index in range(first.count)]
+        contributors = sorted(values, key=lambda item: item.source_offset)
+        data["fragment_source_offsets"] = [item.source_offset for item in contributors]
         events.append(FlightEvent(max(item.sequence for item in values), first.tid,
-                                  RECORD_NAMES[kind], data))
+                                  RECORD_NAMES[kind], data,
+                                  contributors[0].source_offset))
     return events, incomplete
 
 
@@ -751,7 +767,7 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
             cells.append(slot[EMERGENCY_RECORD_BYTES:])
         candidates = []
         invalid_committed = []
-        for cell in cells:
+        for cell_index, cell in enumerate(cells):
             if not any(cell):
                 continue
             values = EMERGENCY_RECORD.unpack(cell)
@@ -776,7 +792,10 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
                     cell_checksum not in {_fnv32(logical), _fnv32(legacy_logical)}):
                 invalid_committed.append(cell_version)
                 continue
-            candidates.append((cell_version, values))
+            cell_offset = (superblock.emergency_offset +
+                           index * superblock.emergency_record_bytes +
+                           cell_index * EMERGENCY_RECORD_BYTES)
+            candidates.append((cell_version, values, cell_offset))
         if not candidates:
             if invalid_committed:
                 raise FlightTraceError(
@@ -805,7 +824,7 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
                     (newer[0] == older[0] + 2 or pinned_pair)):
                 selected = [older, newer]
         pointer_maximum = (1 << (8 * superblock.pointer_width)) - 1
-        for _, values in selected:
+        for _, values, source_offset in selected:
             (kind, tid, sequence, pc, sp, fault, signal, code, published_flags,
              checksum, inverse, version) = values
             flags = published_flags & ~EMERGENCY_COMMITTED
@@ -823,7 +842,8 @@ def _parse_emergencies(source: BinaryIO, superblock: _Superblock) -> list[Flight
             if kind == 15:
                 data["reason_flags"] = flags
                 data["dropped_gap_count"] = code
-            events.append(FlightEvent(sequence, tid, RECORD_NAMES[kind], data))
+            events.append(FlightEvent(sequence, tid, RECORD_NAMES[kind], data,
+                                      source_offset))
     return events
 
 
@@ -873,6 +893,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     directories = _parse_directories(source, superblock)
     directory_by_tid = {entry.tid: entry for entry in directories}
     damage: list[str] = []
+    damage_details: list[dict[str, object]] = []
     stale_entries: list[int] = []
     events: list[FlightEvent] = []
     observed: set[int] = set()
@@ -880,7 +901,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     thread_state: dict[int, tuple[int, FlightRegisters]] = {}
     checkpoint_pcs: set[int] = set()
     chunk_headers: dict[int, tuple[int, int, int]] = {}
-    sealed_ranges: list[tuple[int, int]] = []
+    sealed_ranges: list[tuple[int, int, int]] = []
     decoded_chunks: list[_DecodedChunk] = []
     active_chunk_indexes: list[int] = []
 
@@ -907,16 +928,22 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             if (first == 0) != (last == 0) or (first != 0 and first > last):
                 raise FlightTraceError(f"invalid chunk sequence range at index {index}")
             if first != 0:
-                sealed_ranges.append((first, last))
+                sealed_ranges.append((first, last, offset))
             if committed > capacity or committed & 7:
                 raise FlightTraceError(f"invalid sealed chunk extent at index {index}")
             data = _read_at(source, offset + CHUNK_HEADER_BYTES, committed,
                             f"sealed chunk {index} data")
             if _fnv32(data) != checksum:
                 damage.append(f"sealed chunk {index} checksum mismatch")
+                damage_details.append({
+                    "class": "checksum", "source_offset": offset,
+                    "first_sequence": first, "last_sequence": last,
+                })
                 continue
             try:
-                records = _scan_chunk_data(data, generation, active=False)
+                records = _scan_chunk_data(data, generation,
+                                           offset + CHUNK_HEADER_BYTES,
+                                           active=False)
                 if len(records) != count:
                     raise FlightTraceError("sealed chunk record count mismatch")
                 if records:
@@ -926,14 +953,25 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                     raise FlightTraceError("empty sealed chunk has sequence endpoints")
             except FlightTraceError as error:
                 damage.append(f"sealed chunk {index}: {error}")
+                damage_details.append({
+                    "class": ("checksum" if "checksum" in str(error) else "incomplete"),
+                    "source_offset": offset,
+                    "first_sequence": first, "last_sequence": last,
+                })
                 continue
         else:
             data = _read_at(source, offset + CHUNK_HEADER_BYTES, capacity,
                             f"active chunk {index} data")
-            records = _scan_chunk_data(data, generation, active=True)
+            records = _scan_chunk_data(data, generation,
+                                       offset + CHUNK_HEADER_BYTES,
+                                       active=True)
         if not records:
             if state == 2:
                 damage.append(f"empty sealed chunk {index}")
+                damage_details.append({
+                    "class": "incomplete", "source_offset": offset,
+                    "first_sequence": first, "last_sequence": last,
+                })
             continue
         chunk_events: list[FlightEvent] = []
         chunk_fragments: list[_FragmentValue] = []
@@ -977,6 +1015,14 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
             sealed = {decoded.index for decoded in contributors}
             for index in sorted(sealed):
                 damage.append(f"sealed chunk {index}: {error}")
+                contributor = next(item for item in contributors if item.index == index)
+                damage_details.append({
+                    "class": "incomplete_logical",
+                    "source_offset": (superblock.chunk_offset +
+                                      index * superblock.chunk_bytes),
+                    "first_sequence": contributor.records[0].sequence,
+                    "last_sequence": contributor.records[-1].sequence,
+                })
             decoded_chunks = [
                 decoded for decoded in decoded_chunks if decoded.index not in sealed
             ]
@@ -1008,22 +1054,21 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     thread_events: dict[int, list[FlightEvent]] = {}
     for event in events:
         thread_events.setdefault(event.tid, []).append(event)
-    zero = FlightRegisters.from_values([0] * 34)
     threads = {
         tid: FlightThread(tid, tuple(thread_events.get(tid, ())),
-                          thread_state.get(tid, (0, zero))[1])
+                          (thread_state[tid][1] if tid in thread_state else None))
         for tid in sorted(set(thread_events) | set(thread_state))
     }
 
     range_starts = [entry.first for entry in directories if entry.first]
     range_ends = [entry.last for entry in directories if entry.last]
-    range_starts.extend(first for first, _ in sealed_ranges)
-    range_ends.extend(last for _, last in sealed_ranges)
+    range_starts.extend(first for first, _, _ in sealed_ranges)
+    range_ends.extend(last for _, last, _ in sealed_ranges)
     if observed:
         range_starts.append(min(observed))
         range_ends.append(max(observed))
-    lost = _missing_ranges(min(range_starts) if range_starts else 0,
-                           max(range_ends) if range_ends else 0, observed)
+    missing = _missing_ranges(min(range_starts) if range_starts else 0,
+                              max(range_ends) if range_ends else 0, observed)
     coverage = [event for event in events if event.kind == "coverage_gap"]
     signal_handler_intervals = []
     returned_begins = {
@@ -1086,16 +1131,33 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         "target_module": superblock.target,
         "pointer_width": superblock.pointer_width,
         "artifact_flags": superblock.flags,
+        "artifact_bytes": superblock.artifact_bytes,
+        "directory_offset": superblock.directory_offset,
+        "chunk_offset": superblock.chunk_offset,
+        "chunk_bytes": superblock.chunk_bytes,
         "complete": (superblock.flags == 0 and not damage and not coverage and
                      not incomplete_logical_events and not stale_entries),
+        "provider_complete": (superblock.flags == 0 and not damage and not coverage and
+                              not incomplete_logical_events and not stale_entries and
+                              not any(event.data.get("typed_damage") for event in events)),
         "termination": termination,
         "final_signal": next((event.data for event in reversed(events)
                               if event.kind == "signal"), None),
         "last_recorded_thread": last_recorded_thread,
         "target_pcs": target_pcs,
         "retained_sequences": _ranges(observed),
-        "lost_sequences": lost,
-        "overwritten_sequences": lost if not damage and not coverage else [],
+        "lost_sequences": missing,
+        "overwritten_sequences": missing if not damage and not coverage else [],
+        "provider_ranges": {
+            "lost": (missing if (not damage and (superblock.flags != 0 or coverage or
+                                                 incomplete_logical_events or stale_entries or
+                                                 unterminated_threads))
+                     else []),
+            "overwritten": (missing if not damage and not coverage and
+                             not incomplete_logical_events and not stale_entries and
+                             not unterminated_threads and superblock.flags == 0 else []),
+            "checksum": missing if damage else [],
+        },
         "coverage_gaps": [
             {"sequence": event.global_seq, "tid": event.tid, **event.data}
             for event in coverage
@@ -1105,6 +1167,56 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
         "unterminated_threads": unterminated_threads,
         "incomplete_logical_events": incomplete_logical_events,
         "recovery_damage": damage,
+        "damage_details": damage_details + [
+            {
+                "class": "incomplete_logical",
+                "source_offset": source_offset,
+                "first_sequence": sequence,
+                "last_sequence": sequence,
+            }
+            for item in incomplete_logical_events
+            for sequence in item["retained_fragment_sequences"]
+            for source_offset in [next(
+                fragment.source_offset
+                for decoded in decoded_chunks for fragment in decoded.fragments
+                if fragment.sequence == sequence
+            )]
+        ] + [
+            {
+                "class": "incomplete", "source_offset": event.source_offset,
+                "first_sequence": event.global_seq, "last_sequence": event.global_seq,
+            }
+            for event in events if event.data.get("typed_damage")
+        ],
+        "range_facts": [
+            {
+                "kind": "directory", "source_offset":
+                superblock.directory_offset + entry.index * DIRECTORY_ENTRY_BYTES,
+                "first_sequence": entry.first, "last_sequence": entry.last,
+            }
+            for entry in directories if entry.range_reliable and entry.first
+        ] + [
+            {
+                "kind": "chunk", "source_offset": offset,
+                "first_sequence": first, "last_sequence": last,
+            }
+            for first, last, offset in sealed_ranges
+        ],
+        "physical_records": [
+            {
+                "global_seq": record.sequence,
+                "tid": decoded.tid,
+                "kind": record.kind,
+                "flags": record.flags,
+                "payload_hex": record.payload.hex(),
+                "source_offset": record.source_offset,
+                "chunk_index": decoded.index,
+                "generation": chunk_headers[decoded.index][1],
+                "chunk_state": decoded.state,
+            }
+            for decoded in decoded_chunks
+            for record in decoded.records
+        ],
         "stale_directory_entries": stale_entries,
         "rotating_directory_entries": [entry.index for entry in directories
                                          if entry.state == 2],
@@ -1112,10 +1224,13 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                                          if not entry.range_reliable],
         "threads": {
             str(tid): {
-                "events": len(thread.events), "last_pc": thread.registers.pc,
+                "events": len(thread.events),
+                "last_pc": (thread.registers.pc if thread.registers is not None else None),
+                "registers_known": thread.registers is not None,
                 "retained_sequences": _ranges(observed_by_tid.get(tid, set())),
             }
             for tid, thread in threads.items()
         },
+        "projection_tids": sorted({entry.tid for entry in directories} | set(threads)),
     }
     return FlightRecovery(tuple(events), threads, summary)

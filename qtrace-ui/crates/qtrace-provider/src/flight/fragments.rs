@@ -9,6 +9,10 @@ use crate::{
 };
 
 use super::recovery::MERGED_TIMELINE_ID;
+use super::{
+    recovery::ChunkIdentity,
+    wire::{FLIGHT_CHUNK_HEADER_BYTES, Superblock},
+};
 
 pub(super) struct Fragment {
     key: EventKey,
@@ -86,12 +90,15 @@ pub(super) fn decode(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finish(
     fragments: Vec<Fragment>,
     artifact: crate::ArtifactDigest,
     output: &mut Vec<EventRecord>,
     damaged: &mut Vec<u64>,
     damaged_offsets: &mut Vec<u64>,
+    superblock: &Superblock,
+    chunks: &[Option<ChunkIdentity>],
     guard: &dyn WorkGuard,
 ) -> Result<(), ProviderError> {
     let mut groups: BTreeMap<(u32, u64, u16), Vec<Fragment>> = BTreeMap::new();
@@ -143,8 +150,7 @@ pub(super) fn finish(
             stable &= item.total == expected_total
                 && item.count == expected_count
                 && item.fixed == expected_fixed
-                && item.chunk_index < u32::MAX
-                && item.generation > 0;
+                && contributor_matches(&item, tid, superblock, chunks);
             match ordered.get_mut(item.index as usize) {
                 Some(slot) if slot.is_none() => *slot = Some(item),
                 _ => stable = false,
@@ -290,6 +296,38 @@ pub(super) fn finish(
     Ok(())
 }
 
+fn contributor_matches(
+    item: &Fragment,
+    tid: u32,
+    superblock: &Superblock,
+    chunks: &[Option<ChunkIdentity>],
+) -> bool {
+    let Some(identity) = usize::try_from(item.chunk_index)
+        .ok()
+        .and_then(|index| chunks.get(index))
+        .and_then(Option::as_ref)
+    else {
+        return false;
+    };
+    let Some(chunk_start) = u64::from(item.chunk_index)
+        .checked_mul(u64::from(superblock.chunk_bytes))
+        .and_then(|relative| superblock.chunks.offset.checked_add(relative))
+    else {
+        return false;
+    };
+    let Some(data_start) = chunk_start.checked_add(FLIGHT_CHUNK_HEADER_BYTES as u64) else {
+        return false;
+    };
+    let Some(chunk_end) = chunk_start.checked_add(u64::from(superblock.chunk_bytes)) else {
+        return false;
+    };
+    identity.tid == tid
+        && identity.generation == item.generation
+        && item.key.tid == Some(tid)
+        && item.key.source_offset >= data_start
+        && item.key.source_offset < chunk_end
+}
+
 fn mark_damaged(
     evidence: &[(Option<u64>, u64)],
     damaged: &mut Vec<u64>,
@@ -326,7 +364,67 @@ fn fragment_allocation_error() -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArtifactDigest, TimelineId};
+    use crate::{ArtifactDigest, OperationAbort, TimelineId};
+
+    struct AllowAll;
+
+    impl WorkGuard for AllowAll {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+            Ok(())
+        }
+    }
+
+    fn test_superblock() -> Superblock {
+        Superblock {
+            pointer_width: 8,
+            run_id: 1,
+            pid: 1,
+            module_generation: 1,
+            target: [0; 128],
+            target_len: 0,
+            artifact_bytes: 16_384,
+            directory: super::super::wire::Region {
+                offset: 4096,
+                end: 4160,
+            },
+            directory_entries: 1,
+            chunks: super::super::wire::Region {
+                offset: 8192,
+                end: 12_288,
+            },
+            chunk_bytes: 2048,
+            chunk_count: 2,
+            emergencies: super::super::wire::Region {
+                offset: 4160,
+                end: 4288,
+            },
+            emergency_count: 1,
+            flags: 0,
+        }
+    }
+
+    fn fragment(index: u16, chunk_index: u32, generation: u32, offset: u64) -> Fragment {
+        Fragment {
+            key: EventKey::new(
+                ArtifactDigest::new([7; 32]),
+                TimelineId(0),
+                u64::from(index),
+                offset,
+                Some(u64::from(index) + 1),
+                Some(77),
+            ),
+            provenance: Provenance::Captured,
+            kind: 7,
+            event_id: 9,
+            total: 2,
+            index,
+            count: 2,
+            fixed: vec![Arc::from(&b"rule"[..])],
+            detail: Arc::from(&[b'a' + index as u8][..]),
+            chunk_index,
+            generation,
+        }
+    }
 
     #[test]
     fn repeated_fragment_references_share_string_storage() {
@@ -368,5 +466,56 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first.detail, &shared));
         assert!(Arc::ptr_eq(&second.detail, &shared));
+    }
+
+    #[test]
+    fn cross_chunk_group_requires_each_contributors_real_span_and_generation() {
+        let superblock = test_superblock();
+        let chunks = [
+            Some(ChunkIdentity {
+                tid: 77,
+                generation: 3,
+                state: 2,
+            }),
+            Some(ChunkIdentity {
+                tid: 77,
+                generation: 4,
+                state: 2,
+            }),
+        ];
+        let valid = vec![fragment(0, 0, 3, 8192 + 64), fragment(1, 1, 4, 10_240 + 64)];
+        let mut output = Vec::new();
+        finish(
+            valid,
+            ArtifactDigest::new([7; 32]),
+            &mut output,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &superblock,
+            &chunks,
+            &AllowAll,
+        )
+        .expect("valid cross-chunk group");
+        assert!(matches!(output[0].payload, EventPayload::SemanticRule(_)));
+
+        for forged in [fragment(1, 1, 3, 10_240 + 64), fragment(1, 1, 4, 8192 + 64)] {
+            let mut output = Vec::new();
+            let mut damaged = Vec::new();
+            let mut offsets = Vec::new();
+            finish(
+                vec![fragment(0, 0, 3, 8192 + 64), forged],
+                ArtifactDigest::new([7; 32]),
+                &mut output,
+                &mut damaged,
+                &mut offsets,
+                &superblock,
+                &chunks,
+                &AllowAll,
+            )
+            .expect("reject forged contributor as damage");
+            assert!(output.is_empty());
+            assert_eq!(damaged, [1, 2]);
+            assert_eq!(offsets.len(), 2);
+        }
     }
 }

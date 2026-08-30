@@ -94,12 +94,16 @@ def _qtrb(path: Path) -> dict[str, object]:
 def _flight(path: Path) -> dict[str, object]:
     with _source(path) as source:
         recovered = recover_flight(source)
+    threads = {
+        str(tid): (dataclasses.asdict(thread.registers)
+                   if thread.registers is not None else None)
+        for tid, thread in sorted(recovered.threads.items())
+    }
+    for tid in recovered.summary["projection_tids"]:
+        threads.setdefault(str(tid), None)
     return {
         "events": [dataclasses.asdict(event) for event in recovered.merged],
-        "threads": {
-            str(tid): dataclasses.asdict(thread.registers)
-            for tid, thread in sorted(recovered.threads.items())
-        },
+        "threads": threads,
         "summary": recovered.summary,
     }
 
