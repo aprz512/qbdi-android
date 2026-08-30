@@ -2,8 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use qtrace_provider::{
     ArtifactDigest, ByteSource, CaptureBytes, EventPayload, MemoryDirection, OpenMode,
-    PcRelativeKind, ProviderError, QtrbProvider, SourceIdentity, TerminationKind, TraceProfile,
-    TraceProvider, WorkDelta, WorkGuard,
+    PcRelativeKind, ProviderError, QtrbProvider, SourceCoordinate, SourceIdentity, TerminationKind,
+    TraceProfile, TraceProvider, WorkDelta, WorkGuard,
 };
 
 struct AllowAll;
@@ -323,4 +323,60 @@ fn chunk_metadata_utf8_is_validated_after_the_complete_group() {
 
     let error = collect_bytes(bytes, OpenMode::RecoverablePartial).unwrap_err();
     assert_eq!(error.code(), "source.incomplete_fragment");
+}
+
+#[test]
+fn invalid_register_definition_preserves_record_coordinate() {
+    let mut bytes = partial_prefix(2, 1);
+    let offset = bytes.len() as u64;
+    let mut definition = Vec::new();
+    definition.extend_from_slice(&123_u32.to_le_bytes());
+    definition.extend_from_slice(&0xaa_u32.to_le_bytes());
+    definition.extend_from_slice(&1_u64.to_le_bytes());
+    definition.extend_from_slice(&0_u64.to_le_bytes());
+    definition.extend_from_slice(&0_i64.to_le_bytes());
+    definition.extend_from_slice(&0_u32.to_le_bytes());
+    definition.extend_from_slice(&[0, 0, 0, 0]);
+    definition.extend_from_slice(&wire_string(b"MOV"));
+    definition.extend_from_slice(&wire_string(b"x0, x0"));
+    definition.extend_from_slice(&wire_string(b""));
+    definition.push(0);
+    definition.extend_from_slice(&wire_string(b"X0"));
+    bytes.extend_from_slice(&record(3, 0, &definition));
+
+    let error = collect_bytes(bytes, OpenMode::RecoverablePartial).unwrap_err();
+    assert_eq!(error.code(), "source.invalid_payload");
+    assert_eq!(
+        error.source(),
+        Some(SourceCoordinate {
+            offset,
+            record_ordinal: Some(2),
+        })
+    );
+}
+
+#[test]
+fn invalid_memory_capture_state_preserves_record_coordinate() {
+    let mut bytes = partial_prefix(2, 1);
+    let offset = bytes.len() as u64;
+    let mut memory = Vec::new();
+    memory.extend_from_slice(&1_u32.to_le_bytes());
+    memory.extend_from_slice(&0x20_u64.to_le_bytes());
+    memory.extend_from_slice(&[1, 1]);
+    memory.extend_from_slice(&0_u16.to_le_bytes());
+    memory.extend_from_slice(&0x2000_u64.to_le_bytes());
+    memory.extend_from_slice(&4_u32.to_le_bytes());
+    memory.extend_from_slice(&0_u64.to_le_bytes());
+    memory.extend_from_slice(&[3, 0, 0, 0]);
+    bytes.extend_from_slice(&record(5, 0, &memory));
+
+    let error = collect_bytes(bytes, OpenMode::RecoverablePartial).unwrap_err();
+    assert_eq!(error.code(), "source.invalid_payload");
+    assert_eq!(
+        error.source(),
+        Some(SourceCoordinate {
+            offset,
+            record_ordinal: Some(2),
+        })
+    );
 }

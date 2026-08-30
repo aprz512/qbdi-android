@@ -798,8 +798,13 @@ impl QtrbEventCursor {
         let mnemonic = cursor.bounded_utf8(MAX_MNEMONIC_BYTES, "mnemonic")?;
         let operands = cursor.bounded_utf8(MAX_OPERANDS_BYTES, "operands")?;
         let disassembly = cursor.bounded_utf8(MAX_DISASSEMBLY_BYTES, "disassembly")?;
-        let reads = decode_registers(&mut cursor, read_mask, "read register")?;
-        let writes = decode_registers(&mut cursor, write_mask, "write register")?;
+        let reads = decode_registers(&mut cursor, read_mask, "read register", coordinate(&record))?;
+        let writes = decode_registers(
+            &mut cursor,
+            write_mask,
+            "write register",
+            coordinate(&record),
+        )?;
         let mut memory_operands = Vec::with_capacity(memory_count);
         for _ in 0..memory_count {
             let operand = MemoryOperandWire {
@@ -994,8 +999,8 @@ impl QtrbEventCursor {
                 "invalid memory metadata availability",
             ));
         }
-        let before = decode_memory_state(&mut cursor, "before memory")?;
-        let after = decode_memory_state(&mut cursor, "after memory")?;
+        let before = decode_memory_state(&mut cursor, "before memory", coordinate(&record))?;
+        let after = decode_memory_state(&mut cursor, "after memory", coordinate(&record))?;
         cursor.finish()?;
         Ok(self.event(
             &record,
@@ -1443,6 +1448,7 @@ fn decode_registers(
     cursor: &mut PayloadCursor<'_>,
     mask: u64,
     field: &'static str,
+    coordinate: SourceCoordinate,
 ) -> Result<Vec<RegisterWire>, ProviderError> {
     let count = mask.count_ones() as usize;
     let mut registers = Vec::with_capacity(count);
@@ -1456,7 +1462,7 @@ fn decode_registers(
             return Err(ProviderError::new(
                 "source.invalid_payload",
                 "qtrb.instruction_definition",
-                None,
+                Some(coordinate),
                 false,
                 format!("invalid {field} definition"),
             ));
@@ -1559,6 +1565,7 @@ fn decode_bounded_raw(
 fn decode_memory_state(
     cursor: &mut PayloadCursor<'_>,
     field: &'static str,
+    coordinate: SourceCoordinate,
 ) -> Result<CaptureBytes, ProviderError> {
     let state = cursor.u8()?;
     let count = usize::from(cursor.u8()?);
@@ -1566,7 +1573,7 @@ fn decode_memory_state(
         return Err(ProviderError::new(
             "source.invalid_payload",
             "qtrb.memory",
-            None,
+            Some(coordinate),
             false,
             format!("{field} exceeds capture maximum"),
         ));
@@ -1576,7 +1583,7 @@ fn decode_memory_state(
         return Err(ProviderError::new(
             "source.invalid_payload",
             "qtrb.memory",
-            None,
+            Some(coordinate),
             false,
             format!("invalid {field} state"),
         ));

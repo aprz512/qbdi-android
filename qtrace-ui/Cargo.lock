@@ -2392,6 +2392,7 @@ dependencies = [
  "lz4_flex",
  "serde",
  "serde_json",
+ "twox-hash",
 ]
 
 [[package]]

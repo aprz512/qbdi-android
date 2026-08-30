@@ -9,6 +9,7 @@ license.workspace = true
 hex.workspace = true
 lz4_flex = { version = "0.11", features = ["frame"] }
 serde.workspace = true
+twox-hash.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
