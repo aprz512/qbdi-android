@@ -13,3 +13,9 @@ qtrace-acceptance-failures/
 __pycache__/
 *.py[cod]
 local.properties
+qtrace-ui/target/
+qtrace-ui/src-web/node_modules/
+qtrace-ui/src-web/dist/
+qtrace-ui/src-web/test-results/
+qtrace-ui/src-web/playwright-report/
+qtrace-ui-performance-evidence/

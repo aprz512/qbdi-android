@@ -1,0 +1,9 @@
+[package]
+name = "qtrace-service"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+qtrace-analysis = { path = "../qtrace-analysis", version = "0.1.0" }
