@@ -7,8 +7,10 @@
         "outcome": "success"
       },
       "format": "ELF",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "elf/minimal-aarch64.elf",
+      "role": "standalone",
+      "session": null,
       "sha256": "1937c7eca9fda7e3fdef82fc7a1785b6205f5fcdc2a070c9664d2c634556d4a0",
       "version": "ELF64/AArch64"
     },
@@ -19,8 +21,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-active.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "ffb55cb8e4efb8b3adcf8004bae83a909d3a1006603d68f9edc4451b9b1e8485",
       "version": "2"
     },
@@ -31,8 +35,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-checkpoint-delta.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "ffb55cb8e4efb8b3adcf8004bae83a909d3a1006603d68f9edc4451b9b1e8485",
       "version": "2"
     },
@@ -43,8 +49,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-checksum-damaged.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "39db7f0d6d24413ffa09bd029214066be601bb00c8bad91778c724e036ce0f71",
       "version": "2"
     },
@@ -55,8 +63,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-complete.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "79685edd9d6de367e4a99c2c3b97d56fea85e2cb15ee2f08d84a5bc56fb4d62c",
       "version": "2"
     },
@@ -67,8 +77,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-coverage-gap.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "f72544f2072058e8a44266d533e1c86cd0606f8b2dbe6b22d02ae548771d5b92",
       "version": "2"
     },
@@ -79,8 +91,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-incomplete-fragment.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "7ffd740b8f4c37cf0fc34fed242dcd5cf5f34a3d00dec0b56a92e1d2fc3271bf",
       "version": "2"
     },
@@ -91,8 +105,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-overwritten.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "c5b910ad0cd1032ebf378638d72efc6a937a279c81ec78f8b085a01deaeebd27",
       "version": "2"
     },
@@ -103,8 +119,10 @@
         "outcome": "success"
       },
       "format": "Flight",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "flight/v2-stale-directory.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "9d046a54da3f96fb0d3a60543b3f9bed74625391c964b4d146f5753f803e891b",
       "version": "2"
     },
@@ -116,8 +134,10 @@
         "outcome": "error"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/malformed/bad-header.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "50c78ef2f1561f02515ae1daaa42a1864973c8abaa9f35303dc01e4ddc8be0ef",
       "version": "unknown"
     },
@@ -129,8 +149,10 @@
         "outcome": "error"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/malformed/oversized-record.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "b451361031423c3c3efda446f3dd25b69ebf5341b6620816c1c649785a44cea3",
       "version": "1.2"
     },
@@ -142,8 +164,10 @@
         "outcome": "error"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/malformed/record-after-terminal.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "c90fa8bb68b2dbd1e5c5fc1d30357edbbab18f6b006c0c3b77e6c3ac2d1480d1",
       "version": "1.2"
     },
@@ -155,8 +179,10 @@
         "outcome": "error"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/malformed/sequence-gap.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "0bea81dce5d651215a1f396dd5ead3b542e8c8229da44b0f5cbf22ddfa7ba842",
       "version": "1.2"
     },
@@ -168,8 +194,10 @@
         "outcome": "error"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/malformed/truncated-payload.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "a8fc6dcaf8aa9c6e9a37e82d90a80bdf060526135f278e603386f71b27f76aa7",
       "version": "1.2"
     },
@@ -181,8 +209,10 @@
         "outcome": "error"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/malformed/undefined-metadata.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "68a8f23e281942ca68d24809dc6f49ab0dff11f3220e193d5571d5ec01693530",
       "version": "1.2"
     },
@@ -194,8 +224,10 @@
         "outcome": "error"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/malformed/unsupported-feature.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "5d058934d6880136d23cf62d004902014a038a4ed2ec637407972b42b627c51b",
       "version": "1.2"
     },
@@ -206,8 +238,10 @@
         "outcome": "success"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/v1.0-completed.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "684d6c52565b3760018f90fdee794c6e9ec914d4f8d3e51c2c69ade9b116795e",
       "version": "1.0"
     },
@@ -218,8 +252,10 @@
         "outcome": "success"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/v1.1-chunked.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "6ed34407b30ca50fe94a49856e1763950c7dc55ad08ea980e7a7722f44e15f8f",
       "version": "1.1"
     },
@@ -230,8 +266,10 @@
         "outcome": "success"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/v1.2-completed.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "ce2ed1947dbde81671ecb4524c8b0698240f3f1b3200707961656ad2a121337a",
       "version": "1.2"
     },
@@ -242,8 +280,10 @@
         "outcome": "success"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/v1.2-partial.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "16c121f2f2ac5b51374ba2f2fb3ffc128953e8a5fd8e85f40222f75d43a0b0ce",
       "version": "1.2"
     },
@@ -254,70 +294,83 @@
         "outcome": "success"
       },
       "format": "QTRB",
-      "generator_schema": 1,
+      "generator_schema": 2,
       "path": "qtrb/v1.2-stopped.bin",
+      "role": "standalone",
+      "session": null,
       "sha256": "10a22d075bb4cb41454393b56bb262c007c09028f5c78f2dcc5d6c904d81a129",
       "version": "1.2"
     },
     {
       "bytes": 529,
       "expected": {
-        "class": "session.one-invalid-artifact",
-        "outcome": "success"
+        "class": "qtrb.malformed-truncated-payload",
+        "error": "truncated record payload",
+        "outcome": "error"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "QTRB",
+      "generator_schema": 2,
       "path": "sessions/one-invalid-artifact/artifacts/broken.trace.bin",
+      "role": "session-artifact",
+      "session": "one-invalid-artifact",
       "sha256": "a8fc6dcaf8aa9c6e9a37e82d90a80bdf060526135f278e603386f71b27f76aa7",
-      "version": "1"
+      "version": "1.2"
     },
     {
       "bytes": 10240,
       "expected": {
-        "class": "session.one-invalid-artifact",
+        "class": "flight.v2-complete",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "Flight",
+      "generator_schema": 2,
       "path": "sessions/one-invalid-artifact/artifacts/good.flight.bin",
+      "role": "session-artifact",
+      "session": "one-invalid-artifact",
       "sha256": "79685edd9d6de367e4a99c2c3b97d56fea85e2cb15ee2f08d84a5bc56fb4d62c",
-      "version": "1"
+      "version": "2"
     },
     {
       "bytes": 530,
       "expected": {
-        "class": "session.one-invalid-artifact",
+        "class": "qtrb.v1.2-completed",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "QTRB",
+      "generator_schema": 2,
       "path": "sessions/one-invalid-artifact/artifacts/good.trace.bin",
+      "role": "session-artifact",
+      "session": "one-invalid-artifact",
       "sha256": "ce2ed1947dbde81671ecb4524c8b0698240f3f1b3200707961656ad2a121337a",
-      "version": "1"
+      "version": "1.2"
     },
     {
       "bytes": 96,
       "expected": {
-        "class": "session.one-invalid-artifact",
+        "class": "json.session-support",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/one-invalid-artifact/device.json",
+      "role": "session-support",
+      "session": "one-invalid-artifact",
       "sha256": "8b0c1f7dd0357c558397b1af54cc10757af672a5c0c8555ebbc03508cab14db4",
-      "version": "1"
+      "version": "device/1"
     },
     {
       "bytes": 3,
       "expected": {
-        "class": "session.one-invalid-artifact",
+        "class": "json.session-support",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/one-invalid-artifact/effective-config.json",
+      "role": "session-support",
+      "session": "one-invalid-artifact",
       "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
-      "version": "1"
+      "version": "effective-config/1"
     },
     {
       "bytes": 2251,
@@ -325,23 +378,27 @@
         "class": "session.one-invalid-artifact",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/one-invalid-artifact/report.json",
+      "role": "session-root",
+      "session": "one-invalid-artifact",
       "sha256": "d90a1e483fc50550e16b1d61c0b4a709c872b7e18aae6f5b23889bc960258fc3",
-      "version": "1"
+      "version": "SessionReport/1"
     },
     {
       "bytes": 145,
       "expected": {
-        "class": "session.one-invalid-artifact",
+        "class": "json.session-support",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/one-invalid-artifact/session.json",
+      "role": "session-support",
+      "session": "one-invalid-artifact",
       "sha256": "3bb439676127c586c9b6c1a1d5106e91f09c1331a2f6de2e6b3f4784542a6c26",
-      "version": "1"
+      "version": "session/1"
     },
     {
       "bytes": 1138,
@@ -350,71 +407,83 @@
         "error": "session.path_escape",
         "outcome": "error"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/path-escape/report.json",
+      "role": "session-root",
+      "session": "path-escape",
       "sha256": "327ab8c474e67918934ae631a5751ce28e9afdacb363875139ed15e8069b286b",
-      "version": "1"
+      "version": "SessionReport/1"
     },
     {
       "bytes": 10240,
       "expected": {
-        "class": "session.valid-mixed",
+        "class": "flight.v2-complete",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "Flight",
+      "generator_schema": 2,
       "path": "sessions/valid-mixed/artifacts/capture.flight.bin",
+      "role": "session-artifact",
+      "session": "valid-mixed",
       "sha256": "79685edd9d6de367e4a99c2c3b97d56fea85e2cb15ee2f08d84a5bc56fb4d62c",
-      "version": "1"
+      "version": "2"
     },
     {
       "bytes": 530,
       "expected": {
-        "class": "session.valid-mixed",
+        "class": "qtrb.v1.2-completed",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "QTRB",
+      "generator_schema": 2,
       "path": "sessions/valid-mixed/artifacts/main.trace.bin",
+      "role": "session-artifact",
+      "session": "valid-mixed",
       "sha256": "ce2ed1947dbde81671ecb4524c8b0698240f3f1b3200707961656ad2a121337a",
-      "version": "1"
+      "version": "1.2"
     },
     {
       "bytes": 517,
       "expected": {
-        "class": "session.valid-mixed",
+        "class": "qtrb.v1.0-completed",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "QTRB",
+      "generator_schema": 2,
       "path": "sessions/valid-mixed/artifacts/worker.trace.bin",
+      "role": "session-artifact",
+      "session": "valid-mixed",
       "sha256": "684d6c52565b3760018f90fdee794c6e9ec914d4f8d3e51c2c69ade9b116795e",
-      "version": "1"
+      "version": "1.0"
     },
     {
       "bytes": 96,
       "expected": {
-        "class": "session.valid-mixed",
+        "class": "json.session-support",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/valid-mixed/device.json",
+      "role": "session-support",
+      "session": "valid-mixed",
       "sha256": "8b0c1f7dd0357c558397b1af54cc10757af672a5c0c8555ebbc03508cab14db4",
-      "version": "1"
+      "version": "device/1"
     },
     {
       "bytes": 3,
       "expected": {
-        "class": "session.valid-mixed",
+        "class": "json.session-support",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/valid-mixed/effective-config.json",
+      "role": "session-support",
+      "session": "valid-mixed",
       "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
-      "version": "1"
+      "version": "effective-config/1"
     },
     {
       "bytes": 2260,
@@ -422,24 +491,28 @@
         "class": "session.valid-mixed",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/valid-mixed/report.json",
+      "role": "session-root",
+      "session": "valid-mixed",
       "sha256": "0f831b6483b6d5f6f00bc6dba1d1eea7ab3069bf092f51c91cc79870602171ae",
-      "version": "1"
+      "version": "SessionReport/1"
     },
     {
       "bytes": 145,
       "expected": {
-        "class": "session.valid-mixed",
+        "class": "json.session-support",
         "outcome": "success"
       },
-      "format": "qtrace-session",
-      "generator_schema": 1,
+      "format": "JSON",
+      "generator_schema": 2,
       "path": "sessions/valid-mixed/session.json",
+      "role": "session-support",
+      "session": "valid-mixed",
       "sha256": "7eae29a72ba95c83ef1ea561d8b98bd40e87fc696c185e56cc642e30d9e371d7",
-      "version": "1"
+      "version": "session/1"
     }
   ],
-  "generator_schema": 1
+  "generator_schema": 2
 }

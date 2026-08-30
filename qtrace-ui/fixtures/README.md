@@ -9,6 +9,9 @@ Do not edit binary fixtures or `manifest.json` by hand.
 - Every corpus member is capped at 4 MiB. The differential oracle separately caps inputs at
   8 MiB.
 
-`manifest.json` records each path, digest, byte length, source format/version, expected outcome
-class, and generator schema. QTRB and Flight bytes are composed with the independent builders in
-`scripts/tests/test_trace_binary.py` and `scripts/tests/test_flight_trace.py`.
+`manifest.json` records each path, digest, byte length, native format/version, expected outcome
+class, containment role, owning session (when applicable), and generator schema. Session artifact
+members retain their native QTRB or Flight decoder contract; session roots independently describe
+the bundle result. JSON reports and support documents name their schema in `version`. QTRB and
+Flight bytes are composed with the independent builders in `scripts/tests/test_trace_binary.py`
+and `scripts/tests/test_flight_trace.py`.

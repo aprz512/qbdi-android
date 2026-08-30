@@ -50,7 +50,7 @@ from scripts.tests.test_trace_binary import (  # noqa: E402
 
 
 FIXTURE_ROOT = ROOT / "qtrace-ui" / "fixtures"
-GENERATOR_SCHEMA = 1
+GENERATOR_SCHEMA = 2
 MAX_FIXTURE_BYTES = 4 * 1024 * 1024
 FLIGHT_V2 = 2
 FLIGHT_EMERGENCY_SLOT_BYTES = 128
@@ -65,6 +65,8 @@ class Fixture:
     fixture_class: str
     outcome: str = "success"
     error: str | None = None
+    role: str = "standalone"
+    session: str | None = None
 
 
 def _qtrb_v12(data: bytes) -> bytes:
@@ -386,39 +388,51 @@ def _session_report(session_id: str,
 
 
 def _session_files(directory: str, session_id: str,
-                   artifacts: dict[str, bytes]) -> list[Fixture]:
+                   artifacts: dict[str, Fixture]) -> list[Fixture]:
     prefix = f"sessions/{directory}"
     fixture_class = f"session.{directory}"
     report = _session_report(
         session_id,
-        [_artifact_record(name, data) for name, data in artifacts.items()],
+        [_artifact_record(name, fixture.data) for name, fixture in artifacts.items()],
     )
-    members = {
-        "report.json": _json_bytes(report),
-        "session.json": _json_bytes({
+    members = [
+        Fixture(
+            f"{prefix}/report.json", _json_bytes(report), "JSON", "SessionReport/1",
+            fixture_class, role="session-root", session=directory,
+        ),
+        Fixture(f"{prefix}/session.json", _json_bytes({
             "schema": 1,
             "sessionId": session_id,
             "packageName": "com.example.fixture",
             "status": None,
             "host": {},
-        }),
-        "effective-config.json": _json_bytes({}),
-        "device.json": _json_bytes({
+        }), "JSON", "session/1", "json.session-support",
+                role="session-support", session=directory),
+        Fixture(f"{prefix}/effective-config.json", _json_bytes({}),
+                "JSON", "effective-config/1", "json.session-support",
+                role="session-support", session=directory),
+        Fixture(f"{prefix}/device.json", _json_bytes({
             "serial": "fixture-device",
             "package": "com.example.fixture",
             "access_mode": "run-as",
-        }),
-        **{f"artifacts/{name}": data for name, data in artifacts.items()},
-    }
-    return [
-        Fixture(f"{prefix}/{name}", data, "qtrace-session", "1", fixture_class)
-        for name, data in members.items()
+        }), "JSON", "device/1", "json.session-support",
+                role="session-support", session=directory),
     ]
+    members.extend(
+        Fixture(
+            f"{prefix}/artifacts/{name}", fixture.data,
+            fixture.format, fixture.version, fixture.fixture_class,
+            fixture.outcome, fixture.error,
+            role="session-artifact", session=directory,
+        )
+        for name, fixture in artifacts.items()
+    )
+    return members
 
 
 def _session_fixtures(qtrb: tuple[Fixture, ...], flight: tuple[Fixture, ...]) -> tuple[Fixture, ...]:
-    qtrb_by_path = {fixture.path: fixture.data for fixture in qtrb}
-    flight_by_path = {fixture.path: fixture.data for fixture in flight}
+    qtrb_by_path = {fixture.path: fixture for fixture in qtrb}
+    flight_by_path = {fixture.path: fixture for fixture in flight}
     valid = _session_files(
         "valid-mixed",
         "11111111-1111-4111-8111-111111111111",
@@ -437,7 +451,7 @@ def _session_fixtures(qtrb: tuple[Fixture, ...], flight: tuple[Fixture, ...]) ->
             "broken.trace.bin": qtrb_by_path["qtrb/malformed/truncated-payload.bin"],
         },
     )
-    escape_data = qtrb_by_path["qtrb/v1.2-completed.bin"]
+    escape_data = qtrb_by_path["qtrb/v1.2-completed.bin"].data
     escape_report = _session_report(
         "33333333-3333-4333-8333-333333333333",
         [{
@@ -448,11 +462,13 @@ def _session_fixtures(qtrb: tuple[Fixture, ...], flight: tuple[Fixture, ...]) ->
     path_escape = Fixture(
         "sessions/path-escape/report.json",
         _json_bytes(escape_report),
-        "qtrace-session",
-        "1",
+        "JSON",
+        "SessionReport/1",
         "session.path-escape",
         "error",
         "session.path_escape",
+        role="session-root",
+        session="path-escape",
     )
     return tuple(valid + isolated + [path_escape])
 
@@ -488,9 +504,12 @@ Do not edit binary fixtures or `manifest.json` by hand.
 - Every corpus member is capped at 4 MiB. The differential oracle separately caps inputs at
   8 MiB.
 
-`manifest.json` records each path, digest, byte length, source format/version, expected outcome
-class, and generator schema. QTRB and Flight bytes are composed with the independent builders in
-`scripts/tests/test_trace_binary.py` and `scripts/tests/test_flight_trace.py`.
+`manifest.json` records each path, digest, byte length, native format/version, expected outcome
+class, containment role, owning session (when applicable), and generator schema. Session artifact
+members retain their native QTRB or Flight decoder contract; session roots independently describe
+the bundle result. JSON reports and support documents name their schema in `version`. QTRB and
+Flight bytes are composed with the independent builders in `scripts/tests/test_trace_binary.py`
+and `scripts/tests/test_flight_trace.py`.
 """.encode("utf-8")
 
 
@@ -510,6 +529,8 @@ def _tree() -> dict[str, bytes]:
             "bytes": len(fixture.data),
             "format": fixture.format,
             "version": fixture.version,
+            "role": fixture.role,
+            "session": fixture.session,
             "expected": expected,
             "generator_schema": GENERATOR_SCHEMA,
         })
