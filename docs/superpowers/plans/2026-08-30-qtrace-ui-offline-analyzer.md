@@ -92,43 +92,41 @@ qtrace-ui/
 **Interfaces:**
 - Produces a four-crate Rust workspace, one thin Tauri binary, and one independently testable React frontend.
 - Pins the crate dependency graph to provider → store → analysis → service; `src-tauri` depends only on service plus Tauri.
+- Verifies the scaffold by running Cargo/npm and observing their resolved graph/build output, not by grepping or snapshotting manifest source text.
 
 - [ ] **Step 1: Write the failing scaffold contract**
 
-Add `scripts/tests/test_qtrace_ui_scaffold.py` that parses TOML with `tomllib` and asserts:
+Add `scripts/tests/test_qtrace_ui_scaffold.py` that runs the real toolchain and asserts its observable output:
 
 ```python
 class QtraceUiScaffoldTests(unittest.TestCase):
-    def test_workspace_has_the_approved_members_and_dependency_direction(self):
+    def test_cargo_resolves_the_approved_dependency_direction(self):
         root = Path(__file__).parents[2] / "qtrace-ui"
-        workspace = tomllib.loads((root / "Cargo.toml").read_text())
-        self.assertEqual(
-            [
-                "crates/qtrace-provider",
-                "crates/qtrace-store",
-                "crates/qtrace-analysis",
-                "crates/qtrace-service",
-                "src-tauri",
-            ],
-            workspace["workspace"]["members"],
+        completed = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=root, check=True, capture_output=True, text=True,
         )
-        manifests = {
-            name: tomllib.loads((root / path / "Cargo.toml").read_text())
-            for name, path in {
-                "provider": "crates/qtrace-provider",
-                "store": "crates/qtrace-store",
-                "analysis": "crates/qtrace-analysis",
-                "service": "crates/qtrace-service",
-            }.items()
+        metadata = json.loads(completed.stdout)
+        packages = {package["name"]: package for package in metadata["packages"]}
+        self.assertEqual(
+            {"qtrace-provider", "qtrace-store", "qtrace-analysis", "qtrace-service", "qtrace-ui"},
+            set(packages),
+        )
+        dependencies = {
+            name: {item["name"] for item in packages[name]["dependencies"]}
+            for name in packages
         }
-        self.assertNotIn("qtrace-store", manifests["provider"].get("dependencies", {}))
-        self.assertIn("qtrace-provider", manifests["store"]["dependencies"])
-        self.assertIn("qtrace-store", manifests["analysis"]["dependencies"])
-        self.assertIn("qtrace-analysis", manifests["service"]["dependencies"])
+        self.assertNotIn("qtrace-store", dependencies["qtrace-provider"])
+        self.assertIn("qtrace-provider", dependencies["qtrace-store"])
+        self.assertIn("qtrace-store", dependencies["qtrace-analysis"])
+        self.assertIn("qtrace-analysis", dependencies["qtrace-service"])
 
-    def test_frontend_scripts_cover_format_type_unit_and_e2e(self):
-        package = json.loads((Path(__file__).parents[2] / "qtrace-ui/src-web/package.json").read_text())
-        self.assertEqual({"dev", "build", "lint", "test", "e2e"}, set(package["scripts"]))
+    def test_frontend_production_build_emits_runnable_entrypoint(self):
+        frontend = Path(__file__).parents[2] / "qtrace-ui/src-web"
+        subprocess.run(["npm", "run", "build"], cwd=frontend, check=True, timeout=120)
+        output = frontend / "dist/index.html"
+        self.assertTrue(output.is_file())
+        self.assertIn('<div id="root"></div>', output.read_text(encoding="utf-8"))
 ```
 
 - [ ] **Step 2: Run the scaffold test and confirm it fails**
@@ -139,7 +137,7 @@ Run:
 python3 -m unittest scripts.tests.test_qtrace_ui_scaffold -v
 ```
 
-Expected: FAIL because `qtrace-ui/Cargo.toml` does not exist.
+Expected: FAIL because the `qtrace-ui` workspace cannot yet be resolved or built.
 
 - [ ] **Step 3: Create the compiling workspace**
 
@@ -1384,7 +1382,7 @@ Use these defaults for interactive requests: 5-second deadline, 2,000 returned r
 
 Every job publishes state transitions `queued → running → completed|cancelled|failed` plus bounded progress counters. Closing a workspace cancels jobs and removes live handles; content-addressed cache files already atomically completed remain valid. An expired generation result may be cached but cannot update current projection/selection/annotations.
 
-Derive TypeScript declarations with `ts-rs`. `export_bindings` writes deterministic declarations to stdout and takes no path argument. Add a Rust test that hashes the declaration output so accidental DTO changes require an explicit snapshot update.
+Derive TypeScript declarations with `ts-rs`. `export_bindings` writes deterministic declarations to stdout and takes no path argument. Add a contract test that exports twice, proves byte-for-byte determinism, writes one export to a temporary `generated.ts`, and compiles a hand-written TypeScript consumer that constructs and narrows representative success/error DTOs. This catches unusable or drifting public types through consumer behavior rather than a source hash.
 
 Never serialize Rust `u64`/`i64` as a JSON number. Use `DecimalU64Dto` for sequence/count/ordinal/offset values and `HexU64Dto` for addresses/register values; both serialize as validated strings and generate TypeScript `string`. Page sizes, generation counters, TIDs, enum tags, and bounded viewport row indexes remain JSON numbers. Add boundary snapshots for `u64::MAX` and `i64::MIN`.
 
@@ -1425,7 +1423,7 @@ git commit -m "feat(qtrace-ui): expose analysis service"
 
 - [ ] **Step 1: Write failing command-surface tests**
 
-Parse `commands.rs` with a small contract helper and assert the registered names are exactly:
+Drive the adapter through a fake native picker and real in-memory service boundary, covering these public operations:
 
 ```text
 pick_and_open_session
@@ -1447,7 +1445,7 @@ list_jobs
 cancel_job
 ```
 
-Assert the three picker commands accept a test `NativePicker` abstraction and service state, not a `PathBuf`/string path parameter. Assert all other commands accept DTO IDs/filters only. Serialize every success/error through the exact Task 16 contract.
+For each picker operation, return a controlled path from `NativePicker`, then assert the service opens only that selected object. Deserialize hostile frontend payloads containing `path`, `file`, or `directory` fields with `serde(deny_unknown_fields)` request DTOs and require rejection before the picker/service is called. Invoke every non-picker adapter with representative valid and malformed DTOs and assert the exact Task 16 success/error envelope. Do not inspect `commands.rs` source text or assert framework internals.
 
 - [ ] **Step 2: Run Tauri contract tests and confirm failure**
 
@@ -1804,11 +1802,15 @@ git commit -m "feat(qtrace-ui): complete analysis workspace"
 - Create: `qtrace-ui/src-web/src/api/createApi.ts`
 - Modify: `qtrace-ui/src-web/src/main.tsx`
 - Create: `qtrace-ui/src-web/playwright.config.ts`
+- Create: `qtrace-ui/src-web/playwright.production.config.ts`
 - Create: `qtrace-ui/src-web/tests/e2e/global-setup.ts`
 - Create: `qtrace-ui/src-web/tests/e2e/global-teardown.ts`
 - Create: `qtrace-ui/src-web/tests/e2e/workspace.spec.ts`
 - Create: `qtrace-ui/src-web/tests/e2e/restart.spec.ts`
+- Create: `qtrace-ui/src-web/tests/e2e/production.spec.ts`
 - Create: `qtrace-ui/src-web/tests/e2e/support.ts`
+- Modify: `qtrace-ui/src-web/package.json`
+- Modify: `qtrace-ui/src-web/package-lock.json`
 
 **Interfaces:**
 - Tests the real provider → store → analysis → service path against checked-in small sessions.
@@ -1830,7 +1832,9 @@ Expected: FAIL until fixture authorization and full service composition are wire
 
 Gate `e2e_server` behind a non-default Cargo feature `e2e-fixture`; require `--fixture-root`, `--xdg-root`, and a random 128-bit token. Bind only `127.0.0.1:0`, print one bounded JSON readiness line, and serve the same DTO operations as `QtraceApi`. Picker endpoints select only named members beneath the fixed fixture root through Task 9; they never accept a client filesystem path. Apply request size 1 MiB, concurrency 8, and 30-second deadline limits.
 
-`E2eQtraceApi` sends the token and DTOs to this adapter only when Vite mode is exactly `e2e`. `createApi` selects `TauriQtraceApi` for every production/development build. Add a test that `npm run build` output contains neither the readiness endpoint string nor `E2eQtraceApi`.
+`E2eQtraceApi` sends the token and DTOs to this adapter only when Vite mode is exactly `e2e`. `createApi` selects `TauriQtraceApi` for every production/development build. Add a production-mode Playwright smoke test with a loopback/network trap: load the built app, exercise startup/open controls, and fail if any HTTP request or E2E adapter call occurs. The expected backend failure must be the Tauri bridge's structured unavailable error, proving the production path is selected without scanning bundle text.
+
+Add `"e2e:production": "playwright test --config playwright.production.config.ts"` in Task 22. The production Playwright config serves only `dist/` via Vite preview, selects `production.spec.ts`, and does not start `e2e_server`.
 
 - [ ] **Step 3: Write failing Playwright workflows**
 
@@ -1854,10 +1858,10 @@ cd qtrace-ui && cargo test -p qtrace-service --test end_to_end
 cd src-web && npx playwright install --with-deps chromium
 npm run e2e
 npm run build
-! rg -n "E2eQtraceApi|__qtrace_e2e__" dist
+npm run e2e:production
 ```
 
-Expected: all commands exit 0; the negated `rg` finds no production E2E adapter string.
+Expected: all commands exit 0; the production smoke records no HTTP/E2E adapter request.
 
 - [ ] **Step 5: Commit integration coverage**
 
@@ -1915,6 +1919,7 @@ npm test
 npx playwright install --with-deps chromium
 npm run e2e
 npm run build
+npm run e2e:production
 ```
 
 Keep the existing Python/native/Android job unchanged except that its Python discovery naturally includes the new scaffold/fixture contract tests.
@@ -1931,7 +1936,7 @@ Create a manual workflow that checks out source, installs the same Rust/Node/sys
 cd qtrace-ui/src-web && npm run tauri -- build --bundles deb,appimage
 ```
 
-Add `"tauri": "cd .. && tauri"` to frontend scripts and update the Task 1 scaffold test's exact script set accordingly. From the frontend directory run `npm run tauri -- build --bundles deb,appimage`; the script changes to `qtrace-ui/`, where the sibling `src-tauri/` directory is discoverable. Upload `.deb` and `.AppImage` as workflow artifacts; do not publish a GitHub Release or overwrite an existing artifact.
+Add `"tauri": "cd .. && tauri"` to frontend scripts and extend the scaffold smoke test to run `npm run tauri -- --version` and assert a successful Tauri 2 CLI result. From the frontend directory run `npm run tauri -- build --bundles deb,appimage`; the script changes to `qtrace-ui/`, where the sibling `src-tauri/` directory is discoverable. Upload `.deb` and `.AppImage` as workflow artifacts; do not publish a GitHub Release or overwrite an existing artifact.
 
 - [ ] **Step 5: Run local equivalents and validate workflow syntax**
 
@@ -1940,7 +1945,7 @@ python3 qtrace-ui/tools/check_generated.py
 cd qtrace-ui && cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cd src-web && npm ci && npm run lint && npm test && npx playwright install --with-deps chromium && npm run e2e && npm run build
+cd src-web && npm ci && npm run lint && npm test && npx playwright install --with-deps chromium && npm run e2e && npm run build && npm run e2e:production
 cd ../.. && python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
@@ -2042,7 +2047,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 cd qtrace-ui && cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cd src-web && npm ci && npm run lint && npm test && npm run e2e && npm run build
+cd src-web && npm ci && npm run lint && npm test && npm run e2e && npm run build && npm run e2e:production
 npm run tauri -- build --bundles deb,appimage
 cd ../.. && git diff --check
 ```
