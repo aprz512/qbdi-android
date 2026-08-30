@@ -17,6 +17,16 @@ use tempfile::TempDir;
 
 struct AllowAll;
 
+fn private_root() -> TempDir {
+    let root = TempDir::new().expect("root");
+    fs::set_permissions(
+        root.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("private root");
+    root
+}
+
 type ByteMutation = Box<dyn Fn(&mut Vec<u8>)>;
 type JsonMutation = Box<dyn Fn(&mut Value)>;
 
@@ -113,7 +123,7 @@ fn header_is_exactly_sixty_four_bytes_and_rejects_every_header_corruption() {
     ];
 
     for (index, mutation) in cases.into_iter().enumerate() {
-        let root = TempDir::new().expect("root");
+        let root = private_root();
         mutate_file(root.path(), mutation);
         let reason = expect_rebuild(root.path());
         assert!(
@@ -162,7 +172,7 @@ fn known_section_payloads_are_validated_before_returning_a_view() {
         ("event_keys.v1", 80_usize + 64, 1_u8),
     ];
     for (name, byte, value) in cases {
-        let root = TempDir::new().expect("root");
+        let root = private_root();
         mutate_file(root.path(), |bytes| {
             mutate_section_payload(bytes, name, |section| {
                 if name == "event_keys.v1" && byte == 0 {
@@ -225,7 +235,7 @@ fn every_cache_identity_field_mismatch_is_a_typed_rebuild() {
     ];
 
     for (field, mutation) in cases {
-        let root = TempDir::new().expect("root");
+        let root = private_root();
         mutate_file(root.path(), |bytes| {
             mutate_manifest(bytes, |manifest| mutation(&mut manifest["identity"]));
         });
@@ -263,7 +273,7 @@ fn manifest_and_section_contract_corruption_never_returns_a_view() {
     ];
 
     for (index, mutation) in cases.into_iter().enumerate() {
-        let root = TempDir::new().expect("root");
+        let root = private_root();
         mutate_file(root.path(), |bytes| mutate_manifest(bytes, mutation));
         assert!(
             matches!(expect_rebuild(root.path()), RebuildReason::Section(_)),
@@ -271,7 +281,7 @@ fn manifest_and_section_contract_corruption_never_returns_a_view() {
         );
     }
 
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     mutate_file(root.path(), |bytes| bytes[64] ^= 1);
     assert!(matches!(
         expect_rebuild(root.path()),
@@ -280,8 +290,31 @@ fn manifest_and_section_contract_corruption_never_returns_a_view() {
 }
 
 #[test]
+fn known_sections_require_their_exact_wire_alignment() {
+    for (name, alignment) in [("event_keys.v1", 1_u64), ("event_kinds.v1", 64_u64)] {
+        let root = private_root();
+        mutate_file(root.path(), |bytes| {
+            mutate_manifest(bytes, |manifest| {
+                let section = manifest["sections"]
+                    .as_array_mut()
+                    .expect("sections")
+                    .iter_mut()
+                    .find(|section| section["name"] == name)
+                    .expect("known section");
+                section["alignment"] = alignment.into();
+            });
+        });
+        assert_eq!(
+            expect_rebuild(root.path()),
+            RebuildReason::Section("known alignment"),
+            "reader accepted re-signed {name} alignment {alignment}"
+        );
+    }
+}
+
+#[test]
 fn alignment_padding_is_explicit_zero_and_is_validated() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     let path = publish(root.path());
     let mut bytes = fs::read(&path).expect("cache bytes");
     let (manifest_offset, manifest_length) = manifest_range(&bytes);
@@ -308,7 +341,7 @@ fn alignment_padding_is_explicit_zero_and_is_validated() {
 
 #[test]
 fn malformed_and_oversized_manifest_lengths_do_not_drive_large_allocation() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     mutate_file(root.path(), |bytes| {
         let (offset, _) = manifest_range(bytes);
         bytes[offset] = b'!';
@@ -320,7 +353,7 @@ fn malformed_and_oversized_manifest_lengths_do_not_drive_large_allocation() {
         RebuildReason::Manifest(_)
     ));
 
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     mutate_file(root.path(), |bytes| {
         bytes[24..32].copy_from_slice(&(2_u64 * 1024 * 1024).to_le_bytes());
     });
@@ -332,7 +365,7 @@ fn malformed_and_oversized_manifest_lengths_do_not_drive_large_allocation() {
 
 #[test]
 fn mapped_and_owned_views_answer_the_same_values() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     let owned = sample_owned_store();
     CacheWriter::new(identity(), owned.clone())
         .expect("writer")
@@ -361,6 +394,16 @@ fn mapped_and_owned_views_answer_the_same_values() {
 fn complete_files_are_byte_deterministic_for_the_same_identity() {
     let first = TempDir::new().expect("first");
     let second = TempDir::new().expect("second");
+    fs::set_permissions(
+        first.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("private first root");
+    fs::set_permissions(
+        second.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("private second root");
     let first_path = publish(first.path());
     let second_path = publish(second.path());
     assert_eq!(
@@ -383,7 +426,7 @@ impl WorkGuard for CancelFirstRead {
 
 #[test]
 fn reader_control_errors_propagate_instead_of_becoming_rebuild() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     publish(root.path());
     let error = CacheReader::open(root.path(), &identity(), &CancelFirstRead)
         .expect_err("reader cancellation");
@@ -412,7 +455,7 @@ impl WorkGuard for MutateDuringRead {
 
 #[test]
 fn cache_identity_change_during_validation_is_not_downgraded_to_rebuild() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     let path = publish(root.path());
     let error = CacheReader::open(
         root.path(),

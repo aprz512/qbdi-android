@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{CacheError, CacheIdentityField, RebuildReason};
+use super::{CacheError, CacheIdentityField, RebuildReason, allocation_error};
 
 pub(crate) const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_SECTIONS: usize = 64;
@@ -99,7 +99,7 @@ pub struct CacheManifest {
 
 impl CacheManifest {
     pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, CacheError> {
-        let bytes = canonical_json(self)?;
+        let bytes = canonical_manifest_json(self)?;
         if bytes.len() as u64 > MAX_MANIFEST_BYTES {
             return Err(CacheError::invalid("cache manifest exceeds its byte limit"));
         }
@@ -119,9 +119,17 @@ impl CacheManifest {
     }
 }
 
+pub(crate) fn canonical_manifest_json(value: &CacheManifest) -> Result<Vec<u8>, CacheError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(MAX_MANIFEST_BYTES as usize)
+        .map_err(|_| allocation_error("canonical cache manifest"))?;
+    serde_json::to_writer(&mut bytes, value)
+        .map_err(|error| CacheError::invalid(format!("cannot encode cache JSON: {error}")))?;
+    Ok(bytes)
+}
+
 pub(crate) fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, CacheError> {
-    let value = serde_json::to_value(value)
-        .map_err(|error| CacheError::invalid(format!("cannot materialize cache JSON: {error}")))?;
-    serde_json::to_vec(&value)
+    serde_json::to_vec(value)
         .map_err(|error| CacheError::invalid(format!("cannot encode cache JSON: {error}")))
 }

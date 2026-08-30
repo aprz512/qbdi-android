@@ -19,8 +19,9 @@ use crate::layout::{
 
 use super::{
     CacheDirectory, CacheError, CacheIdentity, CacheManifest, ObjectIdentity, RebuildReason,
-    StoreView,
-    manifest::{MAX_MANIFEST_BYTES, canonical_json},
+    StoreView, allocation_error,
+    manifest::{MAX_MANIFEST_BYTES, canonical_manifest_json},
+    map_errno, map_io_error,
 };
 
 const FINAL_NAME: &str = "index.qtc";
@@ -63,7 +64,7 @@ impl CacheReader {
         let stamp = FileStamp::from_metadata(
             &proof
                 .metadata()
-                .map_err(|error| CacheError::io(error.to_string()))?,
+                .map_err(|error| map_io_error("cannot stat cache proof", error))?,
         );
         match validate_file(file, &directory, expected, guard) {
             Ok(view) => Ok(CacheOpen::Ready(view)),
@@ -156,7 +157,7 @@ impl FileStamp {
         let actual = FileStamp::from_metadata(
             &file
                 .metadata()
-                .map_err(|error| CacheError::io(error.to_string()))?,
+                .map_err(|error| map_io_error("cannot restat cache", error))?,
         );
         if actual != self {
             return Err(CacheError::identity(
@@ -190,14 +191,16 @@ pub(crate) fn open_final(
     let descriptor = match openat(&*directory.file, FINAL_NAME, READ_FLAGS, Mode::empty()) {
         Ok(descriptor) => descriptor,
         Err(Errno::NOENT) => return Ok(None),
-        Err(error) => {
-            return Err(CacheError::path(format!(
-                "cannot open cache leaf without following: {error}"
-            )));
+        Err(Errno::LOOP | Errno::NOTDIR | Errno::NXIO) => {
+            return Err(CacheError::path("cache leaf is symlinked or unsafe"));
         }
+        Err(error) => return Err(map_errno("cannot open cache leaf", error)),
     };
     let file = File::from(descriptor);
     let identity = ObjectIdentity::regular_file(&file)?;
+    if identity.permissions != 0o600 {
+        return Err(CacheError::path("cache final does not have mode 0600"));
+    }
     Ok(Some((file, identity)))
 }
 
@@ -210,7 +213,7 @@ pub(crate) fn validate_file(
     let stamp = FileStamp::from_metadata(
         &file
             .metadata()
-            .map_err(|error| CacheError::io(error.to_string()))?,
+            .map_err(|error| map_io_error("cannot stat cache", error))?,
     );
     if stamp.size < HEADER_BYTES as u64 {
         return Err(ValidationFailure::Rebuild(RebuildReason::Header(
@@ -236,8 +239,15 @@ pub(crate) fn validate_file(
     {
         return Err(ValidationFailure::Rebuild(RebuildReason::Manifest("range")));
     }
+    let manifest_resident = header
+        .manifest_length
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(MAX_MANIFEST_BYTES))
+        .ok_or(ValidationFailure::Rebuild(RebuildReason::Manifest(
+            "resident bound",
+        )))?;
     guard.consume(WorkDelta {
-        resident_bytes: header.manifest_length,
+        resident_bytes: manifest_resident,
         ..WorkDelta::default()
     })?;
     let manifest_length = usize::try_from(header.manifest_length)
@@ -245,7 +255,7 @@ pub(crate) fn validate_file(
     let mut manifest_bytes = Vec::new();
     manifest_bytes
         .try_reserve_exact(manifest_length)
-        .map_err(|_| CacheError::io("cache manifest allocation failed"))?;
+        .map_err(|_| allocation_error("cache manifest"))?;
     manifest_bytes.resize(manifest_length, 0);
     read_exact_at(
         &file,
@@ -260,7 +270,7 @@ pub(crate) fn validate_file(
     }
     let manifest: CacheManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
-    let canonical = canonical_json(&manifest)?;
+    let canonical = canonical_manifest_json(&manifest)?;
     if canonical != manifest_bytes {
         return Err(ValidationFailure::Rebuild(RebuildReason::Manifest(
             "canonical JSON",
@@ -297,6 +307,11 @@ pub(crate) fn validate_file(
             "known element size",
         )));
     }
+    if keys.alignment != 8 || kinds.alignment != 1 {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+            "known alignment",
+        )));
+    }
     let key_count = keys.length / u64::from(keys.element_size);
     let kind_count = kinds.length;
     if key_count != kind_count {
@@ -324,7 +339,7 @@ fn validate_sections(
     let mut names = HashSet::new();
     names
         .try_reserve(manifest.sections.len())
-        .map_err(|_| CacheError::io("section-name set allocation failed"))?;
+        .map_err(|_| allocation_error("section-name set"))?;
     let mut previous_end = HEADER_BYTES as u64;
     for section in &manifest.sections {
         guard.consume(WorkDelta {
@@ -478,7 +493,7 @@ fn read_exact_at(
             Ok(0) => return Err(CacheError::access("cache became shorter during read")),
             Ok(count) if count <= output.len() - filled => filled += count,
             Ok(_) => return Err(CacheError::access("cache read over-reported bytes")),
-            Err(error) => return Err(CacheError::io(error.to_string())),
+            Err(error) => return Err(map_io_error("cannot read cache bytes", error)),
         }
     }
     Ok(())
@@ -490,7 +505,7 @@ pub(crate) fn probe_identity(
 ) -> Result<CacheIdentity, ValidationFailure> {
     let size = file
         .metadata()
-        .map_err(|error| CacheError::io(error.to_string()))?
+        .map_err(|error| map_io_error("cannot stat cache identity", error))?
         .len();
     if size < HEADER_BYTES as u64 {
         return Err(ValidationFailure::Rebuild(RebuildReason::Header(
@@ -509,8 +524,15 @@ pub(crate) fn probe_identity(
     if header.manifest_length == 0 || header.manifest_length > MAX_MANIFEST_BYTES || end != size {
         return Err(ValidationFailure::Rebuild(RebuildReason::Manifest("range")));
     }
+    let manifest_resident =
+        header
+            .manifest_length
+            .checked_mul(2)
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Manifest(
+                "resident bound",
+            )))?;
     guard.consume(WorkDelta {
-        resident_bytes: header.manifest_length,
+        resident_bytes: manifest_resident,
         ..WorkDelta::default()
     })?;
     let length = usize::try_from(header.manifest_length)
@@ -518,7 +540,7 @@ pub(crate) fn probe_identity(
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
-        .map_err(|_| CacheError::io("cache manifest allocation failed"))?;
+        .map_err(|_| allocation_error("cache identity manifest"))?;
     bytes.resize(length, 0);
     read_exact_at(file, header.manifest_offset, &mut bytes, Some(guard))?;
     if Sha256::digest(&bytes).as_slice() != header.manifest_checksum {

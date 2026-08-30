@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     os::unix::{
         fs::{PermissionsExt, symlink},
         net::UnixListener,
@@ -13,7 +14,9 @@ use qtrace_provider::{
     ArtifactDigest, BudgetDimension, EventKey, EventKind, OperationAbort, TimelineId, WorkDelta,
     WorkGuard,
 };
-use qtrace_store::{CacheIdentity, CacheOpen, CacheReader, CacheWriter, OwnedStoreView};
+use qtrace_store::{
+    CacheIdentity, CacheOpen, CacheReader, CacheWriter, OwnedStoreView, PublicationState,
+};
 use tempfile::TempDir;
 
 fn identity(seed: u8) -> CacheIdentity {
@@ -31,6 +34,12 @@ fn identity(seed: u8) -> CacheIdentity {
     }
 }
 
+fn private_root() -> TempDir {
+    let root = TempDir::new().expect("root");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("private root");
+    root
+}
+
 fn store(seed: u8) -> OwnedStoreView {
     OwnedStoreView::new(
         vec![EventKey::new(
@@ -46,10 +55,32 @@ fn store(seed: u8) -> OwnedStoreView {
     .expect("store")
 }
 
+fn store_rows(seed: u8, rows: usize) -> OwnedStoreView {
+    let digest = ArtifactDigest::new([seed; 32]);
+    OwnedStoreView::new(
+        (0..rows)
+            .map(|row| EventKey::new(digest, TimelineId(0), row as u64, 64, Some(1), Some(7)))
+            .collect(),
+        vec![EventKind::Instruction; rows],
+    )
+    .expect("store")
+}
+
 fn final_path(root: &Path, identity: &CacheIdentity) -> PathBuf {
     root.join("qtrace-ui")
         .join(identity.cache_key())
         .join("index.qtc")
+}
+
+fn temporary_paths(digest: &Path) -> Vec<PathBuf> {
+    fs::read_dir(digest)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .map(|entry| entry.path())
+        .collect()
 }
 
 #[derive(Default)]
@@ -88,20 +119,18 @@ impl WorkGuard for CaptureCheckpoint {
             let mut seen = self.seen.lock().expect("checkpoint lock");
             *seen += 1;
             if *seen == self.target {
-                let entries = fs::read_dir(&self.digest)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    entries.len(),
-                    1,
-                    "checkpoint must have exactly one owned temp"
-                );
-                *self.bytes.lock().expect("capture lock") =
-                    fs::read(entries[0].path()).expect("temp bytes");
+                let path = if self.target == 4 {
+                    self.digest.join("index.qtc")
+                } else {
+                    let entries = temporary_paths(&self.digest);
+                    assert_eq!(
+                        entries.len(),
+                        1,
+                        "pre-rename checkpoint must have exactly one owned temp"
+                    );
+                    entries[0].clone()
+                };
+                *self.bytes.lock().expect("capture lock") = fs::read(path).expect("cache bytes");
                 return Err(OperationAbort::Cancelled);
             }
         }
@@ -131,10 +160,10 @@ impl WorkGuard for CancelCheckpoint {
 }
 
 #[test]
-fn every_precommit_cancellation_point_leaves_no_visible_final_or_temp() {
+fn every_publication_cancellation_point_rolls_back_final_and_temp() {
     for budget_failure in [false, true] {
         for checkpoint in 1..=4 {
-            let root = TempDir::new().expect("root");
+            let root = private_root();
             let identity = identity(0x11);
             let error = CacheWriter::new(identity.clone(), store(0x11))
                 .expect("writer")
@@ -161,17 +190,17 @@ fn every_precommit_cancellation_point_leaves_no_visible_final_or_temp() {
             );
             let digest = root.path().join("qtrace-ui").join(identity.cache_key());
             if digest.exists() {
-                assert_eq!(fs::read_dir(digest).expect("digest entries").count(), 0);
+                assert!(temporary_paths(&digest).is_empty());
             }
         }
     }
 }
 
 #[test]
-fn checkpoints_observe_sections_manifest_final_header_and_precommit_in_order() {
+fn checkpoints_observe_sections_manifest_header_and_postrename_final_in_order() {
     let mut captures = Vec::new();
     for checkpoint in 1..=4 {
-        let root = TempDir::new().expect("root");
+        let root = private_root();
         let identity = identity(0x12);
         let digest = root.path().join("qtrace-ui").join(identity.cache_key());
         let guard = CaptureCheckpoint {
@@ -196,9 +225,279 @@ fn checkpoints_observe_sections_manifest_final_header_and_precommit_in_order() {
     assert_eq!(&captures[3][..8], b"QTCACHE\0");
 }
 
+struct RejectLargeResident {
+    limit: u64,
+}
+
+impl WorkGuard for RejectLargeResident {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.resident_bytes > self.limit {
+            Err(OperationAbort::budget_exceeded(
+                BudgetDimension::ResidentBytes,
+                self.limit,
+                delta.resident_bytes,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn writer_declares_true_peak_resident_budget_before_cache_path_io() {
+    let parent = TempDir::new().expect("parent");
+    let root = parent.path().join("not-created");
+    let error = CacheWriter::new(identity(0x13), store_rows(0x13, 4096))
+        .expect("writer")
+        .publish(&root, &RejectLargeResident { limit: 1_500_000 })
+        .expect_err("true peak exceeds guard threshold");
+    assert_eq!(error.code(), "control.budget_exceeded");
+    assert!(
+        !root.exists(),
+        "authorization must precede cache path allocation"
+    );
+}
+
+#[test]
+fn xdg_root_itself_must_be_private_but_ancestors_need_not_be() {
+    let parent = TempDir::new().expect("parent");
+    let root = parent.path().join("xdg-cache");
+    fs::create_dir(&root).expect("root");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).expect("root mode");
+    let error = CacheWriter::new(identity(0x14), store(0x14))
+        .expect("writer")
+        .publish(&root, &AllowAll)
+        .expect_err("public XDG cache root");
+    assert_eq!(error.code(), "cache.path_escape");
+    assert_eq!(fs::read_dir(root).expect("root entries").count(), 0);
+}
+
+struct ChmodAtCheckpoint {
+    target: usize,
+    seen: Mutex<usize>,
+    path: PathBuf,
+}
+
+impl WorkGuard for ChmodAtCheckpoint {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta == WorkDelta::default() {
+            let mut seen = self.seen.lock().expect("checkpoint lock");
+            *seen += 1;
+            if *seen == self.target {
+                fs::set_permissions(&self.path, fs::Permissions::from_mode(0o755))
+                    .expect("mode drift");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn application_and_digest_mode_drift_fail_closed_before_commit() {
+    for drift_app in [true, false] {
+        let root = private_root();
+        let identity = identity(if drift_app { 0x15 } else { 0x16 });
+        let app = root.path().join("qtrace-ui");
+        let digest = app.join(identity.cache_key());
+        let drift = if drift_app { app } else { digest.clone() };
+        let error = CacheWriter::new(identity.clone(), store(identity.artifact_digest[0]))
+            .expect("writer")
+            .publish(
+                root.path(),
+                &ChmodAtCheckpoint {
+                    target: 3,
+                    seen: Mutex::new(0),
+                    path: drift,
+                },
+            )
+            .expect_err("mode drift");
+        assert_eq!(error.code(), "cache.path_escape");
+        assert!(!final_path(root.path(), &identity).exists());
+        assert!(temporary_paths(&digest).is_empty());
+    }
+}
+
+struct ObservePostRenameCancel {
+    seen: Mutex<usize>,
+    final_path: PathBuf,
+    observed_final: Mutex<bool>,
+}
+
+impl WorkGuard for ObservePostRenameCancel {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta == WorkDelta::default() {
+            let mut seen = self.seen.lock().expect("checkpoint lock");
+            *seen += 1;
+            if *seen == 4 {
+                *self.observed_final.lock().expect("observation lock") = self.final_path.exists();
+                return Err(OperationAbort::Cancelled);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn fourth_checkpoint_is_after_rename_and_cancel_rolls_back_owned_final() {
+    let root = private_root();
+    let identity = identity(0x17);
+    let guard = ObservePostRenameCancel {
+        seen: Mutex::new(0),
+        final_path: final_path(root.path(), &identity),
+        observed_final: Mutex::new(false),
+    };
+    let error = CacheWriter::new(identity.clone(), store(0x17))
+        .expect("writer")
+        .publish(root.path(), &guard)
+        .expect_err("post-rename cancellation");
+    assert_eq!(error.code(), "job.cancelled");
+    assert_eq!(error.publication_state(), PublicationState::NoVisibleFinal);
+    assert!(*guard.observed_final.lock().expect("observation lock"));
+    assert!(!final_path(root.path(), &identity).exists());
+    assert!(temporary_paths(&root.path().join("qtrace-ui").join(identity.cache_key())).is_empty());
+}
+
+#[test]
+fn fourth_checkpoint_cancel_restores_exact_displaced_corrupt_inode_bytes() {
+    let root = private_root();
+    let identity = identity(0x1a);
+    CacheWriter::new(identity.clone(), store(0x1a))
+        .expect("initial writer")
+        .publish(root.path(), &AllowAll)
+        .expect("initial publish");
+    let final_path = final_path(root.path(), &identity);
+    let mut corrupt = fs::read(&final_path).expect("cache bytes");
+    corrupt[64] ^= 1;
+    fs::write(&final_path, &corrupt).expect("corrupt final");
+    let metadata = fs::metadata(&final_path).expect("corrupt metadata");
+    let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+    let error = CacheWriter::new(identity.clone(), store(0x1a))
+        .expect("replacement writer")
+        .publish(
+            root.path(),
+            &CancelCheckpoint {
+                target: 4,
+                seen: Mutex::new(0),
+                budget_failure: false,
+            },
+        )
+        .expect_err("post-exchange cancellation");
+    assert_eq!(error.code(), "job.cancelled");
+    assert_eq!(fs::read(&final_path).expect("restored corrupt"), corrupt);
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(&final_path).expect("restored metadata")),
+        inode,
+        "rollback must restore the exact displaced inode"
+    );
+    assert!(temporary_paths(final_path.parent().expect("digest")).is_empty());
+}
+
+struct ReplacePostRenameOperand {
+    seen: Mutex<usize>,
+    digest: PathBuf,
+    replace_final: bool,
+    cancel: bool,
+    foreign: Vec<u8>,
+}
+
+impl WorkGuard for ReplacePostRenameOperand {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta == WorkDelta::default() {
+            let mut seen = self.seen.lock().expect("checkpoint lock");
+            *seen += 1;
+            if *seen == 4 {
+                let target = if self.replace_final {
+                    self.digest.join("index.qtc")
+                } else {
+                    temporary_paths(&self.digest)
+                        .into_iter()
+                        .next()
+                        .expect("displaced staging operand")
+                };
+                fs::rename(&target, target.with_extension("owned-held")).expect("hold operand");
+                let mut file = fs::File::create(&target).expect("foreign replacement");
+                file.write_all(&self.foreign).expect("foreign bytes");
+                file.sync_all().expect("foreign sync");
+                if self.cancel {
+                    return Err(OperationAbort::Cancelled);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn ambiguous_final_replacement_is_preserved_and_never_unlinked() {
+    let root = private_root();
+    let identity = identity(0x18);
+    let digest = root.path().join("qtrace-ui").join(identity.cache_key());
+    let foreign = b"foreign-final-competitor".to_vec();
+    let error = CacheWriter::new(identity.clone(), store(0x18))
+        .expect("writer")
+        .publish(
+            root.path(),
+            &ReplacePostRenameOperand {
+                seen: Mutex::new(0),
+                digest,
+                replace_final: true,
+                cancel: false,
+                foreign: foreign.clone(),
+            },
+        )
+        .expect_err("ambiguous rollback");
+    assert_eq!(
+        error.publication_state(),
+        PublicationState::VisibleDurabilityUncertain
+    );
+    assert_eq!(
+        fs::read(final_path(root.path(), &identity)).expect("foreign survives"),
+        foreign
+    );
+}
+
+#[test]
+fn ambiguous_displaced_operand_is_not_exchanged_into_final_or_deleted() {
+    let root = private_root();
+    let identity = identity(0x19);
+    CacheWriter::new(identity.clone(), store(0x19))
+        .expect("initial writer")
+        .publish(root.path(), &AllowAll)
+        .expect("initial publish");
+    let final_path = final_path(root.path(), &identity);
+    let mut corrupt = fs::read(&final_path).expect("cache bytes");
+    corrupt[64] ^= 1;
+    fs::write(&final_path, corrupt).expect("corrupt final");
+    let digest = final_path.parent().expect("digest").to_owned();
+    let foreign = b"foreign-staging-competitor".to_vec();
+    let error = CacheWriter::new(identity.clone(), store(0x19))
+        .expect("replacement writer")
+        .publish(
+            root.path(),
+            &ReplacePostRenameOperand {
+                seen: Mutex::new(0),
+                digest: digest.clone(),
+                replace_final: false,
+                cancel: true,
+                foreign: foreign.clone(),
+            },
+        )
+        .expect_err("ambiguous displaced operand");
+    assert_eq!(
+        error.publication_state(),
+        PublicationState::VisibleDurabilityUncertain
+    );
+    assert_ne!(fs::read(&final_path).expect("final"), foreign);
+    assert!(
+        temporary_paths(&digest)
+            .into_iter()
+            .any(|path| fs::read(path).ok().as_deref() == Some(foreign.as_slice()))
+    );
+}
+
 #[test]
 fn concurrent_builders_publish_only_a_complete_deterministic_winner() {
-    let root = Arc::new(TempDir::new().expect("root"));
+    let root = Arc::new(private_root());
     let barrier = Arc::new(Barrier::new(3));
     let identity = identity(0x22);
     let mut builders = Vec::new();
@@ -253,7 +552,7 @@ fn symlinked_roots_and_digest_directories_are_rejected_without_following() {
         0
     );
 
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     fs::create_dir(root.path().join("qtrace-ui")).expect("app dir");
     fs::set_permissions(
         root.path().join("qtrace-ui"),
@@ -278,6 +577,70 @@ fn symlinked_roots_and_digest_directories_are_rejected_without_following() {
     );
 }
 
+fn prepare_digest(root: &Path, identity: &CacheIdentity) -> PathBuf {
+    let app = root.join("qtrace-ui");
+    let digest = app.join(identity.cache_key());
+    fs::create_dir_all(&digest).expect("digest");
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o700)).expect("private app");
+    fs::set_permissions(&digest, fs::Permissions::from_mode(0o700)).expect("private digest");
+    digest
+}
+
+#[test]
+fn publication_lock_rejects_symlink_special_and_foreign_mode() {
+    for case in 0..3 {
+        let root = private_root();
+        let identity = identity(0x35 + case);
+        let digest = prepare_digest(root.path(), &identity);
+        let lock = digest.join(".publish.lock");
+        let outside = root.path().join(format!("outside-{case}"));
+        let listener = match case {
+            0 => {
+                fs::write(&outside, b"outside").expect("outside");
+                symlink(&outside, &lock).expect("lock symlink");
+                None
+            }
+            1 => Some(UnixListener::bind(&lock).expect("lock socket")),
+            _ => {
+                fs::write(&lock, b"foreign lock").expect("lock file");
+                fs::set_permissions(&lock, fs::Permissions::from_mode(0o644))
+                    .expect("foreign lock mode");
+                None
+            }
+        };
+        let error = CacheWriter::new(identity, store(0x35 + case))
+            .expect("writer")
+            .publish(root.path(), &AllowAll)
+            .expect_err("unsafe publication lock");
+        assert_eq!(error.code(), "cache.path_escape");
+        assert!(lock.exists());
+        if case == 0 {
+            assert_eq!(fs::read(outside).expect("outside survives"), b"outside");
+        }
+        drop(listener);
+    }
+}
+
+#[test]
+fn final_leaf_mode_is_verified_by_reader_and_writer() {
+    let root = private_root();
+    let identity = identity(0x39);
+    CacheWriter::new(identity.clone(), store(0x39))
+        .expect("writer")
+        .publish(root.path(), &AllowAll)
+        .expect("publish");
+    let final_path = final_path(root.path(), &identity);
+    fs::set_permissions(&final_path, fs::Permissions::from_mode(0o644)).expect("mode drift");
+    let reader_error = CacheReader::open(root.path(), &identity, &AllowAll)
+        .expect_err("reader must reject public final");
+    assert_eq!(reader_error.code(), "cache.path_escape");
+    let writer_error = CacheWriter::new(identity, store(0x39))
+        .expect("writer")
+        .publish(root.path(), &AllowAll)
+        .expect_err("writer must reject public final");
+    assert_eq!(writer_error.code(), "cache.path_escape");
+}
+
 #[test]
 fn reader_authorization_precedes_cache_path_io() {
     let outside = TempDir::new().expect("outside");
@@ -291,7 +654,7 @@ fn reader_authorization_precedes_cache_path_io() {
 
 #[test]
 fn a_special_leaf_is_rejected_and_never_removed() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     let identity = identity(0x44);
     let digest = root.path().join("qtrace-ui").join(identity.cache_key());
     fs::create_dir_all(&digest).expect("digest");
@@ -335,7 +698,7 @@ impl WorkGuard for ReplaceDirectory {
 
 #[test]
 fn digest_directory_replacement_before_commit_fails_without_publishing() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     let identity = identity(0x55);
     let digest = root.path().join("qtrace-ui").join(identity.cache_key());
     let error = CacheWriter::new(identity.clone(), store(0x55))
@@ -355,6 +718,9 @@ fn digest_directory_replacement_before_commit_fails_without_publishing() {
         fs::read_dir(&digest).expect("replacement entries").count(),
         0
     );
+    let displaced = digest.with_extension("held");
+    assert!(!displaced.join("index.qtc").exists());
+    assert!(temporary_paths(&displaced).is_empty());
 }
 
 struct ReplaceDuringRead {
@@ -380,7 +746,7 @@ impl WorkGuard for ReplaceDuringRead {
 
 #[test]
 fn reader_rejects_digest_directory_replacement_during_validation() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     let identity = identity(0x56);
     CacheWriter::new(identity.clone(), store(0x56))
         .expect("writer")
@@ -405,7 +771,7 @@ fn reader_rejects_digest_directory_replacement_during_validation() {
 
 #[test]
 fn same_identity_corrupt_cache_is_atomically_replaced_but_other_identity_is_not() {
-    let root = TempDir::new().expect("root");
+    let root = private_root();
     let expected = identity(0x66);
     CacheWriter::new(expected.clone(), store(0x66))
         .expect("writer")
@@ -429,6 +795,8 @@ fn same_identity_corrupt_cache_is_atomically_replaced_but_other_identity_is_not(
     ));
 
     let other_root = TempDir::new().expect("other root");
+    fs::set_permissions(other_root.path(), fs::Permissions::from_mode(0o700))
+        .expect("private other root");
     let other = identity(0x77);
     CacheWriter::new(other.clone(), store(0x77))
         .expect("other writer")

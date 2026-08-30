@@ -74,6 +74,10 @@ impl CacheError {
         self.publication_state
     }
 
+    pub fn is_control(&self) -> bool {
+        self.code.starts_with("control.") || self.code == "job.cancelled"
+    }
+
     pub(crate) fn invalid(detail: impl Into<String>) -> Self {
         Self::new("cache.invalid_argument", detail)
     }
@@ -92,6 +96,14 @@ impl CacheError {
 
     pub(crate) fn io(detail: impl Into<String>) -> Self {
         Self::new("cache.io", detail)
+    }
+
+    pub(crate) fn permission(detail: impl Into<String>) -> Self {
+        Self::new("cache.permission_denied", detail)
+    }
+
+    pub(crate) fn resource(detail: impl Into<String>) -> Self {
+        Self::new("control.resource_exhausted", detail)
     }
 
     pub(crate) fn conflict(detail: impl Into<String>) -> Self {
@@ -139,6 +151,28 @@ impl fmt::Display for CacheError {
 
 impl Error for CacheError {}
 
+pub(crate) fn map_errno(context: &str, error: Errno) -> CacheError {
+    match error {
+        Errno::MFILE | Errno::NFILE | Errno::NOMEM => {
+            CacheError::resource(format!("{context}: {error}"))
+        }
+        Errno::ACCESS | Errno::PERM => CacheError::permission(format!("{context}: {error}")),
+        _ => CacheError::io(format!("{context}: {error}")),
+    }
+}
+
+pub(crate) fn map_io_error(context: &str, error: std::io::Error) -> CacheError {
+    match error.raw_os_error() {
+        Some(12 | 23 | 24) => CacheError::resource(format!("{context}: {error}")),
+        Some(1 | 13) => CacheError::permission(format!("{context}: {error}")),
+        _ => CacheError::io(format!("{context}: {error}")),
+    }
+}
+
+pub(crate) fn allocation_error(context: &str) -> CacheError {
+    CacheError::resource(format!("{context}: allocation failed"))
+}
+
 pub trait StoreView {
     fn event_count(&self) -> usize;
     fn event_key(&self, row: usize) -> Result<EventKey, CacheError>;
@@ -169,6 +203,14 @@ impl OwnedStoreView {
     pub(crate) fn kinds(&self) -> &[EventKind] {
         &self.event_kinds
     }
+
+    pub(crate) fn key_capacity(&self) -> usize {
+        self.event_keys.capacity()
+    }
+
+    pub(crate) fn kind_capacity(&self) -> usize {
+        self.event_kinds.capacity()
+    }
 }
 
 impl StoreView for OwnedStoreView {
@@ -196,24 +238,26 @@ pub(crate) struct ObjectIdentity {
     device: u64,
     inode: u64,
     kind: u32,
+    permissions: u32,
 }
 
 impl ObjectIdentity {
     fn from_file(file: &File) -> Result<Self, CacheError> {
         let metadata = file
             .metadata()
-            .map_err(|error| CacheError::io(error.to_string()))?;
+            .map_err(|error| map_io_error("cannot stat cache object", error))?;
         Ok(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
             kind: metadata.mode() & 0o170000,
+            permissions: metadata.mode() & 0o7777,
         })
     }
 
     pub(crate) fn regular_file(file: &File) -> Result<Self, CacheError> {
         let metadata = file
             .metadata()
-            .map_err(|error| CacheError::io(error.to_string()))?;
+            .map_err(|error| map_io_error("cannot stat regular cache object", error))?;
         let kind = metadata.file_type();
         if !kind.is_file()
             || kind.is_symlink()
@@ -228,6 +272,7 @@ impl ObjectIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
             kind: metadata.mode() & 0o170000,
+            permissions: metadata.mode() & 0o7777,
         })
     }
 }
@@ -253,6 +298,15 @@ impl CacheDirectory {
             return Err(CacheError::path("cache root exceeds its byte limit"));
         }
         let absolute = root.is_absolute();
+        let root_component_count = root
+            .components()
+            .filter(|component| matches!(component, Component::Normal(_)))
+            .count();
+        if root_component_count == 0 {
+            return Err(CacheError::path(
+                "cache root must name a private directory component",
+            ));
+        }
         let component_count = root
             .components()
             .count()
@@ -276,18 +330,25 @@ impl CacheDirectory {
             Path::new(".")
         };
         let descriptor = open(start, DIRECTORY_FLAGS, Mode::empty())
-            .map_err(|error| CacheError::path(format!("cannot open cache anchor: {error}")))?;
+            .map_err(|error| map_directory_errno("cannot open cache anchor", error))?;
         let anchor = Arc::new(File::from(descriptor));
         let mut current = anchor.clone();
         let mut components = Vec::new();
         components
             .try_reserve_exact(root.components().count().saturating_add(2))
-            .map_err(|_| CacheError::io("cache path proof allocation failed"))?;
+            .map_err(|_| allocation_error("cache path proof"))?;
+        let mut normal_index = 0_usize;
         for component in root.components() {
             match component {
                 Component::RootDir if absolute => continue,
                 Component::Normal(name) => {
-                    let Some(next) = open_or_create_directory(&current, name, create, false)?
+                    normal_index += 1;
+                    let Some(next) = open_or_create_directory(
+                        &current,
+                        name,
+                        create,
+                        normal_index == root_component_count,
+                    )?
                     else {
                         return Ok(None);
                     };
@@ -316,10 +377,8 @@ impl CacheDirectory {
     pub(crate) fn verify(&self) -> Result<(), CacheError> {
         let mut current = self.anchor.clone();
         for (name, expected) in &self.components {
-            let descriptor =
-                openat(&*current, name, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| {
-                    CacheError::path(format!("cache directory binding changed: {error}"))
-                })?;
+            let descriptor = openat(&*current, name, DIRECTORY_FLAGS, Mode::empty())
+                .map_err(|error| map_directory_errno("cache directory binding changed", error))?;
             let next = File::from(descriptor);
             let actual = ObjectIdentity::from_file(&next)?;
             if actual != *expected {
@@ -346,32 +405,62 @@ fn open_or_create_directory(
             match mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
                 Ok(()) | Err(Errno::EXIST) => {}
                 Err(error) => {
-                    return Err(CacheError::io(format!(
-                        "cannot create cache directory: {error}"
-                    )));
+                    return Err(map_errno("cannot create cache directory", error));
                 }
             }
             openat(parent, name, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| {
-                CacheError::path(format!("cannot open created cache directory: {error}"))
+                map_directory_errno("cannot open created cache directory", error)
             })?
         }
         Err(error) => {
-            return Err(CacheError::path(format!(
-                "cannot open cache directory: {error}"
-            )));
+            return Err(map_directory_errno("cannot open cache directory", error));
         }
     };
     let file = File::from(descriptor);
     let metadata = file
         .metadata()
-        .map_err(|error| CacheError::io(error.to_string()))?;
+        .map_err(|error| map_io_error("cannot stat cache directory", error))?;
     if !metadata.file_type().is_dir() {
         return Err(CacheError::path("cache path component is not a directory"));
     }
-    if private && metadata.mode() & 0o777 != 0o700 {
+    if private && metadata.mode() & 0o7777 != 0o700 {
         return Err(CacheError::path(
-            "application cache directory does not have mode 0700",
+            "private cache directory does not have mode 0700",
         ));
     }
     Ok(Some(file))
+}
+
+fn map_directory_errno(context: &str, error: Errno) -> CacheError {
+    match error {
+        Errno::LOOP | Errno::NOTDIR => CacheError::path(format!("{context}: {error}")),
+        _ => map_errno(context, error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allocation_error, map_errno};
+    use rustix::io::Errno;
+
+    #[test]
+    fn resource_failures_have_one_stable_control_code() {
+        for error in [Errno::MFILE, Errno::NFILE, Errno::NOMEM] {
+            let mapped = map_errno("injected syscall", error);
+            assert_eq!(mapped.code(), "control.resource_exhausted");
+            assert!(mapped.is_control());
+        }
+        let mapped = allocation_error("injected reserve");
+        assert_eq!(mapped.code(), "control.resource_exhausted");
+        assert!(mapped.is_control());
+    }
+
+    #[test]
+    fn permission_and_ordinary_io_do_not_collapse_into_path_or_rebuild() {
+        assert_eq!(
+            map_errno("injected syscall", Errno::ACCESS).code(),
+            "cache.permission_denied"
+        );
+        assert_eq!(map_errno("injected syscall", Errno::IO).code(), "cache.io");
+    }
 }
