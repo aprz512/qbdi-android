@@ -24,7 +24,8 @@ struct RawReport {
     finished_at: String,
     timeline: Vec<Value>,
     device: BTreeMap<String, Value>,
-    tracer: BTreeMap<String, Value>,
+    #[serde(rename = "tracer")]
+    _tracer: BTreeMap<String, Value>,
     target: BTreeMap<String, Value>,
     effective_config: BTreeMap<String, Value>,
     native: BTreeMap<String, Value>,
@@ -150,7 +151,7 @@ impl Manifest {
             package_present: !raw.package.is_empty(),
             device_present: !raw.serial.is_empty() && !raw.device.is_empty(),
             target_present: !raw.target.is_empty(),
-            config_present: !raw.effective_config.is_empty() || !raw.tracer.is_empty(),
+            config_present: !raw.effective_config.is_empty(),
             artifacts,
             unavailable,
         })

@@ -2,12 +2,13 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{File, Metadata},
     os::unix::fs::{FileExt, FileTypeExt},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 use qtrace_provider::{ProviderError, ReadAtSource, SourceCoordinate, WorkDelta, WorkGuard};
 use rustix::fs::{Mode, OFlags, open, openat};
+use rustix::io::Errno;
 
 use crate::FileIdentity;
 
@@ -16,8 +17,16 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 const FILE_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::NONBLOCK)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
+
+#[derive(Clone, Copy, Debug)]
+enum OpenContext {
+    Report,
+    Source,
+    Rebind,
+}
 
 #[derive(Debug)]
 pub(crate) struct SecureRoot {
@@ -26,12 +35,20 @@ pub(crate) struct SecureRoot {
 }
 
 impl SecureRoot {
-    pub(crate) fn open(path: &Path) -> Result<Self, ProviderError> {
-        let (directory, binding) = walk_directory(path)?;
+    fn open(path: &Path, context: OpenContext) -> Result<Self, ProviderError> {
+        let (directory, binding) = walk_directory(path, context).map_err(|error| error.error)?;
         Ok(Self { directory, binding })
     }
 
-    pub(crate) fn open_file(&self, relative: &str) -> Result<SecureFile, ProviderError> {
+    pub(crate) fn open_report_file(&self, relative: &str) -> Result<SecureFile, ProviderError> {
+        self.open_file(relative, OpenContext::Report)
+    }
+
+    pub(crate) fn open_source_file(&self, relative: &str) -> Result<SecureFile, ProviderError> {
+        self.open_file(relative, OpenContext::Source)
+    }
+
+    fn open_file(&self, relative: &str, context: OpenContext) -> Result<SecureFile, ProviderError> {
         let components = validated_relative_components(relative)?;
         let (leaf, parents) = components
             .split_last()
@@ -43,13 +60,13 @@ impl SecureRoot {
             .try_reserve_exact(parents.len())
             .map_err(|_| resource_error("source directory proof allocation failed"))?;
         for component in parents {
-            let child = Arc::new(open_directory_at(&parent, component)?);
+            let child = Arc::new(open_directory_at(&parent, component, context)?);
             let identity = directory_identity(&child)?;
             parent_components.push(((*component).to_owned(), identity));
             parent = child;
         }
         let descriptor = openat(&*parent, *leaf, FILE_FLAGS, Mode::empty())
-            .map_err(|error| path_error(format!("cannot open regular source leaf: {error}")))?;
+            .map_err(|error| map_open_error(error, context, "cannot open regular source leaf"))?;
         let file = Arc::new(File::from(descriptor));
         ensure_regular(&file.metadata().map_err(io_error)?)?;
         Ok(SecureFile {
@@ -72,7 +89,11 @@ impl DirectoryBinding {
     fn verify(&self) -> Result<(), ProviderError> {
         let mut directory = self.anchor.clone();
         for (component, expected) in &self.components {
-            let child = Arc::new(open_directory_at(&directory, component)?);
+            let child = Arc::new(open_directory_at(
+                &directory,
+                component,
+                OpenContext::Rebind,
+            )?);
             let actual = directory_identity(&child)?;
             if actual.device != expected.device || actual.inode != expected.inode {
                 return Err(path_error(
@@ -182,7 +203,11 @@ impl SecureFile {
             self.root_binding.verify()?;
             let mut rebound_parent = self.root.clone();
             for (component, expected) in &self.parent_components {
-                let child = Arc::new(open_directory_at(&rebound_parent, component)?);
+                let child = Arc::new(open_directory_at(
+                    &rebound_parent,
+                    component,
+                    OpenContext::Rebind,
+                )?);
                 let actual = directory_identity(&child)?;
                 if actual.device != expected.device || actual.inode != expected.inode {
                     return Err(path_error(
@@ -191,8 +216,15 @@ impl SecureFile {
                 }
                 rebound_parent = child;
             }
-            let rebound = openat(&*rebound_parent, &self.leaf, FILE_FLAGS, Mode::empty())
-                .map_err(|error| path_error(format!("source path changed during read: {error}")))?;
+            let rebound = openat(&*rebound_parent, &self.leaf, FILE_FLAGS, Mode::empty()).map_err(
+                |error| {
+                    map_open_error(
+                        error,
+                        OpenContext::Rebind,
+                        "source path changed during read",
+                    )
+                },
+            )?;
             let rebound = File::from(rebound);
             let rebound_metadata = rebound.metadata().map_err(io_error)?;
             ensure_regular(&rebound_metadata)?;
@@ -288,14 +320,26 @@ impl std::io::Read for FileReader {
 
 pub(crate) fn split_selected_report(
     path: &Path,
-) -> Result<(SecureRoot, &'static str), ProviderError> {
-    if path.file_name() == Some(OsStr::new("report.json")) {
-        let parent = path
-            .parent()
-            .ok_or_else(|| path_error("selected report has no parent directory"))?;
-        Ok((SecureRoot::open(parent)?, "report.json"))
-    } else {
-        Ok((SecureRoot::open(path)?, "report.json"))
+) -> Result<(SecureRoot, &'static str, PathBuf), ProviderError> {
+    match walk_directory(path, OpenContext::Report) {
+        Ok((directory, binding)) => Ok((
+            SecureRoot { directory, binding },
+            "report.json",
+            path.to_owned(),
+        )),
+        Err(error)
+            if error.final_not_directory && path.file_name() == Some(OsStr::new("report.json")) =>
+        {
+            let parent = path
+                .parent()
+                .ok_or_else(|| path_error("selected report has no parent directory"))?;
+            Ok((
+                SecureRoot::open(parent, OpenContext::Report)?,
+                "report.json",
+                parent.to_owned(),
+            ))
+        }
+        Err(error) => Err(error.error),
     }
 }
 
@@ -308,41 +352,84 @@ pub(crate) fn split_selected_file(path: &Path) -> Result<(SecureRoot, String), P
     let parent = path
         .parent()
         .ok_or_else(|| path_error("selected source has no parent directory"))?;
-    Ok((SecureRoot::open(parent)?, leaf.to_owned()))
+    Ok((
+        SecureRoot::open(parent, OpenContext::Source)?,
+        leaf.to_owned(),
+    ))
 }
 
-fn walk_directory(path: &Path) -> Result<(Arc<File>, DirectoryBinding), ProviderError> {
+struct DirectoryWalkError {
+    error: ProviderError,
+    final_not_directory: bool,
+}
+
+fn walk_directory(
+    path: &Path,
+    context: OpenContext,
+) -> Result<(Arc<File>, DirectoryBinding), DirectoryWalkError> {
     let absolute = path.is_absolute();
     let start = if absolute {
         Path::new("/")
     } else {
         Path::new(".")
     };
-    let descriptor = open(start, DIRECTORY_FLAGS, Mode::empty())
-        .map_err(|error| path_error(format!("cannot open trusted root: {error}")))?;
+    let descriptor =
+        open(start, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| DirectoryWalkError {
+            error: map_open_error(error, context, "cannot open trusted root"),
+            final_not_directory: false,
+        })?;
     let anchor = Arc::new(File::from(descriptor));
     let mut directory = anchor.clone();
     let mut components = Vec::new();
     components
         .try_reserve_exact(path.components().count())
-        .map_err(|_| resource_error("selected path proof allocation failed"))?;
-    for component in path.components() {
+        .map_err(|_| DirectoryWalkError {
+            error: resource_error("selected path proof allocation failed"),
+            final_not_directory: false,
+        })?;
+    let mut path_components = path.components().peekable();
+    while let Some(component) = path_components.next() {
         match component {
             Component::RootDir if absolute => continue,
             Component::Normal(component) => {
-                let child = Arc::new(open_directory_at(&directory, component)?);
-                components.push((component.to_owned(), directory_identity(&child)?));
+                let descriptor = openat(&*directory, component, DIRECTORY_FLAGS, Mode::empty())
+                    .map_err(|error| DirectoryWalkError {
+                        final_not_directory: path_components.peek().is_none()
+                            && error == Errno::NOTDIR,
+                        error: map_open_error(
+                            error,
+                            context,
+                            "cannot open selected directory component",
+                        ),
+                    })?;
+                let child = Arc::new(File::from(descriptor));
+                let identity = directory_identity(&child).map_err(|error| DirectoryWalkError {
+                    error,
+                    final_not_directory: false,
+                })?;
+                components.push((component.to_owned(), identity));
                 directory = child;
             }
-            _ => return Err(path_error("selected path contains an unsafe component")),
+            _ => {
+                return Err(DirectoryWalkError {
+                    error: path_error("selected path contains an unsafe component"),
+                    final_not_directory: false,
+                });
+            }
         }
     }
     Ok((directory, DirectoryBinding { anchor, components }))
 }
 
-fn open_directory_at(parent: &File, component: &OsStr) -> Result<File, ProviderError> {
-    let descriptor = openat(parent, component, DIRECTORY_FLAGS, Mode::empty())
-        .map_err(|error| path_error(format!("cannot open source directory component: {error}")))?;
+fn open_directory_at(
+    parent: &File,
+    component: &OsStr,
+    context: OpenContext,
+) -> Result<File, ProviderError> {
+    let descriptor =
+        openat(parent, component, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| {
+            map_open_error(error, context, "cannot open source directory component")
+        })?;
     Ok(File::from(descriptor))
 }
 
@@ -408,6 +495,47 @@ fn ensure_regular(metadata: &Metadata) -> Result<(), ProviderError> {
     Ok(())
 }
 
+fn map_open_error(error: Errno, context: OpenContext, action: &str) -> ProviderError {
+    let detail = format!("{action}: {error}");
+    if matches!(error, Errno::MFILE | Errno::NFILE | Errno::NOMEM) {
+        return ProviderError::new("control.resource_exhausted", "control", None, false, detail);
+    }
+    if matches!(context, OpenContext::Rebind) {
+        return path_error(detail);
+    }
+    if matches!(
+        error,
+        Errno::LOOP | Errno::NOTDIR | Errno::ISDIR | Errno::NXIO
+    ) {
+        return path_error(detail);
+    }
+    if error == Errno::NOENT {
+        return match context {
+            OpenContext::Report => ProviderError::new(
+                "session.report_missing",
+                "session.report",
+                None,
+                false,
+                detail,
+            ),
+            OpenContext::Source => {
+                ProviderError::new("source.not_found", "source.open", None, false, detail)
+            }
+            OpenContext::Rebind => path_error(detail),
+        };
+    }
+    if matches!(error, Errno::ACCESS | Errno::PERM) {
+        return ProviderError::new(
+            "source.permission_denied",
+            "source.open",
+            None,
+            false,
+            detail,
+        );
+    }
+    ProviderError::new("source.io", "source.open", None, false, detail)
+}
+
 fn path_error(detail: impl AsRef<str>) -> ProviderError {
     ProviderError::new("session.path_escape", "session.path", None, false, detail)
 }
@@ -444,4 +572,53 @@ fn short_read(offset: u64, requested: u64, length: u64) -> ProviderError {
             length.saturating_sub(offset)
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use rustix::io::Errno;
+
+    use super::{OpenContext, map_open_error};
+
+    #[test]
+    fn open_errno_mapping_keeps_resource_permission_and_escape_classes_distinct() {
+        for errno in [Errno::MFILE, Errno::NFILE, Errno::NOMEM] {
+            assert_eq!(
+                map_open_error(errno, OpenContext::Source, "test").code(),
+                "control.resource_exhausted"
+            );
+        }
+        for errno in [Errno::ACCESS, Errno::PERM] {
+            assert_eq!(
+                map_open_error(errno, OpenContext::Source, "test").code(),
+                "source.permission_denied"
+            );
+        }
+        for errno in [Errno::LOOP, Errno::NOTDIR] {
+            assert_eq!(
+                map_open_error(errno, OpenContext::Source, "test").code(),
+                "session.path_escape"
+            );
+        }
+        assert_eq!(
+            map_open_error(Errno::NOENT, OpenContext::Source, "test").code(),
+            "source.not_found"
+        );
+        assert_eq!(
+            map_open_error(Errno::NOENT, OpenContext::Report, "test").code(),
+            "session.report_missing"
+        );
+        assert_eq!(
+            map_open_error(Errno::NOENT, OpenContext::Rebind, "test").code(),
+            "session.path_escape"
+        );
+        assert_eq!(
+            map_open_error(Errno::ACCESS, OpenContext::Rebind, "test").code(),
+            "session.path_escape"
+        );
+        assert_eq!(
+            map_open_error(Errno::IO, OpenContext::Source, "test").code(),
+            "source.io"
+        );
+    }
 }

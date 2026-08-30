@@ -1,16 +1,24 @@
 use std::{
+    env,
     fs::{self, OpenOptions},
     io::Write,
     os::unix::{
-        fs::{FileExt, symlink},
+        fs::{FileExt, PermissionsExt, symlink},
         net::UnixListener,
     },
     path::Path,
-    sync::Mutex,
+    process::Command,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use qtrace_provider::{BudgetDimension, OperationAbort, WorkDelta, WorkGuard};
 use qtrace_store::{AuthorizedPath, OpenPolicy, SessionLoader};
+use rustix::fs::{CWD, Mode, mkfifoat};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -21,6 +29,88 @@ struct AllowAll;
 impl WorkGuard for AllowAll {
     fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
         Ok(())
+    }
+}
+
+#[test]
+fn fifo_artifact_leaf_child_rejects_without_waiting_for_a_writer() {
+    let Some(root) = env::var_os("QTRACE_FIFO_SESSION_ROOT") else {
+        return;
+    };
+
+    let error = open(Path::new(&root), &AllowAll).expect_err("FIFO leaf must be rejected");
+    assert_eq!(error.code(), "session.path_escape");
+}
+
+#[test]
+fn fifo_artifact_leaf_returns_a_stable_error_without_blocking() {
+    let temp = TempDir::new().expect("FIFO session");
+    fs::create_dir(temp.path().join("artifacts")).expect("artifacts");
+    mkfifoat(
+        CWD,
+        temp.path().join("artifacts/input.trace.bin"),
+        Mode::RUSR | Mode::WUSR,
+    )
+    .expect("FIFO leaf");
+    write_report(temp.path(), "artifacts/input.trace.bin", 1, &"0".repeat(64));
+
+    let mut child = Command::new(env::current_exe().expect("test executable"))
+        .arg("--exact")
+        .arg("fifo_artifact_leaf_child_rejects_without_waiting_for_a_writer")
+        .arg("--nocapture")
+        .env("QTRACE_FIFO_SESSION_ROOT", temp.path())
+        .spawn()
+        .expect("spawn isolated FIFO check");
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll FIFO child") {
+            assert!(status.success(), "FIFO child failed with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill blocked FIFO child");
+            child.wait().expect("reap blocked FIFO child");
+            panic!("opening an artifact FIFO blocked for 500ms");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn fifo_selected_report_child_rejects_without_waiting_for_a_writer() {
+    let Some(path) = env::var_os("QTRACE_FIFO_REPORT_PATH") else {
+        return;
+    };
+
+    let error = open(Path::new(&path), &AllowAll).expect_err("FIFO report must be rejected");
+    assert_eq!(error.code(), "session.path_escape");
+}
+
+#[test]
+fn fifo_selected_report_returns_a_stable_error_without_blocking() {
+    let temp = TempDir::new().expect("FIFO report container");
+    let path = temp.path().join("report.json");
+    mkfifoat(CWD, &path, Mode::RUSR | Mode::WUSR).expect("FIFO report");
+
+    let mut child = Command::new(env::current_exe().expect("test executable"))
+        .arg("--exact")
+        .arg("fifo_selected_report_child_rejects_without_waiting_for_a_writer")
+        .arg("--nocapture")
+        .env("QTRACE_FIFO_REPORT_PATH", &path)
+        .spawn()
+        .expect("spawn isolated FIFO report check");
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll FIFO report child") {
+            assert!(status.success(), "FIFO report child failed with {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill blocked FIFO report child");
+            child.wait().expect("reap blocked FIFO report child");
+            panic!("opening a selected report FIFO blocked for 500ms");
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -57,6 +147,79 @@ impl WorkGuard for OnArtifactRead {
             }
         }
         Ok(())
+    }
+}
+
+struct RejectNthCall {
+    reject_at: usize,
+    calls: AtomicUsize,
+    abort: OperationAbort,
+}
+
+impl RejectNthCall {
+    fn new(reject_at: usize, abort: OperationAbort) -> Self {
+        Self {
+            reject_at,
+            calls: AtomicUsize::new(0),
+            abort,
+        }
+    }
+}
+
+impl WorkGuard for RejectNthCall {
+    fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.reject_at {
+            Err(self.abort.clone())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct RejectInputCall {
+    reject_at: usize,
+    calls: AtomicUsize,
+    abort: OperationAbort,
+}
+
+impl RejectInputCall {
+    fn new(reject_at: usize, abort: OperationAbort) -> Self {
+        Self {
+            reject_at,
+            calls: AtomicUsize::new(0),
+            abort,
+        }
+    }
+}
+
+impl WorkGuard for RejectInputCall {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.input_bytes == 0 {
+            return Ok(());
+        }
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.reject_at {
+            Err(self.abort.clone())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct RejectTimelineWork;
+
+impl WorkGuard for RejectTimelineWork {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.nodes > 0 {
+            Err(OperationAbort::budget_exceeded(
+                BudgetDimension::Nodes,
+                0,
+                delta.nodes,
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -101,6 +264,72 @@ fn directory_and_special_file_leaves_are_rejected() {
     );
     let error = open(socket_session.path(), &AllowAll).expect_err("special leaf");
     assert_eq!(error.code(), "session.path_escape");
+}
+
+#[test]
+fn a_missing_artifact_is_isolated_without_hiding_a_healthy_timeline() {
+    let bytes = fixture_qtrb();
+    let temp = TempDir::new().expect("session");
+    fs::create_dir(temp.path().join("artifacts")).expect("artifacts");
+    fs::write(temp.path().join("artifacts/healthy.trace.bin"), &bytes).expect("healthy artifact");
+    let artifact = |local_path: &str| {
+        json!({
+            "remote_name": Path::new(local_path).file_name().and_then(|item| item.to_str()),
+            "local_path": local_path,
+            "destination_size": bytes.len(),
+            "sha256": digest(&bytes)
+        })
+    };
+    fs::write(
+        temp.path().join("report.json"),
+        serde_json::to_vec(&report(vec![
+            artifact("artifacts/healthy.trace.bin"),
+            artifact("artifacts/missing.trace.bin"),
+        ]))
+        .expect("encode report"),
+    )
+    .expect("write report");
+
+    let session = open(temp.path(), &AllowAll).expect("missing artifact is local failure");
+    assert_eq!(session.artifacts().len(), 1);
+    assert_eq!(session.failures().len(), 1);
+    assert_eq!(
+        session.failures()[0].local_path(),
+        Some("artifacts/missing.trace.bin")
+    );
+    assert_eq!(session.failures()[0].error().code(), "source.not_found");
+}
+
+#[test]
+fn a_missing_report_is_a_typed_root_error() {
+    let temp = TempDir::new().expect("empty selection");
+
+    let error = open(temp.path(), &AllowAll).expect_err("missing report must reject the root");
+    assert_eq!(error.code(), "session.report_missing");
+}
+
+#[test]
+fn a_permission_denied_artifact_is_a_typed_local_failure() {
+    let bytes = fixture_qtrb();
+    let temp = valid_session(&bytes);
+    let artifact = temp.path().join("artifacts/input.trace.bin");
+    fs::set_permissions(&artifact, fs::Permissions::from_mode(0o0))
+        .expect("remove read permission");
+    if fs::File::open(&artifact).is_ok() {
+        fs::set_permissions(&artifact, fs::Permissions::from_mode(0o600))
+            .expect("restore read permission after privileged preflight");
+        return;
+    }
+
+    let result = open(temp.path(), &AllowAll);
+    fs::set_permissions(&artifact, fs::Permissions::from_mode(0o600))
+        .expect("restore read permission");
+    let session = result.expect("permission denial is artifact-local");
+    assert_eq!(session.failures().len(), 1);
+    assert_eq!(
+        session.failures()[0].error().code(),
+        "source.permission_denied"
+    );
 }
 
 #[test]
@@ -366,6 +595,73 @@ fn cancellation_and_byte_budget_abort_before_unapproved_reads() {
     )
     .expect_err("budgeted report read");
     assert_eq!(budget.code(), "control.budget_exceeded");
+}
+
+#[test]
+fn control_errors_after_the_report_escape_provider_artifact_isolation() {
+    let cases = [
+        (2, OperationAbort::Cancelled, "control.cancelled"),
+        (
+            3,
+            OperationAbort::budget_exceeded(BudgetDimension::InputBytes, 0, 1),
+            "control.budget_exceeded",
+        ),
+    ];
+    for (reject_at, abort, expected) in cases {
+        let temp = valid_session(&fixture_qtrb());
+        let error = open(temp.path(), &RejectNthCall::new(reject_at, abort))
+            .expect_err("global control errors must not become artifact failures");
+        assert_eq!(error.code(), expected, "guard call {reject_at}");
+    }
+
+    let temp = valid_session(&fixture_qtrb());
+    let error = open(
+        temp.path(),
+        &RejectInputCall::new(3, OperationAbort::Cancelled),
+    )
+    .expect_err("provider input cancellation must escape isolation");
+    assert_eq!(error.code(), "control.cancelled");
+
+    let temp = valid_session(&fixture_qtrb());
+    let error = open(temp.path(), &RejectTimelineWork)
+        .expect_err("timeline budget failure must escape isolation");
+    assert_eq!(error.code(), "control.budget_exceeded");
+}
+
+#[test]
+fn control_errors_escape_metadata_and_unknown_artifact_verification() {
+    for local_path in ["artifacts/input.metrics", "artifacts/input.unknown"] {
+        let bytes = b"metadata";
+        let temp = TempDir::new().expect("session");
+        fs::create_dir(temp.path().join("artifacts")).expect("artifacts");
+        fs::write(temp.path().join(local_path), bytes).expect("artifact");
+        write_report(temp.path(), local_path, bytes.len(), &digest(bytes));
+
+        let error = open(
+            temp.path(),
+            &RejectInputCall::new(2, OperationAbort::Cancelled),
+        )
+        .expect_err("metadata verification cancellation must escape isolation");
+        assert_eq!(error.code(), "control.cancelled", "{local_path}");
+    }
+}
+
+#[test]
+fn control_errors_escape_single_artifact_open_after_initial_work() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("qtrace-ui workspace root")
+        .join("fixtures/sessions/valid-mixed/artifacts/main.trace.bin");
+    for reject_at in [1, 2, 3] {
+        let error = SessionLoader::open_artifact(
+            AuthorizedPath::new(path.clone()),
+            OpenPolicy::default(),
+            &RejectNthCall::new(reject_at, OperationAbort::Cancelled),
+        )
+        .expect_err("single-artifact control error must abort the open");
+        assert_eq!(error.code(), "control.cancelled", "guard call {reject_at}");
+    }
 }
 
 fn open(

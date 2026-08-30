@@ -255,8 +255,8 @@ impl SessionLoader {
         guard: &dyn WorkGuard,
     ) -> Result<SessionSource, ProviderError> {
         let selected_path = selected.0;
-        let (root, report_name) = split_selected_report(&selected_path)?;
-        let report_file = root.open_file(report_name)?;
+        let (root, report_name, display_root) = split_selected_report(&selected_path)?;
+        let report_file = root.open_report_file(report_name)?;
         let report_bytes = report_file.read_bounded(MAX_REPORT_BYTES, guard)?;
         let manifest = Manifest::parse(&report_bytes)?;
         let mut session = SessionSource {
@@ -290,12 +290,12 @@ impl SessionLoader {
                         Ok((_source, identity)) => session.metadata.push(ArtifactMetadata {
                             local_path: record.local_path,
                             identity: SourceIdentity::new(
-                                source_display_path(&selected_path, &identity.0),
+                                display_root.join(&identity.0),
                                 identity.1,
                                 identity.2,
                             ),
                         }),
-                        Err(error) if error.code() == "session.path_escape" => return Err(error),
+                        Err(error) if is_session_fatal(&error) => return Err(error),
                         Err(error) => session.failures.push(ArtifactFailure {
                             local_path: Some(record.local_path),
                             error,
@@ -312,7 +312,7 @@ impl SessionLoader {
                                 "local artifact is not a supported analysis source",
                             ),
                         }),
-                        Err(error) if error.code() == "session.path_escape" => return Err(error),
+                        Err(error) if is_session_fatal(&error) => return Err(error),
                         Err(error) => session.failures.push(ArtifactFailure {
                             local_path: Some(local_path),
                             error,
@@ -348,7 +348,7 @@ impl SessionLoader {
                     format,
                     timeline_id: TimelineId(record_index as u64),
                     identity: SourceIdentity::new(
-                        source_display_path(&selected_path, &relative),
+                        display_root.join(&relative),
                         file_identity,
                         provider_identity,
                     ),
@@ -359,7 +359,7 @@ impl SessionLoader {
             })();
             match result {
                 Ok(artifact) => session.artifacts.push(artifact),
-                Err(error) if error.code() == "session.path_escape" => return Err(error),
+                Err(error) if is_session_fatal(&error) => return Err(error),
                 Err(error) => session.failures.push(ArtifactFailure {
                     local_path: Some(local_path),
                     error,
@@ -384,7 +384,7 @@ impl SessionLoader {
                 ));
             }
         };
-        let source = root.open_file(&leaf)?;
+        let source = root.open_source_file(&leaf)?;
         let file_identity = source.identity()?;
         let digest = hash_file(&source, file_identity, guard)?;
         let initial_identity = ProviderSourceIdentity {
@@ -485,7 +485,7 @@ fn open_and_verify(
     ),
     ProviderError,
 > {
-    let source = root.open_file(&record.local_path)?;
+    let source = root.open_source_file(&record.local_path)?;
     let file_identity = source.identity()?;
     if record.size != file_identity.size {
         return Err(ProviderError::new(
@@ -793,15 +793,6 @@ impl EventCursor for IdentityCheckedCursor {
     }
 }
 
-fn source_display_path(selected: &std::path::Path, relative: &str) -> PathBuf {
-    let root = if selected.file_name().and_then(|item| item.to_str()) == Some("report.json") {
-        selected.parent().unwrap_or(selected)
-    } else {
-        selected
-    };
-    root.join(relative)
-}
-
 fn fallible_vec<T>(capacity: usize) -> Result<Vec<T>, ProviderError> {
     let mut output = Vec::new();
     output
@@ -829,6 +820,38 @@ fn format_error(detail: impl AsRef<str>) -> ProviderError {
     )
 }
 
+fn is_session_fatal(error: &ProviderError) -> bool {
+    error.code() == "session.path_escape" || error.code().starts_with("control.")
+}
+
 fn resource_error(detail: impl AsRef<str>) -> ProviderError {
     ProviderError::new("control.budget_exceeded", "control", None, false, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use qtrace_provider::ProviderError;
+
+    use super::is_session_fatal;
+
+    #[test]
+    fn every_control_error_is_session_fatal_but_ordinary_source_errors_are_not() {
+        for code in [
+            "control.cancelled",
+            "control.budget_exceeded",
+            "control.resource_exhausted",
+            "control.future_global_abort",
+        ] {
+            assert!(is_session_fatal(&ProviderError::new(
+                code, "control", None, false, "test"
+            )));
+        }
+        assert!(!is_session_fatal(&ProviderError::new(
+            "source.io",
+            "source.open",
+            None,
+            false,
+            "test"
+        )));
+    }
 }

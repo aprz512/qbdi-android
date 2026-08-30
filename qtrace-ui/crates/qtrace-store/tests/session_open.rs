@@ -305,6 +305,42 @@ fn selected_report_file_and_selected_directory_open_the_same_session() {
 }
 
 #[test]
+fn a_selected_directory_named_report_json_opens_its_child_manifest() {
+    let container = TempDir::new().expect("selection container");
+    let root = container.path().join("report.json");
+    fs::create_dir(&root).expect("directory named report.json");
+    write_json(root.join("report.json"), &report(Vec::new()));
+
+    let session = open_path(&root).expect("selected object kind must decide directory semantics");
+    assert_eq!(
+        session.session_id(),
+        Some("11111111-1111-4111-8111-111111111111")
+    );
+}
+
+#[test]
+fn effective_config_capability_depends_only_on_effective_config() {
+    let temp = TempDir::new().expect("capability session");
+    let tracer_only = with_field(&report(Vec::new()), "tracer", json!({"format": "QTRB"}));
+    write_json(temp.path().join("report.json"), &tracer_only);
+    let session = open_path(temp.path()).expect("tracer-only manifest");
+    assert!(
+        !session
+            .capabilities()
+            .has(SessionCapability::EffectiveConfig)
+    );
+
+    let configured = with_field(&tracer_only, "effective_config", json!({"profile": "fast"}));
+    write_json(temp.path().join("report.json"), &configured);
+    let session = open_path(temp.path()).expect("configured manifest");
+    assert!(
+        session
+            .capabilities()
+            .has(SessionCapability::EffectiveConfig)
+    );
+}
+
+#[test]
 fn single_qtrb_is_degraded_with_explicit_missing_context_capabilities() {
     let path = fixture_root("valid-mixed").join("artifacts/main.trace.bin");
     let session =
