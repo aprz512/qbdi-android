@@ -80,15 +80,19 @@ values must have both a clear presence bit and a zero value. No native struct se
 1. Charge the actual writer peak before path I/O: owned key/kind capacities, identity text,
    manifest capacity, two 64,000-byte streaming buffers, and fixed bookkeeping. Sections are then
    streamed directly to the temp with incremental SHA-256; there is no second whole-cache `Vec`.
-2. Securely open/create the XDG path and acquire the digest-local `.publish.lock`. Newly created
-   root-final/application/digest directories are forced to exact `0700`, and a newly created lock
-   to exact `0600`, before a second descriptor identity/mode proof; existing objects are validated
-   and never chmodded. This makes the result independent of a restrictive process umask. The lock
-   is no-follow, created with `O_EXCL`, and acquired with nonblocking exclusive Linux `flock`
-   retries. Every retry checkpoints the caller guard and sleeps 1 ms after contention, so a
-   cancelled or expired writer does not wait for the current holder to release the lock. All
-   library builders for the digest serialize temp cleanup, rename/exchange, rollback, and
-   directory sync under this lock.
+2. Securely open/create the XDG path and acquire the digest-local `.publish.lock`. Each missing
+   directory is first created as a random same-parent staging name with requested mode `0700`,
+   opened with `O_PATH`, and proved by descriptor identity, exact mode, and named binding. It is
+   published with `renameat2(NOREPLACE)`, then reopened and proved to be the same inode. Ordinary
+   umasks `022` and `077` do not remove requested owner bits and therefore produce exact `0700`.
+   If an extreme umask does reduce those bits, creation fails closed and removes only a staging
+   name still proved to be the held inode; there is no pathname chmod fallback. Existing objects
+   are validated and never chmodded. A newly created lock is descriptor-`fchmod`ed to `0600` and
+   re-proved. The lock is no-follow, created with `O_EXCL`, and acquired with nonblocking exclusive
+   Linux `flock` retries. Every retry checkpoints the caller guard and sleeps 1 ms after
+   contention, so a cancelled or expired writer does not wait for the current holder to release
+   the lock. All library builders for the digest serialize temp cleanup, rename/exchange,
+   rollback, and directory sync under this lock.
 3. Create a cryptographically random same-directory `.tmp` with
    `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, force mode `0600`, and establish cleanup ownership
    immediately. Injected first-`fstat`, `fchmod`, and second-`fstat` failures leave zero temp names.
@@ -186,7 +190,7 @@ commit fsync failure rolls back and durably syncs, returning the original `cache
 |---|---|---|
 | 1 final directory linearization | Deterministic hooks rebound the digest immediately after a successful directory fsync; Missing returned `Published`, while Valid returned `Existing` from the held old directory | Every success/Existing path now ends at a post-fsync directory proof. Missing performs verified rollback+fsync on rebind; post-cleanup Corrupt reports visibility uncertainty; Valid preserves the winner and propagates the binding error |
 | 2 cancellable lock | A real lock holder kept a deadline-guarded contender blocked beyond the 250 ms test bound because `LockExclusive` blocked in the kernel | Lock reuse uses `O_NONBLOCK`; nonblocking exclusive-flock retries checkpoint before every attempt and yield for 1 ms. The contender returns the original `job.cancelled` without holder release or temp/final creation; publication succeeds after release |
-| 3 exact modes under umask | A serialized child set umask `0777`; initial directory open failed with `EACCES`. Injected first-lock-`fstat` then exposed an insecure created lock name left behind | Only newly created private directories/lock are descriptor-finalized to exact `0700`/`0600` and then re-proved; existing objects are never chmodded. First/final `fstat` and `fchmod` injections leave no lock. A follow-up self-review attack covers first/opened/final directory `fstat` and chmod failure; every case returns typed `cache.io` and removes only the new component |
+| 3 exact modes under umask | A serialized child set umask `0777`; initial directory open failed with `EACCES`. Injected first-lock-`fstat` then exposed an insecure created lock name left behind | Regular lock/temp leaves are descriptor-finalized to `0600` and re-proved; directory creation was further replaced in round 3 by exact-mode random staging with no pathname chmod. Existing objects are never chmodded. First/final `fstat` and mode-finalization injections clean only a proved created object |
 | 4 reader clone resources | Injected `EMFILE`/`ENFILE` at the cache proof clone was ignored by the harness and the reader returned `Ready`, demonstrating the direct `cache.io` path remained | The proof clone goes through the centralized I/O mapper; both injected errno values return stable control error `control.resource_exhausted` |
 | 5 valid-winner fsync visibility | Injected temp-cleanup directory-fsync failure returned `NoVisibleFinal` even though the complete winner remained readable | The result is `VisibleDurabilityUncertain`; exact winner bytes remain unchanged and a fresh reader returns `Ready` |
 
@@ -195,11 +199,27 @@ objects whose successful creation was reported by this process; once any descrip
 is observed, cleanup stops and returns conflict. The cooperative same-UID threat boundary remains
 the one described above.
 
+### Independent-review round 3: RED -> GREEN
+
+| Finding | RED/attack evidence | GREEN behavior |
+|---|---|---|
+| Directory mode TOCTOU | After the held `O_PATH` identity was captured, a hook moved the created directory aside and rebound its name to a pre-existing mode-`0755` directory. The old pathname `chmodat` changed that foreign inode to `0700` | Missing components use 128-bit-random same-parent staging. No directory chmod is issued. Held identity, exact `0700`, named staging binding, reopened descriptor, pre-`NOREPLACE`, and post-publish target identity are proved. The foreign inode remains mode `0755`, linked, and the operation returns `cache.identity_conflict` |
+| First-fstat cleanup | The same rebind combined with injected first `fstat` returned `cache.io` and blindly removed the replacement name | A first-proof error retries proof on the held fd solely to establish cleanup ownership. Cleanup proceeds only if the current staging name still denotes that inode; the rebind is preserved and returns identity conflict |
+| Extreme umask boundary | Under serialized child umask `0777`, the prior pathname chmod made publication succeed | With no safe exposed rustix `fchmodat2(AT_EMPTY_PATH)` and Task 10's no-unsafe rule, no path fallback is used. Umasks `022`/`077` publish exact `0700`; `0777` returns `cache.permission_denied`, publishes no target, and removes the stable proved staging directory |
+| Post-publish setup failure | Injected target `fstat` after `NOREPLACE` left the newly published directory behind | The target is removed only after its name is re-proved to equal the recorded staging identity; the fault returns `cache.io` with zero target/staging names |
+| Minor dependency/refactor | The production rustix feature set included test-only `process`; lock and temp duplicated the created-leaf mode/identity cleanup machine | `process` is dev-only. Lock and temp share one descriptor-bound regular-leaf finalizer while retaining real first/second-`fstat` and `fchmod` fault coverage |
+
+Directory staging cleanup is deliberately non-recursive and bounded to one empty 128-bit-random
+name per failed component creation. If a staging name or target no longer matches the held inode,
+the implementation preserves all ambiguous objects and returns typed conflict rather than deleting
+a possible foreign directory. Concurrent creators race at `NOREPLACE`; the loser removes only its
+proved staging inode and validates the winner.
+
 ### Focused GREEN
 
 The final focused suites pass 29 integration tests: 11 format/identity/corruption/view tests and 18
-publication/path/lock/race/cancellation tests. Thirteen cache-focused unit tests cover setup faults,
-post-fsync rebinding, cancellable lock contention, restrictive umask, visibility states, and
+publication/path/lock/race/cancellation tests. Sixteen cache-focused unit tests cover setup faults,
+post-fsync rebinding, cancellable lock contention, umask boundaries, visibility states, and
 resource mapping. Publication abort coverage runs both `Cancelled` and `BudgetExceeded` at all
 four checkpoints; checkpoint 4 is post-rename and its verified rollback leaves no builder
 final/temp when `NoVisibleFinal` is reported.
@@ -207,8 +227,8 @@ final/temp when `NoVisibleFinal` is reported.
 ## Verification
 
 - `cargo test -p qtrace-store --test cache_format --test cache_publication` — passed, 29/29.
-- `cargo test -p qtrace-store cache:: -- --nocapture` — passed, 13/13 cache-focused unit tests.
-- `cargo test -p qtrace-store` — passed, 92/92 (16 unit + 76 integration).
+- `cargo test -p qtrace-store cache:: -- --nocapture` — passed, 16/16 cache-focused unit tests.
+- `cargo test -p qtrace-store` — passed, 95/95 (19 unit + 76 integration).
 - `cargo test -p qtrace-provider` — passed, 122 tests plus one intentional ignored isolated child
   entry point.
 - `cargo clippy -p qtrace-store -p qtrace-provider --all-targets -- -D warnings` — passed.
@@ -235,6 +255,10 @@ final/temp when `NoVisibleFinal` is reported.
 - No network, administrator access, or Tauri/WebKitGTK dependency was needed.
 - Safe mmap was not available without violating the no-`unsafe` contract, so the mapped-named view
   uses safe held-FD `pread`; this is an implementation choice, not a correctness deferral.
+- rustix 1.1.4 does not expose safe Linux `fchmodat2(AT_EMPTY_PATH)`, and `fchmod` cannot operate on
+  an `O_PATH` fd. Task 10 therefore does not attempt to repair directory modes stripped by an
+  extreme umask: it fails closed and cleans only a proved staging inode. This trades availability
+  on unusual umasks for descriptor binding and preserves the no-`unsafe` contract.
 - Task 11 owns the complete normalized columns, eager indexes, provider-to-store build, and scale
   performance work. Task 17 owns UI/Tauri path authorization. Neither was started.
 - No Task 10 correctness or security item is deferred.
@@ -245,3 +269,5 @@ final/temp when `NoVisibleFinal` is reported.
   cannot contain its own hash).
 - Review-fix follow-up: `fix(qtrace-ui): harden cache publication` (exact hash in handoff).
 - Review-round-2 follow-up: `fix(qtrace-ui): close cache commit windows` (exact hash in handoff).
+- Review-round-3 follow-up: `fix(qtrace-ui): bind cache setup to descriptors` (exact hash in
+  handoff).

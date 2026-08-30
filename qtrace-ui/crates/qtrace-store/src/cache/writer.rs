@@ -616,7 +616,7 @@ fn sync_directory(file: &File, context: &str) -> Result<(), CacheError> {
 thread_local! {
     static INJECT_DIRECTORY_FSYNC_FAILURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static POST_DIRECTORY_FSYNC_HOOK: std::cell::RefCell<Option<PostDirectoryFsyncHook>> = const { std::cell::RefCell::new(None) };
-    static INJECT_LOCK_SETUP_FAULT: std::cell::Cell<LockSetupFault> = const { std::cell::Cell::new(LockSetupFault::None) };
+    static INJECT_LOCK_SETUP_FAULT: std::cell::Cell<CreatedLeafFault> = const { std::cell::Cell::new(CreatedLeafFault::None) };
 }
 
 #[cfg(test)]
@@ -661,58 +661,18 @@ impl<'a> PublicationLock<'a> {
             Err(error) => return Err(map_lock_open_error(error)),
         };
         let file = File::from(descriptor);
-        let provisional_result = if created && lock_setup_fault(LockSetupFault::FirstIdentity) {
-            Err(CacheError::io("injected first lock fstat failure"))
+        let identity = if created {
+            finalize_created_regular_leaf(
+                directory,
+                &file,
+                LOCK_NAME,
+                take_lock_setup_fault(),
+                "cache publication lock",
+            )
         } else {
             ObjectIdentity::regular_file(&file)
-        };
-        let provisional = match provisional_result {
-            Ok(identity) => identity,
-            Err(error) if created => {
-                unlink_unidentified_created_lock(directory)?;
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
-        if created {
-            let chmod_result = if lock_setup_fault(LockSetupFault::Chmod) {
-                Err(Errno::IO)
-            } else {
-                fchmod(&file, Mode::RUSR | Mode::WUSR)
-            };
-            if let Err(error) = chmod_result {
-                unlink_created_lock(directory, provisional)?;
-                return Err(map_errno(
-                    "cannot finalize private cache publication lock mode",
-                    error,
-                ));
-            }
-        }
-        let identity_result = if created && lock_setup_fault(LockSetupFault::SecondIdentity) {
-            Err(CacheError::io("injected second lock fstat failure"))
-        } else {
-            ObjectIdentity::regular_file(&file)
-        };
-        let identity = match identity_result {
-            Ok(identity) => identity,
-            Err(error) if created => {
-                unlink_created_lock(directory, provisional)?;
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
-        if !provisional.same_object(identity) {
-            if created {
-                unlink_created_lock(directory, provisional)?;
-            }
-            return Err(CacheError::conflict(
-                "cache publication lock identity changed during mode finalization",
-            ));
-        }
+        }?;
         if identity.permissions != 0o600 {
-            if created {
-                unlink_created_lock(directory, provisional)?;
-            }
             return Err(CacheError::path(
                 "cache publication lock does not have mode 0600",
             ));
@@ -752,8 +712,7 @@ impl<'a> PublicationLock<'a> {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum LockSetupFault {
-    #[cfg(test)]
+enum CreatedLeafFault {
     None,
     FirstIdentity,
     Chmod,
@@ -761,46 +720,92 @@ enum LockSetupFault {
 }
 
 #[cfg(not(test))]
-fn lock_setup_fault(_point: LockSetupFault) -> bool {
-    false
+fn take_lock_setup_fault() -> CreatedLeafFault {
+    CreatedLeafFault::None
 }
 
 #[cfg(test)]
-fn lock_setup_fault(point: LockSetupFault) -> bool {
-    INJECT_LOCK_SETUP_FAULT.with(|fault| {
-        if fault.get() == point {
-            fault.set(LockSetupFault::None);
-            true
-        } else {
-            false
-        }
-    })
+fn take_lock_setup_fault() -> CreatedLeafFault {
+    INJECT_LOCK_SETUP_FAULT.with(|fault| fault.replace(CreatedLeafFault::None))
 }
 
-fn unlink_unidentified_created_lock(directory: &CacheDirectory) -> Result<(), CacheError> {
-    // O_EXCL established ownership of this name. Same-UID processes are part of
-    // the publication trust boundary; an unlink failure is therefore preserved
-    // as a conflict rather than guessed around.
-    unlinkat(&*directory.file, LOCK_NAME, AtFlags::empty()).map_err(|error| {
-        map_errno(
-            "cannot remove unverified failed cache publication lock",
-            error,
-        )
-    })
-}
-
-fn unlink_created_lock(
+fn finalize_created_regular_leaf(
     directory: &CacheDirectory,
-    expected: ObjectIdentity,
-) -> Result<(), CacheError> {
-    let actual = named_identity(directory, LOCK_NAME)?;
-    if !expected.same_object(actual) {
-        return Err(CacheError::conflict(
-            "refusing to remove a replaced cache publication lock",
+    file: &File,
+    name: &str,
+    fault: CreatedLeafFault,
+    kind: &str,
+) -> Result<ObjectIdentity, CacheError> {
+    let provisional_result = if fault == CreatedLeafFault::FirstIdentity {
+        Err(CacheError::io(format!(
+            "injected first {kind} fstat failure"
+        )))
+    } else {
+        ObjectIdentity::regular_file(file)
+    };
+    let provisional = match provisional_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            let recovery = ObjectIdentity::regular_file(file).map_err(|proof_error| {
+                CacheError::io(format!(
+                    "{kind} setup failed ({error}); held identity recovery failed ({proof_error}); leaf preserved"
+                ))
+            })?;
+            remove_created_regular_leaf(directory, name, recovery)?;
+            return Err(error);
+        }
+    };
+    let chmod_result = if fault == CreatedLeafFault::Chmod {
+        Err(Errno::IO)
+    } else {
+        fchmod(file, Mode::RUSR | Mode::WUSR)
+    };
+    if let Err(error) = chmod_result {
+        remove_created_regular_leaf(directory, name, provisional)?;
+        return Err(map_errno(
+            &format!("cannot finalize private {kind} mode"),
+            error,
         ));
     }
-    unlinkat(&*directory.file, LOCK_NAME, AtFlags::empty())
-        .map_err(|error| map_errno("cannot remove failed cache publication lock", error))
+    let identity_result = if fault == CreatedLeafFault::SecondIdentity {
+        Err(CacheError::io(format!(
+            "injected second {kind} fstat failure"
+        )))
+    } else {
+        ObjectIdentity::regular_file(file)
+    };
+    let identity = match identity_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            remove_created_regular_leaf(directory, name, provisional)?;
+            return Err(error);
+        }
+    };
+    if !provisional.same_object(identity) {
+        return Err(CacheError::conflict(format!(
+            "{kind} identity changed during mode finalization"
+        )));
+    }
+    if identity.permissions != 0o600 {
+        remove_created_regular_leaf(directory, name, identity)?;
+        return Err(CacheError::path(format!("{kind} does not have mode 0600")));
+    }
+    Ok(identity)
+}
+
+fn remove_created_regular_leaf(
+    directory: &CacheDirectory,
+    name: &str,
+    expected: ObjectIdentity,
+) -> Result<(), CacheError> {
+    let actual = named_identity(directory, name)?;
+    if !expected.same_object(actual) {
+        return Err(CacheError::conflict(
+            "refusing to remove a replaced created cache leaf",
+        ));
+    }
+    unlinkat(&*directory.file, name, AtFlags::empty())
+        .map_err(|error| map_errno("cannot remove failed created cache leaf", error))
 }
 
 fn map_lock_open_error(error: Errno) -> CacheError {
@@ -822,12 +827,12 @@ struct OwnedTemporary<'a> {
 
 impl<'a> OwnedTemporary<'a> {
     fn create(directory: &'a CacheDirectory) -> Result<Self, CacheError> {
-        Self::create_impl(directory, TempCreateFault::None)
+        Self::create_impl(directory, CreatedLeafFault::None)
     }
 
     fn create_impl(
         directory: &'a CacheDirectory,
-        fault: TempCreateFault,
+        fault: CreatedLeafFault,
     ) -> Result<Self, CacheError> {
         for _ in 0..32 {
             let mut random = [0_u8; 16];
@@ -843,48 +848,13 @@ impl<'a> OwnedTemporary<'a> {
             ) {
                 Ok(descriptor) => {
                     let file = File::from(descriptor);
-                    let provisional_result = if fault == TempCreateFault::FirstIdentity {
-                        Err(CacheError::io("injected first temp fstat failure"))
-                    } else {
-                        ObjectIdentity::regular_file(&file)
-                    };
-                    let provisional = match provisional_result {
-                        Ok(identity) => identity,
-                        Err(error) => {
-                            let _ = unlinkat(&*directory.file, name.as_str(), AtFlags::empty());
-                            return Err(error);
-                        }
-                    };
-                    let chmod_result = if fault == TempCreateFault::Chmod {
-                        Err(Errno::IO)
-                    } else {
-                        fchmod(&file, Mode::RUSR | Mode::WUSR)
-                    };
-                    if let Err(error) = chmod_result {
-                        let cleanup = unlink_verified(directory, &name, provisional);
-                        return Err(match cleanup {
-                            Ok(()) => map_errno("cannot set private cache temp mode", error),
-                            Err(cleanup) => CacheError::conflict(format!(
-                                "temp chmod failed ({error}) and cleanup was ambiguous ({cleanup})"
-                            )),
-                        });
-                    }
-                    let identity_result = if fault == TempCreateFault::SecondIdentity {
-                        Err(CacheError::io("injected second temp fstat failure"))
-                    } else {
-                        ObjectIdentity::regular_file(&file)
-                    };
-                    let identity = match identity_result {
-                        Ok(identity) => identity,
-                        Err(error) => {
-                            let _ = unlinkat(&*directory.file, name.as_str(), AtFlags::empty());
-                            return Err(error);
-                        }
-                    };
-                    if identity.permissions != 0o600 {
-                        let _ = unlink_verified(directory, &name, identity);
-                        return Err(CacheError::path("cache temp does not have mode 0600"));
-                    }
+                    let identity = finalize_created_regular_leaf(
+                        directory,
+                        &file,
+                        &name,
+                        fault,
+                        "cache temp",
+                    )?;
                     return Ok(Self {
                         directory,
                         file: Some(file),
@@ -927,14 +897,6 @@ impl<'a> OwnedTemporary<'a> {
             Ok(())
         }
     }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TempCreateFault {
-    None,
-    FirstIdentity,
-    Chmod,
-    SecondIdentity,
 }
 
 impl Drop for OwnedTemporary<'_> {
@@ -990,8 +952,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        INJECT_DIRECTORY_FSYNC_FAILURES, INJECT_LOCK_SETUP_FAULT, LockSetupFault, OwnedTemporary,
-        POST_DIRECTORY_FSYNC_HOOK, PostDirectoryFsyncHook, PublicationLock, TempCreateFault,
+        CreatedLeafFault, INJECT_DIRECTORY_FSYNC_FAILURES, INJECT_LOCK_SETUP_FAULT, OwnedTemporary,
+        POST_DIRECTORY_FSYNC_HOOK, PostDirectoryFsyncHook, PublicationLock,
     };
     use crate::cache::{
         CacheDirectory, CacheIdentity, CacheOpen, CacheReader, CacheWriter, OwnedStoreView,
@@ -1074,37 +1036,44 @@ mod tests {
         });
     }
 
+    struct RestoreUmask(rustix::fs::Mode);
+
+    impl Drop for RestoreUmask {
+        fn drop(&mut self) {
+            rustix::process::umask(self.0);
+        }
+    }
+
+    fn run_umask_child(test: &str, mode: &str) {
+        let status = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg(test)
+            .arg("--nocapture")
+            .env("QTRACE_STORE_UMASK_CHILD", mode)
+            .status()
+            .expect("umask child");
+        assert!(status.success(), "umask {mode} child failed");
+    }
+
     #[test]
-    fn restrictive_umask_still_creates_exact_private_cache_modes() {
-        const CHILD_ENV: &str = "QTRACE_STORE_UMASK_CHILD";
-        if std::env::var_os(CHILD_ENV).is_none() {
-            let status = Command::new(std::env::current_exe().expect("test executable"))
-                .arg("--exact")
-                .arg("cache::writer::tests::restrictive_umask_still_creates_exact_private_cache_modes")
-                .arg("--nocapture")
-                .env(CHILD_ENV, "1")
-                .status()
-                .expect("umask child");
-            assert!(status.success(), "restrictive-umask child failed");
-            return;
-        }
-
-        struct RestoreUmask(rustix::fs::Mode);
-        impl Drop for RestoreUmask {
-            fn drop(&mut self) {
-                rustix::process::umask(self.0);
+    fn ordinary_umasks_create_exact_private_cache_modes() {
+        const TEST: &str = "cache::writer::tests::ordinary_umasks_create_exact_private_cache_modes";
+        let Some(mode) = std::env::var_os("QTRACE_STORE_UMASK_CHILD") else {
+            for mode in ["022", "077"] {
+                run_umask_child(TEST, mode);
             }
-        }
-
+            return;
+        };
         let parent = private_root();
         let root = parent.path().join("xdg-cache");
-        let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
+        let mode = u32::from_str_radix(&mode.to_string_lossy(), 8).expect("octal umask");
+        let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(mode));
         let _restore = RestoreUmask(previous);
         let identity = identity(0x55);
         CacheWriter::new(identity.clone(), store(0x55))
             .expect("writer")
             .publish(&root, &AllowAll)
-            .expect("publish under restrictive umask");
+            .expect("publish under ordinary umask");
         let app = root.join("qtrace-ui");
         let digest = app.join(identity.cache_key());
         for directory in [&root, &app, &digest] {
@@ -1122,11 +1091,39 @@ mod tests {
     }
 
     #[test]
+    fn all_bits_umask_fails_closed_without_target_or_staging() {
+        const TEST: &str =
+            "cache::writer::tests::all_bits_umask_fails_closed_without_target_or_staging";
+        if std::env::var_os("QTRACE_STORE_UMASK_CHILD").is_none() {
+            run_umask_child(TEST, "777");
+            return;
+        }
+        let parent = private_root();
+        let root = parent.path().join("xdg-cache");
+        let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
+        let _restore = RestoreUmask(previous);
+        let error = CacheWriter::new(identity(0x57), store(0x57))
+            .expect("writer")
+            .publish(&root, &AllowAll)
+            .expect_err("descriptor-bound chmod is unavailable");
+        assert_eq!(error.code(), "cache.permission_denied");
+        assert!(!root.exists(), "private target must not be published");
+        assert_eq!(
+            fs::read_dir(parent.path())
+                .expect("parent entries")
+                .filter_map(Result::ok)
+                .count(),
+            0,
+            "verified staging directory must be cleaned"
+        );
+    }
+
+    #[test]
     fn new_lock_setup_failures_remove_the_insecure_created_leaf() {
         for fault in [
-            LockSetupFault::FirstIdentity,
-            LockSetupFault::Chmod,
-            LockSetupFault::SecondIdentity,
+            CreatedLeafFault::FirstIdentity,
+            CreatedLeafFault::Chmod,
+            CreatedLeafFault::SecondIdentity,
         ] {
             let root = private_root();
             let identity = identity(0x56);
@@ -1280,9 +1277,9 @@ mod tests {
     #[test]
     fn temp_setup_failures_leave_no_random_temporary_name() {
         for fault in [
-            TempCreateFault::FirstIdentity,
-            TempCreateFault::Chmod,
-            TempCreateFault::SecondIdentity,
+            CreatedLeafFault::FirstIdentity,
+            CreatedLeafFault::Chmod,
+            CreatedLeafFault::SecondIdentity,
         ] {
             let root = TempDir::new().expect("root");
             fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))

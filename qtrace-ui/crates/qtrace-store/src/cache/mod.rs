@@ -17,7 +17,7 @@ use std::{
 
 use qtrace_provider::{EventKey, EventKind, OperationAbort, WorkDelta, WorkGuard};
 use rustix::{
-    fs::{AtFlags, Mode, OFlags, chmodat, fchmod, mkdirat, open, openat, unlinkat},
+    fs::{AtFlags, Mode, OFlags, RenameFlags, mkdirat, open, openat, renameat_with, unlinkat},
     io::Errno,
 };
 
@@ -39,14 +39,19 @@ enum DirectorySetupFault {
     #[cfg(test)]
     None,
     FirstIdentity,
-    Chmod,
+    ModeFinalization,
     OpenedIdentity,
     FinalIdentity,
+    PublishedIdentity,
 }
+
+#[cfg(test)]
+type DirectoryAfterOpenHook = Box<dyn FnMut(&OsStr)>;
 
 #[cfg(test)]
 std::thread_local! {
     static INJECT_DIRECTORY_SETUP_FAULT: std::cell::Cell<DirectorySetupFault> = const { std::cell::Cell::new(DirectorySetupFault::None) };
+    static DIRECTORY_AFTER_OPEN_HOOK: std::cell::RefCell<Option<DirectoryAfterOpenHook>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(not(test))]
@@ -64,6 +69,15 @@ fn directory_setup_fault(point: DirectorySetupFault) -> bool {
             false
         }
     })
+}
+
+#[cfg(test)]
+fn run_directory_after_open_hook(name: &OsStr) {
+    DIRECTORY_AFTER_OPEN_HOOK.with(|slot| {
+        if let Some(mut hook) = slot.borrow_mut().take() {
+            hook(name);
+        }
+    });
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -438,26 +452,10 @@ fn open_or_create_directory(
     create: bool,
     private: bool,
 ) -> Result<Option<File>, CacheError> {
-    let mut created = false;
     let descriptor = match openat(parent, name, DIRECTORY_FLAGS, Mode::empty()) {
         Ok(descriptor) => descriptor,
         Err(Errno::NOENT) if !create => return Ok(None),
-        Err(Errno::NOENT) => {
-            match mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
-                Ok(()) => created = true,
-                Err(Errno::EXIST) => {}
-                Err(error) => {
-                    return Err(map_errno("cannot create cache directory", error));
-                }
-            }
-            if created {
-                open_created_private_directory(parent, name)?.into()
-            } else {
-                openat(parent, name, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| {
-                    map_directory_errno("cannot open raced cache directory", error)
-                })?
-            }
-        }
+        Err(Errno::NOENT) => create_staged_private_directory(parent, name)?.into(),
         Err(error) => {
             return Err(map_directory_errno("cannot open cache directory", error));
         }
@@ -477,10 +475,39 @@ fn open_or_create_directory(
     Ok(Some(file))
 }
 
-fn open_created_private_directory(parent: &File, name: &OsStr) -> Result<File, CacheError> {
-    let inspect_descriptor = openat(parent, name, DIRECTORY_INSPECT_FLAGS, Mode::empty())
+fn create_staged_private_directory(parent: &File, target: &OsStr) -> Result<File, CacheError> {
+    for _ in 0..32 {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(|error| {
+            CacheError::io(format!("cannot generate directory staging name: {error}"))
+        })?;
+        let staging = format!(".qtrace-dir-{}.tmp", hex::encode(random));
+        match mkdirat(
+            parent,
+            staging.as_str(),
+            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+        ) {
+            Ok(()) => return finalize_staged_private_directory(parent, &staging, target),
+            Err(Errno::EXIST) => continue,
+            Err(error) => return Err(map_errno("cannot create cache directory staging", error)),
+        }
+    }
+    Err(CacheError::io(
+        "cannot allocate a unique cache directory staging name",
+    ))
+}
+
+fn finalize_staged_private_directory(
+    parent: &File,
+    staging: &str,
+    target: &OsStr,
+) -> Result<File, CacheError> {
+    let staging_name = OsStr::new(staging);
+    let inspect_descriptor = openat(parent, staging, DIRECTORY_INSPECT_FLAGS, Mode::empty())
         .map_err(|error| map_directory_errno("cannot inspect created cache directory", error))?;
     let inspect = File::from(inspect_descriptor);
+    #[cfg(test)]
+    run_directory_after_open_hook(OsStr::new(staging));
     let created_identity_result = if directory_setup_fault(DirectorySetupFault::FirstIdentity) {
         Err(CacheError::io("injected first directory fstat failure"))
     } else {
@@ -489,36 +516,45 @@ fn open_created_private_directory(parent: &File, name: &OsStr) -> Result<File, C
     let created_identity = match created_identity_result {
         Ok(identity) => identity,
         Err(error) => {
+            let recovery = ObjectIdentity::from_file(&inspect).map_err(|proof_error| {
+                CacheError::io(format!(
+                    "created directory setup failed ({error}); held identity recovery failed ({proof_error}); staging preserved"
+                ))
+            })?;
             return Err(cleanup_created_directory_after_error(
-                parent, name, None, error,
+                parent,
+                staging_name,
+                recovery,
+                error,
             ));
         }
     };
-    let chmod_result = if directory_setup_fault(DirectorySetupFault::Chmod) {
-        Err(Errno::IO)
-    } else {
-        chmodat(
-            parent,
-            name,
-            Mode::RUSR | Mode::WUSR | Mode::XUSR,
-            AtFlags::empty(),
-        )
-    };
-    if let Err(error) = chmod_result {
+    verify_named_directory(parent, staging_name, created_identity)?;
+    if directory_setup_fault(DirectorySetupFault::ModeFinalization) {
         return Err(cleanup_created_directory_after_error(
             parent,
-            name,
-            Some(created_identity),
-            map_errno("cannot bootstrap private cache directory mode", error),
+            staging_name,
+            created_identity,
+            CacheError::io("injected directory mode finalization failure"),
         ));
     }
-    let descriptor = match openat(parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+    if created_identity.permissions != 0o700 {
+        return Err(cleanup_created_directory_after_error(
+            parent,
+            staging_name,
+            created_identity,
+            CacheError::permission(
+                "cache directory staging mode was reduced by umask and safe descriptor-bound chmod is unavailable",
+            ),
+        ));
+    }
+    let descriptor = match openat(parent, staging, DIRECTORY_FLAGS, Mode::empty()) {
         Ok(descriptor) => descriptor,
         Err(error) => {
             return Err(cleanup_created_directory_after_error(
                 parent,
-                name,
-                Some(created_identity),
+                staging_name,
+                created_identity,
                 map_directory_errno("cannot open bootstrapped cache directory", error),
             ));
         }
@@ -534,8 +570,8 @@ fn open_created_private_directory(parent: &File, name: &OsStr) -> Result<File, C
         Err(error) => {
             return Err(cleanup_created_directory_after_error(
                 parent,
-                name,
-                Some(created_identity),
+                staging_name,
+                created_identity,
                 error,
             ));
         }
@@ -543,14 +579,6 @@ fn open_created_private_directory(parent: &File, name: &OsStr) -> Result<File, C
     if !created_identity.same_object(opened_identity) {
         return Err(CacheError::conflict(
             "created cache directory binding changed before mode finalization",
-        ));
-    }
-    if let Err(error) = fchmod(&file, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
-        return Err(cleanup_created_directory_after_error(
-            parent,
-            name,
-            Some(created_identity),
-            map_errno("cannot finalize private cache directory mode", error),
         ));
     }
     let finalized_result = if directory_setup_fault(DirectorySetupFault::FinalIdentity) {
@@ -563,8 +591,8 @@ fn open_created_private_directory(parent: &File, name: &OsStr) -> Result<File, C
         Err(error) => {
             return Err(cleanup_created_directory_after_error(
                 parent,
-                name,
-                Some(created_identity),
+                staging_name,
+                created_identity,
                 error,
             ));
         }
@@ -574,26 +602,91 @@ fn open_created_private_directory(parent: &File, name: &OsStr) -> Result<File, C
             "created cache directory mode finalization changed its identity",
         ));
     }
-    Ok(file)
+    verify_named_directory(parent, staging_name, finalized)?;
+    match renameat_with(parent, staging, parent, target, RenameFlags::NOREPLACE) {
+        Ok(()) => open_published_directory(parent, target, finalized),
+        Err(Errno::EXIST) => {
+            remove_created_directory(parent, staging_name, finalized)?;
+            let descriptor = openat(parent, target, DIRECTORY_FLAGS, Mode::empty())
+                .map_err(|error| map_directory_errno("cannot open raced cache directory", error))?;
+            Ok(File::from(descriptor))
+        }
+        Err(error) => Err(cleanup_created_directory_after_error(
+            parent,
+            staging_name,
+            finalized,
+            map_errno("cannot publish cache directory staging", error),
+        )),
+    }
 }
 
 fn cleanup_created_directory_after_error(
     parent: &File,
     name: &OsStr,
-    expected: Option<ObjectIdentity>,
+    expected: ObjectIdentity,
     original: CacheError,
 ) -> CacheError {
-    let cleanup = match expected {
-        Some(identity) => remove_created_directory(parent, name, identity),
-        None => unlinkat(parent, name, AtFlags::REMOVEDIR)
-            .map_err(|error| map_errno("cannot remove unverified failed cache directory", error)),
-    };
+    let cleanup = remove_created_directory(parent, name, expected);
     match cleanup {
         Ok(()) => original,
         Err(cleanup_error) => CacheError::conflict(format!(
             "created cache directory setup failed ({original}); cleanup was ambiguous ({cleanup_error})"
         )),
     }
+}
+
+fn verify_named_directory(
+    parent: &File,
+    name: &OsStr,
+    expected: ObjectIdentity,
+) -> Result<(), CacheError> {
+    let descriptor = openat(parent, name, DIRECTORY_INSPECT_FLAGS, Mode::empty())
+        .map_err(|error| map_directory_errno("cannot verify cache directory staging", error))?;
+    let actual = ObjectIdentity::from_file(&File::from(descriptor))?;
+    if actual != expected {
+        return Err(CacheError::conflict(
+            "cache directory staging binding changed during setup",
+        ));
+    }
+    Ok(())
+}
+
+fn open_published_directory(
+    parent: &File,
+    target: &OsStr,
+    expected: ObjectIdentity,
+) -> Result<File, CacheError> {
+    let descriptor = match openat(parent, target, DIRECTORY_FLAGS, Mode::empty()) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            return Err(cleanup_created_directory_after_error(
+                parent,
+                target,
+                expected,
+                map_directory_errno("cannot open published cache directory", error),
+            ));
+        }
+    };
+    let file = File::from(descriptor);
+    let actual_result = if directory_setup_fault(DirectorySetupFault::PublishedIdentity) {
+        Err(CacheError::io("injected published directory fstat failure"))
+    } else {
+        ObjectIdentity::from_file(&file)
+    };
+    let actual = match actual_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Err(cleanup_created_directory_after_error(
+                parent, target, expected, error,
+            ));
+        }
+    };
+    if actual != expected {
+        return Err(CacheError::conflict(
+            "published cache directory binding does not match its staging identity",
+        ));
+    }
+    Ok(file)
 }
 
 fn remove_created_directory(
@@ -622,11 +715,15 @@ fn map_directory_errno(context: &str, error: Errno) -> CacheError {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, fs::File};
+    use std::{
+        ffi::OsStr,
+        fs::{self, File},
+        os::unix::fs::{MetadataExt, PermissionsExt},
+    };
 
     use super::{
-        DirectorySetupFault, INJECT_DIRECTORY_SETUP_FAULT, allocation_error, map_errno,
-        open_or_create_directory,
+        DIRECTORY_AFTER_OPEN_HOOK, DirectorySetupFault, INJECT_DIRECTORY_SETUP_FAULT,
+        allocation_error, map_errno, open_or_create_directory,
     };
     use rustix::io::Errno;
     use tempfile::TempDir;
@@ -656,9 +753,10 @@ mod tests {
     fn created_directory_setup_failures_remove_the_new_component() {
         for fault in [
             DirectorySetupFault::FirstIdentity,
-            DirectorySetupFault::Chmod,
+            DirectorySetupFault::ModeFinalization,
             DirectorySetupFault::OpenedIdentity,
             DirectorySetupFault::FinalIdentity,
+            DirectorySetupFault::PublishedIdentity,
         ] {
             let parent = TempDir::new().expect("parent");
             let parent_file = File::open(parent.path()).expect("parent descriptor");
@@ -666,10 +764,65 @@ mod tests {
             let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
                 .expect_err("injected directory setup failure must fail");
             assert_eq!(error.code(), "cache.io");
-            assert!(
-                !parent.path().join("created").exists(),
-                "insecure directory leaked after injected setup failure"
+            assert_eq!(
+                fs::read_dir(parent.path())
+                    .expect("parent entries")
+                    .filter_map(Result::ok)
+                    .count(),
+                0,
+                "created directory or staging leaked after injected setup failure"
             );
         }
+    }
+
+    fn install_directory_name_rebind(parent: &std::path::Path) -> File {
+        let foreign = parent.join("foreign");
+        fs::create_dir(&foreign).expect("foreign directory");
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755)).expect("foreign mode");
+        let foreign_file = File::open(&foreign).expect("foreign descriptor");
+        let parent = parent.to_owned();
+        DIRECTORY_AFTER_OPEN_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |name| {
+                fs::rename(parent.join(name), parent.join("held-created"))
+                    .expect("hold created directory");
+                fs::rename(parent.join("foreign"), parent.join(name))
+                    .expect("replace created name");
+            }));
+        });
+        foreign_file
+    }
+
+    #[test]
+    fn created_directory_name_rebind_never_chmods_the_replacement() {
+        let parent = TempDir::new().expect("parent");
+        let foreign = install_directory_name_rebind(parent.path());
+        let parent_file = File::open(parent.path()).expect("parent descriptor");
+        let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
+            .expect_err("rebound created name must fail closed");
+        assert!(
+            matches!(
+                error.code(),
+                "cache.identity_conflict" | "cache.path_escape"
+            ),
+            "unexpected rebind error: {error}"
+        );
+        let metadata = foreign.metadata().expect("foreign metadata");
+        assert_eq!(metadata.mode() & 0o7777, 0o755);
+        assert_eq!(metadata.nlink(), 2, "foreign directory was unlinked");
+    }
+
+    #[test]
+    fn first_directory_fstat_failure_never_unlinks_a_replacement() {
+        let parent = TempDir::new().expect("parent");
+        let foreign = install_directory_name_rebind(parent.path());
+        let parent_file = File::open(parent.path()).expect("parent descriptor");
+        INJECT_DIRECTORY_SETUP_FAULT
+            .with(|injected| injected.set(DirectorySetupFault::FirstIdentity));
+        let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
+            .expect_err("first fstat failure with rebind must fail closed");
+        assert_eq!(error.code(), "cache.identity_conflict");
+        let metadata = foreign.metadata().expect("foreign metadata");
+        assert_eq!(metadata.mode() & 0o7777, 0o755);
+        assert_eq!(metadata.nlink(), 2, "foreign directory was unlinked");
     }
 }
