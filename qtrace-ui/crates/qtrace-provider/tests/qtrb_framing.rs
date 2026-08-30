@@ -39,6 +39,71 @@ impl WorkGuard for AllowAll {
     }
 }
 
+struct ObservedSource {
+    inner: ByteSource,
+    reads: Mutex<Vec<(u64, usize)>>,
+}
+
+impl ObservedSource {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: ByteSource::new(bytes),
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn reads(&self) -> Vec<(u64, usize)> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+impl ReadAtSource for ObservedSource {
+    fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), ProviderError> {
+        self.reads.lock().unwrap().push((offset, output.len()));
+        self.inner.read_exact_at(offset, output)
+    }
+}
+
+struct InputLimit {
+    limit: u64,
+    consumed: Mutex<u64>,
+    attempts: Mutex<Vec<WorkDelta>>,
+}
+
+impl InputLimit {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            consumed: Mutex::new(0),
+            attempts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn attempts(&self) -> Vec<WorkDelta> {
+        self.attempts.lock().unwrap().clone()
+    }
+}
+
+impl WorkGuard for InputLimit {
+    fn consume(&self, delta: WorkDelta) -> Result<(), qtrace_provider::OperationAbort> {
+        self.attempts.lock().unwrap().push(delta);
+        let mut consumed = self.consumed.lock().unwrap();
+        *consumed = consumed.saturating_add(delta.input_bytes);
+        if *consumed > self.limit {
+            return Err(qtrace_provider::OperationAbort::budget_exceeded(
+                qtrace_provider::BudgetDimension::InputBytes,
+                self.limit,
+                *consumed,
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/qtrb")
@@ -91,6 +156,107 @@ fn assert_error(bytes: Vec<u8>, mode: OpenMode, code: &str) {
     assert_eq!(error.code(), code);
     assert!(error.detail().len() <= 512);
     assert!(!error.detail().contains(['\r', '\n']));
+}
+
+#[test]
+fn stream_header_read_requires_work_guard_authorization() {
+    let bytes = fixture("v1.2-completed.bin");
+    let source = Arc::new(ObservedSource::new(bytes.clone()));
+    let guard = InputLimit::new(0);
+
+    let error = QtrbProvider::open(
+        source.clone(),
+        identity(bytes.len() as u64),
+        OpenMode::Sealed,
+        &guard,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "control.budget_exceeded");
+    assert!(source.reads().is_empty());
+    assert_eq!(
+        guard.attempts(),
+        vec![WorkDelta {
+            input_bytes: HEADER_BYTES as u64,
+            decompressed_bytes: HEADER_BYTES as u64,
+            ..WorkDelta::default()
+        }]
+    );
+}
+
+#[test]
+fn record_header_read_requires_work_guard_authorization() {
+    let bytes = fixture("v1.2-completed.bin");
+    let source = Arc::new(ObservedSource::new(bytes.clone()));
+    let provider = QtrbProvider::open(
+        source.clone(),
+        identity(bytes.len() as u64),
+        OpenMode::Sealed,
+        &AllowAll,
+    )
+    .unwrap();
+    let mut cursor = Box::new(provider).into_cursor().unwrap();
+    let guard = InputLimit::new(0);
+
+    let error = cursor.next_event(&guard).unwrap_err();
+
+    assert_eq!(error.code(), "control.budget_exceeded");
+    assert_eq!(source.reads(), vec![(0, HEADER_BYTES)]);
+    assert_eq!(
+        guard.attempts(),
+        vec![WorkDelta {
+            input_bytes: RECORD_HEADER_BYTES as u64,
+            decompressed_bytes: RECORD_HEADER_BYTES as u64,
+            ..WorkDelta::default()
+        }]
+    );
+}
+
+#[test]
+fn payload_read_and_allocation_require_combined_work_authorization() {
+    let begin_record = begin(2);
+    let module_record = module(1, 0x1000, b"libbudget.so");
+    let module_payload_bytes = (module_record.len() - RECORD_HEADER_BYTES) as u64;
+    let module_header_offset = (HEADER_BYTES + begin_record.len()) as u64;
+    let mut bytes = header(2, 1);
+    bytes.extend_from_slice(&begin_record);
+    bytes.extend_from_slice(&module_record);
+    let source = Arc::new(ObservedSource::new(bytes.clone()));
+    let provider = QtrbProvider::open(
+        source.clone(),
+        identity(bytes.len() as u64),
+        OpenMode::RecoverablePartial,
+        &AllowAll,
+    )
+    .unwrap();
+    let mut cursor = Box::new(provider).into_cursor().unwrap();
+    assert_eq!(
+        cursor.next_event(&AllowAll).unwrap().unwrap().kind(),
+        EventKind::Begin
+    );
+    let reads_before_module = source.reads();
+    let guard = InputLimit::new(RECORD_HEADER_BYTES as u64);
+
+    let error = cursor.next_event(&guard).unwrap_err();
+
+    assert_eq!(error.code(), "control.budget_exceeded");
+    let mut expected_reads = reads_before_module;
+    expected_reads.push((module_header_offset, RECORD_HEADER_BYTES));
+    assert_eq!(source.reads(), expected_reads);
+    let attempts = guard.attempts();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts[0],
+        WorkDelta {
+            input_bytes: RECORD_HEADER_BYTES as u64,
+            decompressed_bytes: RECORD_HEADER_BYTES as u64,
+            ..WorkDelta::default()
+        }
+    );
+    assert_eq!(attempts[1].input_bytes, module_payload_bytes);
+    assert_eq!(attempts[1].decompressed_bytes, module_payload_bytes);
+    assert!(attempts[1].resident_bytes > module_payload_bytes);
+    assert_eq!(attempts[1].nodes, 1);
 }
 
 fn le16(value: u16) -> [u8; 2] {

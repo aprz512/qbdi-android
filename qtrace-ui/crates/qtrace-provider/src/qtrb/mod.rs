@@ -50,14 +50,14 @@ impl QtrbProvider {
         guard: &dyn WorkGuard,
     ) -> Result<Self, ProviderError> {
         let mut bytes = [0_u8; STREAM_HEADER_BYTES];
-        source
-            .read_exact_at(0, &mut bytes)
-            .map_err(|error| with_coordinate(error, 0, None, "qtrb.header"))?;
         guard.consume(WorkDelta {
             input_bytes: STREAM_HEADER_BYTES as u64,
             decompressed_bytes: STREAM_HEADER_BYTES as u64,
             ..WorkDelta::default()
         })?;
+        source
+            .read_exact_at(0, &mut bytes)
+            .map_err(|error| with_coordinate(error, 0, None, "qtrb.header"))?;
         let header = StreamHeader::parse(&bytes)?;
         identity.format_major = MAJOR_VERSION;
         identity.format_minor = header.minor;
@@ -295,6 +295,18 @@ fn record_resident_upper_bound(
     u64::from(payload_bytes).saturating_add(decoded)
 }
 
+const fn record_node_upper_bound(
+    record_type: Option<RecordType>,
+    flags: u16,
+    may_start_fragment: bool,
+) -> u64 {
+    match (record_type, flags, may_start_fragment) {
+        (Some(RecordType::ModuleDefinition | RecordType::InstructionDefinition), 0, _) => 1,
+        (Some(RecordType::Call | RecordType::Rule | RecordType::Error), CHUNK_FLAG, true) => 1,
+        _ => 0,
+    }
+}
+
 fn pending_fragment_resident_upper_bound(
     total_detail_bytes: u32,
     chunk_count: u16,
@@ -491,6 +503,11 @@ impl QtrbEventCursor {
             record_ordinal: Some(ordinal),
         };
         let mut header = [0_u8; RECORD_HEADER_BYTES];
+        guard.consume(WorkDelta {
+            input_bytes: RECORD_HEADER_BYTES as u64,
+            decompressed_bytes: RECORD_HEADER_BYTES as u64,
+            ..WorkDelta::default()
+        })?;
         self.source
             .read_exact_at(record_offset, &mut header)
             .map_err(|error| with_coordinate(error, record_offset, Some(ordinal), "qtrb.record"))?;
@@ -498,11 +515,6 @@ impl QtrbEventCursor {
             .offset
             .checked_add(RECORD_HEADER_BYTES as u64)
             .ok_or_else(|| self.record_overflow_error(record_offset, ordinal))?;
-        guard.consume(WorkDelta {
-            input_bytes: RECORD_HEADER_BYTES as u64,
-            decompressed_bytes: RECORD_HEADER_BYTES as u64,
-            ..WorkDelta::default()
-        })?;
 
         let mut cursor = PayloadCursor::new(&header, "record header", coordinate);
         let raw_type = cursor.u16_le()?;
@@ -558,6 +570,9 @@ impl QtrbEventCursor {
             )
         })?;
         guard.consume(WorkDelta {
+            input_bytes: u64::from(payload_bytes),
+            decompressed_bytes: u64::from(payload_bytes),
+            nodes: record_node_upper_bound(record_type, flags, self.pending.is_none()),
             resident_bytes: record_resident_upper_bound(record_type, flags, payload_bytes),
             ..WorkDelta::default()
         })?;
@@ -571,11 +586,6 @@ impl QtrbEventCursor {
             .offset
             .checked_add(u64::from(payload_bytes))
             .ok_or_else(|| self.record_overflow_error(record_offset, ordinal))?;
-        guard.consume(WorkDelta {
-            input_bytes: u64::from(payload_bytes),
-            decompressed_bytes: u64::from(payload_bytes),
-            ..WorkDelta::default()
-        })?;
         self.next_ordinal = self
             .next_ordinal
             .checked_add(1)
@@ -606,9 +616,9 @@ impl QtrbEventCursor {
     ) -> Result<Option<EventRecord>, ProviderError> {
         match record.record_type {
             Some(RecordType::TraceBegin) => self.decode_begin(record).map(Some),
-            Some(RecordType::ModuleDefinition) => self.decode_module(record, guard).map(Some),
+            Some(RecordType::ModuleDefinition) => self.decode_module(record).map(Some),
             Some(RecordType::InstructionDefinition) => {
-                self.decode_instruction_definition(record, guard).map(Some)
+                self.decode_instruction_definition(record).map(Some)
             }
             Some(RecordType::Instruction) => self.decode_instruction(record).map(Some),
             Some(RecordType::Memory) => self.decode_memory(record).map(Some),
@@ -685,11 +695,7 @@ impl QtrbEventCursor {
         ))
     }
 
-    fn decode_module(
-        &mut self,
-        record: PhysicalRecord,
-        guard: &dyn WorkGuard,
-    ) -> Result<EventRecord, ProviderError> {
+    fn decode_module(&mut self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
         let mut cursor = PayloadCursor::new(&record.payload, "MODULE_DEF", coordinate(&record));
         let module_id = cursor.u32_le()?;
         let base = cursor.u64_le()?;
@@ -717,10 +723,6 @@ impl QtrbEventCursor {
                 ));
             }
             None => {
-                guard.consume(WorkDelta {
-                    nodes: 1,
-                    ..WorkDelta::default()
-                })?;
                 self.modules.insert(module_id, definition);
             }
             Some(_) => {}
@@ -739,7 +741,6 @@ impl QtrbEventCursor {
     fn decode_instruction_definition(
         &mut self,
         record: PhysicalRecord,
-        guard: &dyn WorkGuard,
     ) -> Result<EventRecord, ProviderError> {
         let mut cursor =
             PayloadCursor::new(&record.payload, "INSTRUCTION_DEF", coordinate(&record));
@@ -836,10 +837,6 @@ impl QtrbEventCursor {
                 ));
             }
             None => {
-                guard.consume(WorkDelta {
-                    nodes: 1,
-                    ..WorkDelta::default()
-                })?;
                 self.definitions.insert(metadata_id, definition);
             }
             Some(_) => {}
@@ -1074,7 +1071,6 @@ impl QtrbEventCursor {
                     ));
                 }
                 guard.consume(WorkDelta {
-                    nodes: 1,
                     resident_bytes: pending_fragment_resident_upper_bound(
                         total_detail_bytes,
                         chunk_count,
