@@ -9,7 +9,7 @@ license.workspace = true
 getrandom = "0.3"
 hex.workspace = true
 qtrace-provider = { path = "../qtrace-provider", version = "0.1.0" }
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

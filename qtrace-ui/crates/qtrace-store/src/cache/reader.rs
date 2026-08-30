@@ -31,6 +31,11 @@ const READ_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::CLOEXEC);
 const CHECKSUM_CHUNK_BYTES: usize = 64_000;
 
+#[cfg(test)]
+std::thread_local! {
+    static INJECT_PROOF_CLONE_ERRNO: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
 #[derive(Debug)]
 pub enum CacheOpen {
     Missing,
@@ -58,9 +63,7 @@ impl CacheReader {
         let Some((file, _)) = open_final(&directory)? else {
             return Ok(CacheOpen::Missing);
         };
-        let proof = file
-            .try_clone()
-            .map_err(|error| CacheError::io(format!("cannot clone cache descriptor: {error}")))?;
+        let proof = clone_proof_descriptor(&file)?;
         let stamp = FileStamp::from_metadata(
             &proof
                 .metadata()
@@ -76,6 +79,18 @@ impl CacheReader {
             Err(ValidationFailure::Fatal(error)) => Err(error),
         }
     }
+}
+
+fn clone_proof_descriptor(file: &File) -> Result<File, CacheError> {
+    #[cfg(test)]
+    if let Some(errno) = INJECT_PROOF_CLONE_ERRNO.with(std::cell::Cell::take) {
+        return Err(map_io_error(
+            "cannot clone cache descriptor",
+            std::io::Error::from_raw_os_error(errno),
+        ));
+    }
+    file.try_clone()
+        .map_err(|error| map_io_error("cannot clone cache descriptor", error))
 }
 
 #[derive(Clone, Debug)]
@@ -551,4 +566,72 @@ pub(crate) fn probe_identity(
     let manifest: CacheManifest = serde_json::from_slice(&bytes)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
     Ok(manifest.identity)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    use qtrace_provider::{
+        ArtifactDigest, EventKey, EventKind, OperationAbort, TimelineId, WorkDelta, WorkGuard,
+    };
+    use rustix::io::Errno;
+    use tempfile::TempDir;
+
+    use super::INJECT_PROOF_CLONE_ERRNO;
+    use crate::cache::{CacheIdentity, CacheReader, CacheWriter, OwnedStoreView};
+
+    struct AllowAll;
+
+    impl WorkGuard for AllowAll {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+            Ok(())
+        }
+    }
+
+    fn identity() -> CacheIdentity {
+        CacheIdentity {
+            analyzer_version: "test".to_owned(),
+            artifact_digest: [0x71; 32],
+            build_option_digest: [0x72; 32],
+            cache_schema: 1,
+            endian: "little".to_owned(),
+            layout_version: 1,
+            source_features: 0,
+            source_format: "qtrb".to_owned(),
+            source_major: 1,
+            source_minor: 2,
+        }
+    }
+
+    #[test]
+    fn proof_clone_fd_exhaustion_is_a_control_error() {
+        let root = TempDir::new().expect("root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("private root");
+        let identity = identity();
+        let store = OwnedStoreView::new(
+            vec![EventKey::new(
+                ArtifactDigest::new(identity.artifact_digest),
+                TimelineId(0),
+                0,
+                1,
+                None,
+                None,
+            )],
+            vec![EventKind::Instruction],
+        )
+        .expect("store");
+        CacheWriter::new(identity.clone(), store)
+            .expect("writer")
+            .publish(root.path(), &AllowAll)
+            .expect("publish");
+
+        for errno in [Errno::MFILE.raw_os_error(), Errno::NFILE.raw_os_error()] {
+            INJECT_PROOF_CLONE_ERRNO.with(|injected| injected.set(Some(errno)));
+            let error = CacheReader::open(root.path(), &identity, &AllowAll)
+                .expect_err("injected descriptor exhaustion must fail");
+            assert_eq!(error.code(), "control.resource_exhausted");
+            assert!(error.is_control());
+        }
+    }
 }

@@ -80,10 +80,15 @@ values must have both a clear presence bit and a zero value. No native struct se
 1. Charge the actual writer peak before path I/O: owned key/kind capacities, identity text,
    manifest capacity, two 64,000-byte streaming buffers, and fixed bookkeeping. Sections are then
    streamed directly to the temp with incremental SHA-256; there is no second whole-cache `Vec`.
-2. Securely open/create the XDG path and acquire the digest-local `.publish.lock`. The lock is a
-   no-follow regular mode-`0600` leaf created with `O_EXCL`, held with exclusive Linux `flock`, and
-   revalidated by descriptor and name before destructive operations. All library builders for the
-   digest serialize temp cleanup, rename/exchange, rollback, and directory sync under this lock.
+2. Securely open/create the XDG path and acquire the digest-local `.publish.lock`. Newly created
+   root-final/application/digest directories are forced to exact `0700`, and a newly created lock
+   to exact `0600`, before a second descriptor identity/mode proof; existing objects are validated
+   and never chmodded. This makes the result independent of a restrictive process umask. The lock
+   is no-follow, created with `O_EXCL`, and acquired with nonblocking exclusive Linux `flock`
+   retries. Every retry checkpoints the caller guard and sleeps 1 ms after contention, so a
+   cancelled or expired writer does not wait for the current holder to release the lock. All
+   library builders for the digest serialize temp cleanup, rename/exchange, rollback, and
+   directory sync under this lock.
 3. Create a cryptographically random same-directory `.tmp` with
    `O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC`, force mode `0600`, and establish cleanup ownership
    immediately. Injected first-`fstat`, `fchmod`, and second-`fstat` failures leave zero temp names.
@@ -103,10 +108,14 @@ values must have both a clear presence bit and a zero value. No native struct se
    exchanges back, proves both resulting bindings, and removes only the restored builder temp.
    Rollback then fsyncs the held directory; only full rollback+fsync returns the original
    `NoVisibleFinal` error.
-8. Success fsyncs the rename/exchange. Corrupt replacement then removes the verified displaced
-   inode and fsyncs that cleanup. A commit-fsync failure attempts the same verified rollback. If an
-   operand, lock, or rollback fsync is ambiguous, no further destructive action occurs and the
-   result is `VisibleDurabilityUncertain` with all questionable objects preserved.
+8. Success fsyncs the rename/exchange and then proves the complete directory binding again; this
+   post-fsync proof is the success linearization point. Corrupt replacement then removes the
+   verified displaced inode, fsyncs that cleanup, and performs another directory proof. A
+   commit-fsync or reversible post-fsync proof failure attempts the same verified rollback. If an
+   operand, lock, rollback fsync, or irreversible post-cleanup proof is ambiguous, no further
+   destructive action occurs and the result is `VisibleDurabilityUncertain` with all questionable
+   objects preserved. A valid pre-existing winner also requires cleanup fsync plus a final binding
+   proof; cleanup-fsync failure is visibility-uncertain because the winner remains visible.
 
 | Prior state | Post-rename names | Checkpoint-4/failure rollback | Successful commit |
 |---|---|---|---|
@@ -171,18 +180,35 @@ commit fsync failure rolls back and durably syncs, returning the original `cache
 `NoVisibleFinal`; a second injected rollback-fsync failure returns
 `VisibleDurabilityUncertain` rather than making a false no-visible claim.
 
+### Independent-review round 2: RED -> GREEN
+
+| Finding | RED/attack evidence | GREEN behavior |
+|---|---|---|
+| 1 final directory linearization | Deterministic hooks rebound the digest immediately after a successful directory fsync; Missing returned `Published`, while Valid returned `Existing` from the held old directory | Every success/Existing path now ends at a post-fsync directory proof. Missing performs verified rollback+fsync on rebind; post-cleanup Corrupt reports visibility uncertainty; Valid preserves the winner and propagates the binding error |
+| 2 cancellable lock | A real lock holder kept a deadline-guarded contender blocked beyond the 250 ms test bound because `LockExclusive` blocked in the kernel | Lock reuse uses `O_NONBLOCK`; nonblocking exclusive-flock retries checkpoint before every attempt and yield for 1 ms. The contender returns the original `job.cancelled` without holder release or temp/final creation; publication succeeds after release |
+| 3 exact modes under umask | A serialized child set umask `0777`; initial directory open failed with `EACCES`. Injected first-lock-`fstat` then exposed an insecure created lock name left behind | Only newly created private directories/lock are descriptor-finalized to exact `0700`/`0600` and then re-proved; existing objects are never chmodded. First/final `fstat` and `fchmod` injections leave no lock. A follow-up self-review attack covers first/opened/final directory `fstat` and chmod failure; every case returns typed `cache.io` and removes only the new component |
+| 4 reader clone resources | Injected `EMFILE`/`ENFILE` at the cache proof clone was ignored by the harness and the reader returned `Ready`, demonstrating the direct `cache.io` path remained | The proof clone goes through the centralized I/O mapper; both injected errno values return stable control error `control.resource_exhausted` |
+| 5 valid-winner fsync visibility | Injected temp-cleanup directory-fsync failure returned `NoVisibleFinal` even though the complete winner remained readable | The result is `VisibleDurabilityUncertain`; exact winner bytes remain unchanged and a fresh reader returns `Ready` |
+
+The round-2 lock/directory setup harness is test-only. First identity failures are cleaned only for
+objects whose successful creation was reported by this process; once any descriptor/name mismatch
+is observed, cleanup stops and returns conflict. The cooperative same-UID threat boundary remains
+the one described above.
+
 ### Focused GREEN
 
 The final focused suites pass 29 integration tests: 11 format/identity/corruption/view tests and 18
-publication/path/lock/race/cancellation tests. Seven store unit tests include temp setup faults,
-directory-fsync outcomes, and resource errno/allocation mapping. Publication abort coverage runs
-both `Cancelled` and `BudgetExceeded` at all four checkpoints; checkpoint 4 is post-rename and its
-verified rollback leaves no builder final/temp when `NoVisibleFinal` is reported.
+publication/path/lock/race/cancellation tests. Thirteen cache-focused unit tests cover setup faults,
+post-fsync rebinding, cancellable lock contention, restrictive umask, visibility states, and
+resource mapping. Publication abort coverage runs both `Cancelled` and `BudgetExceeded` at all
+four checkpoints; checkpoint 4 is post-rename and its verified rollback leaves no builder
+final/temp when `NoVisibleFinal` is reported.
 
 ## Verification
 
 - `cargo test -p qtrace-store --test cache_format --test cache_publication` — passed, 29/29.
-- `cargo test -p qtrace-store` — passed, 83/83 (7 unit + 76 integration).
+- `cargo test -p qtrace-store cache:: -- --nocapture` — passed, 13/13 cache-focused unit tests.
+- `cargo test -p qtrace-store` — passed, 92/92 (16 unit + 76 integration).
 - `cargo test -p qtrace-provider` — passed, 122 tests plus one intentional ignored isolated child
   entry point.
 - `cargo clippy -p qtrace-store -p qtrace-provider --all-targets -- -D warnings` — passed.
@@ -218,3 +244,4 @@ verified rollback leaves no builder final/temp when `NoVisibleFinal` is reported
 - `feat(qtrace-ui): add safe normalized cache` (exact hash in the task handoff because a commit
   cannot contain its own hash).
 - Review-fix follow-up: `fix(qtrace-ui): harden cache publication` (exact hash in handoff).
+- Review-round-2 follow-up: `fix(qtrace-ui): close cache commit windows` (exact hash in handoff).

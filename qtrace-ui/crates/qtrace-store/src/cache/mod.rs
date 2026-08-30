@@ -17,7 +17,7 @@ use std::{
 
 use qtrace_provider::{EventKey, EventKind, OperationAbort, WorkDelta, WorkGuard};
 use rustix::{
-    fs::{Mode, OFlags, mkdirat, open, openat},
+    fs::{AtFlags, Mode, OFlags, chmodat, fchmod, mkdirat, open, openat, unlinkat},
     io::Errno,
 };
 
@@ -29,6 +29,42 @@ const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
+const DIRECTORY_INSPECT_FLAGS: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DirectorySetupFault {
+    #[cfg(test)]
+    None,
+    FirstIdentity,
+    Chmod,
+    OpenedIdentity,
+    FinalIdentity,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static INJECT_DIRECTORY_SETUP_FAULT: std::cell::Cell<DirectorySetupFault> = const { std::cell::Cell::new(DirectorySetupFault::None) };
+}
+
+#[cfg(not(test))]
+fn directory_setup_fault(_point: DirectorySetupFault) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn directory_setup_fault(point: DirectorySetupFault) -> bool {
+    INJECT_DIRECTORY_SETUP_FAULT.with(|fault| {
+        if fault.get() == point {
+            fault.set(DirectorySetupFault::None);
+            true
+        } else {
+            false
+        }
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheIdentityField {
@@ -242,6 +278,10 @@ pub(crate) struct ObjectIdentity {
 }
 
 impl ObjectIdentity {
+    fn same_object(self, other: Self) -> bool {
+        self.device == other.device && self.inode == other.inode && self.kind == other.kind
+    }
+
     fn from_file(file: &File) -> Result<Self, CacheError> {
         let metadata = file
             .metadata()
@@ -398,19 +438,25 @@ fn open_or_create_directory(
     create: bool,
     private: bool,
 ) -> Result<Option<File>, CacheError> {
+    let mut created = false;
     let descriptor = match openat(parent, name, DIRECTORY_FLAGS, Mode::empty()) {
         Ok(descriptor) => descriptor,
         Err(Errno::NOENT) if !create => return Ok(None),
         Err(Errno::NOENT) => {
             match mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
-                Ok(()) | Err(Errno::EXIST) => {}
+                Ok(()) => created = true,
+                Err(Errno::EXIST) => {}
                 Err(error) => {
                     return Err(map_errno("cannot create cache directory", error));
                 }
             }
-            openat(parent, name, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| {
-                map_directory_errno("cannot open created cache directory", error)
-            })?
+            if created {
+                open_created_private_directory(parent, name)?.into()
+            } else {
+                openat(parent, name, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| {
+                    map_directory_errno("cannot open raced cache directory", error)
+                })?
+            }
         }
         Err(error) => {
             return Err(map_directory_errno("cannot open cache directory", error));
@@ -431,6 +477,142 @@ fn open_or_create_directory(
     Ok(Some(file))
 }
 
+fn open_created_private_directory(parent: &File, name: &OsStr) -> Result<File, CacheError> {
+    let inspect_descriptor = openat(parent, name, DIRECTORY_INSPECT_FLAGS, Mode::empty())
+        .map_err(|error| map_directory_errno("cannot inspect created cache directory", error))?;
+    let inspect = File::from(inspect_descriptor);
+    let created_identity_result = if directory_setup_fault(DirectorySetupFault::FirstIdentity) {
+        Err(CacheError::io("injected first directory fstat failure"))
+    } else {
+        ObjectIdentity::from_file(&inspect)
+    };
+    let created_identity = match created_identity_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Err(cleanup_created_directory_after_error(
+                parent, name, None, error,
+            ));
+        }
+    };
+    let chmod_result = if directory_setup_fault(DirectorySetupFault::Chmod) {
+        Err(Errno::IO)
+    } else {
+        chmodat(
+            parent,
+            name,
+            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+            AtFlags::empty(),
+        )
+    };
+    if let Err(error) = chmod_result {
+        return Err(cleanup_created_directory_after_error(
+            parent,
+            name,
+            Some(created_identity),
+            map_errno("cannot bootstrap private cache directory mode", error),
+        ));
+    }
+    let descriptor = match openat(parent, name, DIRECTORY_FLAGS, Mode::empty()) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            return Err(cleanup_created_directory_after_error(
+                parent,
+                name,
+                Some(created_identity),
+                map_directory_errno("cannot open bootstrapped cache directory", error),
+            ));
+        }
+    };
+    let file = File::from(descriptor);
+    let opened_identity_result = if directory_setup_fault(DirectorySetupFault::OpenedIdentity) {
+        Err(CacheError::io("injected opened directory fstat failure"))
+    } else {
+        ObjectIdentity::from_file(&file)
+    };
+    let opened_identity = match opened_identity_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Err(cleanup_created_directory_after_error(
+                parent,
+                name,
+                Some(created_identity),
+                error,
+            ));
+        }
+    };
+    if !created_identity.same_object(opened_identity) {
+        return Err(CacheError::conflict(
+            "created cache directory binding changed before mode finalization",
+        ));
+    }
+    if let Err(error) = fchmod(&file, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+        return Err(cleanup_created_directory_after_error(
+            parent,
+            name,
+            Some(created_identity),
+            map_errno("cannot finalize private cache directory mode", error),
+        ));
+    }
+    let finalized_result = if directory_setup_fault(DirectorySetupFault::FinalIdentity) {
+        Err(CacheError::io("injected final directory fstat failure"))
+    } else {
+        ObjectIdentity::from_file(&file)
+    };
+    let finalized = match finalized_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Err(cleanup_created_directory_after_error(
+                parent,
+                name,
+                Some(created_identity),
+                error,
+            ));
+        }
+    };
+    if !created_identity.same_object(finalized) || finalized.permissions != 0o700 {
+        return Err(CacheError::conflict(
+            "created cache directory mode finalization changed its identity",
+        ));
+    }
+    Ok(file)
+}
+
+fn cleanup_created_directory_after_error(
+    parent: &File,
+    name: &OsStr,
+    expected: Option<ObjectIdentity>,
+    original: CacheError,
+) -> CacheError {
+    let cleanup = match expected {
+        Some(identity) => remove_created_directory(parent, name, identity),
+        None => unlinkat(parent, name, AtFlags::REMOVEDIR)
+            .map_err(|error| map_errno("cannot remove unverified failed cache directory", error)),
+    };
+    match cleanup {
+        Ok(()) => original,
+        Err(cleanup_error) => CacheError::conflict(format!(
+            "created cache directory setup failed ({original}); cleanup was ambiguous ({cleanup_error})"
+        )),
+    }
+}
+
+fn remove_created_directory(
+    parent: &File,
+    name: &OsStr,
+    expected: ObjectIdentity,
+) -> Result<(), CacheError> {
+    let descriptor = openat(parent, name, DIRECTORY_INSPECT_FLAGS, Mode::empty())
+        .map_err(|error| map_directory_errno("cannot recheck created cache directory", error))?;
+    let actual = ObjectIdentity::from_file(&File::from(descriptor))?;
+    if !expected.same_object(actual) {
+        return Err(CacheError::conflict(
+            "refusing to remove a replaced cache directory",
+        ));
+    }
+    unlinkat(parent, name, AtFlags::REMOVEDIR)
+        .map_err(|error| map_errno("cannot remove failed cache directory", error))
+}
+
 fn map_directory_errno(context: &str, error: Errno) -> CacheError {
     match error {
         Errno::LOOP | Errno::NOTDIR => CacheError::path(format!("{context}: {error}")),
@@ -440,8 +622,14 @@ fn map_directory_errno(context: &str, error: Errno) -> CacheError {
 
 #[cfg(test)]
 mod tests {
-    use super::{allocation_error, map_errno};
+    use std::{ffi::OsStr, fs::File};
+
+    use super::{
+        DirectorySetupFault, INJECT_DIRECTORY_SETUP_FAULT, allocation_error, map_errno,
+        open_or_create_directory,
+    };
     use rustix::io::Errno;
+    use tempfile::TempDir;
 
     #[test]
     fn resource_failures_have_one_stable_control_code() {
@@ -462,5 +650,26 @@ mod tests {
             "cache.permission_denied"
         );
         assert_eq!(map_errno("injected syscall", Errno::IO).code(), "cache.io");
+    }
+
+    #[test]
+    fn created_directory_setup_failures_remove_the_new_component() {
+        for fault in [
+            DirectorySetupFault::FirstIdentity,
+            DirectorySetupFault::Chmod,
+            DirectorySetupFault::OpenedIdentity,
+            DirectorySetupFault::FinalIdentity,
+        ] {
+            let parent = TempDir::new().expect("parent");
+            let parent_file = File::open(parent.path()).expect("parent descriptor");
+            INJECT_DIRECTORY_SETUP_FAULT.with(|injected| injected.set(fault));
+            let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
+                .expect_err("injected directory setup failure must fail");
+            assert_eq!(error.code(), "cache.io");
+            assert!(
+                !parent.path().join("created").exists(),
+                "insecure directory leaked after injected setup failure"
+            );
+        }
     }
 }

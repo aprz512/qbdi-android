@@ -40,7 +40,10 @@ const LOCK_CREATE_FLAGS: OFlags = OFlags::RDWR
     .union(OFlags::EXCL)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
-const LOCK_OPEN_FLAGS: OFlags = OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+const LOCK_OPEN_FLAGS: OFlags = OFlags::RDWR
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::CLOEXEC);
 const INSPECT_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 const SECTION_CHUNK_BYTES: usize = 64_000;
 
@@ -71,7 +74,7 @@ impl CacheWriter {
         let key = self.identity.cache_key();
         let directory = CacheDirectory::open(root, &key, true, guard)?
             .ok_or_else(|| CacheError::io("created cache directory disappeared"))?;
-        let publication_lock = PublicationLock::acquire(&directory)?;
+        let publication_lock = PublicationLock::acquire(&directory, guard)?;
         guard.consume(WorkDelta {
             nodes: 1,
             resident_bytes: 128,
@@ -173,7 +176,17 @@ impl CacheWriter {
             temporary.remove_owned()?;
             directory.verify()?;
             publication_lock.verify()?;
-            sync_directory(&directory.file, "cannot fsync cache directory")?;
+            sync_directory(&directory.file, "cannot fsync cache directory").map_err(|error| {
+                CacheError::durability(format!(
+                    "valid cache winner remains visible, but temp-cleanup fsync failed: {error}"
+                ))
+            })?;
+            publication_lock.verify().map_err(|error| {
+                CacheError::durability(format!(
+                    "valid cache winner remains visible, but lock proof failed: {error}"
+                ))
+            })?;
+            directory.verify()?;
             return Ok(PublishOutcome::Existing);
         }
 
@@ -492,6 +505,9 @@ fn commit_transaction(
             "published cache bindings became ambiguous after commit fsync: {error}"
         ))
     })?;
+    if let Err(error) = directory.verify() {
+        return rollback_after_error(directory, publication_lock, transaction, error).map(|_| ());
+    }
     if let PublicationTransaction::Corrupt {
         own,
         displaced,
@@ -518,6 +534,21 @@ fn commit_transaction(
                 CacheError::durability(format!("cannot fsync displaced-cache cleanup: {error}"))
             },
         )?;
+        publication_lock.verify().map_err(|error| {
+            CacheError::durability(format!(
+                "published cache lock proof failed after cleanup fsync: {error}"
+            ))
+        })?;
+        if named_identity(directory, FINAL_NAME)? != *own {
+            return Err(CacheError::durability(
+                "published final changed after displaced-cache cleanup fsync",
+            ));
+        }
+        directory.verify().map_err(|error| {
+            CacheError::durability(format!(
+                "published cache directory changed after irreversible cleanup: {error}"
+            ))
+        })?;
     }
     Ok(())
 }
@@ -566,12 +597,32 @@ fn sync_directory(file: &File, context: &str) -> Result<(), CacheError> {
     }) {
         return Err(CacheError::io(format!("{context}: injected fsync failure")));
     }
-    fsync(file).map_err(|error| map_errno(context, error))
+    fsync(file).map_err(|error| map_errno(context, error))?;
+    #[cfg(test)]
+    POST_DIRECTORY_FSYNC_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(hook) = slot.as_mut() {
+            hook.remaining -= 1;
+            if hook.remaining == 0 {
+                (hook.action)();
+                *slot = None;
+            }
+        }
+    });
+    Ok(())
 }
 
 #[cfg(test)]
 thread_local! {
     static INJECT_DIRECTORY_FSYNC_FAILURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static POST_DIRECTORY_FSYNC_HOOK: std::cell::RefCell<Option<PostDirectoryFsyncHook>> = const { std::cell::RefCell::new(None) };
+    static INJECT_LOCK_SETUP_FAULT: std::cell::Cell<LockSetupFault> = const { std::cell::Cell::new(LockSetupFault::None) };
+}
+
+#[cfg(test)]
+struct PostDirectoryFsyncHook {
+    remaining: usize,
+    action: Box<dyn FnMut()>,
 }
 
 fn write_part(file: &mut File, bytes: &[u8], guard: &dyn WorkGuard) -> Result<(), CacheError> {
@@ -590,29 +641,95 @@ struct PublicationLock<'a> {
 }
 
 impl<'a> PublicationLock<'a> {
-    fn acquire(directory: &'a CacheDirectory) -> Result<Self, CacheError> {
-        let descriptor = match openat(
+    fn acquire(directory: &'a CacheDirectory, guard: &dyn WorkGuard) -> Result<Self, CacheError> {
+        guard.consume(WorkDelta {
+            nodes: 1,
+            ..WorkDelta::default()
+        })?;
+        let (descriptor, created) = match openat(
             &*directory.file,
             LOCK_NAME,
             LOCK_CREATE_FLAGS,
             Mode::RUSR | Mode::WUSR,
         ) {
-            Ok(descriptor) => descriptor,
-            Err(Errno::EXIST) => {
+            Ok(descriptor) => (descriptor, true),
+            Err(Errno::EXIST) => (
                 openat(&*directory.file, LOCK_NAME, LOCK_OPEN_FLAGS, Mode::empty())
-                    .map_err(map_lock_open_error)?
-            }
+                    .map_err(map_lock_open_error)?,
+                false,
+            ),
             Err(error) => return Err(map_lock_open_error(error)),
         };
         let file = File::from(descriptor);
-        let identity = ObjectIdentity::regular_file(&file)?;
+        let provisional_result = if created && lock_setup_fault(LockSetupFault::FirstIdentity) {
+            Err(CacheError::io("injected first lock fstat failure"))
+        } else {
+            ObjectIdentity::regular_file(&file)
+        };
+        let provisional = match provisional_result {
+            Ok(identity) => identity,
+            Err(error) if created => {
+                unlink_unidentified_created_lock(directory)?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        if created {
+            let chmod_result = if lock_setup_fault(LockSetupFault::Chmod) {
+                Err(Errno::IO)
+            } else {
+                fchmod(&file, Mode::RUSR | Mode::WUSR)
+            };
+            if let Err(error) = chmod_result {
+                unlink_created_lock(directory, provisional)?;
+                return Err(map_errno(
+                    "cannot finalize private cache publication lock mode",
+                    error,
+                ));
+            }
+        }
+        let identity_result = if created && lock_setup_fault(LockSetupFault::SecondIdentity) {
+            Err(CacheError::io("injected second lock fstat failure"))
+        } else {
+            ObjectIdentity::regular_file(&file)
+        };
+        let identity = match identity_result {
+            Ok(identity) => identity,
+            Err(error) if created => {
+                unlink_created_lock(directory, provisional)?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        if !provisional.same_object(identity) {
+            if created {
+                unlink_created_lock(directory, provisional)?;
+            }
+            return Err(CacheError::conflict(
+                "cache publication lock identity changed during mode finalization",
+            ));
+        }
         if identity.permissions != 0o600 {
+            if created {
+                unlink_created_lock(directory, provisional)?;
+            }
             return Err(CacheError::path(
                 "cache publication lock does not have mode 0600",
             ));
         }
-        flock(&file, FlockOperation::LockExclusive)
-            .map_err(|error| map_errno("cannot acquire cache publication lock", error))?;
+        loop {
+            guard.consume(WorkDelta {
+                nodes: 1,
+                ..WorkDelta::default()
+            })?;
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => break,
+                Err(Errno::WOULDBLOCK) => std::thread::sleep(std::time::Duration::from_millis(1)),
+                Err(error) => {
+                    return Err(map_errno("cannot acquire cache publication lock", error));
+                }
+            }
+        }
         let lock = Self {
             directory,
             file,
@@ -632,6 +749,58 @@ impl<'a> PublicationLock<'a> {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LockSetupFault {
+    #[cfg(test)]
+    None,
+    FirstIdentity,
+    Chmod,
+    SecondIdentity,
+}
+
+#[cfg(not(test))]
+fn lock_setup_fault(_point: LockSetupFault) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn lock_setup_fault(point: LockSetupFault) -> bool {
+    INJECT_LOCK_SETUP_FAULT.with(|fault| {
+        if fault.get() == point {
+            fault.set(LockSetupFault::None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn unlink_unidentified_created_lock(directory: &CacheDirectory) -> Result<(), CacheError> {
+    // O_EXCL established ownership of this name. Same-UID processes are part of
+    // the publication trust boundary; an unlink failure is therefore preserved
+    // as a conflict rather than guessed around.
+    unlinkat(&*directory.file, LOCK_NAME, AtFlags::empty()).map_err(|error| {
+        map_errno(
+            "cannot remove unverified failed cache publication lock",
+            error,
+        )
+    })
+}
+
+fn unlink_created_lock(
+    directory: &CacheDirectory,
+    expected: ObjectIdentity,
+) -> Result<(), CacheError> {
+    let actual = named_identity(directory, LOCK_NAME)?;
+    if !expected.same_object(actual) {
+        return Err(CacheError::conflict(
+            "refusing to remove a replaced cache publication lock",
+        ));
+    }
+    unlinkat(&*directory.file, LOCK_NAME, AtFlags::empty())
+        .map_err(|error| map_errno("cannot remove failed cache publication lock", error))
 }
 
 fn map_lock_open_error(error: Errno) -> CacheError {
@@ -805,7 +974,15 @@ fn unlink_verified(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        path::PathBuf,
+        process::Command,
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     use qtrace_provider::{
         ArtifactDigest, EventKey, EventKind, OperationAbort, TimelineId, WorkDelta, WorkGuard,
@@ -813,10 +990,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        INJECT_DIRECTORY_FSYNC_FAILURES, OwnedTemporary, PublicationLock, TempCreateFault,
+        INJECT_DIRECTORY_FSYNC_FAILURES, INJECT_LOCK_SETUP_FAULT, LockSetupFault, OwnedTemporary,
+        POST_DIRECTORY_FSYNC_HOOK, PostDirectoryFsyncHook, PublicationLock, TempCreateFault,
     };
     use crate::cache::{
-        CacheDirectory, CacheIdentity, CacheWriter, OwnedStoreView, PublicationState,
+        CacheDirectory, CacheIdentity, CacheOpen, CacheReader, CacheWriter, OwnedStoreView,
+        PublicationState,
     };
 
     struct AllowAll;
@@ -825,6 +1004,277 @@ mod tests {
         fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
             Ok(())
         }
+    }
+
+    struct DeadlineGuard {
+        deadline: Instant,
+    }
+
+    impl WorkGuard for DeadlineGuard {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+            if Instant::now() >= self.deadline {
+                Err(OperationAbort::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn identity(seed: u8) -> CacheIdentity {
+        CacheIdentity {
+            analyzer_version: "test".to_owned(),
+            artifact_digest: [seed; 32],
+            build_option_digest: [seed.wrapping_add(1); 32],
+            cache_schema: 1,
+            endian: "little".to_owned(),
+            layout_version: 1,
+            source_features: 0,
+            source_format: "qtrb".to_owned(),
+            source_major: 1,
+            source_minor: 2,
+        }
+    }
+
+    fn store(seed: u8) -> OwnedStoreView {
+        OwnedStoreView::new(
+            vec![EventKey::new(
+                ArtifactDigest::new([seed; 32]),
+                TimelineId(0),
+                0,
+                1,
+                None,
+                None,
+            )],
+            vec![EventKind::Instruction],
+        )
+        .expect("store")
+    }
+
+    fn private_root() -> TempDir {
+        let root = TempDir::new().expect("root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("private root");
+        root
+    }
+
+    fn digest_path(root: &TempDir, identity: &CacheIdentity) -> PathBuf {
+        root.path().join("qtrace-ui").join(identity.cache_key())
+    }
+
+    fn install_rebind_after_sync(digest: PathBuf, sync_count: usize) {
+        POST_DIRECTORY_FSYNC_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(PostDirectoryFsyncHook {
+                remaining: sync_count,
+                action: Box::new(move || {
+                    fs::rename(&digest, digest.with_extension("held")).expect("move digest");
+                    fs::create_dir(&digest).expect("replacement digest");
+                    fs::set_permissions(&digest, fs::Permissions::from_mode(0o700))
+                        .expect("private replacement");
+                }),
+            });
+        });
+    }
+
+    #[test]
+    fn restrictive_umask_still_creates_exact_private_cache_modes() {
+        const CHILD_ENV: &str = "QTRACE_STORE_UMASK_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = Command::new(std::env::current_exe().expect("test executable"))
+                .arg("--exact")
+                .arg("cache::writer::tests::restrictive_umask_still_creates_exact_private_cache_modes")
+                .arg("--nocapture")
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("umask child");
+            assert!(status.success(), "restrictive-umask child failed");
+            return;
+        }
+
+        struct RestoreUmask(rustix::fs::Mode);
+        impl Drop for RestoreUmask {
+            fn drop(&mut self) {
+                rustix::process::umask(self.0);
+            }
+        }
+
+        let parent = private_root();
+        let root = parent.path().join("xdg-cache");
+        let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
+        let _restore = RestoreUmask(previous);
+        let identity = identity(0x55);
+        CacheWriter::new(identity.clone(), store(0x55))
+            .expect("writer")
+            .publish(&root, &AllowAll)
+            .expect("publish under restrictive umask");
+        let app = root.join("qtrace-ui");
+        let digest = app.join(identity.cache_key());
+        for directory in [&root, &app, &digest] {
+            assert_eq!(
+                fs::metadata(directory).expect("directory metadata").mode() & 0o7777,
+                0o700
+            );
+        }
+        for file in [digest.join(".publish.lock"), digest.join("index.qtc")] {
+            assert_eq!(
+                fs::metadata(file).expect("file metadata").mode() & 0o7777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn new_lock_setup_failures_remove_the_insecure_created_leaf() {
+        for fault in [
+            LockSetupFault::FirstIdentity,
+            LockSetupFault::Chmod,
+            LockSetupFault::SecondIdentity,
+        ] {
+            let root = private_root();
+            let identity = identity(0x56);
+            let directory =
+                CacheDirectory::open(root.path(), &identity.cache_key(), true, &AllowAll)
+                    .expect("directory")
+                    .expect("created directory");
+            INJECT_LOCK_SETUP_FAULT.with(|injected| injected.set(fault));
+            let error = match PublicationLock::acquire(&directory, &AllowAll) {
+                Err(error) => error,
+                Ok(_) => panic!("injected lock setup failure was ignored"),
+            };
+            assert_eq!(error.code(), "cache.io");
+            assert!(
+                !digest_path(&root, &identity).join(".publish.lock").exists(),
+                "insecure lock leaked after injected setup failure"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_wait_is_cancellable_without_releasing_the_holder() {
+        let root = private_root();
+        let identity = identity(0x50);
+        let directory = CacheDirectory::open(root.path(), &identity.cache_key(), true, &AllowAll)
+            .expect("directory")
+            .expect("created directory");
+        let holder = PublicationLock::acquire(&directory, &AllowAll).expect("holder lock");
+        let root_path = root.path().to_owned();
+        let contender_identity = identity.clone();
+        let (sender, receiver) = mpsc::channel();
+        let contender = thread::spawn(move || {
+            let guard = DeadlineGuard {
+                deadline: Instant::now() + Duration::from_millis(20),
+            };
+            let result = CacheWriter::new(contender_identity, store(0x50))
+                .expect("contender writer")
+                .publish(&root_path, &guard);
+            sender.send(result).expect("send contender result");
+        });
+        let timely = receiver.recv_timeout(Duration::from_millis(250));
+        drop(holder);
+        contender.join().expect("contender thread");
+        let error = timely
+            .expect("contender blocked past cancellation deadline")
+            .expect_err("contender should be cancelled while waiting");
+        assert_eq!(error.code(), "job.cancelled");
+        let digest = digest_path(&root, &identity);
+        assert!(!digest.join("index.qtc").exists());
+        assert_eq!(
+            fs::read_dir(&digest)
+                .expect("digest entries")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
+        CacheWriter::new(identity, store(0x50))
+            .expect("writer after unlock")
+            .publish(root.path(), &AllowAll)
+            .expect("publish after unlock");
+    }
+
+    #[test]
+    fn missing_publish_rebind_after_commit_fsync_rolls_back_held_final() {
+        let root = private_root();
+        let identity = identity(0x51);
+        let digest = digest_path(&root, &identity);
+        install_rebind_after_sync(digest.clone(), 1);
+        let error = CacheWriter::new(identity, store(0x51))
+            .expect("writer")
+            .publish(root.path(), &AllowAll)
+            .expect_err("post-fsync rebind must not return Published");
+        assert_eq!(error.code(), "cache.path_escape");
+        assert!(!digest.with_extension("held").join("index.qtc").exists());
+    }
+
+    #[test]
+    fn corrupt_publish_rebind_after_final_fsync_is_visibility_uncertain() {
+        let root = private_root();
+        let identity = identity(0x52);
+        CacheWriter::new(identity.clone(), store(0x52))
+            .expect("initial writer")
+            .publish(root.path(), &AllowAll)
+            .expect("initial publish");
+        let digest = digest_path(&root, &identity);
+        let final_path = digest.join("index.qtc");
+        let mut corrupt = fs::read(&final_path).expect("cache bytes");
+        corrupt[64] ^= 1;
+        fs::write(&final_path, corrupt).expect("corrupt final");
+        install_rebind_after_sync(digest.clone(), 2);
+        let error = CacheWriter::new(identity, store(0x52))
+            .expect("replacement writer")
+            .publish(root.path(), &AllowAll)
+            .expect_err("post-cleanup-fsync rebind must not return Published");
+        assert_eq!(
+            error.publication_state(),
+            PublicationState::VisibleDurabilityUncertain
+        );
+        assert!(digest.with_extension("held").join("index.qtc").exists());
+    }
+
+    #[test]
+    fn valid_winner_rebind_after_cleanup_fsync_never_returns_existing() {
+        let root = private_root();
+        let identity = identity(0x53);
+        CacheWriter::new(identity.clone(), store(0x53))
+            .expect("initial writer")
+            .publish(root.path(), &AllowAll)
+            .expect("initial publish");
+        let digest = digest_path(&root, &identity);
+        let winner = fs::read(digest.join("index.qtc")).expect("winner bytes");
+        install_rebind_after_sync(digest.clone(), 1);
+        let error = CacheWriter::new(identity, store(0x53))
+            .expect("second writer")
+            .publish(root.path(), &AllowAll)
+            .expect_err("post-fsync rebind must not return Existing");
+        assert_eq!(error.code(), "cache.path_escape");
+        assert_eq!(
+            fs::read(digest.with_extension("held").join("index.qtc")).expect("held winner"),
+            winner
+        );
+    }
+
+    #[test]
+    fn valid_winner_cleanup_fsync_failure_reports_visible_uncertainty() {
+        let root = private_root();
+        let identity = identity(0x54);
+        CacheWriter::new(identity.clone(), store(0x54))
+            .expect("initial writer")
+            .publish(root.path(), &AllowAll)
+            .expect("initial publish");
+        let final_path = digest_path(&root, &identity).join("index.qtc");
+        let winner = fs::read(&final_path).expect("winner bytes");
+        INJECT_DIRECTORY_FSYNC_FAILURES.with(|remaining| remaining.set(1));
+        let error = CacheWriter::new(identity.clone(), store(0x54))
+            .expect("second writer")
+            .publish(root.path(), &AllowAll)
+            .expect_err("winner cleanup fsync failure");
+        assert_eq!(
+            error.publication_state(),
+            PublicationState::VisibleDurabilityUncertain
+        );
+        assert_eq!(fs::read(&final_path).expect("winner survives"), winner);
+        assert!(matches!(
+            CacheReader::open(root.path(), &identity, &AllowAll).expect("reader"),
+            CacheOpen::Ready(_)
+        ));
     }
 
     #[test]
@@ -840,7 +1290,7 @@ mod tests {
             let directory = CacheDirectory::open(root.path(), &"a".repeat(64), true, &AllowAll)
                 .expect("directory")
                 .expect("created directory");
-            let _lock = PublicationLock::acquire(&directory).expect("publication lock");
+            let _lock = PublicationLock::acquire(&directory, &AllowAll).expect("publication lock");
             assert!(
                 OwnedTemporary::create_impl(&directory, fault).is_err(),
                 "injected setup failure was ignored"
