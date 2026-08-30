@@ -374,6 +374,8 @@ pub enum CompletenessCause {
     Active,
     Stale,
     Rotating,
+    Unreliable,
+    Incomplete,
     Lost,
     Overwritten,
     CoverageGap,

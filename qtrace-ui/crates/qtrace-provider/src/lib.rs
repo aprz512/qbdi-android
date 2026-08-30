@@ -2,6 +2,7 @@
 
 mod control;
 mod error;
+mod flight;
 mod model;
 mod qtrb;
 mod source;
@@ -11,6 +12,11 @@ pub use control::{
     WorkGuard,
 };
 pub use error::{ProviderError, SourceCoordinate};
+pub use flight::{
+    FLIGHT_CHUNK_HEADER_BYTES, FLIGHT_DIRECTORY_ENTRY_BYTES, FLIGHT_EMERGENCY_RECORD_BYTES,
+    FLIGHT_EMERGENCY_SLOT_BYTES, FLIGHT_RECORD_HEADER_BYTES, FLIGHT_SUPERBLOCK_BYTES,
+    FlightProjectionDescriptor, FlightProvider,
+};
 pub use model::{
     ArtifactDigest, CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause,
     EventKey, EventKind, EventPayload, EventRecord, FragmentSourceOffsets,
