@@ -1,0 +1,476 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use qtrace_provider::{
+    ArtifactDigest, BeginMetadata, BudgetDimension, ByteSource, CompletenessRange, Discontinuity,
+    DiscontinuityCause, EventCursor, EventKey, EventKind, EventPayload, EventRecord, Instruction,
+    InstructionDefinition, Memory, MemoryDirection, ModuleDefinition, OpaqueOptionalRecord,
+    OperationAbort, Provenance, ProviderCapabilities, ProviderCounters, ProviderError,
+    ProviderSummary, RangeBounds, RangeDomain, ReadAtSource, SemanticEvent, Signal,
+    SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity, Syscall, Termination,
+    TerminationKind, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId,
+    TraceProvider, WorkDelta, WorkGuard,
+};
+
+fn digest(byte: u8) -> ArtifactDigest {
+    ArtifactDigest::new([byte; 32])
+}
+
+#[test]
+fn event_identity_does_not_depend_on_visible_row_or_optional_sequence() {
+    let key = EventKey::new(digest(0x11), TimelineId(7), 19, 0x240, None, Some(42));
+    assert_eq!(key.record_ordinal, 19);
+    assert_eq!(key.source_offset, 0x240);
+    assert_eq!(key.sequence, None);
+    assert_eq!(key.tid, Some(42));
+}
+
+#[test]
+fn provenance_keeps_unknown_and_damaged_distinct() {
+    assert_ne!(Provenance::Unknown, Provenance::Damaged);
+    assert_eq!(
+        serde_json::to_string(&Provenance::Captured).unwrap(),
+        "\"captured\""
+    );
+}
+
+#[test]
+fn capabilities_are_explicit_not_inferred_from_nullable_data() {
+    let caps = ProviderCapabilities::qtrb_register_observations();
+    assert!(caps.per_thread_ordering);
+    assert!(caps.register_read_write_observation);
+    assert!(!caps.global_ordering);
+    assert!(!caps.full_register_checkpoint);
+}
+
+#[test]
+fn event_kind_serialization_stably_names_every_payload_category() {
+    let kinds = [
+        EventKind::Begin,
+        EventKind::ModuleDefinition,
+        EventKind::InstructionDefinition,
+        EventKind::Instruction,
+        EventKind::Memory,
+        EventKind::SemanticCall,
+        EventKind::SemanticRule,
+        EventKind::SemanticError,
+        EventKind::ThreadLifecycle,
+        EventKind::Syscall,
+        EventKind::Signal,
+        EventKind::SignalHandlerBoundary,
+        EventKind::Termination,
+        EventKind::Discontinuity,
+        EventKind::OpaqueOptional,
+    ];
+
+    assert_eq!(
+        serde_json::to_value(kinds).unwrap(),
+        serde_json::json!([
+            "begin",
+            "module_definition",
+            "instruction_definition",
+            "instruction",
+            "memory",
+            "semantic_call",
+            "semantic_rule",
+            "semantic_error",
+            "thread_lifecycle",
+            "syscall",
+            "signal",
+            "signal_handler_boundary",
+            "termination",
+            "discontinuity",
+            "opaque_optional"
+        ])
+    );
+}
+
+#[test]
+fn captured_sequence_range_includes_u64_max_without_overflow() {
+    let coverage =
+        CompletenessRange::captured_sequence(u64::MAX - 2, u64::MAX, Provenance::Captured).unwrap();
+
+    assert_eq!(coverage.domain(), RangeDomain::CapturedSequence);
+    assert_eq!(
+        coverage.bounds(),
+        RangeBounds::InclusiveSequence {
+            first: u64::MAX - 2,
+            last: u64::MAX,
+        }
+    );
+}
+
+#[test]
+fn completeness_range_deserialization_rejects_invalid_domain_or_bounds() {
+    let reversed = serde_json::json!({
+        "domain": "source_bytes",
+        "bounds": { "half_open": { "start": 5, "end_exclusive": 4 } },
+        "provenance": "damaged"
+    });
+    let mismatched = serde_json::json!({
+        "domain": "captured_sequence",
+        "bounds": { "half_open": { "start": 1, "end_exclusive": 2 } },
+        "provenance": "captured"
+    });
+
+    assert!(serde_json::from_value::<CompletenessRange>(reversed).is_err());
+    assert!(serde_json::from_value::<CompletenessRange>(mismatched).is_err());
+}
+
+#[test]
+fn source_and_memory_ranges_are_checked_and_half_open() {
+    for coverage in [
+        CompletenessRange::source_bytes(0x100, 0x110, Provenance::Damaged).unwrap(),
+        CompletenessRange::memory_addresses(0x100, 0x110, Provenance::Unknown).unwrap(),
+    ] {
+        assert!(coverage.contains(0x100));
+        assert!(coverage.contains(0x10f));
+        assert!(!coverage.contains(0x110));
+    }
+    assert!(CompletenessRange::source_bytes(5, 4, Provenance::Damaged).is_none());
+    assert!(CompletenessRange::memory_addresses(5, 4, Provenance::Damaged).is_none());
+}
+
+#[test]
+fn artifact_digest_round_trips_canonical_sha256_hex() {
+    let expected = "abababababababababababababababababababababababababababababababab";
+    let digest = ArtifactDigest::from_hex(expected).unwrap();
+
+    assert_eq!(digest.to_hex(), expected);
+    assert_eq!(
+        serde_json::to_string(&digest).unwrap(),
+        format!("\"{expected}\"")
+    );
+    assert!(ArtifactDigest::from_hex("ab").is_none());
+}
+
+#[test]
+fn provider_error_detail_is_bounded_single_line_utf8() {
+    let detail = format!("first\r\nsecond\n{}", "é".repeat(300));
+    let error = ProviderError::new("source.invalid", "decode", None, false, detail);
+
+    assert!(error.detail.starts_with("first  second "));
+    assert!(!error.detail.contains(['\r', '\n']));
+    assert_eq!(error.detail.len(), 512);
+    assert!(error.detail.is_char_boundary(error.detail.len()));
+    assert_eq!(error.code, "source.invalid");
+    assert_eq!(error.stage, "decode");
+    assert!(!error.retryable);
+}
+
+#[test]
+fn byte_source_reports_exact_short_reads_without_partial_success() {
+    let source = ByteSource::new(vec![0x10, 0x20, 0x30]);
+    let mut output = [0xaa; 2];
+
+    let error = source.read_exact_at(2, &mut output).unwrap_err();
+
+    assert_eq!(output, [0xaa; 2]);
+    assert_eq!(error.code, "source.short_read");
+    assert_eq!(error.stage, "read");
+    assert_eq!(error.source.unwrap().offset, 2);
+    assert!(!error.retryable);
+}
+
+struct LimitGuard {
+    input_limit: u64,
+    event_limit: u64,
+    input: AtomicU64,
+    events: AtomicU64,
+}
+
+impl WorkGuard for LimitGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        let input = self.input.fetch_add(delta.input_bytes, Ordering::Relaxed) + delta.input_bytes;
+        let events = self.events.fetch_add(delta.events, Ordering::Relaxed) + delta.events;
+        if input > self.input_limit {
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::InputBytes,
+                self.input_limit,
+                input,
+            ));
+        }
+        if events > self.event_limit {
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::Events,
+                self.event_limit,
+                events,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn work_guard_can_abort_independently_on_byte_and_event_limits() {
+    let guard = LimitGuard {
+        input_limit: 5,
+        event_limit: 2,
+        input: AtomicU64::new(0),
+        events: AtomicU64::new(0),
+    };
+    guard
+        .consume(WorkDelta {
+            input_bytes: 5,
+            events: 2,
+            ..WorkDelta::default()
+        })
+        .unwrap();
+
+    assert_eq!(
+        guard
+            .consume(WorkDelta {
+                input_bytes: 1,
+                ..WorkDelta::default()
+            })
+            .unwrap_err(),
+        OperationAbort::budget_exceeded(BudgetDimension::InputBytes, 5, 6)
+    );
+
+    let event_guard = LimitGuard {
+        input_limit: 100,
+        event_limit: 0,
+        input: AtomicU64::new(0),
+        events: AtomicU64::new(0),
+    };
+    assert_eq!(
+        event_guard
+            .consume(WorkDelta {
+                events: 1,
+                ..WorkDelta::default()
+            })
+            .unwrap_err(),
+        OperationAbort::budget_exceeded(BudgetDimension::Events, 0, 1)
+    );
+}
+
+#[test]
+fn event_record_kind_is_derived_from_every_closed_payload_variant() {
+    let semantic = SemanticEvent {
+        category: Some("jni".into()),
+        name: "FindClass".into(),
+        detail: "java/lang/String".into(),
+    };
+    let payloads = [
+        (
+            EventPayload::Begin(BeginMetadata {
+                run_id: 9,
+                pid: 10,
+                tid: Some(11),
+            }),
+            EventKind::Begin,
+        ),
+        (
+            EventPayload::ModuleDefinition(ModuleDefinition {
+                module_id: 1,
+                base: 0x1000,
+                name: "libtarget.so".into(),
+            }),
+            EventKind::ModuleDefinition,
+        ),
+        (
+            EventPayload::InstructionDefinition(InstructionDefinition { definition_id: 2 }),
+            EventKind::InstructionDefinition,
+        ),
+        (
+            EventPayload::Instruction(Instruction {
+                definition_id: 2,
+                module_id: 1,
+                relative_pc: 0x40,
+            }),
+            EventKind::Instruction,
+        ),
+        (
+            EventPayload::Memory(Memory {
+                address: 0x2000,
+                size: 8,
+                direction: MemoryDirection::Read,
+            }),
+            EventKind::Memory,
+        ),
+        (
+            EventPayload::SemanticCall(semantic.clone()),
+            EventKind::SemanticCall,
+        ),
+        (
+            EventPayload::SemanticRule(semantic.clone()),
+            EventKind::SemanticRule,
+        ),
+        (
+            EventPayload::SemanticError(semantic),
+            EventKind::SemanticError,
+        ),
+        (
+            EventPayload::ThreadLifecycle(ThreadLifecycle {
+                tid: 11,
+                phase: ThreadLifecyclePhase::Begin,
+            }),
+            EventKind::ThreadLifecycle,
+        ),
+        (
+            EventPayload::Syscall(Syscall {
+                tid: 11,
+                number: 93,
+            }),
+            EventKind::Syscall,
+        ),
+        (
+            EventPayload::Signal(Signal { tid: 11, number: 6 }),
+            EventKind::Signal,
+        ),
+        (
+            EventPayload::SignalHandlerBoundary(SignalHandlerBoundary {
+                tid: 11,
+                phase: SignalHandlerPhase::Return,
+            }),
+            EventKind::SignalHandlerBoundary,
+        ),
+        (
+            EventPayload::Termination(Termination {
+                kind: TerminationKind::Completed,
+            }),
+            EventKind::Termination,
+        ),
+        (
+            EventPayload::Discontinuity(Discontinuity {
+                cause: DiscontinuityCause::Damage,
+                evidence: CompletenessRange::source_bytes(1, 2, Provenance::Damaged).unwrap(),
+            }),
+            EventKind::Discontinuity,
+        ),
+        (
+            EventPayload::OpaqueOptional(OpaqueOptionalRecord {
+                record_type: 0x8001,
+                flags: 3,
+                bytes: vec![0xde, 0xad],
+            }),
+            EventKind::OpaqueOptional,
+        ),
+    ];
+
+    for (ordinal, (payload, expected_kind)) in payloads.into_iter().enumerate() {
+        assert_eq!(payload.kind(), expected_kind);
+        let record = EventRecord::new(
+            EventKey::new(digest(0x22), TimelineId(3), ordinal as u64, 0, None, None),
+            Provenance::Captured,
+            payload,
+        );
+        assert_eq!(record.kind(), expected_kind);
+    }
+}
+
+struct PermitAll;
+
+impl WorkGuard for PermitAll {
+    fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+        Ok(())
+    }
+}
+
+struct FakeCursor {
+    events: std::vec::IntoIter<EventRecord>,
+    drained: bool,
+    summary: ProviderSummary,
+}
+
+impl EventCursor for FakeCursor {
+    fn next_event(&mut self, guard: &dyn WorkGuard) -> Result<Option<EventRecord>, ProviderError> {
+        if let Some(event) = self.events.next() {
+            guard
+                .consume(WorkDelta {
+                    events: 1,
+                    ..WorkDelta::default()
+                })
+                .map_err(ProviderError::from)?;
+            return Ok(Some(event));
+        }
+        self.drained = true;
+        Ok(None)
+    }
+
+    fn finish(self: Box<Self>) -> Result<ProviderSummary, ProviderError> {
+        if !self.drained {
+            return Err(ProviderError::stream_not_drained());
+        }
+        Ok(self.summary)
+    }
+}
+
+struct FakeProvider {
+    identity: SourceIdentity,
+    capabilities: ProviderCapabilities,
+    timelines: Vec<TimelineDescriptor>,
+    events: Vec<EventRecord>,
+}
+
+impl TraceProvider for FakeProvider {
+    fn identity(&self) -> &SourceIdentity {
+        &self.identity
+    }
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
+    }
+
+    fn timelines(&self) -> &[TimelineDescriptor] {
+        &self.timelines
+    }
+
+    fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError> {
+        let summary = ProviderSummary {
+            timelines: self.timelines.clone(),
+            termination: None,
+            counters: ProviderCounters {
+                events_emitted: self.events.len() as u64,
+                ..ProviderCounters::default()
+            },
+            completeness: vec![],
+        };
+        Ok(Box::new(FakeCursor {
+            events: self.events.into_iter(),
+            drained: false,
+            summary,
+        }))
+    }
+}
+
+fn fake_provider() -> Box<dyn TraceProvider> {
+    Box::new(FakeProvider {
+        identity: SourceIdentity {
+            artifact: digest(0x33),
+            format: "test".into(),
+            source_bytes: 4,
+        },
+        capabilities: ProviderCapabilities::qtrb_register_observations(),
+        timelines: vec![TimelineDescriptor {
+            id: TimelineId(8),
+            tid: Some(17),
+            label: None,
+        }],
+        events: vec![EventRecord::new(
+            EventKey::new(digest(0x33), TimelineId(8), 0, 0, None, Some(17)),
+            Provenance::Captured,
+            EventPayload::Begin(BeginMetadata {
+                run_id: 1,
+                pid: 2,
+                tid: Some(17),
+            }),
+        )],
+    })
+}
+
+#[test]
+fn one_shot_cursor_releases_summary_only_after_stream_is_drained() {
+    let early = fake_provider().into_cursor().unwrap().finish().unwrap_err();
+    assert_eq!(early.code, "source.stream_not_drained");
+
+    let mut cursor = fake_provider().into_cursor().unwrap();
+    let mut events = vec![];
+    while let Some(event) = cursor.next_event(&PermitAll).unwrap() {
+        events.push(event);
+    }
+    let summary = cursor.finish().unwrap();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(summary.counters.events_emitted, 1);
+    assert_eq!(summary.timelines[0].tid, Some(17));
+}

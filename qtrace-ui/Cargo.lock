@@ -2378,6 +2378,11 @@ dependencies = [
 [[package]]
 name = "qtrace-provider"
 version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "qtrace-service"
