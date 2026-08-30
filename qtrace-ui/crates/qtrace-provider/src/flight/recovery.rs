@@ -1,9 +1,9 @@
-use std::{cmp::Ordering, mem::size_of, sync::Arc};
+use std::{collections::HashMap, mem::size_of, sync::Arc};
 
 use crate::{
     CompletenessCause, CompletenessRange, EventKey, EventPayload, EventRecord,
-    OpaqueOptionalRecord, Provenance, ProviderCounters, ProviderError, RangeBounds, RangeDomain,
-    ReadAtSource, SourceCoordinate, TimelineId, WorkDelta, WorkGuard,
+    MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance, ProviderCounters, ProviderError,
+    RangeBounds, RangeDomain, ReadAtSource, SourceCoordinate, TimelineId, WorkDelta, WorkGuard,
 };
 
 use super::wire::{
@@ -28,7 +28,6 @@ pub(super) struct RecoveredFlight {
 
 #[derive(Clone, Copy)]
 struct ChunkIdentity {
-    index: u32,
     tid: u32,
     generation: u32,
     state: u32,
@@ -50,7 +49,6 @@ struct RecoveryStatus {
 
 #[derive(Clone, Copy)]
 struct LifecycleBalance {
-    tid: u32,
     balance: i64,
     first_begin: u64,
 }
@@ -59,7 +57,8 @@ struct RecordScan {
     events: Vec<EventRecord>,
     first_sequence: Option<u64>,
     last_sequence: Option<u64>,
-    lifecycle: Vec<LifecycleBalance>,
+    lifecycle_balance: i64,
+    lifecycle_first_begin: Option<u64>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -105,12 +104,20 @@ pub(super) fn recover(
         .map_err(|_| allocation_error("directory count does not fit this host"))?;
     let chunk_capacity = usize::try_from(superblock.chunk_count)
         .map_err(|_| allocation_error("chunk count does not fit this host"))?;
-    let mut directories = fallible_vec(directory_capacity)?;
-    let mut chunks = fallible_vec(chunk_capacity)?;
-    let mut tids = fallible_vec(directory_capacity)?;
-    let mut hints = fallible_vec(directory_capacity.saturating_add(chunk_capacity))?;
     let emergency_capacity = usize::try_from(superblock.emergency_count)
         .map_err(|_| allocation_error("emergency count does not fit this host"))?;
+    let emergency_tid_capacity = emergency_capacity
+        .checked_mul(2)
+        .ok_or_else(|| allocation_error("Flight emergency TID capacity overflow"))?;
+    let tid_capacity = directory_capacity
+        .checked_add(emergency_tid_capacity)
+        .ok_or_else(|| allocation_error("Flight TID capacity overflow"))?;
+    let mut directories = fallible_vec(directory_capacity)?;
+    let mut chunks = fallible_none_vec(chunk_capacity, &context)?;
+    let mut tids = fallible_vec(tid_capacity)?;
+    let mut directory_by_tid = fallible_hash_map(directory_capacity, &context)?;
+    let mut known_tids = fallible_hash_map(tid_capacity, &context)?;
+    let mut hints = fallible_vec(directory_capacity.saturating_add(chunk_capacity))?;
     let completeness_capacity = directory_capacity
         .saturating_mul(3)
         .saturating_add(chunk_capacity.saturating_mul(3))
@@ -128,13 +135,16 @@ pub(super) fn recover(
         let bytes =
             context.read_array::<FLIGHT_DIRECTORY_ENTRY_BYTES>(offset, "flight.directory", None)?;
         if let Some(entry) = parse_directory(&bytes, index, superblock.chunk_count, offset)? {
-            if tids.binary_search(&entry.tid).is_ok() {
+            if directory_by_tid.contains_key(&entry.tid) {
                 return Err(super::wire::directory_error(
                     offset,
                     "duplicate directory TID",
                 ));
             }
-            insert_sorted(&mut tids, entry.tid, &context)?;
+            let directory_index = directories.len();
+            directory_by_tid.insert(entry.tid, directory_index);
+            known_tids.insert(entry.tid, ());
+            guarded_push_without_charge(&mut tids, entry.tid)?;
             if entry.range_reliable && entry.first_sequence != 0 {
                 guarded_push(
                     &mut hints,
@@ -179,7 +189,7 @@ pub(super) fn recover(
     }
 
     let mut events = Vec::new();
-    let mut lifecycle = fallible_vec(directory_capacity)?;
+    let mut lifecycle = fallible_hash_map(directory_capacity, &context)?;
     let mut damage_ranges = fallible_vec(chunk_capacity)?;
     let mut has_damage = false;
     let mut has_incomplete = superblock.flags != 0 || has_directory_uncertainty;
@@ -196,22 +206,21 @@ pub(super) fn recover(
         let Some(header) = parse_chunk_header(&bytes, index, offset)? else {
             continue;
         };
-        if directories.iter().all(|entry| entry.tid != header.tid) {
+        if !directory_by_tid.contains_key(&header.tid) {
             return Err(super::wire::chunk_error(
                 offset,
                 "chunk TID has no directory owner",
             ));
         }
-        guarded_push(
-            &mut chunks,
-            ChunkIdentity {
-                index,
-                tid: header.tid,
-                generation: header.generation,
-                state: header.state,
-            },
-            &context,
-        )?;
+        let chunk_slot = usize::try_from(index)
+            .ok()
+            .and_then(|position| chunks.get_mut(position))
+            .ok_or_else(|| super::wire::chunk_error(offset, "chunk index does not fit host"))?;
+        *chunk_slot = Some(ChunkIdentity {
+            tid: header.tid,
+            generation: header.generation,
+            state: header.state,
+        });
         let capacity = u64::from(superblock.chunk_bytes)
             .checked_sub(FLIGHT_CHUNK_HEADER_BYTES as u64)
             .ok_or_else(|| super::wire::chunk_error(offset, "invalid chunk capacity"))?;
@@ -313,7 +322,12 @@ pub(super) fn recover(
                 has_damage = true;
                 continue;
             }
-            merge_lifecycle(&mut lifecycle, &scan.lifecycle, &context)?;
+            merge_lifecycle(
+                &mut lifecycle,
+                header.tid,
+                scan.lifecycle_balance,
+                scan.lifecycle_first_begin,
+            );
             append_events(&mut events, scan.events, &context)?;
         } else {
             push_source_range(
@@ -325,17 +339,25 @@ pub(super) fn recover(
                 &context,
             )?;
             let scan = scan_records(&mut context, artifact, &header, data_offset, capacity, true)?;
-            merge_lifecycle(&mut lifecycle, &scan.lifecycle, &context)?;
+            merge_lifecycle(
+                &mut lifecycle,
+                header.tid,
+                scan.lifecycle_balance,
+                scan.lifecycle_first_begin,
+            );
             append_events(&mut events, scan.events, &context)?;
         }
     }
 
-    for entry in &directories {
-        context.guard.consume(WorkDelta::default())?;
+    for (index, entry) in directories.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
         if entry.state == 2 || entry.chunk_index == INVALID_INDEX {
             continue;
         }
-        let current = chunks.iter().find(|chunk| chunk.index == entry.chunk_index);
+        let current = usize::try_from(entry.chunk_index)
+            .ok()
+            .and_then(|position| chunks.get(position))
+            .and_then(Option::as_ref);
         if !current.is_some_and(|chunk| {
             chunk.tid == entry.tid
                 && chunk.generation == entry.generation
@@ -359,9 +381,7 @@ pub(super) fn recover(
         }
     }
 
-    context.guard.consume(WorkDelta::default())?;
-    events.sort_by(event_order);
-    reject_duplicate_sequences(&events, &context)?;
+    let regular_sequences = index_regular_sequences(&events, &context)?;
     let emergency_status = scan_emergencies(
         &mut context,
         &superblock,
@@ -369,12 +389,23 @@ pub(super) fn recover(
         &mut events,
         &mut completeness,
         &mut tids,
+        &mut known_tids,
+        &regular_sequences,
     )?;
+    events = guarded_radix_sort(events, 8, event_sequence_byte, &context)?;
+    events = resolve_sequence_collisions(
+        events,
+        superblock.emergencies.offset,
+        superblock.emergencies.end,
+        &mut completeness,
+        &context,
+    )?;
+    tids = guarded_radix_sort(tids, 4, u32_byte, &context)?;
     has_damage |= emergency_status.has_damage;
     has_incomplete |= emergency_status.has_incomplete;
     let mut has_coverage = emergency_status.has_coverage;
-    for event in &events {
-        context.guard.consume(WorkDelta::default())?;
+    for (index, event) in events.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
         if matches!(
             &event.payload,
             EventPayload::OpaqueOptional(record) if record.record_type == 15
@@ -411,8 +442,11 @@ pub(super) fn recover(
             &context,
         )?;
     }
-    for item in &lifecycle {
-        context.guard.consume(WorkDelta::default())?;
+    for (index, tid) in tids.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        let Some(item) = lifecycle.get(tid) else {
+            continue;
+        };
         if item.balance > 0 {
             push_sequence_range(
                 &mut completeness,
@@ -426,8 +460,7 @@ pub(super) fn recover(
         }
     }
 
-    context.guard.consume(WorkDelta::default())?;
-    damage_ranges.sort_by_key(|range| (range.first, range.last));
+    damage_ranges = guarded_radix_sort(damage_ranges, 16, sequence_range_byte, &context)?;
     add_sequence_completeness(
         &events,
         &hints,
@@ -481,7 +514,8 @@ fn scan_records(
     active: bool,
 ) -> Result<RecordScan, ProviderError> {
     let mut events = Vec::new();
-    let mut lifecycle = Vec::new();
+    let mut lifecycle_balance = 0_i64;
+    let mut lifecycle_first_begin = None;
     let mut relative = 0_u64;
     let mut first_sequence = None;
     let mut last_sequence = None;
@@ -611,12 +645,11 @@ fn scan_records(
         }
         last_sequence = Some(record.sequence);
         update_lifecycle(
-            &mut lifecycle,
-            header.tid,
+            &mut lifecycle_balance,
+            &mut lifecycle_first_begin,
             record.kind,
             record.sequence,
-            context,
-        )?;
+        );
         relative = relative
             .checked_add(u64::from(storage))
             .ok_or_else(|| record_error(coordinate, "record cursor overflow"))?;
@@ -634,10 +667,12 @@ fn scan_records(
         events,
         first_sequence,
         last_sequence,
-        lifecycle,
+        lifecycle_balance,
+        lifecycle_first_begin,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_emergencies(
     context: &mut RecoveryContext<'_>,
     superblock: &Superblock,
@@ -645,6 +680,8 @@ fn scan_emergencies(
     events: &mut Vec<EventRecord>,
     completeness: &mut Vec<CompletenessRange>,
     tids: &mut Vec<u32>,
+    known_tids: &mut HashMap<u32, ()>,
+    regular_sequences: &HashMap<u64, ()>,
 ) -> Result<EmergencyStatus, ProviderError> {
     let mut status = EmergencyStatus::default();
     for index in 0..superblock.emergency_count {
@@ -683,16 +720,14 @@ fn scan_emergencies(
         )?;
         let selected = select_emergency(first, second, completeness, context, &mut status)?;
         for candidate in selected.into_iter().flatten() {
-            if events
-                .binary_search_by_key(&candidate.cell.sequence, |event| {
-                    event.key.sequence.unwrap_or(0)
-                })
-                .is_ok()
-            {
+            if regular_sequences.contains_key(&candidate.cell.sequence) {
                 push_source_range(
                     completeness,
                     candidate.offset,
-                    candidate.offset + FLIGHT_EMERGENCY_RECORD_BYTES as u64,
+                    candidate
+                        .offset
+                        .checked_add(FLIGHT_EMERGENCY_RECORD_BYTES as u64)
+                        .ok_or_else(|| allocation_error("emergency stale range overflow"))?,
                     Provenance::Unknown,
                     CompletenessCause::Stale,
                     context,
@@ -702,8 +737,8 @@ fn scan_emergencies(
             if candidate.cell.kind == 15 {
                 status.has_coverage = true;
             }
-            if tids.binary_search(&candidate.cell.tid).is_err() {
-                insert_sorted(tids, candidate.cell.tid, context)?;
+            if known_tids.insert(candidate.cell.tid, ()).is_none() {
+                guarded_push(tids, candidate.cell.tid, context)?;
             }
             context.guard.consume(WorkDelta {
                 events: 1,
@@ -739,16 +774,38 @@ fn scan_emergencies(
                 .next_ordinal
                 .checked_add(1)
                 .ok_or_else(|| allocation_error("emergency ordinal overflow"))?;
-            let position = events
-                .binary_search_by_key(&candidate.cell.sequence, |event| {
-                    event.key.sequence.unwrap_or(0)
-                })
-                .unwrap_or_else(|position| position);
-            guarded_insert_without_charge(events, position, event)?;
+            guarded_push_without_charge(events, event)?;
             context.counters.records_seen = context.counters.records_seen.saturating_add(1);
         }
     }
     Ok(status)
+}
+
+fn index_regular_sequences(
+    events: &[EventRecord],
+    context: &RecoveryContext<'_>,
+) -> Result<HashMap<u64, ()>, ProviderError> {
+    let mut sequences = fallible_hash_map(events.len(), context)?;
+    for (index, event) in events.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        let sequence = event
+            .key
+            .sequence
+            .ok_or_else(|| allocation_error("Flight event has no sequence"))?;
+        if sequences.insert(sequence, ()).is_some() {
+            return Err(ProviderError::new(
+                "source.flight.sequence",
+                "flight.recovery",
+                Some(SourceCoordinate {
+                    offset: event.key.source_offset,
+                    record_ordinal: Some(event.key.record_ordinal),
+                }),
+                false,
+                "duplicate Flight global sequence",
+            ));
+        }
+    }
+    Ok(sequences)
 }
 
 fn evaluate_emergency_cell(
@@ -924,8 +981,8 @@ fn add_sequence_completeness(
         .last()
         .and_then(|event| event.key.sequence)
         .unwrap_or(0);
-    for hint in hints {
-        context.guard.consume(WorkDelta::default())?;
+    for (index, hint) in hints.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
         first = first.min(hint.first);
         last = last.max(hint.last);
     }
@@ -935,8 +992,8 @@ fn add_sequence_completeness(
 
     let mut retained_start = None;
     let mut retained_last = 0;
-    for event in events {
-        context.guard.consume(WorkDelta::default())?;
+    for (index, event) in events.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
         let sequence = event
             .key
             .sequence
@@ -985,8 +1042,10 @@ fn add_sequence_completeness(
         CompletenessCause::Lost
     };
     let mut cursor = Some(first);
-    for event in events {
-        context.guard.consume(WorkDelta::default())?;
+    let mut damage_index = 0_usize;
+    let mut damage_steps = 0_usize;
+    for (index, event) in events.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
         let sequence = event.key.sequence.unwrap_or(0);
         let Some(current) = cursor else {
             break;
@@ -999,6 +1058,8 @@ fn add_sequence_completeness(
                 current,
                 sequence - 1,
                 damage_ranges,
+                &mut damage_index,
+                &mut damage_steps,
                 missing_cause,
                 completeness,
                 context,
@@ -1012,6 +1073,8 @@ fn add_sequence_completeness(
                 current,
                 last,
                 damage_ranges,
+                &mut damage_index,
+                &mut damage_steps,
                 missing_cause,
                 completeness,
                 context,
@@ -1021,22 +1084,34 @@ fn add_sequence_completeness(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_missing_without_damage(
     first: u64,
     last: u64,
     damage_ranges: &[SequenceRange],
+    damage_index: &mut usize,
+    damage_steps: &mut usize,
     cause: CompletenessCause,
     completeness: &mut Vec<CompletenessRange>,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
     let mut cursor = Some(first);
-    for damage in damage_ranges {
-        context.guard.consume(WorkDelta::default())?;
+    while let Some(damage) = damage_ranges.get(*damage_index) {
         let Some(current) = cursor else {
             break;
         };
-        if damage.last < current || damage.first > last {
+        if damage.last < current {
+            guard_checkpoint(context.guard, *damage_steps)?;
+            *damage_steps = damage_steps
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("damage sweep work overflow"))?;
+            *damage_index = damage_index
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("damage sweep index overflow"))?;
             continue;
+        }
+        if damage.first > last {
+            break;
         }
         if damage.first > current {
             push_sequence_range(
@@ -1049,6 +1124,16 @@ fn add_missing_without_damage(
             )?;
         }
         cursor = damage.last.checked_add(1);
+        if damage.last > last {
+            break;
+        }
+        guard_checkpoint(context.guard, *damage_steps)?;
+        *damage_steps = damage_steps
+            .checked_add(1)
+            .ok_or_else(|| allocation_error("damage sweep work overflow"))?;
+        *damage_index = damage_index
+            .checked_add(1)
+            .ok_or_else(|| allocation_error("damage sweep index overflow"))?;
     }
     if let Some(current) = cursor {
         if current <= last {
@@ -1111,54 +1196,42 @@ fn mark_chunk_damage(
     }
 }
 
-fn update_lifecycle(
-    lifecycle: &mut Vec<LifecycleBalance>,
-    tid: u32,
-    kind: u16,
-    sequence: u64,
-    context: &RecoveryContext<'_>,
-) -> Result<(), ProviderError> {
+fn update_lifecycle(balance: &mut i64, first_begin: &mut Option<u64>, kind: u16, sequence: u64) {
     let delta = match kind {
         2 => 1,
         3 => -1,
-        _ => return Ok(()),
+        _ => return,
     };
-    if let Some(item) = lifecycle.iter_mut().find(|item| item.tid == tid) {
-        item.balance = item.balance.saturating_add(delta);
-        if delta > 0 && item.balance == delta {
-            item.first_begin = sequence;
-        }
-    } else {
-        guarded_push(
-            lifecycle,
-            LifecycleBalance {
-                tid,
-                balance: delta,
-                first_begin: sequence,
-            },
-            context,
-        )?;
+    *balance = balance.saturating_add(delta);
+    if delta > 0 && *balance == delta {
+        *first_begin = Some(sequence);
     }
-    Ok(())
 }
 
 fn merge_lifecycle(
-    target: &mut Vec<LifecycleBalance>,
-    source: &[LifecycleBalance],
-    context: &RecoveryContext<'_>,
-) -> Result<(), ProviderError> {
-    for incoming in source {
-        context.guard.consume(WorkDelta::default())?;
-        if let Some(item) = target.iter_mut().find(|item| item.tid == incoming.tid) {
-            if item.balance <= 0 && incoming.balance > 0 {
-                item.first_begin = incoming.first_begin;
+    target: &mut HashMap<u32, LifecycleBalance>,
+    tid: u32,
+    incoming_balance: i64,
+    incoming_first_begin: Option<u64>,
+) {
+    if incoming_balance == 0 && incoming_first_begin.is_none() {
+        return;
+    }
+    match target.entry(tid) {
+        std::collections::hash_map::Entry::Occupied(mut occupied) => {
+            let item = occupied.get_mut();
+            if item.balance <= 0 && incoming_balance > 0 {
+                item.first_begin = incoming_first_begin.unwrap_or(0);
             }
-            item.balance = item.balance.saturating_add(incoming.balance);
-        } else {
-            guarded_push(target, *incoming, context)?;
+            item.balance = item.balance.saturating_add(incoming_balance);
+        }
+        std::collections::hash_map::Entry::Vacant(vacant) => {
+            vacant.insert(LifecycleBalance {
+                balance: incoming_balance,
+                first_begin: incoming_first_begin.unwrap_or(0),
+            });
         }
     }
-    Ok(())
 }
 
 fn append_events(
@@ -1176,23 +1249,49 @@ fn append_events(
     Ok(())
 }
 
-fn reject_duplicate_sequences(
-    events: &[EventRecord],
+fn resolve_sequence_collisions(
+    events: Vec<EventRecord>,
+    emergency_start: u64,
+    emergency_end: u64,
+    completeness: &mut Vec<CompletenessRange>,
     context: &RecoveryContext<'_>,
-) -> Result<(), ProviderError> {
-    for pair in events.windows(2) {
-        context.guard.consume(WorkDelta::default())?;
-        let Some(first) = pair.first().and_then(|event| event.key.sequence) else {
-            continue;
+) -> Result<Vec<EventRecord>, ProviderError> {
+    let event_bytes = u64::try_from(events.len())
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<EventRecord>() as u64))
+        .ok_or_else(|| allocation_error("Flight collision output size overflow"))?;
+    context.guard.consume(WorkDelta {
+        resident_bytes: event_bytes,
+        ..WorkDelta::default()
+    })?;
+    let mut output = fallible_vec(events.len())?;
+    let mut sequence = None;
+    let mut regular = None;
+    let mut emergency = None;
+    for (index, event) in events.into_iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        let current = event
+            .key
+            .sequence
+            .ok_or_else(|| allocation_error("Flight event has no sequence"))?;
+        if sequence.is_some_and(|value| value != current) {
+            flush_sequence_group(&mut output, regular, emergency, completeness, context)?;
+            regular = None;
+            emergency = None;
+        }
+        sequence = Some(current);
+        let from_emergency =
+            event.key.source_offset >= emergency_start && event.key.source_offset < emergency_end;
+        let slot = if from_emergency {
+            &mut emergency
+        } else {
+            &mut regular
         };
-        let Some(second) = pair.last().and_then(|event| event.key.sequence) else {
-            continue;
-        };
-        if first == second {
+        if slot.is_some() {
             return Err(ProviderError::new(
                 "source.flight.sequence",
                 "flight.recovery",
-                pair.last().map(|event| SourceCoordinate {
+                Some(SourceCoordinate {
                     offset: event.key.source_offset,
                     record_ordinal: Some(event.key.record_ordinal),
                 }),
@@ -1200,30 +1299,56 @@ fn reject_duplicate_sequences(
                 "duplicate Flight global sequence",
             ));
         }
+        *slot = Some(event);
     }
-    Ok(())
+    flush_sequence_group(&mut output, regular, emergency, completeness, context)?;
+    Ok(output)
 }
 
-fn event_order(left: &EventRecord, right: &EventRecord) -> Ordering {
-    left.key
-        .sequence
-        .cmp(&right.key.sequence)
-        .then_with(|| left.key.source_offset.cmp(&right.key.source_offset))
-        .then_with(|| left.key.record_ordinal.cmp(&right.key.record_ordinal))
+fn flush_sequence_group(
+    output: &mut Vec<EventRecord>,
+    regular: Option<EventRecord>,
+    emergency: Option<EventRecord>,
+    completeness: &mut Vec<CompletenessRange>,
+    context: &RecoveryContext<'_>,
+) -> Result<(), ProviderError> {
+    match (regular, emergency) {
+        (Some(regular), Some(emergency)) => {
+            push_source_range(
+                completeness,
+                emergency.key.source_offset,
+                emergency
+                    .key
+                    .source_offset
+                    .saturating_add(FLIGHT_EMERGENCY_RECORD_BYTES as u64),
+                Provenance::Unknown,
+                CompletenessCause::Stale,
+                context,
+            )?;
+            guarded_push_without_charge(output, regular)
+        }
+        (Some(event), None) | (None, Some(event)) => guarded_push_without_charge(output, event),
+        (None, None) => Ok(()),
+    }
 }
 
 fn normalize_completeness(
     ranges: &mut Vec<CompletenessRange>,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
+    let sorted = guarded_radix_sort(std::mem::take(ranges), 19, completeness_byte, context)?;
+    *ranges = sorted;
+    let output_bytes = u64::try_from(ranges.len())
+        .ok()
+        .and_then(|count| count.checked_mul(size_of::<CompletenessRange>() as u64))
+        .ok_or_else(|| allocation_error("Flight completeness output size overflow"))?;
     context.guard.consume(WorkDelta {
-        resident_bytes: (ranges.len() as u64).saturating_mul(size_of::<CompletenessRange>() as u64),
+        resident_bytes: output_bytes,
         ..WorkDelta::default()
     })?;
-    ranges.sort_by_key(completeness_key);
     let mut output = fallible_vec(ranges.len())?;
-    for range in ranges.drain(..) {
-        context.guard.consume(WorkDelta::default())?;
+    for (index, range) in ranges.drain(..).enumerate() {
+        guard_checkpoint(context.guard, index)?;
         if let Some(previous) = output.last().copied() {
             if let Some(merged) = merge_range(previous, range) {
                 if let Some(last) = output.last_mut() {
@@ -1258,6 +1383,45 @@ fn completeness_key(range: &CompletenessRange) -> (u8, u8, u64, u64, u8) {
         last,
         provenance_order(range.provenance()),
     )
+}
+
+fn event_sequence_byte(event: &EventRecord, pass: usize) -> Result<u8, ProviderError> {
+    let sequence = event
+        .key
+        .sequence
+        .ok_or_else(|| allocation_error("Flight event has no sequence"))?;
+    byte_at(&sequence.to_le_bytes(), pass)
+}
+
+fn u32_byte(value: &u32, pass: usize) -> Result<u8, ProviderError> {
+    byte_at(&value.to_le_bytes(), pass)
+}
+
+fn sequence_range_byte(range: &SequenceRange, pass: usize) -> Result<u8, ProviderError> {
+    if pass < 8 {
+        byte_at(&range.last.to_le_bytes(), pass)
+    } else {
+        byte_at(&range.first.to_le_bytes(), pass - 8)
+    }
+}
+
+fn completeness_byte(range: &CompletenessRange, pass: usize) -> Result<u8, ProviderError> {
+    let (domain, cause, first, last, provenance) = completeness_key(range);
+    match pass {
+        0 => Ok(provenance),
+        1..=8 => byte_at(&last.to_le_bytes(), pass - 1),
+        9..=16 => byte_at(&first.to_le_bytes(), pass - 9),
+        17 => Ok(cause),
+        18 => Ok(domain),
+        _ => Err(allocation_error("invalid completeness radix pass")),
+    }
+}
+
+fn byte_at(bytes: &[u8], index: usize) -> Result<u8, ProviderError> {
+    bytes
+        .get(index)
+        .copied()
+        .ok_or_else(|| allocation_error("invalid radix byte index"))
 }
 
 fn cause_order(cause: CompletenessCause) -> u8 {
@@ -1391,21 +1555,6 @@ fn guarded_push_without_charge<T>(output: &mut Vec<T>, value: T) -> Result<(), P
     Ok(())
 }
 
-fn guarded_insert_without_charge<T>(
-    output: &mut Vec<T>,
-    index: usize,
-    value: T,
-) -> Result<(), ProviderError> {
-    if output.len() == output.capacity() {
-        let additional = output.capacity().max(4);
-        output
-            .try_reserve_exact(additional)
-            .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
-    }
-    output.insert(index, value);
-    Ok(())
-}
-
 fn fallible_vec<T>(capacity: usize) -> Result<Vec<T>, ProviderError> {
     let mut output = Vec::new();
     output
@@ -1414,25 +1563,145 @@ fn fallible_vec<T>(capacity: usize) -> Result<Vec<T>, ProviderError> {
     Ok(output)
 }
 
-fn insert_sorted<T: Ord>(
-    output: &mut Vec<T>,
-    value: T,
+fn fallible_none_vec<T>(
+    length: usize,
     context: &RecoveryContext<'_>,
-) -> Result<(), ProviderError> {
+) -> Result<Vec<Option<T>>, ProviderError> {
+    let mut output = fallible_vec(length)?;
+    for index in 0..length {
+        guard_checkpoint(context.guard, index)?;
+        output.push(None);
+    }
+    Ok(output)
+}
+
+fn fallible_hash_map<K, V>(
+    capacity: usize,
+    context: &RecoveryContext<'_>,
+) -> Result<HashMap<K, V>, ProviderError>
+where
+    K: Eq + std::hash::Hash,
+{
+    let entry_bytes = size_of::<K>()
+        .checked_add(size_of::<V>())
+        .and_then(|bytes| bytes.checked_mul(4))
+        .and_then(|bytes| bytes.checked_mul(capacity))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight hash index size overflow"))?;
     context.guard.consume(WorkDelta {
-        resident_bytes: (size_of::<T>() as u64).saturating_mul(4),
+        resident_bytes: entry_bytes,
         ..WorkDelta::default()
     })?;
-    let position = output
-        .binary_search(&value)
-        .unwrap_or_else(|position| position);
-    if output.len() == output.capacity() {
-        let additional = output.capacity().max(4);
-        output
-            .try_reserve_exact(additional)
-            .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
+    let mut output = HashMap::new();
+    output
+        .try_reserve(capacity)
+        .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
+    Ok(output)
+}
+
+fn guarded_radix_sort<T, F>(
+    values: Vec<T>,
+    passes: usize,
+    key_byte: F,
+    context: &RecoveryContext<'_>,
+) -> Result<Vec<T>, ProviderError>
+where
+    F: Fn(&T, usize) -> Result<u8, ProviderError>,
+{
+    if values.len() < 2 {
+        return Ok(values);
     }
-    output.insert(position, value);
+    let length = values.len();
+    let scratch_bytes_per_item = size_of::<Option<T>>()
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(size_of::<T>()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("radix scratch item size overflow"))?;
+    let item_bytes = u64::try_from(length)
+        .ok()
+        .and_then(|count| count.checked_mul(scratch_bytes_per_item))
+        .ok_or_else(|| allocation_error("radix scratch size overflow"))?;
+    context.guard.consume(WorkDelta {
+        resident_bytes: item_bytes,
+        ..WorkDelta::default()
+    })?;
+
+    let mut input = fallible_vec(length)?;
+    for (index, value) in values.into_iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        input.push(Some(value));
+    }
+    let mut scratch = fallible_none_vec(length, context)?;
+
+    for pass in 0..passes {
+        let mut counts = [0_usize; 256];
+        for (index, item) in input.iter().enumerate() {
+            guard_checkpoint(context.guard, index)?;
+            let value = item
+                .as_ref()
+                .ok_or_else(|| allocation_error("radix input slot is empty"))?;
+            let bucket = usize::from(key_byte(value, pass)?);
+            let count = counts
+                .get_mut(bucket)
+                .ok_or_else(|| allocation_error("radix count bucket is invalid"))?;
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("radix bucket count overflow"))?;
+        }
+
+        let mut positions = [0_usize; 256];
+        let mut cursor = 0_usize;
+        for (bucket, count) in counts.iter().copied().enumerate() {
+            let position = positions
+                .get_mut(bucket)
+                .ok_or_else(|| allocation_error("radix position bucket is invalid"))?;
+            *position = cursor;
+            cursor = cursor
+                .checked_add(count)
+                .ok_or_else(|| allocation_error("radix position overflow"))?;
+        }
+        if cursor != length {
+            return Err(allocation_error("radix item count mismatch"));
+        }
+
+        for (index, item) in input.iter_mut().enumerate() {
+            guard_checkpoint(context.guard, index)?;
+            let value = item
+                .take()
+                .ok_or_else(|| allocation_error("radix input slot is empty"))?;
+            let bucket = usize::from(key_byte(&value, pass)?);
+            let position = positions
+                .get_mut(bucket)
+                .ok_or_else(|| allocation_error("radix position bucket is invalid"))?;
+            let destination = *position;
+            *position = position
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("radix destination overflow"))?;
+            let slot = scratch
+                .get_mut(destination)
+                .ok_or_else(|| allocation_error("radix destination is invalid"))?;
+            if slot.is_some() {
+                return Err(allocation_error("radix destination is occupied"));
+            }
+            *slot = Some(value);
+        }
+        std::mem::swap(&mut input, &mut scratch);
+    }
+
+    let mut output = fallible_vec(length)?;
+    for (index, item) in input.into_iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        output.push(item.ok_or_else(|| allocation_error("radix output slot is empty"))?);
+    }
+    Ok(output)
+}
+
+fn guard_checkpoint(guard: &dyn WorkGuard, index: usize) -> Result<(), ProviderError> {
+    let interval = usize::try_from(MAX_UNGUARDED_RECORDS)
+        .map_err(|_| allocation_error("Flight checkpoint interval does not fit host"))?;
+    if index % interval == 0 {
+        guard.consume(WorkDelta::default())?;
+    }
     Ok(())
 }
 

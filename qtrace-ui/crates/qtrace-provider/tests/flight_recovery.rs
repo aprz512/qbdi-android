@@ -2,7 +2,7 @@ use std::{
     fs,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -75,6 +75,33 @@ impl WorkGuard for RejectEvents {
         } else {
             Ok(())
         }
+    }
+}
+
+struct EventBudgetGuard {
+    remaining: Mutex<u64>,
+}
+
+impl EventBudgetGuard {
+    fn new(events: u64) -> Self {
+        Self {
+            remaining: Mutex::new(events),
+        }
+    }
+}
+
+impl WorkGuard for EventBudgetGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        let mut remaining = self.remaining.lock().expect("event budget lock");
+        if delta.events > *remaining {
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::Events,
+                *remaining,
+                delta.events,
+            ));
+        }
+        *remaining -= delta.events;
+        Ok(())
     }
 }
 
@@ -155,6 +182,173 @@ impl ReadAtSource for ChangingLenSource {
 
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), ProviderError> {
         self.bytes.read_exact_at(offset, output)
+    }
+}
+
+#[derive(Debug)]
+struct PhaseSource {
+    bytes: Arc<[u8]>,
+    phase: Arc<AtomicBool>,
+    len_calls: AtomicUsize,
+    activate_on_len_call: Option<usize>,
+    activate_on_read_offset: Option<u64>,
+}
+
+impl PhaseSource {
+    fn new(
+        bytes: Vec<u8>,
+        phase: Arc<AtomicBool>,
+        activate_on_len_call: Option<usize>,
+        activate_on_read_offset: Option<u64>,
+    ) -> Self {
+        Self {
+            bytes: bytes.into(),
+            phase,
+            len_calls: AtomicUsize::new(0),
+            activate_on_len_call,
+            activate_on_read_offset,
+        }
+    }
+
+    fn len_calls(&self) -> usize {
+        self.len_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl ReadAtSource for PhaseSource {
+    fn len(&self) -> u64 {
+        let call = self.len_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.activate_on_len_call == Some(call) {
+            self.phase.store(true, Ordering::SeqCst);
+        }
+        self.bytes.len() as u64
+    }
+
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), ProviderError> {
+        let start = usize::try_from(offset).ok();
+        let end = offset
+            .checked_add(output.len() as u64)
+            .and_then(|value| usize::try_from(value).ok());
+        let input = start
+            .zip(end)
+            .and_then(|(start, end)| self.bytes.get(start..end))
+            .ok_or_else(|| {
+                ProviderError::new(
+                    "source.short_read",
+                    "test.phase_source",
+                    None,
+                    false,
+                    "phase source short read",
+                )
+            })?;
+        output.copy_from_slice(input);
+        if self.activate_on_read_offset == Some(offset) {
+            self.phase.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+struct PhaseGuard {
+    phase: Arc<AtomicBool>,
+    calls: AtomicUsize,
+    reject_at: Option<usize>,
+}
+
+impl PhaseGuard {
+    fn new(phase: Arc<AtomicBool>, reject_at: Option<usize>) -> Self {
+        Self {
+            phase,
+            calls: AtomicUsize::new(0),
+            reject_at,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl WorkGuard for PhaseGuard {
+    fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+        if !self.phase.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.reject_at.is_some_and(|rejected| call >= rejected) {
+            Err(OperationAbort::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct ScratchCancelGuard {
+    phase: Arc<AtomicBool>,
+    armed: AtomicBool,
+    minimum_scratch_bytes: u64,
+}
+
+struct DelayedScratchCancelGuard {
+    phase: Arc<AtomicBool>,
+    armed: AtomicBool,
+    allowed_checkpoints: AtomicUsize,
+    minimum_scratch_bytes: u64,
+}
+
+impl DelayedScratchCancelGuard {
+    fn new(phase: Arc<AtomicBool>, minimum_scratch_bytes: u64, allowed_checkpoints: usize) -> Self {
+        Self {
+            phase,
+            armed: AtomicBool::new(false),
+            allowed_checkpoints: AtomicUsize::new(allowed_checkpoints),
+            minimum_scratch_bytes,
+        }
+    }
+}
+
+impl WorkGuard for DelayedScratchCancelGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if !self.phase.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if !self.armed.load(Ordering::SeqCst) {
+            if delta.resident_bytes >= self.minimum_scratch_bytes {
+                self.armed.store(true, Ordering::SeqCst);
+            }
+            return Ok(());
+        }
+        self.allowed_checkpoints
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .map(|_| ())
+            .map_err(|_| OperationAbort::Cancelled)
+    }
+}
+
+impl ScratchCancelGuard {
+    fn new(phase: Arc<AtomicBool>, minimum_scratch_bytes: u64) -> Self {
+        Self {
+            phase,
+            armed: AtomicBool::new(false),
+            minimum_scratch_bytes,
+        }
+    }
+}
+
+impl WorkGuard for ScratchCancelGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if !self.phase.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if self.armed.load(Ordering::SeqCst) {
+            return Err(OperationAbort::Cancelled);
+        }
+        if delta.resident_bytes >= self.minimum_scratch_bytes {
+            self.armed.store(true, Ordering::SeqCst);
+        }
+        Ok(())
     }
 }
 
@@ -420,6 +614,70 @@ fn artifact(
         output[start..start + CHUNK_BYTES].copy_from_slice(encoded);
     }
     output
+}
+
+fn many_thread_artifact(thread_count: u32, records_per_thread: u64) -> Vec<u8> {
+    let capacity = usize::try_from(thread_count).expect("thread count");
+    let mut directories = Vec::with_capacity(capacity);
+    let mut chunks = Vec::with_capacity(capacity);
+    let mut sequence = 1_u64;
+    for index in 0..thread_count {
+        let tid = index + 1;
+        let first = sequence;
+        let mut records =
+            Vec::with_capacity(usize::try_from(records_per_thread).expect("records per thread"));
+        for _ in 0..records_per_thread {
+            records.push(record(1, sequence, b"", 0, 1, true));
+            sequence = sequence.checked_add(1).expect("test sequence");
+        }
+        directories.push(directory(tid, first, sequence - 1, index, 1, 1));
+        chunks.push(chunk(index, tid, 1, &records, 2, b""));
+    }
+    artifact(&directories, &chunks, &[], 0)
+}
+
+fn many_damage_ranges_artifact(damage_count: u32, retained_count: u32) -> Vec<u8> {
+    let total_chunks = damage_count
+        .checked_add(retained_count)
+        .expect("chunk count");
+    let mut chunks = Vec::with_capacity(usize::try_from(total_chunks).expect("chunk capacity"));
+    for index in 0..retained_count {
+        let sequence = u64::from(index)
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .expect("retained sequence");
+        chunks.push(chunk(
+            index,
+            7,
+            1,
+            &[record(1, sequence, b"", 0, 1, true)],
+            2,
+            b"",
+        ));
+    }
+    for index in 0..damage_count {
+        let damage_slot = index % retained_count.saturating_sub(1);
+        let sequence = u64::from(damage_slot)
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(2))
+            .expect("damage sequence");
+        let chunk_index = retained_count.checked_add(index).expect("chunk index");
+        let mut damaged = chunk(
+            chunk_index,
+            7,
+            1,
+            &[record(1, sequence, b"", 0, 1, true)],
+            2,
+            b"",
+        );
+        damaged[48] ^= 1;
+        chunks.push(damaged);
+    }
+    let last_retained = u64::from(retained_count)
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(1))
+        .expect("last retained sequence");
+    artifact(&[directory(7, 1, last_retained, 0, 1, 1)], &chunks, &[], 0)
 }
 
 fn chunk_offset(bytes: &[u8]) -> usize {
@@ -1007,6 +1265,42 @@ fn emergency_evidence_never_replaces_a_committed_record_with_the_same_sequence()
 }
 
 #[test]
+fn stale_emergency_tid_does_not_create_an_empty_projection() {
+    let generation = 1;
+    let regular = record(2, 5, b"committed", 0, generation, true);
+    let emergency = emergency_cell(14, 99, 5, 0x9999, 0, 0, 2, true);
+    let provider = FlightProvider::open(
+        Arc::new(ByteSource::new(artifact(
+            &[directory(7, 5, 5, 0, generation, 1)],
+            &[chunk(0, 7, generation, &[regular], 2, b"")],
+            &[emergency_slot(
+                emergency,
+                [0; FLIGHT_EMERGENCY_RECORD_BYTES],
+            )],
+            0,
+        ))),
+        identity(0),
+        &EventBudgetGuard::new(1),
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider
+            .projections()
+            .iter()
+            .map(|projection| projection.tid)
+            .collect::<Vec<_>>(),
+        vec![7]
+    );
+    let mut cursor = Box::new(provider).into_cursor().unwrap();
+    assert!(cursor.next_event(&AllowAll).unwrap().is_some());
+    assert!(cursor.next_event(&AllowAll).unwrap().is_none());
+    let summary = cursor.finish().unwrap();
+    assert_eq!(summary.counters.records_seen, 1);
+    assert_eq!(summary.counters.events_emitted, 1);
+}
+
+#[test]
 fn coverage_gap_and_unterminated_thread_are_explicit_completeness() {
     let begin = record(2, 1, b"", 0, 1, true);
     let gap = emergency_cell(15, 7, 4, 0x7100_9000, 0, 2, 2, true);
@@ -1062,6 +1356,134 @@ fn coverage_gap_and_unterminated_thread_are_explicit_completeness() {
     assert_eq!(
         sequence_ranges(&regular.summary, CompletenessCause::Lost),
         vec![(2, 3)]
+    );
+}
+
+#[test]
+fn duplicate_emergency_sequences_in_distinct_slots_fail_closed() {
+    let first = emergency_cell(14, 7, 5, 0x1000, 0, 0, 2, true);
+    let second = emergency_cell(11, 7, 5, 0x1004, 0, 0, 2, true);
+    let parsed = collect_bytes(artifact(
+        &[directory(7, 0, 0, 0, 1, 1)],
+        &[chunk(0, 7, 1, &[], 1, b"")],
+        &[
+            emergency_slot(first, [0; FLIGHT_EMERGENCY_RECORD_BYTES]),
+            emergency_slot(second, [0; FLIGHT_EMERGENCY_RECORD_BYTES]),
+        ],
+        0,
+    ));
+
+    let error = parsed.expect_err("distinct emergency slots reused a global sequence");
+    assert_eq!(error.code(), "source.flight.sequence");
+}
+
+#[test]
+fn high_cardinality_projection_and_merge_work_stays_checkpoint_bounded() {
+    let thread_count = 128_u32;
+    let records_per_thread = 64_u64;
+    let expected_events =
+        usize::try_from(u64::from(thread_count) * records_per_thread).expect("event count");
+    let phase = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(PhaseSource::new(
+        many_thread_artifact(thread_count, records_per_thread),
+        phase.clone(),
+        Some(2),
+        None,
+    ));
+    let guard = PhaseGuard::new(phase, None);
+
+    let provider = FlightProvider::open(source, identity(0), &guard).unwrap();
+
+    assert_eq!(provider.projections().len(), thread_count as usize);
+    assert_eq!(
+        provider
+            .projections()
+            .iter()
+            .map(|projection| projection.event_keys.len())
+            .sum::<usize>(),
+        expected_events
+    );
+    assert!(
+        guard.calls() <= 128,
+        "post-validation work used {} guard operations for {expected_events} events",
+        guard.calls()
+    );
+}
+
+#[test]
+fn global_merge_can_cancel_before_the_final_source_identity_recheck() {
+    let bytes = many_thread_artifact(128, 64);
+    let emergency_offset = get_u64(&bytes, 56);
+    let emergency_count = u32::from_le_bytes(bytes[68..72].try_into().expect("emergency count"));
+    let final_slot_offset = emergency_offset
+        .checked_add(u64::from(emergency_count - 1) * FLIGHT_EMERGENCY_SLOT_BYTES as u64)
+        .expect("final emergency slot");
+    let phase = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(PhaseSource::new(
+        bytes,
+        phase.clone(),
+        None,
+        Some(final_slot_offset),
+    ));
+    let guard = ScratchCancelGuard::new(phase, 100_000);
+
+    let error = FlightProvider::open(source.clone(), identity(0), &guard)
+        .expect_err("merge ignored cancellation");
+
+    assert_eq!(error.code(), "control.cancelled");
+    assert_eq!(
+        source.len_calls(),
+        1,
+        "merge reached the final identity recheck before observing cancellation"
+    );
+}
+
+#[test]
+fn radix_scratch_initialization_is_cancellable_after_input_staging() {
+    let bytes = many_thread_artifact(128, 64);
+    let emergency_offset = get_u64(&bytes, 56);
+    let emergency_count = u32::from_le_bytes(bytes[68..72].try_into().expect("emergency count"));
+    let final_slot_offset = emergency_offset
+        .checked_add(u64::from(emergency_count - 1) * FLIGHT_EMERGENCY_SLOT_BYTES as u64)
+        .expect("final emergency slot");
+    let phase = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(PhaseSource::new(
+        bytes,
+        phase.clone(),
+        None,
+        Some(final_slot_offset),
+    ));
+    let guard = DelayedScratchCancelGuard::new(phase, 1_000_000, 2);
+
+    let error = FlightProvider::open(source.clone(), identity(0), &guard)
+        .expect_err("radix scratch initialization ignored cancellation");
+
+    assert_eq!(error.code(), "control.cancelled");
+    assert_eq!(source.len_calls(), 1);
+}
+
+#[test]
+fn damage_subtraction_work_is_linear_in_ranges_and_events() {
+    let retained_count = 512_u32;
+    let phase = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(PhaseSource::new(
+        many_damage_ranges_artifact(4_097, retained_count),
+        phase.clone(),
+        Some(2),
+        None,
+    ));
+    let guard = PhaseGuard::new(phase, None);
+
+    let provider = FlightProvider::open(source, identity(0), &guard).unwrap();
+
+    assert_eq!(
+        provider.projections()[0].event_keys.len(),
+        usize::try_from(retained_count).expect("retained count")
+    );
+    assert!(
+        guard.calls() <= 800,
+        "damage subtraction used {} post-validation guard operations",
+        guard.calls()
     );
 }
 

@@ -1,12 +1,12 @@
 mod recovery;
 mod wire;
 
-use std::{fmt, mem::size_of, sync::Arc, vec};
+use std::{collections::HashMap, fmt, mem::size_of, sync::Arc, vec};
 
 use crate::{
-    EventCursor, EventKey, EventRecord, ProviderCapabilities, ProviderError, ProviderSummary,
-    ReadAtSource, SourceIdentity, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta,
-    WorkGuard,
+    EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS, ProviderCapabilities, ProviderError,
+    ProviderSummary, ReadAtSource, SourceIdentity, TimelineDescriptor, TimelineId, TraceProvider,
+    WorkDelta, WorkGuard,
 };
 
 pub use wire::{
@@ -62,6 +62,9 @@ impl FlightProvider {
                 .saturating_add(
                     projection_count.saturating_mul(size_of::<FlightProjectionDescriptor>() as u64),
                 )
+                .saturating_add(projection_count.saturating_mul(
+                    ((size_of::<u32>() + size_of::<usize>()) as u64).saturating_mul(4),
+                ))
                 .saturating_add(18),
             ..WorkDelta::default()
         })?;
@@ -77,7 +80,9 @@ impl FlightProvider {
             label: Some(fallible_string("Flight")?),
         });
         let mut projections = fallible_vec(recovered.tids.len())?;
+        let mut projection_by_tid = fallible_hash_map(recovered.tids.len())?;
         for (index, tid) in recovered.tids.iter().copied().enumerate() {
+            guard_checkpoint(guard, index)?;
             let timeline = TimelineDescriptor {
                 id: TimelineId(
                     u64::try_from(index)
@@ -94,25 +99,28 @@ impl FlightProvider {
                 timeline,
                 event_keys: Vec::new(),
             });
+            if projection_by_tid.insert(tid, index).is_some() {
+                return Err(resource_error("duplicate Flight projection TID"));
+            }
         }
-        for event in &recovered.events {
-            guard.consume(WorkDelta::default())?;
+        for (event_index, event) in recovered.events.iter().enumerate() {
+            guard_checkpoint(guard, event_index)?;
             let tid = event
                 .key
                 .tid
                 .ok_or_else(|| resource_error("Flight event has no projection TID"))?;
-            let index = recovered
-                .tids
-                .binary_search(&tid)
-                .map_err(|_| resource_error("Flight event projection TID is missing"))?;
+            let index = projection_by_tid
+                .get(&tid)
+                .copied()
+                .ok_or_else(|| resource_error("Flight event projection TID is missing"))?;
             let projection = projections
                 .get_mut(index)
                 .ok_or_else(|| resource_error("Flight projection index is invalid"))?;
             fallible_push(&mut projection.event_keys, event.key.clone())?;
         }
         let mut summary_timelines = fallible_vec(timelines.len())?;
-        for timeline in &timelines {
-            guard.consume(WorkDelta::default())?;
+        for (index, timeline) in timelines.iter().enumerate() {
+            guard_checkpoint(guard, index)?;
             summary_timelines.push(TimelineDescriptor {
                 id: timeline.id,
                 tid: timeline.tid,
@@ -222,6 +230,17 @@ fn fallible_vec<T>(capacity: usize) -> Result<Vec<T>, ProviderError> {
     Ok(output)
 }
 
+fn fallible_hash_map<K, V>(capacity: usize) -> Result<HashMap<K, V>, ProviderError>
+where
+    K: Eq + std::hash::Hash,
+{
+    let mut output = HashMap::new();
+    output
+        .try_reserve(capacity)
+        .map_err(|_| resource_error("Flight provider allocation failed"))?;
+    Ok(output)
+}
+
 fn fallible_push<T>(output: &mut Vec<T>, value: T) -> Result<(), ProviderError> {
     if output.len() == output.capacity() {
         output
@@ -243,4 +262,13 @@ fn fallible_string(value: &str) -> Result<String, ProviderError> {
 
 fn resource_error(detail: &'static str) -> ProviderError {
     ProviderError::new("source.flight.resource", "flight.open", None, false, detail)
+}
+
+fn guard_checkpoint(guard: &dyn WorkGuard, index: usize) -> Result<(), ProviderError> {
+    let interval = usize::try_from(MAX_UNGUARDED_RECORDS)
+        .map_err(|_| resource_error("Flight checkpoint interval does not fit host"))?;
+    if index % interval == 0 {
+        guard.consume(WorkDelta::default())?;
+    }
+    Ok(())
 }
