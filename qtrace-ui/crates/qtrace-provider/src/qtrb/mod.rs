@@ -1,5 +1,14 @@
 mod cursor;
+pub(crate) mod events;
+mod input;
 mod wire;
+
+pub use events::{
+    BeginMetadata, CaptureBytes, Instruction, InstructionDefinition, Memory, MemoryAddressMode,
+    MemoryDirection, MemoryOperand, PcRelativeKind, RegisterDefinition, RegisterExtend,
+    RegisterObservation, TerminalMetrics, Termination, TerminationKind, TraceProfile,
+};
+pub use input::QtrbInput;
 
 use std::{collections::HashMap, fmt, mem::size_of, sync::Arc};
 
@@ -7,11 +16,10 @@ use cursor::PayloadCursor;
 use wire::{RecordType, *};
 
 use crate::{
-    BeginMetadata, CompletenessCause, CompletenessRange, EventCursor, EventKey, EventPayload,
-    EventRecord, Instruction, InstructionDefinition, Memory, MemoryDirection, ModuleDefinition,
-    OpaqueOptionalRecord, Provenance, ProviderCapabilities, ProviderCounters, ProviderError,
-    ProviderSummary, ReadAtSource, SemanticEvent, SourceCoordinate, SourceIdentity, Termination,
-    TerminationKind, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
+    CompletenessCause, CompletenessRange, EventCursor, EventKey, EventPayload, EventRecord,
+    ModuleDefinition, OpaqueOptionalRecord, Provenance, ProviderCapabilities, ProviderCounters,
+    ProviderError, ProviderSummary, ReadAtSource, SemanticEvent, SourceCoordinate, SourceIdentity,
+    TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
 };
 
 const TIMELINE_ID: TimelineId = TimelineId(0);
@@ -185,6 +193,7 @@ struct ModuleWire {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RegisterWire {
+    slot: u8,
     width: u8,
     name: String,
 }
@@ -234,8 +243,8 @@ struct PendingFragment {
     total_detail_bytes: u32,
     chunk_count: u16,
     next_index: u16,
-    category: Option<String>,
-    name: String,
+    category: Option<Vec<u8>>,
+    name: Vec<u8>,
     detail: Vec<u8>,
     first_offset: u64,
     first_ordinal: u64,
@@ -275,9 +284,14 @@ fn record_resident_upper_bound(
                 + 2 * MAX_GPR_COUNT * MAX_REGISTER_NAME_BYTES;
             let register_capacity = 2 * MAX_GPR_COUNT * size_of::<RegisterWire>();
             let memory_capacity = MAX_MEMORY_OPERAND_COUNT * size_of::<MemoryOperandWire>();
-            (string_bytes + register_capacity + memory_capacity) as u64
+            (2 * (string_bytes + register_capacity + memory_capacity)) as u64
                 + hash_map_entry_resident_upper_bound::<(u32, InstructionDefinitionWire)>()
         }
+        (Some(RecordType::Instruction), 0) => {
+            (2 * MAX_GPR_COUNT * (size_of::<RegisterObservation>() + MAX_REGISTER_NAME_BYTES))
+                as u64
+        }
+        (Some(RecordType::Memory), 0) => (2 * MAX_CAPTURED_MEMORY_BYTES) as u64,
         (Some(RecordType::Call), 0) => {
             (MAX_CALL_CATEGORY_BYTES + MAX_CALL_NAME_BYTES + MAX_EVENT_DETAIL_BYTES) as u64
         }
@@ -290,6 +304,7 @@ fn record_resident_upper_bound(
         (Some(RecordType::Rule | RecordType::Error), CHUNK_FLAG) => {
             (MAX_EVENT_NAME_BYTES + MAX_EVENT_CHUNK_DETAIL_BYTES) as u64
         }
+        (Some(RecordType::TraceStop), 0) => "duration_elapsed".len() as u64,
         _ => 0,
     };
     u64::from(payload_bytes).saturating_add(decoded)
@@ -661,17 +676,17 @@ impl QtrbEventCursor {
         }
         let coordinate = coordinate(&record);
         let mut cursor = PayloadCursor::new(&record.payload, "TRACE_BEGIN", coordinate);
-        let _module_base = cursor.u64_le()?;
-        let _target_offset = cursor.u64_le()?;
-        let _target_address = cursor.u64_le()?;
+        let module_base = cursor.u64_le()?;
+        let target_offset = cursor.u64_le()?;
+        let target_address = cursor.u64_le()?;
         let pid = cursor.u32_le()?;
         let tid = cursor.u32_le()?;
         let profile = cursor.u8()?;
         let compression = cursor.u8()?;
         let effective_buffer_bytes = cursor.u64_le()?;
         let run_id = cursor.u64_le()?;
-        let _scene = cursor.bounded_utf8(MAX_CONTEXT_STRING_BYTES, "scene")?;
-        let _target = cursor.bounded_utf8(MAX_CONTEXT_STRING_BYTES, "target")?;
+        let scene = cursor.bounded_utf8(MAX_CONTEXT_STRING_BYTES, "scene")?;
+        let target = cursor.bounded_utf8(MAX_CONTEXT_STRING_BYTES, "target")?;
         cursor.finish()?;
         if profile != self.header.profile || !matches!(compression, 0 | 1) {
             return Err(self.record_error(
@@ -688,9 +703,21 @@ impl QtrbEventCursor {
             &record,
             None,
             EventPayload::Begin(BeginMetadata {
-                run_id,
+                module_base,
+                target_offset,
+                target_address,
                 pid,
                 tid: Some(tid),
+                profile: match profile {
+                    0 => TraceProfile::Fast,
+                    1 => TraceProfile::Balanced,
+                    _ => TraceProfile::Full,
+                },
+                compression_enabled: compression == 1,
+                effective_buffer_bytes,
+                run_id,
+                scene,
+                target,
             }),
         ))
     }
@@ -837,16 +864,14 @@ impl QtrbEventCursor {
                 ));
             }
             None => {
-                self.definitions.insert(metadata_id, definition);
+                self.definitions.insert(metadata_id, definition.clone());
             }
             Some(_) => {}
         }
         Ok(self.event(
             &record,
             None,
-            EventPayload::InstructionDefinition(InstructionDefinition {
-                definition_id: metadata_id,
-            }),
+            EventPayload::InstructionDefinition(typed_definition(metadata_id, &definition)),
         ))
     }
 
@@ -875,8 +900,23 @@ impl QtrbEventCursor {
                 "instruction register counts do not match its definition",
             ));
         }
-        for _ in 0..read_count + write_count {
-            let _value = cursor.u64_le()?;
+        let mut read_before = Vec::with_capacity(read_count);
+        for register in &definition.reads {
+            read_before.push(RegisterObservation {
+                slot: register.slot,
+                captured_width: register.width,
+                name: register.name.clone(),
+                value: cursor.u64_le()?,
+            });
+        }
+        let mut write_after = Vec::with_capacity(write_count);
+        for register in &definition.writes {
+            write_after.push(RegisterObservation {
+                slot: register.slot,
+                captured_width: register.width,
+                name: register.name.clone(),
+                value: cursor.u64_le()?,
+            });
         }
         cursor.finish()?;
         if sequence != self.next_sequence {
@@ -910,6 +950,8 @@ impl QtrbEventCursor {
                 definition_id: metadata_id,
                 module_id,
                 relative_pc,
+                read_before,
+                write_after,
             }),
         ))
     }
@@ -917,7 +959,7 @@ impl QtrbEventCursor {
     fn decode_memory(&self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
         let mut cursor = PayloadCursor::new(&record.payload, "MEMORY", coordinate(&record));
         let module_id = cursor.u32_le()?;
-        let _relative_pc = cursor.u64_le()?;
+        let relative_pc = cursor.u64_le()?;
         let direction = match cursor.u8()? {
             1 => MemoryDirection::Read,
             2 => MemoryDirection::Write,
@@ -932,10 +974,10 @@ impl QtrbEventCursor {
             }
         };
         let metadata_available = cursor.u8()?;
-        let _flags = cursor.u16_le()?;
+        let flags = cursor.u16_le()?;
         let address = cursor.u64_le()?;
         let size = cursor.u32_le()?;
-        let _value = cursor.u64_le()?;
+        let value = cursor.u64_le()?;
         if !self.modules.contains_key(&module_id) {
             return Err(self.record_error(
                 &record,
@@ -952,16 +994,23 @@ impl QtrbEventCursor {
                 "invalid memory metadata availability",
             ));
         }
-        decode_memory_state(&mut cursor, "before memory")?;
-        decode_memory_state(&mut cursor, "after memory")?;
+        let before = decode_memory_state(&mut cursor, "before memory")?;
+        let after = decode_memory_state(&mut cursor, "after memory")?;
         cursor.finish()?;
         Ok(self.event(
             &record,
             None,
             EventPayload::Memory(Memory {
+                module_id,
+                relative_pc,
                 address,
                 size,
                 direction,
+                metadata_available: metadata_available == 1,
+                flags,
+                value,
+                before,
+                after,
             }),
         ))
     }
@@ -1016,7 +1065,12 @@ impl QtrbEventCursor {
         let chunk_index = cursor.u16_le()?;
         let chunk_count = cursor.u16_le()?;
         let category = if kind == FragmentKind::Call {
-            Some(cursor.bounded_utf8(MAX_CALL_CATEGORY_BYTES, "CALL category")?)
+            Some(decode_bounded_raw(
+                &mut cursor,
+                MAX_CALL_CATEGORY_BYTES,
+                "CALL category",
+                coordinate(&record),
+            )?)
         } else {
             None
         };
@@ -1025,7 +1079,7 @@ impl QtrbEventCursor {
         } else {
             MAX_EVENT_NAME_BYTES
         };
-        let name = cursor.bounded_utf8(name_limit, "event name")?;
+        let name = decode_bounded_raw(&mut cursor, name_limit, "event name", coordinate(&record))?;
         let fragment_maximum = if kind == FragmentKind::Call {
             MAX_CALL_CHUNK_DETAIL_BYTES
         } else {
@@ -1074,7 +1128,7 @@ impl QtrbEventCursor {
                     resident_bytes: pending_fragment_resident_upper_bound(
                         total_detail_bytes,
                         chunk_count,
-                        category.as_ref().map_or(0, String::len),
+                        category.as_ref().map_or(0, Vec::len),
                         name.len(),
                     ),
                     ..WorkDelta::default()
@@ -1141,6 +1195,27 @@ impl QtrbEventCursor {
                 "fragment group does not match declared length or count",
             ));
         }
+        let category = pending
+            .category
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| {
+                    self.record_error(
+                        &record,
+                        "source.invalid_utf8",
+                        "qtrb.fragment",
+                        "logical CALL category is not valid UTF-8",
+                    )
+                })
+            })
+            .transpose()?;
+        let name = String::from_utf8(pending.name).map_err(|_| {
+            self.record_error(
+                &record,
+                "source.invalid_utf8",
+                "qtrb.fragment",
+                "logical event name is not valid UTF-8",
+            )
+        })?;
         let detail = String::from_utf8(pending.detail).map_err(|_| {
             self.record_error(
                 &record,
@@ -1157,7 +1232,7 @@ impl QtrbEventCursor {
             offset: pending.first_offset,
             ordinal: pending.first_ordinal,
         };
-        let event = self.semantic_event(&first, kind, pending.category, pending.name, detail);
+        let event = self.semantic_event(&first, kind, category, name, detail);
         let event = EventRecord::with_fragment_source_offsets(
             event.key,
             event.provenance,
@@ -1202,14 +1277,21 @@ impl QtrbEventCursor {
         }
         let mut cursor = PayloadCursor::new(&record.payload, "TRACE_END", coordinate(&record));
         let success = cursor.u8()?;
-        let _return_value = cursor.u64_le()?;
-        let _elapsed_ms = cursor.u64_le()?;
+        let return_value = cursor.u64_le()?;
+        let elapsed_ms = cursor.u64_le()?;
         let metrics = decode_metrics(&mut cursor)?;
         cursor.finish()?;
         if success != 1 {
             return Err(self.invalid_terminal(&record, "TRACE_END is not successful"));
         }
-        self.accept_terminal(&record, &metrics, TerminationKind::Completed)
+        self.accept_terminal(
+            &record,
+            &metrics,
+            TerminationKind::Completed,
+            None,
+            Some(return_value),
+            elapsed_ms,
+        )
     }
 
     fn decode_trace_stop(&mut self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
@@ -1227,7 +1309,7 @@ impl QtrbEventCursor {
         let mut cursor = PayloadCursor::new(&record.payload, "TRACE_STOP", coordinate(&record));
         let reason = cursor.u8()?;
         let reserved = cursor.take(7)?;
-        let _elapsed_ms = cursor.u64_le()?;
+        let elapsed_ms = cursor.u64_le()?;
         let metrics = decode_metrics(&mut cursor)?;
         cursor.finish()?;
         if reason != 1 || reserved != [0; 7] {
@@ -1235,7 +1317,14 @@ impl QtrbEventCursor {
                 self.invalid_terminal(&record, "invalid TRACE_STOP reason or reserved bytes")
             );
         }
-        self.accept_terminal(&record, &metrics, TerminationKind::Stopped)
+        self.accept_terminal(
+            &record,
+            &metrics,
+            TerminationKind::Stopped,
+            Some("duration_elapsed".to_owned()),
+            None,
+            elapsed_ms,
+        )
     }
 
     fn accept_terminal(
@@ -1243,6 +1332,9 @@ impl QtrbEventCursor {
         record: &PhysicalRecord,
         metrics: &[u64; 10],
         kind: TerminationKind,
+        reason: Option<String>,
+        return_value: Option<u64>,
+        elapsed_ms: u64,
     ) -> Result<EventRecord, ProviderError> {
         if self.offset != self.source.len() {
             return Err(self.record_error(
@@ -1263,7 +1355,24 @@ impl QtrbEventCursor {
                 "terminal instruction, encoded-byte, or buffer metric does not match the stream",
             ));
         }
-        let termination = Termination { kind };
+        let termination = Termination {
+            kind,
+            reason,
+            return_value,
+            elapsed_ms,
+            metrics: TerminalMetrics {
+                instructions: metrics[0],
+                encoded_bytes: metrics[1],
+                compressed_bytes: metrics[2],
+                cache_hits: metrics[3],
+                cache_misses: metrics[4],
+                cache_collisions: metrics[5],
+                buffer_swaps: metrics[6],
+                producer_waits: metrics[7],
+                producer_wait_ns: metrics[8],
+                effective_buffer_bytes: metrics[9],
+            },
+        };
         self.termination = Some(termination.clone());
         self.terminal_seen = true;
         Ok(self.event(record, None, EventPayload::Termination(termination)))
@@ -1337,7 +1446,10 @@ fn decode_registers(
 ) -> Result<Vec<RegisterWire>, ProviderError> {
     let count = mask.count_ones() as usize;
     let mut registers = Vec::with_capacity(count);
-    for _ in 0..count {
+    for slot in 0..MAX_GPR_COUNT {
+        if mask & (1_u64 << slot) == 0 {
+            continue;
+        }
         let width = cursor.u8()?;
         let name = cursor.bounded_utf8(MAX_REGISTER_NAME_BYTES, field)?;
         if width == 0 || width > 16 || name.is_empty() {
@@ -1349,9 +1461,80 @@ fn decode_registers(
                 format!("invalid {field} definition"),
             ));
         }
-        registers.push(RegisterWire { width, name });
+        registers.push(RegisterWire {
+            slot: slot as u8,
+            width,
+            name,
+        });
     }
     Ok(registers)
+}
+
+fn typed_definition(
+    definition_id: u32,
+    definition: &InstructionDefinitionWire,
+) -> InstructionDefinition {
+    InstructionDefinition {
+        definition_id,
+        opcode: definition.opcode,
+        read_mask: definition.read_mask,
+        write_mask: definition.write_mask,
+        pc_displacement: definition.displacement,
+        flags: definition.flags,
+        pc_kind: match definition.pc_kind {
+            0 => PcRelativeKind::None,
+            1 => PcRelativeKind::Instruction,
+            _ => PcRelativeKind::Page,
+        },
+        condition: definition.condition,
+        slow_memory_path: definition.slow_memory_path == 1,
+        mnemonic: definition.mnemonic.clone(),
+        operands: definition.operands.clone(),
+        disassembly: definition.disassembly.clone(),
+        reads: definition.reads.iter().map(typed_register).collect(),
+        writes: definition.writes.iter().map(typed_register).collect(),
+        memory_operands: definition
+            .memory_operands
+            .iter()
+            .map(typed_memory_operand)
+            .collect(),
+    }
+}
+
+fn typed_register(register: &RegisterWire) -> RegisterDefinition {
+    RegisterDefinition {
+        slot: register.slot,
+        captured_width: register.width,
+        name: register.name.clone(),
+    }
+}
+
+fn typed_memory_operand(operand: &MemoryOperandWire) -> MemoryOperand {
+    MemoryOperand {
+        base: (operand.base != u8::MAX).then_some(operand.base),
+        index: (operand.index != u8::MAX).then_some(operand.index),
+        extend: match operand.extend {
+            0 => RegisterExtend::None,
+            1 => RegisterExtend::Uxtw,
+            2 => RegisterExtend::Sxtw,
+            3 => RegisterExtend::Lsl,
+            _ => RegisterExtend::Sxtx,
+        },
+        mode: match operand.mode {
+            0 => MemoryAddressMode::Offset,
+            1 => MemoryAddressMode::PreIndex,
+            _ => MemoryAddressMode::PostIndex,
+        },
+        shift: operand.shift,
+        direction: match operand.kind {
+            1 => MemoryDirection::Read,
+            2 => MemoryDirection::Write,
+            _ => MemoryDirection::ReadWrite,
+        },
+        writeback: operand.writeback == 1,
+        size: operand.size,
+        displacement: operand.displacement,
+    }
 }
 
 fn decode_bounded_raw(
@@ -1376,7 +1559,7 @@ fn decode_bounded_raw(
 fn decode_memory_state(
     cursor: &mut PayloadCursor<'_>,
     field: &'static str,
-) -> Result<(), ProviderError> {
+) -> Result<CaptureBytes, ProviderError> {
     let state = cursor.u8()?;
     let count = usize::from(cursor.u8()?);
     if count > MAX_CAPTURED_MEMORY_BYTES {
@@ -1388,7 +1571,7 @@ fn decode_memory_state(
             format!("{field} exceeds capture maximum"),
         ));
     }
-    let _bytes = cursor.take(count)?;
+    let bytes = cursor.take(count)?;
     if !matches!((state, count), (0, 0) | (1, _) | (2, 0)) {
         return Err(ProviderError::new(
             "source.invalid_payload",
@@ -1398,7 +1581,12 @@ fn decode_memory_state(
             format!("invalid {field} state"),
         ));
     }
-    Ok(())
+    Ok(match state {
+        0 => CaptureBytes::NotCaptured,
+        1 => CaptureBytes::Captured(bytes.to_vec()),
+        2 => CaptureBytes::Unavailable,
+        _ => unreachable!(),
+    })
 }
 
 fn decode_metrics(cursor: &mut PayloadCursor<'_>) -> Result<[u64; 10], ProviderError> {

@@ -417,6 +417,7 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
                 run_id: 9,
                 pid: 10,
                 tid: Some(11),
+                ..BeginMetadata::default()
             }),
             EventKind::Begin,
         ),
@@ -429,7 +430,10 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
             EventKind::ModuleDefinition,
         ),
         (
-            EventPayload::InstructionDefinition(InstructionDefinition { definition_id: 2 }),
+            EventPayload::InstructionDefinition(InstructionDefinition {
+                definition_id: 2,
+                ..InstructionDefinition::default()
+            }),
             EventKind::InstructionDefinition,
         ),
         (
@@ -437,6 +441,7 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
                 definition_id: 2,
                 module_id: 1,
                 relative_pc: 0x40,
+                ..Instruction::default()
             }),
             EventKind::Instruction,
         ),
@@ -445,6 +450,7 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
                 address: 0x2000,
                 size: 8,
                 direction: MemoryDirection::Read,
+                ..Memory::default()
             }),
             EventKind::Memory,
         ),
@@ -488,6 +494,7 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
         (
             EventPayload::Termination(Termination {
                 kind: TerminationKind::Completed,
+                ..Termination::default()
             }),
             EventKind::Termination,
         ),
@@ -616,6 +623,7 @@ fn fake_provider() -> Box<dyn TraceProvider> {
                 run_id: 1,
                 pid: 2,
                 tid: Some(17),
+                ..BeginMetadata::default()
             }),
         )],
     })

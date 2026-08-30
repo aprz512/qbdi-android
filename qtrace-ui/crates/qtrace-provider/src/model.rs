@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
+use crate::qtrb::events::{BeginMetadata, Instruction, InstructionDefinition, Memory, Termination};
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
@@ -46,45 +48,10 @@ pub enum EventKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct BeginMetadata {
-    pub run_id: u64,
-    pub pid: u32,
-    pub tid: Option<u32>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModuleDefinition {
     pub module_id: u32,
     pub base: u64,
     pub name: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct InstructionDefinition {
-    pub definition_id: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Instruction {
-    pub definition_id: u32,
-    pub module_id: u32,
-    pub relative_pc: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryDirection {
-    Read,
-    Write,
-    ReadWrite,
-    Unknown,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Memory {
-    pub address: u64,
-    pub size: u32,
-    pub direction: MemoryDirection,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -130,20 +97,6 @@ pub enum SignalHandlerPhase {
 pub struct SignalHandlerBoundary {
     pub tid: u32,
     pub phase: SignalHandlerPhase,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminationKind {
-    Completed,
-    Stopped,
-    Intent,
-    Unknown,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Termination {
-    pub kind: TerminationKind,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]

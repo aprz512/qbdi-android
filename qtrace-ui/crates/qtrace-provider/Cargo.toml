@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 hex.workspace = true
+lz4_flex = { version = "0.11", features = ["frame"] }
 serde.workspace = true
 
 [dev-dependencies]

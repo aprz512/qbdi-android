@@ -12,15 +12,19 @@ pub use control::{
 };
 pub use error::{ProviderError, SourceCoordinate};
 pub use model::{
-    ArtifactDigest, BeginMetadata, CompletenessCause, CompletenessRange, Discontinuity,
-    DiscontinuityCause, EventKey, EventKind, EventPayload, EventRecord, FragmentSourceOffsets,
-    Instruction, InstructionDefinition, MAX_FRAGMENT_SOURCE_OFFSETS, Memory, MemoryDirection,
-    ModuleDefinition, OpaqueOptionalRecord, Provenance, ProviderCapabilities, ProviderCounters,
-    ProviderSummary, RangeBounds, RangeDomain, SemanticEvent, Signal, SignalHandlerBoundary,
-    SignalHandlerPhase, SourceIdentity, Syscall, Termination, TerminationKind, ThreadLifecycle,
-    ThreadLifecyclePhase, TimelineDescriptor, TimelineId,
+    ArtifactDigest, CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause,
+    EventKey, EventKind, EventPayload, EventRecord, FragmentSourceOffsets,
+    MAX_FRAGMENT_SOURCE_OFFSETS, ModuleDefinition, OpaqueOptionalRecord, Provenance,
+    ProviderCapabilities, ProviderCounters, ProviderSummary, RangeBounds, RangeDomain,
+    SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity, Syscall,
+    ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId,
 };
-pub use qtrb::{OpenMode, QtrbProvider};
+pub use qtrb::{
+    BeginMetadata, CaptureBytes, Instruction, InstructionDefinition, Memory, MemoryAddressMode,
+    MemoryDirection, MemoryOperand, OpenMode, PcRelativeKind, QtrbInput, QtrbProvider,
+    RegisterDefinition, RegisterExtend, RegisterObservation, TerminalMetrics, Termination,
+    TerminationKind, TraceProfile,
+};
 pub use source::{ByteSource, EventCursor, ReadAtSource, TraceProvider};
 
 pub const CRATE_NAME: &str = "qtrace-provider";
