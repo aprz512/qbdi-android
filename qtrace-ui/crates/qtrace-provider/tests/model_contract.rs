@@ -1,15 +1,20 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    cell::Cell,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use qtrace_provider::{
-    ArtifactDigest, BeginMetadata, BudgetDimension, ByteSource, CompletenessRange, Discontinuity,
-    DiscontinuityCause, EventCursor, EventKey, EventKind, EventPayload, EventRecord, Instruction,
-    InstructionDefinition, Memory, MemoryDirection, ModuleDefinition, OpaqueOptionalRecord,
+    ArtifactDigest, BeginMetadata, BudgetDimension, ByteSource, CompletenessCause,
+    CompletenessRange, Discontinuity, DiscontinuityCause, EventCursor, EventKey, EventKind,
+    EventPayload, EventRecord, FragmentSourceOffsets, Instruction, InstructionDefinition,
+    MAX_FRAGMENT_SOURCE_OFFSETS, Memory, MemoryDirection, ModuleDefinition, OpaqueOptionalRecord,
     OperationAbort, Provenance, ProviderCapabilities, ProviderCounters, ProviderError,
     ProviderSummary, RangeBounds, RangeDomain, ReadAtSource, SemanticEvent, Signal,
     SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity, Syscall, Termination,
     TerminationKind, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId,
     TraceProvider, WorkDelta, WorkGuard,
 };
+use serde::Deserialize;
 
 fn digest(byte: u8) -> ArtifactDigest {
     ArtifactDigest::new([byte; 32])
@@ -117,6 +122,132 @@ fn completeness_range_deserialization_rejects_invalid_domain_or_bounds() {
 }
 
 #[test]
+fn completeness_cause_is_stable_and_cannot_bypass_range_validation() {
+    let missing = CompletenessRange::source_bytes_with_cause(
+        0x200,
+        0x200,
+        Provenance::Unknown,
+        CompletenessCause::MissingTerminal,
+    )
+    .unwrap();
+    let checksum = CompletenessRange::captured_sequence_with_cause(
+        7,
+        9,
+        Provenance::Damaged,
+        CompletenessCause::Checksum,
+    )
+    .unwrap();
+
+    assert_eq!(missing.cause(), CompletenessCause::MissingTerminal);
+    assert_eq!(checksum.cause(), CompletenessCause::Checksum);
+    assert_eq!(
+        serde_json::to_value(missing).unwrap()["cause"],
+        "missing_terminal"
+    );
+    assert_eq!(serde_json::to_value(checksum).unwrap()["cause"], "checksum");
+
+    let legacy = serde_json::json!({
+        "domain": "source_bytes",
+        "bounds": { "half_open": { "start": 1, "end_exclusive": 2 } },
+        "provenance": "captured"
+    });
+    assert_eq!(
+        serde_json::from_value::<CompletenessRange>(legacy)
+            .unwrap()
+            .cause(),
+        CompletenessCause::Unknown
+    );
+
+    let reversed = serde_json::json!({
+        "domain": "source_bytes",
+        "bounds": { "half_open": { "start": 5, "end_exclusive": 4 } },
+        "provenance": "damaged",
+        "cause": "checksum"
+    });
+    assert!(serde_json::from_value::<CompletenessRange>(reversed).is_err());
+}
+
+#[test]
+fn fragment_offsets_are_bounded_ordered_and_deserialization_checked() {
+    let key = EventKey::new(digest(0x44), TimelineId(2), 8, 0x100, None, Some(9));
+    let record = EventRecord::with_fragment_source_offsets(
+        key,
+        Provenance::Captured,
+        EventPayload::SemanticRule(SemanticEvent {
+            category: None,
+            name: "rule".into(),
+            detail: "detail".into(),
+        }),
+        vec![0x100, 0x120, 0x148],
+    )
+    .unwrap();
+    assert_eq!(record.fragment_source_offsets(), &[0x100, 0x120, 0x148]);
+    let encoded = serde_json::to_value(&record).unwrap();
+    assert_eq!(
+        serde_json::from_value::<EventRecord>(encoded.clone())
+            .unwrap()
+            .fragment_source_offsets(),
+        &[0x100, 0x120, 0x148]
+    );
+
+    let mut wrong_first = encoded.clone();
+    wrong_first["fragment_source_offsets"] = serde_json::json!([0x101, 0x120]);
+    assert!(serde_json::from_value::<EventRecord>(wrong_first).is_err());
+    let mut duplicate = encoded;
+    duplicate["fragment_source_offsets"] = serde_json::json!([0x100, 0x100]);
+    assert!(serde_json::from_value::<EventRecord>(duplicate).is_err());
+
+    let mut legacy = serde_json::to_value(&record).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("fragment_source_offsets");
+    assert!(
+        serde_json::from_value::<EventRecord>(legacy)
+            .unwrap()
+            .fragment_source_offsets()
+            .is_empty()
+    );
+
+    let mut oversized = serde_json::to_value(&record).unwrap();
+    oversized["fragment_source_offsets"] = serde_json::to_value(
+        (0..=MAX_FRAGMENT_SOURCE_OFFSETS)
+            .map(|index| 0x100 + index as u64)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(serde_json::from_value::<EventRecord>(oversized).is_err());
+
+    let key = EventKey::new(digest(0x44), TimelineId(2), 8, 0x100, None, Some(9));
+    assert!(
+        EventRecord::with_fragment_source_offsets(
+            key,
+            Provenance::Captured,
+            EventPayload::SemanticRule(SemanticEvent {
+                category: None,
+                name: "rule".into(),
+                detail: "detail".into(),
+            }),
+            vec![0x100; MAX_FRAGMENT_SOURCE_OFFSETS + 1],
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn fragment_offset_deserialization_stops_at_the_public_bound() {
+    let visited = Cell::new(0_usize);
+    let values = (0..MAX_FRAGMENT_SOURCE_OFFSETS + 100).map(|index| {
+        visited.set(visited.get() + 1);
+        index as u64
+    });
+    let deserializer = serde::de::value::SeqDeserializer::<_, serde::de::value::Error>::new(values);
+
+    assert!(FragmentSourceOffsets::deserialize(deserializer).is_err());
+    assert_eq!(visited.get(), MAX_FRAGMENT_SOURCE_OFFSETS + 1);
+}
+
+#[test]
 fn source_and_memory_ranges_are_checked_and_half_open() {
     for coverage in [
         CompletenessRange::source_bytes(0x100, 0x110, Provenance::Damaged).unwrap(),
@@ -141,6 +272,18 @@ fn artifact_digest_round_trips_canonical_sha256_hex() {
         format!("\"{expected}\"")
     );
     assert!(ArtifactDigest::from_hex("ab").is_none());
+}
+
+#[test]
+fn source_identity_version_fields_keep_legacy_deserialization_compatible() {
+    let identity: SourceIdentity = serde_json::from_value(serde_json::json!({
+        "artifact": "abababababababababababababababababababababababababababababababab",
+        "format": "legacy",
+        "source_bytes": 9
+    }))
+    .unwrap();
+    assert_eq!(identity.format_major, 0);
+    assert_eq!(identity.format_minor, 0);
 }
 
 #[test]
@@ -456,6 +599,8 @@ fn fake_provider() -> Box<dyn TraceProvider> {
         identity: SourceIdentity {
             artifact: digest(0x33),
             format: "test".into(),
+            format_major: 7,
+            format_minor: 4,
             source_bytes: 4,
         },
         capabilities: ProviderCapabilities::qtrb_register_observations(),

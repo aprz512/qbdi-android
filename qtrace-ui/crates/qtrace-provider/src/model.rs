@@ -211,17 +211,90 @@ impl EventPayload {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub const MAX_FRAGMENT_SOURCE_OFFSETS: usize = u16::MAX as usize;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct FragmentSourceOffsets(Vec<u64>);
+
+impl FragmentSourceOffsets {
+    pub fn new(offsets: Vec<u64>) -> Option<Self> {
+        if offsets.len() > MAX_FRAGMENT_SOURCE_OFFSETS
+            || offsets.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return None;
+        }
+        Some(Self(offsets))
+    }
+
+    pub fn as_slice(&self) -> &[u64] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for FragmentSourceOffsets {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct BoundedOffsetsVisitor;
+
+        impl<'de> de::Visitor<'de> for BoundedOffsetsVisitor {
+            type Value = FragmentSourceOffsets;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    formatter,
+                    "at most {MAX_FRAGMENT_SOURCE_OFFSETS} strictly increasing source offsets"
+                )
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let capacity = sequence
+                    .size_hint()
+                    .unwrap_or(0)
+                    .min(MAX_FRAGMENT_SOURCE_OFFSETS);
+                let mut offsets = Vec::with_capacity(capacity);
+                while let Some(offset) = sequence.next_element::<u64>()? {
+                    if offsets.len() == MAX_FRAGMENT_SOURCE_OFFSETS {
+                        return Err(de::Error::custom(
+                            "fragment source offsets exceed their bound",
+                        ));
+                    }
+                    if offsets.last().is_some_and(|previous| *previous >= offset) {
+                        return Err(de::Error::custom(
+                            "fragment source offsets must be strictly increasing",
+                        ));
+                    }
+                    offsets.push(offset);
+                }
+                Ok(FragmentSourceOffsets(offsets))
+            }
+        }
+
+        deserializer.deserialize_seq(BoundedOffsetsVisitor)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EventRecord {
     pub key: EventKey,
     pub provenance: Provenance,
     pub payload: EventPayload,
+    fragment_source_offsets: FragmentSourceOffsets,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceIdentity {
     pub artifact: ArtifactDigest,
     pub format: String,
+    #[serde(default)]
+    pub format_major: u8,
+    #[serde(default)]
+    pub format_minor: u8,
     pub source_bytes: u64,
 }
 
@@ -256,11 +329,72 @@ impl EventRecord {
             key,
             provenance,
             payload,
+            fragment_source_offsets: FragmentSourceOffsets(Vec::new()),
         }
+    }
+
+    pub fn with_fragment_source_offsets(
+        key: EventKey,
+        provenance: Provenance,
+        payload: EventPayload,
+        offsets: Vec<u64>,
+    ) -> Option<Self> {
+        let fragment_source_offsets = FragmentSourceOffsets::new(offsets)?;
+        if fragment_source_offsets
+            .as_slice()
+            .first()
+            .is_some_and(|first| *first != key.source_offset)
+        {
+            return None;
+        }
+        Some(Self {
+            key,
+            provenance,
+            payload,
+            fragment_source_offsets,
+        })
+    }
+
+    pub fn fragment_source_offsets(&self) -> &[u64] {
+        self.fragment_source_offsets.as_slice()
     }
 
     pub const fn kind(&self) -> EventKind {
         self.payload.kind()
+    }
+}
+
+impl<'de> Deserialize<'de> for EventRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SerializedEventRecord {
+            key: EventKey,
+            provenance: Provenance,
+            payload: EventPayload,
+            #[serde(default)]
+            fragment_source_offsets: FragmentSourceOffsets,
+        }
+
+        let value = SerializedEventRecord::deserialize(deserializer)?;
+        if value
+            .fragment_source_offsets
+            .as_slice()
+            .first()
+            .is_some_and(|first| *first != value.key.source_offset)
+        {
+            return Err(de::Error::custom(
+                "first fragment source offset must match the event key",
+            ));
+        }
+        Ok(Self {
+            key: value.key,
+            provenance: value.provenance,
+            payload: value.payload,
+            fragment_source_offsets: value.fragment_source_offsets,
+        })
     }
 }
 
@@ -279,15 +413,43 @@ pub enum RangeBounds {
     HalfOpen { start: u64, end_exclusive: u64 },
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletenessCause {
+    Retained,
+    MissingTerminal,
+    Active,
+    Stale,
+    Rotating,
+    Lost,
+    Overwritten,
+    CoverageGap,
+    Checksum,
+    UnterminatedThread,
+    Truncation,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct CompletenessRange {
     domain: RangeDomain,
     bounds: RangeBounds,
-    provenance: Provenance,
+    pub provenance: Provenance,
+    pub cause: CompletenessCause,
 }
 
 impl CompletenessRange {
     pub const fn captured_sequence(first: u64, last: u64, provenance: Provenance) -> Option<Self> {
+        Self::captured_sequence_with_cause(first, last, provenance, CompletenessCause::Unknown)
+    }
+
+    pub const fn captured_sequence_with_cause(
+        first: u64,
+        last: u64,
+        provenance: Provenance,
+        cause: CompletenessCause,
+    ) -> Option<Self> {
         if first > last {
             return None;
         }
@@ -295,6 +457,7 @@ impl CompletenessRange {
             domain: RangeDomain::CapturedSequence,
             bounds: RangeBounds::InclusiveSequence { first, last },
             provenance,
+            cause,
         })
     }
 
@@ -303,7 +466,22 @@ impl CompletenessRange {
         end_exclusive: u64,
         provenance: Provenance,
     ) -> Option<Self> {
-        Self::half_open(RangeDomain::SourceBytes, start, end_exclusive, provenance)
+        Self::source_bytes_with_cause(start, end_exclusive, provenance, CompletenessCause::Unknown)
+    }
+
+    pub const fn source_bytes_with_cause(
+        start: u64,
+        end_exclusive: u64,
+        provenance: Provenance,
+        cause: CompletenessCause,
+    ) -> Option<Self> {
+        Self::half_open(
+            RangeDomain::SourceBytes,
+            start,
+            end_exclusive,
+            provenance,
+            cause,
+        )
     }
 
     pub const fn memory_addresses(
@@ -311,11 +489,26 @@ impl CompletenessRange {
         end_exclusive: u64,
         provenance: Provenance,
     ) -> Option<Self> {
+        Self::memory_addresses_with_cause(
+            start,
+            end_exclusive,
+            provenance,
+            CompletenessCause::Unknown,
+        )
+    }
+
+    pub const fn memory_addresses_with_cause(
+        start: u64,
+        end_exclusive: u64,
+        provenance: Provenance,
+        cause: CompletenessCause,
+    ) -> Option<Self> {
         Self::half_open(
             RangeDomain::MemoryAddresses,
             start,
             end_exclusive,
             provenance,
+            cause,
         )
     }
 
@@ -324,6 +517,7 @@ impl CompletenessRange {
         start: u64,
         end_exclusive: u64,
         provenance: Provenance,
+        cause: CompletenessCause,
     ) -> Option<Self> {
         if start > end_exclusive {
             return None;
@@ -335,6 +529,7 @@ impl CompletenessRange {
                 end_exclusive,
             },
             provenance,
+            cause,
         })
     }
 
@@ -361,6 +556,10 @@ impl CompletenessRange {
     pub const fn provenance(&self) -> Provenance {
         self.provenance
     }
+
+    pub const fn cause(&self) -> CompletenessCause {
+        self.cause
+    }
 }
 
 impl<'de> Deserialize<'de> for CompletenessRange {
@@ -373,12 +572,14 @@ impl<'de> Deserialize<'de> for CompletenessRange {
             domain: RangeDomain,
             bounds: RangeBounds,
             provenance: Provenance,
+            #[serde(default)]
+            cause: CompletenessCause,
         }
 
         let value = SerializedRange::deserialize(deserializer)?;
         let range = match (value.domain, value.bounds) {
             (RangeDomain::CapturedSequence, RangeBounds::InclusiveSequence { first, last }) => {
-                Self::captured_sequence(first, last, value.provenance)
+                Self::captured_sequence_with_cause(first, last, value.provenance, value.cause)
             }
             (
                 RangeDomain::SourceBytes,
@@ -386,14 +587,19 @@ impl<'de> Deserialize<'de> for CompletenessRange {
                     start,
                     end_exclusive,
                 },
-            ) => Self::source_bytes(start, end_exclusive, value.provenance),
+            ) => Self::source_bytes_with_cause(start, end_exclusive, value.provenance, value.cause),
             (
                 RangeDomain::MemoryAddresses,
                 RangeBounds::HalfOpen {
                     start,
                     end_exclusive,
                 },
-            ) => Self::memory_addresses(start, end_exclusive, value.provenance),
+            ) => Self::memory_addresses_with_cause(
+                start,
+                end_exclusive,
+                value.provenance,
+                value.cause,
+            ),
             _ => None,
         };
         range.ok_or_else(|| de::Error::custom("invalid completeness range domain or bounds"))
