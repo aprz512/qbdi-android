@@ -7,7 +7,7 @@ use std::{
 };
 
 use qtrace_provider::{ProviderError, ReadAtSource, SourceCoordinate, WorkDelta, WorkGuard};
-use rustix::fs::{Mode, OFlags, open, openat};
+use rustix::fs::{FileType as RustixFileType, Mode, OFlags, Stat, fstat, open, openat};
 use rustix::io::Errno;
 
 use crate::FileIdentity;
@@ -20,6 +20,7 @@ const FILE_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NONBLOCK)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
+const INSPECT_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
 
 #[derive(Clone, Copy, Debug)]
 enum OpenContext {
@@ -392,17 +393,13 @@ fn walk_directory(
         match component {
             Component::RootDir if absolute => continue,
             Component::Normal(component) => {
-                let descriptor = openat(&*directory, component, DIRECTORY_FLAGS, Mode::empty())
-                    .map_err(|error| DirectoryWalkError {
+                let child = Arc::new(open_directory_at(&directory, component, context).map_err(
+                    |error| DirectoryWalkError {
                         final_not_directory: path_components.peek().is_none()
-                            && error == Errno::NOTDIR,
-                        error: map_open_error(
-                            error,
-                            context,
-                            "cannot open selected directory component",
-                        ),
-                    })?;
-                let child = Arc::new(File::from(descriptor));
+                            && is_not_directory_error(&error),
+                        error,
+                    },
+                )?);
                 let identity = directory_identity(&child).map_err(|error| DirectoryWalkError {
                     error,
                     final_not_directory: false,
@@ -426,11 +423,117 @@ fn open_directory_at(
     component: &OsStr,
     context: OpenContext,
 ) -> Result<File, ProviderError> {
-    let descriptor =
-        openat(parent, component, DIRECTORY_FLAGS, Mode::empty()).map_err(|error| {
-            map_open_error(error, context, "cannot open source directory component")
-        })?;
-    Ok(File::from(descriptor))
+    let descriptor = openat(parent, component, INSPECT_FLAGS, Mode::empty()).map_err(|error| {
+        map_open_error(error, context, "cannot inspect source directory component")
+    })?;
+    let stat = fstat(&descriptor).map_err(|error| {
+        map_open_error(
+            error,
+            context,
+            "cannot inspect source directory component type",
+        )
+    })?;
+    match RustixFileType::from_raw_mode(stat.st_mode) {
+        RustixFileType::Directory => {
+            let directory = match openat(parent, component, DIRECTORY_FLAGS, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    if matches!(error, Errno::MFILE | Errno::NFILE | Errno::NOMEM) {
+                        return Err(map_open_error(
+                            error,
+                            context,
+                            "cannot open inspected source directory component",
+                        ));
+                    }
+                    verify_inspected_binding(parent, component, &stat)?;
+                    return Err(map_open_error(
+                        error,
+                        context,
+                        "cannot open inspected source directory component",
+                    ));
+                }
+            };
+            let actual = fstat(&directory).map_err(|error| {
+                map_open_error(
+                    error,
+                    OpenContext::Rebind,
+                    "cannot verify opened source directory component",
+                )
+            })?;
+            if !same_file_identity(&actual, &stat) {
+                return Err(path_error(
+                    "source directory component was rebound during inspection",
+                ));
+            }
+            Ok(File::from(directory))
+        }
+        RustixFileType::Symlink => Err(path_error("source parent is a symbolic link")),
+        _ => {
+            verify_inspected_binding(parent, component, &stat)?;
+            Err(not_directory_error(context))
+        }
+    }
+}
+
+fn verify_inspected_binding(
+    parent: &File,
+    component: &OsStr,
+    expected: &Stat,
+) -> Result<(), ProviderError> {
+    let rebound = openat(parent, component, INSPECT_FLAGS, Mode::empty()).map_err(|error| {
+        map_open_error(
+            error,
+            OpenContext::Rebind,
+            "non-directory component changed during inspection",
+        )
+    })?;
+    let actual = fstat(&rebound).map_err(|error| {
+        map_open_error(
+            error,
+            OpenContext::Rebind,
+            "cannot verify non-directory component inspection",
+        )
+    })?;
+    if !same_file_identity(&actual, expected) {
+        return Err(path_error(
+            "non-directory component was rebound during inspection",
+        ));
+    }
+    Ok(())
+}
+
+fn same_file_identity(left: &Stat, right: &Stat) -> bool {
+    left.st_dev == right.st_dev
+        && left.st_ino == right.st_ino
+        && RustixFileType::from_raw_mode(left.st_mode)
+            == RustixFileType::from_raw_mode(right.st_mode)
+}
+
+fn not_directory_error(context: OpenContext) -> ProviderError {
+    match context {
+        OpenContext::Report => ProviderError::new(
+            "session.not_directory",
+            "session.path",
+            None,
+            false,
+            "selected report parent is not a directory",
+        ),
+        OpenContext::Source => ProviderError::new(
+            "source.not_directory",
+            "source.open",
+            None,
+            false,
+            "artifact parent is not a directory",
+        ),
+        OpenContext::Rebind => path_error("source parent binding is not a directory"),
+    }
+}
+
+fn is_not_directory_error(error: &ProviderError) -> bool {
+    matches!(
+        error.code(),
+        "session.not_directory" | "source.not_directory"
+    )
 }
 
 fn directory_identity(directory: &File) -> Result<FileIdentity, ProviderError> {
@@ -576,9 +679,15 @@ fn short_read(offset: u64, requested: u64, length: u64) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use rustix::io::Errno;
+    use std::{ffi::OsStr, fs::File, os::unix::fs::symlink};
 
-    use super::{OpenContext, map_open_error};
+    use rustix::{
+        fs::{Mode, fstat, openat},
+        io::Errno,
+    };
+    use tempfile::TempDir;
+
+    use super::{INSPECT_FLAGS, OpenContext, map_open_error, verify_inspected_binding};
 
     #[test]
     fn open_errno_mapping_keeps_resource_permission_and_escape_classes_distinct() {
@@ -620,5 +729,26 @@ mod tests {
             map_open_error(Errno::IO, OpenContext::Source, "test").code(),
             "source.io"
         );
+    }
+
+    #[test]
+    fn non_directory_inspection_rejects_disappearance_and_symlink_rebinding() {
+        for replace_with_symlink in [false, true] {
+            let temp = TempDir::new().expect("inspection root");
+            let path = temp.path().join("notdir");
+            std::fs::write(&path, b"ordinary file").expect("non-directory component");
+            let parent = File::open(temp.path()).expect("held parent");
+            let inspected = openat(&parent, OsStr::new("notdir"), INSPECT_FLAGS, Mode::empty())
+                .expect("inspect component");
+            let expected = fstat(&inspected).expect("inspected identity");
+            std::fs::rename(&path, temp.path().join("held")).expect("remove original name");
+            if replace_with_symlink {
+                symlink(temp.path(), &path).expect("symlink replacement");
+            }
+
+            let error = verify_inspected_binding(&parent, OsStr::new("notdir"), &expected)
+                .expect_err("inspection ambiguity must fail closed");
+            assert_eq!(error.code(), "session.path_escape");
+        }
     }
 }

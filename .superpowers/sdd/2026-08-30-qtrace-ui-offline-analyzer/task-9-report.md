@@ -59,7 +59,9 @@
   missing reports are `session.report_missing`, permission failures are
   `source.permission_denied`, process/system descriptor or memory exhaustion is
   `control.resource_exhausted`, and other I/O remains `source.io`. Syntax, confirmed symlinks,
-  special leaves, `ENOTDIR`, and rebinding failures remain `session.path_escape`.
+  special leaves, ambiguous raw `ENOTDIR`, and rebinding failures remain `session.path_escape`.
+  A descriptor-proven ordinary regular or special non-directory parent is instead isolated as
+  `source.not_directory`; the selected-report equivalent is `session.not_directory`.
 - Single binary artifacts create a degraded session with explicit missing package, device, target,
   and effective-config capability warnings. Text and derived JSON selections are rejected.
 - `EffectiveConfig` truth depends only on a nonempty `effective_config` object; tracer metadata does
@@ -120,10 +122,27 @@ corresponding focused commands then passed.
   descriptor-relative directory attempt now selects its child manifest; existing file/directory
   selection and symlink/race tests remain green.
 
+### Independent security review round 2 RED -> GREEN
+
+- A session with one healthy QTRB plus `artifacts/notdir/bad.trace.bin`, where `notdir` was an
+  ordinary regular file, returned root `session.path_escape` and discarded the healthy timeline.
+- Parent components are now inspected from the held parent FD with a single Linux
+  `openat(O_PATH|O_NOFOLLOW|O_CLOEXEC)` and `fstat`. A symlink is a containment failure. A regular
+  or special non-directory receives a second descriptor-relative binding proof and becomes typed
+  `source.not_directory`; disappearance, symlink replacement, inode/type replacement, or an
+  unprovable error remains root `session.path_escape`, while resource exhaustion remains global.
+- A proven directory is opened using the required
+  `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` flags and its device/inode/type is compared with the O_PATH
+  inspection before it becomes the next held dirfd. Thus inspection does not introduce a
+  check-then-open race or weaken the original directory-open invariant.
+- Focused behavior covers healthy-sibling preservation, regular and Unix-socket parents,
+  selected-report root typing, inspection-time disappearance/symlink rebinding, existing parent
+  symlinks, parent rename-to-symlink, selected-root replacement, and report file/directory forms.
+
 ### Focused GREEN
 
-The final focused store suite passes 45 tests: 2 unit policy tests, 19 session/import behaviors, and
-24 descriptor/path security behaviors. It includes checked fixtures, strict root parsing, all path
+The final focused store suite passes 49 tests: 3 unit policy tests, 19 session/import behaviors, and
+27 descriptor/path security behaviors. It includes checked fixtures, strict root parsing, all path
 component cases, directory/socket/symlink leaves, regular/symlink/parent/root replacement races,
 grow/shrink and same-size drift, FD retention, compressed QTRB, provider timeline remapping, guard
 rejection, metadata classification, artifact isolation, FIFO nonblocking behavior, typed errno
@@ -131,7 +150,7 @@ handling, selected-object-kind handling, truthful capabilities, and degraded sin
 
 ## Verification
 
-- `cargo test -p qtrace-store --no-fail-fast` — passed, 45/45.
+- `cargo test -p qtrace-store --no-fail-fast` — passed, 49/49.
 - `cargo clippy -p qtrace-store --all-targets -- -D warnings` — passed.
 - `cargo fmt --all -- --check` — passed.
 - `cargo test -p qtrace-provider --no-fail-fast` — passed, 122 tests with one intentional ignored
@@ -165,5 +184,7 @@ handling, selected-object-kind handling, truthful capabilities, and degraded sin
 
 - Initial implementation: `c81ac4d250cf4842eab29baba05b6b9a29f80f8c`
   (`feat(qtrace-ui): load immutable trace sessions`).
-- Security-review follow-up: `fix(qtrace-ui): harden session import boundaries` (exact hash in the
+- Security-review follow-up: `6491e53793161a8a55dd14f5564eeb48080cdf08`
+  (`fix(qtrace-ui): harden session import boundaries`).
+- Security-review round 2: `fix(qtrace-ui): isolate non-directory artifacts` (exact hash in the
   task handoff because a commit cannot contain its own hash).

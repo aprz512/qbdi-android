@@ -301,6 +301,74 @@ fn a_missing_artifact_is_isolated_without_hiding_a_healthy_timeline() {
 }
 
 #[test]
+fn an_ordinary_non_directory_parent_is_isolated_without_hiding_a_healthy_timeline() {
+    let bytes = fixture_qtrb();
+    let temp = TempDir::new().expect("session");
+    fs::create_dir(temp.path().join("artifacts")).expect("artifacts");
+    fs::write(temp.path().join("artifacts/good.trace.bin"), &bytes).expect("healthy artifact");
+    fs::write(
+        temp.path().join("artifacts/notdir"),
+        b"ordinary regular file",
+    )
+    .expect("non-directory parent");
+    let artifact = |local_path: &str| {
+        json!({
+            "remote_name": Path::new(local_path).file_name().and_then(|item| item.to_str()),
+            "local_path": local_path,
+            "destination_size": bytes.len(),
+            "sha256": digest(&bytes)
+        })
+    };
+    fs::write(
+        temp.path().join("report.json"),
+        serde_json::to_vec(&report(vec![
+            artifact("artifacts/good.trace.bin"),
+            artifact("artifacts/notdir/bad.trace.bin"),
+        ]))
+        .expect("encode report"),
+    )
+    .expect("write report");
+
+    let session = open(temp.path(), &AllowAll).expect("ordinary non-directory parent is local");
+    assert_eq!(session.artifacts().len(), 1);
+    assert_eq!(session.failures().len(), 1);
+    assert_eq!(
+        session.failures()[0].local_path(),
+        Some("artifacts/notdir/bad.trace.bin")
+    );
+    assert_eq!(session.failures()[0].error().code(), "source.not_directory");
+}
+
+#[test]
+fn a_special_non_directory_parent_is_a_typed_local_failure() {
+    let bytes = fixture_qtrb();
+    let temp = TempDir::new().expect("session");
+    fs::create_dir(temp.path().join("artifacts")).expect("artifacts");
+    let _socket = UnixListener::bind(temp.path().join("artifacts/notdir"))
+        .expect("special non-directory parent");
+    write_report(
+        temp.path(),
+        "artifacts/notdir/bad.trace.bin",
+        bytes.len(),
+        &digest(&bytes),
+    );
+
+    let session = open(temp.path(), &AllowAll).expect("special non-directory parent is local");
+    assert_eq!(session.failures().len(), 1);
+    assert_eq!(session.failures()[0].error().code(), "source.not_directory");
+}
+
+#[test]
+fn a_non_directory_selected_report_parent_is_a_typed_root_error() {
+    let temp = TempDir::new().expect("selection container");
+    fs::write(temp.path().join("notdir"), b"ordinary file").expect("non-directory parent");
+
+    let error = open(&temp.path().join("notdir/session"), &AllowAll)
+        .expect_err("selected report parent must reject the root");
+    assert_eq!(error.code(), "session.not_directory");
+}
+
+#[test]
 fn a_missing_report_is_a_typed_root_error() {
     let temp = TempDir::new().expect("empty selection");
 
