@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::OperationAbort;
 
@@ -12,13 +12,13 @@ pub struct SourceCoordinate {
     pub record_ordinal: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderError {
-    pub code: String,
-    pub stage: String,
-    pub source: Option<SourceCoordinate>,
-    pub retryable: bool,
-    pub detail: String,
+    code: String,
+    stage: String,
+    source: Option<SourceCoordinate>,
+    retryable: bool,
+    detail: String,
 }
 
 impl ProviderError {
@@ -46,6 +46,51 @@ impl ProviderError {
             false,
             "event stream must return end-of-stream before finish",
         )
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn stage(&self) -> &str {
+        &self.stage
+    }
+
+    pub const fn source(&self) -> Option<SourceCoordinate> {
+        self.source
+    }
+
+    pub const fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SerializedProviderError {
+            code: String,
+            stage: String,
+            source: Option<SourceCoordinate>,
+            retryable: bool,
+            detail: String,
+        }
+
+        let value = SerializedProviderError::deserialize(deserializer)?;
+        Ok(Self::new(
+            value.code,
+            value.stage,
+            value.source,
+            value.retryable,
+            value.detail,
+        ))
     }
 }
 

@@ -148,13 +148,31 @@ fn provider_error_detail_is_bounded_single_line_utf8() {
     let detail = format!("first\r\nsecond\n{}", "é".repeat(300));
     let error = ProviderError::new("source.invalid", "decode", None, false, detail);
 
-    assert!(error.detail.starts_with("first  second "));
-    assert!(!error.detail.contains(['\r', '\n']));
-    assert_eq!(error.detail.len(), 512);
-    assert!(error.detail.is_char_boundary(error.detail.len()));
-    assert_eq!(error.code, "source.invalid");
-    assert_eq!(error.stage, "decode");
-    assert!(!error.retryable);
+    assert!(error.detail().starts_with("first  second "));
+    assert!(!error.detail().contains(['\r', '\n']));
+    assert_eq!(error.detail().len(), 512);
+    assert!(error.detail().is_char_boundary(error.detail().len()));
+    assert_eq!(error.code(), "source.invalid");
+    assert_eq!(error.stage(), "decode");
+    assert!(!error.retryable());
+}
+
+#[test]
+fn provider_error_deserialization_preserves_bounded_single_line_detail() {
+    let value = serde_json::json!({
+        "code": "source.invalid",
+        "stage": "decode",
+        "source": null,
+        "retryable": false,
+        "detail": format!("first\r\nsecond\n{}", "é".repeat(300)),
+    });
+
+    let error: ProviderError = serde_json::from_value(value).unwrap();
+
+    assert!(error.detail().starts_with("first  second "));
+    assert!(!error.detail().contains(['\r', '\n']));
+    assert_eq!(error.detail().len(), 512);
+    assert!(error.detail().is_char_boundary(error.detail().len()));
 }
 
 #[test]
@@ -165,10 +183,10 @@ fn byte_source_reports_exact_short_reads_without_partial_success() {
     let error = source.read_exact_at(2, &mut output).unwrap_err();
 
     assert_eq!(output, [0xaa; 2]);
-    assert_eq!(error.code, "source.short_read");
-    assert_eq!(error.stage, "read");
-    assert_eq!(error.source.unwrap().offset, 2);
-    assert!(!error.retryable);
+    assert_eq!(error.code(), "source.short_read");
+    assert_eq!(error.stage(), "read");
+    assert_eq!(error.source().unwrap().offset, 2);
+    assert!(!error.retryable());
 }
 
 struct LimitGuard {
@@ -461,7 +479,7 @@ fn fake_provider() -> Box<dyn TraceProvider> {
 #[test]
 fn one_shot_cursor_releases_summary_only_after_stream_is_drained() {
     let early = fake_provider().into_cursor().unwrap().finish().unwrap_err();
-    assert_eq!(early.code, "source.stream_not_drained");
+    assert_eq!(early.code(), "source.stream_not_drained");
 
     let mut cursor = fake_provider().into_cursor().unwrap();
     let mut events = vec![];
