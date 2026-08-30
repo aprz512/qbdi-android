@@ -25,6 +25,7 @@ const INSPECT_FLAGS: OFlags = OFlags::PATH.union(OFlags::NOFOLLOW).union(OFlags:
 #[derive(Clone, Copy, Debug)]
 enum OpenContext {
     Report,
+    SelectedSource,
     Source,
     Rebind,
 }
@@ -354,7 +355,7 @@ pub(crate) fn split_selected_file(path: &Path) -> Result<(SecureRoot, String), P
         .parent()
         .ok_or_else(|| path_error("selected source has no parent directory"))?;
     Ok((
-        SecureRoot::open(parent, OpenContext::Source)?,
+        SecureRoot::open(parent, OpenContext::SelectedSource)?,
         leaf.to_owned(),
     ))
 }
@@ -511,12 +512,12 @@ fn same_file_identity(left: &Stat, right: &Stat) -> bool {
 
 fn not_directory_error(context: OpenContext) -> ProviderError {
     match context {
-        OpenContext::Report => ProviderError::new(
+        OpenContext::Report | OpenContext::SelectedSource => ProviderError::new(
             "session.not_directory",
             "session.path",
             None,
             false,
-            "selected report parent is not a directory",
+            "selected path parent is not a directory",
         ),
         OpenContext::Source => ProviderError::new(
             "source.not_directory",
@@ -621,7 +622,7 @@ fn map_open_error(error: Errno, context: OpenContext, action: &str) -> ProviderE
                 false,
                 detail,
             ),
-            OpenContext::Source => {
+            OpenContext::SelectedSource | OpenContext::Source => {
                 ProviderError::new("source.not_found", "source.open", None, false, detail)
             }
             OpenContext::Rebind => path_error(detail),

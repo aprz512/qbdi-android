@@ -365,6 +365,20 @@ fn single_qtrb_is_degraded_with_explicit_missing_context_capabilities() {
 }
 
 #[test]
+fn selected_artifact_with_a_non_directory_parent_is_a_typed_root_error() {
+    let temp = TempDir::new().expect("selection container");
+    fs::write(temp.path().join("notdir"), b"ordinary file").expect("non-directory selected parent");
+
+    let error = SessionLoader::open_artifact(
+        AuthorizedPath::new(temp.path().join("notdir/child.trace.bin")),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect_err("selected artifact parent must reject the root selection");
+    assert_eq!(error.code(), "session.not_directory");
+}
+
+#[test]
 fn compressed_qtrb_keeps_file_and_provider_identity_distinct_and_complete() {
     let raw = fixture_bytes("valid-mixed", "artifacts/main.trace.bin");
     let mut encoder = FrameEncoder::new(Vec::new());

@@ -139,9 +139,22 @@ corresponding focused commands then passed.
   selected-report root typing, inspection-time disappearance/symlink rebinding, existing parent
   symlinks, parent rename-to-symlink, selected-root replacement, and report file/directory forms.
 
+### Final review Minor RED -> GREEN
+
+- Public `SessionLoader::open_artifact` reproduced a typed-contract mismatch when an authorized
+  single-file selection had an ordinary regular-file parent: the call returned
+  `source.not_directory` instead of the selected/root `session.not_directory` contract.
+- A dedicated selected-source traversal context now maps only descriptor-proven non-directory
+  parents to `session.not_directory`. Missing leaves, permission failures, unsupported formats,
+  and provider failures retain source classification; symlink, rebinding, and ambiguous path
+  failures remain `session.path_escape`; resource failures remain global control errors.
+- The focused public-API test failed with the exact old/new code mismatch before the minimal
+  context change, then passed. Manifest artifacts with non-directory parents remain isolated as
+  `source.not_directory`, and the full path/session behavior suites remain green.
+
 ### Focused GREEN
 
-The final focused store suite passes 49 tests: 3 unit policy tests, 19 session/import behaviors, and
+The final focused store suite passes 50 tests: 3 unit policy tests, 20 session/import behaviors, and
 27 descriptor/path security behaviors. It includes checked fixtures, strict root parsing, all path
 component cases, directory/socket/symlink leaves, regular/symlink/parent/root replacement races,
 grow/shrink and same-size drift, FD retention, compressed QTRB, provider timeline remapping, guard
@@ -150,8 +163,8 @@ handling, selected-object-kind handling, truthful capabilities, and degraded sin
 
 ## Verification
 
-- `cargo test -p qtrace-store --no-fail-fast` — passed, 49/49.
-- `cargo clippy -p qtrace-store --all-targets -- -D warnings` — passed.
+- `cargo test -p qtrace-store --no-fail-fast` — passed, 50/50.
+- `cargo clippy -p qtrace-store -p qtrace-provider --all-targets -- -D warnings` — passed.
 - `cargo fmt --all -- --check` — passed.
 - `cargo test -p qtrace-provider --no-fail-fast` — passed, 122 tests with one intentional ignored
   isolated child entry point.
@@ -160,6 +173,10 @@ handling, selected-object-kind handling, truthful capabilities, and degraded sin
 - `python3 -m unittest scripts.tests.test_qtrace_report scripts.tests.test_qtrace_artifacts
   scripts.tests.test_qtrace_ui_fixtures scripts.tests.test_trace_binary
   scripts.tests.test_flight_trace -v` — passed, 181/181.
+- The final Minor follow-up reran the complete store and Provider suites, clippy, and formatting.
+  It did not rerun Python/exporter because its production change is limited to a Rust path-context
+  enum and error mapping, with no schema, Provider, or fixture changes; the Python/exporter results
+  above are the preceding complete Task 9 gate.
 - Rust fixture consumers and the fixture-mutating Python suite were run serially.
 - Production store scan found no `unsafe`, `unwrap`, `expect`, `panic!`, `canonicalize`, or
   path-based `File::open` use.
@@ -186,5 +203,7 @@ handling, selected-object-kind handling, truthful capabilities, and degraded sin
   (`feat(qtrace-ui): load immutable trace sessions`).
 - Security-review follow-up: `6491e53793161a8a55dd14f5564eeb48080cdf08`
   (`fix(qtrace-ui): harden session import boundaries`).
-- Security-review round 2: `fix(qtrace-ui): isolate non-directory artifacts` (exact hash in the
-  task handoff because a commit cannot contain its own hash).
+- Security-review round 2: `93e5c548327b000d5de060ddb0a4bdc9b3b5ffb6`
+  (`fix(qtrace-ui): isolate non-directory artifacts`).
+- Final typed-contract follow-up: `fix(qtrace-ui): preserve selection error contract` (exact hash
+  in the task handoff because a commit cannot contain its own hash).
