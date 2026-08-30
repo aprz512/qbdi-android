@@ -1,0 +1,48 @@
+{
+  "artifacts": [
+    {
+      "conversion_ms": null,
+      "decoder": null,
+      "destination_size": 530,
+      "host_observed_ack_ms": null,
+      "local_path": "../escape.trace.bin",
+      "metrics_schema": null,
+      "native_stop_acknowledged": null,
+      "producer_wait_ns": null,
+      "producer_waits": null,
+      "remote_name": "escape.trace.bin",
+      "sha256": "ce2ed1947dbde81671ecb4524c8b0698240f3f1b3200707961656ad2a121337a",
+      "source_size": 530,
+      "stop_reason": null,
+      "termination": null
+    }
+  ],
+  "device": {
+    "access_mode": "run-as",
+    "serial": "fixture-device"
+  },
+  "effective_config": {},
+  "error": null,
+  "finished_at": "2026-08-30T00:00:01Z",
+  "mode": "run",
+  "native": {},
+  "outputs": [
+    "../escape.trace.bin"
+  ],
+  "package": "com.example.fixture",
+  "pid": 4242,
+  "schema": 1,
+  "serial": "fixture-device",
+  "session_id": "33333333-3333-4333-8333-333333333333",
+  "stage": "sealed",
+  "started_at": "2026-08-30T00:00:00Z",
+  "status": "sealed",
+  "target": {
+    "module": "libtarget.so"
+  },
+  "timeline": [],
+  "tracer": {
+    "format": "binary"
+  },
+  "warnings": []
+}

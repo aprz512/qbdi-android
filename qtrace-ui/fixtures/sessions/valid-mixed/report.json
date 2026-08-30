@@ -1,0 +1,82 @@
+{
+  "artifacts": [
+    {
+      "conversion_ms": null,
+      "decoder": null,
+      "destination_size": 530,
+      "host_observed_ack_ms": null,
+      "local_path": "artifacts/main.trace.bin",
+      "metrics_schema": null,
+      "native_stop_acknowledged": null,
+      "producer_wait_ns": null,
+      "producer_waits": null,
+      "remote_name": "main.trace.bin",
+      "sha256": "ce2ed1947dbde81671ecb4524c8b0698240f3f1b3200707961656ad2a121337a",
+      "source_size": 530,
+      "stop_reason": null,
+      "termination": null
+    },
+    {
+      "conversion_ms": null,
+      "decoder": null,
+      "destination_size": 517,
+      "host_observed_ack_ms": null,
+      "local_path": "artifacts/worker.trace.bin",
+      "metrics_schema": null,
+      "native_stop_acknowledged": null,
+      "producer_wait_ns": null,
+      "producer_waits": null,
+      "remote_name": "worker.trace.bin",
+      "sha256": "684d6c52565b3760018f90fdee794c6e9ec914d4f8d3e51c2c69ade9b116795e",
+      "source_size": 517,
+      "stop_reason": null,
+      "termination": null
+    },
+    {
+      "conversion_ms": null,
+      "decoder": null,
+      "destination_size": 10240,
+      "host_observed_ack_ms": null,
+      "local_path": "artifacts/capture.flight.bin",
+      "metrics_schema": null,
+      "native_stop_acknowledged": null,
+      "producer_wait_ns": null,
+      "producer_waits": null,
+      "remote_name": "capture.flight.bin",
+      "sha256": "79685edd9d6de367e4a99c2c3b97d56fea85e2cb15ee2f08d84a5bc56fb4d62c",
+      "source_size": 10240,
+      "stop_reason": null,
+      "termination": null
+    }
+  ],
+  "device": {
+    "access_mode": "run-as",
+    "serial": "fixture-device"
+  },
+  "effective_config": {},
+  "error": null,
+  "finished_at": "2026-08-30T00:00:01Z",
+  "mode": "run",
+  "native": {},
+  "outputs": [
+    "artifacts/main.trace.bin",
+    "artifacts/worker.trace.bin",
+    "artifacts/capture.flight.bin"
+  ],
+  "package": "com.example.fixture",
+  "pid": 4242,
+  "schema": 1,
+  "serial": "fixture-device",
+  "session_id": "11111111-1111-4111-8111-111111111111",
+  "stage": "sealed",
+  "started_at": "2026-08-30T00:00:00Z",
+  "status": "sealed",
+  "target": {
+    "module": "libtarget.so"
+  },
+  "timeline": [],
+  "tracer": {
+    "format": "binary"
+  },
+  "warnings": []
+}

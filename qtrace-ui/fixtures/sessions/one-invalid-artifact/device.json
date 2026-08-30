@@ -1,0 +1,5 @@
+{
+  "access_mode": "run-as",
+  "package": "com.example.fixture",
+  "serial": "fixture-device"
+}
