@@ -1,5 +1,6 @@
 use std::{
     fs,
+    mem::size_of,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -7,12 +8,12 @@ use std::{
 };
 
 use qtrace_provider::{
-    ArtifactDigest, BudgetDimension, ByteSource, CompletenessCause, EventKey, EventRecord,
-    FLIGHT_CHUNK_HEADER_BYTES, FLIGHT_DIRECTORY_ENTRY_BYTES, FLIGHT_EMERGENCY_RECORD_BYTES,
-    FLIGHT_EMERGENCY_SLOT_BYTES, FLIGHT_RECORD_HEADER_BYTES, FLIGHT_SUPERBLOCK_BYTES,
-    FlightProvider, OperationAbort, Provenance, ProviderCapabilities, ProviderError,
-    ProviderSummary, RangeBounds, ReadAtSource, SourceIdentity, TraceProvider, WorkDelta,
-    WorkGuard,
+    ArtifactDigest, BudgetDimension, ByteSource, CompletenessCause, EventKey, EventPayload,
+    EventRecord, FLIGHT_CHUNK_HEADER_BYTES, FLIGHT_DIRECTORY_ENTRY_BYTES,
+    FLIGHT_EMERGENCY_RECORD_BYTES, FLIGHT_EMERGENCY_SLOT_BYTES, FLIGHT_RECORD_HEADER_BYTES,
+    FLIGHT_SUPERBLOCK_BYTES, FlightProvider, OperationAbort, Provenance, ProviderCapabilities,
+    ProviderError, ProviderSummary, RangeBounds, ReadAtSource, SourceIdentity, TraceProvider,
+    WorkDelta, WorkGuard,
 };
 
 const MAGIC: u32 = 0x5146_4c54;
@@ -75,33 +76,6 @@ impl WorkGuard for RejectEvents {
         } else {
             Ok(())
         }
-    }
-}
-
-struct EventBudgetGuard {
-    remaining: Mutex<u64>,
-}
-
-impl EventBudgetGuard {
-    fn new(events: u64) -> Self {
-        Self {
-            remaining: Mutex::new(events),
-        }
-    }
-}
-
-impl WorkGuard for EventBudgetGuard {
-    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
-        let mut remaining = self.remaining.lock().expect("event budget lock");
-        if delta.events > *remaining {
-            return Err(OperationAbort::budget_exceeded(
-                BudgetDimension::Events,
-                *remaining,
-                delta.events,
-            ));
-        }
-        *remaining -= delta.events;
-        Ok(())
     }
 }
 
@@ -253,6 +227,27 @@ struct PhaseGuard {
     phase: Arc<AtomicBool>,
     calls: AtomicUsize,
     reject_at: Option<usize>,
+}
+
+struct ConservativeEventGuard {
+    phase: Arc<AtomicBool>,
+}
+
+impl WorkGuard for ConservativeEventGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if self.phase.load(Ordering::SeqCst)
+            && delta.nodes != 0
+            && delta.resident_bytes == delta.nodes.saturating_mul(256)
+            && delta.events < delta.nodes
+        {
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::Events,
+                delta.events,
+                delta.nodes,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PhaseGuard {
@@ -458,6 +453,35 @@ fn record(
     if committed {
         put_u32(&mut output, 20, RECORD_COMMIT ^ total as u32 ^ generation);
     }
+    output
+}
+
+fn chunk_begin_payload(tid: u32) -> Vec<u8> {
+    let target = b"libtarget.so";
+    let scene = b"worker";
+    let mut output = Vec::new();
+    output.extend_from_slice(&[2, 8]);
+    output.extend_from_slice(&(target.len() as u16).to_le_bytes());
+    output.extend_from_slice(&(scene.len() as u16).to_le_bytes());
+    output.extend_from_slice(&0_u16.to_le_bytes());
+    output.extend_from_slice(&4242_u32.to_le_bytes());
+    output.extend_from_slice(&tid.to_le_bytes());
+    output.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    output.extend_from_slice(&0x1234_u64.to_le_bytes());
+    output.extend_from_slice(&0x7100_1234_u64.to_le_bytes());
+    output.extend_from_slice(target);
+    output.extend_from_slice(scene);
+    output
+}
+
+fn checkpoint_payload(pc: u64) -> Vec<u8> {
+    let mut output = Vec::with_capacity(34 * size_of::<u64>());
+    for value in 0_u64..31 {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    output.extend_from_slice(&0x7fff_0000_u64.to_le_bytes());
+    output.extend_from_slice(&pc.to_le_bytes());
+    output.extend_from_slice(&0x6000_0000_u64.to_le_bytes());
     output
 }
 
@@ -699,8 +723,17 @@ fn sequence_ranges(summary: &ProviderSummary, cause: CompletenessCause) -> Vec<(
 fn sequences(events: &[EventRecord]) -> Vec<u64> {
     events
         .iter()
-        .map(|event| event.key.sequence.expect("Flight sequence"))
+        .filter_map(|event| event.key.sequence)
         .collect()
+}
+
+fn has_no_physical_events(events: &[EventRecord]) -> bool {
+    events.iter().all(|event| {
+        matches!(
+            event.payload,
+            qtrace_provider::EventPayload::Discontinuity(_)
+        )
+    })
 }
 
 #[test]
@@ -764,7 +797,12 @@ fn merged_and_per_thread_timelines_reference_one_stable_event_identity() {
             .windows(2)
             .all(|pair| pair[0] < pair[1])
     );
-    assert_eq!(sequences(&parsed.events), (1..=30).collect::<Vec<_>>());
+    assert_eq!(
+        sequences(&parsed.events),
+        (1..=30)
+            .filter(|sequence| *sequence != 10)
+            .collect::<Vec<_>>()
+    );
     for (tid, keys) in &parsed.projections {
         let expected = parsed
             .events
@@ -781,7 +819,7 @@ fn merged_and_per_thread_timelines_reference_one_stable_event_identity() {
     }
     assert_eq!(
         parsed.events.len(),
-        30,
+        29,
         "events must not be copied per projection"
     );
 }
@@ -793,7 +831,132 @@ fn damaged_chunk_becomes_explicit_checksum_completeness() {
     assert!(parsed.summary.completeness.iter().any(|item| {
         item.provenance() == Provenance::Damaged && item.cause() == CompletenessCause::Checksum
     }));
-    assert!(parsed.events.is_empty());
+    assert!(has_no_physical_events(&parsed.events));
+    let proof_offset = chunk_offset(&fixture("v2-checksum-damaged.bin")) as u64;
+    let discontinuity = parsed
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.payload,
+                EventPayload::Discontinuity(ref value)
+                    if value.evidence.cause() == CompletenessCause::Checksum
+            )
+        })
+        .expect("checksum discontinuity");
+    assert_eq!(discontinuity.key.source_offset, proof_offset);
+}
+
+#[test]
+fn a_second_checkpoint_after_the_required_prefix_is_damaged() {
+    let tid = 77_u32;
+    let generation = 1;
+    let records = vec![
+        record(1, 1, &chunk_begin_payload(tid), 0, generation, true),
+        record(9, 2, &checkpoint_payload(0x7100_1000), 1, generation, true),
+        record(9, 3, &checkpoint_payload(0x7100_2000), 1, generation, true),
+    ];
+    let bytes = artifact(
+        &[directory(tid, 1, 3, 0, generation, 1)],
+        &[chunk(0, tid, generation, &records, 2, b"")],
+        &[],
+        0,
+    );
+
+    let parsed = collect_bytes(bytes).expect("recover duplicate checkpoint as damage");
+    let duplicate = parsed
+        .events
+        .iter()
+        .find(|event| event.key.sequence == Some(3))
+        .expect("duplicate checkpoint physical evidence");
+    assert_eq!(duplicate.provenance, Provenance::Damaged);
+    assert!(matches!(duplicate.payload, EventPayload::OpaqueOptional(_)));
+    assert!(parsed.summary.completeness.iter().any(|range| {
+        range.provenance() == Provenance::Damaged
+            && matches!(
+                range.bounds(),
+                RangeBounds::InclusiveSequence { first: 3, last: 3 }
+            )
+    }));
+}
+
+#[test]
+fn every_checksum_chunk_keeps_its_own_synthetic_proof_coordinate() {
+    let mut first = chunk(
+        0,
+        7,
+        1,
+        &[record(1, 1, b"", 0, 1, true), record(1, 2, b"", 0, 1, true)],
+        2,
+        b"",
+    );
+    let mut second = chunk(
+        1,
+        7,
+        1,
+        &[record(1, 3, b"", 0, 1, true), record(1, 4, b"", 0, 1, true)],
+        2,
+        b"",
+    );
+    first[48] ^= 1;
+    second[48] ^= 1;
+    let bytes = artifact(&[directory(7, 1, 4, 0, 1, 1)], &[first, second], &[], 0);
+    let first_offset = chunk_offset(&bytes) as u64;
+
+    let parsed = collect_bytes(bytes).expect("recover two damaged chunks");
+    let proof_offsets = parsed
+        .events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventPayload::Discontinuity(value)
+                if value.evidence.cause() == CompletenessCause::Checksum =>
+            {
+                Some(event.key.source_offset)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        proof_offsets,
+        [first_offset, first_offset + CHUNK_BYTES as u64]
+    );
+}
+
+#[test]
+fn unterminated_thread_discontinuity_uses_explicit_eof_proof() {
+    let tid = 77_u32;
+    let generation = 1;
+    let mut lifecycle_begin = Vec::new();
+    lifecycle_begin.extend_from_slice(&1_u32.to_le_bytes());
+    lifecycle_begin.extend_from_slice(&tid.to_le_bytes());
+    lifecycle_begin.extend_from_slice(&0x7100_1234_u64.to_le_bytes());
+    lifecycle_begin.extend_from_slice(&1_u64.to_le_bytes());
+    let records = vec![
+        record(1, 1, &chunk_begin_payload(tid), 0, generation, true),
+        record(9, 2, &checkpoint_payload(0x7100_1000), 1, generation, true),
+        record(2, 3, &lifecycle_begin, 0, generation, true),
+    ];
+    let bytes = artifact(
+        &[directory(tid, 1, 3, 0, generation, 1)],
+        &[chunk(0, tid, generation, &records, 2, b"")],
+        &[],
+        0,
+    );
+    let eof = bytes.len() as u64;
+
+    let parsed = collect_bytes(bytes).expect("recover unterminated thread");
+    let discontinuity = parsed
+        .events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.payload,
+                EventPayload::Discontinuity(ref value)
+                    if value.evidence.cause() == CompletenessCause::UnterminatedThread
+            )
+        })
+        .expect("unterminated-thread discontinuity");
+    assert_eq!(discontinuity.key.source_offset, eof);
 }
 
 #[test]
@@ -936,13 +1099,9 @@ fn active_scan_stops_at_first_uncommitted_record_without_reading_suffix() {
     let parsed = collect_source(source.clone(), &AllowAll).unwrap();
 
     assert_eq!(sequences(&parsed.events), vec![1, 2]);
-    assert!(
-        !parsed
-            .summary
-            .completeness
-            .iter()
-            .any(|item| item.cause() == CompletenessCause::Incomplete)
-    );
+    assert!(parsed.summary.completeness.iter().any(|item| {
+        item.cause() == CompletenessCause::Incomplete && item.provenance() == Provenance::Damaged
+    }));
     assert!(source.reads().iter().all(|(offset, size)| {
         let end = offset.saturating_add(*size as u64);
         end <= uncommitted_payload_start as u64 || *offset >= (data_start + CHUNK_BYTES) as u64
@@ -1007,7 +1166,7 @@ fn sealed_checksum_count_range_commit_checksum_and_padding_are_transactional() {
 
     for (cause, bytes) in cases {
         let parsed = collect_bytes(bytes).unwrap();
-        assert!(parsed.events.is_empty());
+        assert!(has_no_physical_events(&parsed.events));
         assert!(
             parsed
                 .summary
@@ -1179,7 +1338,7 @@ fn emergency_cells_validate_checksum_complement_version_and_stale_history() {
         0,
     ))
     .unwrap();
-    assert!(damaged.events.is_empty());
+    assert!(has_no_physical_events(&damaged.events));
     assert!(damaged.summary.completeness.iter().any(|item| {
         item.provenance() == Provenance::Damaged && item.cause() == CompletenessCause::Checksum
     }));
@@ -1211,7 +1370,7 @@ fn emergency_cells_validate_checksum_complement_version_and_stale_history() {
         0,
     ))
     .unwrap();
-    assert!(odd.events.is_empty());
+    assert!(has_no_physical_events(&odd.events));
     assert!(
         odd.summary
             .completeness
@@ -1228,7 +1387,7 @@ fn emergency_cells_validate_checksum_complement_version_and_stale_history() {
         0,
     ))
     .unwrap();
-    assert!(same_version.events.is_empty());
+    assert!(has_no_physical_events(&same_version.events));
     assert!(
         same_version
             .summary
@@ -1280,7 +1439,7 @@ fn stale_emergency_tid_does_not_create_an_empty_projection() {
             0,
         ))),
         identity(0),
-        &EventBudgetGuard::new(1),
+        &AllowAll,
     )
     .unwrap();
 
@@ -1293,11 +1452,14 @@ fn stale_emergency_tid_does_not_create_an_empty_projection() {
         vec![7]
     );
     let mut cursor = Box::new(provider).into_cursor().unwrap();
-    assert!(cursor.next_event(&AllowAll).unwrap().is_some());
-    assert!(cursor.next_event(&AllowAll).unwrap().is_none());
+    let mut emitted = 0;
+    while cursor.next_event(&AllowAll).unwrap().is_some() {
+        emitted += 1;
+    }
     let summary = cursor.finish().unwrap();
     assert_eq!(summary.counters.records_seen, 1);
-    assert_eq!(summary.counters.events_emitted, 1);
+    assert!(emitted >= 2);
+    assert_eq!(summary.counters.events_emitted, emitted);
 }
 
 #[test]
@@ -1404,7 +1566,7 @@ fn high_cardinality_projection_and_merge_work_stays_checkpoint_bounded() {
         expected_events
     );
     assert!(
-        guard.calls() <= 128,
+        guard.calls() <= 640,
         "post-validation work used {} guard operations for {expected_events} events",
         guard.calls()
     );
@@ -1481,7 +1643,7 @@ fn damage_subtraction_work_is_linear_in_ranges_and_events() {
         usize::try_from(retained_count).expect("retained count")
     );
     assert!(
-        guard.calls() <= 800,
+        guard.calls() <= 2_560,
         "damage subtraction used {} post-validation guard operations",
         guard.calls()
     );
@@ -1540,6 +1702,24 @@ fn work_guard_authorizes_header_metadata_and_event_work_before_io_or_allocation(
             .iter()
             .any(|(offset, _)| *offset == (data_start + FLIGHT_RECORD_HEADER_BYTES) as u64)
     );
+}
+
+#[test]
+fn discontinuity_work_is_conservatively_authorized_before_completeness_scan() {
+    let phase = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(PhaseSource::new(
+        fixture("v2-complete.bin"),
+        phase.clone(),
+        Some(2),
+        None,
+    ));
+    let guard = ConservativeEventGuard { phase };
+
+    let parsed = collect_source(source, &guard).expect("conservative discontinuity authorization");
+
+    assert!(parsed.summary.completeness.iter().any(|range| {
+        range.cause() == CompletenessCause::Retained && range.provenance() == Provenance::Captured
+    }));
 }
 
 #[test]

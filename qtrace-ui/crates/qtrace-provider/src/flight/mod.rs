@@ -1,3 +1,5 @@
+mod events;
+mod fragments;
 mod recovery;
 mod wire;
 
@@ -5,8 +7,8 @@ use std::{collections::HashMap, fmt, mem::size_of, sync::Arc, vec};
 
 use crate::{
     EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS, ProviderCapabilities, ProviderError,
-    ProviderSummary, ReadAtSource, SourceIdentity, TimelineDescriptor, TimelineId, TraceProvider,
-    WorkDelta, WorkGuard,
+    ProviderSummary, ReadAtSource, RegisterSnapshot, SourceIdentity, TimelineDescriptor,
+    TimelineId, TraceProvider, WorkDelta, WorkGuard,
 };
 
 pub use wire::{
@@ -19,6 +21,23 @@ pub struct FlightProjectionDescriptor {
     pub tid: u32,
     pub timeline: TimelineDescriptor,
     pub event_keys: Vec<EventKey>,
+    pub final_registers: Option<RegisterSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FlightRecoverySummary {
+    pub format_version: u16,
+    pub run_id: u64,
+    pub pid: u32,
+    pub module_generation: u32,
+    pub target_module: String,
+    pub pointer_width: u8,
+    pub artifact_flags: u32,
+    pub complete: bool,
+    pub active_chunks: Vec<u32>,
+    pub stale_directory_entries: Vec<u32>,
+    pub rotating_directory_entries: Vec<u32>,
+    pub target_pcs: Vec<u64>,
 }
 
 pub struct FlightProvider {
@@ -28,6 +47,7 @@ pub struct FlightProvider {
     projections: Vec<FlightProjectionDescriptor>,
     events: Vec<EventRecord>,
     summary: ProviderSummary,
+    recovery_summary: FlightRecoverySummary,
 }
 
 impl fmt::Debug for FlightProvider {
@@ -65,6 +85,12 @@ impl FlightProvider {
                 .saturating_add(projection_count.saturating_mul(
                     ((size_of::<u32>() + size_of::<usize>()) as u64).saturating_mul(4),
                 ))
+                .saturating_add(
+                    projection_count
+                        .saturating_mul(crate::RegisterSlot::COUNT as u64)
+                        .saturating_mul(size_of::<u64>() as u64)
+                        .saturating_mul(2),
+                )
                 .saturating_add(18),
             ..WorkDelta::default()
         })?;
@@ -98,6 +124,11 @@ impl FlightProvider {
                 tid,
                 timeline,
                 event_keys: Vec::new(),
+                final_registers: recovered
+                    .final_registers
+                    .get(&tid)
+                    .cloned()
+                    .or_else(|| RegisterSnapshot::new(vec![0; crate::RegisterSlot::COUNT])),
             });
             if projection_by_tid.insert(tid, index).is_some() {
                 return Err(resource_error("duplicate Flight projection TID"));
@@ -105,10 +136,9 @@ impl FlightProvider {
         }
         for (event_index, event) in recovered.events.iter().enumerate() {
             guard_checkpoint(guard, event_index)?;
-            let tid = event
-                .key
-                .tid
-                .ok_or_else(|| resource_error("Flight event has no projection TID"))?;
+            let Some(tid) = event.key.tid else {
+                continue;
+            };
             let index = projection_by_tid
                 .get(&tid)
                 .copied()
@@ -129,7 +159,7 @@ impl FlightProvider {
         }
         let summary = ProviderSummary {
             timelines: summary_timelines,
-            termination: None,
+            termination: recovered.termination.clone(),
             counters: recovered.counters,
             completeness: recovered.completeness,
         };
@@ -138,23 +168,28 @@ impl FlightProvider {
             capabilities: ProviderCapabilities {
                 global_ordering: true,
                 per_thread_ordering: true,
-                full_register_checkpoint: false,
-                register_read_write_observation: false,
-                memory_metadata: false,
-                memory_before_after: false,
-                lifecycle: false,
-                signal_and_termination: false,
+                full_register_checkpoint: true,
+                register_read_write_observation: true,
+                memory_metadata: true,
+                memory_before_after: true,
+                lifecycle: true,
+                signal_and_termination: true,
                 loss_and_damage_ranges: true,
             },
             timelines,
             projections,
             events: recovered.events,
             summary,
+            recovery_summary: recovered.recovery_summary,
         })
     }
 
     pub fn projections(&self) -> &[FlightProjectionDescriptor] {
         &self.projections
+    }
+
+    pub fn recovery_summary(&self) -> &FlightRecoverySummary {
+        &self.recovery_summary
     }
 }
 

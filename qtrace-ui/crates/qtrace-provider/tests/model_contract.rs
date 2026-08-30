@@ -5,14 +5,15 @@ use std::{
 
 use qtrace_provider::{
     ArtifactDigest, BeginMetadata, BudgetDimension, ByteSource, CompletenessCause,
-    CompletenessRange, Discontinuity, DiscontinuityCause, EventCursor, EventKey, EventKind,
-    EventPayload, EventRecord, FragmentSourceOffsets, Instruction, InstructionDefinition,
-    MAX_FRAGMENT_SOURCE_OFFSETS, Memory, MemoryDirection, ModuleDefinition, OpaqueOptionalRecord,
-    OperationAbort, Provenance, ProviderCapabilities, ProviderCounters, ProviderError,
-    ProviderSummary, RangeBounds, RangeDomain, ReadAtSource, SemanticEvent, Signal,
-    SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity, Syscall, Termination,
-    TerminationKind, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId,
-    TraceProvider, WorkDelta, WorkGuard,
+    CompletenessRange, CoverageGap, Discontinuity, DiscontinuityCause, EventCursor, EventKey,
+    EventKind, EventPayload, EventRecord, FragmentSourceOffsets, Instruction,
+    InstructionDefinition, MAX_FRAGMENT_SOURCE_OFFSETS, Memory, MemoryDirection, ModuleDefinition,
+    OpaqueOptionalRecord, OperationAbort, Provenance, ProviderCapabilities, ProviderCounters,
+    ProviderError, ProviderSummary, RangeBounds, RangeDomain, ReadAtSource, RegisterCheckpoint,
+    RegisterDelta, RegisterSlot, RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary,
+    SignalHandlerPhase, SourceIdentity, StringDefinition, Syscall, Termination, TerminationKind,
+    ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId, TraceProvider,
+    WorkDelta, WorkGuard,
 };
 use serde::Deserialize;
 
@@ -63,6 +64,10 @@ fn event_kind_serialization_stably_names_every_payload_category() {
         EventKind::Signal,
         EventKind::SignalHandlerBoundary,
         EventKind::Termination,
+        EventKind::RegisterCheckpoint,
+        EventKind::RegisterDelta,
+        EventKind::StringDefinition,
+        EventKind::CoverageGap,
         EventKind::Discontinuity,
         EventKind::OpaqueOptional,
     ];
@@ -83,6 +88,10 @@ fn event_kind_serialization_stably_names_every_payload_category() {
             "signal",
             "signal_handler_boundary",
             "termination",
+            "register_checkpoint",
+            "register_delta",
+            "string_definition",
+            "coverage_gap",
             "discontinuity",
             "opaque_optional"
         ])
@@ -177,6 +186,7 @@ fn fragment_offsets_are_bounded_ordered_and_deserialization_checked() {
             category: None,
             name: "rule".into(),
             detail: "detail".into(),
+            fragment_sequences: Vec::new(),
         }),
         vec![0x100, 0x120, 0x148],
     )
@@ -227,6 +237,7 @@ fn fragment_offsets_are_bounded_ordered_and_deserialization_checked() {
                 category: None,
                 name: "rule".into(),
                 detail: "detail".into(),
+                fragment_sequences: Vec::new(),
             }),
             vec![0x100; MAX_FRAGMENT_SOURCE_OFFSETS + 1],
         )
@@ -410,6 +421,7 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
         category: Some("jni".into()),
         name: "FindClass".into(),
         detail: "java/lang/String".into(),
+        fragment_sequences: Vec::new(),
     };
     let payloads = [
         (
@@ -470,6 +482,9 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
             EventPayload::ThreadLifecycle(ThreadLifecycle {
                 tid: 11,
                 phase: ThreadLifecyclePhase::Begin,
+                creator_tid: None,
+                start_routine: None,
+                module_generation: None,
             }),
             EventKind::ThreadLifecycle,
         ),
@@ -477,17 +492,37 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
             EventPayload::Syscall(Syscall {
                 tid: 11,
                 number: 93,
+                pc: 0,
+                arguments: [0; 6],
+                result: None,
             }),
             EventKind::Syscall,
         ),
         (
-            EventPayload::Signal(Signal { tid: 11, number: 6 }),
+            EventPayload::Signal(Signal {
+                tid: 11,
+                number: 6,
+                code: 0,
+                pc: 0,
+                sp: 0,
+                fault_address: 0,
+                flags: 0,
+            }),
             EventKind::Signal,
         ),
         (
             EventPayload::SignalHandlerBoundary(SignalHandlerBoundary {
                 tid: 11,
                 phase: SignalHandlerPhase::Return,
+                number: 0,
+                code: 0,
+                pc: 0,
+                sp: 0,
+                fault_address: 0,
+                flags: 0,
+                depth: 0,
+                nested_delivery_count: 0,
+                begin_sequence: None,
             }),
             EventKind::SignalHandlerBoundary,
         ),
@@ -497,6 +532,44 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
                 ..Termination::default()
             }),
             EventKind::Termination,
+        ),
+        (
+            EventPayload::RegisterCheckpoint(RegisterCheckpoint {
+                values: vec![RegisterValue {
+                    slot: RegisterSlot::X0,
+                    value: 1,
+                }],
+            }),
+            EventKind::RegisterCheckpoint,
+        ),
+        (
+            EventPayload::RegisterDelta(RegisterDelta {
+                mask: 1,
+                changed: vec![RegisterValue {
+                    slot: RegisterSlot::X0,
+                    value: 2,
+                }],
+                ancestry_reliable: true,
+            }),
+            EventKind::RegisterDelta,
+        ),
+        (
+            EventPayload::StringDefinition(StringDefinition {
+                id: 1,
+                bytes: b"x".to_vec(),
+            }),
+            EventKind::StringDefinition,
+        ),
+        (
+            EventPayload::CoverageGap(CoverageGap {
+                tid: 11,
+                pc: 0,
+                sp: 0,
+                fault_address: 0,
+                reason_flags: 1,
+                dropped_count: 0,
+            }),
+            EventKind::CoverageGap,
         ),
         (
             EventPayload::Discontinuity(Discontinuity {
@@ -524,6 +597,17 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
         );
         assert_eq!(record.kind(), expected_kind);
     }
+}
+
+#[test]
+fn register_snapshot_deserialization_preserves_the_exact_34_slot_invariant() {
+    let valid = serde_json::json!({"values": vec![0_u64; RegisterSlot::COUNT]});
+    let snapshot: qtrace_provider::RegisterSnapshot =
+        serde_json::from_value(valid).expect("valid register snapshot");
+    assert_eq!(snapshot.values().len(), RegisterSlot::COUNT);
+
+    let invalid = serde_json::json!({"values": []});
+    assert!(serde_json::from_value::<qtrace_provider::RegisterSnapshot>(invalid).is_err());
 }
 
 struct PermitAll;

@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{ProviderError, SourceCoordinate};
+
+use super::{cursor::PayloadCursor, wire::*};
+
+fn is_zero_u8(value: &u8) -> bool {
+    *value == 0
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceProfile {
@@ -32,6 +40,12 @@ pub struct BeginMetadata {
     pub run_id: u64,
     pub scene: String,
     pub target: String,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub pointer_width: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_generation: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -216,4 +230,342 @@ pub struct Termination {
     pub return_value: Option<u64>,
     pub elapsed_ms: u64,
     pub metrics: TerminalMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<TerminationIntent>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TerminationIntent {
+    pub pc: u64,
+    pub syscall_number: i64,
+    pub arguments: [u64; 4],
+}
+
+pub(crate) struct DecodedInstruction {
+    pub(crate) local_sequence: u64,
+    pub(crate) instruction: Instruction,
+}
+
+fn nested(
+    payload: &[u8],
+    expected_kind: u16,
+    coordinate: SourceCoordinate,
+) -> Result<&[u8], ProviderError> {
+    let mut cursor = PayloadCursor::new(payload, "nested QTRB record", coordinate);
+    let kind = cursor.u16_le()?;
+    let flags = cursor.u16_le()?;
+    let size = usize::try_from(cursor.u32_le()?)
+        .map_err(|_| invalid_payload(coordinate, "nested QTRB payload size does not fit host"))?;
+    if kind != expected_kind || flags != 0 || size != payload.len().saturating_sub(8) {
+        return Err(invalid_payload(coordinate, "invalid nested QTRB record"));
+    }
+    cursor.take(size)
+}
+
+pub(crate) fn decode_instruction_definition_record(
+    payload: &[u8],
+    coordinate: SourceCoordinate,
+) -> Result<InstructionDefinition, ProviderError> {
+    decode_instruction_definition_payload(nested(payload, 3, coordinate)?, coordinate)
+}
+
+pub(crate) fn decode_instruction_definition_payload(
+    payload: &[u8],
+    coordinate: SourceCoordinate,
+) -> Result<InstructionDefinition, ProviderError> {
+    let mut cursor = PayloadCursor::new(payload, "INSTRUCTION_DEF", coordinate);
+    let definition_id = cursor.u32_le()?;
+    let opcode = cursor.u32_le()?;
+    let read_mask = cursor.u64_le()?;
+    let write_mask = cursor.u64_le()?;
+    let pc_displacement = cursor.i64_le()?;
+    let flags = cursor.u32_le()?;
+    let pc_kind = cursor.u8()?;
+    let condition = cursor.u8()?;
+    let memory_count = usize::from(cursor.u8()?);
+    let slow_memory_path = cursor.u8()?;
+    if definition_id == 0
+        || flags & !VALID_INSTRUCTION_FLAGS != 0
+        || pc_kind > 2
+        || slow_memory_path > 1
+        || memory_count > MAX_MEMORY_OPERAND_COUNT
+        || read_mask >> MAX_GPR_COUNT != 0
+        || write_mask >> MAX_GPR_COUNT != 0
+    {
+        return Err(invalid_payload(
+            coordinate,
+            "invalid instruction definition metadata",
+        ));
+    }
+    let mnemonic = cursor.bounded_utf8(MAX_MNEMONIC_BYTES, "mnemonic")?;
+    let operands = cursor.bounded_utf8(MAX_OPERANDS_BYTES, "operands")?;
+    let disassembly = cursor.bounded_utf8(MAX_DISASSEMBLY_BYTES, "disassembly")?;
+    let reads = shared_registers(&mut cursor, read_mask, "read register", coordinate)?;
+    let writes = shared_registers(&mut cursor, write_mask, "write register", coordinate)?;
+    let mut memory_operands = Vec::new();
+    memory_operands
+        .try_reserve_exact(memory_count)
+        .map_err(|_| invalid_payload(coordinate, "memory operand allocation failed"))?;
+    for _ in 0..memory_count {
+        let base = cursor.u8()?;
+        let index = cursor.u8()?;
+        let extend = cursor.u8()?;
+        let mode = cursor.u8()?;
+        let shift = cursor.u8()?;
+        let direction = cursor.u8()?;
+        let writeback = cursor.u8()?;
+        let size = cursor.u32_le()?;
+        let displacement = cursor.i64_le()?;
+        if (base >= MAX_GPR_COUNT as u8 && base != u8::MAX)
+            || (index >= MAX_GPR_COUNT as u8 && index != u8::MAX)
+            || extend > 4
+            || mode > 2
+            || !matches!(direction, 1..=3)
+            || writeback > 1
+        {
+            return Err(invalid_payload(
+                coordinate,
+                "invalid instruction memory operand",
+            ));
+        }
+        memory_operands.push(MemoryOperand {
+            base: (base != u8::MAX).then_some(base),
+            index: (index != u8::MAX).then_some(index),
+            extend: match extend {
+                0 => RegisterExtend::None,
+                1 => RegisterExtend::Uxtw,
+                2 => RegisterExtend::Sxtw,
+                3 => RegisterExtend::Lsl,
+                _ => RegisterExtend::Sxtx,
+            },
+            mode: match mode {
+                0 => MemoryAddressMode::Offset,
+                1 => MemoryAddressMode::PreIndex,
+                _ => MemoryAddressMode::PostIndex,
+            },
+            shift,
+            direction: decode_direction(direction, coordinate)?,
+            writeback: writeback == 1,
+            size,
+            displacement,
+        });
+    }
+    cursor.finish()?;
+    Ok(InstructionDefinition {
+        definition_id,
+        opcode,
+        read_mask,
+        write_mask,
+        pc_displacement,
+        flags,
+        pc_kind: match pc_kind {
+            0 => PcRelativeKind::None,
+            1 => PcRelativeKind::Instruction,
+            _ => PcRelativeKind::Page,
+        },
+        condition,
+        slow_memory_path: slow_memory_path == 1,
+        mnemonic,
+        operands,
+        disassembly,
+        reads,
+        writes,
+        memory_operands,
+    })
+}
+
+pub(crate) fn decode_instruction_record(
+    payload: &[u8],
+    definition: &InstructionDefinition,
+    coordinate: SourceCoordinate,
+) -> Result<DecodedInstruction, ProviderError> {
+    let payload = nested(payload, 4, coordinate)?;
+    decode_instruction_payload(payload, definition, Some(1), coordinate)
+}
+
+pub(crate) fn decode_instruction_payload(
+    payload: &[u8],
+    definition: &InstructionDefinition,
+    expected_module_id: Option<u32>,
+    coordinate: SourceCoordinate,
+) -> Result<DecodedInstruction, ProviderError> {
+    let mut cursor = PayloadCursor::new(payload, "INSTRUCTION", coordinate);
+    let local_sequence = cursor.u64_le()?;
+    let module_id = cursor.u32_le()?;
+    let relative_pc = cursor.u64_le()?;
+    let definition_id = cursor.u32_le()?;
+    let read_count = usize::from(cursor.u8()?);
+    let write_count = usize::from(cursor.u8()?);
+    if expected_module_id.is_some_and(|expected| module_id != expected)
+        || definition_id != definition.definition_id
+        || read_count != definition.reads.len()
+        || write_count != definition.writes.len()
+    {
+        return Err(invalid_payload(
+            coordinate,
+            "instruction register counts or dictionary references are invalid",
+        ));
+    }
+    let mut read_before = Vec::new();
+    read_before
+        .try_reserve_exact(read_count)
+        .map_err(|_| invalid_payload(coordinate, "instruction read allocation failed"))?;
+    for register in &definition.reads {
+        read_before.push(RegisterObservation {
+            slot: register.slot,
+            captured_width: register.captured_width,
+            name: register.name.clone(),
+            value: cursor.u64_le()?,
+        });
+    }
+    let mut write_after = Vec::new();
+    write_after
+        .try_reserve_exact(write_count)
+        .map_err(|_| invalid_payload(coordinate, "instruction write allocation failed"))?;
+    for register in &definition.writes {
+        write_after.push(RegisterObservation {
+            slot: register.slot,
+            captured_width: register.captured_width,
+            name: register.name.clone(),
+            value: cursor.u64_le()?,
+        });
+    }
+    cursor.finish()?;
+    Ok(DecodedInstruction {
+        local_sequence,
+        instruction: Instruction {
+            definition_id,
+            module_id,
+            relative_pc,
+            read_before,
+            write_after,
+        },
+    })
+}
+
+pub(crate) fn decode_memory_record(
+    payload: &[u8],
+    coordinate: SourceCoordinate,
+) -> Result<Memory, ProviderError> {
+    let payload = nested(payload, 5, coordinate)?;
+    decode_memory_payload_for_module(payload, Some(1), coordinate)
+}
+
+pub(crate) fn decode_memory_payload(
+    payload: &[u8],
+    coordinate: SourceCoordinate,
+) -> Result<Memory, ProviderError> {
+    decode_memory_payload_for_module(payload, None, coordinate)
+}
+
+fn decode_memory_payload_for_module(
+    payload: &[u8],
+    expected_module_id: Option<u32>,
+    coordinate: SourceCoordinate,
+) -> Result<Memory, ProviderError> {
+    let mut cursor = PayloadCursor::new(payload, "MEMORY", coordinate);
+    let module_id = cursor.u32_le()?;
+    let relative_pc = cursor.u64_le()?;
+    let direction = decode_direction(cursor.u8()?, coordinate)?;
+    let metadata_available = cursor.u8()?;
+    let flags = cursor.u16_le()?;
+    let address = cursor.u64_le()?;
+    let size = cursor.u32_le()?;
+    let value = cursor.u64_le()?;
+    if expected_module_id.is_some_and(|expected| module_id != expected) || metadata_available > 1 {
+        return Err(invalid_payload(coordinate, "invalid memory metadata"));
+    }
+    let before = shared_memory_state(&mut cursor, "before memory", coordinate)?;
+    let after = shared_memory_state(&mut cursor, "after memory", coordinate)?;
+    cursor.finish()?;
+    Ok(Memory {
+        module_id,
+        relative_pc,
+        address,
+        size,
+        direction,
+        metadata_available: metadata_available == 1,
+        flags,
+        value,
+        before,
+        after,
+    })
+}
+
+fn shared_registers(
+    cursor: &mut PayloadCursor<'_>,
+    mask: u64,
+    field: &'static str,
+    coordinate: SourceCoordinate,
+) -> Result<Vec<RegisterDefinition>, ProviderError> {
+    let mut registers = Vec::new();
+    registers
+        .try_reserve_exact(mask.count_ones() as usize)
+        .map_err(|_| invalid_payload(coordinate, "register definition allocation failed"))?;
+    for slot in 0..MAX_GPR_COUNT {
+        if mask & (1_u64 << slot) == 0 {
+            continue;
+        }
+        let captured_width = cursor.u8()?;
+        let name = cursor.bounded_utf8(MAX_REGISTER_NAME_BYTES, field)?;
+        if captured_width == 0 || captured_width > 16 || name.is_empty() {
+            return Err(invalid_payload(coordinate, "invalid register definition"));
+        }
+        registers.push(RegisterDefinition {
+            slot: slot as u8,
+            captured_width,
+            name,
+        });
+    }
+    Ok(registers)
+}
+
+fn shared_memory_state(
+    cursor: &mut PayloadCursor<'_>,
+    field: &'static str,
+    coordinate: SourceCoordinate,
+) -> Result<CaptureBytes, ProviderError> {
+    let state = cursor.u8()?;
+    let count = usize::from(cursor.u8()?);
+    if count > MAX_CAPTURED_MEMORY_BYTES {
+        return Err(invalid_payload(
+            coordinate,
+            "memory capture exceeds maximum",
+        ));
+    }
+    let bytes = cursor.take(count)?;
+    match (state, count) {
+        (0, 0) => Ok(CaptureBytes::NotCaptured),
+        (1, _) => Ok(CaptureBytes::Captured(bytes.to_vec())),
+        (2, 0) => Ok(CaptureBytes::Unavailable),
+        _ => Err(invalid_payload(
+            coordinate,
+            format!("invalid {field} state"),
+        )),
+    }
+}
+
+fn decode_direction(
+    value: u8,
+    coordinate: SourceCoordinate,
+) -> Result<MemoryDirection, ProviderError> {
+    match value {
+        1 => Ok(MemoryDirection::Read),
+        2 => Ok(MemoryDirection::Write),
+        3 => Ok(MemoryDirection::ReadWrite),
+        _ => Err(invalid_payload(
+            coordinate,
+            "invalid memory access direction",
+        )),
+    }
+}
+
+fn invalid_payload(coordinate: SourceCoordinate, detail: impl AsRef<str>) -> ProviderError {
+    ProviderError::new(
+        "source.invalid_payload",
+        "qtrb.shared_payload",
+        Some(coordinate),
+        false,
+        detail,
+    )
 }

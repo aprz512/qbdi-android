@@ -15,21 +15,23 @@ pub use error::{ProviderError, SourceCoordinate};
 pub use flight::{
     FLIGHT_CHUNK_HEADER_BYTES, FLIGHT_DIRECTORY_ENTRY_BYTES, FLIGHT_EMERGENCY_RECORD_BYTES,
     FLIGHT_EMERGENCY_SLOT_BYTES, FLIGHT_RECORD_HEADER_BYTES, FLIGHT_SUPERBLOCK_BYTES,
-    FlightProjectionDescriptor, FlightProvider,
+    FlightProjectionDescriptor, FlightProvider, FlightRecoverySummary,
 };
 pub use model::{
-    ArtifactDigest, CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause,
-    EventKey, EventKind, EventPayload, EventRecord, FragmentSourceOffsets,
+    ArtifactDigest, CompletenessCause, CompletenessRange, CoverageGap, Discontinuity,
+    DiscontinuityCause, EventKey, EventKind, EventPayload, EventRecord, FragmentSourceOffsets,
     MAX_FRAGMENT_SOURCE_OFFSETS, ModuleDefinition, OpaqueOptionalRecord, Provenance,
     ProviderCapabilities, ProviderCounters, ProviderSummary, RangeBounds, RangeDomain,
-    SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity, Syscall,
-    ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId,
+    RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot, RegisterValue,
+    SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity,
+    StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor,
+    TimelineId,
 };
 pub use qtrb::{
     BeginMetadata, CaptureBytes, Instruction, InstructionDefinition, Memory, MemoryAddressMode,
     MemoryDirection, MemoryOperand, OpenMode, PcRelativeKind, QtrbInput, QtrbProvider,
     RegisterDefinition, RegisterExtend, RegisterObservation, TerminalMetrics, Termination,
-    TerminationKind, TraceProfile,
+    TerminationIntent, TerminationKind, TraceProfile,
 };
 pub use source::{ByteSource, EventCursor, ReadAtSource, TraceProvider};
 

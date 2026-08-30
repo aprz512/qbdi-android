@@ -6,7 +6,8 @@ mod wire;
 pub use events::{
     BeginMetadata, CaptureBytes, Instruction, InstructionDefinition, Memory, MemoryAddressMode,
     MemoryDirection, MemoryOperand, PcRelativeKind, RegisterDefinition, RegisterExtend,
-    RegisterObservation, TerminalMetrics, Termination, TerminationKind, TraceProfile,
+    RegisterObservation, TerminalMetrics, Termination, TerminationIntent, TerminationKind,
+    TraceProfile,
 };
 pub use input::QtrbInput;
 
@@ -718,6 +719,9 @@ impl QtrbEventCursor {
                 run_id,
                 scene,
                 target,
+                pointer_width: 0,
+                chunk_index: None,
+                chunk_generation: None,
             }),
         ))
     }
@@ -769,6 +773,8 @@ impl QtrbEventCursor {
         &mut self,
         record: PhysicalRecord,
     ) -> Result<EventRecord, ProviderError> {
+        let _shared_definition =
+            events::decode_instruction_definition_payload(&record.payload, coordinate(&record))?;
         let mut cursor =
             PayloadCursor::new(&record.payload, "INSTRUCTION_DEF", coordinate(&record));
         let metadata_id = cursor.u32_le()?;
@@ -905,6 +911,13 @@ impl QtrbEventCursor {
                 "instruction register counts do not match its definition",
             ));
         }
+        let shared_definition = typed_definition(metadata_id, definition);
+        let shared = events::decode_instruction_payload(
+            &record.payload,
+            &shared_definition,
+            None,
+            coordinate(&record),
+        )?;
         let mut read_before = Vec::with_capacity(read_count);
         for register in &definition.reads {
             read_before.push(RegisterObservation {
@@ -948,6 +961,9 @@ impl QtrbEventCursor {
                 "instruction counter overflows u64",
             )
         })?;
+        debug_assert_eq!(shared.local_sequence, sequence);
+        debug_assert_eq!(shared.instruction.read_before, read_before);
+        debug_assert_eq!(shared.instruction.write_after, write_after);
         Ok(self.event(
             &record,
             Some(sequence),
@@ -962,6 +978,7 @@ impl QtrbEventCursor {
     }
 
     fn decode_memory(&self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
+        let shared = events::decode_memory_payload(&record.payload, coordinate(&record))?;
         let mut cursor = PayloadCursor::new(&record.payload, "MEMORY", coordinate(&record));
         let module_id = cursor.u32_le()?;
         let relative_pc = cursor.u64_le()?;
@@ -1002,6 +1019,9 @@ impl QtrbEventCursor {
         let before = decode_memory_state(&mut cursor, "before memory", coordinate(&record))?;
         let after = decode_memory_state(&mut cursor, "after memory", coordinate(&record))?;
         cursor.finish()?;
+        debug_assert_eq!(shared.module_id, module_id);
+        debug_assert_eq!(shared.before, before);
+        debug_assert_eq!(shared.after, after);
         Ok(self.event(
             &record,
             None,
@@ -1267,6 +1287,7 @@ impl QtrbEventCursor {
             category,
             name,
             detail,
+            fragment_sequences: Vec::new(),
         };
         let payload = match kind {
             FragmentKind::Call => EventPayload::SemanticCall(semantic),
@@ -1377,6 +1398,7 @@ impl QtrbEventCursor {
                 producer_wait_ns: metrics[8],
                 effective_buffer_bytes: metrics[9],
             },
+            intent: None,
         };
         self.termination = Some(termination.clone());
         self.terminal_seen = true;

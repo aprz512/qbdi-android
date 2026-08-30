@@ -43,6 +43,10 @@ pub enum EventKind {
     Signal,
     SignalHandlerBoundary,
     Termination,
+    RegisterCheckpoint,
+    RegisterDelta,
+    StringDefinition,
+    CoverageGap,
     Discontinuity,
     OpaqueOptional,
 }
@@ -59,6 +63,8 @@ pub struct SemanticEvent {
     pub category: Option<String>,
     pub name: String,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fragment_sequences: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -72,18 +78,40 @@ pub enum ThreadLifecyclePhase {
 pub struct ThreadLifecycle {
     pub tid: u32,
     pub phase: ThreadLifecyclePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_tid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_routine: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Syscall {
     pub tid: u32,
     pub number: i64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pc: u64,
+    #[serde(default, skip_serializing_if = "is_zero_args")]
+    pub arguments: [u64; 6],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Signal {
     pub tid: u32,
     pub number: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub code: i32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pc: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub sp: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fault_address: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub flags: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -97,6 +125,248 @@ pub enum SignalHandlerPhase {
 pub struct SignalHandlerBoundary {
     pub tid: u32,
     pub phase: SignalHandlerPhase,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub number: i32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub code: i32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub pc: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub sp: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub fault_address: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub flags: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub depth: u16,
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub nested_delivery_count: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub begin_sequence: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegisterSlot {
+    X0,
+    X1,
+    X2,
+    X3,
+    X4,
+    X5,
+    X6,
+    X7,
+    X8,
+    X9,
+    X10,
+    X11,
+    X12,
+    X13,
+    X14,
+    X15,
+    X16,
+    X17,
+    X18,
+    X19,
+    X20,
+    X21,
+    X22,
+    X23,
+    X24,
+    X25,
+    X26,
+    X27,
+    X28,
+    X29,
+    X30,
+    Sp,
+    Pc,
+    Nzcv,
+}
+
+impl RegisterSlot {
+    pub const COUNT: usize = 34;
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::X0 => 0,
+            Self::X1 => 1,
+            Self::X2 => 2,
+            Self::X3 => 3,
+            Self::X4 => 4,
+            Self::X5 => 5,
+            Self::X6 => 6,
+            Self::X7 => 7,
+            Self::X8 => 8,
+            Self::X9 => 9,
+            Self::X10 => 10,
+            Self::X11 => 11,
+            Self::X12 => 12,
+            Self::X13 => 13,
+            Self::X14 => 14,
+            Self::X15 => 15,
+            Self::X16 => 16,
+            Self::X17 => 17,
+            Self::X18 => 18,
+            Self::X19 => 19,
+            Self::X20 => 20,
+            Self::X21 => 21,
+            Self::X22 => 22,
+            Self::X23 => 23,
+            Self::X24 => 24,
+            Self::X25 => 25,
+            Self::X26 => 26,
+            Self::X27 => 27,
+            Self::X28 => 28,
+            Self::X29 => 29,
+            Self::X30 => 30,
+            Self::Sp => 31,
+            Self::Pc => 32,
+            Self::Nzcv => 33,
+        }
+    }
+
+    pub const fn from_index(index: usize) -> Option<Self> {
+        Some(match index {
+            0 => Self::X0,
+            1 => Self::X1,
+            2 => Self::X2,
+            3 => Self::X3,
+            4 => Self::X4,
+            5 => Self::X5,
+            6 => Self::X6,
+            7 => Self::X7,
+            8 => Self::X8,
+            9 => Self::X9,
+            10 => Self::X10,
+            11 => Self::X11,
+            12 => Self::X12,
+            13 => Self::X13,
+            14 => Self::X14,
+            15 => Self::X15,
+            16 => Self::X16,
+            17 => Self::X17,
+            18 => Self::X18,
+            19 => Self::X19,
+            20 => Self::X20,
+            21 => Self::X21,
+            22 => Self::X22,
+            23 => Self::X23,
+            24 => Self::X24,
+            25 => Self::X25,
+            26 => Self::X26,
+            27 => Self::X27,
+            28 => Self::X28,
+            29 => Self::X29,
+            30 => Self::X30,
+            31 => Self::Sp,
+            32 => Self::Pc,
+            33 => Self::Nzcv,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RegisterValue {
+    pub slot: RegisterSlot,
+    pub value: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RegisterSnapshot {
+    values: Vec<u64>,
+}
+
+impl<'de> Deserialize<'de> for RegisterSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SerializedSnapshot {
+            values: Vec<u64>,
+        }
+
+        let value = SerializedSnapshot::deserialize(deserializer)?;
+        Self::new(value.values)
+            .ok_or_else(|| de::Error::custom("register snapshot must contain exactly 34 values"))
+    }
+}
+
+impl RegisterSnapshot {
+    pub fn new(values: Vec<u64>) -> Option<Self> {
+        (values.len() == RegisterSlot::COUNT).then_some(Self { values })
+    }
+
+    pub fn values(&self) -> &[u64] {
+        &self.values
+    }
+
+    pub fn value(&self, slot: RegisterSlot) -> Option<u64> {
+        self.values.get(slot.index()).copied()
+    }
+
+    pub(crate) fn apply(&mut self, changed: &[RegisterValue]) {
+        for item in changed {
+            if let Some(value) = self.values.get_mut(item.slot.index()) {
+                *value = item.value;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RegisterCheckpoint {
+    pub values: Vec<RegisterValue>,
+}
+
+impl RegisterCheckpoint {
+    pub fn value(&self, slot: RegisterSlot) -> Option<u64> {
+        self.values
+            .iter()
+            .find(|item| item.slot == slot)
+            .map(|item| item.value)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RegisterDelta {
+    pub mask: u64,
+    pub changed: Vec<RegisterValue>,
+    pub ancestry_reliable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StringDefinition {
+    pub id: u32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CoverageGap {
+    pub tid: u32,
+    pub pc: u64,
+    pub sp: u64,
+    pub fault_address: u64,
+    pub reason_flags: u32,
+    pub dropped_count: u32,
+}
+
+fn is_zero_u16(value: &u16) -> bool {
+    *value == 0
+}
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+fn is_zero_args(value: &[u64; 6]) -> bool {
+    value.iter().all(|item| *item == 0)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -138,6 +408,10 @@ pub enum EventPayload {
     Signal(Signal),
     SignalHandlerBoundary(SignalHandlerBoundary),
     Termination(Termination),
+    RegisterCheckpoint(RegisterCheckpoint),
+    RegisterDelta(RegisterDelta),
+    StringDefinition(StringDefinition),
+    CoverageGap(CoverageGap),
     Discontinuity(Discontinuity),
     OpaqueOptional(OpaqueOptionalRecord),
 }
@@ -158,6 +432,10 @@ impl EventPayload {
             Self::Signal(_) => EventKind::Signal,
             Self::SignalHandlerBoundary(_) => EventKind::SignalHandlerBoundary,
             Self::Termination(_) => EventKind::Termination,
+            Self::RegisterCheckpoint(_) => EventKind::RegisterCheckpoint,
+            Self::RegisterDelta(_) => EventKind::RegisterDelta,
+            Self::StringDefinition(_) => EventKind::StringDefinition,
+            Self::CoverageGap(_) => EventKind::CoverageGap,
             Self::Discontinuity(_) => EventKind::Discontinuity,
             Self::OpaqueOptional(_) => EventKind::OpaqueOptional,
         }
@@ -314,6 +592,13 @@ impl EventRecord {
 
     pub const fn kind(&self) -> EventKind {
         self.payload.kind()
+    }
+
+    pub fn register_delta(&self) -> Option<&RegisterDelta> {
+        match &self.payload {
+            EventPayload::RegisterDelta(value) => Some(value),
+            _ => None,
+        }
     }
 }
 

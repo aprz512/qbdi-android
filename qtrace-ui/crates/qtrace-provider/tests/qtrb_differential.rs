@@ -232,6 +232,10 @@ fn render(
             | EventPayload::Syscall(_)
             | EventPayload::Signal(_)
             | EventPayload::SignalHandlerBoundary(_)
+            | EventPayload::RegisterCheckpoint(_)
+            | EventPayload::RegisterDelta(_)
+            | EventPayload::StringDefinition(_)
+            | EventPayload::CoverageGap(_)
             | EventPayload::Discontinuity(_) => {}
         }
     }

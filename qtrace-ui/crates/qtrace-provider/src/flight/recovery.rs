@@ -1,9 +1,10 @@
 use std::{collections::HashMap, mem::size_of, sync::Arc};
 
 use crate::{
-    CompletenessCause, CompletenessRange, EventKey, EventPayload, EventRecord,
-    MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance, ProviderCounters, ProviderError,
-    RangeBounds, RangeDomain, ReadAtSource, SourceCoordinate, TimelineId, WorkDelta, WorkGuard,
+    CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause, EventKey,
+    EventPayload, EventRecord, MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance,
+    ProviderCounters, ProviderError, RangeBounds, RangeDomain, ReadAtSource, SourceCoordinate,
+    TimelineId, WorkDelta, WorkGuard,
 };
 
 use super::wire::{
@@ -24,19 +25,36 @@ pub(super) struct RecoveredFlight {
     pub(super) tids: Vec<u32>,
     pub(super) completeness: Vec<CompletenessRange>,
     pub(super) counters: ProviderCounters,
+    pub(super) final_registers: HashMap<u32, crate::RegisterSnapshot>,
+    pub(super) termination: Option<crate::Termination>,
+    pub(super) recovery_summary: super::FlightRecoverySummary,
 }
 
 #[derive(Clone, Copy)]
-struct ChunkIdentity {
-    tid: u32,
-    generation: u32,
-    state: u32,
+pub(super) struct ChunkIdentity {
+    pub(super) tid: u32,
+    pub(super) generation: u32,
+    pub(super) state: u32,
 }
 
 #[derive(Clone, Copy)]
 struct SequenceRange {
     first: u64,
     last: u64,
+}
+
+#[derive(Clone, Copy)]
+struct SequenceProof {
+    range: SequenceRange,
+    cause: CompletenessCause,
+    provenance: Provenance,
+    coordinate: ProofCoordinate,
+}
+
+#[derive(Clone, Copy)]
+enum ProofCoordinate {
+    Source(u64),
+    Eof,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +142,7 @@ pub(super) fn recover(
         .saturating_add(emergency_capacity);
     let mut completeness = fallible_vec(completeness_capacity)?;
     let mut has_directory_uncertainty = false;
+    let mut rotating_directory_entries = Vec::new();
 
     for index in 0..superblock.directory_entries {
         let offset = indexed_offset(
@@ -156,6 +175,7 @@ pub(super) fn recover(
                 )?;
             }
             if entry.state == 2 {
+                rotating_directory_entries.push(entry.index);
                 has_directory_uncertainty = true;
                 push_source_range(
                     &mut completeness,
@@ -191,8 +211,10 @@ pub(super) fn recover(
     let mut events = Vec::new();
     let mut lifecycle = fallible_hash_map(directory_capacity, &context)?;
     let mut damage_ranges = fallible_vec(chunk_capacity)?;
+    let mut sequence_proofs = fallible_vec(chunk_capacity)?;
     let mut has_damage = false;
     let mut has_incomplete = superblock.flags != 0 || has_directory_uncertainty;
+    let mut active_chunks = Vec::new();
     for index in 0..superblock.chunk_count {
         context.guard.consume(WorkDelta::default())?;
         let offset = indexed_offset(
@@ -238,6 +260,7 @@ pub(super) fn recover(
                 mark_chunk_damage(
                     &mut completeness,
                     &mut damage_ranges,
+                    &mut sequence_proofs,
                     header_range,
                     offset,
                     u64::from(superblock.chunk_bytes),
@@ -252,6 +275,7 @@ pub(super) fn recover(
                 mark_chunk_damage(
                     &mut completeness,
                     &mut damage_ranges,
+                    &mut sequence_proofs,
                     header_range,
                     offset,
                     u64::from(superblock.chunk_bytes),
@@ -286,6 +310,7 @@ pub(super) fn recover(
                     mark_chunk_damage(
                         &mut completeness,
                         &mut damage_ranges,
+                        &mut sequence_proofs,
                         header_range,
                         offset,
                         u64::from(superblock.chunk_bytes),
@@ -313,6 +338,7 @@ pub(super) fn recover(
                 mark_chunk_damage(
                     &mut completeness,
                     &mut damage_ranges,
+                    &mut sequence_proofs,
                     header_range,
                     offset,
                     u64::from(superblock.chunk_bytes),
@@ -330,6 +356,7 @@ pub(super) fn recover(
             );
             append_events(&mut events, scan.events, &context)?;
         } else {
+            active_chunks.push(index);
             push_source_range(
                 &mut completeness,
                 offset,
@@ -349,6 +376,7 @@ pub(super) fn recover(
         }
     }
 
+    let mut stale_directory_entries = Vec::new();
     for (index, entry) in directories.iter().enumerate() {
         guard_checkpoint(context.guard, index)?;
         if entry.state == 2 || entry.chunk_index == INVALID_INDEX {
@@ -363,6 +391,7 @@ pub(super) fn recover(
                 && chunk.generation == entry.generation
                 && matches!(chunk.state, 1 | 2)
         }) {
+            stale_directory_entries.push(entry.index);
             let offset = indexed_offset(
                 superblock.directory.offset,
                 entry.index,
@@ -422,6 +451,19 @@ pub(super) fn recover(
                 CompletenessCause::CoverageGap,
                 &context,
             )?;
+            guarded_push(
+                &mut sequence_proofs,
+                SequenceProof {
+                    range: SequenceRange {
+                        first: sequence,
+                        last: sequence,
+                    },
+                    cause: CompletenessCause::CoverageGap,
+                    provenance: Provenance::Captured,
+                    coordinate: ProofCoordinate::Source(event.key.source_offset),
+                },
+                &context,
+            )?;
             has_coverage = true;
         }
     }
@@ -456,6 +498,19 @@ pub(super) fn recover(
                 CompletenessCause::UnterminatedThread,
                 &context,
             )?;
+            guarded_push(
+                &mut sequence_proofs,
+                SequenceProof {
+                    range: SequenceRange {
+                        first: item.first_begin,
+                        last: item.first_begin,
+                    },
+                    cause: CompletenessCause::UnterminatedThread,
+                    provenance: Provenance::Unknown,
+                    coordinate: ProofCoordinate::Eof,
+                },
+                &context,
+            )?;
             has_incomplete = true;
         }
     }
@@ -474,16 +529,224 @@ pub(super) fn recover(
         &mut completeness,
         &context,
     )?;
+    let decoded = super::events::decode(events, &superblock, &chunks, artifact, context.guard)?;
+    events = decoded.events;
+    for (index, sequence) in decoded.damaged_sequences.iter().copied().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        push_sequence_range(
+            &mut completeness,
+            sequence,
+            sequence,
+            Provenance::Damaged,
+            CompletenessCause::Incomplete,
+            &context,
+        )?;
+        if let Some(source_offset) = decoded.damaged_source_offsets.get(index).copied() {
+            guarded_push(
+                &mut sequence_proofs,
+                SequenceProof {
+                    range: SequenceRange {
+                        first: sequence,
+                        last: sequence,
+                    },
+                    cause: CompletenessCause::Incomplete,
+                    provenance: Provenance::Damaged,
+                    coordinate: ProofCoordinate::Source(source_offset),
+                },
+                &context,
+            )?;
+        }
+    }
+    let mut damaged_source_offsets = fallible_vec(decoded.damaged_source_offsets.len())?;
+    for (index, offset) in decoded.damaged_source_offsets.iter().copied().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        damaged_source_offsets.push(offset);
+    }
+    damaged_source_offsets = guarded_radix_sort(damaged_source_offsets, 8, u64_byte, &context)?;
+    let mut previous_chunk = None;
+    for (index, offset) in damaged_source_offsets.into_iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        let chunk_index =
+            offset.saturating_sub(superblock.chunks.offset) / u64::from(superblock.chunk_bytes);
+        if previous_chunk == Some(chunk_index) {
+            continue;
+        }
+        previous_chunk = Some(chunk_index);
+        let start = superblock
+            .chunks
+            .offset
+            .saturating_add(chunk_index.saturating_mul(u64::from(superblock.chunk_bytes)));
+        push_source_range(
+            &mut completeness,
+            start,
+            start.saturating_add(u64::from(superblock.chunk_bytes)),
+            Provenance::Damaged,
+            CompletenessCause::Incomplete,
+            &context,
+        )?;
+    }
+    has_damage |= !decoded.damaged_sequences.is_empty();
     normalize_completeness(&mut completeness, &context)?;
+    add_discontinuity_events(
+        &mut events,
+        &completeness,
+        &sequence_proofs,
+        artifact,
+        source_size,
+        &mut context,
+    )?;
     context.counters.events_emitted = events.len() as u64;
-    context.counters.opaque_records = events.len() as u64;
+    context.counters.opaque_records = 0;
+    for (index, event) in events.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        if matches!(event.payload, EventPayload::OpaqueOptional(_)) {
+            context.counters.opaque_records = context.counters.opaque_records.saturating_add(1);
+        }
+    }
+    context.counters.damaged_records = context
+        .counters
+        .damaged_records
+        .saturating_add(decoded.damaged_sequences.len() as u64);
+    active_chunks = guarded_radix_sort(active_chunks, 4, u32_byte, &context)?;
+    stale_directory_entries = guarded_radix_sort(stale_directory_entries, 4, u32_byte, &context)?;
+    rotating_directory_entries =
+        guarded_radix_sort(rotating_directory_entries, 4, u32_byte, &context)?;
+    let complete = superblock.flags == 0
+        && !has_damage
+        && !has_coverage
+        && stale_directory_entries.is_empty()
+        && decoded.damaged_sequences.is_empty();
     Ok(RecoveredFlight {
         source_bytes: source_size,
         events,
         tids,
         completeness,
         counters: context.counters,
+        final_registers: decoded.final_registers,
+        termination: decoded.termination,
+        recovery_summary: super::FlightRecoverySummary {
+            format_version: 2,
+            run_id: superblock.run_id,
+            pid: superblock.pid,
+            module_generation: superblock.module_generation,
+            target_module: super::fallible_string(
+                std::str::from_utf8(&superblock.target[..usize::from(superblock.target_len)])
+                    .map_err(|_| {
+                        super::wire::superblock_error("invalid validated Flight target")
+                    })?,
+            )?,
+            pointer_width: superblock.pointer_width,
+            artifact_flags: superblock.flags,
+            complete,
+            active_chunks,
+            stale_directory_entries,
+            rotating_directory_entries,
+            target_pcs: decoded.target_pcs,
+        },
     })
+}
+
+fn add_discontinuity_events(
+    events: &mut Vec<EventRecord>,
+    completeness: &[CompletenessRange],
+    sequence_proofs: &[SequenceProof],
+    artifact: crate::ArtifactDigest,
+    artifact_bytes: u64,
+    context: &mut RecoveryContext<'_>,
+) -> Result<(), ProviderError> {
+    let evidence_capacity = completeness
+        .len()
+        .checked_add(sequence_proofs.len())
+        .ok_or_else(|| allocation_error("discontinuity evidence count overflow"))?;
+    context.guard.consume(WorkDelta {
+        events: evidence_capacity as u64,
+        nodes: evidence_capacity as u64,
+        resident_bytes: (evidence_capacity as u64).saturating_mul(256),
+        ..WorkDelta::default()
+    })?;
+    let mut proof_domains = fallible_hash_map(sequence_proofs.len(), context)?;
+    for (index, proof) in sequence_proofs.iter().copied().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        proof_domains.insert((proof.cause, proof.provenance), ());
+    }
+    let original_event_count = events.len();
+    for (index, evidence) in completeness.iter().copied().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        if evidence.cause() == CompletenessCause::Retained {
+            continue;
+        }
+        if matches!(evidence.bounds(), RangeBounds::InclusiveSequence { .. })
+            && proof_domains.contains_key(&(evidence.cause(), evidence.provenance()))
+        {
+            continue;
+        }
+        let source_offset = match evidence.bounds() {
+            RangeBounds::HalfOpen { start, .. } => start,
+            RangeBounds::InclusiveSequence { last, .. } => {
+                let retained = &events[..original_event_count];
+                let position = retained.partition_point(|event| {
+                    event.key.sequence.is_some_and(|sequence| sequence <= last)
+                });
+                retained
+                    .get(position)
+                    .map(|event| event.key.source_offset)
+                    .unwrap_or(artifact_bytes)
+            }
+        };
+        push_discontinuity(events, evidence, source_offset, artifact, context)?;
+    }
+    for (index, proof) in sequence_proofs.iter().copied().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        let evidence = CompletenessRange::captured_sequence_with_cause(
+            proof.range.first,
+            proof.range.last,
+            proof.provenance,
+            proof.cause,
+        )
+        .ok_or_else(|| allocation_error("invalid discontinuity proof range"))?;
+        let source_offset = match proof.coordinate {
+            ProofCoordinate::Source(offset) => offset,
+            ProofCoordinate::Eof => artifact_bytes,
+        };
+        push_discontinuity(events, evidence, source_offset, artifact, context)?;
+    }
+    Ok(())
+}
+
+fn push_discontinuity(
+    events: &mut Vec<EventRecord>,
+    evidence: CompletenessRange,
+    source_offset: u64,
+    artifact: crate::ArtifactDigest,
+    context: &mut RecoveryContext<'_>,
+) -> Result<(), ProviderError> {
+    let cause = match evidence.cause() {
+        CompletenessCause::Lost => DiscontinuityCause::Loss,
+        CompletenessCause::Overwritten => DiscontinuityCause::Overwrite,
+        CompletenessCause::Checksum => DiscontinuityCause::Damage,
+        CompletenessCause::Truncation => DiscontinuityCause::Truncation,
+        _ => DiscontinuityCause::Unknown,
+    };
+    let key = EventKey::new(
+        artifact,
+        MERGED_TIMELINE_ID,
+        context.next_ordinal,
+        source_offset,
+        None,
+        None,
+    );
+    context.next_ordinal = context
+        .next_ordinal
+        .checked_add(1)
+        .ok_or_else(|| allocation_error("discontinuity ordinal overflow"))?;
+    guarded_push_without_charge(
+        events,
+        EventRecord::new(
+            key,
+            evidence.provenance(),
+            EventPayload::Discontinuity(Discontinuity { cause, evidence }),
+        ),
+    )
 }
 
 fn authorize_metadata(
@@ -1168,6 +1431,7 @@ fn valid_sealed_range(header: &ChunkHeader) -> Option<SequenceRange> {
 fn mark_chunk_damage(
     completeness: &mut Vec<CompletenessRange>,
     damage_ranges: &mut Vec<SequenceRange>,
+    sequence_proofs: &mut Vec<SequenceProof>,
     range: Option<SequenceRange>,
     offset: u64,
     chunk_bytes: u64,
@@ -1175,6 +1439,16 @@ fn mark_chunk_damage(
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
     if let Some(range) = range {
+        guarded_push(
+            sequence_proofs,
+            SequenceProof {
+                range,
+                cause,
+                provenance: Provenance::Damaged,
+                coordinate: ProofCoordinate::Source(offset),
+            },
+            context,
+        )?;
         push_sequence_range(
             completeness,
             range.first,
@@ -1394,6 +1668,10 @@ fn event_sequence_byte(event: &EventRecord, pass: usize) -> Result<u8, ProviderE
 }
 
 fn u32_byte(value: &u32, pass: usize) -> Result<u8, ProviderError> {
+    byte_at(&value.to_le_bytes(), pass)
+}
+
+fn u64_byte(value: &u64, pass: usize) -> Result<u8, ProviderError> {
     byte_at(&value.to_le_bytes(), pass)
 }
 

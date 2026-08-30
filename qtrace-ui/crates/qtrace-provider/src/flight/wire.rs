@@ -27,6 +27,11 @@ pub(super) struct Region {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Superblock {
     pub(super) pointer_width: u8,
+    pub(super) run_id: u64,
+    pub(super) pid: u32,
+    pub(super) module_generation: u32,
+    pub(super) target: [u8; TARGET_NAME_BYTES],
+    pub(super) target_len: u16,
     pub(super) artifact_bytes: u64,
     pub(super) directory: Region,
     pub(super) directory_entries: u32,
@@ -139,7 +144,7 @@ pub(super) fn parse_superblock(
     cursor.skip(4)?;
     let run_id = cursor.u64_le()?;
     let pid = cursor.u32_le()?;
-    let _module_generation = cursor.u32_le()?;
+    let module_generation = cursor.u32_le()?;
     let target_name_bytes = usize::from(cursor.u16_le()?);
 
     if magic != MAGIC
@@ -227,8 +232,15 @@ pub(super) fn parse_superblock(
         return Err(superblock_error("misaligned Flight region"));
     }
 
+    let mut target_copy = [0_u8; TARGET_NAME_BYTES];
+    target_copy[..target_name_bytes].copy_from_slice(target);
     Ok(Superblock {
         pointer_width,
+        run_id,
+        pid,
+        module_generation,
+        target: target_copy,
+        target_len: target_name_bytes as u16,
         artifact_bytes,
         directory,
         directory_entries,
