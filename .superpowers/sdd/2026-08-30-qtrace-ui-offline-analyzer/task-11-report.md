@@ -164,20 +164,31 @@ Schema 2 publication uses an internal receipt containing the exact final object 
 Post-reopen rollback unlinks only if both still match. A later same-CacheIdentity winner is
 preserved and returns conflict/uncertain rather than being deleted.
 
+Cache directory discovery remains Task 10 compatible. The canonical key is still SHA-256 over the
+legacy canonical `CacheIdentity` JSON byte stream; the digest is now fed directly by a bounded
+writer instead of materializing a second JSON buffer. A schema-1 cache installed under the
+pre-change `806b…e32b` golden key is found, held-FD identity checked, and opened normally.
+
 ## Budget, cancellation, and simultaneous-live model
 
-- All Task 11 growth sites use one guard-aware fallible seam: checked `Vec`/`String` exact reserve,
-  checked `HashMap`/`HashSet` reserve (including hashbrown control-group/load-factor headroom), and
-  checked boxed catalog/provider state. Build-state typed columns, source-ID/current-module maps,
-  dedup collision buckets, canonical output, every index-family scratch, and reader validation
-  scratch are authorized before growth. The discontinuity verifier first counts base
-  `EventKind::Discontinuity` rows, then authorizes and reserves exactly that many rows. The guard is
-  cumulative: successful allocations consume authorization; deallocation never credits it back.
+- All Task 11 growth sites use one guard-aware fallible seam. Incremental `Vec`/`String` growth uses
+  `new_cap = max(required, MIN, old_cap * 2)` with checked arithmetic, authorizes the complete new
+  allocation layout (not merely the capacity delta), then calls `try_reserve_exact`. The geometric
+  series charges less than twice the terminal layout per container. `HashMap`/`HashSet` authorization
+  covers hashbrown's 7/8-load bucket power-of-two, full key/value bucket bytes, alignment padding,
+  one control byte per bucket, and the trailing 16-byte SIMD control group. The allocator oracle
+  observes the actual complete `alloc`/`realloc` request. Build-state typed columns,
+  source-ID/current-module maps, dedup collision buckets, canonical output, every index-family
+  scratch, and reader validation scratch are authorized before growth. The discontinuity verifier
+  first performs the zero-allocation external-tag/base-kind pass, counts only verified
+  `Discontinuity` rows, then authorizes and reserves exactly that many rows. The guard is cumulative:
+  successful allocations consume authorization; deallocation never credits it back.
 - Canonical payload serialization is two-pass: the first pass counts exact bytes without an output
   allocation, then the guarded output reserves exactly that count. Decode authorization is by the
   closed `EventKind`, with no fixed per-row tax: fixed/no-heap variants use `1 * encoded`; byte/string
-  variants use `2 *`; Begin/Memory/checkpoint/delta use `3 *`; instruction/definition use `5 *`;
-  semantic uses `10 *`. JSON string escaping makes encoded strings no shorter than decoded bytes;
+  variants with multiple dynamic fields use `4 *`; Begin/Memory/checkpoint/delta use `3 *`;
+  instruction/definition use `5 *`; semantic uses `10 *`. JSON string escaping makes encoded
+  strings no shorter than decoded bytes;
   numeric vector elements require at least a digit and separator while decoded elements are eight
   bytes, and geometric `Vec`/`String` capacity is below twice final length. The higher family
   multipliers include all simultaneous dynamic fields/children and serde growth; the enum and fixed
@@ -235,15 +246,26 @@ preserved and returns conflict/uncertain rather than being deleted.
   remains (the persistent cooperative lock is allowed).
 
 The allocation oracle is an isolated test-process global allocator with a thread-local active
-phase. Test-harness/setup allocations occur while the phase is inactive. During the production
-call, each resident `WorkDelta` adds an authorization token and each `alloc`/growth `realloc`
-consumes it; growth without prior credit and growth after a rejected resident ordinal are recorded
+phase. Test-harness/setup allocations occur while the phase is inactive. Each resident `WorkDelta`
+creates one operation-local token, replacing rather than pooling any earlier slack; the immediately
+following `alloc` or growth `realloc` consumes its complete requested layout. A dedicated 8-to-16
+byte realloc test proves that the full 16-byte request is required even when the system allocator
+could extend in place, and a stale 1 KiB token cannot pay for a later two-byte operation. Growth
+without a sufficient current token and growth after a rejected resident ordinal are recorded
 independently. Warm deep-validation and cold build both finish with zero unauthorized growth. The
-cold fixture records 324 resident ordinals; rejecting each ordinal preserves the original
+cold fixture records every resident ordinal; rejecting each one preserves the original
 `BudgetDimension::ResidentBytes`, limit `0x1122`, consumed `0x3344`, performs zero later allocation,
 and leaves no final/temp/staging object. Warm rejection preserves the pre-existing final byte for
 byte. Unit-phase fixtures separately exercise empty completeness, all closed payload variants, 64
-distinct module/definition IDs, and maximum typed children.
+distinct module/definition IDs, and maximum typed children. N/2N/4N probes at 5k/10k/20k prove
+linear authorization and terminal capacity below 2N; checked 10M arithmetic is below twice the
+terminal `Vec<u64>` layout, while a 10M `HashMap<u64,u64>` full-layout bound is below 512 MiB.
+
+Before any payload heap allocation, a fixed-stack JSON scanner verifies the one and only top-level
+external tag and the complete JSON value shape. It recognizes exactly the 19 closed tags and
+requires the tag to match the held-FD base `EventKind`. Unknown or escaped tags, duplicate or extra
+top-level members, mismatched fixed/semantic/discontinuity kinds, malformed bodies, trailing bytes,
+and nesting beyond the fixed limit fail before variant-bound selection or serde decode.
 
 ## TDD evidence
 
@@ -285,20 +307,29 @@ Review-fix REDs were behavior tests over real checked fixtures and private cache
 | Important: original abort | Deep-validation normalization converted a rejected guard into a synthetic Nodes 0/1 error. | `IndexError`, `CacheError`, and `ProviderError` retain the original `OperationAbort`; exhaustive warm/cold ordinal tests assert exact dimension, limit, and consumed values. Completeness validation no longer maps control errors to corruption. |
 | Minor: completeness canonical contract | Flight recovery and store each owned a private ordering/merge implementation. | `completeness_canonical_key` and `merge_canonical_completeness` are provider-model contracts; Flight produces with them while store independently validates sort, overlap, and payload correspondence. |
 
+### Fourth-review finding matrix
+
+| Finding | Initial RED | Resolution / GREEN evidence |
+|---|---|---|
+| Critical: allocation linearity/oracle correctness | One-at-a-time exact-reserve growth charged 100,020,000 bytes for a 5,000-entry `Vec<u64>` whose final payload was 40,000 bytes. With full-request allocator accounting, the first cold oracle recorded 54 unauthorized growths. | Checked geometric capacities authorize the complete new layout and have a per-container geometric sum below twice the final layout. Guarded provider summaries/cursors, store columns, path names, writer descriptors, identity copies, hash buckets, serde decode, and every validation/index family reduce cold and warm unauthorized counts to zero. Allocation unit tests are 4/4 and the isolated integration oracle is 5/5, including every resident rejection ordinal. |
+| Critical: payload tag before allocation | The behavioral tag test initially did not compile because no pre-decode scanner existed; kind-specific bounds were chosen solely from the base column before serde interpreted the external tag. | The fixed-stack scanner validates all 19 matching tags with zero allocator requests and rejects fixed/semantic/discontinuity cross-kind, escaped/unknown/duplicate/extra tags and malformed bodies before decode. Discontinuity scratch is exact-counted only after this pass. |
+| Important: Task 10 cache-key compatibility | A valid schema-1 object moved under Task 10's canonical `806b…e32b` key returned `CacheOpen::Missing` because the new identity digest used a different representation. | The legacy canonical JSON digest is again the sole writer/read directory key, streamed directly into SHA-256. The stable schema-1 golden discovery test is GREEN and still performs normal held-FD validation. |
+| Minor: shared contracts/helpers | Store had a private semantic-definition fingerprint, session matched provider format to size cursors, two modules copied `OsStr` independently, and receipt cleanup carried unused arguments. | Provider exports `SemanticDefinition` and each provider/wrapper reports its own cursor allocation requirement; one guarded OS-string helper is shared and receipt cleanup now accepts only the exact receipt. Provider semantic fingerprint tests prove only source-local ID is excluded. |
+
 ## Final verification
 
-- `cargo test -p qtrace-store` — 132 passed: library 32, allocation authorization 4, cache
-  format 11, cache publication 19, index build 4, index equivalence 15, path security 27, session
+- `cargo test -p qtrace-store` — 138 passed: library 36, allocation authorization 5, cache
+  format 12, cache publication 19, index build 4, index equivalence 15, path security 27, session
   open 20.
-- `cargo test -p qtrace-provider` — 124 passed, 1 intentional ignored child entry: library 4,
-  Flight differential 2/events 5/recovery 39, model 21, properties 13, QTRB differential 7/events
+- `cargo test -p qtrace-provider` — 125 passed, 1 intentional ignored child entry: library 4,
+  Flight differential 2/events 5/recovery 39, model 22, properties 13, QTRB differential 7/events
   7/framing 16/input 10.
 - `cargo test -p qtrace-store --test index_build` — 4/4 passed, including every successful
   checkpoint ordinal injected once as cancellation and once as budget exhaustion (38.14 s fresh
   full-run instance).
 - `cargo test -p qtrace-store --test index_equivalence` — 15/15 passed.
-- Task 10 cache gates within the full run: format 11/11, publication 19/19; the complete store
-  library suite is 32/32.
+- Task 10 cache gates within the full run: format 12/12, publication 19/19; the complete store
+  library suite is 36/36.
 - `cargo clippy -p qtrace-store -p qtrace-provider --all-targets -- -D warnings` — passed.
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
 - `python3 -m unittest scripts.tests.test_qtrace_ui_fixtures scripts.tests.test_trace_binary

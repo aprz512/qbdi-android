@@ -23,9 +23,9 @@ pub use model::{
     FragmentSourceOffsets, MAX_FRAGMENT_SOURCE_OFFSETS, ModuleDefinition, OpaqueOptionalRecord,
     Provenance, ProviderCapabilities, ProviderCounters, ProviderSummary, RangeBounds, RangeDomain,
     RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot, RegisterValue,
-    SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity,
-    StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor,
-    TimelineId, completeness_canonical_key, merge_canonical_completeness,
+    SemanticDefinition, SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase,
+    SourceIdentity, StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase,
+    TimelineDescriptor, TimelineId, completeness_canonical_key, merge_canonical_completeness,
 };
 pub use qtrb::{
     BeginMetadata, CaptureBytes, Instruction, InstructionDefinition, Memory, MemoryAddressMode,

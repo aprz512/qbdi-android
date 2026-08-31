@@ -1,11 +1,10 @@
 use std::{
     fs::File,
     io::{Seek, SeekFrom, Write},
-    mem::size_of,
     path::Path,
 };
 
-use qtrace_provider::{EventKey, EventKind, OperationAbort, WorkDelta, WorkGuard};
+use qtrace_provider::{OperationAbort, WorkDelta, WorkGuard};
 use rustix::{
     fs::{
         AtFlags, FlockOperation, Mode, OFlags, RenameFlags, fchmod, flock, fsync, openat,
@@ -22,9 +21,7 @@ use crate::layout::{
 
 use super::{
     CacheDirectory, CacheError, CacheIdentity, CacheManifest, ObjectIdentity, OwnedStoreView,
-    SectionDescriptor,
-    manifest::MAX_MANIFEST_BYTES,
-    map_errno, map_io_error,
+    SectionDescriptor, map_errno, map_io_error,
     reader::{ValidationFailure, open_final, probe_identity, validate_file},
 };
 
@@ -94,7 +91,6 @@ impl CacheWriter {
         root: &Path,
         guard: &dyn WorkGuard,
     ) -> Result<(PublishOutcome, Option<PublishedReceipt>), CacheError> {
-        self.authorize_resident_peak(guard)?;
         let key = self.identity.cache_key_guarded(guard)?;
         let directory = CacheDirectory::open(root, &key, true, guard)?
             .ok_or_else(|| CacheError::io("created cache directory disappeared"))?;
@@ -104,7 +100,7 @@ impl CacheWriter {
             resident_bytes: 128,
             ..WorkDelta::default()
         })?;
-        let mut temporary = OwnedTemporary::create(&directory)?;
+        let mut temporary = OwnedTemporary::create(&directory, guard)?;
         let result = self.publish_locked(&directory, &publication_lock, &mut temporary, guard);
         match result {
             Ok((outcome, receipt)) => {
@@ -128,11 +124,7 @@ impl CacheWriter {
         }
     }
 
-    pub(crate) fn remove_published(
-        _root: &Path,
-        _identity: &CacheIdentity,
-        receipt: PublishedReceipt,
-    ) -> Result<(), CacheError> {
+    pub(crate) fn remove_published(receipt: PublishedReceipt) -> Result<(), CacheError> {
         struct CleanupGuard;
         impl WorkGuard for CleanupGuard {
             fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
@@ -164,48 +156,6 @@ impl CacheWriter {
         Ok(())
     }
 
-    fn authorize_resident_peak(&self, guard: &dyn WorkGuard) -> Result<(), CacheError> {
-        let keys = self
-            .store
-            .key_capacity()
-            .checked_mul(size_of::<EventKey>())
-            .ok_or_else(|| CacheError::invalid("event-key resident bound overflow"))?;
-        let kinds = self
-            .store
-            .kind_capacity()
-            .checked_mul(size_of::<EventKind>())
-            .ok_or_else(|| CacheError::invalid("event-kind resident bound overflow"))?;
-        let extras = self
-            .store
-            .extra_sections()
-            .iter()
-            .try_fold(0_usize, |total, section| {
-                total
-                    .checked_add(section.bytes.capacity())
-                    .ok_or_else(|| CacheError::invalid("extra-section resident bound overflow"))
-            })?;
-        let identity_text = self
-            .identity
-            .analyzer_version
-            .capacity()
-            .checked_add(self.identity.source_format.capacity())
-            .ok_or_else(|| CacheError::invalid("identity resident bound overflow"))?;
-        let peak = keys
-            .checked_add(kinds)
-            .and_then(|value| value.checked_add(extras))
-            .and_then(|value| value.checked_add(identity_text))
-            .and_then(|value| value.checked_add(MAX_MANIFEST_BYTES as usize))
-            .and_then(|value| value.checked_add(SECTION_CHUNK_BYTES * 2))
-            .and_then(|value| value.checked_add(4096))
-            .ok_or_else(|| CacheError::invalid("cache resident bound overflow"))?;
-        guard.consume(WorkDelta {
-            resident_bytes: u64::try_from(peak)
-                .map_err(|_| CacheError::invalid("cache resident bound does not fit u64"))?,
-            ..WorkDelta::default()
-        })?;
-        Ok(())
-    }
-
     fn publish_locked(
         &self,
         directory: &CacheDirectory,
@@ -219,7 +169,7 @@ impl CacheWriter {
 
         guard.consume(WorkDelta::default())?;
         let manifest = CacheManifest {
-            identity: try_clone_identity(&self.identity)?,
+            identity: self.identity.try_clone_guarded(guard)?,
             sections,
         };
         let manifest_bytes = manifest.canonical_bytes(guard)?;
@@ -408,15 +358,18 @@ impl CacheWriter {
             .checked_add(keys_length)
             .ok_or_else(|| CacheError::invalid("manifest offset overflow"))?;
         let mut sections = Vec::new();
-        sections
-            .try_reserve_exact(2 + self.store.extra_sections().len())
-            .map_err(|_| super::allocation_error("cache section descriptors"))?;
+        crate::allocation::try_reserve_vec(
+            &mut sections,
+            2 + self.store.extra_sections().len(),
+            guard,
+            "cache section descriptors",
+        )?;
         sections.push(SectionDescriptor {
             alignment: 1,
             checksum: kinds_digest.finalize().into(),
             element_size: 1,
             length: kinds_length,
-            name: try_owned(EVENT_KINDS_SECTION)?,
+            name: try_owned(EVENT_KINDS_SECTION, guard)?,
             offset: kinds_offset,
         });
         sections.push(SectionDescriptor {
@@ -424,7 +377,7 @@ impl CacheWriter {
             checksum: keys_digest.finalize().into(),
             element_size: EVENT_KEY_BYTES as u32,
             length: keys_length,
-            name: try_owned(EVENT_KEYS_SECTION)?,
+            name: try_owned(EVENT_KEYS_SECTION, guard)?,
             offset: keys_offset,
         });
         for section in self.store.extra_sections() {
@@ -455,7 +408,7 @@ impl CacheWriter {
                 checksum: digest.finalize().into(),
                 element_size: section.element_size,
                 length,
-                name: try_owned(section.name)?,
+                name: try_owned(section.name, guard)?,
                 offset,
             });
         }
@@ -463,28 +416,12 @@ impl CacheWriter {
     }
 }
 
-fn try_owned(value: &str) -> Result<String, CacheError> {
-    let mut output = String::new();
-    output
-        .try_reserve_exact(value.len())
-        .map_err(|_| super::allocation_error("cache manifest string"))?;
-    output.push_str(value);
-    Ok(output)
-}
-
-fn try_clone_identity(identity: &CacheIdentity) -> Result<CacheIdentity, CacheError> {
-    Ok(CacheIdentity {
-        analyzer_version: try_owned(&identity.analyzer_version)?,
-        artifact_digest: identity.artifact_digest,
-        build_option_digest: identity.build_option_digest,
-        cache_schema: identity.cache_schema,
-        endian: try_owned(&identity.endian)?,
-        layout_version: identity.layout_version,
-        source_features: identity.source_features,
-        source_format: try_owned(&identity.source_format)?,
-        source_major: identity.source_major,
-        source_minor: identity.source_minor,
-    })
+fn try_owned(value: &str, guard: &dyn WorkGuard) -> Result<String, CacheError> {
+    Ok(crate::allocation::try_copy_string(
+        value,
+        guard,
+        "cache manifest string",
+    )?)
 }
 
 fn align_up(value: u64, alignment: u64) -> Result<u64, CacheError> {
@@ -963,20 +900,27 @@ struct OwnedTemporary<'a> {
 }
 
 impl<'a> OwnedTemporary<'a> {
-    fn create(directory: &'a CacheDirectory) -> Result<Self, CacheError> {
-        Self::create_impl(directory, CreatedLeafFault::None)
+    fn create(directory: &'a CacheDirectory, guard: &dyn WorkGuard) -> Result<Self, CacheError> {
+        Self::create_impl(directory, CreatedLeafFault::None, guard)
     }
 
     fn create_impl(
         directory: &'a CacheDirectory,
         fault: CreatedLeafFault,
+        guard: &dyn WorkGuard,
     ) -> Result<Self, CacheError> {
         for _ in 0..32 {
             let mut random = [0_u8; 16];
             getrandom::fill(&mut random).map_err(|error| {
                 CacheError::io(format!("cannot generate cache temp name: {error}"))
             })?;
-            let name = format!(".index.{}.tmp", hex::encode(random));
+            let name = crate::allocation::try_hex_name(
+                ".index.",
+                &random,
+                ".tmp",
+                guard,
+                "cache temporary name",
+            )?;
             match openat(
                 &directory.file,
                 name.as_str(),
@@ -1274,7 +1218,7 @@ mod tests {
         fs::set_permissions(&final_path, fs::Permissions::from_mode(0o600))
             .expect("later winner mode");
 
-        let error = CacheWriter::remove_published(root.path(), &identity, receipt)
+        let error = CacheWriter::remove_published(receipt)
             .expect_err("old receipt must not remove a later winner");
         assert_eq!(error.code(), "cache.identity_conflict");
         assert_eq!(
@@ -1454,7 +1398,7 @@ mod tests {
                 .expect("created directory");
             let _lock = PublicationLock::acquire(&directory, &AllowAll).expect("publication lock");
             assert!(
-                OwnedTemporary::create_impl(&directory, fault).is_err(),
+                OwnedTemporary::create_impl(&directory, fault, &AllowAll).is_err(),
                 "injected setup failure was ignored"
             );
             let entries = fs::read_dir(root.path().join("qtrace-ui").join("a".repeat(64)))
@@ -1477,7 +1421,11 @@ mod tests {
         let _lock = PublicationLock::acquire(&directory, &AllowAll).expect("publication lock");
         INJECT_CREATED_LEAF_RECOVERY_RESOURCE_FAILURE.with(|injected| injected.set(true));
 
-        let error = match OwnedTemporary::create_impl(&directory, CreatedLeafFault::FirstIdentity) {
+        let error = match OwnedTemporary::create_impl(
+            &directory,
+            CreatedLeafFault::FirstIdentity,
+            &AllowAll,
+        ) {
             Err(error) => error,
             Ok(_) => panic!("both created leaf identity checks must fail"),
         };

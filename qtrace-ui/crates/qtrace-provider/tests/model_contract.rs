@@ -10,10 +10,11 @@ use qtrace_provider::{
     InstructionDefinition, MAX_FRAGMENT_SOURCE_OFFSETS, Memory, MemoryDirection, ModuleDefinition,
     OpaqueOptionalRecord, OperationAbort, Provenance, ProviderCapabilities, ProviderCounters,
     ProviderError, ProviderSummary, RangeBounds, RangeDomain, ReadAtSource, RegisterCheckpoint,
-    RegisterDelta, RegisterSlot, RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary,
-    SignalHandlerPhase, SourceIdentity, StringDefinition, Syscall, Termination, TerminationKind,
-    ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId, TraceProvider,
-    WorkDelta, WorkGuard, completeness_canonical_key, merge_canonical_completeness,
+    RegisterDelta, RegisterSlot, RegisterValue, SemanticDefinition, SemanticEvent, Signal,
+    SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity, StringDefinition, Syscall,
+    Termination, TerminationKind, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor,
+    TimelineId, TraceProvider, WorkDelta, WorkGuard, completeness_canonical_key,
+    merge_canonical_completeness,
 };
 use serde::Deserialize;
 
@@ -28,6 +29,27 @@ fn event_identity_does_not_depend_on_visible_row_or_optional_sequence() {
     assert_eq!(key.source_offset, 0x240);
     assert_eq!(key.sequence, None);
     assert_eq!(key.tid, Some(42));
+}
+
+#[test]
+fn semantic_definition_excludes_only_the_source_local_id() {
+    let first = InstructionDefinition {
+        definition_id: 7,
+        opcode: 0x1234,
+        mnemonic: "add".to_owned(),
+        operands: "x0, x1".to_owned(),
+        ..InstructionDefinition::default()
+    };
+    let mut same_semantics = first.clone();
+    same_semantics.definition_id = 99;
+    let mut different_semantics = first.clone();
+    different_semantics.condition = 3;
+
+    let encoded = |definition| {
+        serde_json::to_vec(&SemanticDefinition(definition)).expect("semantic definition")
+    };
+    assert_eq!(encoded(&first), encoded(&same_semantics));
+    assert_ne!(encoded(&first), encoded(&different_semantics));
 }
 
 #[test]

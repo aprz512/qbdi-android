@@ -8,7 +8,7 @@ use std::{
     fmt,
     fs::File,
     os::unix::{
-        ffi::{OsStrExt, OsStringExt},
+        ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt},
     },
     path::{Component, Path},
@@ -274,6 +274,7 @@ pub(crate) fn map_io_error(context: &str, error: std::io::Error) -> CacheError {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn allocation_error(context: &str) -> CacheError {
     CacheError::resource(format!("{context}: allocation failed"))
 }
@@ -311,7 +312,11 @@ impl OwnedStoreView {
         })
     }
 
-    pub(crate) fn with_section(mut self, section: OwnedSection) -> Result<Self, CacheError> {
+    pub(crate) fn with_section(
+        mut self,
+        section: OwnedSection,
+        guard: &dyn WorkGuard,
+    ) -> Result<Self, CacheError> {
         if section.name.is_empty()
             || section.alignment == 0
             || !section.alignment.is_power_of_two()
@@ -326,9 +331,12 @@ impl OwnedStoreView {
                 "invalid or duplicate owned cache section",
             ));
         }
-        self.extra_sections
-            .try_reserve(1)
-            .map_err(|_| allocation_error("owned cache section list"))?;
+        crate::allocation::try_reserve_vec(
+            &mut self.extra_sections,
+            1,
+            guard,
+            "owned cache section list",
+        )?;
         self.extra_sections.push(section);
         Ok(self)
     }
@@ -339,14 +347,6 @@ impl OwnedStoreView {
 
     pub(crate) fn kinds(&self) -> &[EventKind] {
         &self.event_kinds
-    }
-
-    pub(crate) fn key_capacity(&self) -> usize {
-        self.event_keys.capacity()
-    }
-
-    pub(crate) fn kind_capacity(&self) -> usize {
-        self.event_kinds.capacity()
     }
 
     pub(crate) fn extra_sections(&self) -> &[OwnedSection] {
@@ -493,6 +493,7 @@ impl CacheDirectory {
                         name,
                         create,
                         normal_index == root_component_count,
+                        guard,
                     )?
                     else {
                         return Ok(None);
@@ -505,7 +506,7 @@ impl CacheDirectory {
             }
         }
         for name in [OsStr::new("qtrace-ui"), OsStr::new(key)] {
-            let Some(next) = open_or_create_directory(&current, name, create, true)? else {
+            let Some(next) = open_or_create_directory(&current, name, create, true, guard)? else {
                 return Ok(None);
             };
             let identity = ObjectIdentity::from_file(&next)?;
@@ -541,15 +542,11 @@ impl CacheDirectory {
 }
 
 fn try_copy_os_string(value: &OsStr, guard: &dyn WorkGuard) -> Result<OsString, CacheError> {
-    let mut bytes = Vec::new();
-    crate::allocation::try_reserve_vec(
-        &mut bytes,
-        value.as_bytes().len(),
+    Ok(crate::allocation::try_copy_os_string(
+        value,
         guard,
         "cache path component",
-    )?;
-    bytes.extend_from_slice(value.as_bytes());
-    Ok(OsString::from_vec(bytes))
+    )?)
 }
 
 fn open_or_create_directory(
@@ -557,11 +554,12 @@ fn open_or_create_directory(
     name: &OsStr,
     create: bool,
     private: bool,
+    guard: &dyn WorkGuard,
 ) -> Result<Option<File>, CacheError> {
     let descriptor = match openat(parent, name, DIRECTORY_FLAGS, Mode::empty()) {
         Ok(descriptor) => descriptor,
         Err(Errno::NOENT) if !create => return Ok(None),
-        Err(Errno::NOENT) => create_staged_private_directory(parent, name)?.into(),
+        Err(Errno::NOENT) => create_staged_private_directory(parent, name, guard)?.into(),
         Err(error) => {
             return Err(map_directory_errno("cannot open cache directory", error));
         }
@@ -581,13 +579,23 @@ fn open_or_create_directory(
     Ok(Some(file))
 }
 
-fn create_staged_private_directory(parent: &File, target: &OsStr) -> Result<File, CacheError> {
+fn create_staged_private_directory(
+    parent: &File,
+    target: &OsStr,
+    guard: &dyn WorkGuard,
+) -> Result<File, CacheError> {
     for _ in 0..32 {
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(|error| {
             CacheError::io(format!("cannot generate directory staging name: {error}"))
         })?;
-        let staging = format!(".qtrace-dir-{}.tmp", hex::encode(random));
+        let staging = crate::allocation::try_hex_name(
+            ".qtrace-dir-",
+            &random,
+            ".tmp",
+            guard,
+            "cache directory staging name",
+        )?;
         match mkdirat(
             parent,
             staging.as_str(),
@@ -832,8 +840,17 @@ mod tests {
         INJECT_DIRECTORY_SETUP_FAULT, PublicationState, allocation_error, map_errno,
         open_or_create_directory,
     };
+    use qtrace_provider::{OperationAbort, WorkDelta, WorkGuard};
     use rustix::io::Errno;
     use tempfile::TempDir;
+
+    struct AllowAll;
+
+    impl WorkGuard for AllowAll {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn resource_failures_have_one_stable_control_code() {
@@ -868,8 +885,14 @@ mod tests {
             let parent = TempDir::new().expect("parent");
             let parent_file = File::open(parent.path()).expect("parent descriptor");
             INJECT_DIRECTORY_SETUP_FAULT.with(|injected| injected.set(fault));
-            let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
-                .expect_err("injected directory setup failure must fail");
+            let error = open_or_create_directory(
+                &parent_file,
+                OsStr::new("created"),
+                true,
+                true,
+                &AllowAll,
+            )
+            .expect_err("injected directory setup failure must fail");
             assert_eq!(error.code(), "cache.io");
             assert_eq!(
                 fs::read_dir(parent.path())
@@ -890,8 +913,9 @@ mod tests {
             .with(|injected| injected.set(DirectorySetupFault::FirstIdentity));
         INJECT_DIRECTORY_RECOVERY_RESOURCE_FAILURE.with(|injected| injected.set(true));
 
-        let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
-            .expect_err("both directory identity checks must fail");
+        let error =
+            open_or_create_directory(&parent_file, OsStr::new("created"), true, true, &AllowAll)
+                .expect_err("both directory identity checks must fail");
 
         assert_eq!(error.code(), "control.resource_exhausted");
         assert!(error.is_control());
@@ -929,8 +953,9 @@ mod tests {
         let parent = TempDir::new().expect("parent");
         let foreign = install_directory_name_rebind(parent.path());
         let parent_file = File::open(parent.path()).expect("parent descriptor");
-        let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
-            .expect_err("rebound created name must fail closed");
+        let error =
+            open_or_create_directory(&parent_file, OsStr::new("created"), true, true, &AllowAll)
+                .expect_err("rebound created name must fail closed");
         assert!(
             matches!(
                 error.code(),
@@ -950,8 +975,9 @@ mod tests {
         let parent_file = File::open(parent.path()).expect("parent descriptor");
         INJECT_DIRECTORY_SETUP_FAULT
             .with(|injected| injected.set(DirectorySetupFault::FirstIdentity));
-        let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
-            .expect_err("first fstat failure with rebind must fail closed");
+        let error =
+            open_or_create_directory(&parent_file, OsStr::new("created"), true, true, &AllowAll)
+                .expect_err("first fstat failure with rebind must fail closed");
         assert_eq!(error.code(), "cache.identity_conflict");
         let metadata = foreign.metadata().expect("foreign metadata");
         assert_eq!(metadata.mode() & 0o7777, 0o755);

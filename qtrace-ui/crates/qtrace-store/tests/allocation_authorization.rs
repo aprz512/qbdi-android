@@ -86,7 +86,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record_growth(new_size.saturating_sub(layout.size()));
+        record_growth(new_size);
         // SAFETY: forwards the matching reallocation to the system allocator.
         unsafe { System.realloc(pointer, layout, new_size) }
     }
@@ -163,14 +163,78 @@ impl WorkGuard for OracleGuard {
         }
         ORACLE.with(|slot| {
             let mut state = slot.get();
-            state.authorized = state
-                .authorized
-                .checked_add(delta.resident_bytes)
-                .expect("oracle authorization overflow");
+            // A resident authorization belongs only to the immediately following allocation
+            // scope. Unused credit from an earlier scope must never subsidize another operation.
+            state.authorized = delta.resident_bytes;
             slot.set(state);
         });
         Ok(())
     }
+}
+
+fn active_oracle_state() -> OracleState {
+    OracleState {
+        active: true,
+        ..OracleState::default()
+    }
+}
+
+#[test]
+fn allocator_oracle_binds_credit_to_one_scope_and_counts_full_realloc_requests() {
+    let guard = OracleGuard {
+        reject_resident: None,
+        resident_ordinal: AtomicUsize::new(0),
+    };
+
+    let mut values = Vec::with_capacity(8);
+    values.extend_from_slice(&[0_u8; 8]);
+    ORACLE.with(|slot| slot.set(active_oracle_state()));
+    guard
+        .consume(WorkDelta {
+            resident_bytes: 16,
+            ..WorkDelta::default()
+        })
+        .expect("realloc token");
+    values.try_reserve_exact(8).expect("grow to sixteen");
+    let full_request = ORACLE.with(|slot| {
+        let mut state = slot.get();
+        state.active = false;
+        slot.set(state);
+        state
+    });
+    assert_eq!(values.capacity(), 16);
+    assert_eq!(full_request.unauthorized, 0);
+    assert_eq!(
+        full_request.authorized, 0,
+        "realloc consumes its full new layout"
+    );
+
+    ORACLE.with(|slot| slot.set(active_oracle_state()));
+    guard
+        .consume(WorkDelta {
+            resident_bytes: 1_024,
+            ..WorkDelta::default()
+        })
+        .expect("old scope");
+    guard
+        .consume(WorkDelta {
+            resident_bytes: 1,
+            ..WorkDelta::default()
+        })
+        .expect("replacement scope");
+    let mut second = Vec::<u8>::new();
+    second.try_reserve_exact(2).expect("two-byte request");
+    let scoped = ORACLE.with(|slot| {
+        let mut state = slot.get();
+        state.active = false;
+        slot.set(state);
+        state
+    });
+    assert_eq!(scoped.unauthorized, 1, "stale 1KiB credit must not pool");
+    assert_eq!(
+        scoped.authorized, 1,
+        "failed request cannot consume its token"
+    );
 }
 
 #[test]
@@ -203,10 +267,7 @@ fn warm_deep_validation_heap_growth_requires_prior_resident_authorization() {
         .expect("initial cache");
 
     ORACLE.with(|slot| {
-        slot.set(OracleState {
-            active: true,
-            ..OracleState::default()
-        });
+        slot.set(active_oracle_state());
     });
     let guard = OracleGuard {
         reject_resident: None,
@@ -260,10 +321,7 @@ fn cold_build_heap_growth_requires_prior_resident_authorization() {
         .expect("QTRB artifact");
     let root = private_root();
     ORACLE.with(|slot| {
-        slot.set(OracleState {
-            active: true,
-            ..OracleState::default()
-        });
+        slot.set(active_oracle_state());
     });
     let guard = OracleGuard {
         reject_resident: None,
@@ -339,10 +397,7 @@ fn every_warm_resident_rejection_preserves_the_original_abort_without_later_grow
 
     for reject_at in 1..=resident_calls {
         ORACLE.with(|slot| {
-            slot.set(OracleState {
-                active: true,
-                ..OracleState::default()
-            });
+            slot.set(active_oracle_state());
         });
         let reject = OracleGuard {
             reject_resident: Some(reject_at),
@@ -424,10 +479,7 @@ fn every_cold_resident_rejection_stops_growth_and_leaves_no_cache_object() {
     for reject_at in 1..=resident_calls {
         let root = private_root();
         ORACLE.with(|slot| {
-            slot.set(OracleState {
-                active: true,
-                ..OracleState::default()
-            });
+            slot.set(active_oracle_state());
         });
         let reject = OracleGuard {
             reject_resident: Some(reject_at),

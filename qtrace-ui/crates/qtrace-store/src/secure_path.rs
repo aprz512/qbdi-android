@@ -301,18 +301,8 @@ impl SecureFile {
 }
 
 fn try_copy_os_string(value: &OsStr, guard: &dyn WorkGuard) -> Result<OsString, ProviderError> {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-
-    let mut bytes = Vec::new();
-    crate::allocation::try_reserve_vec(
-        &mut bytes,
-        value.as_bytes().len(),
-        guard,
-        "source path component allocation",
-    )
-    .map_err(allocation_failure)?;
-    bytes.extend_from_slice(value.as_bytes());
-    Ok(OsString::from_vec(bytes))
+    crate::allocation::try_copy_os_string(value, guard, "source path component allocation")
+        .map_err(allocation_failure)
 }
 
 fn allocation_failure(error: crate::allocation::AllocationFailure) -> ProviderError {

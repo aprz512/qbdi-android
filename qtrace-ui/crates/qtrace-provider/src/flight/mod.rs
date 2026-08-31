@@ -204,6 +204,18 @@ impl TraceProvider for FlightProvider {
         &self.timelines
     }
 
+    fn cursor_resident_bytes(&self) -> Result<u64, ProviderError> {
+        u64::try_from(Self::CURSOR_RESIDENT_BYTES).map_err(|_| {
+            ProviderError::new(
+                "control.resource_exhausted",
+                "flight.allocation",
+                None,
+                false,
+                "Flight cursor allocation bound overflow",
+            )
+        })
+    }
+
     fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError> {
         let provider = *self;
         Ok(Box::new(FlightCursor {

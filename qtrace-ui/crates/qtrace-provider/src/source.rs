@@ -20,6 +20,9 @@ pub trait TraceProvider: Send + Sync {
     fn identity(&self) -> &SourceIdentity;
     fn capabilities(&self) -> &ProviderCapabilities;
     fn timelines(&self) -> &[TimelineDescriptor];
+    fn cursor_resident_bytes(&self) -> Result<u64, ProviderError> {
+        Ok(0)
+    }
     fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError>;
 }
 

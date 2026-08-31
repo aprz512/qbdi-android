@@ -209,26 +209,6 @@ impl ArtifactSource {
         )
         .map_err(provider_allocation_error)?)
     }
-
-    pub(crate) fn authorize_provider_cursor(
-        &self,
-        guard: &dyn WorkGuard,
-    ) -> Result<(), ProviderError> {
-        let provider_cursor = match self.format {
-            ArtifactFormat::Qtrb | ArtifactFormat::QtrbLz4 => {
-                QtrbProvider::CURSOR_RESIDENT_BYTES.checked_add(size_of::<TimelineRemapCursor>())
-            }
-            ArtifactFormat::Flight => Some(FlightProvider::CURSOR_RESIDENT_BYTES),
-        }
-        .and_then(|bytes| bytes.checked_add(size_of::<IdentityCheckedCursor>()))
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| resource_error("provider cursor allocation bound overflow"))?;
-        guard.consume(WorkDelta {
-            resident_bytes: provider_cursor,
-            ..WorkDelta::default()
-        })?;
-        Ok(())
-    }
 }
 
 #[derive(Debug)]
@@ -794,6 +774,13 @@ impl TraceProvider for TimelineRemapProvider {
         &self.timelines
     }
 
+    fn cursor_resident_bytes(&self) -> Result<u64, ProviderError> {
+        self.inner
+            .cursor_resident_bytes()?
+            .checked_add(size_of::<TimelineRemapCursor>() as u64)
+            .ok_or_else(|| resource_error("timeline-remap cursor allocation bound overflow"))
+    }
+
     fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError> {
         let Self {
             inner, timeline_id, ..
@@ -846,6 +833,13 @@ impl TraceProvider for IdentityCheckedProvider {
 
     fn timelines(&self) -> &[TimelineDescriptor] {
         self.inner.timelines()
+    }
+
+    fn cursor_resident_bytes(&self) -> Result<u64, ProviderError> {
+        self.inner
+            .cursor_resident_bytes()?
+            .checked_add(size_of::<IdentityCheckedCursor>() as u64)
+            .ok_or_else(|| resource_error("identity cursor allocation bound overflow"))
     }
 
     fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError> {

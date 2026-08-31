@@ -110,6 +110,25 @@ fn mutate_manifest(bytes: &mut Vec<u8>, mutation: impl FnOnce(&mut Value)) {
 }
 
 #[test]
+fn task10_canonical_identity_directory_remains_discoverable() {
+    const LEGACY_KEY: &str = "806b682190815919c7761397740d08c593a0da83521f95f7cb7af8fe3155e32b";
+    let root = private_root();
+    let current_file = publish(root.path());
+    let current_directory = current_file.parent().expect("digest directory");
+    let legacy_directory = root.path().join("qtrace-ui").join(LEGACY_KEY);
+    if current_directory != legacy_directory {
+        fs::rename(current_directory, &legacy_directory)
+            .expect("install pre-change cache directory");
+    }
+
+    match CacheReader::open(root.path(), &identity(), &AllowAll).expect("legacy cache probe") {
+        CacheOpen::Ready(view) => assert_eq!(view.event_count(), 2),
+        CacheOpen::Missing => panic!("Task 10 canonical identity cache was not discovered"),
+        CacheOpen::Rebuild(reason) => panic!("Task 10 cache unexpectedly rebuilt: {reason:?}"),
+    }
+}
+
+#[test]
 fn header_is_exactly_sixty_four_bytes_and_rejects_every_header_corruption() {
     let cases: Vec<ByteMutation> = vec![
         Box::new(|bytes| bytes[0] ^= 1),

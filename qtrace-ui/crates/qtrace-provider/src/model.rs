@@ -1,6 +1,6 @@
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeStruct};
 
 use crate::qtrb::events::{BeginMetadata, Instruction, InstructionDefinition, Memory, Termination};
 
@@ -66,6 +66,35 @@ pub struct SemanticEvent {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fragment_sequences: Vec<u64>,
+}
+
+/// Canonical instruction-definition semantics with the source-local ID normalized away.
+pub struct SemanticDefinition<'a>(pub &'a InstructionDefinition);
+
+impl Serialize for SemanticDefinition<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let definition = self.0;
+        let mut state = serializer.serialize_struct("InstructionDefinition", 15)?;
+        state.serialize_field("definition_id", &0_u32)?;
+        state.serialize_field("opcode", &definition.opcode)?;
+        state.serialize_field("read_mask", &definition.read_mask)?;
+        state.serialize_field("write_mask", &definition.write_mask)?;
+        state.serialize_field("pc_displacement", &definition.pc_displacement)?;
+        state.serialize_field("flags", &definition.flags)?;
+        state.serialize_field("pc_kind", &definition.pc_kind)?;
+        state.serialize_field("condition", &definition.condition)?;
+        state.serialize_field("slow_memory_path", &definition.slow_memory_path)?;
+        state.serialize_field("mnemonic", &definition.mnemonic)?;
+        state.serialize_field("operands", &definition.operands)?;
+        state.serialize_field("disassembly", &definition.disassembly)?;
+        state.serialize_field("reads", &definition.reads)?;
+        state.serialize_field("writes", &definition.writes)?;
+        state.serialize_field("memory_operands", &definition.memory_operands)?;
+        state.end()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]

@@ -26,12 +26,37 @@ pub struct CacheIdentity {
 }
 
 impl CacheIdentity {
+    pub(crate) fn try_clone_guarded(&self, guard: &dyn WorkGuard) -> Result<Self, CacheError> {
+        Ok(Self {
+            analyzer_version: crate::allocation::try_copy_string(
+                &self.analyzer_version,
+                guard,
+                "cache analyzer version",
+            )?,
+            artifact_digest: self.artifact_digest,
+            build_option_digest: self.build_option_digest,
+            cache_schema: self.cache_schema,
+            endian: crate::allocation::try_copy_string(&self.endian, guard, "cache endian")?,
+            layout_version: self.layout_version,
+            source_features: self.source_features,
+            source_format: crate::allocation::try_copy_string(
+                &self.source_format,
+                guard,
+                "cache source format",
+            )?,
+            source_major: self.source_major,
+            source_minor: self.source_minor,
+        })
+    }
+
     pub fn cache_key(&self) -> String {
-        self.fixed_digest_key().map(hex::encode).unwrap_or_default()
+        self.legacy_digest_key()
+            .map(hex::encode)
+            .unwrap_or_default()
     }
 
     pub(crate) fn cache_key_guarded(&self, guard: &dyn WorkGuard) -> Result<String, CacheError> {
-        let digest = self.fixed_digest_key()?;
+        let digest = self.legacy_digest_key()?;
         let mut key = String::new();
         crate::allocation::try_reserve_string(&mut key, 64, guard, "cache identity key")?;
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -42,20 +67,11 @@ impl CacheIdentity {
         Ok(key)
     }
 
-    fn fixed_digest_key(&self) -> Result<[u8; 32], CacheError> {
+    fn legacy_digest_key(&self) -> Result<[u8; 32], CacheError> {
         self.validate()?;
         let mut digest = Sha256::new();
-        digest.update(b"qtrace-cache-identity-v2\0");
-        update_text(&mut digest, self.analyzer_version.as_bytes())?;
-        digest.update(self.artifact_digest);
-        digest.update(self.build_option_digest);
-        digest.update(self.cache_schema.to_le_bytes());
-        update_text(&mut digest, self.endian.as_bytes())?;
-        digest.update(self.layout_version.to_le_bytes());
-        digest.update(self.source_features.to_le_bytes());
-        update_text(&mut digest, self.source_format.as_bytes())?;
-        digest.update(self.source_major.to_le_bytes());
-        digest.update(self.source_minor.to_le_bytes());
+        serde_json::to_writer(DigestWriter(&mut digest), self)
+            .map_err(|_| CacheError::invalid("cannot encode canonical cache identity"))?;
         Ok(digest.finalize().into())
     }
 
@@ -109,12 +125,17 @@ impl CacheIdentity {
     }
 }
 
-fn update_text(digest: &mut Sha256, bytes: &[u8]) -> Result<(), CacheError> {
-    let length = u64::try_from(bytes.len())
-        .map_err(|_| CacheError::invalid("cache identity text length overflow"))?;
-    digest.update(length.to_le_bytes());
-    digest.update(bytes);
-    Ok(())
+struct DigestWriter<'a>(&'a mut Sha256);
+
+impl std::io::Write for DigestWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

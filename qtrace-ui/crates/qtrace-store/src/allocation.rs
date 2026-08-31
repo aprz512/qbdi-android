@@ -1,8 +1,10 @@
 use std::{
     alloc::{Layout, alloc},
     collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
     hash::{BuildHasher, Hash},
-    mem::size_of,
+    mem::{align_of, size_of},
+    os::unix::ffi::{OsStrExt, OsStringExt},
 };
 
 use qtrace_provider::{EventKind, OperationAbort, WorkDelta, WorkGuard};
@@ -25,6 +27,18 @@ pub(crate) fn checked_array_bytes<T>(count: usize) -> Result<u64, AllocationFail
         .checked_mul(size_of::<T>())
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or(AllocationFailure::Overflow("allocation byte count"))
+}
+
+fn geometric_capacity(
+    current: usize,
+    required: usize,
+    minimum: usize,
+    label: &'static str,
+) -> Result<usize, AllocationFailure> {
+    let doubled = current
+        .checked_mul(2)
+        .ok_or(AllocationFailure::Overflow(label))?;
+    Ok(required.max(minimum.max(doubled)))
 }
 
 pub(crate) fn authorize(
@@ -52,9 +66,10 @@ pub(crate) fn try_reserve_vec<T>(
     if required <= values.capacity() {
         return Ok(());
     }
-    authorize(guard, checked_array_bytes::<T>(required)?)?;
+    let new_capacity = geometric_capacity(values.capacity(), required, 4, label)?;
+    authorize(guard, checked_array_bytes::<T>(new_capacity)?)?;
     values
-        .try_reserve_exact(required - values.len())
+        .try_reserve_exact(new_capacity - values.len())
         .map_err(|_| AllocationFailure::Failed(label))
 }
 
@@ -71,12 +86,13 @@ pub(crate) fn try_reserve_string(
     if required <= value.capacity() {
         return Ok(());
     }
+    let new_capacity = geometric_capacity(value.capacity(), required, 8, label)?;
     authorize(
         guard,
-        u64::try_from(required).map_err(|_| AllocationFailure::Overflow(label))?,
+        u64::try_from(new_capacity).map_err(|_| AllocationFailure::Overflow(label))?,
     )?;
     value
-        .try_reserve_exact(required - value.len())
+        .try_reserve_exact(new_capacity - value.len())
         .map_err(|_| AllocationFailure::Failed(label))
 }
 
@@ -89,6 +105,42 @@ pub(crate) fn try_copy_string(
     try_reserve_string(&mut output, value.len(), guard, label)?;
     output.push_str(value);
     Ok(output)
+}
+
+pub(crate) fn try_hex_name(
+    prefix: &str,
+    bytes: &[u8],
+    suffix: &str,
+    guard: &dyn WorkGuard,
+    label: &'static str,
+) -> Result<String, AllocationFailure> {
+    let length = bytes
+        .len()
+        .checked_mul(2)
+        .and_then(|length| length.checked_add(prefix.len()))
+        .and_then(|length| length.checked_add(suffix.len()))
+        .ok_or(AllocationFailure::Overflow(label))?;
+    let mut output = String::new();
+    try_reserve_string(&mut output, length, guard, label)?;
+    output.push_str(prefix);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output.push_str(suffix);
+    Ok(output)
+}
+
+pub(crate) fn try_copy_os_string(
+    value: &OsStr,
+    guard: &dyn WorkGuard,
+    label: &'static str,
+) -> Result<OsString, AllocationFailure> {
+    let mut bytes = Vec::new();
+    try_reserve_vec(&mut bytes, value.as_bytes().len(), guard, label)?;
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(OsString::from_vec(bytes))
 }
 
 pub(crate) fn try_box<T>(
@@ -124,18 +176,29 @@ fn hash_table_bound<K, V>(len: usize, additional: usize) -> Result<u64, Allocati
     if required == 0 {
         return Ok(0);
     }
-    let buckets = required
-        .checked_next_power_of_two()
-        // hashbrown's smallest table has three usable buckets plus its control group; four times
-        // the requested power-of-two covers that initial shape as well as later <= 7/8 load.
-        .and_then(|value| value.checked_mul(4))
-        .ok_or(AllocationFailure::Overflow("hash table bucket count"))?;
-    let bucket_bytes = size_of::<(K, V)>()
-        // One control byte per bucket plus the group sentinel and allocator alignment slack.
-        .checked_add(16)
-        .ok_or(AllocationFailure::Overflow("hash table bucket size"))?;
-    buckets
-        .checked_mul(bucket_bytes)
+    // hashbrown uses four buckets for 1--3 entries, eight for 4--7, then keeps at
+    // most a 7/8 load. Its single allocation is the bucket array, alignment
+    // padding, one control byte per bucket, and one SIMD control group.
+    let buckets = if required < 4 {
+        4
+    } else if required < 8 {
+        8
+    } else {
+        required
+            .checked_mul(8)
+            .and_then(|scaled| scaled.checked_add(6))
+            .map(|scaled| scaled / 7)
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or(AllocationFailure::Overflow("hash table bucket count"))?
+    };
+    let bucket_bytes = buckets
+        .checked_mul(size_of::<(K, V)>())
+        .ok_or(AllocationFailure::Overflow("hash table bucket bytes"))?;
+    let alignment_slack = align_of::<(K, V)>().saturating_sub(1);
+    bucket_bytes
+        .checked_add(alignment_slack)
+        .and_then(|bytes| bytes.checked_add(buckets))
+        .and_then(|bytes| bytes.checked_add(16))
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or(AllocationFailure::Overflow("hash table byte count"))
 }
@@ -209,7 +272,7 @@ pub(crate) fn payload_decode_upper_bound(
         EventKind::ModuleDefinition
         | EventKind::Termination
         | EventKind::StringDefinition
-        | EventKind::OpaqueOptional => 2,
+        | EventKind::OpaqueOptional => 4,
         EventKind::ThreadLifecycle
         | EventKind::Syscall
         | EventKind::Signal
@@ -230,6 +293,7 @@ pub(crate) mod tests {
     use std::{
         alloc::{GlobalAlloc, Layout, System},
         cell::Cell,
+        sync::atomic::{AtomicU64, Ordering},
     };
 
     use super::{authorize, payload_decode_upper_bound};
@@ -288,7 +352,7 @@ pub(crate) mod tests {
         }
 
         unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            record_decode_growth(new_size.saturating_sub(layout.size()));
+            record_decode_growth(new_size);
             // SAFETY: forwards the matching reallocation to the system allocator.
             unsafe { System.realloc(pointer, layout, new_size) }
         }
@@ -328,8 +392,10 @@ pub(crate) mod tests {
                 let mut state = slot.get();
                 if delta.resident_bytes > 0 {
                     state.ordinal += 1;
+                    // Each authorization is scoped to the immediately following container or
+                    // decode operation. Discard prior slack instead of pooling it globally.
+                    state.credit = delta.resident_bytes;
                 }
-                state.credit += delta.resident_bytes;
                 slot.set(state);
             });
             Ok(())
@@ -359,6 +425,124 @@ pub(crate) mod tests {
             let state = slot.get();
             (state.sizes, state.ordinals, state.size_len)
         })
+    }
+
+    struct CountingGuard(AtomicU64);
+
+    impl CountingGuard {
+        fn consumed(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl WorkGuard for CountingGuard {
+        fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+            self.0.fetch_add(delta.resident_bytes, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn incremental_vec_charge(count: usize) -> (u64, usize) {
+        let guard = CountingGuard(AtomicU64::new(0));
+        let mut values = Vec::<u64>::new();
+        for value in 0..count {
+            super::try_reserve_vec(&mut values, 1, &guard, "scaling vector").expect("reserve");
+            values.push(value as u64);
+        }
+        (guard.consumed(), values.capacity())
+    }
+
+    fn incremental_string_charge(count: usize) -> (u64, usize) {
+        let guard = CountingGuard(AtomicU64::new(0));
+        let mut value = String::new();
+        for _ in 0..count {
+            super::try_reserve_string(&mut value, 1, &guard, "scaling string").expect("reserve");
+            value.push('x');
+        }
+        (guard.consumed(), value.capacity())
+    }
+
+    fn incremental_hash_charge(count: usize) -> u64 {
+        let guard = CountingGuard(AtomicU64::new(0));
+        let mut values = std::collections::HashMap::<u64, u64>::new();
+        for value in 0..count {
+            super::try_reserve_hash_map(&mut values, 1, &guard, "scaling hash map")
+                .expect("reserve");
+            values.insert(value as u64, value as u64);
+        }
+        guard.consumed()
+    }
+
+    #[test]
+    fn incremental_capacity_authorization_is_geometric_and_linear() {
+        let mut vector_charges = Vec::new();
+        let mut string_charges = Vec::new();
+        for count in [5_000, 10_000, 20_000] {
+            let (vector_charge, vector_capacity) = incremental_vec_charge(count);
+            let (string_charge, string_capacity) = incremental_string_charge(count);
+            let vector_final = (vector_capacity * std::mem::size_of::<u64>()) as u64;
+            let string_final = string_capacity as u64;
+            assert!(
+                vector_charge < vector_final * 2 + 64,
+                "vector authorization must be less than twice final layout: count={count}, charge={vector_charge}, final={vector_final}"
+            );
+            assert!(
+                string_charge < string_final * 2 + 16,
+                "string authorization must be less than twice final layout: count={count}, charge={string_charge}, final={string_final}"
+            );
+            assert!(vector_capacity < count * 2);
+            assert!(string_capacity < count * 2);
+            vector_charges.push(vector_charge);
+            string_charges.push(string_charge);
+        }
+        for charges in [&vector_charges, &string_charges] {
+            assert!(
+                charges[1] <= charges[0] * 2 + 128,
+                "N -> 2N must stay linear"
+            );
+            assert!(
+                charges[2] <= charges[1] * 2 + 128,
+                "2N -> 4N must stay linear"
+            );
+        }
+        assert!(
+            vector_charges[2] < 20_000 * 8 * 4,
+            "20k probe must not contain quadratic allocation work"
+        );
+        let ten_million_final = 10_000_000_u64 * 8;
+        assert!(ten_million_final.checked_mul(2).expect("10m arithmetic") < 160_000_001);
+    }
+
+    #[test]
+    fn hash_table_bound_covers_full_allocator_requests_and_scales_linearly() {
+        let mut charges = Vec::new();
+        for count in [5_000, 10_000, 20_000] {
+            charges.push(incremental_hash_charge(count));
+        }
+        assert!(charges[1] <= charges[0] * 2 + 4096);
+        assert!(charges[2] <= charges[1] * 2 + 4096);
+        assert!(charges[2] < 64 * 1024 * 1024);
+        let ten_million =
+            super::hash_table_bound::<u64, u64>(0, 10_000_000).expect("10m hash-table arithmetic");
+        assert!(ten_million < 512 * 1024 * 1024);
+
+        let mut values = std::collections::HashMap::<u64, u64>::new();
+        activate_allocation_oracle();
+        for value in 0..20_000_u64 {
+            super::try_reserve_hash_map(&mut values, 1, &DecodeGuard, "hash request proof")
+                .expect("reserve");
+            values.insert(value, value);
+        }
+        let unauthorized = finish_allocation_oracle();
+        let (sizes, ordinals, length) = allocation_oracle_sizes();
+        assert_eq!(
+            unauthorized,
+            0,
+            "hash bucket/control/alignment request escaped bound: {:?}/{:?}",
+            &sizes[..length],
+            &ordinals[..length]
+        );
+        assert_eq!(values.len(), 20_000);
     }
 
     #[test]
@@ -549,8 +733,16 @@ pub(crate) mod tests {
             .expect("authorize");
             let decoded: EventPayload = serde_json::from_slice(&encoded).expect("decode");
             let unauthorized = finish_allocation_oracle();
+            let (sizes, ordinals, length) = allocation_oracle_sizes();
             assert_eq!(decoded, payload);
-            assert_eq!(unauthorized, 0, "variant {:?}", payload.kind());
+            assert_eq!(
+                unauthorized,
+                0,
+                "variant {:?}, sizes={:?}, ordinals={:?}",
+                payload.kind(),
+                &sizes[..length],
+                &ordinals[..length]
+            );
         }
     }
 }

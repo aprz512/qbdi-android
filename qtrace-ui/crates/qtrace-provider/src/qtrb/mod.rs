@@ -122,6 +122,11 @@ impl TraceProvider for QtrbProvider {
         &self.timelines
     }
 
+    fn cursor_resident_bytes(&self) -> Result<u64, ProviderError> {
+        u64::try_from(Self::CURSOR_RESIDENT_BYTES)
+            .map_err(|_| provider_allocation_error("QTRB cursor allocation bound overflow"))
+    }
+
     fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError> {
         let provider = *self;
         Ok(Box::new(QtrbEventCursor {
@@ -144,6 +149,7 @@ impl TraceProvider for QtrbProvider {
             effective_buffer_bytes: 0,
             termination: None,
             completeness: Vec::new(),
+            timelines: provider.timelines,
             counters: ProviderCounters {
                 input_bytes: STREAM_HEADER_BYTES as u64,
                 decompressed_bytes: STREAM_HEADER_BYTES as u64,
@@ -389,6 +395,7 @@ struct QtrbEventCursor {
     effective_buffer_bytes: u64,
     termination: Option<Termination>,
     completeness: Vec<CompletenessRange>,
+    timelines: Vec<TimelineDescriptor>,
     counters: ProviderCounters,
 }
 
@@ -420,13 +427,10 @@ impl EventCursor for QtrbEventCursor {
             return Err(ProviderError::stream_not_drained());
         }
         self.validate_source_identity()?;
-        let tid = self.tid;
+        let mut timelines = self.timelines;
+        timelines[0].tid = self.tid;
         Ok(ProviderSummary {
-            timelines: vec![TimelineDescriptor {
-                id: TIMELINE_ID,
-                tid,
-                label: Some("QTRB".to_owned()),
-            }],
+            timelines,
             termination: self.termination,
             counters: self.counters,
             completeness: self.completeness,
@@ -448,10 +452,10 @@ impl QtrbEventCursor {
                         "record follows QTRB terminal",
                     ));
                 }
-                return self.finish_stream();
+                return self.finish_stream(guard);
             }
             if self.offset == self.source.len() {
-                return self.finish_stream();
+                return self.finish_stream(guard);
             }
             if self.offset > self.source.len() {
                 return Err(self.error_at_current(
@@ -498,7 +502,10 @@ impl QtrbEventCursor {
         }
     }
 
-    fn finish_stream(&mut self) -> Result<Option<EventRecord>, ProviderError> {
+    fn finish_stream(
+        &mut self,
+        guard: &dyn WorkGuard,
+    ) -> Result<Option<EventRecord>, ProviderError> {
         self.validate_source_identity()?;
         if self.pending.is_some() {
             return Err(self.error_at_current(
@@ -514,6 +521,24 @@ impl QtrbEventCursor {
                 "QTRB source has no TRACE_BEGIN",
             ));
         }
+        let completeness_count =
+            usize::from(!self.terminal_seen && self.mode == OpenMode::RecoverablePartial)
+                .checked_add(1)
+                .ok_or_else(|| provider_allocation_error("QTRB completeness count overflow"))?;
+        guard.consume(WorkDelta {
+            resident_bytes: u64::try_from(
+                completeness_count
+                    .checked_mul(size_of::<CompletenessRange>())
+                    .ok_or_else(|| {
+                        provider_allocation_error("QTRB completeness allocation overflow")
+                    })?,
+            )
+            .map_err(|_| provider_allocation_error("QTRB completeness allocation overflow"))?,
+            ..WorkDelta::default()
+        })?;
+        self.completeness
+            .try_reserve_exact(completeness_count)
+            .map_err(|_| provider_allocation_error("QTRB completeness allocation failed"))?;
         if !self.terminal_seen {
             match self.mode {
                 OpenMode::Sealed => {

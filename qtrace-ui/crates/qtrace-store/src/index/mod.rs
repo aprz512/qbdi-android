@@ -1099,7 +1099,7 @@ impl OwnedTraceStore {
         let catalog = *self.catalog;
         for section in wire::encode(catalog, guard)? {
             guard.consume(WorkDelta::default())?;
-            view = view.with_section(section)?;
+            view = view.with_section(section, guard)?;
         }
         Ok(view)
     }
@@ -1437,9 +1437,11 @@ impl TraceStore {
         guard.consume(WorkDelta::default())?;
         let owned = IndexBuilder::build(source, options, guard)?;
         guard.consume(WorkDelta::default())?;
-        let (outcome, receipt) =
-            CacheWriter::new(identity.clone(), owned.into_cache_view_with_catalog(guard)?)?
-                .publish_with_receipt(cache_root, guard)?;
+        let (outcome, receipt) = CacheWriter::new(
+            identity.try_clone_guarded(guard)?,
+            owned.into_cache_view_with_catalog(guard)?,
+        )?
+        .publish_with_receipt(cache_root, guard)?;
         let reopened = (|| {
             guard.consume(WorkDelta::default())?;
             let view = match CacheReader::open(cache_root, &identity, guard)? {
@@ -1460,16 +1462,14 @@ impl TraceStore {
             Err(error) if outcome == crate::PublishOutcome::Published => {
                 let receipt = receipt
                     .ok_or_else(|| IndexError::corrupt("published cache receipt is missing"))?;
-                CacheWriter::remove_published(cache_root, &identity, receipt).map_err(
-                    |cleanup| {
-                        IndexError::new(
-                            cleanup.code(),
-                            format!(
-                                "post-publish reopen failed ({error}); rollback failed ({cleanup})"
-                            ),
-                        )
-                    },
-                )?;
+                CacheWriter::remove_published(receipt).map_err(|cleanup| {
+                    IndexError::new(
+                        cleanup.code(),
+                        format!(
+                            "post-publish reopen failed ({error}); rollback failed ({cleanup})"
+                        ),
+                    )
+                })?;
                 Err(error)
             }
             Err(error) => Err(error),

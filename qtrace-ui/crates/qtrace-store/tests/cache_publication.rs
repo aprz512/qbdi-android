@@ -231,12 +231,18 @@ struct RejectLargeResident {
 
 struct CaptureResident {
     maximum: Mutex<u64>,
+    total: Mutex<u64>,
 }
 
 impl WorkGuard for CaptureResident {
     fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
         let mut maximum = self.maximum.lock().expect("resident maximum");
         *maximum = (*maximum).max(delta.resident_bytes);
+        drop(maximum);
+        let mut total = self.total.lock().expect("resident total");
+        *total = total
+            .checked_add(delta.resident_bytes)
+            .expect("resident sum");
         Ok(())
     }
 }
@@ -256,13 +262,13 @@ impl WorkGuard for RejectLargeResident {
 }
 
 #[test]
-fn writer_declares_true_peak_resident_budget_before_cache_path_io() {
+fn writer_authorizes_its_first_real_allocation_before_cache_path_io() {
     let parent = TempDir::new().expect("parent");
     let root = parent.path().join("not-created");
     let error = CacheWriter::new(identity(0x13), store_rows(0x13, 4096))
         .expect("writer")
-        .publish(&root, &RejectLargeResident { limit: 1_500_000 })
-        .expect_err("true peak exceeds guard threshold");
+        .publish(&root, &RejectLargeResident { limit: 63 })
+        .expect_err("cache-key allocation exceeds guard threshold");
     assert_eq!(error.code(), "control.budget_exceeded");
     assert!(
         !root.exists(),
@@ -271,32 +277,47 @@ fn writer_declares_true_peak_resident_budget_before_cache_path_io() {
 }
 
 #[test]
-fn writer_declared_peak_has_an_exact_success_threshold() {
+fn writer_reports_cumulative_allocation_work_without_a_synthetic_peak() {
     let capture_root = private_root();
     let capture = CaptureResident {
         maximum: Mutex::new(0),
+        total: Mutex::new(0),
     };
     CacheWriter::new(identity(0x23), store_rows(0x23, 4096))
         .expect("writer")
         .publish(capture_root.path(), &capture)
         .expect("capture writer peak");
-    let peak = *capture.maximum.lock().expect("resident maximum");
-    assert!(peak > 0);
+    let maximum = *capture.maximum.lock().expect("resident maximum");
+    let total = *capture.total.lock().expect("resident total");
+    assert!(maximum > 0);
+    assert!(total > maximum, "allocation work is a cumulative sum");
 
-    let parent = TempDir::new().expect("below parent");
-    let below_root = parent.path().join("not-created");
-    let error = CacheWriter::new(identity(0x24), store_rows(0x24, 4096))
+    let below_root = private_root();
+    let error = CacheWriter::new(identity(0x23), store_rows(0x23, 4096))
         .expect("writer")
-        .publish(&below_root, &RejectLargeResident { limit: peak - 1 })
-        .expect_err("one byte below writer peak");
+        .publish(
+            below_root.path(),
+            &RejectLargeResident { limit: maximum - 1 },
+        )
+        .expect_err("one byte below the largest real allocation request");
     assert_eq!(error.code(), "control.budget_exceeded");
-    assert!(!below_root.exists());
+    let below_identity = identity(0x23);
+    assert!(!final_path(below_root.path(), &below_identity).exists());
+    assert!(
+        temporary_paths(
+            &below_root
+                .path()
+                .join("qtrace-ui")
+                .join(below_identity.cache_key())
+        )
+        .is_empty()
+    );
 
     let exact_root = private_root();
-    CacheWriter::new(identity(0x25), store_rows(0x25, 4096))
+    CacheWriter::new(identity(0x23), store_rows(0x23, 4096))
         .expect("writer")
-        .publish(exact_root.path(), &RejectLargeResident { limit: peak })
-        .expect("exact writer peak succeeds");
+        .publish(exact_root.path(), &RejectLargeResident { limit: maximum })
+        .expect("largest real allocation threshold succeeds");
 }
 
 #[test]
