@@ -516,7 +516,20 @@ pub struct EventRecord {
     pub key: EventKey,
     pub provenance: Provenance,
     pub payload: EventPayload,
+    scope: EventScope,
     fragment_source_offsets: FragmentSourceOffsets,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EventScope {
+    #[default]
+    Artifact,
+    FlightChunk {
+        chunk_index: u32,
+        generation: u32,
+        tid: u32,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -561,6 +574,22 @@ impl EventRecord {
             key,
             provenance,
             payload,
+            scope: EventScope::Artifact,
+            fragment_source_offsets: FragmentSourceOffsets(Vec::new()),
+        }
+    }
+
+    pub const fn new_scoped(
+        key: EventKey,
+        provenance: Provenance,
+        scope: EventScope,
+        payload: EventPayload,
+    ) -> Self {
+        Self {
+            key,
+            provenance,
+            payload,
+            scope,
             fragment_source_offsets: FragmentSourceOffsets(Vec::new()),
         }
     }
@@ -583,8 +612,17 @@ impl EventRecord {
             key,
             provenance,
             payload,
+            scope: EventScope::Artifact,
             fragment_source_offsets,
         })
+    }
+
+    pub const fn scope(&self) -> EventScope {
+        self.scope
+    }
+
+    pub fn set_scope(&mut self, scope: EventScope) {
+        self.scope = scope;
     }
 
     pub fn fragment_source_offsets(&self) -> &[u64] {
@@ -614,6 +652,8 @@ impl<'de> Deserialize<'de> for EventRecord {
             provenance: Provenance,
             payload: EventPayload,
             #[serde(default)]
+            scope: EventScope,
+            #[serde(default)]
             fragment_source_offsets: FragmentSourceOffsets,
         }
 
@@ -632,6 +672,7 @@ impl<'de> Deserialize<'de> for EventRecord {
             key: value.key,
             provenance: value.provenance,
             payload: value.payload,
+            scope: value.scope,
             fragment_source_offsets: value.fragment_source_offsets,
         })
     }

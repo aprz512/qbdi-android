@@ -19,9 +19,9 @@ pub use flight::{
 };
 pub use model::{
     ArtifactDigest, CompletenessCause, CompletenessRange, CoverageGap, Discontinuity,
-    DiscontinuityCause, EventKey, EventKind, EventPayload, EventRecord, FragmentSourceOffsets,
-    MAX_FRAGMENT_SOURCE_OFFSETS, ModuleDefinition, OpaqueOptionalRecord, Provenance,
-    ProviderCapabilities, ProviderCounters, ProviderSummary, RangeBounds, RangeDomain,
+    DiscontinuityCause, EventKey, EventKind, EventPayload, EventRecord, EventScope,
+    FragmentSourceOffsets, MAX_FRAGMENT_SOURCE_OFFSETS, ModuleDefinition, OpaqueOptionalRecord,
+    Provenance, ProviderCapabilities, ProviderCounters, ProviderSummary, RangeBounds, RangeDomain,
     RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot, RegisterValue,
     SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity,
     StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor,

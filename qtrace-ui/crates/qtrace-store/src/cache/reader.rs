@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{File, Metadata},
     os::unix::fs::{FileExt, MetadataExt},
     sync::Arc,
@@ -97,6 +97,7 @@ fn clone_proof_descriptor(file: &File) -> Result<File, CacheError> {
 pub struct MappedStoreView {
     file: Arc<File>,
     stamp: FileStamp,
+    identity: Arc<CacheIdentity>,
     event_count: usize,
     event_keys_offset: u64,
     event_kinds_offset: u64,
@@ -104,6 +105,10 @@ pub struct MappedStoreView {
 }
 
 impl MappedStoreView {
+    pub(crate) fn cache_identity(&self) -> &CacheIdentity {
+        &self.identity
+    }
+
     fn checked_read<const N: usize>(&self, offset: u64) -> Result<[u8; N], CacheError> {
         self.stamp.verify(&self.file)?;
         let mut output = [0_u8; N];
@@ -362,40 +367,116 @@ pub(crate) fn validate_file(
     }
     let event_count = usize::try_from(key_count)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("event count")))?;
-    let normalized = manifest
-        .sections
-        .iter()
-        .find(|section| section.name == crate::index::NORMALIZED_CATALOG_SECTION);
-    if expected.cache_schema == 2 && expected.layout_version == 2 && normalized.is_none() {
-        return Err(ValidationFailure::Rebuild(RebuildReason::Section(
-            "missing normalized catalog",
-        )));
-    }
-    if let Some(section) = normalized {
-        const MAX_NORMALIZED_CATALOG_BYTES: u64 = 512 * 1024 * 1024;
-        if section.length == 0 || section.length > MAX_NORMALIZED_CATALOG_BYTES {
+    if expected.cache_schema == 2 && expected.layout_version == 2 {
+        let mut expected_names = Vec::new();
+        expected_names
+            .try_reserve_exact(2 + crate::index::binary_section_specs().len())
+            .map_err(|_| allocation_error("schema-two section names"))?;
+        expected_names.push(EVENT_KINDS_SECTION);
+        expected_names.push(EVENT_KEYS_SECTION);
+        expected_names.extend(
+            crate::index::binary_section_specs()
+                .iter()
+                .map(|(name, _, _)| *name),
+        );
+        if manifest.sections.len() != expected_names.len()
+            || manifest
+                .sections
+                .iter()
+                .zip(expected_names)
+                .any(|(section, name)| section.name != name)
+        {
             return Err(ValidationFailure::Rebuild(RebuildReason::Section(
-                "normalized length",
+                "schema-two exact section set",
             )));
         }
+        let normalized_bytes =
+            crate::index::binary_section_specs().iter().try_fold(
+                0_u64,
+                |total, (name, _, _)| {
+                    let length = manifest
+                        .sections
+                        .iter()
+                        .find(|section| section.name == *name)
+                        .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                            "schema-two exact section set",
+                        )))?
+                        .length;
+                    total.checked_add(length).ok_or(ValidationFailure::Rebuild(
+                        RebuildReason::Section("normalized resident peak overflow"),
+                    ))
+                },
+            )?;
+        let source_facts = key_count
+            .checked_mul(
+                u64::try_from(std::mem::size_of::<EventKey>() + std::mem::size_of::<EventKind>())
+                    .map_err(|_| {
+                    ValidationFailure::Rebuild(RebuildReason::Section("source fact resident size"))
+                })?,
+            )
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "source fact resident peak overflow",
+            )))?;
+        // Serialized sections coexist only until decode consumes them. Four times their encoded
+        // size conservatively covers decoded fixed rows, sorted-map descriptors, and the largest
+        // one-family reconstruction scratch while arenas move into the catalog without copying.
+        let declared_peak = normalized_bytes
+            .checked_mul(5)
+            .and_then(|value| value.checked_add(source_facts))
+            .and_then(|value| value.checked_add(manifest_resident))
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "normalized resident peak overflow",
+            )))?;
         guard.consume(WorkDelta {
-            resident_bytes: section.length,
+            resident_bytes: declared_peak,
             ..WorkDelta::default()
         })?;
-        let length = usize::try_from(section.length)
-            .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("normalized length")))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| allocation_error("normalized catalog validation"))?;
-        bytes.resize(length, 0);
-        read_exact_at(&file, section.offset, &mut bytes, Some(guard))?;
-        crate::index::validate_catalog_bytes(&bytes, event_count)
-            .map_err(normalized_validation_failure)?;
         let (event_keys, event_kinds) =
             read_event_rows(&file, keys.offset, kinds.offset, event_count, guard)?;
-        crate::index::validate_catalog_bytes_with_rows(&bytes, &event_keys, &event_kinds, guard)
-            .map_err(normalized_validation_failure)?;
+        let mut binary = BTreeMap::new();
+        guard.consume(WorkDelta {
+            nodes: crate::index::binary_section_specs().len() as u64,
+            ..WorkDelta::default()
+        })?;
+        for (name, _, _) in crate::index::binary_section_specs() {
+            guard.consume(WorkDelta::default())?;
+            let section = manifest
+                .sections
+                .iter()
+                .find(|section| section.name == *name)
+                .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                    "schema-two exact section set",
+                )))?;
+            let maximum = crate::index::binary_section_max_length(name, event_count)
+                .map_err(normalized_validation_failure)?;
+            if section.length > maximum {
+                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                    "binary section length bound",
+                )));
+            }
+            let length = usize::try_from(section.length).map_err(|_| {
+                ValidationFailure::Rebuild(RebuildReason::Section("binary section length"))
+            })?;
+            guard.consume(WorkDelta {
+                resident_bytes: section.length,
+                ..WorkDelta::default()
+            })?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(length)
+                .map_err(|_| allocation_error("binary section validation"))?;
+            bytes.resize(length, 0);
+            read_exact_at(&file, section.offset, &mut bytes, Some(guard))?;
+            binary.insert((*name).to_owned(), bytes);
+        }
+        crate::index::validate_binary_sections(
+            binary,
+            &event_keys,
+            &event_kinds,
+            &expected.source_format,
+            guard,
+        )
+        .map_err(normalized_validation_failure)?;
     }
     directory.verify()?;
     stamp.verify(&file)?;
@@ -407,6 +488,7 @@ pub(crate) fn validate_file(
     Ok(MappedStoreView {
         file: Arc::new(file),
         stamp,
+        identity: Arc::new(manifest.identity),
         event_count,
         event_keys_offset: keys.offset,
         event_kinds_offset: kinds.offset,

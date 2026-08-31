@@ -2,32 +2,53 @@ mod builder;
 mod checkpoints;
 mod intervals;
 mod postings;
+mod wire;
 
 use std::{
     collections::{BTreeMap, HashMap},
     error::Error,
     fmt,
+    sync::Arc,
 };
 
 use qtrace_provider::{
-    CompletenessCause, CompletenessRange, EventKey, EventKind, MemoryDirection, PcRelativeKind,
-    Provenance, ProviderCapabilities, RangeBounds, RangeDomain, RegisterSlot, WorkDelta, WorkGuard,
+    CompletenessCause, CompletenessRange, EventKey, EventKind, EventScope, MemoryDirection,
+    PcRelativeKind, Provenance, ProviderCapabilities, RangeBounds, RangeDomain, RegisterSlot,
+    WorkDelta, WorkGuard,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     ArtifactSource, CacheError, CacheIdentity, CacheOpen, CacheReader, CacheWriter,
-    MappedStoreView, OwnedStoreView, StoreView, cache::OwnedSection,
+    MappedStoreView, OwnedStoreView, StoreView,
 };
 
 pub use builder::IndexBuilder;
 pub use checkpoints::{RegisterAccess, RegisterObservationRow};
 pub use postings::{PostingList, intersect_rows};
 
-pub(crate) const NORMALIZED_CATALOG_SECTION: &str = "normalized_catalog.v1";
-pub(crate) const NORMALIZED_CATALOG_ALIGNMENT: u32 = 8;
-pub(crate) const NORMALIZED_CATALOG_ELEMENT_SIZE: u32 = 1;
+pub(crate) fn binary_section_contract(name: &str) -> Option<(u32, u32)> {
+    wire::contract(name)
+}
+
+pub(crate) fn binary_section_specs() -> &'static [(&'static str, u32, u32)] {
+    wire::EXACT_SECTIONS
+}
+
+pub(crate) fn binary_section_max_length(name: &str, event_count: usize) -> Result<u64, IndexError> {
+    wire::max_length(name, event_count)
+}
+
+pub(crate) fn validate_binary_sections(
+    sections: BTreeMap<String, Vec<u8>>,
+    keys: &[EventKey],
+    kinds: &[EventKind],
+    source_format: &str,
+    guard: &dyn WorkGuard,
+) -> Result<(), IndexError> {
+    wire::decode(sections, keys, kinds, source_format, true, guard).map(|_| ())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexError {
@@ -103,6 +124,7 @@ impl From<CacheError> for IndexError {
 #[serde(deny_unknown_fields)]
 pub struct BuildOptions {
     interval_block_rows: u32,
+    max_payload_bytes: u64,
     max_blob_bytes: u64,
     max_string_bytes: u64,
 }
@@ -111,6 +133,7 @@ impl Default for BuildOptions {
     fn default() -> Self {
         Self {
             interval_block_rows: 64,
+            max_payload_bytes: 8 * 1024 * 1024 * 1024,
             max_blob_bytes: 64 * 1024 * 1024,
             max_string_bytes: 16 * 1024 * 1024,
         }
@@ -135,46 +158,111 @@ impl BuildOptions {
                 "interval block rows must be a non-zero power of two",
             ));
         }
-        if self.max_blob_bytes == 0 || self.max_string_bytes == 0 {
+        if self.max_payload_bytes == 0 || self.max_blob_bytes == 0 || self.max_string_bytes == 0 {
             return Err(IndexError::invalid("arena byte bounds must be non-zero"));
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ByteSpan {
     offset: u64,
     length: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 struct ByteArena {
-    bytes: Vec<u8>,
-    spans: Vec<ByteSpan>,
+    bytes: Arc<Vec<u8>>,
+    spans: Arc<Vec<ByteSpan>>,
     max_bytes: u64,
-    #[serde(skip, default)]
-    by_hash: HashMap<[u8; 32], Vec<u32>>,
+    by_hash: HashMap<[u8; 32], HashCandidates>,
+    validation_next_id: Option<u32>,
 }
+
+#[derive(Clone, Debug)]
+enum HashCandidates {
+    One(u32),
+    Collisions(Vec<u32>),
+}
+
+impl HashCandidates {
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        let (first, rest): (Option<u32>, &[u32]) = match self {
+            Self::One(id) => (Some(*id), &[]),
+            Self::Collisions(ids) => (None, ids),
+        };
+        first.into_iter().chain(rest.iter().copied())
+    }
+}
+
+impl PartialEq for ByteArena {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes && self.spans == other.spans && self.max_bytes == other.max_bytes
+    }
+}
+
+impl Eq for ByteArena {}
 
 impl ByteArena {
     fn new(max_bytes: u64) -> Self {
         Self {
-            bytes: Vec::new(),
-            spans: Vec::new(),
+            bytes: Arc::new(Vec::new()),
+            spans: Arc::new(Vec::new()),
             max_bytes,
             by_hash: HashMap::new(),
+            validation_next_id: None,
+        }
+    }
+
+    fn validation(source: &Self) -> Self {
+        Self {
+            bytes: Arc::clone(&source.bytes),
+            spans: Arc::clone(&source.spans),
+            max_bytes: source.max_bytes,
+            by_hash: HashMap::new(),
+            validation_next_id: Some(0),
         }
     }
 
     fn intern(&mut self, value: &[u8], guard: &dyn WorkGuard) -> Result<u32, IndexError> {
         let hash: [u8; 32] = Sha256::digest(value).into();
+        let hash_was_present = self.by_hash.contains_key(&hash);
         if let Some(candidates) = self.by_hash.get(&hash) {
-            for id in candidates {
-                if self.get(*id)? == value {
-                    return Ok(*id);
+            for id in candidates.iter() {
+                if self.get(id)? == value {
+                    return Ok(id);
                 }
             }
+        }
+        if let Some(next_id) = self.validation_next_id {
+            if self.get(next_id)? != value {
+                return Err(IndexError::corrupt(
+                    "arena dictionary order disagrees with canonical payload facts",
+                ));
+            }
+            self.validation_next_id = Some(
+                next_id
+                    .checked_add(1)
+                    .ok_or_else(|| IndexError::corrupt("arena validation ID overflow"))?,
+            );
+            guard.consume(WorkDelta {
+                resident_bytes: if hash_was_present {
+                    u64::try_from(std::mem::size_of::<u32>()).unwrap_or(u64::MAX)
+                } else {
+                    u64::try_from(std::mem::size_of::<([u8; 32], HashCandidates)>())
+                        .unwrap_or(u64::MAX)
+                },
+                nodes: 1,
+                ..WorkDelta::default()
+            })?;
+            if !hash_was_present {
+                self.by_hash
+                    .try_reserve(1)
+                    .map_err(|_| IndexError::resource("bounded arena hash allocation failed"))?;
+            }
+            self.insert_hash_candidate(hash, next_id)?;
+            return Ok(next_id);
         }
         let new_length = u64::try_from(self.bytes.len())
             .ok()
@@ -187,34 +275,75 @@ impl ByteArena {
             ));
         }
         guard.consume(WorkDelta {
-            resident_bytes: value.len() as u64,
+            resident_bytes: (value.len() as u64)
+                .checked_add(u64::try_from(std::mem::size_of::<ByteSpan>()).unwrap_or(u64::MAX))
+                .and_then(|bytes| {
+                    bytes.checked_add(if hash_was_present {
+                        u64::try_from(std::mem::size_of::<u32>()).unwrap_or(u64::MAX)
+                    } else {
+                        u64::try_from(std::mem::size_of::<([u8; 32], HashCandidates)>())
+                            .unwrap_or(u64::MAX)
+                    })
+                })
+                .ok_or_else(|| IndexError::resource("bounded arena budget size overflow"))?,
             nodes: 1,
             ..WorkDelta::default()
         })?;
-        self.bytes
+        Arc::get_mut(&mut self.bytes)
+            .ok_or_else(|| IndexError::invalid("mutable arena bytes are unexpectedly shared"))?
             .try_reserve_exact(value.len())
             .map_err(|_| IndexError::resource("bounded arena allocation failed"))?;
-        self.spans
+        Arc::get_mut(&mut self.spans)
+            .ok_or_else(|| IndexError::invalid("mutable arena spans are unexpectedly shared"))?
             .try_reserve(1)
             .map_err(|_| IndexError::resource("bounded arena span allocation failed"))?;
         let id = u32::try_from(self.spans.len())
             .map_err(|_| IndexError::resource("bounded arena has too many spans"))?;
         let offset = u64::try_from(self.bytes.len())
             .map_err(|_| IndexError::resource("bounded arena offset does not fit u64"))?;
-        self.bytes.extend_from_slice(value);
-        self.spans.push(ByteSpan {
-            offset,
-            length: value.len() as u64,
-        });
-        self.by_hash
-            .try_reserve(1)
-            .map_err(|_| IndexError::resource("bounded arena hash allocation failed"))?;
-        let candidates = self.by_hash.entry(hash).or_default();
-        candidates
-            .try_reserve(1)
-            .map_err(|_| IndexError::resource("bounded arena collision allocation failed"))?;
-        candidates.push(id);
+        Arc::get_mut(&mut self.bytes)
+            .ok_or_else(|| IndexError::invalid("mutable arena bytes are unexpectedly shared"))?
+            .extend_from_slice(value);
+        Arc::get_mut(&mut self.spans)
+            .ok_or_else(|| IndexError::invalid("mutable arena spans are unexpectedly shared"))?
+            .push(ByteSpan {
+                offset,
+                length: value.len() as u64,
+            });
+        if !hash_was_present {
+            self.by_hash
+                .try_reserve(1)
+                .map_err(|_| IndexError::resource("bounded arena hash allocation failed"))?;
+        }
+        self.insert_hash_candidate(hash, id)?;
         Ok(id)
+    }
+
+    fn insert_hash_candidate(&mut self, hash: [u8; 32], id: u32) -> Result<(), IndexError> {
+        match self.by_hash.entry(hash) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                HashCandidates::One(first) => {
+                    let first = *first;
+                    let mut candidates = Vec::new();
+                    candidates.try_reserve_exact(2).map_err(|_| {
+                        IndexError::resource("bounded arena collision allocation failed")
+                    })?;
+                    candidates.push(first);
+                    candidates.push(id);
+                    *entry.get_mut() = HashCandidates::Collisions(candidates);
+                }
+                HashCandidates::Collisions(candidates) => {
+                    candidates.try_reserve(1).map_err(|_| {
+                        IndexError::resource("bounded arena collision allocation failed")
+                    })?;
+                    candidates.push(id);
+                }
+            },
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(HashCandidates::One(id));
+            }
+        }
+        Ok(())
     }
 
     fn get(&self, id: u32) -> Result<&[u8], IndexError> {
@@ -239,7 +368,7 @@ impl ByteArena {
             return Err(IndexError::corrupt("arena exceeds its declared byte bound"));
         }
         let mut expected = 0_u64;
-        for span in &self.spans {
+        for span in self.spans.iter() {
             if span.offset != expected {
                 return Err(IndexError::corrupt(
                     "arena spans are not append-only contiguous",
@@ -254,6 +383,17 @@ impl ByteArena {
         }
         Ok(())
     }
+
+    fn validate_dictionary_complete(&self) -> Result<(), IndexError> {
+        let spans = u32::try_from(self.spans.len())
+            .map_err(|_| IndexError::corrupt("arena span count exceeds u32"))?;
+        if self.validation_next_id != Some(spans) {
+            return Err(IndexError::corrupt(
+                "arena has unreferenced or missing dictionary entries",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -261,44 +401,45 @@ struct EventColumn {
     timeline: u64,
     tid: Option<u32>,
     sequence: Option<u64>,
+    scope: EventScope,
     provenance: Provenance,
     payload_blob: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct ModuleRow {
-    source_event_row: usize,
-    provenance: Provenance,
-    source_id: u32,
-    base: u64,
-    name: u32,
+pub struct ModuleRow {
+    pub source_event_row: usize,
+    pub provenance: Provenance,
+    pub source_id: u32,
+    pub base: u64,
+    pub name: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct DefinitionRow {
-    source_event_row: usize,
-    provenance: Provenance,
-    source_id: u32,
-    opcode: u32,
-    read_mask: u64,
-    write_mask: u64,
-    pc_displacement: i64,
-    flags: u32,
-    pc_kind: PcRelativeKind,
-    condition: u8,
-    slow_memory_path: bool,
-    mnemonic: u32,
-    operands: u32,
-    disassembly: u32,
-    exact_blob: u32,
+pub struct DefinitionRow {
+    pub source_event_row: usize,
+    pub provenance: Provenance,
+    pub source_id: u32,
+    pub opcode: u32,
+    pub read_mask: u64,
+    pub write_mask: u64,
+    pub pc_displacement: i64,
+    pub flags: u32,
+    pub pc_kind: PcRelativeKind,
+    pub condition: u8,
+    pub slow_memory_path: bool,
+    pub mnemonic: u32,
+    pub operands: u32,
+    pub disassembly: u32,
+    pub exact_blob: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct InstructionRow {
-    owner_row: usize,
-    module: Option<u32>,
-    relative_pc: u64,
-    definition: Option<u32>,
+pub struct InstructionRow {
+    pub owner_row: usize,
+    pub module: Option<u32>,
+    pub relative_pc: u64,
+    pub definition: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -318,19 +459,19 @@ pub struct MemoryRow {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct SemanticRow {
-    owner_row: usize,
-    category: Option<u32>,
-    name: u32,
-    detail_blob: u32,
+pub struct SemanticRow {
+    pub owner_row: usize,
+    pub category: Option<u32>,
+    pub name: u32,
+    pub detail_blob: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct CompletenessRow {
-    domain: RangeDomain,
-    bounds: RangeBounds,
-    provenance: Provenance,
-    cause: CompletenessCause,
+pub struct CompletenessRow {
+    pub domain: RangeDomain,
+    pub bounds: RangeBounds,
+    pub provenance: Provenance,
+    pub cause: CompletenessCause,
 }
 
 impl CompletenessRow {
@@ -351,29 +492,61 @@ struct SourceKeyRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct SortedMap<K, V> {
+    entries: Vec<(K, V)>,
+}
+
+impl<K: Ord, V> SortedMap<K, V> {
+    fn from_sorted(entries: Vec<(K, V)>) -> Result<Self, IndexError> {
+        if entries.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err(IndexError::corrupt(
+                "sorted map keys are not strictly increasing",
+            ));
+        }
+        Ok(Self { entries })
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        self.entries
+            .binary_search_by(|(candidate, _)| candidate.cmp(key))
+            .ok()
+            .map(|index| &self.entries[index].1)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.iter().map(|(_, value)| value)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter().map(|(key, value)| (key, value))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct IndexCatalog {
-    timeline: BTreeMap<u64, PostingList>,
-    tid: BTreeMap<u32, PostingList>,
-    kind: BTreeMap<u8, PostingList>,
-    module: BTreeMap<u32, PostingList>,
-    definition: BTreeMap<u32, PostingList>,
-    register: BTreeMap<u8, PostingList>,
-    semantic_category: BTreeMap<u32, PostingList>,
-    semantic_name: BTreeMap<u32, PostingList>,
+    timeline: SortedMap<u64, PostingList>,
+    tid: SortedMap<u32, PostingList>,
+    kind: SortedMap<u8, PostingList>,
+    module: SortedMap<u32, PostingList>,
+    definition: SortedMap<u32, PostingList>,
+    register: SortedMap<u8, PostingList>,
+    semantic_category: SortedMap<u32, PostingList>,
+    semantic_name: SortedMap<u32, PostingList>,
     call: PostingList,
     return_rows: PostingList,
     checkpoint: PostingList,
     sequence: Vec<(u64, usize)>,
-    module_pc: BTreeMap<u32, Vec<(u64, usize)>>,
+    module_pc: SortedMap<u32, Vec<(u64, usize)>>,
     memory: intervals::IntervalIndex,
     source_keys: Vec<SourceKeyRow>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct NormalizedCatalog {
     schema: u32,
     capabilities: ProviderCapabilities,
     events: Vec<EventColumn>,
+    payloads: ByteArena,
     strings: ByteArena,
     blobs: ByteArena,
     modules: Vec<ModuleRow>,
@@ -387,26 +560,58 @@ struct NormalizedCatalog {
 }
 
 impl NormalizedCatalog {
-    fn validate_shape(&self, event_count: usize) -> Result<(), IndexError> {
-        if self.schema != 1 || self.events.len() != event_count {
+    fn validate_shape(&self, event_count: usize, guard: &dyn WorkGuard) -> Result<(), IndexError> {
+        if self.schema != 2 || self.events.len() != event_count {
             return Err(IndexError::corrupt(
                 "normalized event-column row counts differ",
             ));
         }
         self.strings.validate()?;
+        self.payloads.validate()?;
         self.blobs.validate()?;
-        for event in &self.events {
-            self.blobs.get(event.payload_blob)?;
+        for chunk in self.events.chunks(4096) {
+            guard.consume(WorkDelta::default())?;
+            for event in chunk {
+                self.payloads.get(event.payload_blob).map_err(|error| {
+                    IndexError::corrupt(format!("event payload reference is invalid: {error}"))
+                })?;
+            }
         }
-        for module in &self.modules {
-            self.strings.get(module.name)?;
+        for chunk in self.modules.chunks(4096) {
+            guard.consume(WorkDelta::default())?;
+            for module in chunk {
+                self.strings.get(module.name).map_err(|error| {
+                    IndexError::corrupt(format!("module name reference is invalid: {error}"))
+                })?;
+            }
         }
-        for definition in &self.definitions {
-            self.strings.get(definition.mnemonic)?;
-            self.strings.get(definition.operands)?;
-            self.strings.get(definition.disassembly)?;
-            self.blobs.get(definition.exact_blob)?;
+        for chunk in self.definitions.chunks(4096) {
+            guard.consume(WorkDelta::default())?;
+            for definition in chunk {
+                self.strings.get(definition.mnemonic).map_err(|error| {
+                    IndexError::corrupt(format!(
+                        "definition mnemonic reference is invalid: {error}"
+                    ))
+                })?;
+                self.strings.get(definition.operands).map_err(|error| {
+                    IndexError::corrupt(format!(
+                        "definition operands reference is invalid: {error}"
+                    ))
+                })?;
+                self.strings.get(definition.disassembly).map_err(|error| {
+                    IndexError::corrupt(format!(
+                        "definition disassembly reference is invalid: {error}"
+                    ))
+                })?;
+                self.blobs.get(definition.exact_blob).map_err(|error| {
+                    IndexError::corrupt(format!("definition blob reference is invalid: {error}"))
+                })?;
+            }
         }
+        checkpoint_chunks(self.instructions.len(), guard)?;
+        checkpoint_chunks(self.memories.len(), guard)?;
+        checkpoint_chunks(self.semantics.len(), guard)?;
+        checkpoint_chunks(self.observations.len(), guard)?;
         if self.instructions.iter().any(|row| {
             row.owner_row >= event_count
                 || row
@@ -437,57 +642,7 @@ impl NormalizedCatalog {
                 "normalized typed-table reference is invalid",
             ));
         }
-        for list in self
-            .indexes
-            .timeline
-            .values()
-            .chain(self.indexes.tid.values())
-            .chain(self.indexes.kind.values())
-            .chain(self.indexes.module.values())
-            .chain(self.indexes.definition.values())
-            .chain(self.indexes.register.values())
-            .chain(self.indexes.semantic_category.values())
-            .chain(self.indexes.semantic_name.values())
-            .chain([
-                &self.indexes.call,
-                &self.indexes.return_rows,
-                &self.indexes.checkpoint,
-            ])
-        {
-            list.validate(event_count)?;
-        }
-        if self
-            .indexes
-            .sequence
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-            || self
-                .indexes
-                .sequence
-                .iter()
-                .any(|(_, row)| *row >= event_count)
-            || self.indexes.module_pc.values().any(|values| {
-                values.windows(2).any(|pair| pair[0] >= pair[1])
-                    || values.iter().any(|(_, row)| *row >= event_count)
-            })
-        {
-            return Err(IndexError::corrupt("sorted range index is invalid"));
-        }
-        self.indexes.memory.validate(event_count)?;
-        let mut seen_rows = Vec::new();
-        seen_rows
-            .try_reserve_exact(event_count)
-            .map_err(|_| IndexError::resource("source-key bijection allocation failed"))?;
-        seen_rows.resize(event_count, false);
-        if self.indexes.source_keys.len() != event_count
-            || self.indexes.source_keys.windows(2).any(|pair| {
-                compare_event_keys(&pair[0].key, &pair[1].key) != std::cmp::Ordering::Less
-            })
-            || self.indexes.source_keys.iter().any(|entry| {
-                entry.row >= event_count || std::mem::replace(&mut seen_rows[entry.row], true)
-            })
-            || seen_rows.iter().any(|seen| !*seen)
-        {
+        if self.indexes.source_keys.len() != event_count {
             return Err(IndexError::corrupt(
                 "source row and EventKey mapping is not bijective",
             ));
@@ -501,13 +656,16 @@ impl NormalizedCatalog {
         kinds: &[EventKind],
         guard: &dyn WorkGuard,
     ) -> Result<(), IndexError> {
-        self.validate_shape(keys.len())?;
+        self.validate_shape(keys.len(), guard)?;
         if kinds.len() != keys.len() {
             return Err(IndexError::corrupt(
                 "normalized event-column row counts differ",
             ));
         }
         for (row, event) in self.events.iter().enumerate() {
+            if row % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
             if event.timeline != keys[row].timeline.0
                 || event.tid != keys[row].tid
                 || event.sequence != keys[row].sequence
@@ -516,92 +674,159 @@ impl NormalizedCatalog {
                     "normalized source coordinates disagree",
                 ));
             }
-            self.blobs.get(event.payload_blob)?;
-        }
-        for list in self
-            .indexes
-            .timeline
-            .values()
-            .chain(self.indexes.tid.values())
-            .chain(self.indexes.kind.values())
-            .chain(self.indexes.module.values())
-            .chain(self.indexes.definition.values())
-            .chain(self.indexes.register.values())
-            .chain(self.indexes.semantic_category.values())
-            .chain(self.indexes.semantic_name.values())
-            .chain([
-                &self.indexes.call,
-                &self.indexes.return_rows,
-                &self.indexes.checkpoint,
-            ])
-        {
-            list.validate(keys.len())?;
-        }
-        if self
-            .indexes
-            .sequence
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-            || self
-                .indexes
-                .sequence
-                .iter()
-                .any(|(_, row)| *row >= keys.len())
-            || self.indexes.module_pc.values().any(|values| {
-                values.windows(2).any(|pair| pair[0] >= pair[1])
-                    || values.iter().any(|(_, row)| *row >= keys.len())
-            })
-        {
-            return Err(IndexError::corrupt("sorted range index is invalid"));
-        }
-        self.indexes.memory.validate(keys.len())?;
-        if self.indexes.source_keys.len() != keys.len()
-            || self.indexes.source_keys.windows(2).any(|pair| {
-                compare_event_keys(&pair[0].key, &pair[1].key) != std::cmp::Ordering::Less
-            })
-            || self
-                .indexes
-                .source_keys
-                .iter()
-                .any(|entry| keys.get(entry.row) != Some(&entry.key))
-        {
-            return Err(IndexError::corrupt(
-                "source row and EventKey mapping is not bijective",
-            ));
+            self.payloads.get(event.payload_blob).map_err(|error| {
+                IndexError::corrupt(format!("event payload reference is invalid: {error}"))
+            })?;
         }
         let interval_block_rows = u32::try_from(self.indexes.memory.block_rows())
             .map_err(|_| IndexError::corrupt("interval block size does not fit u32"))?;
         let options = BuildOptions {
             interval_block_rows,
+            max_payload_bytes: self.payloads.max_bytes,
             max_blob_bytes: self.blobs.max_bytes,
             max_string_bytes: self.strings.max_bytes,
         };
-        let expected = builder::build_indexes(
-            keys,
-            kinds,
-            &self.events,
-            &self.definitions,
-            &self.instructions,
-            &self.memories,
-            &self.semantics,
-            &self.observations,
-            &options,
-            guard,
-        )
-        .map_err(|error| {
+        builder::validate_index_families(keys, kinds, self, &options, guard).map_err(|error| {
             if error.code().starts_with("control.") || error.code() == "job.cancelled" {
                 error
             } else {
                 IndexError::corrupt("eager index reconstruction failed")
             }
         })?;
-        if expected != self.indexes {
-            return Err(IndexError::corrupt(
-                "eager indexes do not match normalized columns",
-            ));
-        }
         Ok(())
     }
+}
+
+fn checkpoint_chunks(rows: usize, guard: &dyn WorkGuard) -> Result<(), IndexError> {
+    for _ in (0..rows).step_by(4096) {
+        guard.consume(WorkDelta::default())?;
+    }
+    Ok(())
+}
+
+/// Stable, read-only normalized facts and eager-index primitives shared by owned and mapped stores.
+pub trait TraceStoreView {
+    fn event_count(&self) -> usize;
+    fn event_key(&self, row: usize) -> Result<Option<EventKey>, IndexError>;
+    fn event_kind(&self, row: usize) -> Result<Option<EventKind>, IndexError>;
+    fn provenance(&self, row: usize) -> Result<Option<Provenance>, IndexError>;
+    fn capabilities(&self) -> &ProviderCapabilities;
+    fn instruction(&self, event_row: usize) -> Option<InstructionRow>;
+    fn memory(&self, event_row: usize) -> Option<MemoryRow>;
+    fn semantic(&self, event_row: usize) -> Option<SemanticRow>;
+    fn module(&self, module: u32) -> Option<&ModuleRow>;
+    fn definition(&self, definition: u32) -> Option<&DefinitionRow>;
+    fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow>;
+    fn completeness(&self) -> &[CompletenessRow];
+    fn rows_for_timeline(&self, timeline: u64) -> Result<Vec<usize>, IndexError>;
+    fn rows_for_tids(&self, tids: &[u32]) -> Result<Vec<usize>, IndexError>;
+    fn rows_for_sequence_range(
+        &self,
+        start: u64,
+        end_exclusive: u64,
+    ) -> Result<Vec<usize>, IndexError>;
+    fn rows_of_kinds(&self, kinds: &[EventKind]) -> Result<Vec<usize>, IndexError>;
+    fn rows_for_modules(&self, modules: &[u32]) -> Result<Vec<usize>, IndexError>;
+    fn rows_for_module_pc_range(
+        &self,
+        module: u32,
+        start: u64,
+        end_exclusive: u64,
+    ) -> Result<Vec<usize>, IndexError>;
+    fn rows_for_definitions(&self, definitions: &[u32]) -> Result<Vec<usize>, IndexError>;
+    fn rows_observing_register(&self, slot: RegisterSlot) -> Result<Vec<usize>, IndexError>;
+    fn checkpoint_rows(&self) -> Result<Vec<usize>, IndexError>;
+    fn call_rows(&self) -> Result<Vec<usize>, IndexError>;
+    fn return_rows(&self) -> Result<Vec<usize>, IndexError>;
+    fn rows_for_semantic_categories(&self, categories: &[&[u8]]) -> Result<Vec<usize>, IndexError>;
+    fn rows_for_semantic_names(&self, names: &[&[u8]]) -> Result<Vec<usize>, IndexError>;
+    fn memory_overlaps(&self, start: u64, end_exclusive: u64) -> Result<Vec<usize>, IndexError>;
+    fn row_for_source_key(&self, key: &EventKey) -> Option<usize>;
+    fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError>;
+}
+
+fn rows_for_posting_keys<K: Ord>(
+    map: &SortedMap<K, PostingList>,
+    keys: &[K],
+) -> Result<Vec<usize>, IndexError> {
+    let lists = keys
+        .iter()
+        .filter_map(|key| map.get(key))
+        .map(PostingList::rows)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(postings::union_rows(&lists))
+}
+
+fn rows_for_semantic_bytes(
+    catalog: &NormalizedCatalog,
+    values: &[&[u8]],
+    by_category: bool,
+) -> Result<Vec<usize>, IndexError> {
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(values.len())
+        .map_err(|_| IndexError::resource("semantic lookup allocation failed"))?;
+    for value in values {
+        if let Some(id) = catalog
+            .strings
+            .spans
+            .iter()
+            .enumerate()
+            .find_map(|(id, _)| {
+                (catalog.strings.get(id as u32).ok() == Some(*value)).then_some(id as u32)
+            })
+        {
+            ids.push(id);
+        }
+    }
+    if by_category {
+        rows_for_posting_keys(&catalog.indexes.semantic_category, &ids)
+    } else {
+        rows_for_posting_keys(&catalog.indexes.semantic_name, &ids)
+    }
+}
+
+fn row_for_source(catalog: &NormalizedCatalog, key: &EventKey) -> Option<usize> {
+    catalog
+        .indexes
+        .source_keys
+        .binary_search_by(|entry| compare_event_keys(&entry.key, key))
+        .ok()
+        .map(|index| catalog.indexes.source_keys[index].row)
+}
+
+fn rows_for_sequence(catalog: &NormalizedCatalog, start: u64, end: u64) -> Vec<usize> {
+    if start >= end {
+        return Vec::new();
+    }
+    let first = catalog
+        .indexes
+        .sequence
+        .partition_point(|(sequence, _)| *sequence < start);
+    let last = catalog
+        .indexes
+        .sequence
+        .partition_point(|(sequence, _)| *sequence < end);
+    catalog.indexes.sequence[first..last]
+        .iter()
+        .map(|(_, row)| *row)
+        .collect()
+}
+
+fn rows_for_module_pc(
+    catalog: &NormalizedCatalog,
+    module: u32,
+    start: u64,
+    end: u64,
+) -> Vec<usize> {
+    if start >= end {
+        return Vec::new();
+    }
+    let Some(rows) = catalog.indexes.module_pc.get(&module) else {
+        return Vec::new();
+    };
+    let first = rows.partition_point(|(pc, _)| *pc < start);
+    let last = rows.partition_point(|(pc, _)| *pc < end);
+    rows[first..last].iter().map(|(_, row)| *row).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -710,17 +935,16 @@ impl OwnedTraceStore {
             .find(|memory| memory.owner_row == event_row)
     }
 
-    fn cache_view_with_catalog(&self) -> Result<OwnedStoreView, IndexError> {
-        Ok(self.base.clone().with_section(OwnedSection {
-            name: NORMALIZED_CATALOG_SECTION,
-            alignment: NORMALIZED_CATALOG_ALIGNMENT,
-            element_size: NORMALIZED_CATALOG_ELEMENT_SIZE,
-            bytes: self.catalog_bytes()?,
-        })?)
-    }
-
-    pub(crate) fn catalog_bytes(&self) -> Result<Vec<u8>, IndexError> {
-        builder::canonical_bytes(&self.catalog)
+    fn into_cache_view_with_catalog(
+        self,
+        guard: &dyn WorkGuard,
+    ) -> Result<OwnedStoreView, IndexError> {
+        let mut view = self.base;
+        for section in wire::encode(self.catalog, guard)? {
+            guard.consume(WorkDelta::default())?;
+            view = view.with_section(section)?;
+        }
+        Ok(view)
     }
 }
 
@@ -733,11 +957,6 @@ pub struct MappedTraceStore {
 impl MappedTraceStore {
     fn open(view: MappedStoreView, guard: &dyn WorkGuard) -> Result<Self, IndexError> {
         guard.consume(WorkDelta::default())?;
-        let bytes = view
-            .section_bytes(NORMALIZED_CATALOG_SECTION, guard)?
-            .ok_or_else(|| IndexError::corrupt("normalized catalog section is missing"))?;
-        let catalog: NormalizedCatalog = serde_json::from_slice(&bytes)
-            .map_err(|_| IndexError::corrupt("normalized catalog JSON is invalid"))?;
         let mut keys = Vec::new();
         let mut kinds = Vec::new();
         keys.try_reserve_exact(view.event_count())
@@ -752,7 +971,26 @@ impl MappedTraceStore {
             keys.push(view.event_key(row)?);
             kinds.push(view.event_kind(row)?);
         }
-        catalog.validate(&keys, &kinds, guard)?;
+        let mut sections = BTreeMap::new();
+        guard.consume(WorkDelta {
+            nodes: wire::EXACT_SECTIONS.len() as u64,
+            ..WorkDelta::default()
+        })?;
+        for (name, _, _) in wire::EXACT_SECTIONS {
+            guard.consume(WorkDelta::default())?;
+            let bytes = view
+                .section_bytes(name, guard)?
+                .ok_or_else(|| IndexError::corrupt(format!("binary section {name} is missing")))?;
+            sections.insert((*name).to_owned(), bytes);
+        }
+        let catalog = wire::decode(
+            sections,
+            &keys,
+            &kinds,
+            &view.cache_identity().source_format,
+            false,
+            guard,
+        )?;
         Ok(Self { view, catalog })
     }
 
@@ -801,6 +1039,204 @@ pub enum TraceStore {
     Mapped(MappedTraceStore),
 }
 
+trait HasNormalizedCatalog {
+    fn normalized_catalog(&self) -> &NormalizedCatalog;
+    fn base_event_count(&self) -> usize;
+    fn base_event_key(&self, row: usize) -> Result<EventKey, IndexError>;
+    fn base_event_kind(&self, row: usize) -> Result<EventKind, IndexError>;
+}
+
+impl HasNormalizedCatalog for OwnedTraceStore {
+    fn normalized_catalog(&self) -> &NormalizedCatalog {
+        &self.catalog
+    }
+    fn base_event_count(&self) -> usize {
+        self.base.event_count()
+    }
+    fn base_event_key(&self, row: usize) -> Result<EventKey, IndexError> {
+        self.base.event_key(row).map_err(IndexError::from)
+    }
+    fn base_event_kind(&self, row: usize) -> Result<EventKind, IndexError> {
+        self.base.event_kind(row).map_err(IndexError::from)
+    }
+}
+
+impl HasNormalizedCatalog for MappedTraceStore {
+    fn normalized_catalog(&self) -> &NormalizedCatalog {
+        &self.catalog
+    }
+    fn base_event_count(&self) -> usize {
+        self.view.event_count()
+    }
+    fn base_event_key(&self, row: usize) -> Result<EventKey, IndexError> {
+        self.view.event_key(row).map_err(IndexError::from)
+    }
+    fn base_event_kind(&self, row: usize) -> Result<EventKind, IndexError> {
+        self.view.event_kind(row).map_err(IndexError::from)
+    }
+}
+
+impl HasNormalizedCatalog for TraceStore {
+    fn normalized_catalog(&self) -> &NormalizedCatalog {
+        match self {
+            Self::Owned(store) => &store.catalog,
+            Self::Mapped(store) => &store.catalog,
+        }
+    }
+    fn base_event_count(&self) -> usize {
+        match self {
+            Self::Owned(store) => store.base.event_count(),
+            Self::Mapped(store) => store.view.event_count(),
+        }
+    }
+    fn base_event_key(&self, row: usize) -> Result<EventKey, IndexError> {
+        match self {
+            Self::Owned(store) => store.base.event_key(row).map_err(IndexError::from),
+            Self::Mapped(store) => store.view.event_key(row).map_err(IndexError::from),
+        }
+    }
+    fn base_event_kind(&self, row: usize) -> Result<EventKind, IndexError> {
+        match self {
+            Self::Owned(store) => store.base.event_kind(row).map_err(IndexError::from),
+            Self::Mapped(store) => store.view.event_kind(row).map_err(IndexError::from),
+        }
+    }
+}
+
+impl<T: HasNormalizedCatalog> TraceStoreView for T {
+    fn event_count(&self) -> usize {
+        self.base_event_count()
+    }
+    fn event_key(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
+        (row < self.base_event_count())
+            .then(|| self.base_event_key(row))
+            .transpose()
+    }
+    fn event_kind(&self, row: usize) -> Result<Option<EventKind>, IndexError> {
+        (row < self.base_event_count())
+            .then(|| self.base_event_kind(row))
+            .transpose()
+    }
+    fn provenance(&self, row: usize) -> Result<Option<Provenance>, IndexError> {
+        Ok(self
+            .normalized_catalog()
+            .events
+            .get(row)
+            .map(|event| event.provenance))
+    }
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.normalized_catalog().capabilities
+    }
+    fn instruction(&self, event_row: usize) -> Option<InstructionRow> {
+        self.normalized_catalog()
+            .instructions
+            .iter()
+            .find(|row| row.owner_row == event_row)
+            .copied()
+    }
+    fn memory(&self, event_row: usize) -> Option<MemoryRow> {
+        self.normalized_catalog()
+            .memories
+            .iter()
+            .find(|row| row.owner_row == event_row)
+            .copied()
+    }
+    fn semantic(&self, event_row: usize) -> Option<SemanticRow> {
+        self.normalized_catalog()
+            .semantics
+            .iter()
+            .find(|row| row.owner_row == event_row)
+            .copied()
+    }
+    fn module(&self, module: u32) -> Option<&ModuleRow> {
+        self.normalized_catalog().modules.get(module as usize)
+    }
+    fn definition(&self, definition: u32) -> Option<&DefinitionRow> {
+        self.normalized_catalog()
+            .definitions
+            .get(definition as usize)
+    }
+    fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow> {
+        self.normalized_catalog()
+            .observations
+            .iter()
+            .filter(|row| row.owner_row == event_row)
+            .copied()
+            .collect()
+    }
+    fn completeness(&self) -> &[CompletenessRow] {
+        &self.normalized_catalog().completeness
+    }
+    fn rows_for_timeline(&self, timeline: u64) -> Result<Vec<usize>, IndexError> {
+        rows_for_posting_keys(&self.normalized_catalog().indexes.timeline, &[timeline])
+    }
+    fn rows_for_tids(&self, tids: &[u32]) -> Result<Vec<usize>, IndexError> {
+        rows_for_posting_keys(&self.normalized_catalog().indexes.tid, tids)
+    }
+    fn rows_for_sequence_range(&self, start: u64, end: u64) -> Result<Vec<usize>, IndexError> {
+        Ok(rows_for_sequence(self.normalized_catalog(), start, end))
+    }
+    fn rows_of_kinds(&self, kinds: &[EventKind]) -> Result<Vec<usize>, IndexError> {
+        let encoded = kinds
+            .iter()
+            .map(|kind| crate::layout::encode_event_kind(*kind))
+            .collect::<Vec<_>>();
+        rows_for_posting_keys(&self.normalized_catalog().indexes.kind, &encoded)
+    }
+    fn rows_for_modules(&self, modules: &[u32]) -> Result<Vec<usize>, IndexError> {
+        rows_for_posting_keys(&self.normalized_catalog().indexes.module, modules)
+    }
+    fn rows_for_module_pc_range(
+        &self,
+        module: u32,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<usize>, IndexError> {
+        Ok(rows_for_module_pc(
+            self.normalized_catalog(),
+            module,
+            start,
+            end,
+        ))
+    }
+    fn rows_for_definitions(&self, definitions: &[u32]) -> Result<Vec<usize>, IndexError> {
+        rows_for_posting_keys(&self.normalized_catalog().indexes.definition, definitions)
+    }
+    fn rows_observing_register(&self, slot: RegisterSlot) -> Result<Vec<usize>, IndexError> {
+        rows_for_posting_keys(
+            &self.normalized_catalog().indexes.register,
+            &[slot.index() as u8],
+        )
+    }
+    fn checkpoint_rows(&self) -> Result<Vec<usize>, IndexError> {
+        self.normalized_catalog().indexes.checkpoint.rows()
+    }
+    fn call_rows(&self) -> Result<Vec<usize>, IndexError> {
+        self.normalized_catalog().indexes.call.rows()
+    }
+    fn return_rows(&self) -> Result<Vec<usize>, IndexError> {
+        self.normalized_catalog().indexes.return_rows.rows()
+    }
+    fn rows_for_semantic_categories(&self, categories: &[&[u8]]) -> Result<Vec<usize>, IndexError> {
+        rows_for_semantic_bytes(self.normalized_catalog(), categories, true)
+    }
+    fn rows_for_semantic_names(&self, names: &[&[u8]]) -> Result<Vec<usize>, IndexError> {
+        rows_for_semantic_bytes(self.normalized_catalog(), names, false)
+    }
+    fn memory_overlaps(&self, start: u64, end: u64) -> Result<Vec<usize>, IndexError> {
+        self.normalized_catalog()
+            .indexes
+            .memory
+            .overlaps(start, end)
+    }
+    fn row_for_source_key(&self, key: &EventKey) -> Option<usize> {
+        row_for_source(self.normalized_catalog(), key)
+    }
+    fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
+        TraceStoreView::event_key(self, row)
+    }
+}
+
 impl TraceStore {
     pub fn open_or_build(
         cache_root: &std::path::Path,
@@ -820,8 +1256,9 @@ impl TraceStore {
         guard.consume(WorkDelta::default())?;
         let owned = IndexBuilder::build(source, options, guard)?;
         guard.consume(WorkDelta::default())?;
-        let outcome = CacheWriter::new(identity.clone(), owned.cache_view_with_catalog()?)?
-            .publish(cache_root, guard)?;
+        let (outcome, receipt) =
+            CacheWriter::new(identity.clone(), owned.into_cache_view_with_catalog(guard)?)?
+                .publish_with_receipt(cache_root, guard)?;
         let reopened = (|| {
             guard.consume(WorkDelta::default())?;
             let view = match CacheReader::open(cache_root, &identity, guard)? {
@@ -840,14 +1277,18 @@ impl TraceStore {
         match reopened {
             Ok(store) => Ok(store),
             Err(error) if outcome == crate::PublishOutcome::Published => {
-                CacheWriter::remove_published(cache_root, &identity).map_err(|cleanup| {
-                    IndexError::new(
-                        cleanup.code(),
-                        format!(
-                            "post-publish reopen failed ({error}); rollback failed ({cleanup})"
-                        ),
-                    )
-                })?;
+                let receipt = receipt
+                    .ok_or_else(|| IndexError::corrupt("published cache receipt is missing"))?;
+                CacheWriter::remove_published(cache_root, &identity, receipt).map_err(
+                    |cleanup| {
+                        IndexError::new(
+                            cleanup.code(),
+                            format!(
+                                "post-publish reopen failed ({error}); rollback failed ({cleanup})"
+                            ),
+                        )
+                    },
+                )?;
                 Err(error)
             }
             Err(error) => Err(error),
@@ -956,35 +1397,4 @@ pub(crate) fn compare_event_keys(left: &EventKey, right: &EventKey) -> std::cmp:
         .then_with(|| left.source_offset.cmp(&right.source_offset))
         .then_with(|| left.sequence.cmp(&right.sequence))
         .then_with(|| left.tid.cmp(&right.tid))
-}
-
-pub(crate) fn validate_catalog_bytes(bytes: &[u8], event_count: usize) -> Result<(), IndexError> {
-    let catalog: NormalizedCatalog = serde_json::from_slice(bytes)
-        .map_err(|_| IndexError::corrupt("normalized catalog JSON is invalid"))?;
-    let canonical = serde_json::to_vec(&catalog)
-        .map_err(|_| IndexError::corrupt("normalized catalog cannot be re-encoded"))?;
-    if canonical != bytes {
-        return Err(IndexError::corrupt(
-            "normalized catalog JSON is not canonical",
-        ));
-    }
-    catalog.validate_shape(event_count)
-}
-
-pub(crate) fn validate_catalog_bytes_with_rows(
-    bytes: &[u8],
-    keys: &[EventKey],
-    kinds: &[EventKind],
-    guard: &dyn WorkGuard,
-) -> Result<(), IndexError> {
-    let catalog: NormalizedCatalog = serde_json::from_slice(bytes)
-        .map_err(|_| IndexError::corrupt("normalized catalog JSON is invalid"))?;
-    let canonical = serde_json::to_vec(&catalog)
-        .map_err(|_| IndexError::corrupt("normalized catalog cannot be re-encoded"))?;
-    if canonical != bytes {
-        return Err(IndexError::corrupt(
-            "normalized catalog JSON is not canonical",
-        ));
-    }
-    catalog.validate(keys, kinds, guard)
 }

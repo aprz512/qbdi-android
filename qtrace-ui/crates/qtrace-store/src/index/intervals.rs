@@ -1,3 +1,4 @@
+use qtrace_provider::{WorkDelta, WorkGuard};
 use serde::{Deserialize, Serialize};
 
 use super::IndexError;
@@ -18,6 +19,28 @@ pub(crate) struct IntervalIndex {
 }
 
 impl IntervalIndex {
+    pub(super) fn encoded_parts(&self) -> (&[IntervalEntry], &[u64], &[u64]) {
+        (
+            &self.entries,
+            &self.prefix_max_end,
+            &self.block_prefix_max_end,
+        )
+    }
+
+    pub(super) fn from_encoded_parts(
+        entries: Vec<IntervalEntry>,
+        prefix_max_end: Vec<u64>,
+        block_prefix_max_end: Vec<u64>,
+        block_rows: usize,
+    ) -> Self {
+        Self {
+            entries,
+            prefix_max_end,
+            block_prefix_max_end,
+            block_rows,
+        }
+    }
+
     pub(super) fn block_rows(&self) -> usize {
         self.block_rows
     }
@@ -25,19 +48,29 @@ impl IntervalIndex {
     pub(crate) fn build(
         mut entries: Vec<IntervalEntry>,
         block_rows: usize,
+        guard: &dyn WorkGuard,
     ) -> Result<Self, IndexError> {
         if block_rows == 0 || !block_rows.is_power_of_two() {
             return Err(IndexError::invalid(
                 "interval block rows must be a non-zero power of two",
             ));
         }
-        entries.sort_unstable_by_key(|entry| (entry.start, entry.end_exclusive, entry.row));
+        super::builder::cancellable_sort_by(&mut entries, guard, |left, right| {
+            (left.start, left.end_exclusive, left.row).cmp(&(
+                right.start,
+                right.end_exclusive,
+                right.row,
+            ))
+        })?;
         let mut prefix_max_end = Vec::new();
         prefix_max_end
             .try_reserve_exact(entries.len())
             .map_err(|_| IndexError::resource("interval prefix allocation failed"))?;
         let mut maximum = 0_u64;
-        for entry in &entries {
+        for (ordinal, entry) in entries.iter().enumerate() {
+            if ordinal % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
             if entry.start >= entry.end_exclusive {
                 return Err(IndexError::invalid(
                     "empty interval entered the overlap index",
@@ -52,6 +85,9 @@ impl IntervalIndex {
             .try_reserve_exact(blocks)
             .map_err(|_| IndexError::resource("interval block allocation failed"))?;
         for block in 0..blocks {
+            if block % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
             let end = ((block + 1) * block_rows).min(entries.len());
             block_prefix_max_end.push(prefix_max_end[end - 1]);
         }
@@ -94,20 +130,5 @@ impl IntervalIndex {
         rows.sort_unstable();
         rows.dedup();
         Ok(rows)
-    }
-
-    pub(crate) fn validate(&self, event_count: usize) -> Result<(), IndexError> {
-        if self.prefix_max_end.len() != self.entries.len()
-            || self.block_rows == 0
-            || !self.block_rows.is_power_of_two()
-            || self.block_prefix_max_end.len() != self.entries.len().div_ceil(self.block_rows)
-        {
-            return Err(IndexError::corrupt("invalid interval augmentation shape"));
-        }
-        let rebuilt = Self::build(self.entries.clone(), self.block_rows)?;
-        if rebuilt != *self || self.entries.iter().any(|entry| entry.row >= event_count) {
-            return Err(IndexError::corrupt("invalid interval augmentation payload"));
-        }
-        Ok(())
     }
 }

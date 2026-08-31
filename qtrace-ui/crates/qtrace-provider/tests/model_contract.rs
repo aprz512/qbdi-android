@@ -6,7 +6,7 @@ use std::{
 use qtrace_provider::{
     ArtifactDigest, BeginMetadata, BudgetDimension, ByteSource, CompletenessCause,
     CompletenessRange, CoverageGap, Discontinuity, DiscontinuityCause, EventCursor, EventKey,
-    EventKind, EventPayload, EventRecord, FragmentSourceOffsets, Instruction,
+    EventKind, EventPayload, EventRecord, EventScope, FragmentSourceOffsets, Instruction,
     InstructionDefinition, MAX_FRAGMENT_SOURCE_OFFSETS, Memory, MemoryDirection, ModuleDefinition,
     OpaqueOptionalRecord, OperationAbort, Provenance, ProviderCapabilities, ProviderCounters,
     ProviderError, ProviderSummary, RangeBounds, RangeDomain, ReadAtSource, RegisterCheckpoint,
@@ -28,6 +28,42 @@ fn event_identity_does_not_depend_on_visible_row_or_optional_sequence() {
     assert_eq!(key.source_offset, 0x240);
     assert_eq!(key.sequence, None);
     assert_eq!(key.tid, Some(42));
+}
+
+#[test]
+fn event_scope_distinguishes_flight_chunk_generations_without_changing_event_identity() {
+    let key = EventKey::new(digest(0x11), TimelineId(0), 19, 0x240, Some(91), Some(42));
+    let event = EventRecord::new_scoped(
+        key.clone(),
+        Provenance::Captured,
+        EventScope::FlightChunk {
+            chunk_index: 3,
+            generation: 7,
+            tid: 42,
+        },
+        EventPayload::Instruction(Instruction::default()),
+    );
+    assert_eq!(event.key, key);
+    assert_eq!(
+        event.scope(),
+        EventScope::FlightChunk {
+            chunk_index: 3,
+            generation: 7,
+            tid: 42,
+        }
+    );
+    let encoded = serde_json::to_vec(&event).expect("event JSON");
+    let decoded: EventRecord = serde_json::from_slice(&encoded).expect("event round trip");
+    assert_eq!(decoded.scope(), event.scope());
+    assert_eq!(
+        EventRecord::new(
+            key,
+            Provenance::Captured,
+            EventPayload::Instruction(Instruction::default())
+        )
+        .scope(),
+        EventScope::Artifact
+    );
 }
 
 #[test]

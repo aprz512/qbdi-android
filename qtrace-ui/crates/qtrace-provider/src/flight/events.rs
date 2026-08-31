@@ -6,7 +6,7 @@ use crate::qtrb::events::{
     decode_memory_record,
 };
 use crate::{
-    CoverageGap, EventKey, EventPayload, EventRecord, OpaqueOptionalRecord, Provenance,
+    CoverageGap, EventKey, EventPayload, EventRecord, EventScope, OpaqueOptionalRecord, Provenance,
     ProviderError, RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot,
     RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase,
     SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, WorkDelta,
@@ -92,6 +92,7 @@ pub(super) fn decode(
         let coordinate = coordinate(&event);
         let sequence = event.key.sequence.unwrap_or(0);
         let tid = event.key.tid.unwrap_or(0);
+        let scope = event.scope();
         let EventPayload::OpaqueOptional(raw) = event.payload else {
             output.push(event);
             continue;
@@ -99,7 +100,7 @@ pub(super) fn decode(
         let chunk_index = chunk_index(superblock, event.key.source_offset);
         if let Some(index) = chunk_index {
             let Some(identity) = chunks.get(index as usize).and_then(Option::as_ref) else {
-                output.push(rewrap(event.key, event.provenance, raw));
+                output.push(rewrap(event.key, event.provenance, scope, raw));
                 continue;
             };
             let state = &mut states[index as usize];
@@ -125,16 +126,17 @@ pub(super) fn decode(
                         &mut damaged_sequences,
                         &mut damaged_source_offsets,
                     );
-                    output.push(rewrap(event.key, Provenance::Damaged, raw));
+                    output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
                     continue;
                 }
                 match decode_begin(&raw.bytes, superblock, identity, index, coordinate) {
                     Ok(begin) => {
                         state.prefix = PrefixState::ExpectCheckpoint;
                         state.module_base = begin.module_base;
-                        output.push(EventRecord::new(
+                        output.push(EventRecord::new_scoped(
                             event.key,
                             event.provenance,
+                            scope,
                             EventPayload::Begin(begin),
                         ));
                     }
@@ -147,7 +149,7 @@ pub(super) fn decode(
                             &mut damaged_sequences,
                             &mut damaged_source_offsets,
                         );
-                        output.push(rewrap(event.key, Provenance::Damaged, raw));
+                        output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
                     }
                 }
                 continue;
@@ -163,7 +165,7 @@ pub(super) fn decode(
                     &mut damaged_sequences,
                     &mut damaged_source_offsets,
                 );
-                output.push(rewrap(event.key, Provenance::Damaged, raw));
+                output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
                 continue;
             }
             if state.prefix == PrefixState::Ready && matches!((raw.record_type, raw.flags), (9, 1))
@@ -178,7 +180,7 @@ pub(super) fn decode(
                     &mut damaged_sequences,
                     &mut damaged_source_offsets,
                 );
-                output.push(rewrap(event.key, Provenance::Damaged, raw));
+                output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
                 continue;
             }
             if state.prefix == PrefixState::Broken {
@@ -197,13 +199,14 @@ pub(super) fn decode(
                 if matches!((raw.record_type, raw.flags), (9, 0))
                     && let Ok(delta) = decode_delta(&raw.bytes, superblock.pointer_width, None)
                 {
-                    output.push(EventRecord::new(
+                    output.push(EventRecord::new_scoped(
                         event.key,
                         Provenance::Damaged,
+                        scope,
                         EventPayload::RegisterDelta(delta),
                     ));
                 } else {
-                    output.push(rewrap(event.key, Provenance::Damaged, raw));
+                    output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
                 }
                 continue;
             }
@@ -211,6 +214,7 @@ pub(super) fn decode(
                 raw,
                 &event.key,
                 event.provenance,
+                scope,
                 identity,
                 index,
                 state,
@@ -241,7 +245,7 @@ pub(super) fn decode(
                     }
                     damaged_sequences.push(sequence);
                     damaged_source_offsets.push(event.key.source_offset);
-                    output.push(rewrap(event.key, Provenance::Damaged, original));
+                    output.push(rewrap(event.key, Provenance::Damaged, scope, original));
                 }
             }
         } else if event.key.source_offset >= superblock.emergencies.offset
@@ -266,7 +270,7 @@ pub(super) fn decode(
             }
             output.push(typed);
         } else {
-            output.push(rewrap(event.key, event.provenance, raw));
+            output.push(rewrap(event.key, event.provenance, scope, raw));
         }
     }
 
@@ -372,6 +376,7 @@ fn decode_chunk_record(
     raw: OpaqueOptionalRecord,
     key: &EventKey,
     provenance: Provenance,
+    scope: EventScope,
     identity: &ChunkIdentity,
     chunk_index: u32,
     state: &mut ChunkState,
@@ -510,13 +515,14 @@ fn decode_chunk_record(
         Ok(payload) => {
             let damaged = matches!(&payload, EventPayload::ThreadLifecycle(value) if value.creator_tid.is_none() && value.phase == ThreadLifecyclePhase::Begin)
                 || matches!(&payload, EventPayload::RegisterDelta(value) if !value.ancestry_reliable);
-            Ok(Some(EventRecord::new(
+            Ok(Some(EventRecord::new_scoped(
                 key.clone(),
                 if damaged {
                     Provenance::Damaged
                 } else {
                     provenance
                 },
+                scope,
                 payload,
             )))
         }
@@ -1023,8 +1029,13 @@ fn chunk_index(superblock: &Superblock, offset: u64) -> Option<u32> {
     u32::try_from((offset - superblock.chunks.offset) / u64::from(superblock.chunk_bytes)).ok()
 }
 
-fn rewrap(key: EventKey, provenance: Provenance, raw: OpaqueOptionalRecord) -> EventRecord {
-    EventRecord::new(key, provenance, EventPayload::OpaqueOptional(raw))
+fn rewrap(
+    key: EventKey,
+    provenance: Provenance,
+    scope: EventScope,
+    raw: OpaqueOptionalRecord,
+) -> EventRecord {
+    EventRecord::new_scoped(key, provenance, scope, EventPayload::OpaqueOptional(raw))
 }
 fn coordinate(event: &EventRecord) -> SourceCoordinate {
     SourceCoordinate {

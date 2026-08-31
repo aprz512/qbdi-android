@@ -53,6 +53,12 @@ pub enum PublishOutcome {
     Published,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PublishedReceipt {
+    directory: ObjectIdentity,
+    final_object: ObjectIdentity,
+}
+
 #[derive(Debug)]
 pub struct CacheWriter {
     identity: CacheIdentity,
@@ -70,6 +76,23 @@ impl CacheWriter {
         root: &Path,
         guard: &dyn WorkGuard,
     ) -> Result<PublishOutcome, CacheError> {
+        self.publish_receipted(root, guard)
+            .map(|(outcome, _)| outcome)
+    }
+
+    pub(crate) fn publish_with_receipt(
+        &self,
+        root: &Path,
+        guard: &dyn WorkGuard,
+    ) -> Result<(PublishOutcome, Option<PublishedReceipt>), CacheError> {
+        self.publish_receipted(root, guard)
+    }
+
+    fn publish_receipted(
+        &self,
+        root: &Path,
+        guard: &dyn WorkGuard,
+    ) -> Result<(PublishOutcome, Option<PublishedReceipt>), CacheError> {
         self.authorize_resident_peak(guard)?;
         let key = self.identity.cache_key();
         let directory = CacheDirectory::open(root, &key, true, guard)?
@@ -96,6 +119,7 @@ impl CacheWriter {
     pub(crate) fn remove_published(
         root: &Path,
         identity: &CacheIdentity,
+        receipt: PublishedReceipt,
     ) -> Result<(), CacheError> {
         struct CleanupGuard;
         impl WorkGuard for CleanupGuard {
@@ -111,16 +135,18 @@ impl CacheWriter {
         let publication_lock = PublicationLock::acquire(&directory, &CleanupGuard)?;
         directory.verify()?;
         publication_lock.verify()?;
-        let (file, object) = open_final(&directory)?
+        if ObjectIdentity::from_file(&directory.file)? != receipt.directory {
+            return Err(CacheError::conflict(
+                "published cache directory binding changed before rollback",
+            ));
+        }
+        let (_file, object) = open_final(&directory)?
             .ok_or_else(|| CacheError::conflict("published cache disappeared before rollback"))?;
-        validate_file(file, &directory, identity, &CleanupGuard).map_err(
-            |failure| match failure {
-                ValidationFailure::Rebuild(reason) => CacheError::conflict(format!(
-                    "published rollback target is invalid: {reason:?}"
-                )),
-                ValidationFailure::Fatal(error) => error,
-            },
-        )?;
+        if object != receipt.final_object {
+            return Err(CacheError::conflict(
+                "published cache was replaced by a later winner before rollback",
+            ));
+        }
         directory.verify()?;
         publication_lock.verify()?;
         unlink_verified(&directory, FINAL_NAME, object)?;
@@ -178,7 +204,8 @@ impl CacheWriter {
         publication_lock: &PublicationLock,
         temporary: &mut OwnedTemporary,
         guard: &dyn WorkGuard,
-    ) -> Result<PublishOutcome, CacheError> {
+    ) -> Result<(PublishOutcome, Option<PublishedReceipt>), CacheError> {
+        let directory_receipt = ObjectIdentity::from_file(&directory.file)?;
         write_part(temporary.file_mut()?, &[0_u8; HEADER_BYTES], guard)?;
         let (sections, manifest_offset) = self.write_sections(temporary.file_mut()?, guard)?;
 
@@ -234,7 +261,7 @@ impl CacheWriter {
                 ))
             })?;
             directory.verify()?;
-            return Ok(PublishOutcome::Existing);
+            return Ok((PublishOutcome::Existing, None));
         }
 
         let transaction = match state {
@@ -277,10 +304,12 @@ impl CacheWriter {
                 publication_lock,
                 &transaction,
                 CacheError::from(abort),
-            );
+            )
+            .map(|outcome| (outcome, None));
         }
         if let Err(error) = directory.verify() {
-            return rollback_after_error(directory, publication_lock, &transaction, error);
+            return rollback_after_error(directory, publication_lock, &transaction, error)
+                .map(|outcome| (outcome, None));
         }
         if let Err(error) = publication_lock.verify() {
             return Err(CacheError::durability(format!(
@@ -289,7 +318,11 @@ impl CacheWriter {
         }
 
         commit_transaction(directory, publication_lock, &transaction)?;
-        Ok(PublishOutcome::Published)
+        let receipt = PublishedReceipt {
+            directory: directory_receipt,
+            final_object: transaction.own(),
+        };
+        Ok((PublishOutcome::Published, Some(receipt)))
     }
 
     fn write_sections(
@@ -474,6 +507,14 @@ enum PublicationTransaction {
         displaced: ObjectIdentity,
         staging: String,
     },
+}
+
+impl PublicationTransaction {
+    fn own(&self) -> ObjectIdentity {
+        match self {
+            Self::Missing { own } | Self::Corrupt { own, .. } => *own,
+        }
+    }
 }
 
 fn inspect_final(
@@ -1049,7 +1090,7 @@ mod tests {
     };
     use crate::cache::{
         CacheDirectory, CacheIdentity, CacheOpen, CacheReader, CacheWriter, OwnedStoreView,
-        PublicationState,
+        PublicationState, PublishOutcome,
     };
 
     struct AllowAll;
@@ -1207,6 +1248,33 @@ mod tests {
                 .count(),
             0,
             "verified staging directory must be cleaned"
+        );
+    }
+
+    #[test]
+    fn receipt_rollback_preserves_a_later_same_identity_winner() {
+        let root = private_root();
+        let identity = identity(0x58);
+        let (outcome, receipt) = CacheWriter::new(identity.clone(), store(0x58))
+            .expect("writer")
+            .publish_with_receipt(root.path(), &AllowAll)
+            .expect("initial publication");
+        assert_eq!(outcome, PublishOutcome::Published);
+        let receipt = receipt.expect("published receipt");
+        let final_path = digest_path(&root, &identity).join("index.qtc");
+        let later_bytes = fs::read(&final_path).expect("published bytes");
+        fs::rename(&final_path, final_path.with_extension("superseded"))
+            .expect("move original winner");
+        fs::write(&final_path, &later_bytes).expect("install later winner");
+        fs::set_permissions(&final_path, fs::Permissions::from_mode(0o600))
+            .expect("later winner mode");
+
+        let error = CacheWriter::remove_published(root.path(), &identity, receipt)
+            .expect_err("old receipt must not remove a later winner");
+        assert_eq!(error.code(), "cache.identity_conflict");
+        assert_eq!(
+            fs::read(&final_path).expect("later winner remains"),
+            later_bytes
         );
     }
 

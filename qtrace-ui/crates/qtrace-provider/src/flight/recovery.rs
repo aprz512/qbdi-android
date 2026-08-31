@@ -312,6 +312,7 @@ pub(super) fn recover(
             let scan = match scan_records(
                 &mut context,
                 artifact,
+                index,
                 &header,
                 data_offset,
                 committed,
@@ -387,7 +388,15 @@ pub(super) fn recover(
                 CompletenessCause::Active,
                 &context,
             )?;
-            let scan = scan_records(&mut context, artifact, &header, data_offset, capacity, true)?;
+            let scan = scan_records(
+                &mut context,
+                artifact,
+                index,
+                &header,
+                data_offset,
+                capacity,
+                true,
+            )?;
             merge_lifecycle(
                 &mut lifecycle,
                 header.tid,
@@ -821,6 +830,7 @@ fn authorize_metadata(
 fn scan_records(
     context: &mut RecoveryContext<'_>,
     artifact: crate::ArtifactDigest,
+    chunk_index: u32,
     header: &ChunkHeader,
     data_offset: u64,
     limit: u64,
@@ -938,9 +948,14 @@ fn scan_records(
             Some(record.sequence),
             Some(header.tid),
         );
-        let event = EventRecord::new(
+        let event = EventRecord::new_scoped(
             key,
             Provenance::Captured,
+            crate::EventScope::FlightChunk {
+                chunk_index,
+                generation: header.generation,
+                tid: header.tid,
+            },
             EventPayload::OpaqueOptional(OpaqueOptionalRecord {
                 record_type: record.kind,
                 flags: record.flags,

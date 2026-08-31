@@ -8,6 +8,14 @@ pub struct PostingList {
 }
 
 impl PostingList {
+    pub(super) fn deltas(&self) -> &[u64] {
+        &self.deltas
+    }
+
+    pub(super) fn from_deltas(deltas: Vec<u64>) -> Self {
+        Self { deltas }
+    }
+
     pub(crate) fn from_rows(rows: &[usize]) -> Result<Self, IndexError> {
         let mut deltas = Vec::new();
         deltas
@@ -58,15 +66,6 @@ impl PostingList {
             previous = Some(row);
         }
         Ok(rows)
-    }
-
-    pub(crate) fn validate(&self, event_count: usize) -> Result<(), IndexError> {
-        if self.rows()?.iter().any(|row| *row >= event_count) {
-            return Err(IndexError::corrupt(
-                "posting row is outside the event table",
-            ));
-        }
-        Ok(())
     }
 }
 

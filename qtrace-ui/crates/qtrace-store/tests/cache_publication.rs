@@ -229,6 +229,18 @@ struct RejectLargeResident {
     limit: u64,
 }
 
+struct CaptureResident {
+    maximum: Mutex<u64>,
+}
+
+impl WorkGuard for CaptureResident {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        let mut maximum = self.maximum.lock().expect("resident maximum");
+        *maximum = (*maximum).max(delta.resident_bytes);
+        Ok(())
+    }
+}
+
 impl WorkGuard for RejectLargeResident {
     fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
         if delta.resident_bytes > self.limit {
@@ -256,6 +268,35 @@ fn writer_declares_true_peak_resident_budget_before_cache_path_io() {
         !root.exists(),
         "authorization must precede cache path allocation"
     );
+}
+
+#[test]
+fn writer_declared_peak_has_an_exact_success_threshold() {
+    let capture_root = private_root();
+    let capture = CaptureResident {
+        maximum: Mutex::new(0),
+    };
+    CacheWriter::new(identity(0x23), store_rows(0x23, 4096))
+        .expect("writer")
+        .publish(capture_root.path(), &capture)
+        .expect("capture writer peak");
+    let peak = *capture.maximum.lock().expect("resident maximum");
+    assert!(peak > 0);
+
+    let parent = TempDir::new().expect("below parent");
+    let below_root = parent.path().join("not-created");
+    let error = CacheWriter::new(identity(0x24), store_rows(0x24, 4096))
+        .expect("writer")
+        .publish(&below_root, &RejectLargeResident { limit: peak - 1 })
+        .expect_err("one byte below writer peak");
+    assert_eq!(error.code(), "control.budget_exceeded");
+    assert!(!below_root.exists());
+
+    let exact_root = private_root();
+    CacheWriter::new(identity(0x25), store_rows(0x25, 4096))
+        .expect("writer")
+        .publish(exact_root.path(), &RejectLargeResident { limit: peak })
+        .expect("exact writer peak succeeds");
 }
 
 #[test]
