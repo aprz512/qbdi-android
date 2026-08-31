@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ProviderError, SourceCoordinate};
+use crate::{ProviderError, SourceCoordinate, WorkGuard, allocation};
 
 use super::{cursor::PayloadCursor, wire::*};
 
@@ -265,13 +265,15 @@ fn nested(
 pub(crate) fn decode_instruction_definition_record(
     payload: &[u8],
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<InstructionDefinition, ProviderError> {
-    decode_instruction_definition_payload(nested(payload, 3, coordinate)?, coordinate)
+    decode_instruction_definition_payload(nested(payload, 3, coordinate)?, coordinate, guard)
 }
 
-pub(crate) fn decode_instruction_definition_payload(
+fn decode_instruction_definition_payload(
     payload: &[u8],
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<InstructionDefinition, ProviderError> {
     let mut cursor = PayloadCursor::new(payload, "INSTRUCTION_DEF", coordinate);
     let definition_id = cursor.u32_le()?;
@@ -297,15 +299,18 @@ pub(crate) fn decode_instruction_definition_payload(
             "invalid instruction definition metadata",
         ));
     }
-    let mnemonic = cursor.bounded_utf8(MAX_MNEMONIC_BYTES, "mnemonic")?;
-    let operands = cursor.bounded_utf8(MAX_OPERANDS_BYTES, "operands")?;
-    let disassembly = cursor.bounded_utf8(MAX_DISASSEMBLY_BYTES, "disassembly")?;
-    let reads = shared_registers(&mut cursor, read_mask, "read register", coordinate)?;
-    let writes = shared_registers(&mut cursor, write_mask, "write register", coordinate)?;
+    let mnemonic = cursor.bounded_utf8_guarded(MAX_MNEMONIC_BYTES, "mnemonic", guard)?;
+    let operands = cursor.bounded_utf8_guarded(MAX_OPERANDS_BYTES, "operands", guard)?;
+    let disassembly = cursor.bounded_utf8_guarded(MAX_DISASSEMBLY_BYTES, "disassembly", guard)?;
+    let reads = shared_registers(&mut cursor, read_mask, "read register", coordinate, guard)?;
+    let writes = shared_registers(&mut cursor, write_mask, "write register", coordinate, guard)?;
     let mut memory_operands = Vec::new();
-    memory_operands
-        .try_reserve_exact(memory_count)
-        .map_err(|_| invalid_payload(coordinate, "memory operand allocation failed"))?;
+    allocation::try_reserve_vec_exact(
+        &mut memory_operands,
+        memory_count,
+        guard,
+        "Flight memory operand allocation failed",
+    )?;
     for _ in 0..memory_count {
         let base = cursor.u8()?;
         let index = cursor.u8()?;
@@ -378,16 +383,18 @@ pub(crate) fn decode_instruction_record(
     payload: &[u8],
     definition: &InstructionDefinition,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<DecodedInstruction, ProviderError> {
     let payload = nested(payload, 4, coordinate)?;
-    decode_instruction_payload(payload, definition, Some(1), coordinate)
+    decode_instruction_payload(payload, definition, Some(1), coordinate, guard)
 }
 
-pub(crate) fn decode_instruction_payload(
+fn decode_instruction_payload(
     payload: &[u8],
     definition: &InstructionDefinition,
     expected_module_id: Option<u32>,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<DecodedInstruction, ProviderError> {
     let mut cursor = PayloadCursor::new(payload, "INSTRUCTION", coordinate);
     let local_sequence = cursor.u64_le()?;
@@ -407,26 +414,40 @@ pub(crate) fn decode_instruction_payload(
         ));
     }
     let mut read_before = Vec::new();
-    read_before
-        .try_reserve_exact(read_count)
-        .map_err(|_| invalid_payload(coordinate, "instruction read allocation failed"))?;
+    allocation::try_reserve_vec_exact(
+        &mut read_before,
+        read_count,
+        guard,
+        "Flight instruction read allocation failed",
+    )?;
     for register in &definition.reads {
         read_before.push(RegisterObservation {
             slot: register.slot,
             captured_width: register.captured_width,
-            name: register.name.clone(),
+            name: allocation::try_copy_string(
+                &register.name,
+                guard,
+                "Flight instruction read name allocation failed",
+            )?,
             value: cursor.u64_le()?,
         });
     }
     let mut write_after = Vec::new();
-    write_after
-        .try_reserve_exact(write_count)
-        .map_err(|_| invalid_payload(coordinate, "instruction write allocation failed"))?;
+    allocation::try_reserve_vec_exact(
+        &mut write_after,
+        write_count,
+        guard,
+        "Flight instruction write allocation failed",
+    )?;
     for register in &definition.writes {
         write_after.push(RegisterObservation {
             slot: register.slot,
             captured_width: register.captured_width,
-            name: register.name.clone(),
+            name: allocation::try_copy_string(
+                &register.name,
+                guard,
+                "Flight instruction write name allocation failed",
+            )?,
             value: cursor.u64_le()?,
         });
     }
@@ -446,22 +467,17 @@ pub(crate) fn decode_instruction_payload(
 pub(crate) fn decode_memory_record(
     payload: &[u8],
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<Memory, ProviderError> {
     let payload = nested(payload, 5, coordinate)?;
-    decode_memory_payload_for_module(payload, Some(1), coordinate)
-}
-
-pub(crate) fn decode_memory_payload(
-    payload: &[u8],
-    coordinate: SourceCoordinate,
-) -> Result<Memory, ProviderError> {
-    decode_memory_payload_for_module(payload, None, coordinate)
+    decode_memory_payload_for_module(payload, Some(1), coordinate, guard)
 }
 
 fn decode_memory_payload_for_module(
     payload: &[u8],
     expected_module_id: Option<u32>,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<Memory, ProviderError> {
     let mut cursor = PayloadCursor::new(payload, "MEMORY", coordinate);
     let module_id = cursor.u32_le()?;
@@ -475,8 +491,8 @@ fn decode_memory_payload_for_module(
     if expected_module_id.is_some_and(|expected| module_id != expected) || metadata_available > 1 {
         return Err(invalid_payload(coordinate, "invalid memory metadata"));
     }
-    let before = shared_memory_state(&mut cursor, "before memory", coordinate)?;
-    let after = shared_memory_state(&mut cursor, "after memory", coordinate)?;
+    let before = shared_memory_state(&mut cursor, "before memory", coordinate, guard)?;
+    let after = shared_memory_state(&mut cursor, "after memory", coordinate, guard)?;
     cursor.finish()?;
     Ok(Memory {
         module_id,
@@ -497,17 +513,21 @@ fn shared_registers(
     mask: u64,
     field: &'static str,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<Vec<RegisterDefinition>, ProviderError> {
     let mut registers = Vec::new();
-    registers
-        .try_reserve_exact(mask.count_ones() as usize)
-        .map_err(|_| invalid_payload(coordinate, "register definition allocation failed"))?;
+    allocation::try_reserve_vec_exact(
+        &mut registers,
+        mask.count_ones() as usize,
+        guard,
+        "Flight register definition allocation failed",
+    )?;
     for slot in 0..MAX_GPR_COUNT {
         if mask & (1_u64 << slot) == 0 {
             continue;
         }
         let captured_width = cursor.u8()?;
-        let name = cursor.bounded_utf8(MAX_REGISTER_NAME_BYTES, field)?;
+        let name = cursor.bounded_utf8_guarded(MAX_REGISTER_NAME_BYTES, field, guard)?;
         if captured_width == 0 || captured_width > 16 || name.is_empty() {
             return Err(invalid_payload(coordinate, "invalid register definition"));
         }
@@ -524,6 +544,7 @@ fn shared_memory_state(
     cursor: &mut PayloadCursor<'_>,
     field: &'static str,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<CaptureBytes, ProviderError> {
     let state = cursor.u8()?;
     let count = usize::from(cursor.u8()?);
@@ -536,7 +557,11 @@ fn shared_memory_state(
     let bytes = cursor.take(count)?;
     match (state, count) {
         (0, 0) => Ok(CaptureBytes::NotCaptured),
-        (1, _) => Ok(CaptureBytes::Captured(bytes.to_vec())),
+        (1, _) => Ok(CaptureBytes::Captured(allocation::try_copy_bytes(
+            bytes,
+            guard,
+            "Flight memory capture allocation failed",
+        )?)),
         (2, 0) => Ok(CaptureBytes::Unavailable),
         _ => Err(invalid_payload(
             coordinate,

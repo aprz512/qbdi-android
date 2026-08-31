@@ -2,7 +2,7 @@ use std::{hash::Hasher, io::Read, sync::Arc};
 
 use twox_hash::XxHash32;
 
-use crate::{ByteSource, ProviderError, WorkDelta, WorkGuard};
+use crate::{ByteSource, ProviderError, WorkDelta, WorkGuard, allocation};
 
 const STANDARD_FRAME_MAGIC: [u8; 4] = 0x184d_2204_u32.to_le_bytes();
 const RAW_CHUNK_BYTES: usize = 64 * 1024;
@@ -62,7 +62,6 @@ impl CountingReader {
 
     fn read_raw(&mut self, guard: &dyn WorkGuard) -> Result<Vec<u8>, ProviderError> {
         let mut bytes = Vec::new();
-        let mut authorized_output = 0_usize;
         loop {
             guard.consume(WorkDelta {
                 input_bytes: 1,
@@ -75,20 +74,20 @@ impl CountingReader {
                 Ok(_) => return Err(input_error(self.offset, "raw reader over-reported bytes")),
                 Err(error) => return Err(input_error(self.offset, &error.to_string())),
             }
-            if authorized_output == 0 {
-                guard.consume(WorkDelta {
-                    resident_bytes: RAW_CHUNK_BYTES as u64,
-                    ..WorkDelta::default()
-                })?;
-                bytes
-                    .try_reserve_exact(RAW_CHUNK_BYTES)
-                    .map_err(|_| input_error(self.offset, "raw input allocation failed"))?;
-                authorized_output = RAW_CHUNK_BYTES;
+            if bytes.len() == bytes.capacity() {
+                let capacity = bytes
+                    .capacity()
+                    .checked_mul(2)
+                    .map(|capacity| capacity.max(RAW_CHUNK_BYTES))
+                    .ok_or_else(|| input_error(self.offset, "raw input capacity overflow"))?;
+                allocation::try_reserve_vec_exact(
+                    &mut bytes,
+                    capacity,
+                    guard,
+                    "raw input allocation failed",
+                )?;
             }
             bytes.push(byte[0]);
-            authorized_output = authorized_output
-                .checked_sub(1)
-                .ok_or_else(|| input_error(self.offset, "raw output authorization underflow"))?;
         }
     }
 
@@ -264,13 +263,15 @@ fn decode_frame(
 
         guard.consume(WorkDelta {
             input_bytes: encoded_size as u64,
-            resident_bytes: encoded_size as u64,
             ..WorkDelta::default()
         })?;
         let mut encoded = Vec::new();
-        encoded
-            .try_reserve_exact(encoded_size)
-            .map_err(|_| compression_error(reader.offset, "compressed block allocation failed"))?;
+        allocation::try_reserve_vec_exact(
+            &mut encoded,
+            encoded_size,
+            guard,
+            "compressed block allocation failed",
+        )?;
         encoded.resize(encoded_size, 0);
         read_pre_authorized(reader, &mut encoded, "truncated LZ4 frame block")?;
 
@@ -287,25 +288,21 @@ fn decode_frame(
         let decoded = if raw {
             guard.consume(WorkDelta {
                 decompressed_bytes: encoded_size as u64,
-                resident_bytes: encoded_size as u64,
                 ..WorkDelta::default()
             })?;
             encoded
         } else {
-            let decode_resident = (descriptor.block_maximum as u64)
-                .checked_mul(2)
-                .ok_or_else(|| compression_error(reader.offset, "decode budget overflow"))?;
             guard.consume(WorkDelta {
                 decompressed_bytes: descriptor.block_maximum as u64,
-                resident_bytes: decode_resident,
                 ..WorkDelta::default()
             })?;
             let mut decoded = Vec::new();
-            decoded
-                .try_reserve_exact(descriptor.block_maximum)
-                .map_err(|_| {
-                    compression_error(reader.offset, "decompression workspace allocation failed")
-                })?;
+            allocation::try_reserve_vec_exact(
+                &mut decoded,
+                descriptor.block_maximum,
+                guard,
+                "decompression workspace allocation failed",
+            )?;
             decoded.resize(descriptor.block_maximum, 0);
             let dictionary = if descriptor.independent {
                 &[][..]
@@ -351,9 +348,16 @@ fn decode_frame(
                 "LZ4 frame exceeds declared content size",
             ));
         }
-        output.try_reserve_exact(decoded.len()).map_err(|_| {
-            compression_error(reader.offset, "decompressed output allocation failed")
-        })?;
+        let output_capacity = output
+            .len()
+            .checked_add(decoded.len())
+            .ok_or_else(|| compression_error(reader.offset, "decompressed output overflow"))?;
+        allocation::try_reserve_vec_exact(
+            output,
+            output_capacity,
+            guard,
+            "decompressed output allocation failed",
+        )?;
         content_hasher.write(&decoded);
         output.extend_from_slice(&decoded);
     }

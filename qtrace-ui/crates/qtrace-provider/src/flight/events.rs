@@ -6,11 +6,11 @@ use crate::qtrb::events::{
     decode_memory_record,
 };
 use crate::{
-    AllocationScope, CoverageGap, EventKey, EventPayload, EventRecord, EventScope,
-    OpaqueOptionalRecord, Provenance, ProviderError, RegisterCheckpoint, RegisterDelta,
-    RegisterSlot, RegisterSnapshot, RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary,
-    SignalHandlerPhase, SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle,
-    ThreadLifecyclePhase, WorkDelta, WorkGuard,
+    CoverageGap, EventKey, EventPayload, EventRecord, EventScope, OpaqueOptionalRecord, Provenance,
+    ProviderError, RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot,
+    RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase,
+    SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, WorkDelta,
+    WorkGuard, allocation,
 };
 
 use super::{
@@ -55,102 +55,102 @@ pub(super) fn decode(
     guard: &dyn WorkGuard,
 ) -> Result<DecodedFlight, ProviderError> {
     guard.consume(WorkDelta::default())?;
-    let mut payload_bytes = 0_u64;
-    let mut definition_entries = 0_u64;
-    let mut string_entries = 0_u64;
-    let mut fragment_entries = 0_u64;
+    let mut definition_counts = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut definition_counts,
+        chunks.len(),
+        guard,
+        "Flight definition-count allocation failed",
+    )?;
+    definition_counts.resize(chunks.len(), 0_usize);
+    let mut string_counts = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut string_counts,
+        chunks.len(),
+        guard,
+        "Flight string-count allocation failed",
+    )?;
+    string_counts.resize(chunks.len(), 0_usize);
+    let mut fragment_count = 0_usize;
     for (index, event) in physical.iter().enumerate() {
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
         if let EventPayload::OpaqueOptional(raw) = &event.payload {
-            payload_bytes = payload_bytes
-                .checked_add(raw.bytes.len() as u64)
-                .ok_or_else(|| allocation_error("Flight payload allocation bound overflow"))?;
-            definition_entries = definition_entries
-                .checked_add(u64::from(matches!((raw.record_type, raw.flags), (4, 1))))
-                .ok_or_else(|| allocation_error("Flight definition count overflow"))?;
-            string_entries = string_entries
-                .checked_add(u64::from(matches!((raw.record_type, raw.flags), (6, 3))))
-                .ok_or_else(|| allocation_error("Flight string count overflow"))?;
-            fragment_entries = fragment_entries
-                .checked_add(u64::from(matches!(
-                    (raw.record_type, raw.flags),
-                    (6..=8, 4)
-                )))
-                .ok_or_else(|| allocation_error("Flight fragment count overflow"))?;
+            if let Some(chunk) = chunk_index(superblock, event.key.source_offset) {
+                let index = chunk as usize;
+                if matches!((raw.record_type, raw.flags), (4, 1)) {
+                    let count = definition_counts
+                        .get_mut(index)
+                        .ok_or_else(|| allocation_error("Flight definition chunk is invalid"))?;
+                    *count = count
+                        .checked_add(1)
+                        .ok_or_else(|| allocation_error("Flight definition count overflow"))?;
+                }
+                if matches!((raw.record_type, raw.flags), (6, 3)) {
+                    let count = string_counts
+                        .get_mut(index)
+                        .ok_or_else(|| allocation_error("Flight string chunk is invalid"))?;
+                    *count = count
+                        .checked_add(1)
+                        .ok_or_else(|| allocation_error("Flight string count overflow"))?;
+                }
+            }
+            if matches!((raw.record_type, raw.flags), (6..=8, 4)) {
+                fragment_count = fragment_count
+                    .checked_add(1)
+                    .ok_or_else(|| allocation_error("Flight fragment count overflow"))?;
+            }
         }
     }
-    // HashMap's first bucket group includes control bytes and alignment; charging sixty-four
-    // complete entries per inserted closed record bounds that group plus every full geometric
-    // reallocation request without a fixed per-event tax.
-    let state_map_bytes = definition_entries
-        .checked_mul(std::mem::size_of::<(u32, InstructionDefinition)>() as u64)
-        .and_then(|bytes| bytes.checked_mul(64))
-        .and_then(|bytes| {
-            string_entries
-                .checked_mul(std::mem::size_of::<(u32, Arc<[u8]>)>() as u64)
-                .and_then(|string_bytes| string_bytes.checked_mul(64))
-                .and_then(|string_bytes| bytes.checked_add(string_bytes))
-        })
-        .ok_or_else(|| allocation_error("Flight state-map allocation bound overflow"))?;
-    let fixed_item_bytes = std::mem::size_of::<EventRecord>()
-        .checked_add(std::mem::size_of::<Fragment>())
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u64>().saturating_mul(3)))
-        .ok_or_else(|| allocation_error("Flight decode item layout overflow"))?;
-    let fixed_decode_bytes = physical
-        .len()
-        .checked_mul(fixed_item_bytes)
-        .and_then(|bytes| bytes.checked_mul(2))
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| allocation_error("Flight fixed decode allocation bound overflow"))?;
-    let state_bytes = chunks
-        .len()
-        .checked_mul(std::mem::size_of::<ChunkState>())
-        .and_then(|bytes| bytes.checked_mul(2))
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| allocation_error("Flight state allocation bound overflow"))?;
-    let register_state_bytes = chunks
-        .len()
-        .checked_mul(RegisterSlot::COUNT)
-        .and_then(|count| count.checked_mul(std::mem::size_of::<u64>()))
-        .and_then(|bytes| bytes.checked_mul(2))
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| allocation_error("Flight register-state allocation bound overflow"))?;
-    let fragment_item_bytes = std::mem::size_of::<Fragment>()
-        .checked_add(std::mem::size_of::<EventRecord>())
-        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<(Option<u64>, u64)>()))
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| allocation_error("Flight fragment item layout overflow"))?;
-    let fragment_bytes = fragment_entries
-        .checked_mul(fragment_item_bytes)
-        .and_then(|bytes| bytes.checked_mul(64))
-        .ok_or_else(|| allocation_error("Flight fragment allocation bound overflow"))?;
-    let decode_work = WorkDelta {
+    guard.consume(WorkDelta {
         nodes: physical.len().saturating_mul(8) as u64,
-        resident_bytes: fixed_decode_bytes
-            .checked_add(state_bytes)
-            .and_then(|bytes| bytes.checked_add(register_state_bytes))
-            .and_then(|bytes| bytes.checked_add(payload_bytes.saturating_mul(4)))
-            .and_then(|bytes| bytes.checked_add(state_map_bytes))
-            .and_then(|bytes| bytes.checked_add(fragment_bytes))
-            .ok_or_else(|| allocation_error("Flight decode allocation bound overflow"))?,
         ..WorkDelta::default()
-    };
-    let _decode_scope =
-        AllocationScope::begin_with_delta(guard, decode_work, decode_work.resident_bytes)?;
-    let mut states = initialize_states(chunks.len(), guard)?;
-    let mut output = reserved_vec(physical.len(), "Flight typed output allocation failed")?;
-    let mut fragments = reserved_vec(physical.len(), "Flight fragment allocation failed")?;
+    })?;
+    let mut states = initialize_states(&definition_counts, &string_counts, guard)?;
+    let mut output = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut output,
+        physical.len(),
+        guard,
+        "Flight typed output allocation failed",
+    )?;
+    let mut fragments = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut fragments,
+        fragment_count,
+        guard,
+        "Flight fragment allocation failed",
+    )?;
     let mut final_state: HashMap<u32, (u64, RegisterSnapshot)> = HashMap::new();
-    final_state
-        .try_reserve(chunks.len())
-        .map_err(|_| allocation_error("Flight final-state allocation failed"))?;
-    let mut target_pcs = reserved_vec(physical.len(), "Flight PC allocation failed")?;
+    allocation::try_reserve_hash_map(
+        &mut final_state,
+        chunks.len(),
+        guard,
+        "Flight final-state allocation failed",
+    )?;
+    let mut target_pcs = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut target_pcs,
+        physical.len(),
+        guard,
+        "Flight PC allocation failed",
+    )?;
     let mut termination = None;
-    let mut damaged_sequences = reserved_vec(physical.len(), "Flight damage allocation failed")?;
-    let mut damaged_source_offsets =
-        reserved_vec(physical.len(), "Flight damage-offset allocation failed")?;
+    let mut damaged_sequences = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut damaged_sequences,
+        physical.len(),
+        guard,
+        "Flight damage allocation failed",
+    )?;
+    let mut damaged_source_offsets = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut damaged_source_offsets,
+        physical.len(),
+        guard,
+        "Flight damage-offset allocation failed",
+    )?;
 
     for (position, event) in physical.into_iter().enumerate() {
         if position as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
@@ -171,18 +171,6 @@ pub(super) fn decode(
                 continue;
             };
             let state = &mut states[index as usize];
-            if matches!((raw.record_type, raw.flags), (4, 1)) {
-                state
-                    .definitions
-                    .try_reserve(1)
-                    .map_err(|_| allocation_error("Flight definition-state allocation failed"))?;
-            }
-            if matches!((raw.record_type, raw.flags), (6, 3)) {
-                state
-                    .strings
-                    .try_reserve(1)
-                    .map_err(|_| allocation_error("Flight string-state allocation failed"))?;
-            }
             if state.prefix == PrefixState::ExpectBegin {
                 if raw.record_type != 1 || raw.flags != 0 {
                     state.prefix = PrefixState::Broken;
@@ -196,7 +184,7 @@ pub(super) fn decode(
                     output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
                     continue;
                 }
-                match decode_begin(&raw.bytes, superblock, identity, index, coordinate) {
+                match decode_begin(&raw.bytes, superblock, identity, index, coordinate, guard) {
                     Ok(begin) => {
                         state.prefix = PrefixState::ExpectCheckpoint;
                         state.module_base = begin.module_base;
@@ -207,6 +195,7 @@ pub(super) fn decode(
                             EventPayload::Begin(begin),
                         ));
                     }
+                    Err(error) if error.operation_abort().is_some() => return Err(error),
                     Err(_) => {
                         state.prefix = PrefixState::Broken;
                         record_prefix_damage(
@@ -263,15 +252,19 @@ pub(super) fn decode(
                     damaged_sequences.push(sequence);
                     damaged_source_offsets.push(event.key.source_offset);
                 }
-                if matches!((raw.record_type, raw.flags), (9, 0))
-                    && let Ok(delta) = decode_delta(&raw.bytes, superblock.pointer_width, None)
-                {
-                    output.push(EventRecord::new_scoped(
-                        event.key,
-                        Provenance::Damaged,
-                        scope,
-                        EventPayload::RegisterDelta(delta),
-                    ));
+                if matches!((raw.record_type, raw.flags), (9, 0)) {
+                    match decode_delta(&raw.bytes, superblock.pointer_width, None, guard) {
+                        Ok(delta) => output.push(EventRecord::new_scoped(
+                            event.key,
+                            Provenance::Damaged,
+                            scope,
+                            EventPayload::RegisterDelta(delta),
+                        )),
+                        Err(TypedDecodeError::Control(error)) => return Err(error),
+                        Err(TypedDecodeError::Invalid) => {
+                            output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
+                        }
+                    }
                 } else {
                     output.push(rewrap(event.key, Provenance::Damaged, scope, raw));
                 }
@@ -288,13 +281,20 @@ pub(super) fn decode(
                 superblock,
                 &mut fragments,
                 &mut target_pcs,
+                guard,
             );
             match decoded {
                 Ok(Some(typed)) => {
                     if let Some(snapshot) = &state.registers {
-                        let item = final_state.entry(tid).or_insert((0, snapshot.clone()));
-                        if sequence >= item.0 {
-                            *item = (sequence, snapshot.clone());
+                        match final_state.entry(tid) {
+                            std::collections::hash_map::Entry::Occupied(mut item) => {
+                                if sequence >= item.get().0 {
+                                    *item.get_mut() = (sequence, clone_snapshot(snapshot, guard)?);
+                                }
+                            }
+                            std::collections::hash_map::Entry::Vacant(item) => {
+                                item.insert((sequence, clone_snapshot(snapshot, guard)?));
+                            }
                         }
                     }
                     if typed.provenance == Provenance::Damaged {
@@ -304,7 +304,7 @@ pub(super) fn decode(
                     output.push(typed);
                 }
                 Ok(None) => {}
-                Err(original) => {
+                Err(ChunkDecodeError::Payload(original)) => {
                     if original.record_type == 9 {
                         state.registers = None;
                         state.prefix = PrefixState::Broken;
@@ -314,6 +314,7 @@ pub(super) fn decode(
                     damaged_source_offsets.push(event.key.source_offset);
                     output.push(rewrap(event.key, Provenance::Damaged, scope, original));
                 }
+                Err(ChunkDecodeError::Control(error)) => return Err(error),
             }
         } else if event.key.source_offset >= superblock.emergencies.offset
             && event.key.source_offset < superblock.emergencies.end
@@ -365,15 +366,40 @@ pub(super) fn decode(
 }
 
 fn initialize_states(
-    count: usize,
+    definition_counts: &[usize],
+    string_counts: &[usize],
     guard: &dyn WorkGuard,
 ) -> Result<Vec<ChunkState>, ProviderError> {
-    let mut states = reserved_vec(count, "Flight chunk-state allocation failed")?;
-    for index in 0..count {
+    if definition_counts.len() != string_counts.len() {
+        return Err(allocation_error("Flight state count mismatch"));
+    }
+    let mut states = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut states,
+        definition_counts.len(),
+        guard,
+        "Flight chunk-state allocation failed",
+    )?;
+    for (index, (&definition_count, &string_count)) in
+        definition_counts.iter().zip(string_counts).enumerate()
+    {
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
-        states.push(ChunkState::default());
+        let mut state = ChunkState::default();
+        allocation::try_reserve_hash_map(
+            &mut state.definitions,
+            definition_count,
+            guard,
+            "Flight definition-state allocation failed",
+        )?;
+        allocation::try_reserve_hash_map(
+            &mut state.strings,
+            string_count,
+            guard,
+            "Flight string-state allocation failed",
+        )?;
+        states.push(state);
     }
     Ok(states)
 }
@@ -382,35 +408,23 @@ fn finalize_registers(
     states: HashMap<u32, (u64, RegisterSnapshot)>,
     guard: &dyn WorkGuard,
 ) -> Result<HashMap<u32, RegisterSnapshot>, ProviderError> {
-    let resident_bytes = states
-        .len()
-        .checked_mul(std::mem::size_of::<(u32, RegisterSnapshot)>())
-        .and_then(|bytes| bytes.checked_mul(4))
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| allocation_error("Flight final-register size overflow"))?;
     guard.consume(WorkDelta {
         nodes: states.len() as u64,
-        resident_bytes,
         ..WorkDelta::default()
     })?;
     let mut output = HashMap::new();
-    output
-        .try_reserve(states.len())
-        .map_err(|_| allocation_error("Flight final-register allocation failed"))?;
+    allocation::try_reserve_hash_map(
+        &mut output,
+        states.len(),
+        guard,
+        "Flight final-register allocation failed",
+    )?;
     for (index, (tid, (_, state))) in states.into_iter().enumerate() {
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
         output.insert(tid, state);
     }
-    Ok(output)
-}
-
-fn reserved_vec<T>(capacity: usize, message: &'static str) -> Result<Vec<T>, ProviderError> {
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(capacity)
-        .map_err(|_| allocation_error(message))?;
     Ok(output)
 }
 
@@ -450,25 +464,27 @@ fn decode_chunk_record(
     superblock: &Superblock,
     fragments: &mut Vec<Fragment>,
     target_pcs: &mut Vec<u64>,
-) -> Result<Option<EventRecord>, OpaqueOptionalRecord> {
+    guard: &dyn WorkGuard,
+) -> Result<Option<EventRecord>, ChunkDecodeError> {
     let coordinate = SourceCoordinate {
         offset: key.source_offset,
         record_ordinal: Some(key.record_ordinal),
     };
     let tid = identity.tid;
     let result = match (raw.record_type, raw.flags) {
-        (9, 1) => decode_checkpoint(&raw.bytes, superblock.pointer_width)
+        (9, 1) => decode_checkpoint(&raw.bytes, superblock.pointer_width, guard)
             .map(|(checkpoint, snapshot)| {
                 push_pc(target_pcs, snapshot.value(RegisterSlot::Pc).unwrap_or(0));
                 state.registers = Some(snapshot);
                 state.prefix = PrefixState::Ready;
                 EventPayload::RegisterCheckpoint(checkpoint)
             })
-            .map_err(|_| payload_error(coordinate, "invalid register checkpoint")),
+            .map_err(|error| typed_decode_error(error, coordinate, "invalid register checkpoint")),
         (9, 0) => decode_delta(
             &raw.bytes,
             superblock.pointer_width,
             state.registers.as_mut(),
+            guard,
         )
         .map(|delta| {
             if let Some(snapshot) = &state.registers {
@@ -476,48 +492,58 @@ fn decode_chunk_record(
             }
             EventPayload::RegisterDelta(delta)
         })
-        .map_err(|_| payload_error(coordinate, "invalid register delta")),
-        (4, 1) => {
-            decode_instruction_definition_record(&raw.bytes, coordinate).and_then(|definition| {
+        .map_err(|error| typed_decode_error(error, coordinate, "invalid register delta")),
+        (4, 1) => decode_instruction_definition_record(&raw.bytes, coordinate, guard).and_then(
+            |definition| {
                 if state.definitions.contains_key(&definition.definition_id) {
                     return Err(payload_error(
                         coordinate,
                         "duplicate Flight instruction definition",
                     ));
                 }
-                state
-                    .definitions
-                    .insert(definition.definition_id, definition.clone());
+                state.definitions.insert(
+                    definition.definition_id,
+                    clone_instruction_definition(&definition, guard)?,
+                );
                 Ok(EventPayload::InstructionDefinition(definition))
-            })
-        }
+            },
+        ),
         (4, 0) => definition_id(&raw.bytes).and_then(|id| {
             let definition = state.definitions.get(&id).ok_or_else(|| {
                 payload_error(coordinate, "undefined Flight instruction definition")
             })?;
-            decode_instruction_record(&raw.bytes, definition, coordinate).and_then(|decoded| {
-                let _local_sequence = decoded.local_sequence;
-                let pc = pointer_sum(
-                    state.module_base,
-                    decoded.instruction.relative_pc,
-                    superblock.pointer_width,
-                )
-                .ok_or_else(|| payload_error(coordinate, "instruction PC exceeds pointer width"))?;
-                for observation in decoded
-                    .instruction
-                    .read_before
-                    .iter()
-                    .chain(&decoded.instruction.write_after)
-                {
-                    require_pointer(observation.value, superblock.pointer_width).map_err(|_| {
-                        payload_error(coordinate, "instruction observation exceeds pointer width")
+            decode_instruction_record(&raw.bytes, definition, coordinate, guard).and_then(
+                |decoded| {
+                    let _local_sequence = decoded.local_sequence;
+                    let pc = pointer_sum(
+                        state.module_base,
+                        decoded.instruction.relative_pc,
+                        superblock.pointer_width,
+                    )
+                    .ok_or_else(|| {
+                        payload_error(coordinate, "instruction PC exceeds pointer width")
                     })?;
-                }
-                push_pc(target_pcs, pc);
-                Ok(EventPayload::Instruction(decoded.instruction))
-            })
+                    for observation in decoded
+                        .instruction
+                        .read_before
+                        .iter()
+                        .chain(&decoded.instruction.write_after)
+                    {
+                        require_pointer(observation.value, superblock.pointer_width).map_err(
+                            |_| {
+                                payload_error(
+                                    coordinate,
+                                    "instruction observation exceeds pointer width",
+                                )
+                            },
+                        )?;
+                    }
+                    push_pc(target_pcs, pc);
+                    Ok(EventPayload::Instruction(decoded.instruction))
+                },
+            )
         }),
-        (5, 0) => decode_memory_record(&raw.bytes, coordinate).and_then(|memory| {
+        (5, 0) => decode_memory_record(&raw.bytes, coordinate, guard).and_then(|memory| {
             let pc = pointer_sum(
                 state.module_base,
                 memory.relative_pc,
@@ -529,10 +555,12 @@ fn decode_chunk_record(
             push_pc(target_pcs, pc);
             Ok(EventPayload::Memory(memory))
         }),
-        (6, 3) => decode_string(&raw.bytes, &mut state.strings).map(EventPayload::StringDefinition),
-        (kind @ 6..=8, 0) => decode_semantic(kind, &raw.bytes, &state.strings, Vec::new()),
+        (6, 3) => {
+            decode_string(&raw.bytes, &mut state.strings, guard).map(EventPayload::StringDefinition)
+        }
+        (kind @ 6..=8, 0) => decode_semantic(kind, &raw.bytes, &state.strings, Vec::new(), guard),
         (kind @ 6..=8, 4) => {
-            let fragment = fragments::decode(
+            let fragment = match fragments::decode(
                 kind,
                 &raw.bytes,
                 &state.strings,
@@ -540,8 +568,14 @@ fn decode_chunk_record(
                 provenance,
                 chunk_index,
                 identity.generation,
-            )
-            .map_err(|_| raw.clone())?;
+                guard,
+            ) {
+                Ok(fragment) => fragment,
+                Err(error) if error.operation_abort().is_some() => {
+                    return Err(ChunkDecodeError::Control(error));
+                }
+                Err(_) => return Err(ChunkDecodeError::Payload(raw)),
+            };
             fragments.push(fragment);
             return Ok(None);
         }
@@ -576,7 +610,7 @@ fn decode_chunk_record(
             push_pc(target_pcs, item.pc);
             EventPayload::Signal(item)
         }),
-        _ => return Err(raw),
+        _ => return Err(ChunkDecodeError::Payload(raw)),
     };
     match result {
         Ok(payload) => {
@@ -593,7 +627,29 @@ fn decode_chunk_record(
                 payload,
             )))
         }
-        Err(_) => Err(raw),
+        Err(error) if error.operation_abort().is_some() => Err(ChunkDecodeError::Control(error)),
+        Err(_) => Err(ChunkDecodeError::Payload(raw)),
+    }
+}
+
+enum ChunkDecodeError {
+    Payload(OpaqueOptionalRecord),
+    Control(ProviderError),
+}
+
+enum TypedDecodeError {
+    Invalid,
+    Control(ProviderError),
+}
+
+fn typed_decode_error(
+    error: TypedDecodeError,
+    coordinate: SourceCoordinate,
+    detail: &'static str,
+) -> ProviderError {
+    match error {
+        TypedDecodeError::Invalid => payload_error(coordinate, detail),
+        TypedDecodeError::Control(error) => error,
     }
 }
 
@@ -603,6 +659,7 @@ fn decode_begin(
     identity: &ChunkIdentity,
     index: u32,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<BeginMetadata, ProviderError> {
     let mut c = Cursor::new(bytes);
     let profile = c.u8()?;
@@ -615,8 +672,8 @@ fn decode_begin(
     let module_base = c.u64()?;
     let target_offset = c.u64()?;
     let target_address = c.u64()?;
-    let target = c.text(target_len)?;
-    let scene = c.text(scene_len)?;
+    let target = c.text_guarded(target_len, guard)?;
+    let scene = c.text_guarded(scene_len, guard)?;
     c.finish()?;
     let expected_target = std::str::from_utf8(&superblock.target[..superblock.target_len as usize])
         .map_err(|_| payload_error(coordinate, "invalid superblock target"))?;
@@ -665,51 +722,188 @@ fn decode_begin(
 fn decode_checkpoint(
     bytes: &[u8],
     width: u8,
-) -> Result<(RegisterCheckpoint, RegisterSnapshot), ()> {
+    guard: &dyn WorkGuard,
+) -> Result<(RegisterCheckpoint, RegisterSnapshot), TypedDecodeError> {
     if bytes.len() != RegisterSlot::COUNT * 8 {
-        return Err(());
+        return Err(TypedDecodeError::Invalid);
     }
-    let mut values = Vec::with_capacity(RegisterSlot::COUNT);
-    let mut snapshot = Vec::with_capacity(RegisterSlot::COUNT);
+    let mut values = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut values,
+        RegisterSlot::COUNT,
+        guard,
+        "Flight checkpoint value allocation failed",
+    )
+    .map_err(TypedDecodeError::Control)?;
+    let mut snapshot = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut snapshot,
+        RegisterSlot::COUNT,
+        guard,
+        "Flight checkpoint snapshot allocation failed",
+    )
+    .map_err(TypedDecodeError::Control)?;
     for index in 0..RegisterSlot::COUNT {
-        let value = u64::from_le_bytes(bytes[index * 8..index * 8 + 8].try_into().map_err(|_| ())?);
-        require_pointer(value, width)?;
+        let value = u64::from_le_bytes(
+            bytes[index * 8..index * 8 + 8]
+                .try_into()
+                .map_err(|_| TypedDecodeError::Invalid)?,
+        );
+        require_pointer(value, width).map_err(|_| TypedDecodeError::Invalid)?;
         values.push(RegisterValue {
-            slot: RegisterSlot::from_index(index).ok_or(())?,
+            slot: RegisterSlot::from_index(index).ok_or(TypedDecodeError::Invalid)?,
             value,
         });
         snapshot.push(value);
     }
     Ok((
         RegisterCheckpoint { values },
-        RegisterSnapshot::new(snapshot).ok_or(())?,
+        RegisterSnapshot::new(snapshot).ok_or(TypedDecodeError::Invalid)?,
     ))
+}
+
+fn clone_snapshot(
+    snapshot: &RegisterSnapshot,
+    guard: &dyn WorkGuard,
+) -> Result<RegisterSnapshot, ProviderError> {
+    let mut values = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut values,
+        snapshot.values().len(),
+        guard,
+        "Flight register snapshot clone allocation failed",
+    )?;
+    values.extend_from_slice(snapshot.values());
+    RegisterSnapshot::new(values).ok_or_else(|| {
+        payload_error(
+            SourceCoordinate {
+                offset: 0,
+                record_ordinal: None,
+            },
+            "invalid register snapshot clone",
+        )
+    })
+}
+
+fn clone_instruction_definition(
+    definition: &InstructionDefinition,
+    guard: &dyn WorkGuard,
+) -> Result<InstructionDefinition, ProviderError> {
+    let mut reads = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut reads,
+        definition.reads.len(),
+        guard,
+        "Flight dictionary read allocation failed",
+    )?;
+    for register in &definition.reads {
+        reads.push(crate::qtrb::RegisterDefinition {
+            slot: register.slot,
+            captured_width: register.captured_width,
+            name: allocation::try_copy_string(
+                &register.name,
+                guard,
+                "Flight dictionary register name allocation failed",
+            )?,
+        });
+    }
+    let mut writes = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut writes,
+        definition.writes.len(),
+        guard,
+        "Flight dictionary write allocation failed",
+    )?;
+    for register in &definition.writes {
+        writes.push(crate::qtrb::RegisterDefinition {
+            slot: register.slot,
+            captured_width: register.captured_width,
+            name: allocation::try_copy_string(
+                &register.name,
+                guard,
+                "Flight dictionary register name allocation failed",
+            )?,
+        });
+    }
+    let mut memory_operands = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut memory_operands,
+        definition.memory_operands.len(),
+        guard,
+        "Flight dictionary memory operand allocation failed",
+    )?;
+    memory_operands.extend(definition.memory_operands.iter().cloned());
+    Ok(InstructionDefinition {
+        definition_id: definition.definition_id,
+        opcode: definition.opcode,
+        read_mask: definition.read_mask,
+        write_mask: definition.write_mask,
+        pc_displacement: definition.pc_displacement,
+        flags: definition.flags,
+        pc_kind: definition.pc_kind,
+        condition: definition.condition,
+        slow_memory_path: definition.slow_memory_path,
+        mnemonic: allocation::try_copy_string(
+            &definition.mnemonic,
+            guard,
+            "Flight dictionary mnemonic allocation failed",
+        )?,
+        operands: allocation::try_copy_string(
+            &definition.operands,
+            guard,
+            "Flight dictionary operands allocation failed",
+        )?,
+        disassembly: allocation::try_copy_string(
+            &definition.disassembly,
+            guard,
+            "Flight dictionary disassembly allocation failed",
+        )?,
+        reads,
+        writes,
+        memory_operands,
+    })
 }
 
 fn decode_delta(
     bytes: &[u8],
     width: u8,
     ancestry: Option<&mut RegisterSnapshot>,
-) -> Result<RegisterDelta, ()> {
+    guard: &dyn WorkGuard,
+) -> Result<RegisterDelta, TypedDecodeError> {
     if bytes.len() < 8 {
-        return Err(());
+        return Err(TypedDecodeError::Invalid);
     }
-    let mask = u64::from_le_bytes(bytes[..8].try_into().map_err(|_| ())?);
+    let mask = u64::from_le_bytes(
+        bytes[..8]
+            .try_into()
+            .map_err(|_| TypedDecodeError::Invalid)?,
+    );
     if mask == 0
         || mask >> RegisterSlot::COUNT != 0
         || bytes.len() != 8 + mask.count_ones() as usize * 8
     {
-        return Err(());
+        return Err(TypedDecodeError::Invalid);
     }
     let reliable = ancestry.is_some();
-    let mut changed = Vec::with_capacity(mask.count_ones() as usize);
+    let mut changed = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut changed,
+        mask.count_ones() as usize,
+        guard,
+        "Flight delta allocation failed",
+    )
+    .map_err(TypedDecodeError::Control)?;
     let mut cursor = 8;
     for index in 0..RegisterSlot::COUNT {
         if mask & (1 << index) != 0 {
-            let value = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().map_err(|_| ())?);
-            require_pointer(value, width)?;
+            let value = u64::from_le_bytes(
+                bytes[cursor..cursor + 8]
+                    .try_into()
+                    .map_err(|_| TypedDecodeError::Invalid)?,
+            );
+            require_pointer(value, width).map_err(|_| TypedDecodeError::Invalid)?;
             changed.push(RegisterValue {
-                slot: RegisterSlot::from_index(index).ok_or(())?,
+                slot: RegisterSlot::from_index(index).ok_or(TypedDecodeError::Invalid)?,
                 value,
             });
             cursor += 8;
@@ -728,6 +922,7 @@ fn decode_delta(
 fn decode_string(
     bytes: &[u8],
     strings: &mut HashMap<u32, Arc<[u8]>>,
+    guard: &dyn WorkGuard,
 ) -> Result<StringDefinition, ProviderError> {
     if bytes.len() < 8 {
         return Err(payload_error(
@@ -765,11 +960,45 @@ fn decode_string(
             "invalid string definition",
         ));
     }
-    let value: Arc<[u8]> = Arc::from(&bytes[8..]);
+    let owned = allocation::try_copy_bytes(
+        &bytes[8..],
+        guard,
+        "Flight string dictionary bytes allocation failed",
+    )?;
+    let arc_alignment = std::mem::align_of::<usize>();
+    let unaligned_arc_bytes = size
+        .checked_add(std::mem::size_of::<usize>().saturating_mul(2))
+        .ok_or_else(|| {
+            payload_error(
+                SourceCoordinate {
+                    offset: 0,
+                    record_ordinal: None,
+                },
+                "string Arc allocation overflow",
+            )
+        })?;
+    let arc_bytes = unaligned_arc_bytes
+        .checked_add(arc_alignment.saturating_sub(1))
+        .map(|bytes| bytes & !arc_alignment.saturating_sub(1))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| {
+            payload_error(
+                SourceCoordinate {
+                    offset: 0,
+                    record_ordinal: None,
+                },
+                "string Arc aligned allocation overflow",
+            )
+        })?;
+    let arc_slack = arc_bytes.saturating_sub(unaligned_arc_bytes as u64);
+    let arc_scope =
+        crate::AllocationScope::begin(guard, arc_bytes, arc_slack).map_err(ProviderError::from)?;
+    let value: Arc<[u8]> = Arc::from(owned);
+    drop(arc_scope);
     strings.insert(id, Arc::clone(&value));
     Ok(StringDefinition {
         id,
-        bytes: value.to_vec(),
+        bytes: allocation::try_copy_bytes(&value, guard, "Flight string event allocation failed")?,
     })
 }
 
@@ -778,6 +1007,7 @@ fn decode_semantic(
     bytes: &[u8],
     strings: &HashMap<u32, Arc<[u8]>>,
     fragment_sequences: Vec<u64>,
+    guard: &dyn WorkGuard,
 ) -> Result<EventPayload, ProviderError> {
     let count = if kind == 6 { 3 } else { 2 };
     if bytes.len() != count * 4 {
@@ -789,7 +1019,13 @@ fn decode_semantic(
             "invalid semantic string references",
         ));
     }
-    let mut fields = Vec::with_capacity(count);
+    let mut fields = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut fields,
+        count,
+        guard,
+        "Flight semantic field allocation failed",
+    )?;
     for index in 0..count {
         let id = raw_u32(bytes, index * 4).ok_or_else(|| {
             payload_error(
@@ -809,19 +1045,19 @@ fn decode_semantic(
                 "undefined string reference",
             )
         })?;
-        fields.push(
-            std::str::from_utf8(raw)
-                .map_err(|_| {
-                    payload_error(
-                        SourceCoordinate {
-                            offset: 0,
-                            record_ordinal: None,
-                        },
-                        "semantic string is not UTF-8",
-                    )
-                })?
-                .to_owned(),
-        );
+        fields.push(allocation::try_copy_string(
+            std::str::from_utf8(raw).map_err(|_| {
+                payload_error(
+                    SourceCoordinate {
+                        offset: 0,
+                        record_ordinal: None,
+                    },
+                    "semantic string is not UTF-8",
+                )
+            })?,
+            guard,
+            "Flight semantic string allocation failed",
+        )?);
     }
     if fields[0].len() > 255
         || (kind == 6 && fields[1].len() > 255)
@@ -1174,15 +1410,12 @@ fn guarded_sort_events(
             positions[index] = positions[index - 1] + counts[index - 1];
         }
         let mut slots = Vec::new();
-        slots.try_reserve_exact(values.len()).map_err(|_| {
-            payload_error(
-                SourceCoordinate {
-                    offset: 0,
-                    record_ordinal: None,
-                },
-                "Flight event sort allocation failed",
-            )
-        })?;
+        allocation::try_reserve_vec_exact(
+            &mut slots,
+            values.len(),
+            guard,
+            "Flight event sort allocation failed",
+        )?;
         for index in 0..values.len() {
             if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
                 guard.consume(WorkDelta::default())?;
@@ -1234,15 +1467,12 @@ pub(super) fn guarded_sort_u64(
             positions[index] = positions[index - 1] + counts[index - 1];
         }
         let mut output = Vec::new();
-        output.try_reserve_exact(values.len()).map_err(|_| {
-            payload_error(
-                SourceCoordinate {
-                    offset: 0,
-                    record_ordinal: None,
-                },
-                "Flight u64 sort allocation failed",
-            )
-        })?;
+        allocation::try_reserve_vec_exact(
+            &mut output,
+            values.len(),
+            guard,
+            "Flight u64 sort allocation failed",
+        )?;
         for index in 0..values.len() {
             if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
                 guard.consume(WorkDelta::default())?;
@@ -1261,15 +1491,12 @@ pub(super) fn guarded_sort_u64(
         values = output;
     }
     let mut unique = Vec::new();
-    unique.try_reserve_exact(values.len()).map_err(|_| {
-        payload_error(
-            SourceCoordinate {
-                offset: 0,
-                record_ordinal: None,
-            },
-            "Flight u64 deduplication allocation failed",
-        )
-    })?;
+    allocation::try_reserve_vec_exact(
+        &mut unique,
+        values.len(),
+        guard,
+        "Flight u64 deduplication allocation failed",
+    )?;
     for (index, value) in values.into_iter().enumerate() {
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
@@ -1329,8 +1556,12 @@ impl<'a> Cursor<'a> {
         raw.copy_from_slice(self.take(8)?);
         Ok(u64::from_le_bytes(raw))
     }
-    fn text(&mut self, count: usize) -> Result<String, ProviderError> {
-        String::from_utf8(self.take(count)?.to_vec()).map_err(|_| {
+    fn text_guarded(
+        &mut self,
+        count: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<String, ProviderError> {
+        let text = std::str::from_utf8(self.take(count)?).map_err(|_| {
             payload_error(
                 SourceCoordinate {
                     offset: 0,
@@ -1338,7 +1569,8 @@ impl<'a> Cursor<'a> {
                 },
                 "invalid UTF-8",
             )
-        })
+        })?;
+        allocation::try_copy_string(text, guard, "Flight text allocation failed")
     }
     fn finish(&self) -> Result<(), ProviderError> {
         if self.offset == self.bytes.len() {

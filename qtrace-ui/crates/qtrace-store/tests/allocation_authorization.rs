@@ -16,6 +16,7 @@ const ABORT_CHILD_ENV: &str = "QTRACE_ALLOCATION_ABORT_ORACLE_CHILD";
 const COLD_CHILD_ENV: &str = "QTRACE_ALLOCATION_COLD_ORACLE_CHILD";
 const COLD_ABORT_CHILD_ENV: &str = "QTRACE_ALLOCATION_COLD_ABORT_ORACLE_CHILD";
 const FLIGHT_COLD_CHILD_ENV: &str = "QTRACE_ALLOCATION_FLIGHT_COLD_ORACLE_CHILD";
+const PROVIDER_SCOPE_CHILD_ENV: &str = "QTRACE_PROVIDER_SCOPE_ORACLE_CHILD";
 
 #[derive(Clone, Copy)]
 struct OracleState {
@@ -24,6 +25,9 @@ struct OracleState {
     authorized: u64,
     allowed_slack: u64,
     allocations: u64,
+    authorized_bytes: u64,
+    requested_bytes: u64,
+    max_scope_slack: u64,
     unauthorized: u64,
     scope_violations: u64,
     nested_scopes: u64,
@@ -44,6 +48,9 @@ impl Default for OracleState {
             authorized: 0,
             allowed_slack: 0,
             allocations: 0,
+            authorized_bytes: 0,
+            requested_bytes: 0,
+            max_scope_slack: 0,
             unauthorized: 0,
             scope_violations: 0,
             nested_scopes: 0,
@@ -65,6 +72,9 @@ thread_local! {
         authorized: 0,
         allowed_slack: 0,
         allocations: 0,
+        authorized_bytes: 0,
+        requested_bytes: 0,
+        max_scope_slack: 0,
         unauthorized: 0,
         scope_violations: 0,
         nested_scopes: 0,
@@ -118,6 +128,7 @@ fn record_growth(bytes: usize) {
             return;
         }
         state.allocations = state.allocations.saturating_add(1);
+        state.requested_bytes = state.requested_bytes.saturating_add(bytes as u64);
         if state.rejected {
             state.post_reject = state.post_reject.saturating_add(1);
             if state.unauthorized_len < state.unauthorized_sizes.len() {
@@ -190,6 +201,7 @@ impl WorkGuard for OracleGuard {
             }
             state.scope_active = true;
             state.authorized = delta.resident_bytes;
+            state.authorized_bytes = state.authorized_bytes.saturating_add(delta.resident_bytes);
             state.allowed_slack = allowed_slack;
             slot.set(state);
         });
@@ -202,6 +214,7 @@ impl WorkGuard for OracleGuard {
             if !state.scope_active || state.authorized > state.allowed_slack {
                 state.scope_violations = state.scope_violations.saturating_add(1);
             }
+            state.max_scope_slack = state.max_scope_slack.max(state.authorized);
             state.scope_active = false;
             state.authorized = 0;
             state.allowed_slack = 0;
@@ -441,6 +454,80 @@ fn cold_flight_build_heap_growth_requires_explicit_scopes() {
 }
 
 #[test]
+fn provider_allocation_work_tracks_real_layout_requests_without_whole_decode_credit() {
+    if std::env::var_os(PROVIDER_SCOPE_CHILD_ENV).is_none() {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg("provider_allocation_work_tracks_real_layout_requests_without_whole_decode_credit")
+            .arg("--nocapture")
+            .env(PROVIDER_SCOPE_CHILD_ENV, "1")
+            .status()
+            .expect("provider allocation oracle child");
+        assert!(
+            status.success(),
+            "provider allocation oracle child failed: {status}"
+        );
+        return;
+    }
+
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    for (label, suffix) in [("QTRB", "main.trace.bin"), ("Flight", "capture.flight.bin")] {
+        let source = session
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.local_path().ends_with(suffix))
+            .unwrap_or_else(|| panic!("{label} artifact"));
+        ORACLE.with(|slot| slot.set(active_oracle_state()));
+        let guard = OracleGuard {
+            reject_resident: None,
+            resident_ordinal: AtomicUsize::new(0),
+        };
+        let provider = source.open_provider(&guard).expect("provider open");
+        let open_unauthorized = ORACLE.with(|slot| slot.get().unauthorized);
+        let cursor_bytes = provider.cursor_resident_bytes().expect("cursor size");
+        let cursor = {
+            let _scope = AllocationScope::begin(&guard, cursor_bytes, 0).expect("cursor scope");
+            provider.into_cursor().expect("provider cursor")
+        };
+        let mut cursor = cursor;
+        while cursor.next_event(&guard).expect("provider event").is_some() {}
+        cursor.finish().expect("provider finish");
+        let state = ORACLE.with(|slot| {
+            let mut state = slot.get();
+            state.active = false;
+            slot.set(state);
+            state
+        });
+        assert_eq!(
+            state.unauthorized,
+            0,
+            "{label} unauthorized growth (open={open_unauthorized}, nested={}): sizes={:?} ordinals={:?} resident={:?}",
+            state.nested_scopes,
+            &state.unauthorized_sizes[..state.unauthorized_len],
+            &state.unauthorized_ordinals[..state.unauthorized_len],
+            &state.resident_bytes[..=state.resident_ordinal.min(255)]
+        );
+        assert!(
+            state.authorized_bytes.saturating_mul(10) <= state.requested_bytes.saturating_mul(11),
+            "{label} allocation-work is synthetic: authorized={} requested={} max_scope_slack={}",
+            state.authorized_bytes,
+            state.requested_bytes,
+            state.max_scope_slack
+        );
+        assert_eq!(
+            open_unauthorized, 0,
+            "{label} open-provider growth escaped scope"
+        );
+        assert_scopes_closed(&state, label);
+    }
+}
+
+#[test]
 fn every_warm_resident_rejection_preserves_the_original_abort_without_later_growth() {
     if std::env::var_os(ABORT_CHILD_ENV).is_none() {
         let status = Command::new(std::env::current_exe().expect("current test executable"))
@@ -590,7 +677,8 @@ fn every_cold_resident_rejection_stops_growth_and_leaves_no_cache_object() {
             assert_eq!(
                 error.code(),
                 "control.budget_exceeded",
-                "{label} ordinal {reject_at}"
+                "{label} ordinal {reject_at}: {error}; resident={:?}",
+                &state.resident_bytes[..=state.resident_ordinal.min(255)]
             );
             let detail = error.to_string();
             assert!(

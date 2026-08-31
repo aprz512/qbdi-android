@@ -213,7 +213,7 @@ fn record_header_read_requires_work_guard_authorization() {
 }
 
 #[test]
-fn payload_read_and_allocation_require_combined_work_authorization() {
+fn payload_buffer_read_is_authorized_before_any_decoded_field_allocation() {
     let begin_record = begin(2);
     let module_record = module(1, 0x1000, b"libbudget.so");
     let module_payload_bytes = (module_record.len() - RECORD_HEADER_BYTES) as u64;
@@ -255,7 +255,7 @@ fn payload_read_and_allocation_require_combined_work_authorization() {
     );
     assert_eq!(attempts[1].input_bytes, module_payload_bytes);
     assert_eq!(attempts[1].decompressed_bytes, module_payload_bytes);
-    assert!(attempts[1].resident_bytes > module_payload_bytes);
+    assert_eq!(attempts[1].resident_bytes, 0);
     assert_eq!(attempts[1].nodes, 1);
 }
 

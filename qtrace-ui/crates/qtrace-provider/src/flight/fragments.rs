@@ -1,11 +1,8 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     EventKey, EventPayload, EventRecord, Provenance, ProviderError, SemanticEvent, WorkDelta,
-    WorkGuard,
+    WorkGuard, allocation,
 };
 
 use super::recovery::MERGED_TIMELINE_ID;
@@ -37,28 +34,53 @@ pub(super) fn decode(
     provenance: Provenance,
     chunk_index: u32,
     generation: u32,
-) -> Result<Fragment, ()> {
+    guard: &dyn WorkGuard,
+) -> Result<Fragment, ProviderError> {
     let field_count = if kind == 6 { 3 } else { 2 };
     if bytes.len() != 16 + field_count * 4 {
-        return Err(());
+        return Err(fragment_payload_error());
     }
-    let event_id = u64::from_le_bytes(bytes[..8].try_into().map_err(|_| ())?);
-    let total = u32::from_le_bytes(bytes[8..12].try_into().map_err(|_| ())?);
-    let index = u16::from_le_bytes(bytes[12..14].try_into().map_err(|_| ())?);
-    let count = u16::from_le_bytes(bytes[14..16].try_into().map_err(|_| ())?);
+    let event_id = u64::from_le_bytes(
+        bytes[..8]
+            .try_into()
+            .map_err(|_| fragment_payload_error())?,
+    );
+    let total = u32::from_le_bytes(
+        bytes[8..12]
+            .try_into()
+            .map_err(|_| fragment_payload_error())?,
+    );
+    let index = u16::from_le_bytes(
+        bytes[12..14]
+            .try_into()
+            .map_err(|_| fragment_payload_error())?,
+    );
+    let count = u16::from_le_bytes(
+        bytes[14..16]
+            .try_into()
+            .map_err(|_| fragment_payload_error())?,
+    );
     if event_id == 0 || total == 0 || count < 2 || index >= count {
-        return Err(());
+        return Err(fragment_payload_error());
     }
-    let mut raw_fields = Vec::with_capacity(field_count);
+    let mut raw_fields = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut raw_fields,
+        field_count,
+        guard,
+        "Flight fragment field allocation failed",
+    )?;
     for field in 0..field_count {
         let id = u32::from_le_bytes(
             bytes[16 + field * 4..20 + field * 4]
                 .try_into()
-                .map_err(|_| ())?,
+                .map_err(|_| fragment_payload_error())?,
         );
-        raw_fields.push(Arc::clone(strings.get(&id).ok_or(())?));
+        raw_fields.push(Arc::clone(
+            strings.get(&id).ok_or_else(fragment_payload_error)?,
+        ));
     }
-    let detail = raw_fields.pop().ok_or(())?;
+    let detail = raw_fields.pop().ok_or_else(fragment_payload_error)?;
     let total_limit = if kind == 6 { 1 << 20 } else { 4096 };
     if raw_fields.first().is_none_or(|field| field.len() > 255)
         || (kind == 6 && raw_fields.get(1).is_none_or(|field| field.len() > 255))
@@ -73,7 +95,7 @@ pub(super) fn decode(
                 .saturating_add(count as usize)
                 .saturating_sub(1)
     {
-        return Err(());
+        return Err(fragment_payload_error());
     }
     Ok(Fragment {
         key,
@@ -101,18 +123,52 @@ pub(super) fn finish(
     chunks: &[Option<ChunkIdentity>],
     guard: &dyn WorkGuard,
 ) -> Result<(), ProviderError> {
-    let mut groups: BTreeMap<(u32, u64, u16), Vec<Fragment>> = BTreeMap::new();
-    for (index, fragment) in fragments.into_iter().enumerate() {
+    let mut group_counts = HashMap::new();
+    allocation::try_reserve_hash_map(
+        &mut group_counts,
+        fragments.len(),
+        guard,
+        "Flight fragment count map allocation failed",
+    )?;
+    for (index, fragment) in fragments.iter().enumerate() {
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
+        let key = (
+            fragment.key.tid.unwrap_or(0),
+            fragment.event_id,
+            fragment.kind,
+        );
+        let count = group_counts.entry(key).or_insert(0_usize);
+        *count = count.checked_add(1).ok_or_else(fragment_allocation_error)?;
+    }
+    let mut groups = HashMap::new();
+    allocation::try_reserve_hash_map(
+        &mut groups,
+        group_counts.len(),
+        guard,
+        "Flight fragment group map allocation failed",
+    )?;
+    for (&key, &count) in &group_counts {
+        let mut values = Vec::new();
+        allocation::try_reserve_vec_exact(
+            &mut values,
+            count,
+            guard,
+            "Flight fragment group allocation failed",
+        )?;
+        groups.insert(key, values);
+    }
+    for (index, fragment) in fragments.into_iter().enumerate() {
+        checkpoint(guard, index)?;
+        let key = (
+            fragment.key.tid.unwrap_or(0),
+            fragment.event_id,
+            fragment.kind,
+        );
         groups
-            .entry((
-                fragment.key.tid.unwrap_or(0),
-                fragment.event_id,
-                fragment.kind,
-            ))
-            .or_default()
+            .get_mut(&key)
+            .ok_or_else(fragment_allocation_error)?
             .push(fragment);
     }
     for (group_index, ((tid, _, kind), values)) in groups.into_iter().enumerate() {
@@ -122,20 +178,32 @@ pub(super) fn finish(
         };
         let expected_total = first.total;
         let expected_count = first.count;
-        let expected_fixed = first.fixed.clone();
+        let mut expected_fixed = Vec::new();
+        allocation::try_reserve_vec_exact(
+            &mut expected_fixed,
+            first.fixed.len(),
+            guard,
+            "Flight fragment fixed-field allocation failed",
+        )?;
+        expected_fixed.extend(first.fixed.iter().cloned());
         let mut evidence = Vec::new();
-        if evidence.try_reserve_exact(values.len()).is_err() {
-            return Err(fragment_allocation_error());
-        }
+        allocation::try_reserve_vec_exact(
+            &mut evidence,
+            values.len(),
+            guard,
+            "Flight fragment evidence allocation failed",
+        )?;
         for (index, item) in values.iter().enumerate() {
             checkpoint(guard, index)?;
             evidence.push((item.key.sequence, item.key.source_offset));
         }
         let mut ordered = Vec::new();
-        if ordered.try_reserve_exact(expected_count as usize).is_err() {
-            mark_damaged(&evidence, damaged, damaged_offsets, guard)?;
-            continue;
-        }
+        allocation::try_reserve_vec_exact(
+            &mut ordered,
+            expected_count as usize,
+            guard,
+            "Flight fragment ordering allocation failed",
+        )?;
         for index in 0..expected_count as usize {
             if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
                 guard.consume(WorkDelta::default())?;
@@ -157,10 +225,12 @@ pub(super) fn finish(
             }
         }
         let mut values = Vec::new();
-        if values.try_reserve_exact(expected_count as usize).is_err() {
-            mark_damaged(&evidence, damaged, damaged_offsets, guard)?;
-            continue;
-        }
+        allocation::try_reserve_vec_exact(
+            &mut values,
+            expected_count as usize,
+            guard,
+            "Flight fragment value allocation failed",
+        )?;
         for (index, item) in ordered.into_iter().enumerate() {
             if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
                 guard.consume(WorkDelta::default())?;
@@ -188,13 +258,20 @@ pub(super) fn finish(
             continue;
         };
         let mut fixed = Vec::new();
-        if fixed.try_reserve_exact(first.fixed.len()).is_err() {
-            return Err(fragment_allocation_error());
-        }
+        allocation::try_reserve_vec_exact(
+            &mut fixed,
+            first.fixed.len(),
+            guard,
+            "Flight semantic fixed-field allocation failed",
+        )?;
         let mut fixed_valid = true;
         for raw in &first.fixed {
             match std::str::from_utf8(raw) {
-                Ok(value) => fixed.push(value.to_owned()),
+                Ok(value) => fixed.push(allocation::try_copy_string(
+                    value,
+                    guard,
+                    "Flight semantic fixed string allocation failed",
+                )?),
                 Err(_) => {
                     mark_damaged(&evidence, damaged, damaged_offsets, guard)?;
                     fixed_valid = false;
@@ -206,10 +283,12 @@ pub(super) fn finish(
             continue;
         }
         let mut detail = Vec::new();
-        if detail.try_reserve_exact(first.total as usize).is_err() {
-            mark_damaged(&evidence, damaged, damaged_offsets, guard)?;
-            continue;
-        }
+        allocation::try_reserve_vec_exact(
+            &mut detail,
+            first.total as usize,
+            guard,
+            "Flight fragment detail allocation failed",
+        )?;
         for (index, value) in values.iter().enumerate() {
             checkpoint(guard, index)?;
             let Some(next_len) = detail.len().checked_add(value.detail.len()) else {
@@ -240,11 +319,18 @@ pub(super) fn finish(
         };
         let mut fragment_sequences = Vec::new();
         let mut offsets = Vec::new();
-        if fragment_sequences.try_reserve_exact(values.len()).is_err()
-            || offsets.try_reserve_exact(values.len()).is_err()
-        {
-            return Err(fragment_allocation_error());
-        }
+        allocation::try_reserve_vec_exact(
+            &mut fragment_sequences,
+            values.len(),
+            guard,
+            "Flight fragment sequence allocation failed",
+        )?;
+        allocation::try_reserve_vec_exact(
+            &mut offsets,
+            values.len(),
+            guard,
+            "Flight fragment offset allocation failed",
+        )?;
         let mut sequence = 0;
         let mut all_captured = true;
         let mut first_ordinal = first.key.record_ordinal;
@@ -262,9 +348,24 @@ pub(super) fn finish(
             }
             offsets.push(item.key.source_offset);
         }
+        let (category, name) = if kind == 6 {
+            let mut fields = fixed.into_iter();
+            (
+                fields.next(),
+                fields.next().ok_or_else(fragment_allocation_error)?,
+            )
+        } else {
+            (
+                None,
+                fixed
+                    .into_iter()
+                    .next()
+                    .ok_or_else(fragment_allocation_error)?,
+            )
+        };
         let semantic = SemanticEvent {
-            category: (kind == 6).then(|| fixed[0].clone()),
-            name: fixed[if kind == 6 { 1 } else { 0 }].clone(),
+            category,
+            name,
             detail,
             fragment_sequences,
         };
@@ -358,6 +459,16 @@ fn fragment_allocation_error() -> ProviderError {
         None,
         false,
         "Flight fragment allocation failed",
+    )
+}
+
+fn fragment_payload_error() -> ProviderError {
+    ProviderError::new(
+        "source.flight.payload",
+        "flight.fragment",
+        None,
+        false,
+        "invalid Flight fragment payload",
     )
 }
 
@@ -458,11 +569,21 @@ mod tests {
             Provenance::Captured,
             0,
             1,
+            &AllowAll,
         )
         .expect("first fragment");
         payload[12..14].copy_from_slice(&1_u16.to_le_bytes());
-        let second = decode(6, &payload, &strings, key, Provenance::Captured, 0, 1)
-            .expect("second fragment");
+        let second = decode(
+            6,
+            &payload,
+            &strings,
+            key,
+            Provenance::Captured,
+            0,
+            1,
+            &AllowAll,
+        )
+        .expect("second fragment");
 
         assert!(Arc::ptr_eq(&first.detail, &shared));
         assert!(Arc::ptr_eq(&second.detail, &shared));

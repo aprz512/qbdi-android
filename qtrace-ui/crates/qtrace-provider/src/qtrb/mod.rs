@@ -11,17 +11,16 @@ pub use events::{
 };
 pub use input::QtrbInput;
 
-use std::{collections::HashMap, fmt, mem::size_of, ops::Deref, sync::Arc};
+use std::{collections::HashMap, fmt, mem::size_of, sync::Arc};
 
 use cursor::PayloadCursor;
 use wire::{RecordType, *};
 
 use crate::{
-    AllocationScope, CompletenessCause, CompletenessRange, EventCursor, EventKey, EventPayload,
-    EventRecord, ModuleDefinition, OpaqueOptionalRecord, Provenance, ProviderCapabilities,
-    ProviderCounters, ProviderError, ProviderSummary, ReadAtSource, SemanticEvent,
-    SourceCoordinate, SourceIdentity, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta,
-    WorkGuard,
+    CompletenessCause, CompletenessRange, EventCursor, EventKey, EventPayload, EventRecord,
+    ModuleDefinition, OpaqueOptionalRecord, Provenance, ProviderCapabilities, ProviderCounters,
+    ProviderError, ProviderSummary, ReadAtSource, SemanticEvent, SourceCoordinate, SourceIdentity,
+    TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard, allocation,
 };
 
 const TIMELINE_ID: TimelineId = TimelineId(0);
@@ -75,24 +74,19 @@ impl QtrbProvider {
         identity.format_major = MAJOR_VERSION;
         identity.format_minor = header.minor;
         identity.source_bytes = source_bytes;
-        let timeline_resident = size_of::<TimelineDescriptor>()
-            .checked_add(4)
-            .and_then(|bytes| u64::try_from(bytes).ok())
-            .ok_or_else(|| provider_allocation_error("QTRB provider allocation bound overflow"))?;
         guard.consume(WorkDelta {
             nodes: 1,
             ..WorkDelta::default()
         })?;
-        let _scope = AllocationScope::begin(guard, timeline_resident, 0)?;
         let mut timelines = Vec::new();
-        timelines
-            .try_reserve_exact(1)
-            .map_err(|_| provider_allocation_error("QTRB timeline allocation failed"))?;
-        let mut label = String::new();
-        label
-            .try_reserve_exact(4)
-            .map_err(|_| provider_allocation_error("QTRB timeline label allocation failed"))?;
-        label.push_str("QTRB");
+        allocation::try_reserve_vec_exact(
+            &mut timelines,
+            1,
+            guard,
+            "QTRB timeline allocation failed",
+        )?;
+        let label =
+            allocation::try_copy_string("QTRB", guard, "QTRB timeline label allocation failed")?;
         timelines.push(TimelineDescriptor {
             id: TIMELINE_ID,
             tid: None,
@@ -291,27 +285,11 @@ struct PhysicalRecord {
     ordinal: u64,
 }
 
-struct ScopedPhysicalRecord<'a> {
-    record: Option<PhysicalRecord>,
-    _scope: AllocationScope<'a>,
-}
-
-impl ScopedPhysicalRecord<'_> {
-    fn take(&mut self) -> PhysicalRecord {
-        self.record
-            .take()
-            .expect("scoped physical record taken once")
-    }
-}
-
-impl Deref for ScopedPhysicalRecord<'_> {
-    type Target = PhysicalRecord;
-
-    fn deref(&self) -> &Self::Target {
-        self.record
-            .as_ref()
-            .expect("scoped physical record present")
-    }
+struct TerminalDraft {
+    kind: TerminationKind,
+    reason: Option<String>,
+    return_value: Option<u64>,
+    elapsed_ms: u64,
 }
 
 fn provider_allocation_error(detail: &'static str) -> ProviderError {
@@ -324,56 +302,6 @@ fn provider_allocation_error(detail: &'static str) -> ProviderError {
     )
 }
 
-fn hash_map_entry_resident_upper_bound<T>() -> u64 {
-    // HashMap growth may reserve several buckets at once. Charging four entries
-    // per insertion also covers control bytes and the initial small table.
-    (size_of::<T>() as u64 + 1).saturating_mul(4)
-}
-
-fn record_resident_upper_bound(
-    record_type: Option<RecordType>,
-    flags: u16,
-    payload_bytes: u32,
-) -> u64 {
-    let decoded = match (record_type, flags) {
-        (Some(RecordType::TraceBegin), 0) => (2 * MAX_CONTEXT_STRING_BYTES) as u64,
-        (Some(RecordType::ModuleDefinition), 0) => {
-            (2 * MAX_MODULE_NAME_BYTES) as u64
-                + hash_map_entry_resident_upper_bound::<(u32, ModuleWire)>()
-        }
-        (Some(RecordType::InstructionDefinition), 0) => {
-            let string_bytes = MAX_MNEMONIC_BYTES
-                + MAX_OPERANDS_BYTES
-                + MAX_DISASSEMBLY_BYTES
-                + 2 * MAX_GPR_COUNT * MAX_REGISTER_NAME_BYTES;
-            let register_capacity = 2 * MAX_GPR_COUNT * size_of::<RegisterWire>();
-            let memory_capacity = MAX_MEMORY_OPERAND_COUNT * size_of::<MemoryOperandWire>();
-            (2 * (string_bytes + register_capacity + memory_capacity)) as u64
-                + hash_map_entry_resident_upper_bound::<(u32, InstructionDefinitionWire)>()
-        }
-        (Some(RecordType::Instruction), 0) => {
-            (2 * MAX_GPR_COUNT * (size_of::<RegisterObservation>() + MAX_REGISTER_NAME_BYTES))
-                as u64
-        }
-        (Some(RecordType::Memory), 0) => (2 * MAX_CAPTURED_MEMORY_BYTES) as u64,
-        (Some(RecordType::Call), 0) => {
-            (MAX_CALL_CATEGORY_BYTES + MAX_CALL_NAME_BYTES + MAX_EVENT_DETAIL_BYTES) as u64
-        }
-        (Some(RecordType::Call), CHUNK_FLAG) => {
-            (MAX_CALL_CATEGORY_BYTES + MAX_CALL_NAME_BYTES + MAX_CALL_CHUNK_DETAIL_BYTES) as u64
-        }
-        (Some(RecordType::Rule | RecordType::Error), 0) => {
-            (MAX_EVENT_NAME_BYTES + MAX_EVENT_DETAIL_BYTES) as u64
-        }
-        (Some(RecordType::Rule | RecordType::Error), CHUNK_FLAG) => {
-            (MAX_EVENT_NAME_BYTES + MAX_EVENT_CHUNK_DETAIL_BYTES) as u64
-        }
-        (Some(RecordType::TraceStop), 0) => "duration_elapsed".len() as u64,
-        _ => 0,
-    };
-    u64::from(payload_bytes).saturating_add(decoded)
-}
-
 const fn record_node_upper_bound(
     record_type: Option<RecordType>,
     flags: u16,
@@ -384,18 +312,6 @@ const fn record_node_upper_bound(
         (Some(RecordType::Call | RecordType::Rule | RecordType::Error), CHUNK_FLAG, true) => 1,
         _ => 0,
     }
-}
-
-fn pending_fragment_resident_upper_bound(
-    total_detail_bytes: u32,
-    chunk_count: u16,
-    category_bytes: usize,
-    name_bytes: usize,
-) -> u64 {
-    u64::from(total_detail_bytes)
-        .saturating_add(u64::from(chunk_count).saturating_mul(size_of::<u64>() as u64))
-        .saturating_add(category_bytes as u64)
-        .saturating_add(name_bytes as u64)
 }
 
 struct QtrbEventCursor {
@@ -488,7 +404,7 @@ impl QtrbEventCursor {
                 ));
             }
 
-            let mut record = self.read_record(guard)?;
+            let record = self.read_record(guard)?;
             if !self.began && record.record_type != Some(RecordType::TraceBegin) {
                 return Err(self.record_error(
                     &record,
@@ -513,7 +429,7 @@ impl QtrbEventCursor {
                 }
             }
 
-            let event = self.decode_record(record.take(), guard)?;
+            let event = self.decode_record(record, guard)?;
             if let Some(event) = event {
                 guard.consume(WorkDelta {
                     events: 1,
@@ -548,18 +464,17 @@ impl QtrbEventCursor {
             usize::from(!self.terminal_seen && self.mode == OpenMode::RecoverablePartial)
                 .checked_add(1)
                 .ok_or_else(|| provider_allocation_error("QTRB completeness count overflow"))?;
-        let completeness_bytes = u64::try_from(
-            completeness_count
-                .checked_mul(size_of::<CompletenessRange>())
-                .ok_or_else(|| {
-                    provider_allocation_error("QTRB completeness allocation overflow")
-                })?,
-        )
-        .map_err(|_| provider_allocation_error("QTRB completeness allocation overflow"))?;
-        let _scope = AllocationScope::begin(guard, completeness_bytes, 0)?;
-        self.completeness
-            .try_reserve_exact(completeness_count)
-            .map_err(|_| provider_allocation_error("QTRB completeness allocation failed"))?;
+        let completeness_target = self
+            .completeness
+            .len()
+            .checked_add(completeness_count)
+            .ok_or_else(|| provider_allocation_error("QTRB completeness count overflow"))?;
+        allocation::try_reserve_vec_exact(
+            &mut self.completeness,
+            completeness_target,
+            guard,
+            "QTRB completeness allocation failed",
+        )?;
         if !self.terminal_seen {
             match self.mode {
                 OpenMode::Sealed => {
@@ -609,10 +524,7 @@ impl QtrbEventCursor {
         Ok(())
     }
 
-    fn read_record<'a>(
-        &mut self,
-        guard: &'a dyn WorkGuard,
-    ) -> Result<ScopedPhysicalRecord<'a>, ProviderError> {
+    fn read_record(&mut self, guard: &dyn WorkGuard) -> Result<PhysicalRecord, ProviderError> {
         let record_offset = self.offset;
         let ordinal = self.next_ordinal;
         let coordinate = SourceCoordinate {
@@ -686,19 +598,20 @@ impl QtrbEventCursor {
                 "record payload cannot be represented on this host",
             )
         })?;
-        let resident = record_resident_upper_bound(record_type, flags, payload_bytes);
-        let scope = AllocationScope::begin_with_delta(
+        guard.consume(WorkDelta {
+            input_bytes: u64::from(payload_bytes),
+            decompressed_bytes: u64::from(payload_bytes),
+            nodes: record_node_upper_bound(record_type, flags, self.pending.is_none()),
+            ..WorkDelta::default()
+        })?;
+        let mut payload = Vec::new();
+        allocation::try_reserve_vec_exact(
+            &mut payload,
+            payload_len,
             guard,
-            WorkDelta {
-                input_bytes: u64::from(payload_bytes),
-                decompressed_bytes: u64::from(payload_bytes),
-                nodes: record_node_upper_bound(record_type, flags, self.pending.is_none()),
-                resident_bytes: resident,
-                ..WorkDelta::default()
-            },
-            resident,
+            "QTRB payload buffer allocation failed",
         )?;
-        let mut payload = vec![0_u8; payload_len];
+        payload.resize(payload_len, 0);
         self.source
             .read_exact_at(self.offset, &mut payload)
             .map_err(|error| {
@@ -721,16 +634,13 @@ impl QtrbEventCursor {
             .counters
             .decompressed_bytes
             .saturating_add(RECORD_HEADER_BYTES as u64 + u64::from(payload_bytes));
-        Ok(ScopedPhysicalRecord {
-            record: Some(PhysicalRecord {
-                record_type,
-                raw_type,
-                flags,
-                payload,
-                offset: record_offset,
-                ordinal,
-            }),
-            _scope: scope,
+        Ok(PhysicalRecord {
+            record_type,
+            raw_type,
+            flags,
+            payload,
+            offset: record_offset,
+            ordinal,
         })
     }
 
@@ -740,18 +650,18 @@ impl QtrbEventCursor {
         guard: &dyn WorkGuard,
     ) -> Result<Option<EventRecord>, ProviderError> {
         match record.record_type {
-            Some(RecordType::TraceBegin) => self.decode_begin(record).map(Some),
-            Some(RecordType::ModuleDefinition) => self.decode_module(record).map(Some),
+            Some(RecordType::TraceBegin) => self.decode_begin(record, guard).map(Some),
+            Some(RecordType::ModuleDefinition) => self.decode_module(record, guard).map(Some),
             Some(RecordType::InstructionDefinition) => {
-                self.decode_instruction_definition(record).map(Some)
+                self.decode_instruction_definition(record, guard).map(Some)
             }
-            Some(RecordType::Instruction) => self.decode_instruction(record).map(Some),
-            Some(RecordType::Memory) => self.decode_memory(record).map(Some),
+            Some(RecordType::Instruction) => self.decode_instruction(record, guard).map(Some),
+            Some(RecordType::Memory) => self.decode_memory(record, guard).map(Some),
             Some(RecordType::Call) => self.decode_semantic(record, FragmentKind::Call, guard),
             Some(RecordType::Rule) => self.decode_semantic(record, FragmentKind::Rule, guard),
             Some(RecordType::Error) => self.decode_semantic(record, FragmentKind::Error, guard),
-            Some(RecordType::TraceEnd) => self.decode_trace_end(record).map(Some),
-            Some(RecordType::TraceStop) => self.decode_trace_stop(record).map(Some),
+            Some(RecordType::TraceEnd) => self.decode_trace_end(record, guard).map(Some),
+            Some(RecordType::TraceStop) => self.decode_trace_stop(record, guard).map(Some),
             None => {
                 self.counters.opaque_records = self.counters.opaque_records.saturating_add(1);
                 let key = EventKey::new(
@@ -775,7 +685,11 @@ impl QtrbEventCursor {
         }
     }
 
-    fn decode_begin(&mut self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
+    fn decode_begin(
+        &mut self,
+        record: PhysicalRecord,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventRecord, ProviderError> {
         if self.began {
             return Err(self.record_error(
                 &record,
@@ -795,8 +709,8 @@ impl QtrbEventCursor {
         let compression = cursor.u8()?;
         let effective_buffer_bytes = cursor.u64_le()?;
         let run_id = cursor.u64_le()?;
-        let scene = cursor.bounded_utf8(MAX_CONTEXT_STRING_BYTES, "scene")?;
-        let target = cursor.bounded_utf8(MAX_CONTEXT_STRING_BYTES, "target")?;
+        let scene = cursor.bounded_utf8_guarded(MAX_CONTEXT_STRING_BYTES, "scene", guard)?;
+        let target = cursor.bounded_utf8_guarded(MAX_CONTEXT_STRING_BYTES, "target", guard)?;
         cursor.finish()?;
         if profile != self.header.profile || !matches!(compression, 0 | 1) {
             return Err(self.record_error(
@@ -835,15 +749,23 @@ impl QtrbEventCursor {
         ))
     }
 
-    fn decode_module(&mut self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
+    fn decode_module(
+        &mut self,
+        record: PhysicalRecord,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventRecord, ProviderError> {
         let mut cursor = PayloadCursor::new(&record.payload, "MODULE_DEF", coordinate(&record));
         let module_id = cursor.u32_le()?;
         let base = cursor.u64_le()?;
-        let name = cursor.bounded_utf8(MAX_MODULE_NAME_BYTES, "module name")?;
+        let name = cursor.bounded_utf8_guarded(MAX_MODULE_NAME_BYTES, "module name", guard)?;
         cursor.finish()?;
         let definition = ModuleWire {
             base,
-            name: name.clone(),
+            name: allocation::try_copy_string(
+                &name,
+                guard,
+                "QTRB module dictionary string allocation failed",
+            )?,
         };
         match self.modules.get(&module_id) {
             Some(existing) if existing != &definition => {
@@ -863,6 +785,12 @@ impl QtrbEventCursor {
                 ));
             }
             None => {
+                allocation::try_reserve_hash_map(
+                    &mut self.modules,
+                    1,
+                    guard,
+                    "QTRB module dictionary allocation failed",
+                )?;
                 self.modules.insert(module_id, definition);
             }
             Some(_) => {}
@@ -881,9 +809,8 @@ impl QtrbEventCursor {
     fn decode_instruction_definition(
         &mut self,
         record: PhysicalRecord,
+        guard: &dyn WorkGuard,
     ) -> Result<EventRecord, ProviderError> {
-        let _shared_definition =
-            events::decode_instruction_definition_payload(&record.payload, coordinate(&record))?;
         let mut cursor =
             PayloadCursor::new(&record.payload, "INSTRUCTION_DEF", coordinate(&record));
         let metadata_id = cursor.u32_le()?;
@@ -910,17 +837,31 @@ impl QtrbEventCursor {
                 "invalid instruction definition metadata",
             ));
         }
-        let mnemonic = cursor.bounded_utf8(MAX_MNEMONIC_BYTES, "mnemonic")?;
-        let operands = cursor.bounded_utf8(MAX_OPERANDS_BYTES, "operands")?;
-        let disassembly = cursor.bounded_utf8(MAX_DISASSEMBLY_BYTES, "disassembly")?;
-        let reads = decode_registers(&mut cursor, read_mask, "read register", coordinate(&record))?;
+        let mnemonic = cursor.bounded_utf8_guarded(MAX_MNEMONIC_BYTES, "mnemonic", guard)?;
+        let operands = cursor.bounded_utf8_guarded(MAX_OPERANDS_BYTES, "operands", guard)?;
+        let disassembly =
+            cursor.bounded_utf8_guarded(MAX_DISASSEMBLY_BYTES, "disassembly", guard)?;
+        let reads = decode_registers(
+            &mut cursor,
+            read_mask,
+            "read register",
+            coordinate(&record),
+            guard,
+        )?;
         let writes = decode_registers(
             &mut cursor,
             write_mask,
             "write register",
             coordinate(&record),
+            guard,
         )?;
-        let mut memory_operands = Vec::with_capacity(memory_count);
+        let mut memory_operands = Vec::new();
+        allocation::try_reserve_vec_exact(
+            &mut memory_operands,
+            memory_count,
+            guard,
+            "QTRB memory operand allocation failed",
+        )?;
         for _ in 0..memory_count {
             let operand = MemoryOperandWire {
                 base: cursor.u8()?,
@@ -984,18 +925,29 @@ impl QtrbEventCursor {
                 ));
             }
             None => {
-                self.definitions.insert(metadata_id, definition.clone());
+                allocation::try_reserve_hash_map(
+                    &mut self.definitions,
+                    1,
+                    guard,
+                    "QTRB instruction dictionary allocation failed",
+                )?;
+                self.definitions
+                    .insert(metadata_id, clone_definition_wire(&definition, guard)?);
             }
             Some(_) => {}
         }
         Ok(self.event(
             &record,
             None,
-            EventPayload::InstructionDefinition(typed_definition(metadata_id, &definition)),
+            EventPayload::InstructionDefinition(typed_definition(metadata_id, &definition, guard)?),
         ))
     }
 
-    fn decode_instruction(&mut self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
+    fn decode_instruction(
+        &mut self,
+        record: PhysicalRecord,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventRecord, ProviderError> {
         let mut cursor = PayloadCursor::new(&record.payload, "INSTRUCTION", coordinate(&record));
         let sequence = cursor.u64_le()?;
         let module_id = cursor.u32_le()?;
@@ -1020,28 +972,41 @@ impl QtrbEventCursor {
                 "instruction register counts do not match its definition",
             ));
         }
-        let shared_definition = typed_definition(metadata_id, definition);
-        let shared = events::decode_instruction_payload(
-            &record.payload,
-            &shared_definition,
-            None,
-            coordinate(&record),
+        let mut read_before = Vec::new();
+        allocation::try_reserve_vec_exact(
+            &mut read_before,
+            read_count,
+            guard,
+            "QTRB read observation allocation failed",
         )?;
-        let mut read_before = Vec::with_capacity(read_count);
         for register in &definition.reads {
             read_before.push(RegisterObservation {
                 slot: register.slot,
                 captured_width: register.width,
-                name: register.name.clone(),
+                name: allocation::try_copy_string(
+                    &register.name,
+                    guard,
+                    "QTRB read observation name allocation failed",
+                )?,
                 value: cursor.u64_le()?,
             });
         }
-        let mut write_after = Vec::with_capacity(write_count);
+        let mut write_after = Vec::new();
+        allocation::try_reserve_vec_exact(
+            &mut write_after,
+            write_count,
+            guard,
+            "QTRB write observation allocation failed",
+        )?;
         for register in &definition.writes {
             write_after.push(RegisterObservation {
                 slot: register.slot,
                 captured_width: register.width,
-                name: register.name.clone(),
+                name: allocation::try_copy_string(
+                    &register.name,
+                    guard,
+                    "QTRB write observation name allocation failed",
+                )?,
                 value: cursor.u64_le()?,
             });
         }
@@ -1070,9 +1035,6 @@ impl QtrbEventCursor {
                 "instruction counter overflows u64",
             )
         })?;
-        debug_assert_eq!(shared.local_sequence, sequence);
-        debug_assert_eq!(shared.instruction.read_before, read_before);
-        debug_assert_eq!(shared.instruction.write_after, write_after);
         Ok(self.event(
             &record,
             Some(sequence),
@@ -1086,8 +1048,11 @@ impl QtrbEventCursor {
         ))
     }
 
-    fn decode_memory(&self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
-        let shared = events::decode_memory_payload(&record.payload, coordinate(&record))?;
+    fn decode_memory(
+        &self,
+        record: PhysicalRecord,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventRecord, ProviderError> {
         let mut cursor = PayloadCursor::new(&record.payload, "MEMORY", coordinate(&record));
         let module_id = cursor.u32_le()?;
         let relative_pc = cursor.u64_le()?;
@@ -1125,12 +1090,9 @@ impl QtrbEventCursor {
                 "invalid memory metadata availability",
             ));
         }
-        let before = decode_memory_state(&mut cursor, "before memory", coordinate(&record))?;
-        let after = decode_memory_state(&mut cursor, "after memory", coordinate(&record))?;
+        let before = decode_memory_state(&mut cursor, "before memory", coordinate(&record), guard)?;
+        let after = decode_memory_state(&mut cursor, "after memory", coordinate(&record), guard)?;
         cursor.finish()?;
-        debug_assert_eq!(shared.module_id, module_id);
-        debug_assert_eq!(shared.before, before);
-        debug_assert_eq!(shared.after, after);
         Ok(self.event(
             &record,
             None,
@@ -1159,7 +1121,11 @@ impl QtrbEventCursor {
             let mut cursor =
                 PayloadCursor::new(&record.payload, "semantic event", coordinate(&record));
             let category = if kind == FragmentKind::Call {
-                Some(cursor.bounded_utf8(MAX_CALL_CATEGORY_BYTES, "CALL category")?)
+                Some(cursor.bounded_utf8_guarded(
+                    MAX_CALL_CATEGORY_BYTES,
+                    "CALL category",
+                    guard,
+                )?)
             } else {
                 None
             };
@@ -1168,8 +1134,9 @@ impl QtrbEventCursor {
             } else {
                 MAX_EVENT_NAME_BYTES
             };
-            let name = cursor.bounded_utf8(name_limit, "event name")?;
-            let detail = cursor.bounded_utf8(MAX_EVENT_DETAIL_BYTES, "event detail")?;
+            let name = cursor.bounded_utf8_guarded(name_limit, "event name", guard)?;
+            let detail =
+                cursor.bounded_utf8_guarded(MAX_EVENT_DETAIL_BYTES, "event detail", guard)?;
             cursor.finish()?;
             return Ok(Some(
                 self.semantic_event(&record, kind, category, name, detail),
@@ -1204,6 +1171,7 @@ impl QtrbEventCursor {
                 MAX_CALL_CATEGORY_BYTES,
                 "CALL category",
                 coordinate(&record),
+                guard,
             )?)
         } else {
             None
@@ -1213,7 +1181,13 @@ impl QtrbEventCursor {
         } else {
             MAX_EVENT_NAME_BYTES
         };
-        let name = decode_bounded_raw(&mut cursor, name_limit, "event name", coordinate(&record))?;
+        let name = decode_bounded_raw(
+            &mut cursor,
+            name_limit,
+            "event name",
+            coordinate(&record),
+            guard,
+        )?;
         let fragment_maximum = if kind == FragmentKind::Call {
             MAX_CALL_CHUNK_DETAIL_BYTES
         } else {
@@ -1224,6 +1198,7 @@ impl QtrbEventCursor {
             fragment_maximum,
             "event detail fragment",
             coordinate(&record),
+            guard,
         )?;
         cursor.finish()?;
         let logical_maximum = if kind == FragmentKind::Call {
@@ -1258,27 +1233,47 @@ impl QtrbEventCursor {
                         "fragment index must start at zero",
                     ));
                 }
-                guard.consume(WorkDelta {
-                    resident_bytes: pending_fragment_resident_upper_bound(
-                        total_detail_bytes,
-                        chunk_count,
-                        category.as_ref().map_or(0, Vec::len),
-                        name.len(),
-                    ),
-                    ..WorkDelta::default()
-                })?;
+                let category_copy = category
+                    .as_deref()
+                    .map(|bytes| {
+                        allocation::try_copy_bytes(
+                            bytes,
+                            guard,
+                            "QTRB fragment category allocation failed",
+                        )
+                    })
+                    .transpose()?;
+                let name_copy = allocation::try_copy_bytes(
+                    &name,
+                    guard,
+                    "QTRB fragment name allocation failed",
+                )?;
+                let mut logical_detail = Vec::new();
+                allocation::try_reserve_vec_exact(
+                    &mut logical_detail,
+                    total_detail_bytes as usize,
+                    guard,
+                    "QTRB logical fragment allocation failed",
+                )?;
+                let mut fragment_offsets = Vec::new();
+                allocation::try_reserve_vec_exact(
+                    &mut fragment_offsets,
+                    usize::from(chunk_count),
+                    guard,
+                    "QTRB fragment offset allocation failed",
+                )?;
                 PendingFragment {
                     kind,
                     event_id,
                     total_detail_bytes,
                     chunk_count,
                     next_index: 0,
-                    category: category.clone(),
-                    name: name.clone(),
-                    detail: Vec::with_capacity(total_detail_bytes as usize),
+                    category: category_copy,
+                    name: name_copy,
+                    detail: logical_detail,
                     first_offset: record.offset,
                     first_ordinal: record.ordinal,
-                    fragment_offsets: Vec::with_capacity(usize::from(chunk_count)),
+                    fragment_offsets,
                 }
             }
         };
@@ -1406,7 +1401,11 @@ impl QtrbEventCursor {
         self.event(record, None, payload)
     }
 
-    fn decode_trace_end(&mut self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
+    fn decode_trace_end(
+        &mut self,
+        record: PhysicalRecord,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventRecord, ProviderError> {
         if record.payload.len() != TRACE_END_PAYLOAD_BYTES as usize {
             return Err(self.invalid_terminal(&record, "invalid TRACE_END payload size"));
         }
@@ -1422,14 +1421,21 @@ impl QtrbEventCursor {
         self.accept_terminal(
             &record,
             &metrics,
-            TerminationKind::Completed,
-            None,
-            Some(return_value),
-            elapsed_ms,
+            TerminalDraft {
+                kind: TerminationKind::Completed,
+                reason: None,
+                return_value: Some(return_value),
+                elapsed_ms,
+            },
+            guard,
         )
     }
 
-    fn decode_trace_stop(&mut self, record: PhysicalRecord) -> Result<EventRecord, ProviderError> {
+    fn decode_trace_stop(
+        &mut self,
+        record: PhysicalRecord,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventRecord, ProviderError> {
         if self.header.minor != 2 || self.header.required_features & STOPPED_TERMINAL_FEATURE == 0 {
             return Err(self.record_error(
                 &record,
@@ -1455,10 +1461,17 @@ impl QtrbEventCursor {
         self.accept_terminal(
             &record,
             &metrics,
-            TerminationKind::Stopped,
-            Some("duration_elapsed".to_owned()),
-            None,
-            elapsed_ms,
+            TerminalDraft {
+                kind: TerminationKind::Stopped,
+                reason: Some(allocation::try_copy_string(
+                    "duration_elapsed",
+                    guard,
+                    "QTRB terminal reason allocation failed",
+                )?),
+                return_value: None,
+                elapsed_ms,
+            },
+            guard,
         )
     }
 
@@ -1466,10 +1479,8 @@ impl QtrbEventCursor {
         &mut self,
         record: &PhysicalRecord,
         metrics: &[u64; 10],
-        kind: TerminationKind,
-        reason: Option<String>,
-        return_value: Option<u64>,
-        elapsed_ms: u64,
+        draft: TerminalDraft,
+        guard: &dyn WorkGuard,
     ) -> Result<EventRecord, ProviderError> {
         if self.offset != self.source.len() {
             return Err(self.record_error(
@@ -1490,26 +1501,51 @@ impl QtrbEventCursor {
                 "terminal instruction, encoded-byte, or buffer metric does not match the stream",
             ));
         }
+        let summary_reason = draft
+            .reason
+            .as_deref()
+            .map(|value| {
+                allocation::try_copy_string(
+                    value,
+                    guard,
+                    "QTRB summary terminal reason allocation failed",
+                )
+            })
+            .transpose()?;
+        let metrics = TerminalMetrics {
+            instructions: metrics[0],
+            encoded_bytes: metrics[1],
+            compressed_bytes: metrics[2],
+            cache_hits: metrics[3],
+            cache_misses: metrics[4],
+            cache_collisions: metrics[5],
+            buffer_swaps: metrics[6],
+            producer_waits: metrics[7],
+            producer_wait_ns: metrics[8],
+            effective_buffer_bytes: metrics[9],
+        };
+        let TerminalDraft {
+            kind,
+            reason,
+            return_value,
+            elapsed_ms,
+        } = draft;
         let termination = Termination {
             kind,
             reason,
             return_value,
             elapsed_ms,
-            metrics: TerminalMetrics {
-                instructions: metrics[0],
-                encoded_bytes: metrics[1],
-                compressed_bytes: metrics[2],
-                cache_hits: metrics[3],
-                cache_misses: metrics[4],
-                cache_collisions: metrics[5],
-                buffer_swaps: metrics[6],
-                producer_waits: metrics[7],
-                producer_wait_ns: metrics[8],
-                effective_buffer_bytes: metrics[9],
-            },
+            metrics: metrics.clone(),
             intent: None,
         };
-        self.termination = Some(termination.clone());
+        self.termination = Some(Termination {
+            kind,
+            reason: summary_reason,
+            return_value,
+            elapsed_ms,
+            metrics,
+            intent: None,
+        });
         self.terminal_seen = true;
         Ok(self.event(record, None, EventPayload::Termination(termination)))
     }
@@ -1580,15 +1616,22 @@ fn decode_registers(
     mask: u64,
     field: &'static str,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<Vec<RegisterWire>, ProviderError> {
     let count = mask.count_ones() as usize;
-    let mut registers = Vec::with_capacity(count);
+    let mut registers = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut registers,
+        count,
+        guard,
+        "QTRB register definition allocation failed",
+    )?;
     for slot in 0..MAX_GPR_COUNT {
         if mask & (1_u64 << slot) == 0 {
             continue;
         }
         let width = cursor.u8()?;
-        let name = cursor.bounded_utf8(MAX_REGISTER_NAME_BYTES, field)?;
+        let name = cursor.bounded_utf8_guarded(MAX_REGISTER_NAME_BYTES, field, guard)?;
         if width == 0 || width > 16 || name.is_empty() {
             return Err(ProviderError::new(
                 "source.invalid_payload",
@@ -1610,8 +1653,37 @@ fn decode_registers(
 fn typed_definition(
     definition_id: u32,
     definition: &InstructionDefinitionWire,
-) -> InstructionDefinition {
-    InstructionDefinition {
+    guard: &dyn WorkGuard,
+) -> Result<InstructionDefinition, ProviderError> {
+    let mut reads = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut reads,
+        definition.reads.len(),
+        guard,
+        "QTRB typed read definition allocation failed",
+    )?;
+    for register in &definition.reads {
+        reads.push(typed_register(register, guard)?);
+    }
+    let mut writes = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut writes,
+        definition.writes.len(),
+        guard,
+        "QTRB typed write definition allocation failed",
+    )?;
+    for register in &definition.writes {
+        writes.push(typed_register(register, guard)?);
+    }
+    let mut memory_operands = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut memory_operands,
+        definition.memory_operands.len(),
+        guard,
+        "QTRB typed memory operand allocation failed",
+    )?;
+    memory_operands.extend(definition.memory_operands.iter().map(typed_memory_operand));
+    Ok(InstructionDefinition {
         definition_id,
         opcode: definition.opcode,
         read_mask: definition.read_mask,
@@ -1625,25 +1697,118 @@ fn typed_definition(
         },
         condition: definition.condition,
         slow_memory_path: definition.slow_memory_path == 1,
-        mnemonic: definition.mnemonic.clone(),
-        operands: definition.operands.clone(),
-        disassembly: definition.disassembly.clone(),
-        reads: definition.reads.iter().map(typed_register).collect(),
-        writes: definition.writes.iter().map(typed_register).collect(),
-        memory_operands: definition
-            .memory_operands
-            .iter()
-            .map(typed_memory_operand)
-            .collect(),
-    }
+        mnemonic: allocation::try_copy_string(
+            &definition.mnemonic,
+            guard,
+            "QTRB typed mnemonic allocation failed",
+        )?,
+        operands: allocation::try_copy_string(
+            &definition.operands,
+            guard,
+            "QTRB typed operands allocation failed",
+        )?,
+        disassembly: allocation::try_copy_string(
+            &definition.disassembly,
+            guard,
+            "QTRB typed disassembly allocation failed",
+        )?,
+        reads,
+        writes,
+        memory_operands,
+    })
 }
 
-fn typed_register(register: &RegisterWire) -> RegisterDefinition {
-    RegisterDefinition {
+fn typed_register(
+    register: &RegisterWire,
+    guard: &dyn WorkGuard,
+) -> Result<RegisterDefinition, ProviderError> {
+    Ok(RegisterDefinition {
         slot: register.slot,
         captured_width: register.width,
-        name: register.name.clone(),
+        name: allocation::try_copy_string(
+            &register.name,
+            guard,
+            "QTRB typed register name allocation failed",
+        )?,
+    })
+}
+
+fn clone_definition_wire(
+    definition: &InstructionDefinitionWire,
+    guard: &dyn WorkGuard,
+) -> Result<InstructionDefinitionWire, ProviderError> {
+    let mut reads = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut reads,
+        definition.reads.len(),
+        guard,
+        "QTRB dictionary read definition allocation failed",
+    )?;
+    for register in &definition.reads {
+        reads.push(RegisterWire {
+            slot: register.slot,
+            width: register.width,
+            name: allocation::try_copy_string(
+                &register.name,
+                guard,
+                "QTRB dictionary register name allocation failed",
+            )?,
+        });
     }
+    let mut writes = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut writes,
+        definition.writes.len(),
+        guard,
+        "QTRB dictionary write definition allocation failed",
+    )?;
+    for register in &definition.writes {
+        writes.push(RegisterWire {
+            slot: register.slot,
+            width: register.width,
+            name: allocation::try_copy_string(
+                &register.name,
+                guard,
+                "QTRB dictionary register name allocation failed",
+            )?,
+        });
+    }
+    let mut memory_operands = Vec::new();
+    allocation::try_reserve_vec_exact(
+        &mut memory_operands,
+        definition.memory_operands.len(),
+        guard,
+        "QTRB dictionary memory operand allocation failed",
+    )?;
+    memory_operands.extend(definition.memory_operands.iter().cloned());
+    Ok(InstructionDefinitionWire {
+        opcode: definition.opcode,
+        read_mask: definition.read_mask,
+        write_mask: definition.write_mask,
+        displacement: definition.displacement,
+        flags: definition.flags,
+        pc_kind: definition.pc_kind,
+        condition: definition.condition,
+        slow_memory_path: definition.slow_memory_path,
+        mnemonic: allocation::try_copy_string(
+            &definition.mnemonic,
+            guard,
+            "QTRB dictionary mnemonic allocation failed",
+        )?,
+        operands: allocation::try_copy_string(
+            &definition.operands,
+            guard,
+            "QTRB dictionary operands allocation failed",
+        )?,
+        disassembly: allocation::try_copy_string(
+            &definition.disassembly,
+            guard,
+            "QTRB dictionary disassembly allocation failed",
+        )?,
+        reads,
+        writes,
+        memory_operands,
+    })
 }
 
 fn typed_memory_operand(operand: &MemoryOperandWire) -> MemoryOperand {
@@ -1679,6 +1844,7 @@ fn decode_bounded_raw(
     maximum: usize,
     field: &'static str,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<Vec<u8>, ProviderError> {
     let size = usize::from(cursor.u16_le()?);
     if size > maximum {
@@ -1690,13 +1856,18 @@ fn decode_bounded_raw(
             format!("{field} exceeds {maximum} bytes"),
         ));
     }
-    Ok(cursor.take(size)?.to_vec())
+    allocation::try_copy_bytes(
+        cursor.take(size)?,
+        guard,
+        "QTRB raw field allocation failed",
+    )
 }
 
 fn decode_memory_state(
     cursor: &mut PayloadCursor<'_>,
     field: &'static str,
     coordinate: SourceCoordinate,
+    guard: &dyn WorkGuard,
 ) -> Result<CaptureBytes, ProviderError> {
     let state = cursor.u8()?;
     let count = usize::from(cursor.u8()?);
@@ -1721,7 +1892,11 @@ fn decode_memory_state(
     }
     Ok(match state {
         0 => CaptureBytes::NotCaptured,
-        1 => CaptureBytes::Captured(bytes.to_vec()),
+        1 => CaptureBytes::Captured(allocation::try_copy_bytes(
+            bytes,
+            guard,
+            "QTRB memory capture allocation failed",
+        )?),
         2 => CaptureBytes::Unavailable,
         _ => unreachable!(),
     })

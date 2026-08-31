@@ -74,10 +74,9 @@ impl ProofJoinCancelGuard {
 
 impl WorkGuard for ProofJoinCancelGuard {
     fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
-        let retained_range_charge = (size_of::<qtrace_provider::CompletenessRange>() as u64) * 4;
         if self.phase.load(Ordering::SeqCst)
-            && delta.resident_bytes == retained_range_charge
-            && delta.nodes == 0
+            && delta.resident_bytes == 0
+            && delta.nodes > 4_096
             && delta.events == 0
             && !self.marker_seen.swap(true, Ordering::SeqCst)
         {
@@ -92,8 +91,6 @@ impl WorkGuard for ProofJoinCancelGuard {
             if checkpoint == 3 {
                 return Err(OperationAbort::Cancelled);
             }
-        } else if delta.nodes != 0 {
-            self.armed.store(false, Ordering::SeqCst);
         }
         Ok(())
     }

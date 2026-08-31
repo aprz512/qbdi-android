@@ -1,5 +1,6 @@
 //! Trace-input provider boundary.
 
+mod allocation;
 mod control;
 mod error;
 mod flight;

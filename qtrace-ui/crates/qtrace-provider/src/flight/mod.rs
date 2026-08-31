@@ -3,12 +3,12 @@ mod fragments;
 mod recovery;
 mod wire;
 
-use std::{collections::HashMap, fmt, mem::size_of, sync::Arc, vec};
+use std::{collections::HashMap, fmt, sync::Arc, vec};
 
 use crate::{
-    AllocationScope, EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS,
-    ProviderCapabilities, ProviderError, ProviderSummary, ReadAtSource, RegisterSnapshot,
-    SourceIdentity, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
+    EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS, ProviderCapabilities, ProviderError,
+    ProviderSummary, ReadAtSource, RegisterSnapshot, SourceIdentity, TimelineDescriptor,
+    TimelineId, TraceProvider, WorkDelta, WorkGuard, allocation,
 };
 
 pub use wire::{
@@ -275,15 +275,13 @@ impl EventCursor for FlightCursor {
 }
 
 fn fallible_vec<T>(capacity: usize, guard: &dyn WorkGuard) -> Result<Vec<T>, ProviderError> {
-    let bytes = capacity
-        .checked_mul(size_of::<T>())
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| resource_error("Flight vector allocation bound overflow"))?;
-    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
     let mut output = Vec::new();
-    output
-        .try_reserve_exact(capacity)
-        .map_err(|_| resource_error("Flight provider allocation failed"))?;
+    allocation::try_reserve_vec_exact(
+        &mut output,
+        capacity,
+        guard,
+        "Flight provider allocation failed",
+    )?;
     Ok(output)
 }
 
@@ -294,16 +292,13 @@ fn fallible_hash_map<K, V>(
 where
     K: Eq + std::hash::Hash,
 {
-    let bytes = capacity
-        .checked_mul(size_of::<K>().saturating_add(size_of::<V>()))
-        .and_then(|value| value.checked_mul(4))
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| resource_error("Flight hash allocation bound overflow"))?;
-    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
     let mut output = HashMap::new();
-    output
-        .try_reserve(capacity)
-        .map_err(|_| resource_error("Flight provider allocation failed"))?;
+    allocation::try_reserve_hash_map(
+        &mut output,
+        capacity,
+        guard,
+        "Flight provider allocation failed",
+    )?;
     Ok(output)
 }
 
@@ -318,14 +313,12 @@ fn fallible_push<T>(
             .checked_mul(2)
             .map(|capacity| capacity.max(4))
             .ok_or_else(|| resource_error("Flight vector capacity overflow"))?;
-        let bytes = new_capacity
-            .checked_mul(size_of::<T>())
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| resource_error("Flight vector layout overflow"))?;
-        let _scope = AllocationScope::begin(guard, bytes, bytes)?;
-        output
-            .try_reserve_exact(output.capacity().max(4))
-            .map_err(|_| resource_error("Flight provider allocation failed"))?;
+        allocation::try_reserve_vec_exact(
+            output,
+            new_capacity,
+            guard,
+            "Flight provider allocation failed",
+        )?;
     }
     output.push(value);
     Ok(())
@@ -339,25 +332,11 @@ fn reserve_vec_exact<T>(
     if capacity <= output.capacity() {
         return Ok(());
     }
-    let bytes = capacity
-        .checked_mul(size_of::<T>())
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| resource_error("Flight vector layout overflow"))?;
-    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
-    output
-        .try_reserve_exact(capacity - output.len())
-        .map_err(|_| resource_error("Flight provider allocation failed"))
+    allocation::try_reserve_vec_exact(output, capacity, guard, "Flight provider allocation failed")
 }
 
 fn fallible_string(value: &str, guard: &dyn WorkGuard) -> Result<String, ProviderError> {
-    let bytes = value.len() as u64;
-    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
-    let mut output = String::new();
-    output
-        .try_reserve_exact(value.len())
-        .map_err(|_| resource_error("Flight provider allocation failed"))?;
-    output.push_str(value);
-    Ok(output)
+    allocation::try_copy_string(value, guard, "Flight provider allocation failed")
 }
 
 fn resource_error(detail: &'static str) -> ProviderError {

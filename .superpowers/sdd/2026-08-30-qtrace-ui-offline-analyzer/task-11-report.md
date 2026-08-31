@@ -189,18 +189,24 @@ pre-change `806b…e32b` golden key is found, held-FD identity checked, and open
   allocate. `Drop` always closes the scope on `?`, ordinary error, and panic unwind, clears unused
   credit, and never turns slack mismatch into a second panic. The isolated oracle records mismatch
   as fixed TLS state. Nested scopes are forbidden and observed as a test failure; successful warm
-  and cold runs contain none. QTRB keeps its established combined input/decompressed/node/resident
-  authorization by holding one `ScopedPhysicalRecord` allocation scope across payload read and
-  typed decode. The added Flight cold oracle initially exposed 237 scope-external requests. Flight
-  recovery now scopes metadata, exact damage/discontinuity scratch, full geometric Vec layouts,
+  and cold runs contain none. QTRB now separates physical payload-buffer IO from typed decode:
+  header/input/decompressed/node work is authorized first, the payload `Vec` receives its exact
+  layout scope, and each decoded string, observation vector, memory capture, definition table, and
+  fragment field receives a separate operation-local scope after its fixed-stack count/length is
+  parsed. No absent observation, maximum 34-slot mask, or maximum string is prepaid. Compressed
+  input similarly scopes the encoded block, decoded block, and growing raw output independently.
+  The added Flight cold oracle initially exposed 237 scope-external requests. Flight recovery now
+  scopes metadata, exact damage/discontinuity scratch, full geometric Vec layouts,
   hash/radix/payload work, typed decode, and projection storage; the oracle is zero. Typed Flight
   decode has no all-row constant allowance: fixed output families are charged from their concrete
   element layouts, while definition/string state maps and fragment grouping are charged only after
-  a zero-allocation pass counts those closed record tags. Their complete-entry factors include the
-  first hash/B-tree bucket/node, control/alignment, and the full geometric request series. Projection
-  keys use two passes (per-TID count, one exact reserve, append), and final register snapshots move
-  from recovery into projections instead of being cloned. The 8,192-event/128-TID provider gate
-  remains below its 640-checkpoint ceiling.
+  a zero-allocation pass counts those closed record tags. Recovery no longer reserves
+  `2 * emergency_count` TIDs or `3 * directory/chunk` completeness rows: directory, TID,
+  completeness, damage, proof, and lifecycle collections grow only for actual facts with the
+  checked geometric full-layout rule. Indexed chunk state remains one exact wire-count array.
+  Projection keys use two passes (per-TID count, one exact reserve, append), and final register
+  snapshots move from recovery into projections instead of being cloned. The
+  8,192-event/128-TID provider gate remains below its 640-checkpoint ceiling.
 - Canonical payload serialization is two-pass: the first pass counts exact bytes without an output
   allocation, then the guarded output reserves exactly that count. Decode authorization is by the
   closed `EventKind`, with no fixed per-row tax: fixed/no-heap variants use `1 * encoded`; byte/string
@@ -353,12 +359,26 @@ Review-fix REDs were behavior tests over real checked fixtures and private cache
 | Important: JSON Unicode validation | A semantic payload containing 16 KiB of valid name bytes followed by raw `0xff` passed the pre-serde scanner. Overlong UTF-8 and isolated surrogate escapes also passed. | Independent fixed-stack validation checks every raw segment as UTF-8 and implements exact JSON escape/surrogate rules. Invalid/overlong/truncated/control/escape/surrogate mutations fail with zero scanner heap growth; legal UTF-8 and `D83D DE00` pass. Existing unique-member, tag, depth, and trailing gates remain. |
 | Minor: duplicated closed contracts | Provider had no external-tag API and the first provider contract test failed to compile for missing `EventKind::ALL`, `external_tag`, and `from_external_tag`; store owned a duplicate 19-arm table. | Provider owns the literal contract and store consumes it. The hand-derived 19-entry provider test and store's 19 serialized payload matrix are GREEN. `SemanticDefinition` now destructures every `InstructionDefinition` field without `..`, so a future field addition is a compile failure until fingerprint semantics are chosen. |
 
+### Sixth-review finding matrix
+
+| Finding | Initial RED | Resolution / GREEN evidence |
+|---|---|---|
+| Critical: provider allocation-work used synthetic whole-record credit | QTRB charged absent/maximal child shapes through one physical-record bound; Flight used whole-decode and count multipliers. After removing those umbrellas, the isolated provider oracle exposed unscoped typed/recovery growth. A cold rejection at Flight resident ordinal 83 was also misclassified as damaged payload, producing a cache completeness mismatch instead of the original budget abort. | Provider allocation uses concrete complete layouts only. QTRB payload IO and every owned decoded field have separate scopes; Flight performs a closed-tag count pass for definitions/strings/fragments, exact-reserves known outputs, and operation-locally grows only actual directory/TID/completeness/damage/proof/lifecycle facts. String `Arc` allocation includes its real header/alignment request. Allocation failures are never recovery damage: `decode_begin`, typed register decode, and fragment assembly preserve the original control error. The provider-only global allocator oracle reports zero unauthorized requests for QTRB and Flight, no leaked/nested scope, and authorization within 110% of real complete allocator requests; all cold resident rejection ordinals return the exact original abort with zero later growth or publication debris. Shared production layout probes are linear at N/2N/4N and checked at 10M sparse rows. |
+
+The QTRB shape contract is local and closed rather than a speculative maximum: each wire count,
+mask popcount, and length is checked from the already bounded payload before the corresponding
+reserve, and that same parsed value drives the decoder loop. Flight's first pass recognizes only
+closed physical `(record_type, flags)` pairs; the second pass consumes the same records. Existing
+byte-truncation/differential suites exercise every boundary, while sparse/full register masks,
+34-slot checkpoints, empty/large strings, memory captures, high-cardinality 8,192-event/128-TID
+recovery, and all current cold/warm allocation ordinals run through the production allocation seam.
+
 ## Final verification
 
-- `cargo test -p qtrace-store` — 142 passed: library 39, allocation authorization 6, cache
+- `cargo test -p qtrace-store` — 143 passed: library 39, allocation authorization 7, cache
   format 12, cache publication 19, index build 4, index equivalence 15, path security 27, session
   open 20.
-- `cargo test -p qtrace-provider` — 126 passed, 1 intentional ignored child entry: library 4,
+- `cargo test -p qtrace-provider` — 128 passed, 1 intentional ignored child entry: library 6,
   Flight differential 2/events 5/recovery 39, model 23, properties 13, QTRB differential 7/events
   7/framing 16/input 10.
 - `cargo test -p qtrace-store --test index_build` — 4/4 passed, including every successful

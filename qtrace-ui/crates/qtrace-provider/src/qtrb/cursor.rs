@@ -1,4 +1,4 @@
-use crate::{ProviderError, SourceCoordinate};
+use crate::{ProviderError, SourceCoordinate, WorkGuard, allocation};
 
 pub(super) struct PayloadCursor<'a> {
     bytes: &'a [u8],
@@ -60,10 +60,11 @@ impl<'a> PayloadCursor<'a> {
         ]))
     }
 
-    pub(super) fn bounded_utf8(
+    pub(super) fn bounded_utf8_guarded(
         &mut self,
         maximum: usize,
         field: &'static str,
+        guard: &dyn WorkGuard,
     ) -> Result<String, ProviderError> {
         let size = usize::from(self.u16_le()?);
         if size > maximum {
@@ -75,8 +76,8 @@ impl<'a> PayloadCursor<'a> {
                 format!("{field} exceeds {maximum} bytes"),
             ));
         }
-        let raw = self.take(size)?.to_vec();
-        String::from_utf8(raw).map_err(|_| {
+        let raw = self.take(size)?;
+        let value = std::str::from_utf8(raw).map_err(|_| {
             ProviderError::new(
                 "source.invalid_utf8",
                 "qtrb.payload",
@@ -84,7 +85,8 @@ impl<'a> PayloadCursor<'a> {
                 false,
                 format!("{field} is not valid UTF-8"),
             )
-        })
+        })?;
+        allocation::try_copy_string(value, guard, "QTRB string allocation failed")
     }
 
     pub(super) fn finish(self) -> Result<(), ProviderError> {
