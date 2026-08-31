@@ -1,5 +1,4 @@
 use std::{
-    collections::{BTreeMap, HashSet},
     fs::{File, Metadata},
     os::unix::fs::{FileExt, MetadataExt},
     sync::Arc,
@@ -23,6 +22,7 @@ use super::{
     manifest::{MAX_MANIFEST_BYTES, canonical_manifest_json},
     map_errno, map_io_error,
 };
+use crate::index::ValidatedCatalog;
 
 const FINAL_NAME: &str = "index.qtc";
 const READ_FLAGS: OFlags = OFlags::RDONLY
@@ -97,18 +97,13 @@ fn clone_proof_descriptor(file: &File) -> Result<File, CacheError> {
 pub struct MappedStoreView {
     file: Arc<File>,
     stamp: FileStamp,
-    identity: Arc<CacheIdentity>,
     event_count: usize,
     event_keys_offset: u64,
     event_kinds_offset: u64,
-    sections: Vec<super::SectionDescriptor>,
+    validated_catalog: Option<ValidatedCatalog>,
 }
 
 impl MappedStoreView {
-    pub(crate) fn cache_identity(&self) -> &CacheIdentity {
-        &self.identity
-    }
-
     fn checked_read<const N: usize>(&self, offset: u64) -> Result<[u8; N], CacheError> {
         self.stamp.verify(&self.file)?;
         let mut output = [0_u8; N];
@@ -117,29 +112,8 @@ impl MappedStoreView {
         Ok(output)
     }
 
-    pub(crate) fn section_bytes(
-        &self,
-        name: &str,
-        guard: &dyn WorkGuard,
-    ) -> Result<Option<Vec<u8>>, CacheError> {
-        let Some(section) = self.sections.iter().find(|section| section.name == name) else {
-            return Ok(None);
-        };
-        guard.consume(WorkDelta {
-            resident_bytes: section.length,
-            ..WorkDelta::default()
-        })?;
-        let length = usize::try_from(section.length)
-            .map_err(|_| CacheError::access("cache section length does not fit usize"))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| allocation_error("mapped cache section"))?;
-        bytes.resize(length, 0);
-        self.stamp.verify(&self.file)?;
-        read_exact_at(&self.file, section.offset, &mut bytes, Some(guard))?;
-        self.stamp.verify(&self.file)?;
-        Ok(Some(bytes))
+    pub(crate) fn take_validated_catalog(&mut self) -> Option<ValidatedCatalog> {
+        self.validated_catalog.take()
     }
 }
 
@@ -285,15 +259,10 @@ pub(crate) fn validate_file(
     {
         return Err(ValidationFailure::Rebuild(RebuildReason::Manifest("range")));
     }
-    let manifest_resident = header
-        .manifest_length
-        .checked_mul(3)
-        .and_then(|value| value.checked_add(MAX_MANIFEST_BYTES))
-        .ok_or(ValidationFailure::Rebuild(RebuildReason::Manifest(
-            "resident bound",
-        )))?;
+    // WorkDelta is cumulative: charge each allocation immediately before it is made instead of
+    // reserving a synthetic resident peak and then charging the same storage again below.
     guard.consume(WorkDelta {
-        resident_bytes: manifest_resident,
+        resident_bytes: header.manifest_length,
         ..WorkDelta::default()
     })?;
     let manifest_length = usize::try_from(header.manifest_length)
@@ -314,8 +283,19 @@ pub(crate) fn validate_file(
             "checksum",
         )));
     }
+    // serde_json owns strings and vectors described by the bounded manifest. Its allocator is not
+    // fallible, so authorize its conservative input-sized working set before entering serde.
+    guard.consume(WorkDelta {
+        resident_bytes: header.manifest_length,
+        ..WorkDelta::default()
+    })?;
     let manifest: CacheManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
+    // canonical_manifest_json reserves this exact bounded capacity before writing.
+    guard.consume(WorkDelta {
+        resident_bytes: MAX_MANIFEST_BYTES,
+        ..WorkDelta::default()
+    })?;
     let canonical = canonical_manifest_json(&manifest)?;
     if canonical != manifest_bytes {
         return Err(ValidationFailure::Rebuild(RebuildReason::Manifest(
@@ -367,10 +347,19 @@ pub(crate) fn validate_file(
     }
     let event_count = usize::try_from(key_count)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("event count")))?;
+    let mut validated_catalog = None;
     if expected.cache_schema == 2 && expected.layout_version == 2 {
+        let expected_name_count = 2 + crate::index::binary_section_specs().len();
+        guard.consume(WorkDelta {
+            resident_bytes: u64::try_from(
+                expected_name_count.saturating_mul(std::mem::size_of::<&str>()),
+            )
+            .unwrap_or(u64::MAX),
+            ..WorkDelta::default()
+        })?;
         let mut expected_names = Vec::new();
         expected_names
-            .try_reserve_exact(2 + crate::index::binary_section_specs().len())
+            .try_reserve_exact(expected_name_count)
             .map_err(|_| allocation_error("schema-two section names"))?;
         expected_names.push(EVENT_KINDS_SECTION);
         expected_names.push(EVENT_KEYS_SECTION);
@@ -390,54 +379,21 @@ pub(crate) fn validate_file(
                 "schema-two exact section set",
             )));
         }
-        let normalized_bytes =
-            crate::index::binary_section_specs().iter().try_fold(
-                0_u64,
-                |total, (name, _, _)| {
-                    let length = manifest
-                        .sections
-                        .iter()
-                        .find(|section| section.name == *name)
-                        .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
-                            "schema-two exact section set",
-                        )))?
-                        .length;
-                    total.checked_add(length).ok_or(ValidationFailure::Rebuild(
-                        RebuildReason::Section("normalized resident peak overflow"),
-                    ))
-                },
-            )?;
-        let source_facts = key_count
-            .checked_mul(
-                u64::try_from(std::mem::size_of::<EventKey>() + std::mem::size_of::<EventKind>())
-                    .map_err(|_| {
-                    ValidationFailure::Rebuild(RebuildReason::Section("source fact resident size"))
-                })?,
-            )
-            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
-                "source fact resident peak overflow",
-            )))?;
-        // Serialized sections coexist only until decode consumes them. Four times their encoded
-        // size conservatively covers decoded fixed rows, sorted-map descriptors, and the largest
-        // one-family reconstruction scratch while arenas move into the catalog without copying.
-        let declared_peak = normalized_bytes
-            .checked_mul(5)
-            .and_then(|value| value.checked_add(source_facts))
-            .and_then(|value| value.checked_add(manifest_resident))
-            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
-                "normalized resident peak overflow",
-            )))?;
-        guard.consume(WorkDelta {
-            resident_bytes: declared_peak,
-            ..WorkDelta::default()
-        })?;
         let (event_keys, event_kinds) =
             read_event_rows(&file, keys.offset, kinds.offset, event_count, guard)?;
-        let mut binary = BTreeMap::new();
+        let section_count = crate::index::binary_section_specs().len();
         guard.consume(WorkDelta {
-            nodes: crate::index::binary_section_specs().len() as u64,
+            resident_bytes: u64::try_from(
+                section_count.saturating_mul(std::mem::size_of::<(&str, Vec<u8>)>()),
+            )
+            .unwrap_or(u64::MAX),
+            nodes: section_count as u64,
             ..WorkDelta::default()
         })?;
+        let mut binary = Vec::new();
+        binary
+            .try_reserve_exact(section_count)
+            .map_err(|_| allocation_error("schema-two binary section list"))?;
         for (name, _, _) in crate::index::binary_section_specs() {
             guard.consume(WorkDelta::default())?;
             let section = manifest
@@ -467,32 +423,33 @@ pub(crate) fn validate_file(
                 .map_err(|_| allocation_error("binary section validation"))?;
             bytes.resize(length, 0);
             read_exact_at(&file, section.offset, &mut bytes, Some(guard))?;
-            binary.insert((*name).to_owned(), bytes);
+            binary.push((*name, bytes));
         }
-        crate::index::validate_binary_sections(
-            binary,
-            &event_keys,
-            &event_kinds,
-            &expected.source_format,
-            guard,
-        )
-        .map_err(normalized_validation_failure)?;
+        validated_catalog = Some(
+            crate::index::validate_binary_sections(
+                binary,
+                &event_keys,
+                &event_kinds,
+                &expected.source_format,
+                guard,
+            )
+            .map_err(normalized_validation_failure)?,
+        );
     }
     directory.verify()?;
     stamp.verify(&file)?;
-    let mut sections = Vec::new();
-    sections
-        .try_reserve_exact(manifest.sections.len())
-        .map_err(|_| allocation_error("mapped section descriptors"))?;
-    sections.extend(manifest.sections.iter().cloned());
+    guard.consume(WorkDelta {
+        resident_bytes: u64::try_from(std::mem::size_of::<File>()).unwrap_or(u64::MAX),
+        nodes: 1,
+        ..WorkDelta::default()
+    })?;
     Ok(MappedStoreView {
         file: Arc::new(file),
         stamp,
-        identity: Arc::new(manifest.identity),
         event_count,
         event_keys_offset: keys.offset,
         event_kinds_offset: kinds.offset,
-        sections,
+        validated_catalog,
     })
 }
 
@@ -572,17 +529,16 @@ fn validate_sections(
     manifest_offset: u64,
     guard: &dyn WorkGuard,
 ) -> Result<(), ValidationFailure> {
-    let mut names = HashSet::new();
-    names
-        .try_reserve(manifest.sections.len())
-        .map_err(|_| allocation_error("section-name set"))?;
     let mut previous_end = HEADER_BYTES as u64;
-    for section in &manifest.sections {
+    for (ordinal, section) in manifest.sections.iter().enumerate() {
         guard.consume(WorkDelta {
             nodes: 1,
             ..WorkDelta::default()
         })?;
-        if !names.insert(section.name.as_str()) {
+        if manifest.sections[..ordinal]
+            .iter()
+            .any(|previous| previous.name == section.name)
+        {
             return Err(ValidationFailure::Rebuild(RebuildReason::Section(
                 "duplicate name",
             )));
@@ -780,15 +736,8 @@ pub(crate) fn probe_identity(
     if header.manifest_length == 0 || header.manifest_length > MAX_MANIFEST_BYTES || end != size {
         return Err(ValidationFailure::Rebuild(RebuildReason::Manifest("range")));
     }
-    let manifest_resident =
-        header
-            .manifest_length
-            .checked_mul(2)
-            .ok_or(ValidationFailure::Rebuild(RebuildReason::Manifest(
-                "resident bound",
-            )))?;
     guard.consume(WorkDelta {
-        resident_bytes: manifest_resident,
+        resident_bytes: header.manifest_length,
         ..WorkDelta::default()
     })?;
     let length = usize::try_from(header.manifest_length)
@@ -804,6 +753,10 @@ pub(crate) fn probe_identity(
             "checksum",
         )));
     }
+    guard.consume(WorkDelta {
+        resident_bytes: header.manifest_length,
+        ..WorkDelta::default()
+    })?;
     let manifest: CacheManifest = serde_json::from_slice(&bytes)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
     Ok(manifest.identity)

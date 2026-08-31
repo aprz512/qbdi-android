@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use qtrace_provider::{
     CompletenessCause, EventKey, EventKind, EventScope, MemoryDirection, PcRelativeKind,
     Provenance, ProviderCapabilities, RangeBounds, RangeDomain, RegisterSlot, WorkDelta, WorkGuard,
@@ -29,6 +27,7 @@ pub(super) const DEFINITIONS: &str = "definitions.v2";
 pub(super) const INSTRUCTIONS: &str = "instructions.v2";
 pub(super) const MEMORIES: &str = "memories.v2";
 pub(super) const SEMANTICS: &str = "semantics.v2";
+pub(super) const SOURCE_COMPLETENESS: &str = "source_completeness.v2";
 pub(super) const COMPLETENESS: &str = "completeness.v2";
 pub(super) const REGISTER_OBSERVATIONS: &str = "register_observations.v2";
 pub(super) const INDEX_META: &str = "index_meta.v2";
@@ -76,6 +75,7 @@ pub(super) const EXACT_SECTIONS: &[(&str, u32, u32)] = &[
     (INSTRUCTIONS, 8, INSTRUCTION_BYTES),
     (MEMORIES, 8, MEMORY_BYTES),
     (SEMANTICS, 8, SEMANTIC_BYTES),
+    (SOURCE_COMPLETENESS, 8, COMPLETENESS_BYTES),
     (COMPLETENESS, 8, COMPLETENESS_BYTES),
     (REGISTER_OBSERVATIONS, 8, OBSERVATION_BYTES),
     (INDEX_META, 8, 16),
@@ -127,6 +127,9 @@ pub(super) fn max_length(name: &str, event_count: usize) -> Result<u64, IndexErr
         STRING_ARENA => return Ok(BuildOptions::default().max_string_bytes),
         BLOB_ARENA => return Ok(BuildOptions::default().max_blob_bytes),
         STRING_SPANS | BLOB_SPANS => events.checked_mul(8).and_then(|value| value.checked_add(1)),
+        SOURCE_COMPLETENESS | COMPLETENESS => {
+            events.checked_mul(4).and_then(|value| value.checked_add(1))
+        }
         REGISTER_OBSERVATIONS | REGISTER_POSTINGS => events.checked_mul(RegisterSlot::COUNT as u64),
         MODULE_PC_INDEX => events.checked_mul(2),
         MEMORY_BLOCK_MAX => events.checked_add(1),
@@ -206,6 +209,12 @@ pub(super) fn encode(
         8,
         SEMANTIC_BYTES,
         encode_semantics(&catalog.semantics, guard)?,
+    ));
+    sections.push(section(
+        SOURCE_COMPLETENESS,
+        8,
+        COMPLETENESS_BYTES,
+        encode_completeness(&catalog.completeness, guard)?,
     ));
     sections.push(section(
         COMPLETENESS,
@@ -750,7 +759,7 @@ fn completeness_cause(v: CompletenessCause) -> u8 {
 }
 
 pub(super) fn decode(
-    mut sections: BTreeMap<String, Vec<u8>>,
+    mut sections: Vec<(&'static str, Vec<u8>)>,
     keys: &[EventKey],
     kinds: &[EventKind],
     source_format: &str,
@@ -788,7 +797,14 @@ pub(super) fn decode(
     let instructions = decode_instructions(&take(&mut sections, INSTRUCTIONS)?, guard)?;
     let memories = decode_memories(&take(&mut sections, MEMORIES)?, guard)?;
     let semantics = decode_semantics(&take(&mut sections, SEMANTICS)?, guard)?;
+    let source_completeness =
+        decode_completeness(&take(&mut sections, SOURCE_COMPLETENESS)?, guard)?;
     let completeness = decode_completeness(&take(&mut sections, COMPLETENESS)?, guard)?;
+    if completeness != source_completeness {
+        return Err(IndexError::corrupt(
+            "derived completeness differs from canonical provider summary",
+        ));
+    }
     let observations = decode_observations(&take(&mut sections, REGISTER_OBSERVATIONS)?, guard)?;
     let index_meta = take(&mut sections, INDEX_META)?;
     let meta = Cursor::new(&index_meta, 16)?;
@@ -856,15 +872,24 @@ pub(super) fn decode(
     };
     if deep_validate {
         catalog.validate(keys, kinds, guard)?;
-        super::builder::validate_cached_truth(&catalog, keys, kinds, source_format, guard)?;
+        super::builder::validate_cached_truth(
+            &catalog,
+            &source_completeness,
+            keys,
+            kinds,
+            source_format,
+            guard,
+        )?;
     }
     Ok(catalog)
 }
 
-fn take(sections: &mut BTreeMap<String, Vec<u8>>, name: &str) -> Result<Vec<u8>, IndexError> {
-    sections
-        .remove(name)
-        .ok_or_else(|| IndexError::corrupt(format!("missing binary section {name}")))
+fn take(sections: &mut Vec<(&'static str, Vec<u8>)>, name: &str) -> Result<Vec<u8>, IndexError> {
+    let index = sections
+        .iter()
+        .position(|(candidate, _)| *candidate == name)
+        .ok_or_else(|| IndexError::corrupt(format!("missing binary section {name}")))?;
+    Ok(sections.swap_remove(index).1)
 }
 
 struct Cursor<'a> {
@@ -1019,6 +1044,14 @@ fn decode_arena(
             length: c.u64(row, 8)?,
         });
     }
+    guard.consume(WorkDelta {
+        resident_bytes: u64::try_from(
+            std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<Vec<ByteSpan>>(),
+        )
+        .unwrap_or(u64::MAX),
+        nodes: 2,
+        ..WorkDelta::default()
+    })?;
     let arena = ByteArena {
         bytes: std::sync::Arc::new(bytes),
         spans: std::sync::Arc::new(decoded),

@@ -21,20 +21,61 @@ impl WorkGuard for AllowAll {
 
 struct ResidentLimit {
     limit: u64,
-    maximum: Mutex<u64>,
+    consumed: Mutex<u64>,
+}
+
+struct AllocationProbe {
+    watched: u64,
+    watched_count: Mutex<usize>,
+    resident_total: Mutex<u64>,
+}
+
+struct RejectAllocation {
+    watched: u64,
+    rejected_count: Mutex<usize>,
+}
+
+impl WorkGuard for RejectAllocation {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.resident_bytes == self.watched {
+            *self.rejected_count.lock().expect("rejected count") += 1;
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::ResidentBytes,
+                self.watched.saturating_sub(1),
+                self.watched,
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl WorkGuard for AllocationProbe {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.resident_bytes == self.watched {
+            *self.watched_count.lock().expect("watched count") += 1;
+        }
+        let mut total = self.resident_total.lock().expect("resident total");
+        *total = total
+            .checked_add(delta.resident_bytes)
+            .expect("test resident total");
+        Ok(())
+    }
 }
 
 impl WorkGuard for ResidentLimit {
     fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
-        let mut maximum = self.maximum.lock().expect("resident maximum");
-        *maximum = (*maximum).max(delta.resident_bytes);
-        if delta.resident_bytes > self.limit {
+        let mut consumed = self.consumed.lock().expect("resident total");
+        let next = consumed
+            .checked_add(delta.resident_bytes)
+            .expect("test resident total overflow");
+        if next > self.limit {
             Err(OperationAbort::budget_exceeded(
                 BudgetDimension::ResidentBytes,
                 self.limit,
-                delta.resident_bytes,
+                next,
             ))
         } else {
+            *consumed = next;
             Ok(())
         }
     }
@@ -46,6 +87,15 @@ fn fixture() -> PathBuf {
         .and_then(Path::parent)
         .expect("workspace root")
         .join("fixtures/sessions/valid-mixed")
+}
+
+fn flight_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("fixtures/flight")
+        .join(name)
 }
 
 #[test]
@@ -112,7 +162,7 @@ fn published_cache_reopens_as_mapped_store_with_equivalent_queries() {
 }
 
 #[test]
-fn reader_declares_a_stable_peak_before_normalized_section_allocation() {
+fn warm_reader_uses_a_stable_cumulative_allocation_budget() {
     let session = SessionLoader::open_report(
         AuthorizedPath::new(fixture()),
         OpenPolicy::default(),
@@ -132,35 +182,110 @@ fn reader_declares_a_stable_peak_before_normalized_section_allocation() {
 
     let capture = ResidentLimit {
         limit: u64::MAX,
-        maximum: Mutex::new(0),
+        consumed: Mutex::new(0),
     };
-    TraceStore::open_or_build(root.path(), source, &options, &capture).expect("capture peak");
-    let peak = *capture.maximum.lock().expect("resident maximum");
-    assert!(peak > 0);
+    TraceStore::open_or_build(root.path(), source, &options, &capture).expect("capture budget");
+    let budget = *capture.consumed.lock().expect("resident total");
+    assert!(budget > 0);
 
-    let error = TraceStore::open_or_build(
-        root.path(),
-        source,
-        &options,
-        &ResidentLimit {
-            limit: peak - 1,
-            maximum: Mutex::new(0),
-        },
-    )
-    .expect_err("one byte below declared reader peak");
+    let below = ResidentLimit {
+        limit: budget - 1,
+        consumed: Mutex::new(0),
+    };
+    let error = TraceStore::open_or_build(root.path(), source, &options, &below)
+        .expect_err("one byte below cumulative reader budget");
     assert_eq!(error.code(), "control.budget_exceeded");
+    assert!(error.to_string().contains("ResidentBytes"));
+    assert!(*below.consumed.lock().expect("below total") < budget);
     assert_eq!(fs::read(&cache).expect("cache retained"), original);
+    assert_no_transient_cache_entries(root.path());
 
-    TraceStore::open_or_build(
-        root.path(),
-        source,
-        &options,
-        &ResidentLimit {
-            limit: peak,
-            maximum: Mutex::new(0),
-        },
+    let exact = ResidentLimit {
+        limit: budget,
+        consumed: Mutex::new(0),
+    };
+    TraceStore::open_or_build(root.path(), source, &options, &exact)
+        .expect("exact cumulative reader budget succeeds");
+    assert_eq!(*exact.consumed.lock().expect("exact total"), budget);
+}
+
+#[test]
+fn warm_open_allocates_each_normalized_section_only_once() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
     )
-    .expect("exact reader peak succeeds");
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let root = private_root();
+    TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+        .expect("initial cache");
+    let bytes = fs::read(only_cache(root.path())).expect("cache bytes");
+    let manifest = cache_manifest(&bytes);
+    let payload_length = manifest["sections"]
+        .as_array()
+        .expect("sections")
+        .iter()
+        .find(|section| section["name"] == "payload_arena.v2")
+        .and_then(|section| section["length"].as_u64())
+        .expect("payload arena length");
+    assert!(payload_length > 0);
+    let probe = AllocationProbe {
+        watched: payload_length,
+        watched_count: Mutex::new(0),
+        resident_total: Mutex::new(0),
+    };
+    TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &probe)
+        .expect("warm open");
+    assert_eq!(
+        *probe.watched_count.lock().expect("watched count"),
+        1,
+        "validated section backing must transfer into MappedTraceStore"
+    );
+}
+
+#[test]
+fn warm_reader_authorizes_a_large_section_before_allocation_and_preserves_final() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let root = private_root();
+    TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+        .expect("initial cache");
+    let cache = only_cache(root.path());
+    let original = fs::read(&cache).expect("cache bytes");
+    let manifest = cache_manifest(&original);
+    let payload_length = manifest["sections"]
+        .as_array()
+        .expect("sections")
+        .iter()
+        .find(|section| section["name"] == "payload_arena.v2")
+        .and_then(|section| section["length"].as_u64())
+        .expect("payload arena length");
+    assert!(payload_length > 0);
+    let reject = RejectAllocation {
+        watched: payload_length,
+        rejected_count: Mutex::new(0),
+    };
+    let error = TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &reject)
+        .expect_err("large section allocation is rejected");
+    assert_eq!(error.code(), "control.budget_exceeded");
+    assert_eq!(*reject.rejected_count.lock().expect("reject count"), 1);
+    assert_eq!(fs::read(&cache).expect("cache retained"), original);
+    assert_no_transient_cache_entries(root.path());
 }
 
 #[test]
@@ -351,6 +476,90 @@ fn public_index_view_matches_naive_rows_and_is_owned_mapped_equivalent() {
 }
 
 #[test]
+fn exact_byte_views_are_owned_mapped_equivalent_and_reject_invalid_ids() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let options = BuildOptions::default();
+    let owned = IndexBuilder::build(source, &options, &AllowAll).expect("owned store");
+    let root = private_root();
+    let mapped =
+        TraceStore::open_or_build(root.path(), source, &options, &AllowAll).expect("mapped store");
+    let owned_view: &dyn TraceStoreView = &owned;
+    let mapped_view: &dyn TraceStoreView = &mapped;
+
+    for row in 0..owned_view.event_count() {
+        assert_eq!(
+            owned_view.payload_bytes(row).expect("owned payload"),
+            mapped_view.payload_bytes(row).expect("mapped payload")
+        );
+        if let Some(definition) = owned_view
+            .instruction(row)
+            .and_then(|instruction| instruction.definition)
+            .and_then(|id| owned_view.definition(id))
+        {
+            for string_id in [
+                definition.mnemonic,
+                definition.operands,
+                definition.disassembly,
+            ] {
+                assert_eq!(
+                    owned_view.string_bytes(string_id).expect("owned string"),
+                    mapped_view.string_bytes(string_id).expect("mapped string")
+                );
+            }
+        }
+        if let Some(semantic) = owned_view.semantic(row) {
+            assert_eq!(
+                owned_view
+                    .blob_bytes(semantic.detail_blob)
+                    .expect("owned semantic detail"),
+                mapped_view
+                    .blob_bytes(semantic.detail_blob)
+                    .expect("mapped semantic detail")
+            );
+        }
+        if owned_view.memory(row).is_some() {
+            assert_eq!(
+                owned_view.memory_before_bytes(row).expect("owned before"),
+                mapped_view.memory_before_bytes(row).expect("mapped before")
+            );
+            assert_eq!(
+                owned_view.memory_after_bytes(row).expect("owned after"),
+                mapped_view.memory_after_bytes(row).expect("mapped after")
+            );
+        }
+    }
+    assert_eq!(
+        owned_view.string_bytes(u32::MAX).unwrap_err().code(),
+        "index.invalid"
+    );
+    assert_eq!(
+        mapped_view.blob_bytes(u32::MAX).unwrap_err().code(),
+        "index.invalid"
+    );
+    assert_eq!(
+        owned_view.payload_bytes(usize::MAX).unwrap_err().code(),
+        "index.invalid"
+    );
+    assert_eq!(
+        mapped_view
+            .memory_before_bytes(usize::MAX)
+            .unwrap_err()
+            .code(),
+        "index.invalid"
+    );
+}
+
+#[test]
 fn schema_two_cache_has_only_the_exact_binary_section_contract() {
     let session = SessionLoader::open_report(
         AuthorizedPath::new(fixture()),
@@ -396,6 +605,7 @@ fn schema_two_cache_has_only_the_exact_binary_section_contract() {
             "instructions.v2",
             "memories.v2",
             "semantics.v2",
+            "source_completeness.v2",
             "completeness.v2",
             "register_observations.v2",
             "index_meta.v2",
@@ -490,6 +700,129 @@ fn a_resigned_capability_without_payload_evidence_is_rebuilt() {
     let rebuilt = TraceStore::open_or_build(root.path(), source, &options, &AllowAll)
         .expect("wrongly downgraded capability is rebuilt");
     assert!(rebuilt.capabilities().per_thread_ordering);
+}
+
+#[test]
+fn resigned_completeness_must_match_canonical_provider_summary_and_discontinuity() {
+    let artifact_root = TempDir::new().expect("Flight artifact root");
+    let artifact_path = artifact_root.path().join("damaged.flight.bin");
+    fs::copy(flight_fixture("v2-checksum-damaged.bin"), &artifact_path)
+        .expect("copy checksum fixture");
+    let session = SessionLoader::open_artifact(
+        AuthorizedPath::new(artifact_path),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("checksum-damaged Flight fixture");
+    let source = &session.artifacts()[0];
+    for section in ["source_completeness.v2", "completeness.v2"] {
+        for case in ["provenance", "range", "reason"] {
+            let root = private_root();
+            TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+                .expect("initial damaged cache");
+            let cache = only_cache(root.path());
+            let original = fs::read(&cache).expect("original cache");
+            let mut corrupted = original.clone();
+            resign_binary_section_mutation(&mut corrupted, section, |rows| {
+                assert_eq!(rows.len(), 32, "review fixture has one completeness row");
+                match case {
+                    "provenance" => {
+                        assert_eq!(rows[2], 4);
+                        rows[2] = 0;
+                    }
+                    "range" => {
+                        let end = u64::from_le_bytes(rows[16..24].try_into().expect("range end"));
+                        rows[16..24].copy_from_slice(&end.checked_add(1).unwrap().to_le_bytes());
+                    }
+                    "reason" => rows[3] = 13,
+                    _ => unreachable!(),
+                }
+            });
+            fs::write(&cache, corrupted).expect("resigned completeness mutation");
+            TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+                .unwrap_or_else(|error| panic!("{case} must rebuild: {error}"));
+            assert_eq!(
+                fs::read(&cache).expect("rebuilt cache"),
+                original,
+                "{section} {case}"
+            );
+        }
+    }
+
+    let root = private_root();
+    TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+        .expect("initial damaged cache");
+    let cache = only_cache(root.path());
+    let original = fs::read(&cache).expect("original cache");
+    let mut corrupted = original.clone();
+    resign_binary_section_mutation(&mut corrupted, "capabilities.v2", |capabilities| {
+        assert_eq!(capabilities[8], 1, "damage range capability");
+        capabilities[8] = 0;
+    });
+    fs::write(&cache, corrupted).expect("resigned capability mutation");
+    TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+        .expect("wrongly downgraded completeness capability rebuilds");
+    assert_eq!(
+        fs::read(&cache).expect("rebuilt cache"),
+        original,
+        "loss-and-damage capability is independently derived"
+    );
+}
+
+#[test]
+fn resigned_completeness_rejects_spliced_reordered_and_overlap_rows() {
+    let artifact_root = TempDir::new().expect("Flight artifact root");
+    let artifact_path = artifact_root.path().join("overwritten.flight.bin");
+    fs::copy(flight_fixture("v2-overwritten.bin"), &artifact_path)
+        .expect("copy overwritten fixture");
+    let session = SessionLoader::open_artifact(
+        AuthorizedPath::new(artifact_path),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("overwritten Flight fixture");
+    let source = &session.artifacts()[0];
+    for case in ["splice", "reorder", "overlap"] {
+        let root = private_root();
+        TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+            .expect("initial overwritten cache");
+        let cache = only_cache(root.path());
+        let original = fs::read(&cache).expect("original cache");
+        let mut corrupted = original.clone();
+        for section in ["source_completeness.v2", "completeness.v2"] {
+            resign_binary_section_mutation(&mut corrupted, section, |rows| {
+                assert!(rows.len() >= 64, "fixture has multiple completeness rows");
+                match case {
+                    "splice" => {
+                        let first = rows[0..32].to_vec();
+                        rows[32..64].copy_from_slice(&first);
+                    }
+                    "reorder" => {
+                        let first = rows[0..32].to_vec();
+                        let second = rows[32..64].to_vec();
+                        rows[0..32].copy_from_slice(&second);
+                        rows[32..64].copy_from_slice(&first);
+                    }
+                    "overlap" => {
+                        let first = rows[0..32].to_vec();
+                        rows[32..64].copy_from_slice(&first);
+                        let start = u64::from_le_bytes(first[8..16].try_into().expect("start"));
+                        let end = u64::from_le_bytes(first[16..24].try_into().expect("end"));
+                        assert!(start < end, "fixture first completeness range is non-empty");
+                        rows[40..48].copy_from_slice(&end.to_le_bytes());
+                        rows[48..56].copy_from_slice(
+                            &end.checked_add(1).expect("overlap end").to_le_bytes(),
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            });
+        }
+        fs::write(&cache, corrupted).expect("resigned completeness mutation");
+        TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
+            .unwrap_or_else(|error| panic!("{case} must rebuild: {error}"));
+        assert_eq!(fs::read(&cache).expect("rebuilt cache"), original, "{case}");
+    }
 }
 
 #[test]
@@ -596,7 +929,14 @@ fn schema_two_rejects_missing_extra_reordered_and_wrong_contract_sections() {
         .iter()
         .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
         .expect("QTRB artifact");
-    for case in ["missing", "extra", "reordered", "wrong contract"] {
+    for case in [
+        "missing",
+        "extra",
+        "reordered",
+        "wrong contract",
+        "missing source completeness",
+        "wrong source completeness contract",
+    ] {
         let root = private_root();
         TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &AllowAll)
             .expect("initial cache");
@@ -614,6 +954,20 @@ fn schema_two_rejects_missing_extra_reordered_and_wrong_contract_sections() {
                 }
                 "reordered" => sections.swap(2, 3),
                 "wrong contract" => sections[2]["element_size"] = 8.into(),
+                "missing source completeness" => {
+                    let index = sections
+                        .iter()
+                        .position(|section| section["name"] == "source_completeness.v2")
+                        .expect("source completeness section");
+                    sections.remove(index);
+                }
+                "wrong source completeness contract" => {
+                    let section = sections
+                        .iter_mut()
+                        .find(|section| section["name"] == "source_completeness.v2")
+                        .expect("source completeness section");
+                    section["element_size"] = 16.into();
+                }
                 _ => unreachable!(),
             }
         });
@@ -632,6 +986,19 @@ fn only_cache(root: &Path) -> PathBuf {
         .find(|entry| entry.path().is_dir())
         .expect("digest");
     digest.path().join("index.qtc")
+}
+
+fn cache_manifest(bytes: &[u8]) -> Value {
+    let manifest_offset = usize::try_from(u64::from_le_bytes(
+        bytes[16..24].try_into().expect("manifest offset"),
+    ))
+    .expect("offset usize");
+    let manifest_length = usize::try_from(u64::from_le_bytes(
+        bytes[24..32].try_into().expect("manifest length"),
+    ))
+    .expect("length usize");
+    serde_json::from_slice(&bytes[manifest_offset..manifest_offset + manifest_length])
+        .expect("manifest JSON")
 }
 
 fn resign_source_row_corruption(bytes: &mut Vec<u8>) {
@@ -705,4 +1072,29 @@ fn private_root() -> TempDir {
     )
     .expect("private root");
     root
+}
+
+fn assert_no_transient_cache_entries(root: &Path) {
+    fn walk(path: &Path, bad: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let child = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".tmp")
+                || name.contains("staging")
+                || name.starts_with(".qtrace-dir-")
+            {
+                bad.push(child.clone());
+            }
+            if child.is_dir() {
+                walk(&child, bad);
+            }
+        }
+    }
+    let mut bad = Vec::new();
+    walk(root, &mut bad);
+    assert!(bad.is_empty(), "transient cache entries: {bad:?}");
 }

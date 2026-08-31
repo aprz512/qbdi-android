@@ -4,12 +4,7 @@ mod intervals;
 mod postings;
 mod wire;
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    error::Error,
-    fmt,
-    sync::Arc,
-};
+use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
 use qtrace_provider::{
     CompletenessCause, CompletenessRange, EventKey, EventKind, EventScope, MemoryDirection,
@@ -41,14 +36,23 @@ pub(crate) fn binary_section_max_length(name: &str, event_count: usize) -> Resul
 }
 
 pub(crate) fn validate_binary_sections(
-    sections: BTreeMap<String, Vec<u8>>,
+    sections: Vec<(&'static str, Vec<u8>)>,
     keys: &[EventKey],
     kinds: &[EventKind],
     source_format: &str,
     guard: &dyn WorkGuard,
-) -> Result<(), IndexError> {
-    wire::decode(sections, keys, kinds, source_format, true, guard).map(|_| ())
+) -> Result<ValidatedCatalog, IndexError> {
+    let catalog = wire::decode(sections, keys, kinds, source_format, true, guard)?;
+    guard.consume(WorkDelta {
+        resident_bytes: u64::try_from(std::mem::size_of::<NormalizedCatalog>()).unwrap_or(u64::MAX),
+        nodes: 1,
+        ..WorkDelta::default()
+    })?;
+    Ok(ValidatedCatalog(Arc::new(catalog)))
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedCatalog(Arc<NormalizedCatalog>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexError {
@@ -714,6 +718,11 @@ pub trait TraceStoreView {
     fn instruction(&self, event_row: usize) -> Option<InstructionRow>;
     fn memory(&self, event_row: usize) -> Option<MemoryRow>;
     fn semantic(&self, event_row: usize) -> Option<SemanticRow>;
+    fn payload_bytes(&self, event_row: usize) -> Result<&[u8], IndexError>;
+    fn string_bytes(&self, string_id: u32) -> Result<&[u8], IndexError>;
+    fn blob_bytes(&self, blob_id: u32) -> Result<&[u8], IndexError>;
+    fn memory_before_bytes(&self, event_row: usize) -> Result<Option<&[u8]>, IndexError>;
+    fn memory_after_bytes(&self, event_row: usize) -> Result<Option<&[u8]>, IndexError>;
     fn module(&self, module: u32) -> Option<&ModuleRow>;
     fn definition(&self, definition: u32) -> Option<&DefinitionRow>;
     fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow>;
@@ -832,7 +841,7 @@ fn rows_for_module_pc(
 #[derive(Clone, Debug)]
 pub struct OwnedTraceStore {
     base: OwnedStoreView,
-    catalog: NormalizedCatalog,
+    catalog: Arc<NormalizedCatalog>,
 }
 
 impl OwnedTraceStore {
@@ -843,9 +852,15 @@ impl OwnedTraceStore {
         guard: &dyn WorkGuard,
     ) -> Result<Self, IndexError> {
         catalog.validate(&keys, &kinds, guard)?;
+        guard.consume(WorkDelta {
+            resident_bytes: u64::try_from(std::mem::size_of::<NormalizedCatalog>())
+                .unwrap_or(u64::MAX),
+            nodes: 1,
+            ..WorkDelta::default()
+        })?;
         Ok(Self {
             base: OwnedStoreView::new(keys, kinds)?,
-            catalog,
+            catalog: Arc::new(catalog),
         })
     }
 
@@ -865,7 +880,7 @@ impl OwnedTraceStore {
         self.catalog.events.get(row).map(|event| event.provenance)
     }
 
-    pub const fn capabilities(&self) -> &ProviderCapabilities {
+    pub fn capabilities(&self) -> &ProviderCapabilities {
         &self.catalog.capabilities
     }
 
@@ -940,7 +955,9 @@ impl OwnedTraceStore {
         guard: &dyn WorkGuard,
     ) -> Result<OwnedStoreView, IndexError> {
         let mut view = self.base;
-        for section in wire::encode(self.catalog, guard)? {
+        let catalog = Arc::try_unwrap(self.catalog)
+            .map_err(|_| IndexError::resource("owned catalog is still shared during encoding"))?;
+        for section in wire::encode(catalog, guard)? {
             guard.consume(WorkDelta::default())?;
             view = view.with_section(section)?;
         }
@@ -951,46 +968,15 @@ impl OwnedTraceStore {
 #[derive(Clone, Debug)]
 pub struct MappedTraceStore {
     view: MappedStoreView,
-    catalog: NormalizedCatalog,
+    catalog: Arc<NormalizedCatalog>,
 }
 
 impl MappedTraceStore {
-    fn open(view: MappedStoreView, guard: &dyn WorkGuard) -> Result<Self, IndexError> {
+    fn open(mut view: MappedStoreView, guard: &dyn WorkGuard) -> Result<Self, IndexError> {
         guard.consume(WorkDelta::default())?;
-        let mut keys = Vec::new();
-        let mut kinds = Vec::new();
-        keys.try_reserve_exact(view.event_count())
-            .map_err(|_| IndexError::resource("mapped key validation allocation failed"))?;
-        kinds
-            .try_reserve_exact(view.event_count())
-            .map_err(|_| IndexError::resource("mapped kind validation allocation failed"))?;
-        for row in 0..view.event_count() {
-            if row % 4096 == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            keys.push(view.event_key(row)?);
-            kinds.push(view.event_kind(row)?);
-        }
-        let mut sections = BTreeMap::new();
-        guard.consume(WorkDelta {
-            nodes: wire::EXACT_SECTIONS.len() as u64,
-            ..WorkDelta::default()
+        let ValidatedCatalog(catalog) = view.take_validated_catalog().ok_or_else(|| {
+            IndexError::corrupt("schema-two cache did not transfer its validated catalog")
         })?;
-        for (name, _, _) in wire::EXACT_SECTIONS {
-            guard.consume(WorkDelta::default())?;
-            let bytes = view
-                .section_bytes(name, guard)?
-                .ok_or_else(|| IndexError::corrupt(format!("binary section {name} is missing")))?;
-            sections.insert((*name).to_owned(), bytes);
-        }
-        let catalog = wire::decode(
-            sections,
-            &keys,
-            &kinds,
-            &view.cache_identity().source_format,
-            false,
-            guard,
-        )?;
         Ok(Self { view, catalog })
     }
 
@@ -1012,7 +998,7 @@ impl MappedTraceStore {
     pub fn provenance(&self, row: usize) -> Result<Option<Provenance>, IndexError> {
         Ok(self.catalog.events.get(row).map(|event| event.provenance))
     }
-    pub const fn capabilities(&self) -> &ProviderCapabilities {
+    pub fn capabilities(&self) -> &ProviderCapabilities {
         &self.catalog.capabilities
     }
     fn rows_of_kinds(&self, kinds: &[EventKind]) -> Result<Vec<usize>, IndexError> {
@@ -1147,6 +1133,61 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
             .iter()
             .find(|row| row.owner_row == event_row)
             .copied()
+    }
+    fn payload_bytes(&self, event_row: usize) -> Result<&[u8], IndexError> {
+        let event = self
+            .normalized_catalog()
+            .events
+            .get(event_row)
+            .ok_or_else(|| IndexError::invalid("event row is out of range"))?;
+        self.normalized_catalog()
+            .payloads
+            .get(event.payload_blob)
+            .map_err(|_| IndexError::corrupt("event payload span is invalid"))
+    }
+    fn string_bytes(&self, string_id: u32) -> Result<&[u8], IndexError> {
+        self.normalized_catalog()
+            .strings
+            .get(string_id)
+            .map_err(|_| IndexError::invalid("string ID is out of range"))
+    }
+    fn blob_bytes(&self, blob_id: u32) -> Result<&[u8], IndexError> {
+        self.normalized_catalog()
+            .blobs
+            .get(blob_id)
+            .map_err(|_| IndexError::invalid("blob ID is out of range"))
+    }
+    fn memory_before_bytes(&self, event_row: usize) -> Result<Option<&[u8]>, IndexError> {
+        if event_row >= self.base_event_count() {
+            return Err(IndexError::invalid("event row is out of range"));
+        }
+        self.normalized_catalog()
+            .memories
+            .iter()
+            .find(|row| row.owner_row == event_row)
+            .map(|row| {
+                self.normalized_catalog()
+                    .blobs
+                    .get(row.before_blob)
+                    .map_err(|_| IndexError::corrupt("memory before blob is invalid"))
+            })
+            .transpose()
+    }
+    fn memory_after_bytes(&self, event_row: usize) -> Result<Option<&[u8]>, IndexError> {
+        if event_row >= self.base_event_count() {
+            return Err(IndexError::invalid("event row is out of range"));
+        }
+        self.normalized_catalog()
+            .memories
+            .iter()
+            .find(|row| row.owner_row == event_row)
+            .map(|row| {
+                self.normalized_catalog()
+                    .blobs
+                    .get(row.after_blob)
+                    .map_err(|_| IndexError::corrupt("memory after blob is invalid"))
+            })
+            .transpose()
     }
     fn module(&self, module: u32) -> Option<&ModuleRow> {
         self.normalized_catalog().modules.get(module as usize)

@@ -490,6 +490,8 @@ impl BuildState {
             })?;
             self.completeness.push(CompletenessRow::from_range(range));
         }
+        validate_completeness_rows(&self.completeness, guard)
+            .map_err(|_| IndexError::invalid("provider completeness is not canonical"))?;
         Ok(())
     }
 
@@ -540,6 +542,7 @@ impl BuildState {
 
 pub(super) fn validate_cached_truth(
     catalog: &NormalizedCatalog,
+    source_completeness: &[CompletenessRow],
     keys: &[qtrace_provider::EventKey],
     kinds: &[EventKind],
     source_format: &str,
@@ -566,6 +569,19 @@ pub(super) fn validate_cached_truth(
     let mut observation_cursor = 0;
     let mut module_cursor = 0;
     let mut definition_cursor = 0;
+    let mut discontinuities = Vec::new();
+    guard.consume(WorkDelta {
+        resident_bytes: u64::try_from(
+            source_completeness
+                .len()
+                .saturating_mul(std::mem::size_of::<CompletenessRow>()),
+        )
+        .unwrap_or(u64::MAX),
+        ..WorkDelta::default()
+    })?;
+    discontinuities
+        .try_reserve_exact(source_completeness.len())
+        .map_err(|_| IndexError::resource("discontinuity evidence allocation failed"))?;
     for row in 0..keys.len() {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
@@ -575,6 +591,13 @@ pub(super) fn validate_cached_truth(
             .map_err(|_| IndexError::corrupt("canonical event payload cannot be decoded"))?;
         if canonical_bytes(&payload)? != bytes {
             return Err(IndexError::corrupt("event payload bytes are not canonical"));
+        }
+        if let EventPayload::Discontinuity(discontinuity) = &payload {
+            guard.consume(WorkDelta {
+                nodes: 1,
+                ..WorkDelta::default()
+            })?;
+            discontinuities.push(CompletenessRow::from_range(discontinuity.evidence));
         }
         let event = EventRecord::new_scoped(
             keys[row].clone(),
@@ -657,6 +680,31 @@ pub(super) fn validate_cached_truth(
             "stored typed child cardinality exceeds canonical payload facts",
         ));
     }
+    validate_completeness_rows(source_completeness, guard)
+        .map_err(|_| IndexError::corrupt("canonical provider completeness is not normalized"))?;
+    if source_format.eq_ignore_ascii_case("flight") {
+        cancellable_sort_by(&mut discontinuities, guard, compare_completeness_rows)?;
+        let mut evidence = discontinuities.iter();
+        for (ordinal, source) in source_completeness
+            .iter()
+            .filter(|row| row.cause != qtrace_provider::CompletenessCause::Retained)
+            .enumerate()
+        {
+            if ordinal % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            if evidence.next() != Some(source) {
+                return Err(IndexError::corrupt(
+                    "Flight discontinuity payloads disagree with provider completeness",
+                ));
+            }
+        }
+        if evidence.next().is_some() {
+            return Err(IndexError::corrupt(
+                "Flight discontinuity payload has no provider completeness fact",
+            ));
+        }
+    }
     for (ordinal, _) in catalog.completeness.iter().enumerate() {
         if ordinal % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
@@ -682,7 +730,7 @@ pub(super) fn validate_cached_truth(
         ));
     };
     capabilities.full_register_checkpoint &= state.saw_complete_checkpoint;
-    capabilities.loss_and_damage_ranges &= !catalog.completeness.is_empty();
+    capabilities.loss_and_damage_ranges &= !source_completeness.is_empty();
     capabilities.register_read_write_observation &= state.saw_register_observation;
     capabilities.memory_metadata &= state.saw_memory_metadata;
     capabilities.memory_before_after &= state.saw_memory_before_after;
@@ -696,6 +744,99 @@ pub(super) fn validate_cached_truth(
         ));
     }
     Ok(())
+}
+
+fn validate_completeness_rows(
+    rows: &[CompletenessRow],
+    guard: &dyn WorkGuard,
+) -> Result<(), IndexError> {
+    for (ordinal, pair) in rows.windows(2).enumerate() {
+        if ordinal % 4096 == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        if compare_completeness_rows(&pair[0], &pair[1]) != std::cmp::Ordering::Less {
+            return Err(IndexError::invalid(
+                "completeness rows are not strictly canonical",
+            ));
+        }
+        if same_completeness_class(&pair[0], &pair[1])
+            && completeness_ranges_touch_or_overlap(&pair[0], &pair[1])?
+        {
+            return Err(IndexError::invalid(
+                "mergeable completeness rows remain adjacent",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn compare_completeness_rows(
+    left: &CompletenessRow,
+    right: &CompletenessRow,
+) -> std::cmp::Ordering {
+    completeness_key(left).cmp(&completeness_key(right))
+}
+
+fn completeness_key(row: &CompletenessRow) -> (u8, u8, u64, u64, u8) {
+    let domain = match row.domain {
+        qtrace_provider::RangeDomain::CapturedSequence => 0,
+        qtrace_provider::RangeDomain::SourceBytes => 1,
+        qtrace_provider::RangeDomain::MemoryAddresses => 2,
+    };
+    let cause = match row.cause {
+        qtrace_provider::CompletenessCause::Retained => 0,
+        qtrace_provider::CompletenessCause::Active => 1,
+        qtrace_provider::CompletenessCause::Rotating => 2,
+        qtrace_provider::CompletenessCause::Stale => 3,
+        qtrace_provider::CompletenessCause::Unreliable => 4,
+        qtrace_provider::CompletenessCause::Incomplete => 5,
+        qtrace_provider::CompletenessCause::Lost => 6,
+        qtrace_provider::CompletenessCause::Overwritten => 7,
+        qtrace_provider::CompletenessCause::CoverageGap => 8,
+        qtrace_provider::CompletenessCause::Checksum => 9,
+        qtrace_provider::CompletenessCause::UnterminatedThread => 10,
+        qtrace_provider::CompletenessCause::MissingTerminal => 11,
+        qtrace_provider::CompletenessCause::Truncation => 12,
+        qtrace_provider::CompletenessCause::Unknown => 13,
+    };
+    let (start, end) = match row.bounds {
+        qtrace_provider::RangeBounds::InclusiveSequence { first, last } => (first, last),
+        qtrace_provider::RangeBounds::HalfOpen {
+            start,
+            end_exclusive,
+        } => (start, end_exclusive),
+    };
+    let provenance = match row.provenance {
+        Provenance::Captured => 0,
+        Provenance::Derived => 1,
+        Provenance::Heuristic => 2,
+        Provenance::Unknown => 3,
+        Provenance::Damaged => 4,
+    };
+    (domain, cause, start, end, provenance)
+}
+
+fn same_completeness_class(left: &CompletenessRow, right: &CompletenessRow) -> bool {
+    left.domain == right.domain && left.cause == right.cause && left.provenance == right.provenance
+}
+
+fn completeness_ranges_touch_or_overlap(
+    left: &CompletenessRow,
+    right: &CompletenessRow,
+) -> Result<bool, IndexError> {
+    match (left.bounds, right.bounds) {
+        (
+            qtrace_provider::RangeBounds::InclusiveSequence { last, .. },
+            qtrace_provider::RangeBounds::InclusiveSequence { first, .. },
+        ) => Ok(last == u64::MAX || first <= last + 1),
+        (
+            qtrace_provider::RangeBounds::HalfOpen { end_exclusive, .. },
+            qtrace_provider::RangeBounds::HalfOpen { start, .. },
+        ) => Ok(start <= end_exclusive),
+        _ => Err(IndexError::invalid(
+            "completeness bounds disagree with their domain",
+        )),
+    }
 }
 
 fn compare_streamed_rows<T: Eq>(
@@ -1382,8 +1523,10 @@ mod tests {
         ArtifactDigest, BeginMetadata, EventCursor, EventKey, EventPayload, EventRecord,
         EventScope, Instruction, InstructionDefinition, Memory, MemoryDirection, Provenance,
         ProviderCapabilities, ProviderCounters, ProviderError, ProviderSummary, SourceIdentity,
-        TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
+        StringDefinition, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
     };
+
+    use crate::TraceStoreView;
 
     use super::{BuildOptions, IndexBuilder, cancellable_sort};
 
@@ -1544,8 +1687,9 @@ mod tests {
             IndexBuilder::build_provider(provider(events), &BuildOptions::default(), &AllowAll)
                 .expect("large synthetic build");
         assert_eq!(store.event_count(), count as usize);
+        let catalog = std::sync::Arc::try_unwrap(store.catalog).expect("unique owned catalog");
         let sections =
-            super::super::wire::encode(store.catalog, &AllowAll).expect("large binary sections");
+            super::super::wire::encode(catalog, &AllowAll).expect("large binary sections");
         let event_meta = sections
             .iter()
             .find(|section| section.name == "event_meta.v2")
@@ -1601,6 +1745,24 @@ mod tests {
 
         assert_eq!(store.event_count(), 1);
         assert_eq!(store.memory_overlaps(0x1004, 0x1005).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn exact_string_bytes_preserve_invalid_utf8() {
+        let mut event = memory_event(1, 0, 0);
+        event.payload = EventPayload::StringDefinition(StringDefinition {
+            id: 7,
+            bytes: vec![0xff, 0x00, 0x80],
+        });
+        let store = IndexBuilder::build_provider(
+            provider(vec![event]),
+            &BuildOptions::default(),
+            &AllowAll,
+        )
+        .expect("invalid UTF-8 remains byte evidence");
+        let bytes = TraceStoreView::string_bytes(&store, 0).expect("string bytes");
+        assert_eq!(bytes, &[0xff, 0x00, 0x80]);
+        assert!(std::str::from_utf8(bytes).is_err());
     }
 
     #[test]
