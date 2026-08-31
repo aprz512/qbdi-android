@@ -1,8 +1,8 @@
 use std::{collections::HashMap, mem::size_of, sync::Arc};
 
 use crate::{
-    CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause, EventKey,
-    EventPayload, EventRecord, MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance,
+    AllocationScope, CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause,
+    EventKey, EventPayload, EventRecord, MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance,
     ProviderCounters, ProviderError, RangeBounds, ReadAtSource, SourceCoordinate, TimelineId,
     WorkDelta, WorkGuard, completeness_canonical_key, merge_canonical_completeness,
 };
@@ -128,7 +128,7 @@ pub(super) fn recover(
     let superblock_bytes =
         context.read_array::<FLIGHT_SUPERBLOCK_BYTES>(0, "flight.superblock", None)?;
     let superblock = parse_superblock(&superblock_bytes, source_size)?;
-    authorize_metadata(&context, &superblock)?;
+    let metadata_delta = metadata_work(&superblock)?;
 
     let directory_capacity = usize::try_from(superblock.directory_entries)
         .map_err(|_| allocation_error("directory count does not fit this host"))?;
@@ -142,17 +142,34 @@ pub(super) fn recover(
     let tid_capacity = directory_capacity
         .checked_add(emergency_tid_capacity)
         .ok_or_else(|| allocation_error("Flight TID capacity overflow"))?;
-    let mut directories = fallible_vec(directory_capacity)?;
-    let mut chunks = fallible_none_vec(chunk_capacity, &context)?;
-    let mut tids = fallible_vec(tid_capacity)?;
-    let mut directory_by_tid = fallible_hash_map(directory_capacity, &context)?;
-    let mut known_tids = fallible_hash_map(tid_capacity, &context)?;
-    let mut hints = fallible_vec(directory_capacity.saturating_add(chunk_capacity))?;
     let completeness_capacity = directory_capacity
         .saturating_mul(3)
         .saturating_add(chunk_capacity.saturating_mul(3))
         .saturating_add(emergency_capacity);
-    let mut completeness = fallible_vec(completeness_capacity)?;
+    let (
+        mut directories,
+        mut chunks,
+        mut tids,
+        mut directory_by_tid,
+        mut known_tids,
+        mut hints,
+        mut completeness,
+    ) = {
+        let _metadata_scope = AllocationScope::begin_with_delta(
+            context.guard,
+            metadata_delta,
+            metadata_delta.resident_bytes,
+        )?;
+        (
+            fallible_vec(directory_capacity)?,
+            fallible_none_vec(chunk_capacity, &context)?,
+            fallible_vec(tid_capacity)?,
+            fallible_hash_map_without_charge(directory_capacity)?,
+            fallible_hash_map_without_charge(tid_capacity)?,
+            fallible_vec(directory_capacity.saturating_add(chunk_capacity))?,
+            fallible_vec(completeness_capacity)?,
+        )
+    };
     let mut has_directory_uncertainty = false;
     let mut rotating_directory_entries = Vec::new();
 
@@ -190,7 +207,7 @@ pub(super) fn recover(
                 )?;
             }
             if entry.state == 2 {
-                rotating_directory_entries.push(entry.index);
+                guarded_push(&mut rotating_directory_entries, entry.index, &context)?;
                 has_directory_uncertainty = true;
                 push_source_range(
                     &mut completeness,
@@ -225,8 +242,15 @@ pub(super) fn recover(
 
     let mut events = Vec::new();
     let mut lifecycle = fallible_hash_map(directory_capacity, &context)?;
-    let mut damage_ranges = fallible_vec(chunk_capacity)?;
-    let mut sequence_proofs = fallible_vec(chunk_capacity)?;
+    let scan_scratch_bytes = chunk_capacity
+        .checked_mul(size_of::<SequenceRange>().saturating_add(size_of::<SequenceProof>()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight scan scratch size overflow"))?;
+    let (mut damage_ranges, mut sequence_proofs) = {
+        let _scan_scope =
+            AllocationScope::begin(context.guard, scan_scratch_bytes, scan_scratch_bytes)?;
+        (fallible_vec(chunk_capacity)?, fallible_vec(chunk_capacity)?)
+    };
     let mut has_damage = false;
     let mut has_incomplete = superblock.flags != 0 || has_directory_uncertainty;
     let mut active_chunks = Vec::new();
@@ -379,7 +403,7 @@ pub(super) fn recover(
             );
             append_events(&mut events, scan.events, &context)?;
         } else {
-            active_chunks.push(index);
+            guarded_push(&mut active_chunks, index, &context)?;
             push_source_range(
                 &mut completeness,
                 offset,
@@ -422,7 +446,7 @@ pub(super) fn recover(
                 && chunk.generation == entry.generation
                 && matches!(chunk.state, 1 | 2)
         }) {
-            stale_directory_entries.push(entry.index);
+            guarded_push(&mut stale_directory_entries, entry.index, &context)?;
             let offset = indexed_offset(
                 superblock.directory.offset,
                 entry.index,
@@ -574,16 +598,23 @@ pub(super) fn recover(
         )
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or_else(|| allocation_error("decoded damage evidence size overflow"))?;
-    context.guard.consume(WorkDelta {
+    let decoded_damage_delta = WorkDelta {
         resident_bytes: decoded_damage_bytes,
         ..WorkDelta::default()
-    })?;
-    completeness
-        .try_reserve_exact(decoded_damage_count)
-        .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
-    sequence_proofs
-        .try_reserve_exact(decoded_damage_count)
-        .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
+    };
+    {
+        let _decoded_damage_scope = AllocationScope::begin_with_delta(
+            context.guard,
+            decoded_damage_delta,
+            decoded_damage_delta.resident_bytes,
+        )?;
+        completeness
+            .try_reserve_exact(decoded_damage_count)
+            .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
+        sequence_proofs
+            .try_reserve_exact(decoded_damage_count)
+            .map_err(|_| allocation_error("Flight recovery allocation failed"))?;
+    }
     for (index, sequence) in decoded.damaged_sequences.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
         let evidence = CompletenessRange::captured_sequence_with_cause(
@@ -609,7 +640,17 @@ pub(super) fn recover(
             )?;
         }
     }
-    let mut damaged_source_offsets = fallible_vec(decoded.damaged_source_offsets.len())?;
+    let damage_offset_bytes = decoded
+        .damaged_source_offsets
+        .len()
+        .checked_mul(size_of::<u64>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight damage-offset size overflow"))?;
+    let mut damaged_source_offsets = {
+        let _damage_offset_scope =
+            AllocationScope::begin(context.guard, damage_offset_bytes, damage_offset_bytes)?;
+        fallible_vec(decoded.damaged_source_offsets.len())?
+    };
     for (index, offset) in decoded.damaged_source_offsets.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
         damaged_source_offsets.push(offset);
@@ -686,6 +727,7 @@ pub(super) fn recover(
                     .map_err(|_| {
                         super::wire::superblock_error("invalid validated Flight target")
                     })?,
+                context.guard,
             )?,
             pointer_width: superblock.pointer_width,
             artifact_flags: superblock.flags,
@@ -710,13 +752,20 @@ fn add_discontinuity_events(
         .len()
         .checked_add(sequence_proofs.len())
         .ok_or_else(|| allocation_error("discontinuity evidence count overflow"))?;
-    context.guard.consume(WorkDelta {
+    let evidence_delta = WorkDelta {
         events: evidence_capacity as u64,
         nodes: evidence_capacity as u64,
         resident_bytes: (evidence_capacity as u64).saturating_mul(256),
         ..WorkDelta::default()
-    })?;
-    let mut proof_ranges = fallible_vec(sequence_proofs.len())?;
+    };
+    let mut proof_ranges = {
+        let _proof_scope = AllocationScope::begin_with_delta(
+            context.guard,
+            evidence_delta,
+            evidence_delta.resident_bytes,
+        )?;
+        fallible_vec(sequence_proofs.len())?
+    };
     for (index, proof) in sequence_proofs.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
         let evidence = CompletenessRange::captured_sequence_with_cause(
@@ -798,20 +847,18 @@ fn push_discontinuity(
         .next_ordinal
         .checked_add(1)
         .ok_or_else(|| allocation_error("discontinuity ordinal overflow"))?;
-    guarded_push_without_charge(
+    guarded_push(
         events,
         EventRecord::new(
             key,
             evidence.provenance(),
             EventPayload::Discontinuity(Discontinuity { cause, evidence }),
         ),
+        context,
     )
 }
 
-fn authorize_metadata(
-    context: &RecoveryContext<'_>,
-    superblock: &Superblock,
-) -> Result<(), ProviderError> {
+fn metadata_work(superblock: &Superblock) -> Result<WorkDelta, ProviderError> {
     let nodes = u64::from(superblock.directory_entries)
         .checked_add(u64::from(superblock.chunk_count))
         .and_then(|value| value.checked_add(u64::from(superblock.emergency_count)))
@@ -819,12 +866,11 @@ fn authorize_metadata(
     let resident_bytes = nodes
         .checked_mul(256)
         .ok_or_else(|| allocation_error("Flight metadata size overflow"))?;
-    context.guard.consume(WorkDelta {
+    Ok(WorkDelta {
         nodes,
         resident_bytes,
         ..WorkDelta::default()
-    })?;
-    Ok(())
+    })
 }
 
 fn scan_records(
@@ -962,7 +1008,7 @@ fn scan_records(
                 bytes: payload,
             }),
         );
-        guarded_push_without_charge(&mut events, event)?;
+        guarded_push(&mut events, event, context)?;
         context.next_ordinal = context
             .next_ordinal
             .checked_add(1)
@@ -1068,13 +1114,20 @@ fn scan_emergencies(
             if known_tids.insert(candidate.cell.tid, ()).is_none() {
                 guarded_push(tids, candidate.cell.tid, context)?;
             }
-            context.guard.consume(WorkDelta {
+            let payload_delta = WorkDelta {
                 events: 1,
                 resident_bytes: (FLIGHT_EMERGENCY_RECORD_BYTES as u64)
                     .saturating_add((size_of::<EventRecord>() as u64).saturating_mul(4)),
                 ..WorkDelta::default()
-            })?;
-            let mut payload = fallible_vec(52)?;
+            };
+            let mut payload = {
+                let _payload_scope = AllocationScope::begin_with_delta(
+                    context.guard,
+                    payload_delta,
+                    payload_delta.resident_bytes,
+                )?;
+                fallible_vec(52)?
+            };
             let logical = candidate
                 .raw
                 .get(..52)
@@ -1102,7 +1155,7 @@ fn scan_emergencies(
                 .next_ordinal
                 .checked_add(1)
                 .ok_or_else(|| allocation_error("emergency ordinal overflow"))?;
-            guarded_push_without_charge(events, event)?;
+            guarded_push(events, event, context)?;
             context.counters.records_seen = context.counters.records_seen.saturating_add(1);
         }
     }
@@ -1654,11 +1707,7 @@ fn append_events(
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
     for event in source {
-        context.guard.consume(WorkDelta {
-            resident_bytes: (size_of::<EventRecord>() as u64).saturating_mul(4),
-            ..WorkDelta::default()
-        })?;
-        guarded_push_without_charge(target, event)?;
+        guarded_push(target, event, context)?;
     }
     Ok(())
 }
@@ -1674,11 +1723,18 @@ fn resolve_sequence_collisions(
         .ok()
         .and_then(|count| count.checked_mul(size_of::<EventRecord>() as u64))
         .ok_or_else(|| allocation_error("Flight collision output size overflow"))?;
-    context.guard.consume(WorkDelta {
+    let output_delta = WorkDelta {
         resident_bytes: event_bytes,
         ..WorkDelta::default()
-    })?;
-    let mut output = fallible_vec(events.len())?;
+    };
+    let mut output = {
+        let _output_scope = AllocationScope::begin_with_delta(
+            context.guard,
+            output_delta,
+            output_delta.resident_bytes,
+        )?;
+        fallible_vec(events.len())?
+    };
     let mut sequence = None;
     let mut regular = None;
     let mut emergency = None;
@@ -1739,9 +1795,9 @@ fn flush_sequence_group(
                 CompletenessCause::Stale,
                 context,
             )?;
-            guarded_push_without_charge(output, regular)
+            guarded_push(output, regular, context)
         }
-        (Some(event), None) | (None, Some(event)) => guarded_push_without_charge(output, event),
+        (Some(event), None) | (None, Some(event)) => guarded_push(output, event, context),
         (None, None) => Ok(()),
     }
 }
@@ -1756,11 +1812,18 @@ fn normalize_completeness(
         .ok()
         .and_then(|count| count.checked_mul(size_of::<CompletenessRange>() as u64))
         .ok_or_else(|| allocation_error("Flight completeness output size overflow"))?;
-    context.guard.consume(WorkDelta {
+    let output_delta = WorkDelta {
         resident_bytes: output_bytes,
         ..WorkDelta::default()
-    })?;
-    let mut output = fallible_vec(ranges.len())?;
+    };
+    let mut output = {
+        let _output_scope = AllocationScope::begin_with_delta(
+            context.guard,
+            output_delta,
+            output_delta.resident_bytes,
+        )?;
+        fallible_vec(ranges.len())?
+    };
     for (index, range) in ranges.drain(..).enumerate() {
         guard_checkpoint(context.guard, index)?;
         if let Some(previous) = output.last().copied() {
@@ -1855,10 +1918,25 @@ fn guarded_push<T>(
     value: T,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
-    context.guard.consume(WorkDelta {
-        resident_bytes: (size_of::<T>() as u64).saturating_mul(4),
+    if output.len() < output.capacity() {
+        output.push(value);
+        return Ok(());
+    }
+    let new_capacity = output
+        .capacity()
+        .checked_mul(2)
+        .map(|capacity| capacity.max(4))
+        .ok_or_else(|| allocation_error("Flight vector capacity overflow"))?;
+    let resident_bytes = new_capacity
+        .checked_mul(size_of::<T>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight vector layout overflow"))?;
+    let push_delta = WorkDelta {
+        resident_bytes,
         ..WorkDelta::default()
-    })?;
+    };
+    let _push_scope =
+        AllocationScope::begin_with_delta(context.guard, push_delta, push_delta.resident_bytes)?;
     guarded_push_without_charge(output, value)
 }
 
@@ -1906,10 +1984,19 @@ where
         .and_then(|bytes| bytes.checked_mul(capacity))
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or_else(|| allocation_error("Flight hash index size overflow"))?;
-    context.guard.consume(WorkDelta {
+    let hash_delta = WorkDelta {
         resident_bytes: entry_bytes,
         ..WorkDelta::default()
-    })?;
+    };
+    let _hash_scope =
+        AllocationScope::begin_with_delta(context.guard, hash_delta, hash_delta.resident_bytes)?;
+    fallible_hash_map_without_charge(capacity)
+}
+
+fn fallible_hash_map_without_charge<K, V>(capacity: usize) -> Result<HashMap<K, V>, ProviderError>
+where
+    K: Eq + std::hash::Hash,
+{
     let mut output = HashMap::new();
     output
         .try_reserve(capacity)
@@ -1939,10 +2026,12 @@ where
         .ok()
         .and_then(|count| count.checked_mul(scratch_bytes_per_item))
         .ok_or_else(|| allocation_error("radix scratch size overflow"))?;
-    context.guard.consume(WorkDelta {
+    let radix_delta = WorkDelta {
         resident_bytes: item_bytes,
         ..WorkDelta::default()
-    })?;
+    };
+    let _radix_scope =
+        AllocationScope::begin_with_delta(context.guard, radix_delta, radix_delta.resident_bytes)?;
 
     let mut input = fallible_vec(length)?;
     for (index, value) in values.into_iter().enumerate() {
@@ -2095,13 +2184,18 @@ impl RecoveryContext<'_> {
     ) -> Result<Vec<u8>, ProviderError> {
         let length = usize::try_from(size)
             .map_err(|_| record_error(coordinate, "payload does not fit this host"))?;
-        self.guard.consume(WorkDelta {
+        let payload_delta = WorkDelta {
             input_bytes: u64::from(size),
             events: 1,
             resident_bytes: u64::from(size)
                 .saturating_add((size_of::<EventRecord>() as u64).saturating_mul(4)),
             ..WorkDelta::default()
-        })?;
+        };
+        let _payload_scope = AllocationScope::begin_with_delta(
+            self.guard,
+            payload_delta,
+            payload_delta.resident_bytes,
+        )?;
         let mut output = Vec::new();
         output
             .try_reserve_exact(length)

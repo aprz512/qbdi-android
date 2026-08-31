@@ -7,7 +7,7 @@ use std::{
     os::unix::ffi::{OsStrExt, OsStringExt},
 };
 
-use qtrace_provider::{EventKind, OperationAbort, WorkDelta, WorkGuard};
+use qtrace_provider::{AllocationScope, EventKind, OperationAbort, WorkGuard};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AllocationFailure {
@@ -41,16 +41,12 @@ fn geometric_capacity(
     Ok(required.max(minimum.max(doubled)))
 }
 
-pub(crate) fn authorize(
+pub(crate) fn scope(
     guard: &dyn WorkGuard,
     resident_bytes: u64,
-) -> Result<(), AllocationFailure> {
-    guard
-        .consume(WorkDelta {
-            resident_bytes,
-            ..WorkDelta::default()
-        })
-        .map_err(AllocationFailure::Aborted)
+    allowed_slack: u64,
+) -> Result<AllocationScope<'_>, AllocationFailure> {
+    AllocationScope::begin(guard, resident_bytes, allowed_slack).map_err(AllocationFailure::Aborted)
 }
 
 pub(crate) fn try_reserve_vec<T>(
@@ -67,7 +63,7 @@ pub(crate) fn try_reserve_vec<T>(
         return Ok(());
     }
     let new_capacity = geometric_capacity(values.capacity(), required, 4, label)?;
-    authorize(guard, checked_array_bytes::<T>(new_capacity)?)?;
+    let _scope = scope(guard, checked_array_bytes::<T>(new_capacity)?, 0)?;
     values
         .try_reserve_exact(new_capacity - values.len())
         .map_err(|_| AllocationFailure::Failed(label))
@@ -87,9 +83,10 @@ pub(crate) fn try_reserve_string(
         return Ok(());
     }
     let new_capacity = geometric_capacity(value.capacity(), required, 8, label)?;
-    authorize(
+    let _scope = scope(
         guard,
         u64::try_from(new_capacity).map_err(|_| AllocationFailure::Overflow(label))?,
+        0,
     )?;
     value
         .try_reserve_exact(new_capacity - value.len())
@@ -149,9 +146,10 @@ pub(crate) fn try_box<T>(
     label: &'static str,
 ) -> Result<Box<T>, AllocationFailure> {
     let layout = Layout::new::<T>();
-    authorize(
+    let _scope = scope(
         guard,
         u64::try_from(layout.size()).map_err(|_| AllocationFailure::Overflow(label))?,
+        0,
     )?;
     if layout.size() == 0 {
         return Ok(Box::new(value));
@@ -169,12 +167,12 @@ pub(crate) fn try_box<T>(
     }
 }
 
-fn hash_table_bound<K, V>(len: usize, additional: usize) -> Result<u64, AllocationFailure> {
+fn hash_table_bound<K, V>(len: usize, additional: usize) -> Result<(u64, u64), AllocationFailure> {
     let required = len
         .checked_add(additional)
         .ok_or(AllocationFailure::Overflow("hash table entry count"))?;
     if required == 0 {
-        return Ok(0);
+        return Ok((0, 0));
     }
     // hashbrown uses four buckets for 1--3 entries, eight for 4--7, then keeps at
     // most a 7/8 load. Its single allocation is the bucket array, alignment
@@ -195,12 +193,17 @@ fn hash_table_bound<K, V>(len: usize, additional: usize) -> Result<u64, Allocati
         .checked_mul(size_of::<(K, V)>())
         .ok_or(AllocationFailure::Overflow("hash table bucket bytes"))?;
     let alignment_slack = align_of::<(K, V)>().saturating_sub(1);
-    bucket_bytes
+    let bytes = bucket_bytes
         .checked_add(alignment_slack)
         .and_then(|bytes| bytes.checked_add(buckets))
         .and_then(|bytes| bytes.checked_add(16))
         .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or(AllocationFailure::Overflow("hash table byte count"))
+        .ok_or(AllocationFailure::Overflow("hash table byte count"))?;
+    Ok((
+        bytes,
+        u64::try_from(alignment_slack)
+            .map_err(|_| AllocationFailure::Overflow("hash table alignment slack"))?,
+    ))
 }
 
 pub(crate) fn try_reserve_hash_map<K, V, S>(
@@ -216,7 +219,8 @@ where
     if additional == 0 || values.capacity().saturating_sub(values.len()) >= additional {
         return Ok(());
     }
-    authorize(guard, hash_table_bound::<K, V>(values.len(), additional)?)?;
+    let (bytes, allowed_slack) = hash_table_bound::<K, V>(values.len(), additional)?;
+    let _scope = scope(guard, bytes, allowed_slack)?;
     values
         .try_reserve(additional)
         .map_err(|_| AllocationFailure::Failed(label))
@@ -235,7 +239,8 @@ where
     if additional == 0 || values.capacity().saturating_sub(values.len()) >= additional {
         return Ok(());
     }
-    authorize(guard, hash_table_bound::<K, ()>(values.len(), additional)?)?;
+    let (bytes, allowed_slack) = hash_table_bound::<K, ()>(values.len(), additional)?;
+    let _scope = scope(guard, bytes, allowed_slack)?;
     values
         .try_reserve(additional)
         .map_err(|_| AllocationFailure::Failed(label))
@@ -293,10 +298,11 @@ pub(crate) mod tests {
     use std::{
         alloc::{GlobalAlloc, Layout, System},
         cell::Cell,
-        sync::atomic::{AtomicU64, Ordering},
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
-    use super::{authorize, payload_decode_upper_bound};
+    use super::{payload_decode_upper_bound, scope};
     use qtrace_provider::{
         BeginMetadata, CaptureBytes, CompletenessCause, CompletenessRange, CoverageGap,
         Discontinuity, DiscontinuityCause, EventKind, EventPayload, Instruction,
@@ -311,8 +317,12 @@ pub(crate) mod tests {
     #[derive(Clone, Copy, Default)]
     struct DecodeOracle {
         active: bool,
+        scope_active: bool,
         credit: u64,
+        allowed_slack: u64,
         unauthorized: u64,
+        scope_violations: u64,
+        nested_scopes: u64,
         sizes: [usize; 16],
         ordinals: [usize; 16],
         size_len: usize,
@@ -322,8 +332,12 @@ pub(crate) mod tests {
     thread_local! {
         static DECODE_ORACLE: Cell<DecodeOracle> = const { Cell::new(DecodeOracle {
             active: false,
+            scope_active: false,
             credit: 0,
+            allowed_slack: 0,
             unauthorized: 0,
+            scope_violations: 0,
+            nested_scopes: 0,
             sizes: [0; 16],
             ordinals: [0; 16],
             size_len: 0,
@@ -369,7 +383,7 @@ pub(crate) mod tests {
             let mut state = slot.get();
             if state.active {
                 let bytes = bytes as u64;
-                if bytes <= state.credit {
+                if state.scope_active && bytes <= state.credit {
                     state.credit -= bytes;
                 } else {
                     state.unauthorized += 1;
@@ -392,13 +406,42 @@ pub(crate) mod tests {
                 let mut state = slot.get();
                 if delta.resident_bytes > 0 {
                     state.ordinal += 1;
-                    // Each authorization is scoped to the immediately following container or
-                    // decode operation. Discard prior slack instead of pooling it globally.
-                    state.credit = delta.resident_bytes;
                 }
                 slot.set(state);
             });
             Ok(())
+        }
+
+        fn begin_allocation_scope(
+            &self,
+            delta: WorkDelta,
+            allowed_slack: u64,
+        ) -> Result<(), OperationAbort> {
+            self.consume(delta)?;
+            DECODE_ORACLE.with(|slot| {
+                let mut state = slot.get();
+                if state.scope_active {
+                    state.nested_scopes += 1;
+                }
+                state.scope_active = true;
+                state.credit = delta.resident_bytes;
+                state.allowed_slack = allowed_slack;
+                slot.set(state);
+            });
+            Ok(())
+        }
+
+        fn end_allocation_scope(&self) {
+            DECODE_ORACLE.with(|slot| {
+                let mut state = slot.get();
+                if !state.scope_active || state.credit > state.allowed_slack {
+                    state.scope_violations += 1;
+                }
+                state.scope_active = false;
+                state.credit = 0;
+                state.allowed_slack = 0;
+                slot.set(state);
+            });
         }
     }
 
@@ -416,6 +459,8 @@ pub(crate) mod tests {
             let mut state = slot.get();
             state.active = false;
             slot.set(state);
+            assert_eq!(state.nested_scopes, 0, "allocation scopes must not nest");
+            assert_eq!(state.scope_violations, 0, "allocation scope slack bound");
             state.unauthorized
         })
     }
@@ -509,8 +554,18 @@ pub(crate) mod tests {
             vector_charges[2] < 20_000 * 8 * 4,
             "20k probe must not contain quadratic allocation work"
         );
-        let ten_million_final = 10_000_000_u64 * 8;
-        assert!(ten_million_final.checked_mul(2).expect("10m arithmetic") < 160_000_001);
+        let mut capacity = 0_usize;
+        let mut ten_million_series = 0_u64;
+        while capacity < 10_000_000 {
+            capacity = super::geometric_capacity(capacity, capacity + 1, 4, "10m geometry")
+                .expect("10m capacity");
+            ten_million_series = ten_million_series
+                .checked_add((capacity * std::mem::size_of::<u64>()) as u64)
+                .expect("10m allocation-work series");
+        }
+        assert_eq!(capacity, 16_777_216);
+        let terminal_layout = (capacity * std::mem::size_of::<u64>()) as u64;
+        assert!(ten_million_series < terminal_layout * 2);
     }
 
     #[test]
@@ -522,7 +577,7 @@ pub(crate) mod tests {
         assert!(charges[1] <= charges[0] * 2 + 4096);
         assert!(charges[2] <= charges[1] * 2 + 4096);
         assert!(charges[2] < 64 * 1024 * 1024);
-        let ten_million =
+        let (ten_million, _) =
             super::hash_table_bound::<u64, u64>(0, 10_000_000).expect("10m hash-table arithmetic");
         assert!(ten_million < 512 * 1024 * 1024);
 
@@ -543,6 +598,72 @@ pub(crate) mod tests {
             &ordinals[..length]
         );
         assert_eq!(values.len(), 20_000);
+    }
+
+    #[test]
+    fn hash_reserve_scope_does_not_authorize_later_vec_growth() {
+        let mut values = std::collections::HashMap::<u64, u64>::new();
+        activate_allocation_oracle();
+        super::try_reserve_hash_map(&mut values, 1, &DecodeGuard, "hash scope")
+            .expect("guarded hash reserve");
+        values.insert(1, 1);
+
+        let mut unscoped = Vec::<u8>::new();
+        unscoped
+            .try_reserve_exact(4)
+            .expect("unscoped vector reserve");
+
+        assert_eq!(
+            finish_allocation_oracle(),
+            1,
+            "unused hash-table authorization must be cleared when its operation ends"
+        );
+    }
+
+    struct ScopeLifecycleGuard {
+        begins: AtomicUsize,
+        ends: AtomicUsize,
+    }
+
+    impl WorkGuard for ScopeLifecycleGuard {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+            Ok(())
+        }
+
+        fn begin_allocation_scope(
+            &self,
+            _delta: WorkDelta,
+            _allowed_slack: u64,
+        ) -> Result<(), OperationAbort> {
+            self.begins.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn end_allocation_scope(&self) {
+            self.ends.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn allocation_scope_drop_closes_during_error_and_panic_unwind() {
+        let guard = ScopeLifecycleGuard {
+            begins: AtomicUsize::new(0),
+            ends: AtomicUsize::new(0),
+        };
+        let error_path = || -> Result<(), super::AllocationFailure> {
+            let _scope = super::scope(&guard, 8, 8)?;
+            Err(super::AllocationFailure::Failed(
+                "injected operation failure",
+            ))
+        };
+        assert!(error_path().is_err());
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _scope = super::scope(&guard, 8, 8).expect("panic scope");
+            panic!("injected operation panic");
+        }));
+        assert!(panic.is_err());
+        assert_eq!(guard.begins.load(Ordering::Relaxed), 2);
+        assert_eq!(guard.ends.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -726,12 +847,12 @@ pub(crate) mod tests {
         for payload in payloads {
             let encoded = serde_json::to_vec(&payload).expect("canonical payload");
             activate_allocation_oracle();
-            authorize(
-                &DecodeGuard,
-                payload_decode_upper_bound(payload.kind(), encoded.len()).expect("bound"),
-            )
-            .expect("authorize");
-            let decoded: EventPayload = serde_json::from_slice(&encoded).expect("decode");
+            let decoded: EventPayload = {
+                let bytes =
+                    payload_decode_upper_bound(payload.kind(), encoded.len()).expect("bound");
+                let _scope = scope(&DecodeGuard, bytes, bytes).expect("authorize");
+                serde_json::from_slice(&encoded).expect("decode")
+            };
             let unauthorized = finish_allocation_oracle();
             let (sizes, ordinals, length) = allocation_oracle_sizes();
             assert_eq!(decoded, payload);

@@ -670,27 +670,18 @@ fn session_timelines(
     timelines: &[TimelineDescriptor],
     guard: &dyn WorkGuard,
 ) -> Result<Vec<TimelineDescriptor>, ProviderError> {
-    let labels = timelines
-        .iter()
-        .try_fold(0_u64, |total, timeline| {
-            total.checked_add(
-                timeline
-                    .label
-                    .as_ref()
-                    .map_or(0, |label| label.len() as u64),
-            )
-        })
-        .ok_or_else(|| resource_error("timeline label byte count overflow"))?;
-    let resident_bytes = (timelines.len() as u64)
-        .checked_mul(size_of::<TimelineDescriptor>() as u64)
-        .and_then(|bytes| bytes.checked_add(labels))
-        .ok_or_else(|| resource_error("timeline allocation size overflow"))?;
     guard.consume(WorkDelta {
         nodes: timelines.len() as u64,
-        resident_bytes,
         ..WorkDelta::default()
     })?;
-    let mut output = fallible_vec(timelines.len())?;
+    let mut output = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut output,
+        timelines.len(),
+        guard,
+        "session timeline allocation",
+    )
+    .map_err(provider_allocation_error)?;
     for timeline in timelines {
         output.push(TimelineDescriptor {
             id: if format.is_qtrb() {
@@ -699,7 +690,11 @@ fn session_timelines(
                 timeline.id
             },
             tid: timeline.tid,
-            label: timeline.label.as_deref().map(fallible_string).transpose()?,
+            label: timeline
+                .label
+                .as_deref()
+                .map(|label| guarded_provider_string(label, guard))
+                .transpose()?,
         });
     }
     Ok(output)
@@ -884,15 +879,6 @@ fn fallible_vec<T>(capacity: usize) -> Result<Vec<T>, ProviderError> {
     output
         .try_reserve_exact(capacity)
         .map_err(|_| resource_error("session allocation failed"))?;
-    Ok(output)
-}
-
-fn fallible_string(value: &str) -> Result<String, ProviderError> {
-    let mut output = String::new();
-    output
-        .try_reserve_exact(value.len())
-        .map_err(|_| resource_error("session string allocation failed"))?;
-    output.push_str(value);
     Ok(output)
 }
 

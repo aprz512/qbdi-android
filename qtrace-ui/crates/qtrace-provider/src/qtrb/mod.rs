@@ -11,16 +11,17 @@ pub use events::{
 };
 pub use input::QtrbInput;
 
-use std::{collections::HashMap, fmt, mem::size_of, sync::Arc};
+use std::{collections::HashMap, fmt, mem::size_of, ops::Deref, sync::Arc};
 
 use cursor::PayloadCursor;
 use wire::{RecordType, *};
 
 use crate::{
-    CompletenessCause, CompletenessRange, EventCursor, EventKey, EventPayload, EventRecord,
-    ModuleDefinition, OpaqueOptionalRecord, Provenance, ProviderCapabilities, ProviderCounters,
-    ProviderError, ProviderSummary, ReadAtSource, SemanticEvent, SourceCoordinate, SourceIdentity,
-    TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
+    AllocationScope, CompletenessCause, CompletenessRange, EventCursor, EventKey, EventPayload,
+    EventRecord, ModuleDefinition, OpaqueOptionalRecord, Provenance, ProviderCapabilities,
+    ProviderCounters, ProviderError, ProviderSummary, ReadAtSource, SemanticEvent,
+    SourceCoordinate, SourceIdentity, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta,
+    WorkGuard,
 };
 
 const TIMELINE_ID: TimelineId = TimelineId(0);
@@ -74,16 +75,15 @@ impl QtrbProvider {
         identity.format_major = MAJOR_VERSION;
         identity.format_minor = header.minor;
         identity.source_bytes = source_bytes;
-        let timeline_resident = size_of::<QtrbEventCursor>()
-            .checked_add(size_of::<TimelineDescriptor>())
-            .and_then(|bytes| bytes.checked_add(4))
+        let timeline_resident = size_of::<TimelineDescriptor>()
+            .checked_add(4)
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or_else(|| provider_allocation_error("QTRB provider allocation bound overflow"))?;
         guard.consume(WorkDelta {
             nodes: 1,
-            resident_bytes: timeline_resident,
             ..WorkDelta::default()
         })?;
+        let _scope = AllocationScope::begin(guard, timeline_resident, 0)?;
         let mut timelines = Vec::new();
         timelines
             .try_reserve_exact(1)
@@ -291,6 +291,29 @@ struct PhysicalRecord {
     ordinal: u64,
 }
 
+struct ScopedPhysicalRecord<'a> {
+    record: Option<PhysicalRecord>,
+    _scope: AllocationScope<'a>,
+}
+
+impl ScopedPhysicalRecord<'_> {
+    fn take(&mut self) -> PhysicalRecord {
+        self.record
+            .take()
+            .expect("scoped physical record taken once")
+    }
+}
+
+impl Deref for ScopedPhysicalRecord<'_> {
+    type Target = PhysicalRecord;
+
+    fn deref(&self) -> &Self::Target {
+        self.record
+            .as_ref()
+            .expect("scoped physical record present")
+    }
+}
+
 fn provider_allocation_error(detail: &'static str) -> ProviderError {
     ProviderError::new(
         "control.resource_exhausted",
@@ -465,7 +488,7 @@ impl QtrbEventCursor {
                 ));
             }
 
-            let record = self.read_record(guard)?;
+            let mut record = self.read_record(guard)?;
             if !self.began && record.record_type != Some(RecordType::TraceBegin) {
                 return Err(self.record_error(
                     &record,
@@ -490,7 +513,7 @@ impl QtrbEventCursor {
                 }
             }
 
-            let event = self.decode_record(record, guard)?;
+            let event = self.decode_record(record.take(), guard)?;
             if let Some(event) = event {
                 guard.consume(WorkDelta {
                     events: 1,
@@ -525,17 +548,15 @@ impl QtrbEventCursor {
             usize::from(!self.terminal_seen && self.mode == OpenMode::RecoverablePartial)
                 .checked_add(1)
                 .ok_or_else(|| provider_allocation_error("QTRB completeness count overflow"))?;
-        guard.consume(WorkDelta {
-            resident_bytes: u64::try_from(
-                completeness_count
-                    .checked_mul(size_of::<CompletenessRange>())
-                    .ok_or_else(|| {
-                        provider_allocation_error("QTRB completeness allocation overflow")
-                    })?,
-            )
-            .map_err(|_| provider_allocation_error("QTRB completeness allocation overflow"))?,
-            ..WorkDelta::default()
-        })?;
+        let completeness_bytes = u64::try_from(
+            completeness_count
+                .checked_mul(size_of::<CompletenessRange>())
+                .ok_or_else(|| {
+                    provider_allocation_error("QTRB completeness allocation overflow")
+                })?,
+        )
+        .map_err(|_| provider_allocation_error("QTRB completeness allocation overflow"))?;
+        let _scope = AllocationScope::begin(guard, completeness_bytes, 0)?;
         self.completeness
             .try_reserve_exact(completeness_count)
             .map_err(|_| provider_allocation_error("QTRB completeness allocation failed"))?;
@@ -588,7 +609,10 @@ impl QtrbEventCursor {
         Ok(())
     }
 
-    fn read_record(&mut self, guard: &dyn WorkGuard) -> Result<PhysicalRecord, ProviderError> {
+    fn read_record<'a>(
+        &mut self,
+        guard: &'a dyn WorkGuard,
+    ) -> Result<ScopedPhysicalRecord<'a>, ProviderError> {
         let record_offset = self.offset;
         let ordinal = self.next_ordinal;
         let coordinate = SourceCoordinate {
@@ -662,13 +686,18 @@ impl QtrbEventCursor {
                 "record payload cannot be represented on this host",
             )
         })?;
-        guard.consume(WorkDelta {
-            input_bytes: u64::from(payload_bytes),
-            decompressed_bytes: u64::from(payload_bytes),
-            nodes: record_node_upper_bound(record_type, flags, self.pending.is_none()),
-            resident_bytes: record_resident_upper_bound(record_type, flags, payload_bytes),
-            ..WorkDelta::default()
-        })?;
+        let resident = record_resident_upper_bound(record_type, flags, payload_bytes);
+        let scope = AllocationScope::begin_with_delta(
+            guard,
+            WorkDelta {
+                input_bytes: u64::from(payload_bytes),
+                decompressed_bytes: u64::from(payload_bytes),
+                nodes: record_node_upper_bound(record_type, flags, self.pending.is_none()),
+                resident_bytes: resident,
+                ..WorkDelta::default()
+            },
+            resident,
+        )?;
         let mut payload = vec![0_u8; payload_len];
         self.source
             .read_exact_at(self.offset, &mut payload)
@@ -692,13 +721,16 @@ impl QtrbEventCursor {
             .counters
             .decompressed_bytes
             .saturating_add(RECORD_HEADER_BYTES as u64 + u64::from(payload_bytes));
-        Ok(PhysicalRecord {
-            record_type,
-            raw_type,
-            flags,
-            payload,
-            offset: record_offset,
-            ordinal,
+        Ok(ScopedPhysicalRecord {
+            record: Some(PhysicalRecord {
+                record_type,
+                raw_type,
+                flags,
+                payload,
+                offset: record_offset,
+                ordinal,
+            }),
+            _scope: scope,
         })
     }
 

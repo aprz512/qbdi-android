@@ -52,6 +52,60 @@ pub enum EventKind {
     OpaqueOptional,
 }
 
+impl EventKind {
+    pub const ALL: [Self; 19] = [
+        Self::Begin,
+        Self::ModuleDefinition,
+        Self::InstructionDefinition,
+        Self::Instruction,
+        Self::Memory,
+        Self::SemanticCall,
+        Self::SemanticRule,
+        Self::SemanticError,
+        Self::ThreadLifecycle,
+        Self::Syscall,
+        Self::Signal,
+        Self::SignalHandlerBoundary,
+        Self::Termination,
+        Self::RegisterCheckpoint,
+        Self::RegisterDelta,
+        Self::StringDefinition,
+        Self::CoverageGap,
+        Self::Discontinuity,
+        Self::OpaqueOptional,
+    ];
+
+    pub const fn external_tag(self) -> &'static [u8] {
+        match self {
+            Self::Begin => b"begin",
+            Self::ModuleDefinition => b"module_definition",
+            Self::InstructionDefinition => b"instruction_definition",
+            Self::Instruction => b"instruction",
+            Self::Memory => b"memory",
+            Self::SemanticCall => b"semantic_call",
+            Self::SemanticRule => b"semantic_rule",
+            Self::SemanticError => b"semantic_error",
+            Self::ThreadLifecycle => b"thread_lifecycle",
+            Self::Syscall => b"syscall",
+            Self::Signal => b"signal",
+            Self::SignalHandlerBoundary => b"signal_handler_boundary",
+            Self::Termination => b"termination",
+            Self::RegisterCheckpoint => b"register_checkpoint",
+            Self::RegisterDelta => b"register_delta",
+            Self::StringDefinition => b"string_definition",
+            Self::CoverageGap => b"coverage_gap",
+            Self::Discontinuity => b"discontinuity",
+            Self::OpaqueOptional => b"opaque_optional",
+        }
+    }
+
+    pub fn from_external_tag(tag: &[u8]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.external_tag() == tag)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModuleDefinition {
     pub module_id: u32,
@@ -76,23 +130,39 @@ impl Serialize for SemanticDefinition<'_> {
     where
         S: Serializer,
     {
-        let definition = self.0;
+        let InstructionDefinition {
+            definition_id: _,
+            opcode,
+            read_mask,
+            write_mask,
+            pc_displacement,
+            flags,
+            pc_kind,
+            condition,
+            slow_memory_path,
+            mnemonic,
+            operands,
+            disassembly,
+            reads,
+            writes,
+            memory_operands,
+        } = self.0;
         let mut state = serializer.serialize_struct("InstructionDefinition", 15)?;
         state.serialize_field("definition_id", &0_u32)?;
-        state.serialize_field("opcode", &definition.opcode)?;
-        state.serialize_field("read_mask", &definition.read_mask)?;
-        state.serialize_field("write_mask", &definition.write_mask)?;
-        state.serialize_field("pc_displacement", &definition.pc_displacement)?;
-        state.serialize_field("flags", &definition.flags)?;
-        state.serialize_field("pc_kind", &definition.pc_kind)?;
-        state.serialize_field("condition", &definition.condition)?;
-        state.serialize_field("slow_memory_path", &definition.slow_memory_path)?;
-        state.serialize_field("mnemonic", &definition.mnemonic)?;
-        state.serialize_field("operands", &definition.operands)?;
-        state.serialize_field("disassembly", &definition.disassembly)?;
-        state.serialize_field("reads", &definition.reads)?;
-        state.serialize_field("writes", &definition.writes)?;
-        state.serialize_field("memory_operands", &definition.memory_operands)?;
+        state.serialize_field("opcode", opcode)?;
+        state.serialize_field("read_mask", read_mask)?;
+        state.serialize_field("write_mask", write_mask)?;
+        state.serialize_field("pc_displacement", pc_displacement)?;
+        state.serialize_field("flags", flags)?;
+        state.serialize_field("pc_kind", pc_kind)?;
+        state.serialize_field("condition", condition)?;
+        state.serialize_field("slow_memory_path", slow_memory_path)?;
+        state.serialize_field("mnemonic", mnemonic)?;
+        state.serialize_field("operands", operands)?;
+        state.serialize_field("disassembly", disassembly)?;
+        state.serialize_field("reads", reads)?;
+        state.serialize_field("writes", writes)?;
+        state.serialize_field("memory_operands", memory_operands)?;
         state.end()
     }
 }

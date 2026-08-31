@@ -6,9 +6,9 @@ mod wire;
 use std::{collections::HashMap, fmt, mem::size_of, sync::Arc, vec};
 
 use crate::{
-    EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS, ProviderCapabilities, ProviderError,
-    ProviderSummary, ReadAtSource, RegisterSnapshot, SourceIdentity, TimelineDescriptor,
-    TimelineId, TraceProvider, WorkDelta, WorkGuard,
+    AllocationScope, EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS,
+    ProviderCapabilities, ProviderError, ProviderSummary, ReadAtSource, RegisterSnapshot,
+    SourceIdentity, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
 };
 
 pub use wire::{
@@ -69,46 +69,25 @@ impl FlightProvider {
         mut identity: SourceIdentity,
         guard: &dyn WorkGuard,
     ) -> Result<Self, ProviderError> {
-        let recovered = recovery::recover(source, identity.artifact, guard)?;
+        let mut recovered = recovery::recover(source, identity.artifact, guard)?;
         let projection_nodes = recovered.tids.len().saturating_add(1) as u64;
-        let projection_count = recovered.tids.len() as u64;
-        let key_count = recovered.events.len() as u64;
         guard.consume(WorkDelta {
             nodes: projection_nodes,
-            resident_bytes: key_count
-                .saturating_mul((size_of::<EventKey>() as u64).saturating_mul(4))
-                .saturating_add(
-                    projection_nodes
-                        .saturating_mul((size_of::<TimelineDescriptor>() as u64).saturating_mul(2)),
-                )
-                .saturating_add(
-                    projection_count.saturating_mul(size_of::<FlightProjectionDescriptor>() as u64),
-                )
-                .saturating_add(projection_count.saturating_mul(
-                    ((size_of::<u32>() + size_of::<usize>()) as u64).saturating_mul(4),
-                ))
-                .saturating_add(
-                    projection_count
-                        .saturating_mul(crate::RegisterSlot::COUNT as u64)
-                        .saturating_mul(size_of::<u64>() as u64)
-                        .saturating_mul(2),
-                )
-                .saturating_add(18),
             ..WorkDelta::default()
         })?;
 
-        identity.format = fallible_string("Flight")?;
+        identity.format = fallible_string("Flight", guard)?;
         identity.format_major = 2;
         identity.format_minor = 0;
         identity.source_bytes = recovered.source_bytes;
-        let mut timelines = fallible_vec(recovered.tids.len().saturating_add(1))?;
+        let mut timelines = fallible_vec(recovered.tids.len().saturating_add(1), guard)?;
         timelines.push(TimelineDescriptor {
             id: recovery::MERGED_TIMELINE_ID,
             tid: None,
-            label: Some(fallible_string("Flight")?),
+            label: Some(fallible_string("Flight", guard)?),
         });
-        let mut projections = fallible_vec(recovered.tids.len())?;
-        let mut projection_by_tid = fallible_hash_map(recovered.tids.len())?;
+        let mut projections = fallible_vec(recovered.tids.len(), guard)?;
+        let mut projection_by_tid = fallible_hash_map(recovered.tids.len(), guard)?;
         for (index, tid) in recovered.tids.iter().copied().enumerate() {
             guard_checkpoint(guard, index)?;
             let timeline = TimelineDescriptor {
@@ -126,11 +105,35 @@ impl FlightProvider {
                 tid,
                 timeline,
                 event_keys: Vec::new(),
-                final_registers: recovered.final_registers.get(&tid).cloned(),
+                final_registers: recovered.final_registers.remove(&tid),
             });
             if projection_by_tid.insert(tid, index).is_some() {
                 return Err(resource_error("duplicate Flight projection TID"));
             }
+        }
+        let mut projection_counts = fallible_vec(projections.len(), guard)?;
+        projection_counts.resize(projections.len(), 0_usize);
+        for (event_index, event) in recovered.events.iter().enumerate() {
+            guard_checkpoint(guard, event_index)?;
+            let Some(tid) = event.key.tid else {
+                continue;
+            };
+            let index = projection_by_tid
+                .get(&tid)
+                .copied()
+                .ok_or_else(|| resource_error("Flight event projection TID is missing"))?;
+            let count = projection_counts
+                .get_mut(index)
+                .ok_or_else(|| resource_error("Flight projection count index is invalid"))?;
+            *count = count
+                .checked_add(1)
+                .ok_or_else(|| resource_error("Flight projection event count overflow"))?;
+        }
+        for (index, (projection, count)) in
+            projections.iter_mut().zip(projection_counts).enumerate()
+        {
+            guard_checkpoint(guard, index)?;
+            reserve_vec_exact(&mut projection.event_keys, count, guard)?;
         }
         for (event_index, event) in recovered.events.iter().enumerate() {
             guard_checkpoint(guard, event_index)?;
@@ -144,15 +147,19 @@ impl FlightProvider {
             let projection = projections
                 .get_mut(index)
                 .ok_or_else(|| resource_error("Flight projection index is invalid"))?;
-            fallible_push(&mut projection.event_keys, event.key.clone())?;
+            fallible_push(&mut projection.event_keys, event.key.clone(), guard)?;
         }
-        let mut summary_timelines = fallible_vec(timelines.len())?;
+        let mut summary_timelines = fallible_vec(timelines.len(), guard)?;
         for (index, timeline) in timelines.iter().enumerate() {
             guard_checkpoint(guard, index)?;
             summary_timelines.push(TimelineDescriptor {
                 id: timeline.id,
                 tid: timeline.tid,
-                label: timeline.label.as_deref().map(fallible_string).transpose()?,
+                label: timeline
+                    .label
+                    .as_deref()
+                    .map(|label| fallible_string(label, guard))
+                    .transpose()?,
             });
         }
         let summary = ProviderSummary {
@@ -267,7 +274,12 @@ impl EventCursor for FlightCursor {
     }
 }
 
-fn fallible_vec<T>(capacity: usize) -> Result<Vec<T>, ProviderError> {
+fn fallible_vec<T>(capacity: usize, guard: &dyn WorkGuard) -> Result<Vec<T>, ProviderError> {
+    let bytes = capacity
+        .checked_mul(size_of::<T>())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| resource_error("Flight vector allocation bound overflow"))?;
+    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
     let mut output = Vec::new();
     output
         .try_reserve_exact(capacity)
@@ -275,10 +287,19 @@ fn fallible_vec<T>(capacity: usize) -> Result<Vec<T>, ProviderError> {
     Ok(output)
 }
 
-fn fallible_hash_map<K, V>(capacity: usize) -> Result<HashMap<K, V>, ProviderError>
+fn fallible_hash_map<K, V>(
+    capacity: usize,
+    guard: &dyn WorkGuard,
+) -> Result<HashMap<K, V>, ProviderError>
 where
     K: Eq + std::hash::Hash,
 {
+    let bytes = capacity
+        .checked_mul(size_of::<K>().saturating_add(size_of::<V>()))
+        .and_then(|value| value.checked_mul(4))
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| resource_error("Flight hash allocation bound overflow"))?;
+    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
     let mut output = HashMap::new();
     output
         .try_reserve(capacity)
@@ -286,8 +307,22 @@ where
     Ok(output)
 }
 
-fn fallible_push<T>(output: &mut Vec<T>, value: T) -> Result<(), ProviderError> {
+fn fallible_push<T>(
+    output: &mut Vec<T>,
+    value: T,
+    guard: &dyn WorkGuard,
+) -> Result<(), ProviderError> {
     if output.len() == output.capacity() {
+        let new_capacity = output
+            .capacity()
+            .checked_mul(2)
+            .map(|capacity| capacity.max(4))
+            .ok_or_else(|| resource_error("Flight vector capacity overflow"))?;
+        let bytes = new_capacity
+            .checked_mul(size_of::<T>())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| resource_error("Flight vector layout overflow"))?;
+        let _scope = AllocationScope::begin(guard, bytes, bytes)?;
         output
             .try_reserve_exact(output.capacity().max(4))
             .map_err(|_| resource_error("Flight provider allocation failed"))?;
@@ -296,7 +331,27 @@ fn fallible_push<T>(output: &mut Vec<T>, value: T) -> Result<(), ProviderError> 
     Ok(())
 }
 
-fn fallible_string(value: &str) -> Result<String, ProviderError> {
+fn reserve_vec_exact<T>(
+    output: &mut Vec<T>,
+    capacity: usize,
+    guard: &dyn WorkGuard,
+) -> Result<(), ProviderError> {
+    if capacity <= output.capacity() {
+        return Ok(());
+    }
+    let bytes = capacity
+        .checked_mul(size_of::<T>())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| resource_error("Flight vector layout overflow"))?;
+    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
+    output
+        .try_reserve_exact(capacity - output.len())
+        .map_err(|_| resource_error("Flight provider allocation failed"))
+}
+
+fn fallible_string(value: &str, guard: &dyn WorkGuard) -> Result<String, ProviderError> {
+    let bytes = value.len() as u64;
+    let _scope = AllocationScope::begin(guard, bytes, bytes)?;
     let mut output = String::new();
     output
         .try_reserve_exact(value.len())

@@ -7,7 +7,9 @@ use std::{
     sync::Arc,
 };
 
-use qtrace_provider::{ProviderError, ReadAtSource, SourceCoordinate, WorkDelta, WorkGuard};
+use qtrace_provider::{
+    AllocationScope, ProviderError, ReadAtSource, SourceCoordinate, WorkDelta, WorkGuard,
+};
 use rustix::fs::{FileType as RustixFileType, Mode, OFlags, Stat, fstat, open, openat};
 use rustix::io::Errno;
 
@@ -282,10 +284,7 @@ impl SecureFile {
             .checked_add(3 * size_of::<usize>())
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or_else(|| resource_error("file-source allocation bound overflow"))?;
-        guard.consume(WorkDelta {
-            resident_bytes: resident,
-            ..WorkDelta::default()
-        })?;
+        let _scope = AllocationScope::begin(guard, resident, size_of::<usize>() as u64)?;
         Ok(Arc::new(FileSource {
             file: self.file.clone(),
             length,

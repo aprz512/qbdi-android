@@ -67,4 +67,56 @@ impl Error for OperationAbort {}
 
 pub trait WorkGuard: Send + Sync {
     fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort>;
+
+    /// Authorizes one immediately-following heap-allocation operation.
+    ///
+    /// Implementations that observe allocator requests may override this hook to bind the
+    /// authorization to a scope. The default preserves the ordinary cumulative budget contract.
+    fn begin_allocation_scope(
+        &self,
+        delta: WorkDelta,
+        _allowed_slack: u64,
+    ) -> Result<(), OperationAbort> {
+        self.consume(delta)
+    }
+
+    /// Closes the allocation operation opened by `begin_allocation_scope`.
+    fn end_allocation_scope(&self) {}
+}
+
+/// Stack-only RAII boundary for one authorized heap-allocation operation.
+pub struct AllocationScope<'a> {
+    guard: &'a dyn WorkGuard,
+}
+
+impl<'a> AllocationScope<'a> {
+    pub fn begin(
+        guard: &'a dyn WorkGuard,
+        resident_bytes: u64,
+        allowed_slack: u64,
+    ) -> Result<Self, OperationAbort> {
+        Self::begin_with_delta(
+            guard,
+            WorkDelta {
+                resident_bytes,
+                ..WorkDelta::default()
+            },
+            allowed_slack,
+        )
+    }
+
+    pub fn begin_with_delta(
+        guard: &'a dyn WorkGuard,
+        delta: WorkDelta,
+        allowed_slack: u64,
+    ) -> Result<Self, OperationAbort> {
+        guard.begin_allocation_scope(delta, allowed_slack)?;
+        Ok(Self { guard })
+    }
+}
+
+impl Drop for AllocationScope<'_> {
+    fn drop(&mut self) {
+        self.guard.end_allocation_scope();
+    }
 }

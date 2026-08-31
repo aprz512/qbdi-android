@@ -183,6 +183,24 @@ pre-change `806b…e32b` golden key is found, held-FD identity checked, and open
   first performs the zero-allocation external-tag/base-kind pass, counts only verified
   `Discontinuity` rows, then authorizes and reserves exactly that many rows. The guard is cumulative:
   successful allocations consume authorization; deallocation never credits it back.
+- Allocation authorization is an explicit stack-only RAII operation. `AllocationScope::begin`
+  first submits the complete `WorkDelta`; a rejected guard returns before any scope/token becomes
+  active. Only then may the immediately enclosed reserve, box, hash-table growth, or serde decode
+  allocate. `Drop` always closes the scope on `?`, ordinary error, and panic unwind, clears unused
+  credit, and never turns slack mismatch into a second panic. The isolated oracle records mismatch
+  as fixed TLS state. Nested scopes are forbidden and observed as a test failure; successful warm
+  and cold runs contain none. QTRB keeps its established combined input/decompressed/node/resident
+  authorization by holding one `ScopedPhysicalRecord` allocation scope across payload read and
+  typed decode. The added Flight cold oracle initially exposed 237 scope-external requests. Flight
+  recovery now scopes metadata, exact damage/discontinuity scratch, full geometric Vec layouts,
+  hash/radix/payload work, typed decode, and projection storage; the oracle is zero. Typed Flight
+  decode has no all-row constant allowance: fixed output families are charged from their concrete
+  element layouts, while definition/string state maps and fragment grouping are charged only after
+  a zero-allocation pass counts those closed record tags. Their complete-entry factors include the
+  first hash/B-tree bucket/node, control/alignment, and the full geometric request series. Projection
+  keys use two passes (per-TID count, one exact reserve, append), and final register snapshots move
+  from recovery into projections instead of being cloned. The 8,192-event/128-TID provider gate
+  remains below its 640-checkpoint ceiling.
 - Canonical payload serialization is two-pass: the first pass counts exact bytes without an output
   allocation, then the guarded output reserves exactly that count. Decode authorization is by the
   closed `EventKind`, with no fixed per-row tax: fixed/no-heap variants use `1 * encoded`; byte/string
@@ -246,26 +264,37 @@ pre-change `806b…e32b` golden key is found, held-FD identity checked, and open
   remains (the persistent cooperative lock is allowed).
 
 The allocation oracle is an isolated test-process global allocator with a thread-local active
-phase. Test-harness/setup allocations occur while the phase is inactive. Each resident `WorkDelta`
-creates one operation-local token, replacing rather than pooling any earlier slack; the immediately
-following `alloc` or growth `realloc` consumes its complete requested layout. A dedicated 8-to-16
-byte realloc test proves that the full 16-byte request is required even when the system allocator
-could extend in place, and a stale 1 KiB token cannot pay for a later two-byte operation. Growth
-without a sufficient current token and growth after a rejected resident ordinal are recorded
-independently. Warm deep-validation and cold build both finish with zero unauthorized growth. The
+phase and fixed-size scope state. Test-harness/setup allocations occur while the phase is inactive.
+Every production allocation scope creates one operation-local token only after its `WorkDelta`
+succeeds; each `alloc` or growth `realloc` debits its complete requested layout. Scope end verifies
+remaining credit is no larger than that operation's declared formula slack and then unconditionally
+clears it. A dedicated 8-to-16 byte realloc test proves that the full 16-byte request is required
+even when the system allocator could extend in place. The reviewer sequence—guarded hash reserve,
+then raw unscoped four-byte Vec reserve—records exactly one unauthorized allocation, proving the
+hash alignment slack cannot escape. Growth outside a scope, without sufficient current credit, or
+after a rejected resident ordinal is recorded independently. Warm deep-validation and cold build
+both finish with zero unauthorized growth, leaked scopes, nesting, or slack violations. The
 cold fixture records every resident ordinal; rejecting each one preserves the original
 `BudgetDimension::ResidentBytes`, limit `0x1122`, consumed `0x3344`, performs zero later allocation,
 and leaves no final/temp/staging object. Warm rejection preserves the pre-existing final byte for
 byte. Unit-phase fixtures separately exercise empty completeness, all closed payload variants, 64
 distinct module/definition IDs, and maximum typed children. N/2N/4N probes at 5k/10k/20k prove
-linear authorization and terminal capacity below 2N; checked 10M arithmetic is below twice the
-terminal `Vec<u64>` layout, while a 10M `HashMap<u64,u64>` full-layout bound is below 512 MiB.
+linear authorization and terminal capacity below 2N. The 10M check runs the actual production
+geometric recurrence through every capacity level, reaches terminal capacity 16,777,216, and sums
+all complete allocation requests to less than twice that terminal `Vec<u64>` layout; a 10M
+`HashMap<u64,u64>` full-layout bound is below 512 MiB. QTRB and Flight cold builds are both oracle
+clean, and the rejection test walks every resident ordinal of both providers.
 
-Before any payload heap allocation, a fixed-stack JSON scanner verifies the one and only top-level
-external tag and the complete JSON value shape. It recognizes exactly the 19 closed tags and
-requires the tag to match the held-FD base `EventKind`. Unknown or escaped tags, duplicate or extra
-top-level members, mismatched fixed/semantic/discontinuity kinds, malformed bodies, trailing bytes,
-and nesting beyond the fixed limit fail before variant-bound selection or serde decode.
+Before any payload heap allocation, the independent `index::validation` fixed-stack JSON scanner
+verifies the one and only top-level external tag and the complete JSON value shape. The provider
+model owns the single exhaustive `EventKind::ALL` / `external_tag` / `from_external_tag` contract;
+the store has no second 19-tag table. Each raw string segment is checked with allocation-free UTF-8
+validation. Invalid, truncated, and overlong encodings, raw controls, illegal escapes, isolated
+high/low surrogates, and high-surrogate/non-low pairs fail; a high surrogate must be immediately
+followed by a legal low surrogate. Unknown or escaped tags, duplicate or extra top-level members,
+mismatched fixed/semantic/discontinuity kinds, malformed bodies, trailing bytes, and nesting beyond
+the fixed limit likewise fail before variant-bound selection or serde decode. A mutation with an
+invalid byte after a 16 KiB valid field proves no partial serde allocation precedes rejection.
 
 ## TDD evidence
 
@@ -303,7 +332,7 @@ Review-fix REDs were behavior tests over real checked fixtures and private cache
 
 | Finding | Initial RED | Resolution / GREEN evidence |
 |---|---|---|
-| Critical: allocation authorization | The isolated warm oracle observed 29 unauthorized growths; the cold oracle observed 31. A broad `32 * payload + 4096/row` fallback also over-rejected representative traces. | Unified fallible reserve/box/hash/canonical seams and closed-variant decode bounds reduce both oracles to zero. All 19 payload variants and the 64-ID/max-child build fixture are zero; all 324 cold resident rejection ordinals stop before further growth. |
+| Critical: allocation authorization | The isolated warm oracle observed 29 unauthorized growths; the cold oracle observed 31. A broad `32 * payload + 4096/row` fallback also over-rejected representative traces. | Unified fallible reserve/box/hash/canonical seams and closed-variant decode bounds reduce both oracles to zero. All 19 payload variants and the 64-ID/max-child build fixture are zero; every current QTRB and Flight cold resident rejection ordinal stops before further growth. |
 | Important: original abort | Deep-validation normalization converted a rejected guard into a synthetic Nodes 0/1 error. | `IndexError`, `CacheError`, and `ProviderError` retain the original `OperationAbort`; exhaustive warm/cold ordinal tests assert exact dimension, limit, and consumed values. Completeness validation no longer maps control errors to corruption. |
 | Minor: completeness canonical contract | Flight recovery and store each owned a private ordering/merge implementation. | `completeness_canonical_key` and `merge_canonical_completeness` are provider-model contracts; Flight produces with them while store independently validates sort, overlap, and payload correspondence. |
 
@@ -311,25 +340,33 @@ Review-fix REDs were behavior tests over real checked fixtures and private cache
 
 | Finding | Initial RED | Resolution / GREEN evidence |
 |---|---|---|
-| Critical: allocation linearity/oracle correctness | One-at-a-time exact-reserve growth charged 100,020,000 bytes for a 5,000-entry `Vec<u64>` whose final payload was 40,000 bytes. With full-request allocator accounting, the first cold oracle recorded 54 unauthorized growths. | Checked geometric capacities authorize the complete new layout and have a per-container geometric sum below twice the final layout. Guarded provider summaries/cursors, store columns, path names, writer descriptors, identity copies, hash buckets, serde decode, and every validation/index family reduce cold and warm unauthorized counts to zero. Allocation unit tests are 4/4 and the isolated integration oracle is 5/5, including every resident rejection ordinal. |
+| Critical: allocation linearity/oracle correctness | One-at-a-time exact-reserve growth charged 100,020,000 bytes for a 5,000-entry `Vec<u64>` whose final payload was 40,000 bytes. With full-request allocator accounting, the first cold oracle recorded 54 unauthorized growths. | Checked geometric capacities authorize the complete new layout and have a per-container geometric sum below twice the final layout. Guarded provider summaries/cursors, store columns, path names, writer descriptors, identity copies, hash buckets, serde decode, and every validation/index family reduce cold and warm unauthorized counts to zero. Allocation unit tests are 6/6 and the isolated integration oracle is 6/6, including every resident rejection ordinal. |
 | Critical: payload tag before allocation | The behavioral tag test initially did not compile because no pre-decode scanner existed; kind-specific bounds were chosen solely from the base column before serde interpreted the external tag. | The fixed-stack scanner validates all 19 matching tags with zero allocator requests and rejects fixed/semantic/discontinuity cross-kind, escaped/unknown/duplicate/extra tags and malformed bodies before decode. Discontinuity scratch is exact-counted only after this pass. |
 | Important: Task 10 cache-key compatibility | A valid schema-1 object moved under Task 10's canonical `806b…e32b` key returned `CacheOpen::Missing` because the new identity digest used a different representation. | The legacy canonical JSON digest is again the sole writer/read directory key, streamed directly into SHA-256. The stable schema-1 golden discovery test is GREEN and still performs normal held-FD validation. |
 | Minor: shared contracts/helpers | Store had a private semantic-definition fingerprint, session matched provider format to size cursors, two modules copied `OsStr` independently, and receipt cleanup carried unused arguments. | Provider exports `SemanticDefinition` and each provider/wrapper reports its own cursor allocation requirement; one guarded OS-string helper is shared and receipt cleanup now accepts only the exact receipt. Provider semantic fingerprint tests prove only source-local ID is excluded. |
 
+### Fifth-review finding matrix
+
+| Finding | Initial RED | Resolution / GREEN evidence |
+|---|---|---|
+| Critical: explicit allocation scope | After a guarded one-entry `HashMap<u64,u64>` reserve, its alignment slack paid for an unscoped four-byte Vec reserve: expected unauthorized 1, observed 0. Switching the oracle from implicit credit to explicit scope exposed 95 QTRB cold unauthorized allocations; the added Flight cold fixture exposed 237. | `AllocationScope` is stack-only RAII; begin consumes before activation, complete alloc/realloc layouts debit only the active operation, and Drop clears credit on success/error/panic. Store/provider cursor, QTRB payload+decode, Flight recovery/decode/projections, Vec/String/hash/box, canonical/manifest/payload serde, source paths, writer/reader, typed/index families now use the seam. QTRB 95→0, Flight 237→0, and warm remains 0; every rejection ordinal for both providers preserves the original abort with no later growth. Unit 6/6 and isolated integration 6/6 are GREEN. |
+| Important: JSON Unicode validation | A semantic payload containing 16 KiB of valid name bytes followed by raw `0xff` passed the pre-serde scanner. Overlong UTF-8 and isolated surrogate escapes also passed. | Independent fixed-stack validation checks every raw segment as UTF-8 and implements exact JSON escape/surrogate rules. Invalid/overlong/truncated/control/escape/surrogate mutations fail with zero scanner heap growth; legal UTF-8 and `D83D DE00` pass. Existing unique-member, tag, depth, and trailing gates remain. |
+| Minor: duplicated closed contracts | Provider had no external-tag API and the first provider contract test failed to compile for missing `EventKind::ALL`, `external_tag`, and `from_external_tag`; store owned a duplicate 19-arm table. | Provider owns the literal contract and store consumes it. The hand-derived 19-entry provider test and store's 19 serialized payload matrix are GREEN. `SemanticDefinition` now destructures every `InstructionDefinition` field without `..`, so a future field addition is a compile failure until fingerprint semantics are chosen. |
+
 ## Final verification
 
-- `cargo test -p qtrace-store` — 138 passed: library 36, allocation authorization 5, cache
+- `cargo test -p qtrace-store` — 142 passed: library 39, allocation authorization 6, cache
   format 12, cache publication 19, index build 4, index equivalence 15, path security 27, session
   open 20.
-- `cargo test -p qtrace-provider` — 125 passed, 1 intentional ignored child entry: library 4,
-  Flight differential 2/events 5/recovery 39, model 22, properties 13, QTRB differential 7/events
+- `cargo test -p qtrace-provider` — 126 passed, 1 intentional ignored child entry: library 4,
+  Flight differential 2/events 5/recovery 39, model 23, properties 13, QTRB differential 7/events
   7/framing 16/input 10.
 - `cargo test -p qtrace-store --test index_build` — 4/4 passed, including every successful
-  checkpoint ordinal injected once as cancellation and once as budget exhaustion (38.14 s fresh
+  checkpoint ordinal injected once as cancellation and once as budget exhaustion (94.05 s fresh
   full-run instance).
 - `cargo test -p qtrace-store --test index_equivalence` — 15/15 passed.
 - Task 10 cache gates within the full run: format 12/12, publication 19/19; the complete store
-  library suite is 36/36.
+  library suite is 39/39.
 - `cargo clippy -p qtrace-store -p qtrace-provider --all-targets -- -D warnings` — passed.
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
 - `python3 -m unittest scripts.tests.test_qtrace_ui_fixtures scripts.tests.test_trace_binary

@@ -13,6 +13,7 @@ use super::{
     InstructionRow, MemoryRow, ModuleRow, NormalizedCatalog, OwnedTraceStore, SemanticRow,
     SortedMap, SourceKeyRow, checkpoints::RegisterAccess, checkpoints::RegisterObservationRow,
     intervals::IntervalEntry, intervals::IntervalIndex, postings::PostingList,
+    validation::validate_external_payload_tag,
 };
 
 pub struct IndexBuilder;
@@ -26,10 +27,6 @@ impl IndexBuilder {
         options.validate()?;
         guard.consume(WorkDelta::default())?;
         let provider = source.open_provider(guard)?;
-        guard.consume(WorkDelta {
-            resident_bytes: provider.cursor_resident_bytes()?,
-            ..WorkDelta::default()
-        })?;
         Self::build_provider(provider, options, guard)
     }
 
@@ -39,7 +36,11 @@ impl IndexBuilder {
         guard: &dyn WorkGuard,
     ) -> Result<OwnedTraceStore, IndexError> {
         let mut capabilities = provider.capabilities().clone();
-        let mut cursor = provider.into_cursor()?;
+        let mut cursor = {
+            let resident = provider.cursor_resident_bytes()?;
+            let _scope = crate::allocation::scope(guard, resident, 0)?;
+            provider.into_cursor()?
+        };
         let mut state = BuildState::new(options)?;
         while let Some(event) = cursor.next_event(guard)? {
             guard.consume(WorkDelta {
@@ -669,12 +670,12 @@ pub(super) fn validate_cached_truth(
         }
         let bytes = catalog.payloads.get(catalog.events[row].payload_blob)?;
         validate_external_payload_tag(bytes, kind)?;
-        crate::allocation::authorize(
-            guard,
-            crate::allocation::payload_decode_upper_bound(kind, bytes.len())?,
-        )?;
-        let payload: EventPayload = serde_json::from_slice(bytes)
-            .map_err(|_| IndexError::corrupt("canonical event payload cannot be decoded"))?;
+        let payload: EventPayload = {
+            let resident = crate::allocation::payload_decode_upper_bound(kind, bytes.len())?;
+            let _scope = crate::allocation::scope(guard, resident, resident)?;
+            serde_json::from_slice(bytes)
+                .map_err(|_| IndexError::corrupt("canonical event payload cannot be decoded"))?
+        };
         if canonical_bytes(&payload, guard)? != bytes {
             return Err(IndexError::corrupt("event payload bytes are not canonical"));
         }
@@ -829,293 +830,6 @@ pub(super) fn validate_cached_truth(
         ));
     }
     Ok(())
-}
-
-fn validate_external_payload_tag(bytes: &[u8], expected: EventKind) -> Result<(), IndexError> {
-    let mut scanner = JsonScanner { bytes, cursor: 0 };
-    scanner.skip_whitespace();
-    scanner.expect_byte(b'{')?;
-    scanner.skip_whitespace();
-    let tag = scanner.external_tag()?;
-    if tag != expected {
-        return Err(IndexError::corrupt(
-            "canonical payload external tag disagrees with base kind",
-        ));
-    }
-    scanner.skip_whitespace();
-    scanner.expect_byte(b':')?;
-    scanner.skip_whitespace();
-    scanner.value(0)?;
-    scanner.skip_whitespace();
-    scanner.expect_byte(b'}')?;
-    scanner.skip_whitespace();
-    if scanner.cursor != bytes.len() {
-        return Err(IndexError::corrupt(
-            "canonical payload contains trailing or extra fields",
-        ));
-    }
-    Ok(())
-}
-
-struct JsonScanner<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-}
-
-impl JsonScanner<'_> {
-    fn skip_whitespace(&mut self) {
-        while matches!(
-            self.bytes.get(self.cursor),
-            Some(b' ' | b'\n' | b'\r' | b'\t')
-        ) {
-            self.cursor += 1;
-        }
-    }
-
-    fn expect_byte(&mut self, expected: u8) -> Result<(), IndexError> {
-        if self.bytes.get(self.cursor).copied() != Some(expected) {
-            return Err(IndexError::corrupt(
-                "canonical payload has malformed JSON structure",
-            ));
-        }
-        self.cursor += 1;
-        Ok(())
-    }
-
-    fn external_tag(&mut self) -> Result<EventKind, IndexError> {
-        self.expect_byte(b'"')?;
-        let start = self.cursor;
-        while let Some(byte) = self.bytes.get(self.cursor).copied() {
-            match byte {
-                b'"' => {
-                    let tag = &self.bytes[start..self.cursor];
-                    self.cursor += 1;
-                    return event_kind_for_tag(tag).ok_or_else(|| {
-                        IndexError::corrupt("canonical payload has an unknown external tag")
-                    });
-                }
-                b'\\' | 0..=0x1f => {
-                    return Err(IndexError::corrupt(
-                        "canonical payload external tag must be literal ASCII",
-                    ));
-                }
-                _ => self.cursor += 1,
-            }
-        }
-        Err(IndexError::corrupt(
-            "canonical payload external tag is unterminated",
-        ))
-    }
-
-    fn value(&mut self, depth: u8) -> Result<(), IndexError> {
-        if depth >= 64 {
-            return Err(IndexError::corrupt(
-                "canonical payload JSON nesting exceeds its bound",
-            ));
-        }
-        match self.bytes.get(self.cursor).copied() {
-            Some(b'{') => self.object(depth + 1),
-            Some(b'[') => self.array(depth + 1),
-            Some(b'"') => self.string(),
-            Some(b't') => self.literal(b"true"),
-            Some(b'f') => self.literal(b"false"),
-            Some(b'n') => self.literal(b"null"),
-            Some(b'-' | b'0'..=b'9') => self.number(),
-            _ => Err(IndexError::corrupt(
-                "canonical payload has a malformed JSON value",
-            )),
-        }
-    }
-
-    fn object(&mut self, depth: u8) -> Result<(), IndexError> {
-        self.expect_byte(b'{')?;
-        self.skip_whitespace();
-        if self.bytes.get(self.cursor) == Some(&b'}') {
-            self.cursor += 1;
-            return Ok(());
-        }
-        loop {
-            self.string()?;
-            self.skip_whitespace();
-            self.expect_byte(b':')?;
-            self.skip_whitespace();
-            self.value(depth)?;
-            self.skip_whitespace();
-            match self.bytes.get(self.cursor).copied() {
-                Some(b',') => {
-                    self.cursor += 1;
-                    self.skip_whitespace();
-                }
-                Some(b'}') => {
-                    self.cursor += 1;
-                    return Ok(());
-                }
-                _ => {
-                    return Err(IndexError::corrupt(
-                        "canonical payload has a malformed JSON object",
-                    ));
-                }
-            }
-        }
-    }
-
-    fn array(&mut self, depth: u8) -> Result<(), IndexError> {
-        self.expect_byte(b'[')?;
-        self.skip_whitespace();
-        if self.bytes.get(self.cursor) == Some(&b']') {
-            self.cursor += 1;
-            return Ok(());
-        }
-        loop {
-            self.value(depth)?;
-            self.skip_whitespace();
-            match self.bytes.get(self.cursor).copied() {
-                Some(b',') => {
-                    self.cursor += 1;
-                    self.skip_whitespace();
-                }
-                Some(b']') => {
-                    self.cursor += 1;
-                    return Ok(());
-                }
-                _ => {
-                    return Err(IndexError::corrupt(
-                        "canonical payload has a malformed JSON array",
-                    ));
-                }
-            }
-        }
-    }
-
-    fn string(&mut self) -> Result<(), IndexError> {
-        self.expect_byte(b'"')?;
-        while let Some(byte) = self.bytes.get(self.cursor).copied() {
-            self.cursor += 1;
-            match byte {
-                b'"' => return Ok(()),
-                b'\\' => match self.bytes.get(self.cursor).copied() {
-                    Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => {
-                        self.cursor += 1;
-                    }
-                    Some(b'u') => {
-                        self.cursor += 1;
-                        for _ in 0..4 {
-                            if !matches!(
-                                self.bytes.get(self.cursor),
-                                Some(b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
-                            ) {
-                                return Err(IndexError::corrupt(
-                                    "canonical payload has a malformed JSON escape",
-                                ));
-                            }
-                            self.cursor += 1;
-                        }
-                    }
-                    _ => {
-                        return Err(IndexError::corrupt(
-                            "canonical payload has a malformed JSON escape",
-                        ));
-                    }
-                },
-                0..=0x1f => {
-                    return Err(IndexError::corrupt(
-                        "canonical payload has a control byte in a JSON string",
-                    ));
-                }
-                _ => {}
-            }
-        }
-        Err(IndexError::corrupt(
-            "canonical payload has an unterminated JSON string",
-        ))
-    }
-
-    fn literal(&mut self, literal: &[u8]) -> Result<(), IndexError> {
-        let end = self
-            .cursor
-            .checked_add(literal.len())
-            .ok_or_else(|| IndexError::corrupt("canonical payload JSON offset overflow"))?;
-        if self.bytes.get(self.cursor..end) != Some(literal) {
-            return Err(IndexError::corrupt(
-                "canonical payload has a malformed JSON literal",
-            ));
-        }
-        self.cursor = end;
-        Ok(())
-    }
-
-    fn number(&mut self) -> Result<(), IndexError> {
-        if self.bytes.get(self.cursor) == Some(&b'-') {
-            self.cursor += 1;
-        }
-        match self.bytes.get(self.cursor).copied() {
-            Some(b'0') => self.cursor += 1,
-            Some(b'1'..=b'9') => {
-                self.cursor += 1;
-                while matches!(self.bytes.get(self.cursor), Some(b'0'..=b'9')) {
-                    self.cursor += 1;
-                }
-            }
-            _ => {
-                return Err(IndexError::corrupt(
-                    "canonical payload has a malformed JSON number",
-                ));
-            }
-        }
-        if self.bytes.get(self.cursor) == Some(&b'.') {
-            self.cursor += 1;
-            let start = self.cursor;
-            while matches!(self.bytes.get(self.cursor), Some(b'0'..=b'9')) {
-                self.cursor += 1;
-            }
-            if self.cursor == start {
-                return Err(IndexError::corrupt(
-                    "canonical payload has a malformed JSON fraction",
-                ));
-            }
-        }
-        if matches!(self.bytes.get(self.cursor), Some(b'e' | b'E')) {
-            self.cursor += 1;
-            if matches!(self.bytes.get(self.cursor), Some(b'+' | b'-')) {
-                self.cursor += 1;
-            }
-            let start = self.cursor;
-            while matches!(self.bytes.get(self.cursor), Some(b'0'..=b'9')) {
-                self.cursor += 1;
-            }
-            if self.cursor == start {
-                return Err(IndexError::corrupt(
-                    "canonical payload has a malformed JSON exponent",
-                ));
-            }
-        }
-        Ok(())
-    }
-}
-
-fn event_kind_for_tag(tag: &[u8]) -> Option<EventKind> {
-    Some(match tag {
-        b"begin" => EventKind::Begin,
-        b"module_definition" => EventKind::ModuleDefinition,
-        b"instruction_definition" => EventKind::InstructionDefinition,
-        b"instruction" => EventKind::Instruction,
-        b"memory" => EventKind::Memory,
-        b"semantic_call" => EventKind::SemanticCall,
-        b"semantic_rule" => EventKind::SemanticRule,
-        b"semantic_error" => EventKind::SemanticError,
-        b"thread_lifecycle" => EventKind::ThreadLifecycle,
-        b"syscall" => EventKind::Syscall,
-        b"signal" => EventKind::Signal,
-        b"signal_handler_boundary" => EventKind::SignalHandlerBoundary,
-        b"termination" => EventKind::Termination,
-        b"register_checkpoint" => EventKind::RegisterCheckpoint,
-        b"register_delta" => EventKind::RegisterDelta,
-        b"string_definition" => EventKind::StringDefinition,
-        b"coverage_gap" => EventKind::CoverageGap,
-        b"discontinuity" => EventKind::Discontinuity,
-        b"opaque_optional" => EventKind::OpaqueOptional,
-        _ => return None,
-    })
 }
 
 fn validate_completeness_rows(
@@ -1875,6 +1589,7 @@ mod tests {
 
     use crate::TraceStoreView;
 
+    use super::super::validation::scan_external_payload_tag;
     use super::{
         BuildOptions, BuildState, IndexBuilder, cancellable_sort, validate_external_payload_tag,
     };
@@ -2423,6 +2138,55 @@ mod tests {
             // Error reporting may own its bounded diagnostic; the scanner itself is proven
             // allocation-free by the successful matrix above, before serde is reachable.
             crate::allocation::tests::finish_allocation_oracle();
+        }
+    }
+
+    #[test]
+    fn external_payload_validation_rejects_invalid_utf8_and_surrogates_before_decode() {
+        let mut invalid_after_large_field =
+            b"{\"semantic_rule\":{\"category\":null,\"name\":\"".to_vec();
+        invalid_after_large_field.extend(std::iter::repeat_n(b'a', 16 * 1024));
+        invalid_after_large_field.extend_from_slice(b"\",\"detail\":\"");
+        invalid_after_large_field.push(0xff);
+        invalid_after_large_field.extend_from_slice(b"\",\"fragment_sequences\":[]}}");
+        let mut invalid_overlong = b"{\"semantic_rule\":{\"category\":null,\"name\":\"".to_vec();
+        invalid_overlong.extend_from_slice(&[0xc0, 0xaf]);
+        invalid_overlong.extend_from_slice(b"\",\"detail\":\"x\"}}");
+        let mut invalid_control = b"{\"semantic_rule\":{\"category\":null,\"name\":\"".to_vec();
+        invalid_control.push(0x01);
+        invalid_control.extend_from_slice(b"\",\"detail\":\"x\"}}");
+        let mut truncated_utf8 = b"{\"semantic_rule\":{\"category\":null,\"name\":\"".to_vec();
+        truncated_utf8.extend_from_slice(&[0xe2, 0x82]);
+        truncated_utf8.extend_from_slice(b"\",\"detail\":\"x\"}}");
+        let invalid_cases: &[&[u8]] = &[
+            &invalid_after_large_field,
+            &invalid_overlong,
+            &invalid_control,
+            &truncated_utf8,
+            br#"{"semantic_rule":{"category":null,"name":"\uD800","detail":"x"}}"#,
+            br#"{"semantic_rule":{"category":null,"name":"\uDC00","detail":"x"}}"#,
+            br#"{"semantic_rule":{"category":null,"name":"\uD800\u0041","detail":"x"}}"#,
+            br#"{"semantic_rule":{"category":null,"name":"bad\xescape","detail":"x"}}"#,
+        ];
+        for bytes in invalid_cases {
+            crate::allocation::tests::activate_allocation_oracle();
+            let error = scan_external_payload_tag(bytes, qtrace_provider::EventKind::SemanticRule)
+                .expect_err("invalid string content must fail before serde");
+            assert!(error.contains("payload"));
+            assert_eq!(
+                crate::allocation::tests::finish_allocation_oracle(),
+                0,
+                "validation itself must remain allocation-free"
+            );
+        }
+
+        let valid_utf8 = r#"{"semantic_rule":{"category":null,"name":"雪","detail":"x"}}"#;
+        for bytes in [
+            valid_utf8.as_bytes(),
+            br#"{"semantic_rule":{"category":null,"name":"\uD83D\uDE00","detail":"x"}}"#,
+        ] {
+            validate_external_payload_tag(bytes, qtrace_provider::EventKind::SemanticRule)
+                .expect("valid UTF-8 and surrogate pair");
         }
     }
 }

@@ -285,12 +285,12 @@ pub(crate) fn validate_file(
     }
     // serde_json owns strings and vectors described by the bounded manifest. Its allocator is not
     // fallible, so authorize its conservative input-sized working set before entering serde.
-    crate::allocation::authorize(
-        guard,
-        crate::allocation::manifest_decode_upper_bound(manifest_bytes.len())?,
-    )?;
-    let manifest: CacheManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
+    let manifest: CacheManifest = {
+        let bytes = crate::allocation::manifest_decode_upper_bound(manifest_bytes.len())?;
+        let _scope = crate::allocation::scope(guard, bytes, bytes)?;
+        serde_json::from_slice(&manifest_bytes)
+            .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?
+    };
     let canonical = canonical_manifest_json(&manifest, guard)?;
     if canonical != manifest_bytes {
         return Err(ValidationFailure::Rebuild(RebuildReason::Manifest(
@@ -732,12 +732,12 @@ pub(crate) fn probe_identity(
             "checksum",
         )));
     }
-    crate::allocation::authorize(
-        guard,
-        crate::allocation::manifest_decode_upper_bound(bytes.len())?,
-    )?;
-    let manifest: CacheManifest = serde_json::from_slice(&bytes)
-        .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?;
+    let manifest: CacheManifest = {
+        let resident = crate::allocation::manifest_decode_upper_bound(bytes.len())?;
+        let _scope = crate::allocation::scope(guard, resident, resident)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Manifest("json")))?
+    };
     Ok(manifest.identity)
 }
 

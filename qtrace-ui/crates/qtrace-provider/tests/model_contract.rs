@@ -157,6 +157,46 @@ fn event_kind_serialization_stably_names_every_payload_category() {
 }
 
 #[test]
+fn external_payload_tags_have_one_exhaustive_provider_contract() {
+    let expected = [
+        (EventKind::Begin, b"begin".as_slice()),
+        (EventKind::ModuleDefinition, b"module_definition".as_slice()),
+        (
+            EventKind::InstructionDefinition,
+            b"instruction_definition".as_slice(),
+        ),
+        (EventKind::Instruction, b"instruction".as_slice()),
+        (EventKind::Memory, b"memory".as_slice()),
+        (EventKind::SemanticCall, b"semantic_call".as_slice()),
+        (EventKind::SemanticRule, b"semantic_rule".as_slice()),
+        (EventKind::SemanticError, b"semantic_error".as_slice()),
+        (EventKind::ThreadLifecycle, b"thread_lifecycle".as_slice()),
+        (EventKind::Syscall, b"syscall".as_slice()),
+        (EventKind::Signal, b"signal".as_slice()),
+        (
+            EventKind::SignalHandlerBoundary,
+            b"signal_handler_boundary".as_slice(),
+        ),
+        (EventKind::Termination, b"termination".as_slice()),
+        (
+            EventKind::RegisterCheckpoint,
+            b"register_checkpoint".as_slice(),
+        ),
+        (EventKind::RegisterDelta, b"register_delta".as_slice()),
+        (EventKind::StringDefinition, b"string_definition".as_slice()),
+        (EventKind::CoverageGap, b"coverage_gap".as_slice()),
+        (EventKind::Discontinuity, b"discontinuity".as_slice()),
+        (EventKind::OpaqueOptional, b"opaque_optional".as_slice()),
+    ];
+    assert_eq!(EventKind::ALL.len(), expected.len());
+    for (kind, tag) in expected {
+        assert_eq!(kind.external_tag(), tag);
+        assert_eq!(EventKind::from_external_tag(tag), Some(kind));
+    }
+    assert_eq!(EventKind::from_external_tag(b"unknown"), None);
+}
+
+#[test]
 fn captured_sequence_range_includes_u64_max_without_overflow() {
     let coverage =
         CompletenessRange::captured_sequence(u64::MAX - 2, u64::MAX, Provenance::Captured).unwrap();

@@ -8,8 +8,8 @@ mod qtrb;
 mod source;
 
 pub use control::{
-    BudgetDimension, MAX_UNGUARDED_BYTES, MAX_UNGUARDED_RECORDS, OperationAbort, WorkDelta,
-    WorkGuard,
+    AllocationScope, BudgetDimension, MAX_UNGUARDED_BYTES, MAX_UNGUARDED_RECORDS, OperationAbort,
+    WorkDelta, WorkGuard,
 };
 pub use error::{ProviderError, SourceCoordinate};
 pub use flight::{

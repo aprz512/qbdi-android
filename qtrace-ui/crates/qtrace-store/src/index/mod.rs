@@ -2,6 +2,7 @@ mod builder;
 mod checkpoints;
 mod intervals;
 mod postings;
+mod validation;
 mod wire;
 
 use std::{collections::HashMap, error::Error, fmt};

@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use qtrace_provider::{BudgetDimension, OperationAbort, WorkDelta, WorkGuard};
+use qtrace_provider::{AllocationScope, BudgetDimension, OperationAbort, WorkDelta, WorkGuard};
 use qtrace_store::{AuthorizedPath, BuildOptions, OpenPolicy, SessionLoader, TraceStore};
 use tempfile::TempDir;
 
@@ -15,13 +15,18 @@ const CHILD_ENV: &str = "QTRACE_ALLOCATION_ORACLE_CHILD";
 const ABORT_CHILD_ENV: &str = "QTRACE_ALLOCATION_ABORT_ORACLE_CHILD";
 const COLD_CHILD_ENV: &str = "QTRACE_ALLOCATION_COLD_ORACLE_CHILD";
 const COLD_ABORT_CHILD_ENV: &str = "QTRACE_ALLOCATION_COLD_ABORT_ORACLE_CHILD";
+const FLIGHT_COLD_CHILD_ENV: &str = "QTRACE_ALLOCATION_FLIGHT_COLD_ORACLE_CHILD";
 
 #[derive(Clone, Copy)]
 struct OracleState {
     active: bool,
+    scope_active: bool,
     authorized: u64,
+    allowed_slack: u64,
     allocations: u64,
     unauthorized: u64,
+    scope_violations: u64,
+    nested_scopes: u64,
     post_reject: u64,
     rejected: bool,
     unauthorized_sizes: [usize; 64],
@@ -35,9 +40,13 @@ impl Default for OracleState {
     fn default() -> Self {
         Self {
             active: false,
+            scope_active: false,
             authorized: 0,
+            allowed_slack: 0,
             allocations: 0,
             unauthorized: 0,
+            scope_violations: 0,
+            nested_scopes: 0,
             post_reject: 0,
             rejected: false,
             unauthorized_sizes: [0; 64],
@@ -52,9 +61,13 @@ impl Default for OracleState {
 thread_local! {
     static ORACLE: Cell<OracleState> = const { Cell::new(OracleState {
         active: false,
+        scope_active: false,
         authorized: 0,
+        allowed_slack: 0,
         allocations: 0,
         unauthorized: 0,
+        scope_violations: 0,
+        nested_scopes: 0,
         post_reject: 0,
         rejected: false,
         unauthorized_sizes: [0; 64],
@@ -113,7 +126,7 @@ fn record_growth(bytes: usize) {
                 state.unauthorized_len += 1;
             }
         } else if let Ok(bytes) = u64::try_from(bytes) {
-            if state.authorized >= bytes {
+            if state.scope_active && state.authorized >= bytes {
                 state.authorized -= bytes;
             } else {
                 state.unauthorized = state.unauthorized.saturating_add(1);
@@ -161,14 +174,39 @@ impl WorkGuard for OracleGuard {
                 0x3344,
             ));
         }
+        Ok(())
+    }
+
+    fn begin_allocation_scope(
+        &self,
+        delta: WorkDelta,
+        allowed_slack: u64,
+    ) -> Result<(), OperationAbort> {
+        self.consume(delta)?;
         ORACLE.with(|slot| {
             let mut state = slot.get();
-            // A resident authorization belongs only to the immediately following allocation
-            // scope. Unused credit from an earlier scope must never subsidize another operation.
+            if state.scope_active {
+                state.nested_scopes = state.nested_scopes.saturating_add(1);
+            }
+            state.scope_active = true;
             state.authorized = delta.resident_bytes;
+            state.allowed_slack = allowed_slack;
             slot.set(state);
         });
         Ok(())
+    }
+
+    fn end_allocation_scope(&self) {
+        ORACLE.with(|slot| {
+            let mut state = slot.get();
+            if !state.scope_active || state.authorized > state.allowed_slack {
+                state.scope_violations = state.scope_violations.saturating_add(1);
+            }
+            state.scope_active = false;
+            state.authorized = 0;
+            state.allowed_slack = 0;
+            slot.set(state);
+        });
     }
 }
 
@@ -177,6 +215,19 @@ fn active_oracle_state() -> OracleState {
         active: true,
         ..OracleState::default()
     }
+}
+
+fn assert_scopes_closed(state: &OracleState, context: &str) {
+    assert!(!state.scope_active, "{context}: allocation scope leaked");
+    assert_eq!(state.authorized, 0, "{context}: stale credit survived");
+    assert_eq!(
+        state.nested_scopes, 0,
+        "{context}: allocation scopes nested"
+    );
+    assert_eq!(
+        state.scope_violations, 0,
+        "{context}: allocation scope exceeded its slack formula"
+    );
 }
 
 #[test]
@@ -189,13 +240,10 @@ fn allocator_oracle_binds_credit_to_one_scope_and_counts_full_realloc_requests()
     let mut values = Vec::with_capacity(8);
     values.extend_from_slice(&[0_u8; 8]);
     ORACLE.with(|slot| slot.set(active_oracle_state()));
-    guard
-        .consume(WorkDelta {
-            resident_bytes: 16,
-            ..WorkDelta::default()
-        })
-        .expect("realloc token");
-    values.try_reserve_exact(8).expect("grow to sixteen");
+    {
+        let _scope = AllocationScope::begin(&guard, 16, 0).expect("realloc token");
+        values.try_reserve_exact(8).expect("grow to sixteen");
+    }
     let full_request = ORACLE.with(|slot| {
         let mut state = slot.get();
         state.active = false;
@@ -210,20 +258,12 @@ fn allocator_oracle_binds_credit_to_one_scope_and_counts_full_realloc_requests()
     );
 
     ORACLE.with(|slot| slot.set(active_oracle_state()));
-    guard
-        .consume(WorkDelta {
-            resident_bytes: 1_024,
-            ..WorkDelta::default()
-        })
-        .expect("old scope");
-    guard
-        .consume(WorkDelta {
-            resident_bytes: 1,
-            ..WorkDelta::default()
-        })
-        .expect("replacement scope");
+    drop(AllocationScope::begin(&guard, 1_024, 1_024).expect("old scope"));
     let mut second = Vec::<u8>::new();
-    second.try_reserve_exact(2).expect("two-byte request");
+    {
+        let _scope = AllocationScope::begin(&guard, 1, 1).expect("replacement scope");
+        second.try_reserve_exact(2).expect("two-byte request");
+    }
     let scoped = ORACLE.with(|slot| {
         let mut state = slot.get();
         state.active = false;
@@ -231,10 +271,10 @@ fn allocator_oracle_binds_credit_to_one_scope_and_counts_full_realloc_requests()
         state
     });
     assert_eq!(scoped.unauthorized, 1, "stale 1KiB credit must not pool");
-    assert_eq!(
-        scoped.authorized, 1,
-        "failed request cannot consume its token"
-    );
+    assert_eq!(scoped.authorized, 0, "scope drop clears unused credit");
+    assert_eq!(scoped.scope_violations, 0);
+    assert_eq!(scoped.nested_scopes, 0);
+    assert_scopes_closed(&scoped, "manual full-request scope");
 }
 
 #[test]
@@ -289,6 +329,7 @@ fn warm_deep_validation_heap_growth_requires_prior_resident_authorization() {
         &state.unauthorized_sizes[..state.unauthorized_len],
         &state.unauthorized_ordinals[..state.unauthorized_len]
     );
+    assert_scopes_closed(&state, "warm validation");
 }
 
 #[test]
@@ -347,6 +388,56 @@ fn cold_build_heap_growth_requires_prior_resident_authorization() {
         &state.unauthorized_ordinals[..state.unauthorized_len],
         &state.resident_bytes[..=guard.resident_ordinal.load(Ordering::Relaxed).min(255)]
     );
+    assert_scopes_closed(&state, "cold build");
+}
+
+#[test]
+fn cold_flight_build_heap_growth_requires_explicit_scopes() {
+    if std::env::var_os(FLIGHT_COLD_CHILD_ENV).is_none() {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg("cold_flight_build_heap_growth_requires_explicit_scopes")
+            .arg("--nocapture")
+            .env(FLIGHT_COLD_CHILD_ENV, "1")
+            .status()
+            .expect("Flight allocation oracle child");
+        assert!(status.success(), "Flight oracle child failed: {status}");
+        return;
+    }
+
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("capture.flight.bin"))
+        .expect("Flight artifact");
+    let root = private_root();
+    ORACLE.with(|slot| slot.set(active_oracle_state()));
+    let guard = OracleGuard {
+        reject_resident: None,
+        resident_ordinal: AtomicUsize::new(0),
+    };
+    TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &guard)
+        .expect("cold Flight build");
+    let state = ORACLE.with(|slot| {
+        let mut state = slot.get();
+        state.active = false;
+        slot.set(state);
+        state
+    });
+    assert_eq!(
+        state.unauthorized,
+        0,
+        "Flight growth escaped explicit scope: sizes={:?}, ordinals={:?}",
+        &state.unauthorized_sizes[..state.unauthorized_len],
+        &state.unauthorized_ordinals[..state.unauthorized_len]
+    );
+    assert_scopes_closed(&state, "cold Flight build");
 }
 
 #[test]
@@ -430,6 +521,7 @@ fn every_warm_resident_rejection_preserves_the_original_abort_without_later_grow
             "ordinal {reject_at} allocated after rejection: sizes={:?}",
             &state.unauthorized_sizes[..state.unauthorized_len]
         );
+        assert_scopes_closed(&state, "warm rejection");
         assert_eq!(fs::read(&final_path).expect("retained final"), original);
         assert_no_transient_cache_entries(root.path());
     }
@@ -458,65 +550,74 @@ fn every_cold_resident_rejection_stops_growth_and_leaves_no_cache_object() {
         &AllowAll,
     )
     .expect("mixed fixture");
-    let source = session
-        .artifacts()
-        .iter()
-        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
-        .expect("QTRB artifact");
-    let count_root = private_root();
-    let count = OracleGuard {
-        reject_resident: None,
-        resident_ordinal: AtomicUsize::new(0),
-    };
-    TraceStore::open_or_build(count_root.path(), source, &BuildOptions::default(), &count)
-        .expect("count cold resident ordinals");
-    let resident_calls = count.resident_ordinal.load(Ordering::Relaxed);
-    assert!(
-        resident_calls > 128,
-        "cold build needs all allocation phases"
-    );
-
-    for reject_at in 1..=resident_calls {
-        let root = private_root();
-        ORACLE.with(|slot| {
-            slot.set(active_oracle_state());
-        });
-        let reject = OracleGuard {
-            reject_resident: Some(reject_at),
+    for (label, suffix) in [("QTRB", "main.trace.bin"), ("Flight", "capture.flight.bin")] {
+        let source = session
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.local_path().ends_with(suffix))
+            .unwrap_or_else(|| panic!("{label} artifact"));
+        let count_root = private_root();
+        let count = OracleGuard {
+            reject_resident: None,
             resident_ordinal: AtomicUsize::new(0),
         };
-        let error =
-            TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &reject)
-                .expect_err("resident rejection");
-        let state = ORACLE.with(|slot| {
-            let mut state = slot.get();
-            state.active = false;
-            slot.set(state);
-            state
-        });
-        assert_eq!(
-            error.code(),
-            "control.budget_exceeded",
-            "ordinal {reject_at}"
-        );
-        let detail = error.to_string();
+        TraceStore::open_or_build(count_root.path(), source, &BuildOptions::default(), &count)
+            .unwrap_or_else(|error| panic!("count {label} resident ordinals: {error}"));
+        let resident_calls = count.resident_ordinal.load(Ordering::Relaxed);
         assert!(
-            detail.contains("ResidentBytes"),
-            "ordinal {reject_at}: {detail}"
+            resident_calls > 128,
+            "{label} cold build needs all allocation phases"
         );
-        assert!(detail.contains("4386"), "ordinal {reject_at}: {detail}");
-        assert!(detail.contains("13124"), "ordinal {reject_at}: {detail}");
-        assert_eq!(
-            state.post_reject,
-            0,
-            "ordinal {reject_at} allocated after rejection: sizes={:?}",
-            &state.unauthorized_sizes[..state.unauthorized_len]
-        );
-        assert!(
-            !contains_name(root.path(), "index.qtc"),
-            "ordinal {reject_at}"
-        );
-        assert_no_transient_cache_entries(root.path());
+
+        for reject_at in 1..=resident_calls {
+            let root = private_root();
+            ORACLE.with(|slot| {
+                slot.set(active_oracle_state());
+            });
+            let reject = OracleGuard {
+                reject_resident: Some(reject_at),
+                resident_ordinal: AtomicUsize::new(0),
+            };
+            let error =
+                TraceStore::open_or_build(root.path(), source, &BuildOptions::default(), &reject)
+                    .expect_err("resident rejection");
+            let state = ORACLE.with(|slot| {
+                let mut state = slot.get();
+                state.active = false;
+                slot.set(state);
+                state
+            });
+            assert_eq!(
+                error.code(),
+                "control.budget_exceeded",
+                "{label} ordinal {reject_at}"
+            );
+            let detail = error.to_string();
+            assert!(
+                detail.contains("ResidentBytes"),
+                "{label} ordinal {reject_at}: {detail}"
+            );
+            assert!(
+                detail.contains("4386"),
+                "{label} ordinal {reject_at}: {detail}"
+            );
+            assert!(
+                detail.contains("13124"),
+                "{label} ordinal {reject_at}: {detail}"
+            );
+            assert_eq!(
+                state.post_reject,
+                0,
+                "{label} ordinal {reject_at} allocated after rejection: sizes={:?}",
+                &state.unauthorized_sizes[..state.unauthorized_len]
+            );
+            assert_scopes_closed(&state, "cold rejection");
+            assert!(
+                !contains_name(root.path(), "index.qtc"),
+                "{label} ordinal {reject_at}"
+            );
+            assert_no_transient_cache_entries(root.path());
+        }
     }
 }
 

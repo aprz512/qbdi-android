@@ -6,11 +6,11 @@ use crate::qtrb::events::{
     decode_memory_record,
 };
 use crate::{
-    CoverageGap, EventKey, EventPayload, EventRecord, EventScope, OpaqueOptionalRecord, Provenance,
-    ProviderError, RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot,
-    RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase,
-    SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, WorkDelta,
-    WorkGuard,
+    AllocationScope, CoverageGap, EventKey, EventPayload, EventRecord, EventScope,
+    OpaqueOptionalRecord, Provenance, ProviderError, RegisterCheckpoint, RegisterDelta,
+    RegisterSlot, RegisterSnapshot, RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary,
+    SignalHandlerPhase, SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle,
+    ThreadLifecyclePhase, WorkDelta, WorkGuard,
 };
 
 use super::{
@@ -56,22 +56,89 @@ pub(super) fn decode(
 ) -> Result<DecodedFlight, ProviderError> {
     guard.consume(WorkDelta::default())?;
     let mut payload_bytes = 0_u64;
+    let mut definition_entries = 0_u64;
+    let mut string_entries = 0_u64;
+    let mut fragment_entries = 0_u64;
     for (index, event) in physical.iter().enumerate() {
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
-        payload_bytes = payload_bytes.saturating_add(match &event.payload {
-            EventPayload::OpaqueOptional(raw) => raw.bytes.len() as u64,
-            _ => 0,
-        });
+        if let EventPayload::OpaqueOptional(raw) = &event.payload {
+            payload_bytes = payload_bytes
+                .checked_add(raw.bytes.len() as u64)
+                .ok_or_else(|| allocation_error("Flight payload allocation bound overflow"))?;
+            definition_entries = definition_entries
+                .checked_add(u64::from(matches!((raw.record_type, raw.flags), (4, 1))))
+                .ok_or_else(|| allocation_error("Flight definition count overflow"))?;
+            string_entries = string_entries
+                .checked_add(u64::from(matches!((raw.record_type, raw.flags), (6, 3))))
+                .ok_or_else(|| allocation_error("Flight string count overflow"))?;
+            fragment_entries = fragment_entries
+                .checked_add(u64::from(matches!(
+                    (raw.record_type, raw.flags),
+                    (6..=8, 4)
+                )))
+                .ok_or_else(|| allocation_error("Flight fragment count overflow"))?;
+        }
     }
-    guard.consume(WorkDelta {
+    // HashMap's first bucket group includes control bytes and alignment; charging sixty-four
+    // complete entries per inserted closed record bounds that group plus every full geometric
+    // reallocation request without a fixed per-event tax.
+    let state_map_bytes = definition_entries
+        .checked_mul(std::mem::size_of::<(u32, InstructionDefinition)>() as u64)
+        .and_then(|bytes| bytes.checked_mul(64))
+        .and_then(|bytes| {
+            string_entries
+                .checked_mul(std::mem::size_of::<(u32, Arc<[u8]>)>() as u64)
+                .and_then(|string_bytes| string_bytes.checked_mul(64))
+                .and_then(|string_bytes| bytes.checked_add(string_bytes))
+        })
+        .ok_or_else(|| allocation_error("Flight state-map allocation bound overflow"))?;
+    let fixed_item_bytes = std::mem::size_of::<EventRecord>()
+        .checked_add(std::mem::size_of::<Fragment>())
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u64>().saturating_mul(3)))
+        .ok_or_else(|| allocation_error("Flight decode item layout overflow"))?;
+    let fixed_decode_bytes = physical
+        .len()
+        .checked_mul(fixed_item_bytes)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight fixed decode allocation bound overflow"))?;
+    let state_bytes = chunks
+        .len()
+        .checked_mul(std::mem::size_of::<ChunkState>())
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight state allocation bound overflow"))?;
+    let register_state_bytes = chunks
+        .len()
+        .checked_mul(RegisterSlot::COUNT)
+        .and_then(|count| count.checked_mul(std::mem::size_of::<u64>()))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight register-state allocation bound overflow"))?;
+    let fragment_item_bytes = std::mem::size_of::<Fragment>()
+        .checked_add(std::mem::size_of::<EventRecord>())
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<(Option<u64>, u64)>()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| allocation_error("Flight fragment item layout overflow"))?;
+    let fragment_bytes = fragment_entries
+        .checked_mul(fragment_item_bytes)
+        .and_then(|bytes| bytes.checked_mul(64))
+        .ok_or_else(|| allocation_error("Flight fragment allocation bound overflow"))?;
+    let decode_work = WorkDelta {
         nodes: physical.len().saturating_mul(8) as u64,
-        resident_bytes: (physical.len() as u64)
-            .saturating_mul(2048)
-            .saturating_add(payload_bytes.saturating_mul(4)),
+        resident_bytes: fixed_decode_bytes
+            .checked_add(state_bytes)
+            .and_then(|bytes| bytes.checked_add(register_state_bytes))
+            .and_then(|bytes| bytes.checked_add(payload_bytes.saturating_mul(4)))
+            .and_then(|bytes| bytes.checked_add(state_map_bytes))
+            .and_then(|bytes| bytes.checked_add(fragment_bytes))
+            .ok_or_else(|| allocation_error("Flight decode allocation bound overflow"))?,
         ..WorkDelta::default()
-    })?;
+    };
+    let _decode_scope =
+        AllocationScope::begin_with_delta(guard, decode_work, decode_work.resident_bytes)?;
     let mut states = initialize_states(chunks.len(), guard)?;
     let mut output = reserved_vec(physical.len(), "Flight typed output allocation failed")?;
     let mut fragments = reserved_vec(physical.len(), "Flight fragment allocation failed")?;
