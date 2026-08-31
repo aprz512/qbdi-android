@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use qtrace_provider::{EventKey, EventKind, WorkDelta, WorkGuard};
+use qtrace_provider::{EventKey, EventKind, OperationAbort, WorkDelta, WorkGuard};
 use rustix::{
     fs::{
         AtFlags, FlockOperation, Mode, OFlags, RenameFlags, fchmod, flock, fsync, openat,
@@ -93,6 +93,43 @@ impl CacheWriter {
         }
     }
 
+    pub(crate) fn remove_published(
+        root: &Path,
+        identity: &CacheIdentity,
+    ) -> Result<(), CacheError> {
+        struct CleanupGuard;
+        impl WorkGuard for CleanupGuard {
+            fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+                Ok(())
+            }
+        }
+        let key = identity.cache_key();
+        let directory =
+            CacheDirectory::open(root, &key, false, &CleanupGuard)?.ok_or_else(|| {
+                CacheError::conflict("published cache directory disappeared before rollback")
+            })?;
+        let publication_lock = PublicationLock::acquire(&directory, &CleanupGuard)?;
+        directory.verify()?;
+        publication_lock.verify()?;
+        let (file, object) = open_final(&directory)?
+            .ok_or_else(|| CacheError::conflict("published cache disappeared before rollback"))?;
+        validate_file(file, &directory, identity, &CleanupGuard).map_err(
+            |failure| match failure {
+                ValidationFailure::Rebuild(reason) => CacheError::conflict(format!(
+                    "published rollback target is invalid: {reason:?}"
+                )),
+                ValidationFailure::Fatal(error) => error,
+            },
+        )?;
+        directory.verify()?;
+        publication_lock.verify()?;
+        unlink_verified(&directory, FINAL_NAME, object)?;
+        sync_directory(&directory.file, "cannot fsync published-cache rollback")?;
+        directory.verify()?;
+        publication_lock.verify()?;
+        Ok(())
+    }
+
     fn authorize_resident_peak(&self, guard: &dyn WorkGuard) -> Result<(), CacheError> {
         let keys = self
             .store
@@ -104,6 +141,15 @@ impl CacheWriter {
             .kind_capacity()
             .checked_mul(size_of::<EventKind>())
             .ok_or_else(|| CacheError::invalid("event-kind resident bound overflow"))?;
+        let extras = self
+            .store
+            .extra_sections()
+            .iter()
+            .try_fold(0_usize, |total, section| {
+                total
+                    .checked_add(section.bytes.capacity())
+                    .ok_or_else(|| CacheError::invalid("extra-section resident bound overflow"))
+            })?;
         let identity_text = self
             .identity
             .analyzer_version
@@ -112,6 +158,7 @@ impl CacheWriter {
             .ok_or_else(|| CacheError::invalid("identity resident bound overflow"))?;
         let peak = keys
             .checked_add(kinds)
+            .and_then(|value| value.checked_add(extras))
             .and_then(|value| value.checked_add(identity_text))
             .and_then(|value| value.checked_add(MAX_MANIFEST_BYTES as usize))
             .and_then(|value| value.checked_add(SECTION_CHUNK_BYTES * 2))
@@ -319,12 +366,12 @@ impl CacheWriter {
             .checked_mul(EVENT_KEY_BYTES)
             .and_then(|value| u64::try_from(value).ok())
             .ok_or_else(|| CacheError::invalid("event-key section length overflow"))?;
-        let manifest_offset = keys_offset
+        let mut next_offset = keys_offset
             .checked_add(keys_length)
             .ok_or_else(|| CacheError::invalid("manifest offset overflow"))?;
         let mut sections = Vec::new();
         sections
-            .try_reserve_exact(2)
+            .try_reserve_exact(2 + self.store.extra_sections().len())
             .map_err(|_| super::allocation_error("cache section descriptors"))?;
         sections.push(SectionDescriptor {
             alignment: 1,
@@ -342,7 +389,39 @@ impl CacheWriter {
             name: try_owned(EVENT_KEYS_SECTION)?,
             offset: keys_offset,
         });
-        Ok((sections, manifest_offset))
+        for section in self.store.extra_sections() {
+            guard.consume(WorkDelta::default())?;
+            let offset = align_up(next_offset, u64::from(section.alignment))?;
+            let padding = usize::try_from(offset - next_offset)
+                .map_err(|_| CacheError::invalid("extra-section padding overflow"))?;
+            if padding > 0 {
+                let zeros = [0_u8; 4096];
+                write_part(file, &zeros[..padding], guard)?;
+            }
+            let mut digest = Sha256::new();
+            for chunk in section.bytes.chunks(SECTION_CHUNK_BYTES) {
+                guard.consume(WorkDelta {
+                    rows: (chunk.len() / section.element_size as usize) as u64,
+                    ..WorkDelta::default()
+                })?;
+                digest.update(chunk);
+                write_part(file, chunk, guard)?;
+            }
+            let length = u64::try_from(section.bytes.len())
+                .map_err(|_| CacheError::invalid("extra-section length does not fit u64"))?;
+            next_offset = offset
+                .checked_add(length)
+                .ok_or_else(|| CacheError::invalid("extra-section range overflow"))?;
+            sections.push(SectionDescriptor {
+                alignment: section.alignment,
+                checksum: digest.finalize().into(),
+                element_size: section.element_size,
+                length,
+                name: try_owned(section.name)?,
+                offset,
+            });
+        }
+        Ok((sections, next_offset))
     }
 }
 

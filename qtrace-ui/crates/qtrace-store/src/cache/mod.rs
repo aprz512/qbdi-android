@@ -253,9 +253,18 @@ pub trait StoreView {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct OwnedSection {
+    pub(crate) name: &'static str,
+    pub(crate) alignment: u32,
+    pub(crate) element_size: u32,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
 pub struct OwnedStoreView {
     event_keys: Vec<EventKey>,
     event_kinds: Vec<EventKind>,
+    extra_sections: Vec<OwnedSection>,
 }
 
 impl OwnedStoreView {
@@ -266,7 +275,30 @@ impl OwnedStoreView {
         Ok(Self {
             event_keys,
             event_kinds,
+            extra_sections: Vec::new(),
         })
+    }
+
+    pub(crate) fn with_section(mut self, section: OwnedSection) -> Result<Self, CacheError> {
+        if section.name.is_empty()
+            || section.alignment == 0
+            || !section.alignment.is_power_of_two()
+            || section.element_size == 0
+            || section.bytes.len() as u64 % u64::from(section.element_size) != 0
+            || self
+                .extra_sections
+                .iter()
+                .any(|existing| existing.name == section.name)
+        {
+            return Err(CacheError::invalid(
+                "invalid or duplicate owned cache section",
+            ));
+        }
+        self.extra_sections
+            .try_reserve(1)
+            .map_err(|_| allocation_error("owned cache section list"))?;
+        self.extra_sections.push(section);
+        Ok(self)
     }
 
     pub(crate) fn keys(&self) -> &[EventKey] {
@@ -283,6 +315,10 @@ impl OwnedStoreView {
 
     pub(crate) fn kind_capacity(&self) -> usize {
         self.event_kinds.capacity()
+    }
+
+    pub(crate) fn extra_sections(&self) -> &[OwnedSection] {
+        &self.extra_sections
     }
 }
 

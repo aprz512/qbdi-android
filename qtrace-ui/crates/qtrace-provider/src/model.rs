@@ -14,7 +14,8 @@ pub enum Provenance {
     Damaged,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderCapabilities {
     pub global_ordering: bool,
     pub per_thread_ordering: bool,

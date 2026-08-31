@@ -8,6 +8,18 @@ pub(crate) const EVENT_KEY_BYTES: usize = 80;
 pub(crate) const EVENT_KEYS_SECTION: &str = "event_keys.v1";
 pub(crate) const EVENT_KINDS_SECTION: &str = "event_kinds.v1";
 
+pub(crate) fn known_section_contract(name: &str) -> Option<(u32, u32)> {
+    match name {
+        EVENT_KINDS_SECTION => Some((1, 1)),
+        EVENT_KEYS_SECTION => Some((8, EVENT_KEY_BYTES as u32)),
+        crate::index::NORMALIZED_CATALOG_SECTION => Some((
+            crate::index::NORMALIZED_CATALOG_ALIGNMENT,
+            crate::index::NORMALIZED_CATALOG_ELEMENT_SIZE,
+        )),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CacheHeader {
     pub schema: u32,

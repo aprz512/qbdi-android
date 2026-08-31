@@ -282,7 +282,7 @@ impl SessionLoader {
 
         for (record_index, record) in manifest.artifacts.into_iter().enumerate() {
             guard.consume(WorkDelta::default())?;
-            let format = match classify(&record.local_path) {
+            let _suffix_format = match classify(&record.local_path) {
                 ArtifactClass::Provider(format) => format,
                 ArtifactClass::Metadata => {
                     let opened = open_and_verify(&root, &record, guard);
@@ -326,6 +326,7 @@ impl SessionLoader {
             let result: Result<ArtifactSource, ProviderError> = (|| {
                 let (source, (relative, file_identity, mut provider_identity)) =
                     open_and_verify(&root, &record, guard)?;
+                let format = probe_artifact_format(&source, guard)?;
                 let provider = open_provider(
                     &source,
                     format,
@@ -376,7 +377,7 @@ impl SessionLoader {
     ) -> Result<SessionSource, ProviderError> {
         let path = selected.0;
         let (root, leaf) = split_selected_file(&path)?;
-        let format = match classify(&leaf) {
+        let _suffix_format = match classify(&leaf) {
             ArtifactClass::Provider(format) => format,
             _ => {
                 return Err(format_error(
@@ -387,6 +388,7 @@ impl SessionLoader {
         let source = root.open_source_file(&leaf)?;
         let file_identity = source.identity()?;
         let digest = hash_file(&source, file_identity, guard)?;
+        let format = probe_artifact_format(&source, guard)?;
         let initial_identity = ProviderSourceIdentity {
             artifact: digest,
             format: format.label().to_owned(),
@@ -585,6 +587,29 @@ fn open_provider(
             },
             guard,
         )?)),
+    }
+}
+
+fn probe_artifact_format(
+    source: &SecureFile,
+    guard: &dyn WorkGuard,
+) -> Result<ArtifactFormat, ProviderError> {
+    let identity = source.identity()?;
+    if identity.size < 4 {
+        return Err(format_error("binary source is shorter than its magic"));
+    }
+    guard.consume(WorkDelta {
+        input_bytes: 4,
+        nodes: 1,
+        ..WorkDelta::default()
+    })?;
+    let mut magic = [0_u8; 4];
+    source.read_exact_at_unchecked(0, &mut magic)?;
+    match magic {
+        [b'Q', b'T', b'R', b'B'] => Ok(ArtifactFormat::Qtrb),
+        [0x04, 0x22, 0x4d, 0x18] => Ok(ArtifactFormat::QtrbLz4),
+        [b'T', b'L', b'F', b'Q'] => Ok(ArtifactFormat::Flight),
+        _ => Err(format_error("binary source magic is unsupported")),
     }
 }
 

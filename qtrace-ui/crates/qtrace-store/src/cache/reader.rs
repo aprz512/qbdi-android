@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::layout::{
     CacheHeader, EVENT_KEY_BYTES, EVENT_KEYS_SECTION, EVENT_KINDS_SECTION, HEADER_BYTES,
-    decode_event_key, decode_event_kind,
+    decode_event_key, decode_event_kind, known_section_contract,
 };
 
 use super::{
@@ -100,6 +100,7 @@ pub struct MappedStoreView {
     event_count: usize,
     event_keys_offset: u64,
     event_kinds_offset: u64,
+    sections: Vec<super::SectionDescriptor>,
 }
 
 impl MappedStoreView {
@@ -109,6 +110,31 @@ impl MappedStoreView {
         read_exact_at(&self.file, offset, &mut output, None)?;
         self.stamp.verify(&self.file)?;
         Ok(output)
+    }
+
+    pub(crate) fn section_bytes(
+        &self,
+        name: &str,
+        guard: &dyn WorkGuard,
+    ) -> Result<Option<Vec<u8>>, CacheError> {
+        let Some(section) = self.sections.iter().find(|section| section.name == name) else {
+            return Ok(None);
+        };
+        guard.consume(WorkDelta {
+            resident_bytes: section.length,
+            ..WorkDelta::default()
+        })?;
+        let length = usize::try_from(section.length)
+            .map_err(|_| CacheError::access("cache section length does not fit usize"))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| allocation_error("mapped cache section"))?;
+        bytes.resize(length, 0);
+        self.stamp.verify(&self.file)?;
+        read_exact_at(&self.file, section.offset, &mut bytes, Some(guard))?;
+        self.stamp.verify(&self.file)?;
+        Ok(Some(bytes))
     }
 }
 
@@ -336,13 +362,126 @@ pub(crate) fn validate_file(
     }
     let event_count = usize::try_from(key_count)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("event count")))?;
+    let normalized = manifest
+        .sections
+        .iter()
+        .find(|section| section.name == crate::index::NORMALIZED_CATALOG_SECTION);
+    if expected.cache_schema == 2 && expected.layout_version == 2 && normalized.is_none() {
+        return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+            "missing normalized catalog",
+        )));
+    }
+    if let Some(section) = normalized {
+        const MAX_NORMALIZED_CATALOG_BYTES: u64 = 512 * 1024 * 1024;
+        if section.length == 0 || section.length > MAX_NORMALIZED_CATALOG_BYTES {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "normalized length",
+            )));
+        }
+        guard.consume(WorkDelta {
+            resident_bytes: section.length,
+            ..WorkDelta::default()
+        })?;
+        let length = usize::try_from(section.length)
+            .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("normalized length")))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| allocation_error("normalized catalog validation"))?;
+        bytes.resize(length, 0);
+        read_exact_at(&file, section.offset, &mut bytes, Some(guard))?;
+        crate::index::validate_catalog_bytes(&bytes, event_count)
+            .map_err(normalized_validation_failure)?;
+        let (event_keys, event_kinds) =
+            read_event_rows(&file, keys.offset, kinds.offset, event_count, guard)?;
+        crate::index::validate_catalog_bytes_with_rows(&bytes, &event_keys, &event_kinds, guard)
+            .map_err(normalized_validation_failure)?;
+    }
+    directory.verify()?;
+    stamp.verify(&file)?;
+    let mut sections = Vec::new();
+    sections
+        .try_reserve_exact(manifest.sections.len())
+        .map_err(|_| allocation_error("mapped section descriptors"))?;
+    sections.extend(manifest.sections.iter().cloned());
     Ok(MappedStoreView {
         file: Arc::new(file),
         stamp,
         event_count,
         event_keys_offset: keys.offset,
         event_kinds_offset: kinds.offset,
+        sections,
     })
+}
+
+fn normalized_validation_failure(error: crate::IndexError) -> ValidationFailure {
+    match error.code() {
+        "job.cancelled" => ValidationFailure::Fatal(CacheError::from(OperationAbort::Cancelled)),
+        "control.budget_exceeded" => ValidationFailure::Fatal(CacheError::from(
+            OperationAbort::budget_exceeded(qtrace_provider::BudgetDimension::Nodes, 0, 1),
+        )),
+        code if code.starts_with("control.") => {
+            ValidationFailure::Fatal(CacheError::resource(error.to_string()))
+        }
+        _ => ValidationFailure::Rebuild(RebuildReason::Section("normalized payload")),
+    }
+}
+
+fn read_event_rows(
+    file: &File,
+    keys_offset: u64,
+    kinds_offset: u64,
+    event_count: usize,
+    guard: &dyn WorkGuard,
+) -> Result<(Vec<EventKey>, Vec<EventKind>), ValidationFailure> {
+    let resident = event_count
+        .checked_mul(std::mem::size_of::<EventKey>() + std::mem::size_of::<EventKind>())
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+            "event count",
+        )))?;
+    guard.consume(WorkDelta {
+        resident_bytes: resident,
+        ..WorkDelta::default()
+    })?;
+    let mut keys = Vec::new();
+    let mut kinds = Vec::new();
+    keys.try_reserve_exact(event_count)
+        .map_err(|_| allocation_error("normalized event-key validation"))?;
+    kinds
+        .try_reserve_exact(event_count)
+        .map_err(|_| allocation_error("normalized event-kind validation"))?;
+    let mut encoded_key = [0_u8; EVENT_KEY_BYTES];
+    for row in 0..event_count {
+        if row % 4096 == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        let byte_offset = row
+            .checked_mul(EVENT_KEY_BYTES)
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(|value| keys_offset.checked_add(value))
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "event-key range",
+            )))?;
+        read_exact_at(file, byte_offset, &mut encoded_key, Some(guard))?;
+        keys.push(
+            decode_event_key(&encoded_key)
+                .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?,
+        );
+        let kind_offset =
+            kinds_offset
+                .checked_add(row as u64)
+                .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                    "event-kind range",
+                )))?;
+        let mut encoded_kind = [0_u8; 1];
+        read_exact_at(file, kind_offset, &mut encoded_kind, Some(guard))?;
+        kinds.push(
+            decode_event_kind(encoded_kind[0])
+                .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?,
+        );
+    }
+    Ok((keys, kinds))
 }
 
 fn validate_sections(
@@ -381,6 +520,26 @@ fn validate_sections(
             return Err(ValidationFailure::Rebuild(RebuildReason::Section(
                 "element size",
             )));
+        }
+        if let Some((alignment, element_size)) = known_section_contract(&section.name) {
+            if section.alignment != alignment {
+                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                    if section.name == EVENT_KEYS_SECTION || section.name == EVENT_KINDS_SECTION {
+                        "known alignment"
+                    } else {
+                        "known section contract"
+                    },
+                )));
+            }
+            if section.element_size != element_size {
+                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                    if section.name == EVENT_KEYS_SECTION || section.name == EVENT_KINDS_SECTION {
+                        "known element size"
+                    } else {
+                        "known section contract"
+                    },
+                )));
+            }
         }
         let end = section
             .offset

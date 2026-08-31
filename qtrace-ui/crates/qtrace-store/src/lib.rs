@@ -2,6 +2,7 @@
 
 mod cache;
 mod identity;
+mod index;
 mod layout;
 mod manifest;
 mod secure_path;
@@ -13,6 +14,10 @@ pub use cache::{
     SectionDescriptor, StoreView,
 };
 pub use identity::{FileIdentity, SourceIdentity};
+pub use index::{
+    BuildOptions, IndexBuilder, IndexError, MappedTraceStore, MemoryRow, OwnedTraceStore,
+    PostingList, RegisterAccess, RegisterObservationRow, Rows, TraceStore, intersect_rows,
+};
 pub use session::{
     ArtifactFailure, ArtifactFormat, ArtifactMetadata, ArtifactSource, AuthorizedPath, OpenPolicy,
     SessionCapabilities, SessionCapability, SessionLoader, SessionSource, SessionWarning,
