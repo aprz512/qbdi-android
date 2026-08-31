@@ -617,6 +617,7 @@ thread_local! {
     static INJECT_DIRECTORY_FSYNC_FAILURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static POST_DIRECTORY_FSYNC_HOOK: std::cell::RefCell<Option<PostDirectoryFsyncHook>> = const { std::cell::RefCell::new(None) };
     static INJECT_LOCK_SETUP_FAULT: std::cell::Cell<CreatedLeafFault> = const { std::cell::Cell::new(CreatedLeafFault::None) };
+    static INJECT_CREATED_LEAF_RECOVERY_RESOURCE_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -729,6 +730,17 @@ fn take_lock_setup_fault() -> CreatedLeafFault {
     INJECT_LOCK_SETUP_FAULT.with(|fault| fault.replace(CreatedLeafFault::None))
 }
 
+fn recover_created_regular_leaf_identity(file: &File) -> Result<ObjectIdentity, CacheError> {
+    #[cfg(test)]
+    if INJECT_CREATED_LEAF_RECOVERY_RESOURCE_FAILURE.with(|fault| fault.replace(false)) {
+        return Err(map_io_error(
+            "injected created leaf recovery fstat",
+            std::io::Error::from_raw_os_error(12),
+        ));
+    }
+    ObjectIdentity::regular_file(file)
+}
+
 fn finalize_created_regular_leaf(
     directory: &CacheDirectory,
     file: &File,
@@ -746,10 +758,10 @@ fn finalize_created_regular_leaf(
     let provisional = match provisional_result {
         Ok(identity) => identity,
         Err(error) => {
-            let recovery = ObjectIdentity::regular_file(file).map_err(|proof_error| {
-                CacheError::io(format!(
-                    "{kind} setup failed ({error}); held identity recovery failed ({proof_error}); leaf preserved"
-                ))
+            let recovery = recover_created_regular_leaf_identity(file).map_err(|proof_error| {
+                proof_error.with_static_context(
+                    "created cache leaf setup failed; held identity recovery failed; leaf preserved",
+                )
             })?;
             remove_created_regular_leaf(directory, name, recovery)?;
             return Err(error);
@@ -952,7 +964,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CreatedLeafFault, INJECT_DIRECTORY_FSYNC_FAILURES, INJECT_LOCK_SETUP_FAULT, OwnedTemporary,
+        CreatedLeafFault, INJECT_CREATED_LEAF_RECOVERY_RESOURCE_FAILURE,
+        INJECT_DIRECTORY_FSYNC_FAILURES, INJECT_LOCK_SETUP_FAULT, OwnedTemporary,
         POST_DIRECTORY_FSYNC_HOOK, PostDirectoryFsyncHook, PublicationLock,
     };
     use crate::cache::{
@@ -1299,6 +1312,33 @@ mod tests {
                 .count();
             assert_eq!(entries, 0, "temp leaked after injected setup failure");
         }
+    }
+
+    #[test]
+    fn created_leaf_recovery_resource_error_remains_control() {
+        let root = TempDir::new().expect("root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("private root");
+        let digest = "a".repeat(64);
+        let directory = CacheDirectory::open(root.path(), &digest, true, &AllowAll)
+            .expect("directory")
+            .expect("created directory");
+        let _lock = PublicationLock::acquire(&directory, &AllowAll).expect("publication lock");
+        INJECT_CREATED_LEAF_RECOVERY_RESOURCE_FAILURE.with(|injected| injected.set(true));
+
+        let error = match OwnedTemporary::create_impl(&directory, CreatedLeafFault::FirstIdentity) {
+            Err(error) => error,
+            Ok(_) => panic!("both created leaf identity checks must fail"),
+        };
+
+        assert_eq!(error.code(), "control.resource_exhausted");
+        assert!(error.is_control());
+        assert_eq!(error.publication_state(), PublicationState::NoVisibleFinal);
+        let temporary_count = fs::read_dir(root.path().join("qtrace-ui").join(digest))
+            .expect("digest entries")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(temporary_count, 1, "unproved temp must be preserved");
     }
 
     #[test]

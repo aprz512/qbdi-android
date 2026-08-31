@@ -215,10 +215,25 @@ the implementation preserves all ambiguous objects and returns typed conflict ra
 a possible foreign directory. Concurrent creators race at `NOREPLACE`; the loser removes only its
 proved staging inode and validates the winner.
 
+### Independent-review round 4: RED -> GREEN
+
+Two real consecutive-`fstat` fault tests cover the directory-staging and shared regular-leaf setup
+machines. The first descriptor identity check fails with ordinary `cache.io`; the recovery proof
+then fails through the centralized `ENOMEM` mapper. Before the fix both paths rebuilt that recovery
+error with `CacheError::io`, and the focused run failed 2/2 with `left: "cache.io"`,
+`right: "control.resource_exhausted"`.
+
+The recovery paths now add only a compile-time-static, 192-byte-bounded context to the existing
+`CacheError`. They preserve its validated code, original detail, control classification, and
+publication visibility state. Both tests return `control.resource_exhausted`/`is_control`; because
+the held inode could not be proved, one staging directory or random temp remains conservatively
+preserved rather than being removed by name. A scan of setup/recovery wrappers found no additional
+first-error/recovery-error downgrade site.
+
 ### Focused GREEN
 
 The final focused suites pass 29 integration tests: 11 format/identity/corruption/view tests and 18
-publication/path/lock/race/cancellation tests. Sixteen cache-focused unit tests cover setup faults,
+publication/path/lock/race/cancellation tests. Eighteen cache-focused unit tests cover setup faults,
 post-fsync rebinding, cancellable lock contention, umask boundaries, visibility states, and
 resource mapping. Publication abort coverage runs both `Cancelled` and `BudgetExceeded` at all
 four checkpoints; checkpoint 4 is post-rename and its verified rollback leaves no builder
@@ -227,8 +242,8 @@ final/temp when `NoVisibleFinal` is reported.
 ## Verification
 
 - `cargo test -p qtrace-store --test cache_format --test cache_publication` — passed, 29/29.
-- `cargo test -p qtrace-store cache:: -- --nocapture` — passed, 16/16 cache-focused unit tests.
-- `cargo test -p qtrace-store` — passed, 95/95 (19 unit + 76 integration).
+- `cargo test -p qtrace-store cache:: -- --nocapture` — passed, 18/18 cache-focused unit tests.
+- `cargo test -p qtrace-store` — passed, 97/97 (21 unit + 76 integration).
 - `cargo test -p qtrace-provider` — passed, 122 tests plus one intentional ignored isolated child
   entry point.
 - `cargo clippy -p qtrace-store -p qtrace-provider --all-targets -- -D warnings` — passed.
@@ -270,4 +285,6 @@ final/temp when `NoVisibleFinal` is reported.
 - Review-fix follow-up: `fix(qtrace-ui): harden cache publication` (exact hash in handoff).
 - Review-round-2 follow-up: `fix(qtrace-ui): close cache commit windows` (exact hash in handoff).
 - Review-round-3 follow-up: `fix(qtrace-ui): bind cache setup to descriptors` (exact hash in
+  handoff).
+- Review-round-4 follow-up: `fix(qtrace-ui): preserve cache resource errors` (exact hash in
   handoff).

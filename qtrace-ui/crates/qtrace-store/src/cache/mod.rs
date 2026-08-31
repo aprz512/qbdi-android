@@ -51,6 +51,7 @@ type DirectoryAfterOpenHook = Box<dyn FnMut(&OsStr)>;
 #[cfg(test)]
 std::thread_local! {
     static INJECT_DIRECTORY_SETUP_FAULT: std::cell::Cell<DirectorySetupFault> = const { std::cell::Cell::new(DirectorySetupFault::None) };
+    static INJECT_DIRECTORY_RECOVERY_RESOURCE_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static DIRECTORY_AFTER_OPEN_HOOK: std::cell::RefCell<Option<DirectoryAfterOpenHook>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -69,6 +70,17 @@ fn directory_setup_fault(point: DirectorySetupFault) -> bool {
             false
         }
     })
+}
+
+fn recover_created_directory_identity(file: &File) -> Result<ObjectIdentity, CacheError> {
+    #[cfg(test)]
+    if INJECT_DIRECTORY_RECOVERY_RESOURCE_FAILURE.with(|fault| fault.replace(false)) {
+        return Err(map_io_error(
+            "injected created directory recovery fstat",
+            std::io::Error::from_raw_os_error(12),
+        ));
+    }
+    ObjectIdentity::from_file(file)
 }
 
 #[cfg(test)]
@@ -158,6 +170,17 @@ impl CacheError {
 
     pub(crate) fn conflict(detail: impl Into<String>) -> Self {
         Self::new("cache.identity_conflict", detail)
+    }
+
+    pub(crate) fn with_static_context(mut self, context: &'static str) -> Self {
+        const MAX_CONTEXT_BYTES: usize = 192;
+        let bounded = if context.len() <= MAX_CONTEXT_BYTES {
+            context
+        } else {
+            "cache operation failed"
+        };
+        self.detail = format!("{bounded}: {}", self.detail);
+        self
     }
 
     pub(crate) fn durability(detail: impl Into<String>) -> Self {
@@ -516,10 +539,10 @@ fn finalize_staged_private_directory(
     let created_identity = match created_identity_result {
         Ok(identity) => identity,
         Err(error) => {
-            let recovery = ObjectIdentity::from_file(&inspect).map_err(|proof_error| {
-                CacheError::io(format!(
-                    "created directory setup failed ({error}); held identity recovery failed ({proof_error}); staging preserved"
-                ))
+            let recovery = recover_created_directory_identity(&inspect).map_err(|proof_error| {
+                proof_error.with_static_context(
+                    "created directory setup failed; held identity recovery failed; staging preserved",
+                )
             })?;
             return Err(cleanup_created_directory_after_error(
                 parent,
@@ -722,8 +745,9 @@ mod tests {
     };
 
     use super::{
-        DIRECTORY_AFTER_OPEN_HOOK, DirectorySetupFault, INJECT_DIRECTORY_SETUP_FAULT,
-        allocation_error, map_errno, open_or_create_directory,
+        DIRECTORY_AFTER_OPEN_HOOK, DirectorySetupFault, INJECT_DIRECTORY_RECOVERY_RESOURCE_FAILURE,
+        INJECT_DIRECTORY_SETUP_FAULT, PublicationState, allocation_error, map_errno,
+        open_or_create_directory,
     };
     use rustix::io::Errno;
     use tempfile::TempDir;
@@ -773,6 +797,31 @@ mod tests {
                 "created directory or staging leaked after injected setup failure"
             );
         }
+    }
+
+    #[test]
+    fn created_directory_recovery_resource_error_remains_control() {
+        let parent = TempDir::new().expect("parent");
+        let parent_file = File::open(parent.path()).expect("parent descriptor");
+        INJECT_DIRECTORY_SETUP_FAULT
+            .with(|injected| injected.set(DirectorySetupFault::FirstIdentity));
+        INJECT_DIRECTORY_RECOVERY_RESOURCE_FAILURE.with(|injected| injected.set(true));
+
+        let error = open_or_create_directory(&parent_file, OsStr::new("created"), true, true)
+            .expect_err("both directory identity checks must fail");
+
+        assert_eq!(error.code(), "control.resource_exhausted");
+        assert!(error.is_control());
+        assert_eq!(error.publication_state(), PublicationState::NoVisibleFinal);
+        assert!(!parent.path().join("created").exists());
+        assert_eq!(
+            fs::read_dir(parent.path())
+                .expect("parent entries")
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "unproved staging must be preserved"
+        );
     }
 
     fn install_directory_name_rebind(parent: &std::path::Path) -> File {
