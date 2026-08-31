@@ -4,7 +4,7 @@ use qtrace_provider::{
     EventKind, EventPayload, EventRecord, EventScope, Provenance, ProviderCapabilities,
     RegisterSlot, TraceProvider, WorkDelta, WorkGuard,
 };
-use serde::Serialize;
+use serde::{Serialize, ser::SerializeStruct};
 
 use crate::ArtifactSource;
 
@@ -26,6 +26,7 @@ impl IndexBuilder {
         options.validate()?;
         guard.consume(WorkDelta::default())?;
         let provider = source.open_provider(guard)?;
+        source.authorize_provider_cursor(guard)?;
         Self::build_provider(provider, options, guard)
     }
 
@@ -54,15 +55,15 @@ impl IndexBuilder {
     }
 }
 
-struct BuildState {
+struct BuildState<'a> {
     next_row: usize,
     retain_source_columns: bool,
     keys: Vec<qtrace_provider::EventKey>,
     kinds: Vec<EventKind>,
     events: Vec<EventColumn>,
-    payloads: ByteArena,
-    strings: ByteArena,
-    blobs: ByteArena,
+    payloads: ByteArena<'a>,
+    strings: ByteArena<'a>,
+    blobs: ByteArena<'a>,
     modules: Vec<ModuleRow>,
     definitions: Vec<DefinitionRow>,
     instructions: Vec<InstructionRow>,
@@ -86,13 +87,19 @@ struct BuildState {
     current_module: HashMap<EventScope, (u64, Vec<u8>)>,
 }
 
-impl BuildState {
+impl<'a> BuildState<'a> {
     fn new(options: &BuildOptions) -> Result<Self, IndexError> {
         Self::with_source_columns(options, true)
     }
 
-    fn validation(options: &BuildOptions) -> Result<Self, IndexError> {
-        Self::with_source_columns(options, false)
+    fn validation(
+        options: &BuildOptions,
+        catalog: &'a NormalizedCatalog,
+    ) -> Result<Self, IndexError> {
+        let mut state = Self::with_source_columns(options, false)?;
+        state.strings = ByteArena::validation(&catalog.strings);
+        state.blobs = ByteArena::validation(&catalog.blobs);
+        Ok(state)
     }
 
     fn with_source_columns(
@@ -133,7 +140,7 @@ impl BuildState {
     }
 
     fn append(&mut self, event: EventRecord, guard: &dyn WorkGuard) -> Result<(), IndexError> {
-        let payload_bytes = canonical_bytes(&event.payload)?;
+        let payload_bytes = canonical_bytes(&event.payload, guard)?;
         let payload_blob = self.payloads.intern(&payload_bytes, guard)?;
         self.append_with_payload_blob(event, payload_blob, guard)
     }
@@ -145,9 +152,12 @@ impl BuildState {
         guard: &dyn WorkGuard,
     ) -> Result<(), IndexError> {
         if self.retain_source_columns {
-            self.source_keys
-                .try_reserve(1)
-                .map_err(|_| IndexError::resource("source-key set allocation failed"))?;
+            crate::allocation::try_reserve_hash_set(
+                &mut self.source_keys,
+                1,
+                guard,
+                "source-key set allocation",
+            )?;
             if !self.source_keys.insert(event.key.clone()) {
                 return Err(IndexError::duplicate_key("duplicate source EventKey"));
             }
@@ -158,15 +168,14 @@ impl BuildState {
             .checked_add(1)
             .ok_or_else(|| IndexError::resource("event row count overflow"))?;
         if self.retain_source_columns {
-            self.keys
-                .try_reserve(1)
-                .map_err(|_| IndexError::resource("event key allocation failed"))?;
-            self.kinds
-                .try_reserve(1)
-                .map_err(|_| IndexError::resource("event kind allocation failed"))?;
-            self.events
-                .try_reserve(1)
-                .map_err(|_| IndexError::resource("event column allocation failed"))?;
+            crate::allocation::try_reserve_vec(&mut self.keys, 1, guard, "event key allocation")?;
+            crate::allocation::try_reserve_vec(&mut self.kinds, 1, guard, "event kind allocation")?;
+            crate::allocation::try_reserve_vec(
+                &mut self.events,
+                1,
+                guard,
+                "event column allocation",
+            )?;
             self.keys.push(event.key.clone());
             self.kinds.push(event.kind());
             self.events.push(EventColumn {
@@ -181,14 +190,17 @@ impl BuildState {
 
         match &event.payload {
             EventPayload::Begin(begin) => {
-                self.current_module
-                    .try_reserve(1)
-                    .map_err(|_| IndexError::resource("module scope allocation failed"))?;
+                crate::allocation::try_reserve_hash_map(
+                    &mut self.current_module,
+                    1,
+                    guard,
+                    "module scope allocation",
+                )?;
                 self.current_module.insert(
                     event.scope(),
                     (
                         begin.module_base,
-                        try_copy_bytes(begin.target.as_bytes(), "begin target")?,
+                        try_copy_bytes(begin.target.as_bytes(), guard, "begin target")?,
                     ),
                 );
             }
@@ -208,9 +220,12 @@ impl BuildState {
                             self.next_module_id = id.checked_add(1).ok_or_else(|| {
                                 IndexError::resource("module dictionary exceeds u32")
                             })?;
-                            self.modules.try_reserve(1).map_err(|_| {
-                                IndexError::resource("module dictionary allocation failed")
-                            })?;
+                            crate::allocation::try_reserve_vec(
+                                &mut self.modules,
+                                1,
+                                guard,
+                                "module dictionary allocation",
+                            )?;
                             self.modules.push(ModuleRow {
                                 source_event_row: row,
                                 provenance: event.provenance,
@@ -218,24 +233,28 @@ impl BuildState {
                                 base: module.base,
                                 name,
                             });
-                            self.module_by_semantic.try_reserve(1).map_err(|_| {
-                                IndexError::resource("module semantic map allocation failed")
-                            })?;
+                            crate::allocation::try_reserve_hash_map(
+                                &mut self.module_by_semantic,
+                                1,
+                                guard,
+                                "module semantic map allocation",
+                            )?;
                             self.module_by_semantic.insert(semantic_key, id);
                             id
                         };
-                        self.module_by_source.try_reserve(1).map_err(|_| {
-                            IndexError::resource("module source map allocation failed")
-                        })?;
+                        crate::allocation::try_reserve_hash_map(
+                            &mut self.module_by_source,
+                            1,
+                            guard,
+                            "module source map allocation",
+                        )?;
                         self.module_by_source
                             .insert(source_key, (id, module.base, name));
                     }
                 }
             }
             EventPayload::InstructionDefinition(definition) => {
-                let mut semantic_definition = definition.clone();
-                semantic_definition.definition_id = 0;
-                let exact = canonical_bytes(&semantic_definition)?;
+                let exact = canonical_bytes(&SemanticDefinition(definition), guard)?;
                 let exact_blob = self.blobs.intern(&exact, guard)?;
                 let source_key = (event.scope(), definition.definition_id);
                 if let Some((_, previous_blob)) = self.definition_by_source.get(&source_key) {
@@ -257,9 +276,12 @@ impl BuildState {
                         let disassembly = self
                             .strings
                             .intern(definition.disassembly.as_bytes(), guard)?;
-                        self.definitions.try_reserve(1).map_err(|_| {
-                            IndexError::resource("definition dictionary allocation failed")
-                        })?;
+                        crate::allocation::try_reserve_vec(
+                            &mut self.definitions,
+                            1,
+                            guard,
+                            "definition dictionary allocation",
+                        )?;
                         self.definitions.push(DefinitionRow {
                             source_event_row: row,
                             provenance: event.provenance,
@@ -277,15 +299,21 @@ impl BuildState {
                             disassembly,
                             exact_blob,
                         });
-                        self.definition_by_blob.try_reserve(1).map_err(|_| {
-                            IndexError::resource("definition semantic map allocation failed")
-                        })?;
+                        crate::allocation::try_reserve_hash_map(
+                            &mut self.definition_by_blob,
+                            1,
+                            guard,
+                            "definition semantic map allocation",
+                        )?;
                         self.definition_by_blob.insert(exact_blob, id);
                         id
                     };
-                    self.definition_by_source.try_reserve(1).map_err(|_| {
-                        IndexError::resource("definition source map allocation failed")
-                    })?;
+                    crate::allocation::try_reserve_hash_map(
+                        &mut self.definition_by_source,
+                        1,
+                        guard,
+                        "definition source map allocation",
+                    )?;
                     self.definition_by_source
                         .insert(source_key, (id, exact_blob));
                 }
@@ -303,9 +331,12 @@ impl BuildState {
                             self.next_module_id = id.checked_add(1).ok_or_else(|| {
                                 IndexError::resource("module dictionary exceeds u32")
                             })?;
-                            self.modules.try_reserve(1).map_err(|_| {
-                                IndexError::resource("module dictionary allocation failed")
-                            })?;
+                            crate::allocation::try_reserve_vec(
+                                &mut self.modules,
+                                1,
+                                guard,
+                                "module dictionary allocation",
+                            )?;
                             self.modules.push(ModuleRow {
                                 source_event_row: row,
                                 provenance: Provenance::Derived,
@@ -313,15 +344,21 @@ impl BuildState {
                                 base: *base,
                                 name,
                             });
-                            self.module_by_semantic.try_reserve(1).map_err(|_| {
-                                IndexError::resource("module semantic map allocation failed")
-                            })?;
+                            crate::allocation::try_reserve_hash_map(
+                                &mut self.module_by_semantic,
+                                1,
+                                guard,
+                                "module semantic map allocation",
+                            )?;
                             self.module_by_semantic.insert(semantic_key, id);
                             id
                         };
-                        self.module_by_source.try_reserve(1).map_err(|_| {
-                            IndexError::resource("module source map allocation failed")
-                        })?;
+                        crate::allocation::try_reserve_hash_map(
+                            &mut self.module_by_source,
+                            1,
+                            guard,
+                            "module source map allocation",
+                        )?;
                         self.module_by_source
                             .insert(module_source_key, (id, *base, name));
                     }
@@ -334,20 +371,33 @@ impl BuildState {
                     .definition_by_source
                     .get(&(event.scope(), instruction.definition_id))
                     .map(|item| item.0);
-                self.instructions
-                    .try_reserve(1)
-                    .map_err(|_| IndexError::resource("instruction column allocation failed"))?;
+                crate::allocation::try_reserve_vec(
+                    &mut self.instructions,
+                    1,
+                    guard,
+                    "instruction column allocation",
+                )?;
                 self.instructions.push(InstructionRow {
                     owner_row: row,
                     module,
                     relative_pc: instruction.relative_pc,
                     definition,
                 });
+                let observation_count = instruction
+                    .read_before
+                    .len()
+                    .checked_add(instruction.write_after.len())
+                    .ok_or_else(|| {
+                        IndexError::resource("instruction observation count overflow")
+                    })?;
+                crate::allocation::try_reserve_vec(
+                    &mut self.observations,
+                    observation_count,
+                    guard,
+                    "register observation allocation",
+                )?;
                 for value in &instruction.read_before {
                     self.saw_register_observation = true;
-                    self.observations.try_reserve(1).map_err(|_| {
-                        IndexError::resource("register observation allocation failed")
-                    })?;
                     self.observations.push(RegisterObservationRow {
                         owner_row: row,
                         slot: value.slot,
@@ -359,9 +409,6 @@ impl BuildState {
                 }
                 for value in &instruction.write_after {
                     self.saw_register_observation = true;
-                    self.observations.try_reserve(1).map_err(|_| {
-                        IndexError::resource("register observation allocation failed")
-                    })?;
                     self.observations.push(RegisterObservationRow {
                         owner_row: row,
                         slot: value.slot,
@@ -381,9 +428,12 @@ impl BuildState {
                     .address
                     .checked_add(u64::from(memory.size))
                     .ok_or_else(|| IndexError::invalid("memory address plus size overflows"))?;
-                self.memories
-                    .try_reserve(1)
-                    .map_err(|_| IndexError::resource("memory column allocation failed"))?;
+                crate::allocation::try_reserve_vec(
+                    &mut self.memories,
+                    1,
+                    guard,
+                    "memory column allocation",
+                )?;
                 self.memories.push(MemoryRow {
                     owner_row: row,
                     module: self
@@ -400,16 +450,21 @@ impl BuildState {
                     value: memory.value,
                     before_blob: self
                         .blobs
-                        .intern(&canonical_bytes(&memory.before)?, guard)?,
-                    after_blob: self.blobs.intern(&canonical_bytes(&memory.after)?, guard)?,
+                        .intern(&canonical_bytes(&memory.before, guard)?, guard)?,
+                    after_blob: self
+                        .blobs
+                        .intern(&canonical_bytes(&memory.after, guard)?, guard)?,
                 });
             }
             EventPayload::SemanticCall(value)
             | EventPayload::SemanticRule(value)
             | EventPayload::SemanticError(value) => {
-                self.semantics
-                    .try_reserve(1)
-                    .map_err(|_| IndexError::resource("semantic column allocation failed"))?;
+                crate::allocation::try_reserve_vec(
+                    &mut self.semantics,
+                    1,
+                    guard,
+                    "semantic column allocation",
+                )?;
                 self.semantics.push(SemanticRow {
                     owner_row: row,
                     category: value
@@ -430,10 +485,13 @@ impl BuildState {
                             .iter()
                             .enumerate()
                             .all(|(index, item)| item.slot.index() == index);
+                crate::allocation::try_reserve_vec(
+                    &mut self.observations,
+                    checkpoint.values.len(),
+                    guard,
+                    "register checkpoint observation allocation",
+                )?;
                 for value in &checkpoint.values {
-                    self.observations.try_reserve(1).map_err(|_| {
-                        IndexError::resource("register observation allocation failed")
-                    })?;
                     self.observations.push(RegisterObservationRow {
                         owner_row: row,
                         slot: value.slot.index() as u8,
@@ -445,10 +503,13 @@ impl BuildState {
                 }
             }
             EventPayload::RegisterDelta(delta) => {
+                crate::allocation::try_reserve_vec(
+                    &mut self.observations,
+                    delta.changed.len(),
+                    guard,
+                    "register delta observation allocation",
+                )?;
                 for value in &delta.changed {
-                    self.observations.try_reserve(1).map_err(|_| {
-                        IndexError::resource("register observation allocation failed")
-                    })?;
                     self.observations.push(RegisterObservationRow {
                         owner_row: row,
                         slot: value.slot.index() as u8,
@@ -480,9 +541,12 @@ impl BuildState {
         ranges: Vec<qtrace_provider::CompletenessRange>,
         guard: &dyn WorkGuard,
     ) -> Result<(), IndexError> {
-        self.completeness
-            .try_reserve_exact(ranges.len())
-            .map_err(|_| IndexError::resource("completeness allocation failed"))?;
+        crate::allocation::try_reserve_vec(
+            &mut self.completeness,
+            ranges.len(),
+            guard,
+            "completeness allocation",
+        )?;
         for range in ranges {
             guard.consume(WorkDelta {
                 nodes: 1,
@@ -490,8 +554,13 @@ impl BuildState {
             })?;
             self.completeness.push(CompletenessRow::from_range(range));
         }
-        validate_completeness_rows(&self.completeness, guard)
-            .map_err(|_| IndexError::invalid("provider completeness is not canonical"))?;
+        validate_completeness_rows(&self.completeness, guard).map_err(|error| {
+            if error.code().starts_with("control.") || error.code() == "job.cancelled" {
+                error
+            } else {
+                IndexError::invalid("provider completeness is not canonical")
+            }
+        })?;
         Ok(())
     }
 
@@ -519,13 +588,16 @@ impl BuildState {
             options,
             guard,
         )?;
+        let (payload_bytes, payload_spans, payload_max) = self.payloads.into_owned_parts()?;
+        let (string_bytes, string_spans, string_max) = self.strings.into_owned_parts()?;
+        let (blob_bytes, blob_spans, blob_max) = self.blobs.into_owned_parts()?;
         let catalog = NormalizedCatalog {
             schema: 2,
             capabilities,
             events: self.events,
-            payloads: self.payloads,
-            strings: self.strings,
-            blobs: self.blobs,
+            payloads: ByteArena::from_owned_parts(payload_bytes, payload_spans, payload_max),
+            strings: ByteArena::from_owned_parts(string_bytes, string_spans, string_max),
+            blobs: ByteArena::from_owned_parts(blob_bytes, blob_spans, blob_max),
             modules: self.modules,
             definitions: self.definitions,
             instructions: self.instructions,
@@ -560,36 +632,36 @@ pub(super) fn validate_cached_truth(
         max_blob_bytes: catalog.blobs.max_bytes,
         max_string_bytes: catalog.strings.max_bytes,
     };
-    let mut state = BuildState::validation(&options)?;
-    state.strings = ByteArena::validation(&catalog.strings);
-    state.blobs = ByteArena::validation(&catalog.blobs);
+    let mut state = BuildState::validation(&options, catalog)?;
     let mut instruction_cursor = 0;
     let mut memory_cursor = 0;
     let mut semantic_cursor = 0;
     let mut observation_cursor = 0;
     let mut module_cursor = 0;
     let mut definition_cursor = 0;
+    let discontinuity_count = kinds
+        .iter()
+        .filter(|kind| **kind == EventKind::Discontinuity)
+        .count();
     let mut discontinuities = Vec::new();
-    guard.consume(WorkDelta {
-        resident_bytes: u64::try_from(
-            source_completeness
-                .len()
-                .saturating_mul(std::mem::size_of::<CompletenessRow>()),
-        )
-        .unwrap_or(u64::MAX),
-        ..WorkDelta::default()
-    })?;
-    discontinuities
-        .try_reserve_exact(source_completeness.len())
-        .map_err(|_| IndexError::resource("discontinuity evidence allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut discontinuities,
+        discontinuity_count,
+        guard,
+        "discontinuity evidence allocation",
+    )?;
     for row in 0..keys.len() {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
         }
         let bytes = catalog.payloads.get(catalog.events[row].payload_blob)?;
+        crate::allocation::authorize(
+            guard,
+            crate::allocation::payload_decode_upper_bound(kinds[row], bytes.len())?,
+        )?;
         let payload: EventPayload = serde_json::from_slice(bytes)
             .map_err(|_| IndexError::corrupt("canonical event payload cannot be decoded"))?;
-        if canonical_bytes(&payload)? != bytes {
+        if canonical_bytes(&payload, guard)? != bytes {
             return Err(IndexError::corrupt("event payload bytes are not canonical"));
         }
         if let EventPayload::Discontinuity(discontinuity) = &payload {
@@ -680,8 +752,7 @@ pub(super) fn validate_cached_truth(
             "stored typed child cardinality exceeds canonical payload facts",
         ));
     }
-    validate_completeness_rows(source_completeness, guard)
-        .map_err(|_| IndexError::corrupt("canonical provider completeness is not normalized"))?;
+    validate_completeness_rows(source_completeness, guard).map_err(cached_rebuild_error)?;
     if source_format.eq_ignore_ascii_case("flight") {
         cancellable_sort_by(&mut discontinuities, guard, compare_completeness_rows)?;
         let mut evidence = discontinuities.iter();
@@ -750,6 +821,16 @@ fn validate_completeness_rows(
     rows: &[CompletenessRow],
     guard: &dyn WorkGuard,
 ) -> Result<(), IndexError> {
+    for (ordinal, row) in rows.iter().enumerate() {
+        if ordinal % 4096 == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        if row.to_range().is_none() {
+            return Err(IndexError::invalid(
+                "completeness bounds disagree with their domain",
+            ));
+        }
+    }
     for (ordinal, pair) in rows.windows(2).enumerate() {
         if ordinal % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
@@ -774,46 +855,13 @@ fn compare_completeness_rows(
     left: &CompletenessRow,
     right: &CompletenessRow,
 ) -> std::cmp::Ordering {
-    completeness_key(left).cmp(&completeness_key(right))
-}
-
-fn completeness_key(row: &CompletenessRow) -> (u8, u8, u64, u64, u8) {
-    let domain = match row.domain {
-        qtrace_provider::RangeDomain::CapturedSequence => 0,
-        qtrace_provider::RangeDomain::SourceBytes => 1,
-        qtrace_provider::RangeDomain::MemoryAddresses => 2,
-    };
-    let cause = match row.cause {
-        qtrace_provider::CompletenessCause::Retained => 0,
-        qtrace_provider::CompletenessCause::Active => 1,
-        qtrace_provider::CompletenessCause::Rotating => 2,
-        qtrace_provider::CompletenessCause::Stale => 3,
-        qtrace_provider::CompletenessCause::Unreliable => 4,
-        qtrace_provider::CompletenessCause::Incomplete => 5,
-        qtrace_provider::CompletenessCause::Lost => 6,
-        qtrace_provider::CompletenessCause::Overwritten => 7,
-        qtrace_provider::CompletenessCause::CoverageGap => 8,
-        qtrace_provider::CompletenessCause::Checksum => 9,
-        qtrace_provider::CompletenessCause::UnterminatedThread => 10,
-        qtrace_provider::CompletenessCause::MissingTerminal => 11,
-        qtrace_provider::CompletenessCause::Truncation => 12,
-        qtrace_provider::CompletenessCause::Unknown => 13,
-    };
-    let (start, end) = match row.bounds {
-        qtrace_provider::RangeBounds::InclusiveSequence { first, last } => (first, last),
-        qtrace_provider::RangeBounds::HalfOpen {
-            start,
-            end_exclusive,
-        } => (start, end_exclusive),
-    };
-    let provenance = match row.provenance {
-        Provenance::Captured => 0,
-        Provenance::Derived => 1,
-        Provenance::Heuristic => 2,
-        Provenance::Unknown => 3,
-        Provenance::Damaged => 4,
-    };
-    (domain, cause, start, end, provenance)
+    let left = left
+        .to_range()
+        .map(|range| qtrace_provider::completeness_canonical_key(&range));
+    let right = right
+        .to_range()
+        .map(|range| qtrace_provider::completeness_canonical_key(&range));
+    left.cmp(&right)
 }
 
 fn same_completeness_class(left: &CompletenessRow, right: &CompletenessRow) -> bool {
@@ -957,8 +1005,8 @@ pub(super) fn build_indexes(
             }
         }
     }
-    let call = PostingList::from_rows(&call)?;
-    let return_rows = PostingList::from_rows(&return_rows)?;
+    let call = PostingList::from_rows(&call, guard)?;
+    let return_rows = PostingList::from_rows(&return_rows, guard)?;
 
     let mut pc_pairs = reserved_pairs(instructions.len(), "module PC index", guard)?;
     for (ordinal, instruction) in instructions.iter().enumerate() {
@@ -991,7 +1039,7 @@ pub(super) fn build_indexes(
     }
     cancellable_sort(&mut checkpoint, guard)?;
     checkpoint.dedup();
-    let checkpoint = PostingList::from_rows(&checkpoint)?;
+    let checkpoint = PostingList::from_rows(&checkpoint, guard)?;
 
     let mut semantic_category_pairs =
         reserved_pairs(semantics.len(), "semantic category index", guard)?;
@@ -1014,11 +1062,13 @@ pub(super) fn build_indexes(
     }
     let semantic_name = keyed_postings(semantic_name_pairs, guard)?;
 
-    charge_allocation::<IntervalEntry>(memories.len(), guard)?;
     let mut intervals = Vec::new();
-    intervals
-        .try_reserve(memories.len())
-        .map_err(|_| IndexError::resource("memory interval allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut intervals,
+        memories.len(),
+        guard,
+        "memory interval allocation",
+    )?;
     for (ordinal, memory) in memories.iter().enumerate() {
         if ordinal % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
@@ -1033,11 +1083,13 @@ pub(super) fn build_indexes(
     }
     let memory = IntervalIndex::build(intervals, options.interval_block_rows as usize, guard)?;
 
-    charge_allocation::<SourceKeyRow>(keys.len(), guard)?;
     let mut source_keys = Vec::new();
-    source_keys
-        .try_reserve_exact(keys.len())
-        .map_err(|_| IndexError::resource("source-key index allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut source_keys,
+        keys.len(),
+        guard,
+        "source-key index allocation",
+    )?;
     for (row, key) in keys.iter().cloned().enumerate() {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
@@ -1147,7 +1199,7 @@ pub(super) fn validate_index_families(
         }
         cancellable_sort(&mut rows, guard)?;
         rows.dedup();
-        let expected = PostingList::from_rows(&rows)?;
+        let expected = PostingList::from_rows(&rows, guard)?;
         let actual = indexes.register.get(&slot);
         if (!rows.is_empty() && actual != Some(&expected)) || (rows.is_empty() && actual.is_some())
         {
@@ -1201,9 +1253,9 @@ pub(super) fn validate_index_families(
             }
         }
     }
-    require_equal(PostingList::from_rows(&call)?, &indexes.call, "call")?;
+    require_equal(PostingList::from_rows(&call, guard)?, &indexes.call, "call")?;
     require_equal(
-        PostingList::from_rows(&returns)?,
+        PostingList::from_rows(&returns, guard)?,
         &indexes.return_rows,
         "return",
     )?;
@@ -1226,7 +1278,7 @@ pub(super) fn validate_index_families(
     cancellable_sort(&mut checkpoint, guard)?;
     checkpoint.dedup();
     require_equal(
-        PostingList::from_rows(&checkpoint)?,
+        PostingList::from_rows(&checkpoint, guard)?,
         &indexes.checkpoint,
         "checkpoint",
     )?;
@@ -1252,9 +1304,12 @@ pub(super) fn validate_index_families(
     )?;
 
     let mut intervals = Vec::new();
-    intervals
-        .try_reserve_exact(catalog.memories.len())
-        .map_err(|_| IndexError::resource("memory validation allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut intervals,
+        catalog.memories.len(),
+        guard,
+        "memory validation allocation",
+    )?;
     intervals.extend(
         catalog
             .memories
@@ -1270,9 +1325,12 @@ pub(super) fn validate_index_families(
     require_equal(memory, &indexes.memory, "memory interval")?;
 
     let mut source_keys = Vec::new();
-    source_keys
-        .try_reserve_exact(keys.len())
-        .map_err(|_| IndexError::resource("source validation allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut source_keys,
+        keys.len(),
+        guard,
+        "source validation allocation",
+    )?;
     source_keys.extend(
         keys.iter()
             .cloned()
@@ -1297,40 +1355,22 @@ fn require_equal<T: Eq>(actual: T, expected: &T, label: &str) -> Result<(), Inde
 
 fn reserved_pairs<A, B>(
     rows: usize,
-    label: &str,
+    label: &'static str,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<(A, B)>, IndexError> {
-    charge_allocation::<(A, B)>(rows, guard)?;
     let mut values = Vec::new();
-    values
-        .try_reserve_exact(rows)
-        .map_err(|_| IndexError::resource(format!("{label} allocation failed")))?;
+    crate::allocation::try_reserve_vec(&mut values, rows, guard, label)?;
     Ok(values)
 }
 
 fn reserved_rows(
     rows: usize,
-    label: &str,
+    label: &'static str,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<usize>, IndexError> {
-    charge_allocation::<usize>(rows, guard)?;
     let mut values = Vec::new();
-    values
-        .try_reserve_exact(rows)
-        .map_err(|_| IndexError::resource(format!("{label} allocation failed")))?;
+    crate::allocation::try_reserve_vec(&mut values, rows, guard, label)?;
     Ok(values)
-}
-
-fn charge_allocation<T>(rows: usize, guard: &dyn WorkGuard) -> Result<(), IndexError> {
-    let bytes = rows
-        .checked_mul(std::mem::size_of::<T>())
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| IndexError::resource("allocation budget size overflow"))?;
-    guard.consume(WorkDelta {
-        resident_bytes: bytes,
-        ..WorkDelta::default()
-    })?;
-    Ok(())
 }
 
 fn keyed_postings<K: Ord + Clone>(
@@ -1350,10 +1390,7 @@ fn keyed_postings<K: Ord + Clone>(
         }
     }
     let mut result = Vec::new();
-    charge_allocation::<(K, PostingList)>(groups, guard)?;
-    result
-        .try_reserve_exact(groups)
-        .map_err(|_| IndexError::resource("posting map allocation failed"))?;
+    crate::allocation::try_reserve_vec(&mut result, groups, guard, "posting map allocation")?;
     let mut first = 0;
     while first < pairs.len() {
         guard.consume(WorkDelta {
@@ -1367,7 +1404,10 @@ fn keyed_postings<K: Ord + Clone>(
         let mut rows = reserved_rows(last - first, "posting rows", guard)?;
         rows.extend(pairs[first..last].iter().map(|(_, row)| *row));
         rows.dedup();
-        result.push((pairs[first].0.clone(), PostingList::from_rows(&rows)?));
+        result.push((
+            pairs[first].0.clone(),
+            PostingList::from_rows(&rows, guard)?,
+        ));
         first = last;
     }
     SortedMap::from_sorted(result)
@@ -1390,10 +1430,7 @@ fn keyed_values<K: Ord + Clone, V: Ord + Clone>(
         }
     }
     let mut result = Vec::new();
-    charge_allocation::<(K, Vec<V>)>(groups, guard)?;
-    result
-        .try_reserve_exact(groups)
-        .map_err(|_| IndexError::resource("keyed value map allocation failed"))?;
+    crate::allocation::try_reserve_vec(&mut result, groups, guard, "keyed value map allocation")?;
     let mut first = 0;
     while first < pairs.len() {
         guard.consume(WorkDelta {
@@ -1405,9 +1442,12 @@ fn keyed_values<K: Ord + Clone, V: Ord + Clone>(
             last += 1;
         }
         let mut values = Vec::new();
-        values
-            .try_reserve_exact(last - first)
-            .map_err(|_| IndexError::resource("keyed value allocation failed"))?;
+        crate::allocation::try_reserve_vec(
+            &mut values,
+            last - first,
+            guard,
+            "keyed value allocation",
+        )?;
         values.extend(pairs[first..last].iter().map(|(_, value)| value.clone()));
         result.push((pairs[first].0.clone(), values));
         first = last;
@@ -1435,15 +1475,13 @@ pub(super) fn cancellable_sort_by<T: Clone>(
     if rows.len() <= CHUNK {
         return Ok(());
     }
-    guard.consume(WorkDelta {
-        resident_bytes: u64::try_from(rows.len().saturating_mul(std::mem::size_of::<T>()))
-            .unwrap_or(u64::MAX),
-        ..WorkDelta::default()
-    })?;
     let mut scratch = Vec::new();
-    scratch
-        .try_reserve_exact(rows.len())
-        .map_err(|_| IndexError::resource("merge-sort scratch allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut scratch,
+        rows.len(),
+        guard,
+        "merge-sort scratch allocation",
+    )?;
     let mut width = CHUNK;
     while width < rows.len() {
         scratch.clear();
@@ -1470,7 +1508,10 @@ pub(super) fn cancellable_sort_by<T: Clone>(
     Ok(())
 }
 
-pub(super) fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, IndexError> {
+pub(super) fn canonical_bytes<T: Serialize>(
+    value: &T,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<u8>, IndexError> {
     #[derive(Default)]
     struct Counter(usize);
 
@@ -1492,9 +1533,12 @@ pub(super) fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, IndexE
     serde_json::to_writer(&mut counter, value)
         .map_err(|error| IndexError::invalid(format!("cannot size normalized payload: {error}")))?;
     let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(counter.0)
-        .map_err(|_| IndexError::resource("normalized payload allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut bytes,
+        counter.0,
+        guard,
+        "normalized payload allocation",
+    )?;
     serde_json::to_writer(&mut bytes, value).map_err(|error| {
         IndexError::invalid(format!("cannot encode normalized payload: {error}"))
     })?;
@@ -1506,13 +1550,43 @@ pub(super) fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, IndexE
     Ok(bytes)
 }
 
-fn try_copy_bytes(value: &[u8], label: &str) -> Result<Vec<u8>, IndexError> {
+fn try_copy_bytes(
+    value: &[u8],
+    guard: &dyn WorkGuard,
+    label: &'static str,
+) -> Result<Vec<u8>, IndexError> {
     let mut output = Vec::new();
-    output
-        .try_reserve_exact(value.len())
-        .map_err(|_| IndexError::resource(format!("{label} allocation failed")))?;
+    crate::allocation::try_reserve_vec(&mut output, value.len(), guard, label)?;
     output.extend_from_slice(value);
     Ok(output)
+}
+
+struct SemanticDefinition<'a>(&'a qtrace_provider::InstructionDefinition);
+
+impl Serialize for SemanticDefinition<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let definition = self.0;
+        let mut state = serializer.serialize_struct("InstructionDefinition", 15)?;
+        state.serialize_field("definition_id", &0_u32)?;
+        state.serialize_field("opcode", &definition.opcode)?;
+        state.serialize_field("read_mask", &definition.read_mask)?;
+        state.serialize_field("write_mask", &definition.write_mask)?;
+        state.serialize_field("pc_displacement", &definition.pc_displacement)?;
+        state.serialize_field("flags", &definition.flags)?;
+        state.serialize_field("pc_kind", &definition.pc_kind)?;
+        state.serialize_field("condition", &definition.condition)?;
+        state.serialize_field("slow_memory_path", &definition.slow_memory_path)?;
+        state.serialize_field("mnemonic", &definition.mnemonic)?;
+        state.serialize_field("operands", &definition.operands)?;
+        state.serialize_field("disassembly", &definition.disassembly)?;
+        state.serialize_field("reads", &definition.reads)?;
+        state.serialize_field("writes", &definition.writes)?;
+        state.serialize_field("memory_operands", &definition.memory_operands)?;
+        state.end()
+    }
 }
 
 #[cfg(test)]
@@ -1528,7 +1602,7 @@ mod tests {
 
     use crate::TraceStoreView;
 
-    use super::{BuildOptions, IndexBuilder, cancellable_sort};
+    use super::{BuildOptions, BuildState, IndexBuilder, cancellable_sort};
 
     struct AllowAll;
 
@@ -1687,7 +1761,7 @@ mod tests {
             IndexBuilder::build_provider(provider(events), &BuildOptions::default(), &AllowAll)
                 .expect("large synthetic build");
         assert_eq!(store.event_count(), count as usize);
-        let catalog = std::sync::Arc::try_unwrap(store.catalog).expect("unique owned catalog");
+        let catalog = *store.catalog;
         let sections =
             super::super::wire::encode(catalog, &AllowAll).expect("large binary sections");
         let event_meta = sections
@@ -1871,6 +1945,114 @@ mod tests {
         assert_ne!(
             store.catalog.instructions[0].module,
             store.catalog.instructions[1].module
+        );
+    }
+
+    #[test]
+    fn many_source_ids_and_max_typed_children_use_only_authorized_growth() {
+        let definitions = || {
+            (0..qtrace_provider::RegisterSlot::COUNT)
+                .map(|slot| qtrace_provider::RegisterDefinition {
+                    slot: slot as u8,
+                    captured_width: 8,
+                    name: format!("r{slot}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let observations = || {
+            (0..qtrace_provider::RegisterSlot::COUNT)
+                .map(|slot| qtrace_provider::RegisterObservation {
+                    slot: slot as u8,
+                    captured_width: 8,
+                    name: format!("r{slot}"),
+                    value: slot as u64,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut events = Vec::new();
+        for source_id in 0..64_u32 {
+            let ordinal = u64::from(source_id) * 3;
+            let key = |delta| {
+                EventKey::new(
+                    ArtifactDigest::new([0x91; 32]),
+                    TimelineId(0),
+                    ordinal + delta,
+                    ordinal * 16 + delta,
+                    Some(ordinal + delta + 1),
+                    Some(7),
+                )
+            };
+            events.push(EventRecord::new(
+                key(0),
+                Provenance::Captured,
+                EventPayload::ModuleDefinition(qtrace_provider::ModuleDefinition {
+                    module_id: source_id,
+                    base: u64::from(source_id) << 20,
+                    name: format!("module-{source_id}"),
+                }),
+            ));
+            events.push(EventRecord::new(
+                key(1),
+                Provenance::Captured,
+                EventPayload::InstructionDefinition(InstructionDefinition {
+                    definition_id: source_id,
+                    opcode: source_id,
+                    mnemonic: format!("op-{source_id}"),
+                    reads: definitions(),
+                    writes: definitions(),
+                    ..InstructionDefinition::default()
+                }),
+            ));
+            let values = observations();
+            events.push(EventRecord::new(
+                key(2),
+                Provenance::Captured,
+                EventPayload::Instruction(Instruction {
+                    definition_id: source_id,
+                    module_id: source_id,
+                    relative_pc: u64::from(source_id) * 4,
+                    read_before: values.clone(),
+                    write_after: values,
+                }),
+            ));
+        }
+
+        crate::allocation::tests::activate_allocation_oracle();
+        let guard = crate::allocation::tests::DecodeGuard;
+        let options = BuildOptions::default();
+        let mut state = BuildState::new(&options).expect("state");
+        for event in events {
+            state.append(event, &guard).expect("append");
+        }
+        state
+            .append_completeness(Vec::new(), &guard)
+            .expect("empty completeness");
+        let store = state
+            .finish(
+                ProviderCapabilities {
+                    global_ordering: false,
+                    per_thread_ordering: true,
+                    full_register_checkpoint: false,
+                    register_read_write_observation: true,
+                    memory_metadata: false,
+                    memory_before_after: false,
+                    lifecycle: false,
+                    signal_and_termination: false,
+                    loss_and_damage_ranges: false,
+                },
+                &options,
+                &guard,
+            )
+            .expect("finish");
+        let unauthorized = crate::allocation::tests::finish_allocation_oracle();
+        let (sizes, ordinals, size_len) = crate::allocation::tests::allocation_oracle_sizes();
+        assert_eq!(store.event_count(), 64 * 3);
+        assert_eq!(
+            unauthorized,
+            0,
+            "unauthorized sizes/ordinals: {:?}/{:?}",
+            &sizes[..size_len],
+            &ordinals[..size_len]
         );
     }
 }

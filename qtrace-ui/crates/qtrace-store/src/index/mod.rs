@@ -4,7 +4,7 @@ mod intervals;
 mod postings;
 mod wire;
 
-use std::{collections::HashMap, error::Error, fmt, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt};
 
 use qtrace_provider::{
     CompletenessCause, CompletenessRange, EventKey, EventKind, EventScope, MemoryDirection,
@@ -43,32 +43,60 @@ pub(crate) fn validate_binary_sections(
     guard: &dyn WorkGuard,
 ) -> Result<ValidatedCatalog, IndexError> {
     let catalog = wire::decode(sections, keys, kinds, source_format, true, guard)?;
-    guard.consume(WorkDelta {
-        resident_bytes: u64::try_from(std::mem::size_of::<NormalizedCatalog>()).unwrap_or(u64::MAX),
-        nodes: 1,
-        ..WorkDelta::default()
-    })?;
-    Ok(ValidatedCatalog(Arc::new(catalog)))
+    Ok(ValidatedCatalog(crate::allocation::try_box(
+        catalog,
+        guard,
+        "validated normalized catalog",
+    )?))
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ValidatedCatalog(Arc<NormalizedCatalog>);
+#[derive(Debug)]
+pub(crate) struct ValidatedCatalog(Box<NormalizedCatalog>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexError {
-    code: String,
-    detail: String,
+    detail: IndexErrorDetail,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum IndexErrorDetail {
+    Message { code: &'static str, detail: String },
+    Provider(qtrace_provider::ProviderError),
+    Cache(CacheError),
+    Abort(qtrace_provider::OperationAbort),
 }
 
 impl IndexError {
     pub fn code(&self) -> &str {
-        &self.code
+        match &self.detail {
+            IndexErrorDetail::Message { code, .. } => code,
+            IndexErrorDetail::Provider(error) if error.code() == "control.cancelled" => {
+                "job.cancelled"
+            }
+            IndexErrorDetail::Provider(error) => error.code(),
+            IndexErrorDetail::Cache(error) => error.code(),
+            IndexErrorDetail::Abort(qtrace_provider::OperationAbort::Cancelled) => "job.cancelled",
+            IndexErrorDetail::Abort(qtrace_provider::OperationAbort::BudgetExceeded { .. }) => {
+                "control.budget_exceeded"
+            }
+        }
     }
 
-    fn new(code: impl Into<String>, detail: impl Into<String>) -> Self {
+    fn new(code: &'static str, detail: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
-            detail: detail.into(),
+            detail: IndexErrorDetail::Message {
+                code,
+                detail: detail.into(),
+            },
+        }
+    }
+
+    pub(crate) fn operation_abort(&self) -> Option<&qtrace_provider::OperationAbort> {
+        match &self.detail {
+            IndexErrorDetail::Abort(abort) => Some(abort),
+            IndexErrorDetail::Cache(error) => error.operation_abort(),
+            IndexErrorDetail::Provider(error) => error.operation_abort(),
+            IndexErrorDetail::Message { .. } => None,
         }
     }
 
@@ -91,7 +119,13 @@ impl IndexError {
 
 impl fmt::Display for IndexError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.detail)
+        write!(formatter, "{}: ", self.code())?;
+        match &self.detail {
+            IndexErrorDetail::Message { detail, .. } => formatter.write_str(detail),
+            IndexErrorDetail::Provider(error) => fmt::Display::fmt(error, formatter),
+            IndexErrorDetail::Cache(error) => fmt::Display::fmt(error, formatter),
+            IndexErrorDetail::Abort(abort) => fmt::Display::fmt(abort, formatter),
+        }
     }
 }
 
@@ -99,28 +133,35 @@ impl Error for IndexError {}
 
 impl From<qtrace_provider::ProviderError> for IndexError {
     fn from(error: qtrace_provider::ProviderError) -> Self {
-        let code = if error.code() == "control.cancelled" {
-            "job.cancelled"
-        } else {
-            error.code()
-        };
-        Self::new(code, error.to_string())
+        Self {
+            detail: IndexErrorDetail::Provider(error),
+        }
     }
 }
 
 impl From<qtrace_provider::OperationAbort> for IndexError {
     fn from(error: qtrace_provider::OperationAbort) -> Self {
-        let code = match error {
-            qtrace_provider::OperationAbort::Cancelled => "job.cancelled",
-            qtrace_provider::OperationAbort::BudgetExceeded { .. } => "control.budget_exceeded",
-        };
-        Self::new(code, error.to_string())
+        Self {
+            detail: IndexErrorDetail::Abort(error),
+        }
     }
 }
 
 impl From<CacheError> for IndexError {
     fn from(error: CacheError) -> Self {
-        Self::new(error.code(), error.to_string())
+        Self {
+            detail: IndexErrorDetail::Cache(error),
+        }
+    }
+}
+
+impl From<crate::allocation::AllocationFailure> for IndexError {
+    fn from(error: crate::allocation::AllocationFailure) -> Self {
+        match error {
+            crate::allocation::AllocationFailure::Aborted(abort) => Self::from(abort),
+            crate::allocation::AllocationFailure::Overflow(detail)
+            | crate::allocation::AllocationFailure::Failed(detail) => Self::resource(detail),
+        }
     }
 }
 
@@ -152,8 +193,13 @@ impl BuildOptions {
     }
 
     pub fn digest(&self) -> [u8; 32] {
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
-        Sha256::digest(bytes).into()
+        let mut digest = Sha256::new();
+        digest.update(b"qtrace-build-options-v2\0");
+        digest.update(self.interval_block_rows.to_le_bytes());
+        digest.update(self.max_payload_bytes.to_le_bytes());
+        digest.update(self.max_blob_bytes.to_le_bytes());
+        digest.update(self.max_string_bytes.to_le_bytes());
+        digest.finalize().into()
     }
 
     fn validate(&self) -> Result<(), IndexError> {
@@ -175,10 +221,43 @@ struct ByteSpan {
     length: u64,
 }
 
-#[derive(Clone, Debug)]
-struct ByteArena {
-    bytes: Arc<Vec<u8>>,
-    spans: Arc<Vec<ByteSpan>>,
+#[derive(Debug)]
+enum ArenaBacking<'a, T> {
+    Owned(Vec<T>),
+    Borrowed(&'a [T]),
+}
+
+impl<T> ArenaBacking<'_, T> {
+    fn as_slice(&self) -> &[T] {
+        match self {
+            Self::Owned(values) => values,
+            Self::Borrowed(values) => values,
+        }
+    }
+
+    fn owned_mut(&mut self) -> Result<&mut Vec<T>, IndexError> {
+        match self {
+            Self::Owned(values) => Ok(values),
+            Self::Borrowed(_) => Err(IndexError::invalid(
+                "borrowed validation arena cannot append new bytes",
+            )),
+        }
+    }
+
+    fn into_owned(self) -> Result<Vec<T>, IndexError> {
+        match self {
+            Self::Owned(values) => Ok(values),
+            Self::Borrowed(_) => Err(IndexError::invalid(
+                "borrowed validation arena cannot become owned",
+            )),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ByteArena<'a> {
+    bytes: ArenaBacking<'a, u8>,
+    spans: ArenaBacking<'a, ByteSpan>,
     max_bytes: u64,
     by_hash: HashMap<[u8; 32], HashCandidates>,
     validation_next_id: Option<u32>,
@@ -200,29 +279,31 @@ impl HashCandidates {
     }
 }
 
-impl PartialEq for ByteArena {
+impl PartialEq for ByteArena<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.bytes == other.bytes && self.spans == other.spans && self.max_bytes == other.max_bytes
+        self.bytes.as_slice() == other.bytes.as_slice()
+            && self.spans.as_slice() == other.spans.as_slice()
+            && self.max_bytes == other.max_bytes
     }
 }
 
-impl Eq for ByteArena {}
+impl Eq for ByteArena<'_> {}
 
-impl ByteArena {
+impl<'a> ByteArena<'a> {
     fn new(max_bytes: u64) -> Self {
         Self {
-            bytes: Arc::new(Vec::new()),
-            spans: Arc::new(Vec::new()),
+            bytes: ArenaBacking::Owned(Vec::new()),
+            spans: ArenaBacking::Owned(Vec::new()),
             max_bytes,
             by_hash: HashMap::new(),
             validation_next_id: None,
         }
     }
 
-    fn validation(source: &Self) -> Self {
+    fn validation(source: &'a ByteArena<'static>) -> Self {
         Self {
-            bytes: Arc::clone(&source.bytes),
-            spans: Arc::clone(&source.spans),
+            bytes: ArenaBacking::Borrowed(source.bytes.as_slice()),
+            spans: ArenaBacking::Borrowed(source.spans.as_slice()),
             max_bytes: source.max_bytes,
             by_hash: HashMap::new(),
             validation_next_id: Some(0),
@@ -251,24 +332,21 @@ impl ByteArena {
                     .ok_or_else(|| IndexError::corrupt("arena validation ID overflow"))?,
             );
             guard.consume(WorkDelta {
-                resident_bytes: if hash_was_present {
-                    u64::try_from(std::mem::size_of::<u32>()).unwrap_or(u64::MAX)
-                } else {
-                    u64::try_from(std::mem::size_of::<([u8; 32], HashCandidates)>())
-                        .unwrap_or(u64::MAX)
-                },
                 nodes: 1,
                 ..WorkDelta::default()
             })?;
             if !hash_was_present {
-                self.by_hash
-                    .try_reserve(1)
-                    .map_err(|_| IndexError::resource("bounded arena hash allocation failed"))?;
+                crate::allocation::try_reserve_hash_map(
+                    &mut self.by_hash,
+                    1,
+                    guard,
+                    "bounded arena hash allocation",
+                )?;
             }
-            self.insert_hash_candidate(hash, next_id)?;
+            self.insert_hash_candidate(hash, next_id, guard)?;
             return Ok(next_id);
         }
-        let new_length = u64::try_from(self.bytes.len())
+        let new_length = u64::try_from(self.bytes.as_slice().len())
             .ok()
             .and_then(|length| length.checked_add(value.len() as u64))
             .ok_or_else(|| IndexError::resource("bounded arena length overflow"))?;
@@ -279,67 +357,70 @@ impl ByteArena {
             ));
         }
         guard.consume(WorkDelta {
-            resident_bytes: (value.len() as u64)
-                .checked_add(u64::try_from(std::mem::size_of::<ByteSpan>()).unwrap_or(u64::MAX))
-                .and_then(|bytes| {
-                    bytes.checked_add(if hash_was_present {
-                        u64::try_from(std::mem::size_of::<u32>()).unwrap_or(u64::MAX)
-                    } else {
-                        u64::try_from(std::mem::size_of::<([u8; 32], HashCandidates)>())
-                            .unwrap_or(u64::MAX)
-                    })
-                })
-                .ok_or_else(|| IndexError::resource("bounded arena budget size overflow"))?,
             nodes: 1,
             ..WorkDelta::default()
         })?;
-        Arc::get_mut(&mut self.bytes)
-            .ok_or_else(|| IndexError::invalid("mutable arena bytes are unexpectedly shared"))?
-            .try_reserve_exact(value.len())
-            .map_err(|_| IndexError::resource("bounded arena allocation failed"))?;
-        Arc::get_mut(&mut self.spans)
-            .ok_or_else(|| IndexError::invalid("mutable arena spans are unexpectedly shared"))?
-            .try_reserve(1)
-            .map_err(|_| IndexError::resource("bounded arena span allocation failed"))?;
-        let id = u32::try_from(self.spans.len())
+        crate::allocation::try_reserve_vec(
+            self.bytes.owned_mut()?,
+            value.len(),
+            guard,
+            "bounded arena allocation",
+        )?;
+        crate::allocation::try_reserve_vec(
+            self.spans.owned_mut()?,
+            1,
+            guard,
+            "bounded arena span allocation",
+        )?;
+        let id = u32::try_from(self.spans.as_slice().len())
             .map_err(|_| IndexError::resource("bounded arena has too many spans"))?;
-        let offset = u64::try_from(self.bytes.len())
+        let offset = u64::try_from(self.bytes.as_slice().len())
             .map_err(|_| IndexError::resource("bounded arena offset does not fit u64"))?;
-        Arc::get_mut(&mut self.bytes)
-            .ok_or_else(|| IndexError::invalid("mutable arena bytes are unexpectedly shared"))?
-            .extend_from_slice(value);
-        Arc::get_mut(&mut self.spans)
-            .ok_or_else(|| IndexError::invalid("mutable arena spans are unexpectedly shared"))?
-            .push(ByteSpan {
-                offset,
-                length: value.len() as u64,
-            });
+        self.bytes.owned_mut()?.extend_from_slice(value);
+        self.spans.owned_mut()?.push(ByteSpan {
+            offset,
+            length: value.len() as u64,
+        });
         if !hash_was_present {
-            self.by_hash
-                .try_reserve(1)
-                .map_err(|_| IndexError::resource("bounded arena hash allocation failed"))?;
+            crate::allocation::try_reserve_hash_map(
+                &mut self.by_hash,
+                1,
+                guard,
+                "bounded arena hash allocation",
+            )?;
         }
-        self.insert_hash_candidate(hash, id)?;
+        self.insert_hash_candidate(hash, id, guard)?;
         Ok(id)
     }
 
-    fn insert_hash_candidate(&mut self, hash: [u8; 32], id: u32) -> Result<(), IndexError> {
+    fn insert_hash_candidate(
+        &mut self,
+        hash: [u8; 32],
+        id: u32,
+        guard: &dyn WorkGuard,
+    ) -> Result<(), IndexError> {
         match self.by_hash.entry(hash) {
             std::collections::hash_map::Entry::Occupied(mut entry) => match entry.get_mut() {
                 HashCandidates::One(first) => {
                     let first = *first;
                     let mut candidates = Vec::new();
-                    candidates.try_reserve_exact(2).map_err(|_| {
-                        IndexError::resource("bounded arena collision allocation failed")
-                    })?;
+                    crate::allocation::try_reserve_vec(
+                        &mut candidates,
+                        2,
+                        guard,
+                        "bounded arena collision allocation",
+                    )?;
                     candidates.push(first);
                     candidates.push(id);
                     *entry.get_mut() = HashCandidates::Collisions(candidates);
                 }
                 HashCandidates::Collisions(candidates) => {
-                    candidates.try_reserve(1).map_err(|_| {
-                        IndexError::resource("bounded arena collision allocation failed")
-                    })?;
+                    crate::allocation::try_reserve_vec(
+                        candidates,
+                        1,
+                        guard,
+                        "bounded arena collision allocation",
+                    )?;
                     candidates.push(id);
                 }
             },
@@ -353,6 +434,7 @@ impl ByteArena {
     fn get(&self, id: u32) -> Result<&[u8], IndexError> {
         let span = self
             .spans
+            .as_slice()
             .get(id as usize)
             .ok_or_else(|| IndexError::corrupt("arena span id is out of range"))?;
         let start = usize::try_from(span.offset)
@@ -363,16 +445,17 @@ impl ByteArena {
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| IndexError::corrupt("arena span range overflow"))?;
         self.bytes
+            .as_slice()
             .get(start..end)
             .ok_or_else(|| IndexError::corrupt("arena span is outside its bytes"))
     }
 
     fn validate(&self) -> Result<(), IndexError> {
-        if self.bytes.len() as u64 > self.max_bytes {
+        if self.bytes.as_slice().len() as u64 > self.max_bytes {
             return Err(IndexError::corrupt("arena exceeds its declared byte bound"));
         }
         let mut expected = 0_u64;
-        for span in self.spans.iter() {
+        for span in self.spans.as_slice() {
             if span.offset != expected {
                 return Err(IndexError::corrupt(
                     "arena spans are not append-only contiguous",
@@ -382,14 +465,14 @@ impl ByteArena {
                 .checked_add(span.length)
                 .ok_or_else(|| IndexError::corrupt("arena span end overflow"))?;
         }
-        if expected != self.bytes.len() as u64 {
+        if expected != self.bytes.as_slice().len() as u64 {
             return Err(IndexError::corrupt("arena spans do not cover exact bytes"));
         }
         Ok(())
     }
 
     fn validate_dictionary_complete(&self) -> Result<(), IndexError> {
-        let spans = u32::try_from(self.spans.len())
+        let spans = u32::try_from(self.spans.as_slice().len())
             .map_err(|_| IndexError::corrupt("arena span count exceeds u32"))?;
         if self.validation_next_id != Some(spans) {
             return Err(IndexError::corrupt(
@@ -397,6 +480,32 @@ impl ByteArena {
             ));
         }
         Ok(())
+    }
+
+    fn spans(&self) -> &[ByteSpan] {
+        self.spans.as_slice()
+    }
+
+    fn into_owned_parts(self) -> Result<(Vec<u8>, Vec<ByteSpan>, u64), IndexError> {
+        Ok((
+            self.bytes.into_owned()?,
+            self.spans.into_owned()?,
+            self.max_bytes,
+        ))
+    }
+
+    fn from_owned_parts(
+        bytes: Vec<u8>,
+        spans: Vec<ByteSpan>,
+        max_bytes: u64,
+    ) -> ByteArena<'static> {
+        ByteArena {
+            bytes: ArenaBacking::Owned(bytes),
+            spans: ArenaBacking::Owned(spans),
+            max_bytes,
+            by_hash: HashMap::new(),
+            validation_next_id: None,
+        }
     }
 }
 
@@ -487,6 +596,44 @@ impl CompletenessRow {
             cause: value.cause(),
         }
     }
+
+    fn to_range(self) -> Option<CompletenessRange> {
+        match (self.domain, self.bounds) {
+            (RangeDomain::CapturedSequence, RangeBounds::InclusiveSequence { first, last }) => {
+                CompletenessRange::captured_sequence_with_cause(
+                    first,
+                    last,
+                    self.provenance,
+                    self.cause,
+                )
+            }
+            (
+                RangeDomain::SourceBytes,
+                RangeBounds::HalfOpen {
+                    start,
+                    end_exclusive,
+                },
+            ) => CompletenessRange::source_bytes_with_cause(
+                start,
+                end_exclusive,
+                self.provenance,
+                self.cause,
+            ),
+            (
+                RangeDomain::MemoryAddresses,
+                RangeBounds::HalfOpen {
+                    start,
+                    end_exclusive,
+                },
+            ) => CompletenessRange::memory_addresses_with_cause(
+                start,
+                end_exclusive,
+                self.provenance,
+                self.cause,
+            ),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -545,14 +692,14 @@ struct IndexCatalog {
     source_keys: Vec<SourceKeyRow>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 struct NormalizedCatalog {
     schema: u32,
     capabilities: ProviderCapabilities,
     events: Vec<EventColumn>,
-    payloads: ByteArena,
-    strings: ByteArena,
-    blobs: ByteArena,
+    payloads: ByteArena<'static>,
+    strings: ByteArena<'static>,
+    blobs: ByteArena<'static>,
     modules: Vec<ModuleRow>,
     definitions: Vec<DefinitionRow>,
     instructions: Vec<InstructionRow>,
@@ -777,7 +924,7 @@ fn rows_for_semantic_bytes(
     for value in values {
         if let Some(id) = catalog
             .strings
-            .spans
+            .spans()
             .iter()
             .enumerate()
             .find_map(|(id, _)| {
@@ -838,10 +985,10 @@ fn rows_for_module_pc(
     rows[first..last].iter().map(|(_, row)| *row).collect()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct OwnedTraceStore {
     base: OwnedStoreView,
-    catalog: Arc<NormalizedCatalog>,
+    catalog: Box<NormalizedCatalog>,
 }
 
 impl OwnedTraceStore {
@@ -852,15 +999,9 @@ impl OwnedTraceStore {
         guard: &dyn WorkGuard,
     ) -> Result<Self, IndexError> {
         catalog.validate(&keys, &kinds, guard)?;
-        guard.consume(WorkDelta {
-            resident_bytes: u64::try_from(std::mem::size_of::<NormalizedCatalog>())
-                .unwrap_or(u64::MAX),
-            nodes: 1,
-            ..WorkDelta::default()
-        })?;
         Ok(Self {
             base: OwnedStoreView::new(keys, kinds)?,
-            catalog: Arc::new(catalog),
+            catalog: crate::allocation::try_box(catalog, guard, "owned normalized catalog")?,
         })
     }
 
@@ -955,8 +1096,7 @@ impl OwnedTraceStore {
         guard: &dyn WorkGuard,
     ) -> Result<OwnedStoreView, IndexError> {
         let mut view = self.base;
-        let catalog = Arc::try_unwrap(self.catalog)
-            .map_err(|_| IndexError::resource("owned catalog is still shared during encoding"))?;
+        let catalog = *self.catalog;
         for section in wire::encode(catalog, guard)? {
             guard.consume(WorkDelta::default())?;
             view = view.with_section(section)?;
@@ -965,10 +1105,10 @@ impl OwnedTraceStore {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MappedTraceStore {
     view: MappedStoreView,
-    catalog: Arc<NormalizedCatalog>,
+    catalog: Box<NormalizedCatalog>,
 }
 
 impl MappedTraceStore {
@@ -1019,7 +1159,7 @@ impl MappedTraceStore {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum TraceStore {
     Owned(OwnedTraceStore),
     Mapped(MappedTraceStore),
@@ -1286,7 +1426,7 @@ impl TraceStore {
         guard: &dyn WorkGuard,
     ) -> Result<Self, IndexError> {
         options.validate()?;
-        let identity = cache_identity(source, options);
+        let identity = cache_identity(source, options, guard)?;
         guard.consume(WorkDelta::default())?;
         match CacheReader::open(cache_root, &identity, guard)? {
             CacheOpen::Ready(view) => {
@@ -1389,20 +1529,32 @@ impl From<OwnedTraceStore> for TraceStore {
     }
 }
 
-fn cache_identity(source: &ArtifactSource, options: &BuildOptions) -> CacheIdentity {
+fn cache_identity(
+    source: &ArtifactSource,
+    options: &BuildOptions,
+    guard: &dyn WorkGuard,
+) -> Result<CacheIdentity, IndexError> {
     let provider = source.identity().provider();
-    CacheIdentity {
-        analyzer_version: env!("CARGO_PKG_VERSION").to_owned(),
+    Ok(CacheIdentity {
+        analyzer_version: crate::allocation::try_copy_string(
+            env!("CARGO_PKG_VERSION"),
+            guard,
+            "cache analyzer version",
+        )?,
         artifact_digest: *provider.artifact.as_bytes(),
         build_option_digest: options.digest(),
         cache_schema: 2,
-        endian: "little".to_owned(),
+        endian: crate::allocation::try_copy_string("little", guard, "cache endian")?,
         layout_version: 2,
         source_features: 0,
-        source_format: provider.format.clone(),
+        source_format: crate::allocation::try_copy_string(
+            &provider.format,
+            guard,
+            "cache source format",
+        )?,
         source_major: u16::from(provider.format_major),
         source_minor: u16::from(provider.format_minor),
-    }
+    })
 }
 
 pub struct Rows {

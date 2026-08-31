@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use qtrace_provider::WorkGuard;
+
 use super::IndexError;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -16,11 +18,14 @@ impl PostingList {
         Self { deltas }
     }
 
-    pub(crate) fn from_rows(rows: &[usize]) -> Result<Self, IndexError> {
+    pub(crate) fn from_rows(rows: &[usize], guard: &dyn WorkGuard) -> Result<Self, IndexError> {
         let mut deltas = Vec::new();
-        deltas
-            .try_reserve_exact(rows.len())
-            .map_err(|_| IndexError::resource("posting-list allocation failed"))?;
+        crate::allocation::try_reserve_vec(
+            &mut deltas,
+            rows.len(),
+            guard,
+            "posting-list allocation",
+        )?;
         let mut previous: Option<u64> = None;
         for row in rows {
             let row = u64::try_from(*row)

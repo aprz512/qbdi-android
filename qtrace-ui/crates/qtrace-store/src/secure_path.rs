@@ -1,6 +1,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, Metadata},
+    mem::size_of,
     os::unix::fs::{FileExt, FileTypeExt},
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -88,14 +89,28 @@ struct DirectoryBinding {
 }
 
 impl DirectoryBinding {
+    fn try_clone_guarded(&self, guard: &dyn WorkGuard) -> Result<Self, ProviderError> {
+        let mut components = Vec::new();
+        crate::allocation::try_reserve_vec(
+            &mut components,
+            self.components.len(),
+            guard,
+            "source root binding allocation",
+        )
+        .map_err(allocation_failure)?;
+        for (name, identity) in &self.components {
+            components.push((try_copy_os_string(name, guard)?, *identity));
+        }
+        Ok(Self {
+            anchor: Arc::clone(&self.anchor),
+            components,
+        })
+    }
+
     fn verify(&self) -> Result<(), ProviderError> {
-        let mut directory = self.anchor.clone();
+        let mut directory = self.anchor.try_clone().map_err(io_error)?;
         for (component, expected) in &self.components {
-            let child = Arc::new(open_directory_at(
-                &directory,
-                component,
-                OpenContext::Rebind,
-            )?);
+            let child = open_directory_at(&directory, component, OpenContext::Rebind)?;
             let actual = directory_identity(&child)?;
             if actual.device != expected.device || actual.inode != expected.inode {
                 return Err(path_error(
@@ -118,6 +133,27 @@ pub(crate) struct SecureFile {
 }
 
 impl SecureFile {
+    pub(crate) fn try_clone_guarded(&self, guard: &dyn WorkGuard) -> Result<Self, ProviderError> {
+        let mut parent_components = Vec::new();
+        crate::allocation::try_reserve_vec(
+            &mut parent_components,
+            self.parent_components.len(),
+            guard,
+            "source parent binding allocation",
+        )
+        .map_err(allocation_failure)?;
+        for (name, identity) in &self.parent_components {
+            parent_components.push((try_copy_os_string(name, guard)?, *identity));
+        }
+        Ok(Self {
+            file: Arc::clone(&self.file),
+            root: Arc::clone(&self.root),
+            root_binding: self.root_binding.try_clone_guarded(guard)?,
+            parent_components,
+            leaf: try_copy_os_string(&self.leaf, guard)?,
+        })
+    }
+
     pub(crate) fn identity(&self) -> Result<FileIdentity, ProviderError> {
         let metadata = self.file.metadata().map_err(io_error)?;
         ensure_regular(&metadata)?;
@@ -203,13 +239,9 @@ impl SecureFile {
         let after = self.identity()?;
         if verify_binding {
             self.root_binding.verify()?;
-            let mut rebound_parent = self.root.clone();
+            let mut rebound_parent = self.root.try_clone().map_err(io_error)?;
             for (component, expected) in &self.parent_components {
-                let child = Arc::new(open_directory_at(
-                    &rebound_parent,
-                    component,
-                    OpenContext::Rebind,
-                )?);
+                let child = open_directory_at(&rebound_parent, component, OpenContext::Rebind)?;
                 let actual = directory_identity(&child)?;
                 if actual.device != expected.device || actual.inode != expected.inode {
                     return Err(path_error(
@@ -218,7 +250,7 @@ impl SecureFile {
                 }
                 rebound_parent = child;
             }
-            let rebound = openat(&*rebound_parent, &self.leaf, FILE_FLAGS, Mode::empty()).map_err(
+            let rebound = openat(&rebound_parent, &self.leaf, FILE_FLAGS, Mode::empty()).map_err(
                 |error| {
                     map_open_error(
                         error,
@@ -241,11 +273,23 @@ impl SecureFile {
         Ok(())
     }
 
-    pub(crate) fn source(&self, length: u64) -> Arc<dyn ReadAtSource> {
-        Arc::new(FileSource {
+    pub(crate) fn source(
+        &self,
+        length: u64,
+        guard: &dyn WorkGuard,
+    ) -> Result<Arc<dyn ReadAtSource>, ProviderError> {
+        let resident = size_of::<FileSource>()
+            .checked_add(3 * size_of::<usize>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| resource_error("file-source allocation bound overflow"))?;
+        guard.consume(WorkDelta {
+            resident_bytes: resident,
+            ..WorkDelta::default()
+        })?;
+        Ok(Arc::new(FileSource {
             file: self.file.clone(),
             length,
-        })
+        }))
     }
 
     pub(crate) fn reader(&self) -> FileReader {
@@ -253,6 +297,29 @@ impl SecureFile {
             file: self.file.clone(),
             offset: 0,
         }
+    }
+}
+
+fn try_copy_os_string(value: &OsStr, guard: &dyn WorkGuard) -> Result<OsString, ProviderError> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let mut bytes = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut bytes,
+        value.as_bytes().len(),
+        guard,
+        "source path component allocation",
+    )
+    .map_err(allocation_failure)?;
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(OsString::from_vec(bytes))
+}
+
+fn allocation_failure(error: crate::allocation::AllocationFailure) -> ProviderError {
+    match error {
+        crate::allocation::AllocationFailure::Aborted(abort) => ProviderError::from(abort),
+        crate::allocation::AllocationFailure::Overflow(detail)
+        | crate::allocation::AllocationFailure::Failed(detail) => resource_error(detail),
     }
 }
 

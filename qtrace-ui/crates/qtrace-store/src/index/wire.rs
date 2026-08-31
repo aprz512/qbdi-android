@@ -150,9 +150,12 @@ pub(super) fn encode(
     guard: &dyn WorkGuard,
 ) -> Result<Vec<OwnedSection>, IndexError> {
     let mut sections = Vec::new();
-    sections
-        .try_reserve_exact(EXACT_SECTIONS.len())
-        .map_err(|_| IndexError::resource("binary section list allocation failed"))?;
+    crate::allocation::try_reserve_vec(
+        &mut sections,
+        EXACT_SECTIONS.len(),
+        guard,
+        "binary section list allocation",
+    )?;
     sections.push(section(
         CAPABILITIES,
         8,
@@ -344,14 +347,16 @@ impl Encoder {
             .checked_mul(element as usize)
             .ok_or_else(|| IndexError::resource("binary section length overflow"))?;
         guard.consume(WorkDelta {
-            resident_bytes: expected as u64,
             rows: rows as u64,
             ..WorkDelta::default()
         })?;
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(expected)
-            .map_err(|_| IndexError::resource("binary section allocation failed"))?;
+        crate::allocation::try_reserve_vec(
+            &mut bytes,
+            expected,
+            guard,
+            "binary section allocation",
+        )?;
         Ok(Self { bytes, expected })
     }
 
@@ -438,18 +443,17 @@ fn encode_arena(
     sections: &mut Vec<OwnedSection>,
     spans_name: &'static str,
     bytes_name: &'static str,
-    arena: ByteArena,
+    arena: ByteArena<'static>,
     guard: &dyn WorkGuard,
 ) -> Result<(), IndexError> {
-    let mut spans = Encoder::rows(arena.spans.len(), SPAN_BYTES, guard)?;
-    for (index, span) in arena.spans.iter().enumerate() {
+    let mut spans = Encoder::rows(arena.spans().len(), SPAN_BYTES, guard)?;
+    for (index, span) in arena.spans().iter().enumerate() {
         checkpoint(guard, index)?;
         spans.u64(span.offset);
         spans.u64(span.length);
     }
     sections.push(section(spans_name, 8, SPAN_BYTES, spans.finish()?));
-    let bytes = std::sync::Arc::try_unwrap(arena.bytes)
-        .map_err(|_| IndexError::invalid("encoded arena backing is unexpectedly shared"))?;
+    let (bytes, _, _) = arena.into_owned_parts()?;
     sections.push(section(bytes_name, 1, 1, bytes));
     Ok(())
 }
@@ -1031,7 +1035,7 @@ fn decode_arena(
     bytes: Vec<u8>,
     max_bytes: u64,
     guard: &dyn WorkGuard,
-) -> Result<ByteArena, IndexError> {
+) -> Result<ByteArena<'static>, IndexError> {
     if bytes.len() as u64 > max_bytes {
         return Err(IndexError::corrupt("binary arena exceeds bound"));
     }
@@ -1052,13 +1056,7 @@ fn decode_arena(
         nodes: 2,
         ..WorkDelta::default()
     })?;
-    let arena = ByteArena {
-        bytes: std::sync::Arc::new(bytes),
-        spans: std::sync::Arc::new(decoded),
-        max_bytes,
-        by_hash: std::collections::HashMap::new(),
-        validation_next_id: None,
-    };
+    let arena = ByteArena::from_owned_parts(bytes, decoded, max_bytes);
     arena.validate()?;
     Ok(arena)
 }
@@ -1383,18 +1381,13 @@ fn decode_source_rows(
     Ok(out)
 }
 
-fn reserved<T>(rows: usize, label: &str, guard: &dyn WorkGuard) -> Result<Vec<T>, IndexError> {
-    let bytes = rows
-        .checked_mul(std::mem::size_of::<T>())
-        .and_then(|bytes| u64::try_from(bytes).ok())
-        .ok_or_else(|| IndexError::resource("binary decode allocation size overflow"))?;
-    guard.consume(WorkDelta {
-        resident_bytes: bytes,
-        ..WorkDelta::default()
-    })?;
+fn reserved<T>(
+    rows: usize,
+    label: &'static str,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<T>, IndexError> {
     let mut out = Vec::new();
-    out.try_reserve_exact(rows)
-        .map_err(|_| IndexError::resource(format!("{label} allocation failed")))?;
+    crate::allocation::try_reserve_vec(&mut out, rows, guard, label)?;
     Ok(out)
 }
 fn usize_value(v: u64) -> Result<usize, IndexError> {

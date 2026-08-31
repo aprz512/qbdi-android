@@ -1,5 +1,6 @@
 //! Trace-storage boundary.
 
+mod allocation;
 mod cache;
 mod identity;
 mod index;

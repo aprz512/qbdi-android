@@ -25,7 +25,7 @@ pub use model::{
     RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot, RegisterValue,
     SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase, SourceIdentity,
     StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor,
-    TimelineId,
+    TimelineId, completeness_canonical_key, merge_canonical_completeness,
 };
 pub use qtrb::{
     BeginMetadata, CaptureBytes, Instruction, InstructionDefinition, Memory, MemoryAddressMode,

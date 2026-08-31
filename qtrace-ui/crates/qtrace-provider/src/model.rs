@@ -844,6 +844,113 @@ impl CompletenessRange {
     }
 }
 
+pub fn completeness_canonical_key(range: &CompletenessRange) -> (u8, u8, u64, u64, u8) {
+    let domain = match range.domain() {
+        RangeDomain::CapturedSequence => 0,
+        RangeDomain::SourceBytes => 1,
+        RangeDomain::MemoryAddresses => 2,
+    };
+    let (first, last) = match range.bounds() {
+        RangeBounds::InclusiveSequence { first, last } => (first, last),
+        RangeBounds::HalfOpen {
+            start,
+            end_exclusive,
+        } => (start, end_exclusive),
+    };
+    (
+        domain,
+        completeness_cause_order(range.cause()),
+        first,
+        last,
+        provenance_canonical_order(range.provenance()),
+    )
+}
+
+pub fn merge_canonical_completeness(
+    left: CompletenessRange,
+    right: CompletenessRange,
+) -> Option<CompletenessRange> {
+    if left.domain() != right.domain()
+        || left.cause() != right.cause()
+        || left.provenance() != right.provenance()
+    {
+        return None;
+    }
+    match (left.bounds(), right.bounds()) {
+        (
+            RangeBounds::InclusiveSequence {
+                first: left_first,
+                last: left_last,
+            },
+            RangeBounds::InclusiveSequence {
+                first: right_first,
+                last: right_last,
+            },
+        ) if right_first <= left_last.saturating_add(1) => {
+            CompletenessRange::captured_sequence_with_cause(
+                left_first,
+                left_last.max(right_last),
+                left.provenance(),
+                left.cause(),
+            )
+        }
+        (
+            RangeBounds::HalfOpen {
+                start: left_start,
+                end_exclusive: left_end,
+            },
+            RangeBounds::HalfOpen {
+                start: right_start,
+                end_exclusive: right_end,
+            },
+        ) if right_start <= left_end => match left.domain() {
+            RangeDomain::SourceBytes => CompletenessRange::source_bytes_with_cause(
+                left_start,
+                left_end.max(right_end),
+                left.provenance(),
+                left.cause(),
+            ),
+            RangeDomain::MemoryAddresses => CompletenessRange::memory_addresses_with_cause(
+                left_start,
+                left_end.max(right_end),
+                left.provenance(),
+                left.cause(),
+            ),
+            RangeDomain::CapturedSequence => None,
+        },
+        _ => None,
+    }
+}
+
+const fn completeness_cause_order(cause: CompletenessCause) -> u8 {
+    match cause {
+        CompletenessCause::Retained => 0,
+        CompletenessCause::Active => 1,
+        CompletenessCause::Rotating => 2,
+        CompletenessCause::Stale => 3,
+        CompletenessCause::Unreliable => 4,
+        CompletenessCause::Incomplete => 5,
+        CompletenessCause::Lost => 6,
+        CompletenessCause::Overwritten => 7,
+        CompletenessCause::CoverageGap => 8,
+        CompletenessCause::Checksum => 9,
+        CompletenessCause::UnterminatedThread => 10,
+        CompletenessCause::MissingTerminal => 11,
+        CompletenessCause::Truncation => 12,
+        CompletenessCause::Unknown => 13,
+    }
+}
+
+const fn provenance_canonical_order(provenance: Provenance) -> u8 {
+    match provenance {
+        Provenance::Captured => 0,
+        Provenance::Derived => 1,
+        Provenance::Heuristic => 2,
+        Provenance::Unknown => 3,
+        Provenance::Damaged => 4,
+    }
+}
+
 impl<'de> Deserialize<'de> for CompletenessRange {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

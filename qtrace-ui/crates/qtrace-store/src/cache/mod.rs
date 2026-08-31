@@ -8,11 +8,10 @@ use std::{
     fmt,
     fs::File,
     os::unix::{
-        ffi::OsStrExt,
+        ffi::{OsStrExt, OsStringExt},
         fs::{FileTypeExt, MetadataExt},
     },
     path::{Component, Path},
-    sync::Arc,
 };
 
 use qtrace_provider::{EventKey, EventKind, OperationAbort, WorkDelta, WorkGuard};
@@ -123,8 +122,14 @@ pub enum PublicationState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CacheError {
     code: &'static str,
-    detail: String,
+    detail: CacheErrorDetail,
     publication_state: PublicationState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CacheErrorDetail {
+    Message(String),
+    Abort(OperationAbort),
 }
 
 impl CacheError {
@@ -138,6 +143,13 @@ impl CacheError {
 
     pub fn is_control(&self) -> bool {
         self.code.starts_with("control.") || self.code == "job.cancelled"
+    }
+
+    pub(crate) fn operation_abort(&self) -> Option<&OperationAbort> {
+        match &self.detail {
+            CacheErrorDetail::Abort(abort) => Some(abort),
+            CacheErrorDetail::Message(_) => None,
+        }
     }
 
     pub(crate) fn invalid(detail: impl Into<String>) -> Self {
@@ -179,14 +191,16 @@ impl CacheError {
         } else {
             "cache operation failed"
         };
-        self.detail = format!("{bounded}: {}", self.detail);
+        if let CacheErrorDetail::Message(detail) = &mut self.detail {
+            *detail = format!("{bounded}: {detail}");
+        }
         self
     }
 
     pub(crate) fn durability(detail: impl Into<String>) -> Self {
         Self {
             code: "cache.durability_uncertain",
-            detail: detail.into(),
+            detail: CacheErrorDetail::Message(detail.into()),
             publication_state: PublicationState::VisibleDurabilityUncertain,
         }
     }
@@ -194,7 +208,7 @@ impl CacheError {
     fn new(code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             code,
-            detail: detail.into(),
+            detail: CacheErrorDetail::Message(detail.into()),
             publication_state: PublicationState::NoVisibleFinal,
         }
     }
@@ -206,7 +220,21 @@ impl From<OperationAbort> for CacheError {
             OperationAbort::Cancelled => "job.cancelled",
             OperationAbort::BudgetExceeded { .. } => "control.budget_exceeded",
         };
-        Self::new(code, error.to_string())
+        Self {
+            code,
+            detail: CacheErrorDetail::Abort(error),
+            publication_state: PublicationState::NoVisibleFinal,
+        }
+    }
+}
+
+impl From<crate::allocation::AllocationFailure> for CacheError {
+    fn from(error: crate::allocation::AllocationFailure) -> Self {
+        match error {
+            crate::allocation::AllocationFailure::Aborted(abort) => Self::from(abort),
+            crate::allocation::AllocationFailure::Overflow(detail)
+            | crate::allocation::AllocationFailure::Failed(detail) => Self::resource(detail),
+        }
     }
 }
 
@@ -218,7 +246,11 @@ impl From<RebuildReason> for CacheError {
 
 impl fmt::Display for CacheError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.detail)
+        write!(formatter, "{}: ", self.code)?;
+        match &self.detail {
+            CacheErrorDetail::Message(detail) => formatter.write_str(detail),
+            CacheErrorDetail::Abort(abort) => fmt::Display::fmt(abort, formatter),
+        }
     }
 }
 
@@ -392,8 +424,8 @@ impl ObjectIdentity {
 
 #[derive(Debug)]
 pub(crate) struct CacheDirectory {
-    pub(crate) file: Arc<File>,
-    anchor: Arc<File>,
+    pub(crate) file: File,
+    anchor: File,
     components: Vec<(OsString, ObjectIdentity)>,
 }
 
@@ -428,13 +460,8 @@ impl CacheDirectory {
         if component_count > 256 {
             return Err(CacheError::path("cache root has too many components"));
         }
-        let proof_bytes = component_count
-            .checked_mul(128)
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| CacheError::path("cache path proof size overflow"))?;
         guard.consume(WorkDelta {
             nodes: component_count as u64,
-            resident_bytes: proof_bytes,
             ..WorkDelta::default()
         })?;
         let start = if absolute {
@@ -444,12 +471,17 @@ impl CacheDirectory {
         };
         let descriptor = open(start, DIRECTORY_FLAGS, Mode::empty())
             .map_err(|error| map_directory_errno("cannot open cache anchor", error))?;
-        let anchor = Arc::new(File::from(descriptor));
-        let mut current = anchor.clone();
+        let anchor = File::from(descriptor);
+        let mut current = anchor
+            .try_clone()
+            .map_err(|error| map_io_error("cannot clone cache anchor", error))?;
         let mut components = Vec::new();
-        components
-            .try_reserve_exact(root.components().count().saturating_add(2))
-            .map_err(|_| allocation_error("cache path proof"))?;
+        crate::allocation::try_reserve_vec(
+            &mut components,
+            root.components().count().saturating_add(2),
+            guard,
+            "cache path proof",
+        )?;
         let mut normal_index = 0_usize;
         for component in root.components() {
             match component {
@@ -466,8 +498,8 @@ impl CacheDirectory {
                         return Ok(None);
                     };
                     let identity = ObjectIdentity::from_file(&next)?;
-                    components.push((name.to_owned(), identity));
-                    current = Arc::new(next);
+                    components.push((try_copy_os_string(name, guard)?, identity));
+                    current = next;
                 }
                 _ => return Err(CacheError::path("cache root contains an unsafe component")),
             }
@@ -477,8 +509,8 @@ impl CacheDirectory {
                 return Ok(None);
             };
             let identity = ObjectIdentity::from_file(&next)?;
-            components.push((name.to_owned(), identity));
-            current = Arc::new(next);
+            components.push((try_copy_os_string(name, guard)?, identity));
+            current = next;
         }
         Ok(Some(Self {
             file: current,
@@ -488,9 +520,12 @@ impl CacheDirectory {
     }
 
     pub(crate) fn verify(&self) -> Result<(), CacheError> {
-        let mut current = self.anchor.clone();
+        let mut current = self
+            .anchor
+            .try_clone()
+            .map_err(|error| map_io_error("cannot clone cache proof anchor", error))?;
         for (name, expected) in &self.components {
-            let descriptor = openat(&*current, name, DIRECTORY_FLAGS, Mode::empty())
+            let descriptor = openat(&current, name, DIRECTORY_FLAGS, Mode::empty())
                 .map_err(|error| map_directory_errno("cache directory binding changed", error))?;
             let next = File::from(descriptor);
             let actual = ObjectIdentity::from_file(&next)?;
@@ -499,10 +534,22 @@ impl CacheDirectory {
                     "cache directory identity changed during operation",
                 ));
             }
-            current = Arc::new(next);
+            current = next;
         }
         Ok(())
     }
+}
+
+fn try_copy_os_string(value: &OsStr, guard: &dyn WorkGuard) -> Result<OsString, CacheError> {
+    let mut bytes = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut bytes,
+        value.as_bytes().len(),
+        guard,
+        "cache path component",
+    )?;
+    bytes.extend_from_slice(value.as_bytes());
+    Ok(OsString::from_vec(bytes))
 }
 
 fn open_or_create_directory(

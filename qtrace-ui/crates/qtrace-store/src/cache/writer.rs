@@ -53,9 +53,10 @@ pub enum PublishOutcome {
     Published,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub(crate) struct PublishedReceipt {
-    directory: ObjectIdentity,
+    directory: CacheDirectory,
+    directory_object: ObjectIdentity,
     final_object: ObjectIdentity,
 }
 
@@ -94,7 +95,7 @@ impl CacheWriter {
         guard: &dyn WorkGuard,
     ) -> Result<(PublishOutcome, Option<PublishedReceipt>), CacheError> {
         self.authorize_resident_peak(guard)?;
-        let key = self.identity.cache_key();
+        let key = self.identity.cache_key_guarded(guard)?;
         let directory = CacheDirectory::open(root, &key, true, guard)?
             .ok_or_else(|| CacheError::io("created cache directory disappeared"))?;
         let publication_lock = PublicationLock::acquire(&directory, guard)?;
@@ -106,7 +107,18 @@ impl CacheWriter {
         let mut temporary = OwnedTemporary::create(&directory)?;
         let result = self.publish_locked(&directory, &publication_lock, &mut temporary, guard);
         match result {
-            Ok(outcome) => Ok(outcome),
+            Ok((outcome, receipt)) => {
+                drop(temporary);
+                drop(publication_lock);
+                Ok((
+                    outcome,
+                    receipt.map(|(directory_object, final_object)| PublishedReceipt {
+                        directory,
+                        directory_object,
+                        final_object,
+                    }),
+                ))
+            }
             Err(error) => match temporary.remove_if_armed() {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(CacheError::conflict(format!(
@@ -117,8 +129,8 @@ impl CacheWriter {
     }
 
     pub(crate) fn remove_published(
-        root: &Path,
-        identity: &CacheIdentity,
+        _root: &Path,
+        _identity: &CacheIdentity,
         receipt: PublishedReceipt,
     ) -> Result<(), CacheError> {
         struct CleanupGuard;
@@ -127,15 +139,11 @@ impl CacheWriter {
                 Ok(())
             }
         }
-        let key = identity.cache_key();
-        let directory =
-            CacheDirectory::open(root, &key, false, &CleanupGuard)?.ok_or_else(|| {
-                CacheError::conflict("published cache directory disappeared before rollback")
-            })?;
+        let directory = receipt.directory;
         let publication_lock = PublicationLock::acquire(&directory, &CleanupGuard)?;
         directory.verify()?;
         publication_lock.verify()?;
-        if ObjectIdentity::from_file(&directory.file)? != receipt.directory {
+        if ObjectIdentity::from_file(&directory.file)? != receipt.directory_object {
             return Err(CacheError::conflict(
                 "published cache directory binding changed before rollback",
             ));
@@ -204,7 +212,7 @@ impl CacheWriter {
         publication_lock: &PublicationLock,
         temporary: &mut OwnedTemporary,
         guard: &dyn WorkGuard,
-    ) -> Result<(PublishOutcome, Option<PublishedReceipt>), CacheError> {
+    ) -> Result<(PublishOutcome, Option<(ObjectIdentity, ObjectIdentity)>), CacheError> {
         let directory_receipt = ObjectIdentity::from_file(&directory.file)?;
         write_part(temporary.file_mut()?, &[0_u8; HEADER_BYTES], guard)?;
         let (sections, manifest_offset) = self.write_sections(temporary.file_mut()?, guard)?;
@@ -214,7 +222,7 @@ impl CacheWriter {
             identity: try_clone_identity(&self.identity)?,
             sections,
         };
-        let manifest_bytes = manifest.canonical_bytes()?;
+        let manifest_bytes = manifest.canonical_bytes(guard)?;
         write_part(temporary.file_mut()?, &manifest_bytes, guard)?;
 
         guard.consume(WorkDelta::default())?;
@@ -267,9 +275,9 @@ impl CacheWriter {
         let transaction = match state {
             FinalState::Missing => {
                 renameat_with(
-                    &*directory.file,
+                    &directory.file,
                     temporary.name(),
-                    &*directory.file,
+                    &directory.file,
                     FINAL_NAME,
                     RenameFlags::NOREPLACE,
                 )
@@ -281,9 +289,9 @@ impl CacheWriter {
             }
             FinalState::CorruptSame(displaced) => {
                 renameat_with(
-                    &*directory.file,
+                    &directory.file,
                     temporary.name(),
-                    &*directory.file,
+                    &directory.file,
                     FINAL_NAME,
                     RenameFlags::EXCHANGE,
                 )
@@ -318,10 +326,7 @@ impl CacheWriter {
         }
 
         commit_transaction(directory, publication_lock, &transaction)?;
-        let receipt = PublishedReceipt {
-            directory: directory_receipt,
-            final_object: transaction.own(),
-        };
+        let receipt = (directory_receipt, transaction.own());
         Ok((PublishOutcome::Published, Some(receipt)))
     }
 
@@ -585,9 +590,9 @@ fn rollback_transaction(
             }
             publication_lock.verify()?;
             renameat_with(
-                &*directory.file,
+                &directory.file,
                 staging,
-                &*directory.file,
+                &directory.file,
                 FINAL_NAME,
                 RenameFlags::EXCHANGE,
             )
@@ -768,14 +773,14 @@ impl<'a> PublicationLock<'a> {
             ..WorkDelta::default()
         })?;
         let (descriptor, created) = match openat(
-            &*directory.file,
+            &directory.file,
             LOCK_NAME,
             LOCK_CREATE_FLAGS,
             Mode::RUSR | Mode::WUSR,
         ) {
             Ok(descriptor) => (descriptor, true),
             Err(Errno::EXIST) => (
-                openat(&*directory.file, LOCK_NAME, LOCK_OPEN_FLAGS, Mode::empty())
+                openat(&directory.file, LOCK_NAME, LOCK_OPEN_FLAGS, Mode::empty())
                     .map_err(map_lock_open_error)?,
                 false,
             ),
@@ -936,7 +941,7 @@ fn remove_created_regular_leaf(
             "refusing to remove a replaced created cache leaf",
         ));
     }
-    unlinkat(&*directory.file, name, AtFlags::empty())
+    unlinkat(&directory.file, name, AtFlags::empty())
         .map_err(|error| map_errno("cannot remove failed created cache leaf", error))
 }
 
@@ -973,7 +978,7 @@ impl<'a> OwnedTemporary<'a> {
             })?;
             let name = format!(".index.{}.tmp", hex::encode(random));
             match openat(
-                &*directory.file,
+                &directory.file,
                 name.as_str(),
                 CREATE_FLAGS,
                 Mode::RUSR | Mode::WUSR,
@@ -1040,7 +1045,7 @@ impl Drop for OwnedTemporary<'_> {
 }
 
 fn named_identity(directory: &CacheDirectory, name: &str) -> Result<ObjectIdentity, CacheError> {
-    let descriptor = openat(&*directory.file, name, INSPECT_FLAGS, Mode::empty()).map_err(
+    let descriptor = openat(&directory.file, name, INSPECT_FLAGS, Mode::empty()).map_err(
         |error| match error {
             Errno::LOOP | Errno::NOTDIR => {
                 CacheError::path(format!("unsafe cache publication leaf: {error}"))
@@ -1062,7 +1067,7 @@ fn unlink_verified(
             "refusing to unlink a cache leaf with an unexpected identity or mode",
         ));
     }
-    unlinkat(&*directory.file, name, AtFlags::empty())
+    unlinkat(&directory.file, name, AtFlags::empty())
         .map_err(|error| map_errno("cannot unlink verified cache leaf", error))
 }
 

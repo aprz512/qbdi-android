@@ -218,7 +218,7 @@ fn every_build_checkpoint_aborts_without_visible_cache_or_staging() {
                 } else {
                     "job.cancelled"
                 },
-                "ordinal {target}"
+                "ordinal {target}: {error}"
             );
             assert_no_publication_debris(root.path());
         }

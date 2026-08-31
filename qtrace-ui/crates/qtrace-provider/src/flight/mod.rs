@@ -62,6 +62,8 @@ impl fmt::Debug for FlightProvider {
 }
 
 impl FlightProvider {
+    pub const CURSOR_RESIDENT_BYTES: usize = std::mem::size_of::<FlightCursor>();
+
     pub fn open(
         source: Arc<dyn ReadAtSource>,
         mut identity: SourceIdentity,

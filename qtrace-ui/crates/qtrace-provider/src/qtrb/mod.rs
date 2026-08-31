@@ -52,6 +52,8 @@ impl fmt::Debug for QtrbProvider {
 }
 
 impl QtrbProvider {
+    pub const CURSOR_RESIDENT_BYTES: usize = size_of::<QtrbEventCursor>();
+
     pub fn open(
         source: Arc<dyn ReadAtSource>,
         mut identity: SourceIdentity,
@@ -72,15 +74,35 @@ impl QtrbProvider {
         identity.format_major = MAJOR_VERSION;
         identity.format_minor = header.minor;
         identity.source_bytes = source_bytes;
+        let timeline_resident = size_of::<QtrbEventCursor>()
+            .checked_add(size_of::<TimelineDescriptor>())
+            .and_then(|bytes| bytes.checked_add(4))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| provider_allocation_error("QTRB provider allocation bound overflow"))?;
+        guard.consume(WorkDelta {
+            nodes: 1,
+            resident_bytes: timeline_resident,
+            ..WorkDelta::default()
+        })?;
+        let mut timelines = Vec::new();
+        timelines
+            .try_reserve_exact(1)
+            .map_err(|_| provider_allocation_error("QTRB timeline allocation failed"))?;
+        let mut label = String::new();
+        label
+            .try_reserve_exact(4)
+            .map_err(|_| provider_allocation_error("QTRB timeline label allocation failed"))?;
+        label.push_str("QTRB");
+        timelines.push(TimelineDescriptor {
+            id: TIMELINE_ID,
+            tid: None,
+            label: Some(label),
+        });
         Ok(Self {
             source,
             identity,
             capabilities: ProviderCapabilities::qtrb_register_observations(),
-            timelines: vec![TimelineDescriptor {
-                id: TIMELINE_ID,
-                tid: None,
-                label: Some("QTRB".to_owned()),
-            }],
+            timelines,
             mode,
             header,
         })
@@ -261,6 +283,16 @@ struct PhysicalRecord {
     payload: Vec<u8>,
     offset: u64,
     ordinal: u64,
+}
+
+fn provider_allocation_error(detail: &'static str) -> ProviderError {
+    ProviderError::new(
+        "control.resource_exhausted",
+        "qtrb.allocation",
+        None,
+        false,
+        detail,
+    )
 }
 
 fn hash_map_entry_resident_upper_bound<T>() -> u64 {

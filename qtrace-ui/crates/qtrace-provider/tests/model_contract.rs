@@ -13,7 +13,7 @@ use qtrace_provider::{
     RegisterDelta, RegisterSlot, RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary,
     SignalHandlerPhase, SourceIdentity, StringDefinition, Syscall, Termination, TerminationKind,
     ThreadLifecycle, ThreadLifecyclePhase, TimelineDescriptor, TimelineId, TraceProvider,
-    WorkDelta, WorkGuard,
+    WorkDelta, WorkGuard, completeness_canonical_key, merge_canonical_completeness,
 };
 use serde::Deserialize;
 
@@ -764,4 +764,41 @@ fn one_shot_cursor_releases_summary_only_after_stream_is_drained() {
     assert_eq!(events.len(), 1);
     assert_eq!(summary.counters.events_emitted, 1);
     assert_eq!(summary.timelines[0].tid, Some(17));
+}
+
+#[test]
+fn completeness_canonical_contract_orders_and_merges_exact_classes() {
+    let first = CompletenessRange::captured_sequence_with_cause(
+        1,
+        4,
+        Provenance::Damaged,
+        CompletenessCause::Checksum,
+    )
+    .expect("first");
+    let adjacent = CompletenessRange::captured_sequence_with_cause(
+        5,
+        8,
+        Provenance::Damaged,
+        CompletenessCause::Checksum,
+    )
+    .expect("adjacent");
+    let different_provenance = CompletenessRange::captured_sequence_with_cause(
+        5,
+        8,
+        Provenance::Captured,
+        CompletenessCause::Checksum,
+    )
+    .expect("different provenance");
+
+    assert!(completeness_canonical_key(&first) < completeness_canonical_key(&adjacent));
+    assert_eq!(
+        merge_canonical_completeness(first, adjacent)
+            .expect("same-class adjacency")
+            .bounds(),
+        RangeBounds::InclusiveSequence { first: 1, last: 8 }
+    );
+    assert_eq!(
+        merge_canonical_completeness(first, different_provenance),
+        None
+    );
 }

@@ -1,4 +1,4 @@
-use std::{error::Error, fmt};
+use std::{borrow::Cow, error::Error, fmt};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -14,11 +14,18 @@ pub struct SourceCoordinate {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderError {
-    code: String,
-    stage: String,
+    code: Cow<'static, str>,
+    stage: Cow<'static, str>,
     source: Option<SourceCoordinate>,
     retryable: bool,
-    detail: String,
+    detail: ProviderErrorDetail,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+enum ProviderErrorDetail {
+    Message(Cow<'static, str>),
+    Abort(OperationAbort),
 }
 
 impl ProviderError {
@@ -30,11 +37,11 @@ impl ProviderError {
         detail: impl AsRef<str>,
     ) -> Self {
         Self {
-            code: code.into(),
-            stage: stage.into(),
+            code: Cow::Owned(code.into()),
+            stage: Cow::Owned(stage.into()),
             source,
             retryable,
-            detail: bounded_single_line(detail.as_ref()),
+            detail: ProviderErrorDetail::Message(Cow::Owned(bounded_single_line(detail.as_ref()))),
         }
     }
 
@@ -65,7 +72,17 @@ impl ProviderError {
     }
 
     pub fn detail(&self) -> &str {
-        &self.detail
+        match &self.detail {
+            ProviderErrorDetail::Message(detail) => detail,
+            ProviderErrorDetail::Abort(_) => "operation aborted by work guard",
+        }
+    }
+
+    pub const fn operation_abort(&self) -> Option<&OperationAbort> {
+        match &self.detail {
+            ProviderErrorDetail::Abort(abort) => Some(abort),
+            ProviderErrorDetail::Message(_) => None,
+        }
     }
 }
 
@@ -96,26 +113,30 @@ impl<'de> Deserialize<'de> for ProviderError {
 
 impl From<OperationAbort> for ProviderError {
     fn from(abort: OperationAbort) -> Self {
-        Self::new(
-            match abort {
-                OperationAbort::Cancelled => "control.cancelled",
-                OperationAbort::BudgetExceeded { .. } => "control.budget_exceeded",
-            },
-            "control",
-            None,
-            false,
-            abort.to_string(),
-        )
+        let code = match abort {
+            OperationAbort::Cancelled => "control.cancelled",
+            OperationAbort::BudgetExceeded { .. } => "control.budget_exceeded",
+        };
+        Self {
+            code: Cow::Borrowed(code),
+            stage: Cow::Borrowed("control"),
+            source: None,
+            retryable: false,
+            detail: ProviderErrorDetail::Abort(abort),
+        }
     }
 }
 
 impl fmt::Display for ProviderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} at {}: {}",
-            self.code, self.stage, self.detail
-        )
+        match &self.detail {
+            ProviderErrorDetail::Abort(abort) => {
+                write!(formatter, "{} at {}: {abort}", self.code, self.stage)
+            }
+            ProviderErrorDetail::Message(detail) => {
+                write!(formatter, "{} at {}: {}", self.code, self.stage, detail)
+            }
+        }
     }
 }
 

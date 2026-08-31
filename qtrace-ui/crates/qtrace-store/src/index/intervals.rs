@@ -63,9 +63,12 @@ impl IntervalIndex {
             ))
         })?;
         let mut prefix_max_end = Vec::new();
-        prefix_max_end
-            .try_reserve_exact(entries.len())
-            .map_err(|_| IndexError::resource("interval prefix allocation failed"))?;
+        crate::allocation::try_reserve_vec(
+            &mut prefix_max_end,
+            entries.len(),
+            guard,
+            "interval prefix allocation",
+        )?;
         let mut maximum = 0_u64;
         for (ordinal, entry) in entries.iter().enumerate() {
             if ordinal % 4096 == 0 {
@@ -81,9 +84,12 @@ impl IntervalIndex {
         }
         let blocks = entries.len().div_ceil(block_rows);
         let mut block_prefix_max_end = Vec::new();
-        block_prefix_max_end
-            .try_reserve_exact(blocks)
-            .map_err(|_| IndexError::resource("interval block allocation failed"))?;
+        crate::allocation::try_reserve_vec(
+            &mut block_prefix_max_end,
+            blocks,
+            guard,
+            "interval block allocation",
+        )?;
         for block in 0..blocks {
             if block % 4096 == 0 {
                 guard.consume(WorkDelta::default())?;

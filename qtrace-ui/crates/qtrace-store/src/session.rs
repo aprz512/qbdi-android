@@ -190,7 +190,7 @@ impl ArtifactSource {
         let mut provider = open_provider(
             &self.source,
             self.format,
-            self.identity.provider().clone(),
+            try_clone_provider_identity(self.identity.provider(), guard)?,
             self.qtrb_mode,
             guard,
         )?;
@@ -198,11 +198,36 @@ impl ArtifactSource {
         if self.format.is_qtrb() {
             provider = remap_qtrb_provider(provider, self.timeline_id, guard)?;
         }
-        Ok(Box::new(IdentityCheckedProvider {
-            inner: provider,
-            source: self.source.clone(),
-            expected,
-        }))
+        Ok(crate::allocation::try_box(
+            IdentityCheckedProvider {
+                inner: provider,
+                source: self.source.try_clone_guarded(guard)?,
+                expected,
+            },
+            guard,
+            "identity-checked provider allocation",
+        )
+        .map_err(provider_allocation_error)?)
+    }
+
+    pub(crate) fn authorize_provider_cursor(
+        &self,
+        guard: &dyn WorkGuard,
+    ) -> Result<(), ProviderError> {
+        let provider_cursor = match self.format {
+            ArtifactFormat::Qtrb | ArtifactFormat::QtrbLz4 => {
+                QtrbProvider::CURSOR_RESIDENT_BYTES.checked_add(size_of::<TimelineRemapCursor>())
+            }
+            ArtifactFormat::Flight => Some(FlightProvider::CURSOR_RESIDENT_BYTES),
+        }
+        .and_then(|bytes| bytes.checked_add(size_of::<IdentityCheckedCursor>()))
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| resource_error("provider cursor allocation bound overflow"))?;
+        guard.consume(WorkDelta {
+            resident_bytes: provider_cursor,
+            ..WorkDelta::default()
+        })?;
+        Ok(())
     }
 }
 
@@ -558,35 +583,50 @@ fn open_provider(
     guard: &dyn WorkGuard,
 ) -> Result<Box<dyn TraceProvider>, ProviderError> {
     match format {
-        ArtifactFormat::Qtrb => Ok(Box::new(QtrbProvider::open(
-            source.source(identity.source_bytes),
-            ProviderSourceIdentity {
-                format: "QTRB".to_owned(),
-                ..identity
-            },
-            mode,
-            guard,
-        )?)),
-        ArtifactFormat::QtrbLz4 => {
-            let decoded = QtrbInput::lz4(source.reader()).into_source(guard)?;
-            Ok(Box::new(QtrbProvider::open(
-                decoded,
+        ArtifactFormat::Qtrb => Ok(crate::allocation::try_box(
+            QtrbProvider::open(
+                source.source(identity.source_bytes, guard)?,
                 ProviderSourceIdentity {
-                    format: "QTRB".to_owned(),
+                    format: guarded_provider_string("QTRB", guard)?,
                     ..identity
                 },
                 mode,
                 guard,
-            )?))
-        }
-        ArtifactFormat::Flight => Ok(Box::new(FlightProvider::open(
-            source.source(identity.source_bytes),
-            ProviderSourceIdentity {
-                format: "Flight".to_owned(),
-                ..identity
-            },
+            )?,
             guard,
-        )?)),
+            "QTRB provider allocation",
+        )
+        .map_err(provider_allocation_error)?),
+        ArtifactFormat::QtrbLz4 => {
+            let decoded = QtrbInput::lz4(source.reader()).into_source(guard)?;
+            Ok(crate::allocation::try_box(
+                QtrbProvider::open(
+                    decoded,
+                    ProviderSourceIdentity {
+                        format: guarded_provider_string("QTRB", guard)?,
+                        ..identity
+                    },
+                    mode,
+                    guard,
+                )?,
+                guard,
+                "compressed QTRB provider allocation",
+            )
+            .map_err(provider_allocation_error)?)
+        }
+        ArtifactFormat::Flight => Ok(crate::allocation::try_box(
+            FlightProvider::open(
+                source.source(identity.source_bytes, guard)?,
+                ProviderSourceIdentity {
+                    format: guarded_provider_string("Flight", guard)?,
+                    ..identity
+                },
+                guard,
+            )?,
+            guard,
+            "Flight provider allocation",
+        )
+        .map_err(provider_allocation_error)?),
     }
 }
 
@@ -690,20 +730,47 @@ fn remap_qtrb_provider(
     timeline_id: TimelineId,
     guard: &dyn WorkGuard,
 ) -> Result<Box<dyn TraceProvider>, ProviderError> {
-    guard.consume(WorkDelta {
-        resident_bytes: inner.identity().format.len() as u64,
-        ..WorkDelta::default()
-    })?;
-    let identity = inner.identity().clone();
+    let identity = try_clone_provider_identity(inner.identity(), guard)?;
     let capabilities = inner.capabilities().clone();
     let timelines = session_timelines(ArtifactFormat::Qtrb, timeline_id, inner.timelines(), guard)?;
-    Ok(Box::new(TimelineRemapProvider {
-        inner,
-        identity,
-        capabilities,
-        timelines,
-        timeline_id,
-    }))
+    Ok(crate::allocation::try_box(
+        TimelineRemapProvider {
+            inner,
+            identity,
+            capabilities,
+            timelines,
+            timeline_id,
+        },
+        guard,
+        "timeline-remap provider allocation",
+    )
+    .map_err(provider_allocation_error)?)
+}
+
+fn guarded_provider_string(value: &str, guard: &dyn WorkGuard) -> Result<String, ProviderError> {
+    crate::allocation::try_copy_string(value, guard, "provider identity string")
+        .map_err(provider_allocation_error)
+}
+
+fn try_clone_provider_identity(
+    identity: &ProviderSourceIdentity,
+    guard: &dyn WorkGuard,
+) -> Result<ProviderSourceIdentity, ProviderError> {
+    Ok(ProviderSourceIdentity {
+        artifact: identity.artifact,
+        format: guarded_provider_string(&identity.format, guard)?,
+        format_major: identity.format_major,
+        format_minor: identity.format_minor,
+        source_bytes: identity.source_bytes,
+    })
+}
+
+fn provider_allocation_error(error: crate::allocation::AllocationFailure) -> ProviderError {
+    match error {
+        crate::allocation::AllocationFailure::Aborted(abort) => ProviderError::from(abort),
+        crate::allocation::AllocationFailure::Overflow(detail)
+        | crate::allocation::AllocationFailure::Failed(detail) => resource_error(detail),
+    }
 }
 
 struct TimelineRemapProvider {

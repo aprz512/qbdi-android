@@ -166,6 +166,31 @@ preserved and returns conflict/uncertain rather than being deleted.
 
 ## Budget, cancellation, and simultaneous-live model
 
+- All Task 11 growth sites use one guard-aware fallible seam: checked `Vec`/`String` exact reserve,
+  checked `HashMap`/`HashSet` reserve (including hashbrown control-group/load-factor headroom), and
+  checked boxed catalog/provider state. Build-state typed columns, source-ID/current-module maps,
+  dedup collision buckets, canonical output, every index-family scratch, and reader validation
+  scratch are authorized before growth. The discontinuity verifier first counts base
+  `EventKind::Discontinuity` rows, then authorizes and reserves exactly that many rows. The guard is
+  cumulative: successful allocations consume authorization; deallocation never credits it back.
+- Canonical payload serialization is two-pass: the first pass counts exact bytes without an output
+  allocation, then the guarded output reserves exactly that count. Decode authorization is by the
+  closed `EventKind`, with no fixed per-row tax: fixed/no-heap variants use `1 * encoded`; byte/string
+  variants use `2 *`; Begin/Memory/checkpoint/delta use `3 *`; instruction/definition use `5 *`;
+  semantic uses `10 *`. JSON string escaping makes encoded strings no shorter than decoded bytes;
+  numeric vector elements require at least a digit and separator while decoded elements are eight
+  bytes, and geometric `Vec`/`String` capacity is below twice final length. The higher family
+  multipliers include all simultaneous dynamic fields/children and serde growth; the enum and fixed
+  fields live on the stack and are not charged as heap. A 19-variant matrix covers tiny fixed
+  payloads, escaped Unicode, arbitrary 0..255 byte vectors, 512 semantic fragments, 34-slot
+  checkpoint/delta vectors, 34+34 definition registers, 32 memory operands, and maximum instruction
+  observations. The representative 20,000 x 256-byte semantic decode authorization is 51,200,000
+  bytes (48.83 MiB), rather than the rejected 4 KiB/row scheme's structural 78.13 MiB tax; at 10M
+  rows there is likewise no fixed 40 GiB charge.
+- Manifest JSON is bounded to 1 MiB and receives one conservative whole-file decode authorization;
+  unlike payload authorization this is once per cache, not once per event. Provider cursor/wrapper
+  allocations use their exact associated resident sizes, and held-path identity copies are exact
+  length guarded copies.
 - Build holds one typed append-only catalog. Cache encoding consumes the store: base rows are moved,
   and payload/string/blob arena byte vectors become section backing without cloning. Task 10 writer
   streams each section in 64 KiB pieces and never creates a second complete cache-file image.
@@ -209,6 +234,17 @@ preserved and returns conflict/uncertain rather than being deleted.
   and budget failure are injected at every ordinal. No visible final, random temp, or staging name
   remains (the persistent cooperative lock is allowed).
 
+The allocation oracle is an isolated test-process global allocator with a thread-local active
+phase. Test-harness/setup allocations occur while the phase is inactive. During the production
+call, each resident `WorkDelta` adds an authorization token and each `alloc`/growth `realloc`
+consumes it; growth without prior credit and growth after a rejected resident ordinal are recorded
+independently. Warm deep-validation and cold build both finish with zero unauthorized growth. The
+cold fixture records 324 resident ordinals; rejecting each ordinal preserves the original
+`BudgetDimension::ResidentBytes`, limit `0x1122`, consumed `0x3344`, performs zero later allocation,
+and leaves no final/temp/staging object. Warm rejection preserves the pre-existing final byte for
+byte. Unit-phase fixtures separately exercise empty completeness, all closed payload variants, 64
+distinct module/definition IDs, and maximum typed children.
+
 ## TDD evidence
 
 Review-fix REDs were behavior tests over real checked fixtures and private cache roots:
@@ -241,19 +277,33 @@ Review-fix REDs were behavior tests over real checked fixtures and private cache
 - Public owned/mapped index views match naive scans, including empty/OOB, source bijection,
   timeline/TID/kind/module/PC/definition/register/checkpoint/call/return/semantic/memory behavior.
 
+### Third-review finding matrix
+
+| Finding | Initial RED | Resolution / GREEN evidence |
+|---|---|---|
+| Critical: allocation authorization | The isolated warm oracle observed 29 unauthorized growths; the cold oracle observed 31. A broad `32 * payload + 4096/row` fallback also over-rejected representative traces. | Unified fallible reserve/box/hash/canonical seams and closed-variant decode bounds reduce both oracles to zero. All 19 payload variants and the 64-ID/max-child build fixture are zero; all 324 cold resident rejection ordinals stop before further growth. |
+| Important: original abort | Deep-validation normalization converted a rejected guard into a synthetic Nodes 0/1 error. | `IndexError`, `CacheError`, and `ProviderError` retain the original `OperationAbort`; exhaustive warm/cold ordinal tests assert exact dimension, limit, and consumed values. Completeness validation no longer maps control errors to corruption. |
+| Minor: completeness canonical contract | Flight recovery and store each owned a private ordering/merge implementation. | `completeness_canonical_key` and `merge_canonical_completeness` are provider-model contracts; Flight produces with them while store independently validates sort, overlap, and payload correspondence. |
+
 ## Final verification
 
-- `cargo test -p qtrace-store` — 125 passed.
-- `cargo test -p qtrace-provider --no-fail-fast` — 123 passed, 1 intentional ignored child entry.
+- `cargo test -p qtrace-store` — 132 passed: library 32, allocation authorization 4, cache
+  format 11, cache publication 19, index build 4, index equivalence 15, path security 27, session
+  open 20.
+- `cargo test -p qtrace-provider` — 124 passed, 1 intentional ignored child entry: library 4,
+  Flight differential 2/events 5/recovery 39, model 21, properties 13, QTRB differential 7/events
+  7/framing 16/input 10.
 - `cargo test -p qtrace-store --test index_build` — 4/4 passed, including every successful
-  checkpoint ordinal injected once as cancellation and once as budget exhaustion (36.46 s fresh
+  checkpoint ordinal injected once as cancellation and once as budget exhaustion (38.14 s fresh
   full-run instance).
 - `cargo test -p qtrace-store --test index_equivalence` — 15/15 passed.
-- Task 10 cache gates within the full run: format 11/11, publication 19/19, cache/store unit 29/29.
+- Task 10 cache gates within the full run: format 11/11, publication 19/19; the complete store
+  library suite is 32/32.
 - `cargo clippy -p qtrace-store -p qtrace-provider --all-targets -- -D warnings` — passed.
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
 - `python3 -m unittest scripts.tests.test_qtrace_ui_fixtures scripts.tests.test_trace_binary
-  scripts.tests.test_flight_trace -v` — 89/89 passed; `export_contract_fixtures.py --check` passed.
+  scripts.tests.test_flight_trace -v` — 89/89 passed;
+  `python3 qtrace-ui/tools/export_contract_fixtures.py --check` passed.
   Python fixtures were not modified and Python/Rust fixture consumers ran serially.
 
 ## Deferred by design
