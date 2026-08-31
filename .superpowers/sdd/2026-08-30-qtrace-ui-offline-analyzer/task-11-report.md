@@ -373,17 +373,24 @@ byte-truncation/differential suites exercise every boundary, while sparse/full r
 34-slot checkpoints, empty/large strings, memory captures, high-cardinality 8,192-event/128-TID
 recovery, and all current cold/warm allocation ordinals run through the production allocation seam.
 
+### Seventh-review finding matrix
+
+| Finding | Initial RED / gap | Resolution / GREEN evidence |
+|---|---|---|
+| Important: shape accounting lacked public-path evidence | The sixth-review allocator proof used checked fixtures and helper-level layout probes, but did not independently exercise zero/max QTRB observation shapes or Flight definition/string/fragment cardinality slopes through each provider's public `open`/cursor/drain/`finish` path. | A dev-only integration allocator oracle now runs 13 generated wire artifacts: QTRB read 0/34 and write 0/34 with matching masks/counts, plus Flight definition-only, string-only, and fragment-heavy artifacts at N/2N/4N = 8/16/32. Every shape asserts zero unauthorized growth, nesting, leaked/slack-invalid scopes, operation slack at most 15 alignment bytes, authorization within 110% of complete allocator requests, exact cumulative resident-budget success, and one-byte-low typed `ResidentBytes` failure. Every resident ordinal of all 13 shapes is rejected in turn and preserves the exact original limit/consumed values with zero post-rejection growth. Providers operate only on in-memory `ByteSource`s, so these paths cannot create final/temp/staging debris. Flight family authorized and requested deltas have nonzero, bounded linear slopes; the shared production geometric planner proves terminal capacity below 2N for 8/16/32 and 10M. |
+| Minor: duplicate Flight allocation helpers | `flight/mod.rs` and `flight/recovery.rs` separately implemented fallible Vec/HashMap construction and checked geometric push growth. The wished shared helper test failed to compile with five missing-symbol `E0425` errors. | `allocation.rs` now owns `checked_geometric_capacity`, `try_vec_with_capacity`, `try_hash_map_with_capacity`, and `try_push_vec`. Flight open calls them directly; recovery's context adapters only forward guard and diagnostic text. The checked 10M count passes through the same `checked_vec_capacity` used by exact reserve, while unknown growth uses the shared geometric planner. The focused helper RED is GREEN and the 13-shape public oracle remains GREEN after refactoring. |
+
 ## Final verification
 
 - `cargo test -p qtrace-store` — 143 passed: library 39, allocation authorization 7, cache
   format 12, cache publication 19, index build 4, index equivalence 15, path security 27, session
   open 20.
-- `cargo test -p qtrace-provider` — 128 passed, 1 intentional ignored child entry: library 6,
-  Flight differential 2/events 5/recovery 39, model 23, properties 13, QTRB differential 7/events
-  7/framing 16/input 10.
+- `cargo test -p qtrace-provider` — 131 passed, 1 intentional ignored child entry: library 7,
+  Flight differential 2/events 5/recovery 39, provider allocation shapes 2, model 23,
+  properties 13, QTRB differential 7/events 7/framing 16/input 10.
 - `cargo test -p qtrace-store --test index_build` — 4/4 passed, including every successful
-  checkpoint ordinal injected once as cancellation and once as budget exhaustion (94.05 s fresh
-  full-run instance).
+  checkpoint ordinal injected once as cancellation and once as budget exhaustion (37.27 s fresh
+  seventh-review run).
 - `cargo test -p qtrace-store --test index_equivalence` — 15/15 passed.
 - Task 10 cache gates within the full run: format 12/12, publication 19/19; the complete store
   library suite is 39/39.

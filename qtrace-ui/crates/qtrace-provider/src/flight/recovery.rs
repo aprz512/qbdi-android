@@ -1850,22 +1850,7 @@ fn guarded_push<T>(
     value: T,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
-    if output.len() < output.capacity() {
-        output.push(value);
-        return Ok(());
-    }
-    let new_capacity = output
-        .capacity()
-        .checked_mul(2)
-        .map(|capacity| capacity.max(4))
-        .ok_or_else(|| allocation_error("Flight vector capacity overflow"))?;
-    allocation::try_reserve_vec_exact(
-        output,
-        new_capacity,
-        context.guard,
-        "Flight vector growth failed",
-    )?;
-    guarded_push_without_charge(output, value)
+    allocation::try_push_vec(output, value, context.guard, "Flight vector growth failed")
 }
 
 fn guarded_push_without_charge<T>(output: &mut Vec<T>, value: T) -> Result<(), ProviderError> {
@@ -1882,14 +1867,7 @@ fn fallible_vec<T>(
     capacity: usize,
     context: &RecoveryContext<'_>,
 ) -> Result<Vec<T>, ProviderError> {
-    let mut output = Vec::new();
-    allocation::try_reserve_vec_exact(
-        &mut output,
-        capacity,
-        context.guard,
-        "Flight recovery allocation failed",
-    )?;
-    Ok(output)
+    allocation::try_vec_with_capacity(capacity, context.guard, "Flight recovery allocation failed")
 }
 
 fn fallible_none_vec<T>(
@@ -1911,14 +1889,11 @@ fn fallible_hash_map<K, V>(
 where
     K: Eq + std::hash::Hash,
 {
-    let mut output = HashMap::new();
-    allocation::try_reserve_hash_map(
-        &mut output,
+    allocation::try_hash_map_with_capacity(
         capacity,
         context.guard,
         "Flight recovery hash allocation failed",
-    )?;
-    Ok(output)
+    )
 }
 
 fn guarded_radix_sort<T, F>(

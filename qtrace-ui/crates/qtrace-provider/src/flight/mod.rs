@@ -3,7 +3,7 @@ mod fragments;
 mod recovery;
 mod wire;
 
-use std::{collections::HashMap, fmt, sync::Arc, vec};
+use std::{fmt, sync::Arc, vec};
 
 use crate::{
     EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS, ProviderCapabilities, ProviderError,
@@ -80,14 +80,26 @@ impl FlightProvider {
         identity.format_major = 2;
         identity.format_minor = 0;
         identity.source_bytes = recovered.source_bytes;
-        let mut timelines = fallible_vec(recovered.tids.len().saturating_add(1), guard)?;
+        let mut timelines = allocation::try_vec_with_capacity(
+            recovered.tids.len().saturating_add(1),
+            guard,
+            "Flight timeline allocation failed",
+        )?;
         timelines.push(TimelineDescriptor {
             id: recovery::MERGED_TIMELINE_ID,
             tid: None,
             label: Some(fallible_string("Flight", guard)?),
         });
-        let mut projections = fallible_vec(recovered.tids.len(), guard)?;
-        let mut projection_by_tid = fallible_hash_map(recovered.tids.len(), guard)?;
+        let mut projections = allocation::try_vec_with_capacity(
+            recovered.tids.len(),
+            guard,
+            "Flight projection allocation failed",
+        )?;
+        let mut projection_by_tid = allocation::try_hash_map_with_capacity(
+            recovered.tids.len(),
+            guard,
+            "Flight projection map allocation failed",
+        )?;
         for (index, tid) in recovered.tids.iter().copied().enumerate() {
             guard_checkpoint(guard, index)?;
             let timeline = TimelineDescriptor {
@@ -111,7 +123,11 @@ impl FlightProvider {
                 return Err(resource_error("duplicate Flight projection TID"));
             }
         }
-        let mut projection_counts = fallible_vec(projections.len(), guard)?;
+        let mut projection_counts = allocation::try_vec_with_capacity(
+            projections.len(),
+            guard,
+            "Flight projection count allocation failed",
+        )?;
         projection_counts.resize(projections.len(), 0_usize);
         for (event_index, event) in recovered.events.iter().enumerate() {
             guard_checkpoint(guard, event_index)?;
@@ -133,7 +149,12 @@ impl FlightProvider {
             projections.iter_mut().zip(projection_counts).enumerate()
         {
             guard_checkpoint(guard, index)?;
-            reserve_vec_exact(&mut projection.event_keys, count, guard)?;
+            allocation::try_reserve_vec_exact(
+                &mut projection.event_keys,
+                count,
+                guard,
+                "Flight projection key allocation failed",
+            )?;
         }
         for (event_index, event) in recovered.events.iter().enumerate() {
             guard_checkpoint(guard, event_index)?;
@@ -147,9 +168,18 @@ impl FlightProvider {
             let projection = projections
                 .get_mut(index)
                 .ok_or_else(|| resource_error("Flight projection index is invalid"))?;
-            fallible_push(&mut projection.event_keys, event.key.clone(), guard)?;
+            allocation::try_push_vec(
+                &mut projection.event_keys,
+                event.key.clone(),
+                guard,
+                "Flight projection key growth failed",
+            )?;
         }
-        let mut summary_timelines = fallible_vec(timelines.len(), guard)?;
+        let mut summary_timelines = allocation::try_vec_with_capacity(
+            timelines.len(),
+            guard,
+            "Flight summary timeline allocation failed",
+        )?;
         for (index, timeline) in timelines.iter().enumerate() {
             guard_checkpoint(guard, index)?;
             summary_timelines.push(TimelineDescriptor {
@@ -272,67 +302,6 @@ impl EventCursor for FlightCursor {
         }
         Ok(self.summary)
     }
-}
-
-fn fallible_vec<T>(capacity: usize, guard: &dyn WorkGuard) -> Result<Vec<T>, ProviderError> {
-    let mut output = Vec::new();
-    allocation::try_reserve_vec_exact(
-        &mut output,
-        capacity,
-        guard,
-        "Flight provider allocation failed",
-    )?;
-    Ok(output)
-}
-
-fn fallible_hash_map<K, V>(
-    capacity: usize,
-    guard: &dyn WorkGuard,
-) -> Result<HashMap<K, V>, ProviderError>
-where
-    K: Eq + std::hash::Hash,
-{
-    let mut output = HashMap::new();
-    allocation::try_reserve_hash_map(
-        &mut output,
-        capacity,
-        guard,
-        "Flight provider allocation failed",
-    )?;
-    Ok(output)
-}
-
-fn fallible_push<T>(
-    output: &mut Vec<T>,
-    value: T,
-    guard: &dyn WorkGuard,
-) -> Result<(), ProviderError> {
-    if output.len() == output.capacity() {
-        let new_capacity = output
-            .capacity()
-            .checked_mul(2)
-            .map(|capacity| capacity.max(4))
-            .ok_or_else(|| resource_error("Flight vector capacity overflow"))?;
-        allocation::try_reserve_vec_exact(
-            output,
-            new_capacity,
-            guard,
-            "Flight provider allocation failed",
-        )?;
-    }
-    output.push(value);
-    Ok(())
-}
-
-fn reserve_vec_exact<T>(
-    output: &mut Vec<T>,
-    capacity: usize,
-    guard: &dyn WorkGuard,
-) -> Result<(), ProviderError> {
-    if capacity <= output.capacity() {
-        return Ok(());
-    }
-    allocation::try_reserve_vec_exact(output, capacity, guard, "Flight provider allocation failed")
 }
 
 fn fallible_string(value: &str, guard: &dyn WorkGuard) -> Result<String, ProviderError> {
