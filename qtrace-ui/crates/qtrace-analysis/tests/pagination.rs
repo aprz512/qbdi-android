@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Barrier, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -992,13 +992,14 @@ fn discontinuity_payload_and_context_byte_limits_fail_before_decode() {
     let mut cumulative = CountingStore::new(17, 9, false);
     cumulative.discontinuity_rows = 17;
     let encoded = cumulative.discontinuity_payload.clone();
-    cumulative.discontinuity_payload = vec![
-        b' ';
+    cumulative.discontinuity_payload = encoded[..encoded.len() - 1].to_vec();
+    cumulative.discontinuity_payload.extend(std::iter::repeat_n(
+        b' ',
         MAX_DISCONTINUITY_PAYLOAD_BYTES
             .checked_sub(encoded.len())
-            .expect("payload bound exceeds encoded evidence")
-    ];
-    cumulative.discontinuity_payload.extend_from_slice(&encoded);
+            .expect("payload bound exceeds encoded evidence"),
+    ));
+    cumulative.discontinuity_payload.push(b'}');
     assert!(
         cumulative.discontinuity_payload.len() * cumulative.discontinuity_rows
             > MAX_DISCONTINUITY_TOTAL_BYTES
@@ -1042,6 +1043,10 @@ fn validates_limits_reports_exact_total_and_projects_completeness_and_discontinu
     assert!(
         matches!(page.rows.last(), Some(TimelineRow::Discontinuity(row)) if row.cause == DiscontinuityCause::Truncation && row.evidence.cause == CompletenessCause::Lost)
     );
+    projection.cancel();
+    assert!(!projection.is_cancelled());
+    assert_eq!(query_events(&projection, None, 2_000).unwrap(), page);
+    assert_eq!(projection.total_visible_rows().unwrap(), (7, true));
 }
 
 #[test]
@@ -1074,6 +1079,63 @@ fn semantic_detail_scan_publishes_inexact_pages_then_an_immutable_exact_result()
     assert_eq!(complete.total, 32);
     assert_eq!(complete.rows.len(), 10);
     assert_eq!(query_events(&projection, None, 10).unwrap(), complete);
+    projection.cancel();
+    assert!(!projection.is_cancelled());
+    assert_eq!(query_events(&projection, None, 10).unwrap(), complete);
+    assert_eq!(projection.total_visible_rows().unwrap(), (32, true));
+}
+
+#[test]
+fn semantic_completion_racing_cancel_has_one_idempotent_terminal_outcome() {
+    for _ in 0..8 {
+        let store = Arc::new(CountingStore::new(32, 9, true));
+        let projection = Arc::new(projection(
+            store.clone(),
+            EventFilter {
+                semantic_detail_contains: vec!["needle".into()],
+                ..EventFilter::default()
+            },
+        ));
+        store.wait_for_semantic_calls(2);
+        let barrier = Arc::new(Barrier::new(3));
+        let cancelling = {
+            let projection = projection.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                projection.cancel();
+            })
+        };
+        let completing = {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.release_semantic_scan();
+            })
+        };
+        barrier.wait();
+        cancelling.join().unwrap();
+        completing.join().unwrap();
+        assert!(projection.wait_until_complete(Duration::from_secs(2)));
+
+        let first = query_events(&projection, None, 10);
+        projection.cancel();
+        let second = query_events(&projection, None, 10);
+        match (first, second) {
+            (Ok(first), Ok(second)) => {
+                assert_eq!(first, second);
+                assert!(first.exact_total);
+                assert!(!projection.is_cancelled());
+            }
+            (Err(first), Err(second)) => {
+                assert_eq!(first.code(), "job.cancelled");
+                assert_eq!(second.code(), "job.cancelled");
+                assert!(projection.is_cancelled());
+            }
+            outcome => panic!("terminal outcome changed after repeated cancel: {outcome:?}"),
+        }
+    }
 }
 
 #[test]

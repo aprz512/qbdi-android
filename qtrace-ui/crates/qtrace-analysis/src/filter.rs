@@ -79,18 +79,18 @@ pub struct EventFilter {
 }
 
 impl EventFilter {
-    pub(crate) fn normalized(&self) -> Result<Self, AnalysisError> {
-        if raw_term_count(self) > MAX_FILTER_TERMS {
+    pub(crate) fn normalized(mut self) -> Result<Self, AnalysisError> {
+        if raw_term_count(&self) > MAX_FILTER_TERMS {
             return Err(AnalysisError::filter_too_complex(
                 "filter exceeds 512 terms",
             ));
         }
-        if raw_text_bytes(self).is_none_or(|bytes| bytes > MAX_FILTER_TEXT_BYTES) {
+        if raw_text_bytes(&self).is_none_or(|bytes| bytes > MAX_FILTER_TEXT_BYTES) {
             return Err(AnalysisError::filter_too_complex(
                 "filter text exceeds 1 MiB",
             ));
         }
-        let mut filter = self.clone();
+        let filter = &mut self;
         filter.tids.sort_unstable();
         filter.tids.dedup();
         filter.kinds.sort_by_key(|kind| kind_tag(*kind));
@@ -107,7 +107,8 @@ impl EventFilter {
             let value = match matcher {
                 MnemonicFilter::Exact(value) | MnemonicFilter::Contains(value) => value,
             };
-            *value = value.trim().to_ascii_lowercase();
+            trim_string_in_place(value);
+            value.make_ascii_lowercase();
             if value.is_empty() {
                 return Err(AnalysisError::invalid_filter(
                     "mnemonic matcher must not be empty",
@@ -183,7 +184,7 @@ impl EventFilter {
                 "module/range expansion exceeds 4096 pairs",
             ));
         }
-        Ok(filter)
+        Ok(self)
     }
 
     pub(crate) fn digest(&self) -> [u8; 32] {
@@ -365,7 +366,7 @@ fn normalize_slots(slots: &mut Vec<RegisterSlot>) {
 
 fn normalize_text(values: &mut Vec<String>, label: &str) -> Result<(), AnalysisError> {
     for value in values.iter_mut() {
-        *value = value.trim().to_owned();
+        trim_string_in_place(value);
         if value.is_empty() {
             return Err(AnalysisError::invalid_filter(format!(
                 "{label} must not be empty"
@@ -375,6 +376,14 @@ fn normalize_text(values: &mut Vec<String>, label: &str) -> Result<(), AnalysisE
     values.sort();
     values.dedup();
     Ok(())
+}
+
+fn trim_string_in_place(value: &mut String) {
+    let trimmed = value.trim();
+    let start = trimmed.as_ptr() as usize - value.as_ptr() as usize;
+    let end = start + trimmed.len();
+    value.truncate(end);
+    value.drain(..start);
 }
 
 fn mnemonic_key(value: &MnemonicFilter) -> (u8, &str) {

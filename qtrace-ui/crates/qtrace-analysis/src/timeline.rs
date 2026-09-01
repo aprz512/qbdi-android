@@ -27,19 +27,63 @@ use crate::{CompletenessSummary, DiscontinuityRow, EventFilter, MemoryFilter, Mn
 const CURSOR_VERSION: u8 = 2;
 const CURSOR_PAYLOAD_BYTES: usize = 136;
 const CURSOR_BYTES: usize = CURSOR_PAYLOAD_BYTES + 32;
+const CURSOR_ENCODED_BYTES: usize = 224;
 const MAX_CANDIDATE_ROWS: usize = 10_000_000;
-const MAX_CANDIDATE_WORK: usize = 20_000_000;
+const MAX_CANDIDATE_DECODE_ROWS: usize = 20_000_000;
 const MAX_CANDIDATE_RESIDENT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SEMANTIC_DETAIL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SEMANTIC_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const SEMANTIC_WORKERS: usize = 4;
 const MAX_PENDING_SEMANTIC_JOBS: usize = 32;
 const MAX_MATCHER_BUILD_WORK: usize = 16 * 1024 * 1024;
+const STABLE_KEY_RADIX_PASSES: usize = 70;
+const MAX_INDEXED_FIELDS: usize = 13;
+const MAX_LINEAR_PASSES_PER_INDEXED_FIELD: usize = 4;
+const MAX_GLOBAL_CANDIDATE_LINEAR_PASSES: usize = 12;
+const MAX_CANDIDATE_LINEAR_PASSES: usize =
+    MAX_INDEXED_FIELDS * MAX_LINEAR_PASSES_PER_INDEXED_FIELD + MAX_GLOBAL_CANDIDATE_LINEAR_PASSES;
+const MATCHER_ALPHABET_SIZE: usize = u8::MAX as usize + 1;
+const MAX_MATCHER_TRANSITION_WORK_PER_BYTE: usize = 2 * MATCHER_ALPHABET_SIZE + 2;
+const MAX_PAGE_LIMIT: usize = 2_000;
+const MAX_PAGE_COMPARISONS: usize = usize::BITS as usize + 1;
 pub const MAX_CONTEXT_EVENTS: usize = 10_000_000;
 pub const MAX_CONTEXT_TYPED_ROWS: usize = 20_000_000;
 pub const MAX_CONTEXT_DICTIONARY_ENTRIES: usize = 20_000_000;
 pub const MAX_DISCONTINUITY_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_DISCONTINUITY_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+
+fn stable_key_work_bound(rows: usize) -> Option<u64> {
+    let rows = u64::try_from(rows).ok()?;
+    let per_pass = rows.checked_mul(2)?.checked_add(256)?;
+    rows.checked_add(per_pass.checked_mul(STABLE_KEY_RADIX_PASSES as u64)?)
+}
+
+fn candidate_work_limit_for(candidate_rows: usize, semantic_bytes: usize) -> Option<u64> {
+    let stable = stable_key_work_bound(candidate_rows)?;
+    let linear = u64::try_from(candidate_rows)
+        .ok()?
+        .checked_mul(MAX_CANDIDATE_LINEAR_PASSES as u64)?;
+    let semantic = u64::try_from(semantic_bytes)
+        .ok()?
+        .checked_mul(MAX_MATCHER_TRANSITION_WORK_PER_BYTE as u64)?;
+    stable
+        .checked_add(linear)?
+        .checked_add(semantic)?
+        .checked_add(MAX_MATCHER_BUILD_WORK as u64)
+}
+
+fn candidate_work_limit() -> Option<u64> {
+    candidate_work_limit_for(MAX_CANDIDATE_ROWS, MAX_SEMANTIC_SCAN_BYTES)
+}
+
+fn page_work_limit(limit: usize) -> Option<u64> {
+    u64::try_from(limit)
+        .ok()?
+        .checked_mul(2)?
+        .checked_add(MAX_PAGE_COMPARISONS as u64)?
+        .checked_add(1)?
+        .checked_add((CURSOR_BYTES * 2 + CURSOR_ENCODED_BYTES) as u64)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalysisError {
@@ -292,21 +336,28 @@ struct ProjectionState {
 
 pub struct TimelineProjection {
     context: Arc<QueryContext>,
-    filter: EventFilter,
+    filter: Arc<EventFilter>,
     plan: QueryPlan,
     state: Arc<(Mutex<ProjectionState>, Condvar)>,
     cancelled: Arc<AtomicBool>,
-    guard: CandidateGuard,
 }
 
 impl TimelineProjection {
     pub fn new(context: Arc<QueryContext>, filter: EventFilter) -> Result<Self, AnalysisError> {
         let filter = filter.normalized()?;
-        let projection_identity = derive_projection_identity(context.identity, &filter);
         let cancelled = Arc::new(AtomicBool::new(false));
         let guard = CandidateGuard::new(cancelled.clone());
-        let (candidates, indexed_fields) = plan_candidates(&context, &filter, &guard)?;
-        let residual = synchronous_residual_filter(&filter);
+        let filter_arc_bytes = std::mem::size_of::<EventFilter>()
+            .checked_add(2 * std::mem::size_of::<usize>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| AnalysisError::resource_exhausted("normalized filter size overflow"))?;
+        let filter_scope =
+            AllocationScope::begin(&guard, filter_arc_bytes, 0).map_err(AnalysisError::control)?;
+        let filter = Arc::new(filter);
+        drop(filter_scope);
+        let projection_identity = derive_projection_identity(context.identity, filter.as_ref());
+        let (candidates, indexed_fields) = plan_candidates(&context, filter.as_ref(), &guard)?;
+        let residual = synchronous_residual_filter(filter.as_ref());
         let candidates = apply_synchronous_residuals(&context, &residual, candidates, &guard)?;
         let candidates = sort_rows_by_stable_key(&context, candidates, &guard)?;
         let has_residual_scan = filter.has_semantic_detail_residual();
@@ -321,7 +372,7 @@ impl TimelineProjection {
         if has_residual_scan {
             submit_semantic_scan(
                 context.clone(),
-                filter.semantic_detail_contains.clone(),
+                filter.clone(),
                 candidates,
                 state.clone(),
                 cancelled.clone(),
@@ -340,7 +391,6 @@ impl TimelineProjection {
             plan,
             state,
             cancelled,
-            guard,
         })
     }
 
@@ -349,7 +399,7 @@ impl TimelineProjection {
     }
 
     pub fn filter(&self) -> &EventFilter {
-        &self.filter
+        self.filter.as_ref()
     }
 
     pub fn total_visible_rows(&self) -> Result<(usize, bool), AnalysisError> {
@@ -361,12 +411,21 @@ impl TimelineProjection {
     }
 
     pub fn cancel(&self) {
+        let mut state = self
+            .state
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.completed {
+            return;
+        }
         self.cancelled.store(true, Ordering::Release);
-        terminalize_projection(
-            &self.state,
-            false,
-            Some(AnalysisError::cancelled("semantic analysis cancelled")),
-        );
+        state.visible.clear();
+        state.watermark = None;
+        state.exact_total = false;
+        state.completed = true;
+        state.error = Some(AnalysisError::cancelled("semantic analysis cancelled"));
+        self.state.1.notify_all();
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -384,9 +443,19 @@ impl TimelineProjection {
     }
 
     fn page(&self, cursor: Option<&PageCursor>, limit: usize) -> Result<EventPage, AnalysisError> {
-        if !(1..=2_000).contains(&limit) {
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
             return Err(AnalysisError::invalid_limit());
         }
+        let guard = CandidateGuard::page(self.cancelled.clone(), limit)?;
+        self.page_guarded(cursor, limit, &guard)
+    }
+
+    fn page_guarded(
+        &self,
+        cursor: Option<&PageCursor>,
+        limit: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventPage, AnalysisError> {
         let (page_rows, total, exact_total, has_more, analysis_pending, watermark) = {
             let state = self.state.0.lock().expect("projection state poisoned");
             if let Some(error) = &state.error {
@@ -395,7 +464,7 @@ impl TimelineProjection {
             let start = match cursor {
                 None => 0,
                 Some(cursor) => {
-                    let decoded = decode_cursor(cursor)?;
+                    let decoded = decode_cursor(cursor, guard)?;
                     if decoded.store != self.context.identity
                         || decoded.projection != self.plan.projection_identity
                     {
@@ -404,7 +473,7 @@ impl TimelineProjection {
                         ));
                     }
                     decoded.last_key.as_ref().map_or(Ok(0), |key| {
-                        locate_after_key(&self.context, &state.visible, key)
+                        locate_after_key(&self.context, &state.visible, key, guard)
                     })?
                 }
             };
@@ -412,7 +481,7 @@ impl TimelineProjection {
             (
                 try_clone_slice(
                     &state.visible[start..end],
-                    &self.guard,
+                    guard,
                     "page source-row allocation failed",
                 )?,
                 state.visible.len(),
@@ -426,11 +495,11 @@ impl TimelineProjection {
         try_reserve_analysis(
             &mut rows,
             page_rows.len(),
-            &self.guard,
+            guard,
             "page row allocation failed",
         )?;
         for chunk in page_rows.chunks(4096) {
-            consume_analysis_work(&self.guard, chunk.len())?;
+            consume_analysis_work(guard, chunk.len())?;
             for source_row in chunk {
                 rows.push(self.project_row(*source_row)?);
             }
@@ -442,6 +511,7 @@ impl TimelineProjection {
             } else {
                 match (last_returned, watermark) {
                     (Some(left), Some(right)) => {
+                        consume_analysis_work(guard, 1)?;
                         Some(if compare_event_keys(&left, &right).is_lt() {
                             right
                         } else {
@@ -456,7 +526,8 @@ impl TimelineProjection {
                 self.context.identity,
                 self.plan.projection_identity,
                 anchor.as_ref(),
-            ))
+                guard,
+            )?)
         } else {
             None
         };
@@ -1007,6 +1078,8 @@ struct CandidateLedger {
     work: AtomicU64,
     resident: AtomicU64,
     cancelled: Arc<AtomicBool>,
+    work_limit: u64,
+    resident_limit: u64,
 }
 
 #[derive(Clone)]
@@ -1016,11 +1089,38 @@ struct CandidateGuard {
 
 impl CandidateGuard {
     fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self::with_limits(
+            cancelled,
+            candidate_work_limit().expect("candidate work constants must fit u64"),
+            MAX_CANDIDATE_RESIDENT_BYTES as u64,
+        )
+    }
+
+    fn page(cancelled: Arc<AtomicBool>, limit: usize) -> Result<Self, AnalysisError> {
+        let work_limit = page_work_limit(limit)
+            .ok_or_else(|| AnalysisError::resource_exhausted("page work budget overflow"))?;
+        let resident_limit = limit
+            .checked_mul(
+                std::mem::size_of::<usize>()
+                    .checked_add(std::mem::size_of::<TimelineRow>())
+                    .ok_or_else(|| {
+                        AnalysisError::resource_exhausted("page resident budget overflow")
+                    })?,
+            )
+            .and_then(|bytes| bytes.checked_add(CURSOR_BYTES + CURSOR_ENCODED_BYTES))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| AnalysisError::resource_exhausted("page resident budget overflow"))?;
+        Ok(Self::with_limits(cancelled, work_limit, resident_limit))
+    }
+
+    fn with_limits(cancelled: Arc<AtomicBool>, work_limit: u64, resident_limit: u64) -> Self {
         Self {
             ledger: Arc::new(CandidateLedger {
                 work: AtomicU64::new(0),
                 resident: AtomicU64::new(0),
                 cancelled,
+                work_limit,
+                resident_limit,
             }),
         }
     }
@@ -1049,14 +1149,21 @@ impl WorkGuard for CandidateGuard {
             .ledger
             .work
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |work| {
-                Some(work.saturating_add(work_delta))
+                work.checked_add(work_delta)
+                    .filter(|work| *work <= self.ledger.work_limit)
             })
-            .unwrap_or_else(|work| work)
-            .saturating_add(work_delta);
-        if work > MAX_CANDIDATE_WORK as u64 {
+            .map(|prior| prior + work_delta)
+            .map_err(|prior| {
+                qtrace_provider::OperationAbort::budget_exceeded(
+                    qtrace_provider::BudgetDimension::Rows,
+                    self.ledger.work_limit,
+                    prior.saturating_add(work_delta),
+                )
+            })?;
+        if work > self.ledger.work_limit {
             return Err(qtrace_provider::OperationAbort::budget_exceeded(
                 qtrace_provider::BudgetDimension::Rows,
-                MAX_CANDIDATE_WORK as u64,
+                self.ledger.work_limit,
                 work,
             ));
         }
@@ -1065,14 +1172,22 @@ impl WorkGuard for CandidateGuard {
                 .ledger
                 .resident
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |resident| {
-                    Some(resident.saturating_add(delta.resident_bytes))
+                    resident
+                        .checked_add(delta.resident_bytes)
+                        .filter(|resident| *resident <= self.ledger.resident_limit)
                 })
-                .unwrap_or_else(|resident| resident)
-                .saturating_add(delta.resident_bytes);
-            if resident > MAX_CANDIDATE_RESIDENT_BYTES as u64 {
+                .map(|prior| prior + delta.resident_bytes)
+                .map_err(|prior| {
+                    qtrace_provider::OperationAbort::budget_exceeded(
+                        qtrace_provider::BudgetDimension::ResidentBytes,
+                        self.ledger.resident_limit,
+                        prior.saturating_add(delta.resident_bytes),
+                    )
+                })?;
+            if resident > self.ledger.resident_limit {
                 return Err(qtrace_provider::OperationAbort::budget_exceeded(
                     qtrace_provider::BudgetDimension::ResidentBytes,
-                    MAX_CANDIDATE_RESIDENT_BYTES as u64,
+                    self.ledger.resident_limit,
                     resident,
                 ));
             }
@@ -1087,7 +1202,12 @@ fn plan_candidates(
     guard: &CandidateGuard,
 ) -> Result<(Vec<usize>, usize), AnalysisError> {
     let mut fields = Vec::new();
-    try_reserve_analysis(&mut fields, 13, guard, "posting plan allocation failed")?;
+    try_reserve_analysis(
+        &mut fields,
+        MAX_INDEXED_FIELDS,
+        guard,
+        "posting plan allocation failed",
+    )?;
     if !filter.tids.is_empty() {
         fields.push(CandidateField::Tids);
     }
@@ -1121,7 +1241,6 @@ fn plan_candidates(
             .definitions
             .len()
             .checked_mul(filter.mnemonic.len())
-            .filter(|work| *work <= MAX_CANDIDATE_WORK)
             .ok_or_else(|| {
                 AnalysisError::resource_exhausted("mnemonic definition scan exceeds work budget")
             })?;
@@ -1303,7 +1422,7 @@ fn estimate_posting(
 fn checked_estimate_add(total: &mut usize, value: usize) -> Result<(), AnalysisError> {
     *total = total
         .checked_add(value)
-        .filter(|total| *total <= MAX_CANDIDATE_WORK)
+        .filter(|total| *total <= MAX_CANDIDATE_DECODE_ROWS)
         .ok_or_else(|| {
             AnalysisError::resource_exhausted("posting estimate exceeds candidate work budget")
         })?;
@@ -1691,12 +1810,12 @@ fn intersect_rows_fallible_guarded(
 }
 
 fn preflight_semantic_lookup(context: &QueryContext, terms: usize) -> Result<(), AnalysisError> {
-    if context
+    let work = context
         .store
         .string_count()
         .checked_mul(terms)
-        .is_none_or(|work| work > MAX_CANDIDATE_WORK)
-    {
+        .and_then(|work| u64::try_from(work).ok());
+    if work.is_none_or(|work| work > candidate_work_limit().unwrap_or(0)) {
         return Err(AnalysisError::resource_exhausted(
             "semantic dictionary lookup exceeds work budget",
         ));
@@ -1785,7 +1904,7 @@ fn union_rows_guarded(
     let work = lists
         .iter()
         .try_fold(0_usize, |total, rows| total.checked_add(rows.len()));
-    let Some(work) = work.filter(|work| *work <= MAX_CANDIDATE_WORK) else {
+    let Some(work) = work.filter(|work| *work <= MAX_CANDIDATE_DECODE_ROWS) else {
         return Err(AnalysisError::resource_exhausted(
             "posting union exceeds candidate work budget",
         ));
@@ -2113,10 +2232,13 @@ fn radix_sort_rows_by_keys_guarded(
     if rows.len() < 2 {
         return Ok(rows);
     }
-    if rows.iter().any(|row| *row >= keys.len()) {
-        return Err(AnalysisError::store_shape(
-            "candidate row is outside the event-key map",
-        ));
+    for chunk in rows.chunks(4096) {
+        consume_analysis_work(guard, chunk.len())?;
+        if chunk.iter().any(|row| *row >= keys.len()) {
+            return Err(AnalysisError::store_shape(
+                "candidate row is outside the event-key map",
+            ));
+        }
     }
     let mut scratch = Vec::new();
     try_reserve_analysis(
@@ -2126,7 +2248,7 @@ fn radix_sort_rows_by_keys_guarded(
         "stable-key sort allocation failed",
     )?;
     scratch.resize(rows.len(), 0);
-    for pass in 0..70 {
+    for pass in 0..STABLE_KEY_RADIX_PASSES {
         let mut counts = [0_usize; 256];
         for chunk in rows.chunks(4096) {
             consume_analysis_work(guard, chunk.len())?;
@@ -2242,30 +2364,6 @@ fn map_discontinuities(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ClosedPayloadTag {
-    Begin(serde::de::IgnoredAny),
-    ModuleDefinition(serde::de::IgnoredAny),
-    InstructionDefinition(serde::de::IgnoredAny),
-    Instruction(serde::de::IgnoredAny),
-    Memory(serde::de::IgnoredAny),
-    SemanticCall(serde::de::IgnoredAny),
-    SemanticRule(serde::de::IgnoredAny),
-    SemanticError(serde::de::IgnoredAny),
-    ThreadLifecycle(serde::de::IgnoredAny),
-    Syscall(serde::de::IgnoredAny),
-    Signal(serde::de::IgnoredAny),
-    SignalHandlerBoundary(serde::de::IgnoredAny),
-    Termination(serde::de::IgnoredAny),
-    RegisterCheckpoint(serde::de::IgnoredAny),
-    RegisterDelta(serde::de::IgnoredAny),
-    StringDefinition(serde::de::IgnoredAny),
-    CoverageGap(serde::de::IgnoredAny),
-    Discontinuity(serde::de::IgnoredAny),
-    OpaqueOptional(serde::de::IgnoredAny),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
 enum BorrowedDiscontinuityPayload {
     Discontinuity(BorrowedDiscontinuity),
 }
@@ -2284,13 +2382,50 @@ fn decode_discontinuity_payload(payload: &[u8]) -> Result<BorrowedDiscontinuity,
 }
 
 fn validate_discontinuity_payload_tag(payload: &[u8]) -> Result<(), AnalysisError> {
-    let tag: ClosedPayloadTag = serde_json::from_slice(payload).map_err(|error| {
-        AnalysisError::store_shape(format!("invalid discontinuity payload tag: {error}"))
-    })?;
-    if !matches!(tag, ClosedPayloadTag::Discontinuity(_)) {
-        return Err(AnalysisError::store_shape(
-            "discontinuity row payload has the wrong event kind",
-        ));
+    scan_discontinuity_payload_tag(payload).map_err(|error| match error {
+        RawDiscontinuityTagError::WrongVariant => {
+            AnalysisError::store_shape("discontinuity row payload has the wrong event kind")
+        }
+        RawDiscontinuityTagError::Malformed => {
+            AnalysisError::store_shape("invalid discontinuity payload tag")
+        }
+        RawDiscontinuityTagError::Escape => {
+            AnalysisError::store_shape("discontinuity payload must use canonical unescaped JSON")
+        }
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RawDiscontinuityTagError {
+    WrongVariant,
+    Malformed,
+    Escape,
+}
+
+fn scan_discontinuity_payload_tag(payload: &[u8]) -> Result<(), RawDiscontinuityTagError> {
+    const PREFIX: &[u8] = b"{\"";
+    if !payload.starts_with(PREFIX) {
+        return Err(RawDiscontinuityTagError::Malformed);
+    }
+    let key_start = PREFIX.len();
+    let mut cursor = key_start;
+    while let Some(byte) = payload.get(cursor).copied() {
+        match byte {
+            b'\\' => return Err(RawDiscontinuityTagError::Escape),
+            b'"' => break,
+            0x00..=0x1f => return Err(RawDiscontinuityTagError::Malformed),
+            _ => cursor += 1,
+        }
+    }
+    let key_end = cursor;
+    if payload.get(key_end) != Some(&b'"') || payload.get(key_end + 1) != Some(&b':') {
+        return Err(RawDiscontinuityTagError::Malformed);
+    }
+    if payload.get(key_start..key_end) != Some(b"discontinuity".as_slice()) {
+        return Err(RawDiscontinuityTagError::WrongVariant);
+    }
+    if payload[key_end + 2..].contains(&b'\\') {
+        return Err(RawDiscontinuityTagError::Escape);
     }
     Ok(())
 }
@@ -2444,7 +2579,7 @@ impl Drop for SemanticExecutor {
 
 fn submit_semantic_scan(
     context: Arc<QueryContext>,
-    needles: Vec<String>,
+    filter: Arc<EventFilter>,
     candidates: Vec<usize>,
     state: Arc<(Mutex<ProjectionState>, Condvar)>,
     cancelled: Arc<AtomicBool>,
@@ -2457,7 +2592,7 @@ fn submit_semantic_scan(
             let mut charged_matcher_work = 0_usize;
             let mut matcher_ledger_error = None;
             let matcher_result = DetailMatcher::new_guarded_with_probe(
-                &needles,
+                &filter.semantic_detail_contains,
                 MAX_MATCHER_BUILD_WORK,
                 &guard,
                 |work| {
@@ -2832,16 +2967,18 @@ impl DetailMatcher {
         Ok(None)
     }
 
-    fn transition(&self, state: usize, byte: u8) -> Option<usize> {
+    fn transition(&self, state: usize, byte: u8) -> (Option<usize>, usize) {
         let mut edge = self.nodes[state].first_edge;
+        let mut visits = 0_usize;
         while edge != NO_EDGE {
+            visits += 1;
             let candidate = self.edges[edge as usize];
             if candidate.byte == byte {
-                return Some(candidate.target as usize);
+                return (Some(candidate.target as usize), visits);
             }
             edge = candidate.next;
         }
-        None
+        (None, visits)
     }
 
     fn build_failures(
@@ -2936,24 +3073,46 @@ impl DetailMatcher {
                     "semantic scan exceeds 64 MiB work budget",
                 ));
             }
-            let mut transitions = 0_usize;
+            let mut transition_work = 0_usize;
             let mut matched = false;
             for byte in chunk {
                 while state != 0 {
-                    transitions += 1;
-                    if self.transition(state, *byte).is_some() {
+                    let (target, edge_visits) = self.transition(state, *byte);
+                    transition_work =
+                        transition_work
+                            .checked_add(1 + edge_visits)
+                            .ok_or_else(|| {
+                                AnalysisError::resource_exhausted(
+                                    "semantic transition work overflow",
+                                )
+                            })?;
+                    while transition_work >= 4096 {
+                        consume_analysis_work(guard, 4096)?;
+                        transition_work -= 4096;
+                    }
+                    if target.is_some() {
                         break;
                     }
                     state = self.nodes[state].failure as usize;
                 }
-                transitions += 1;
-                state = self.transition(state, *byte).unwrap_or(0);
+                let (target, edge_visits) = self.transition(state, *byte);
+                transition_work =
+                    transition_work
+                        .checked_add(1 + edge_visits)
+                        .ok_or_else(|| {
+                            AnalysisError::resource_exhausted("semantic transition work overflow")
+                        })?;
+                while transition_work >= 4096 {
+                    consume_analysis_work(guard, 4096)?;
+                    transition_work -= 4096;
+                }
+                state = target.unwrap_or(0);
                 if self.nodes[state].terminal {
                     matched = true;
                     break;
                 }
             }
-            consume_analysis_work(guard, transitions)?;
+            consume_analysis_work(guard, transition_work)?;
             if matched {
                 return Ok((true, processed));
             }
@@ -2992,21 +3151,22 @@ fn locate_after_key(
     context: &QueryContext,
     rows: &[usize],
     key: &EventKey,
+    guard: &dyn WorkGuard,
 ) -> Result<usize, AnalysisError> {
-    locate_after_key_with_probe(&context.keys, rows, key, || {})
+    locate_after_key_with_probe(&context.keys, rows, key, || consume_analysis_work(guard, 1))
 }
 
 fn locate_after_key_with_probe(
     keys: &[EventKey],
     rows: &[usize],
     key: &EventKey,
-    mut comparison: impl FnMut(),
+    mut comparison: impl FnMut() -> Result<(), AnalysisError>,
 ) -> Result<usize, AnalysisError> {
     let mut left = 0;
     let mut right = rows.len();
     while left < right {
         let middle = left + (right - left) / 2;
-        comparison();
+        comparison()?;
         let candidate = keys
             .get(rows[middle])
             .ok_or_else(|| AnalysisError::store_shape("cursor row is outside event-key map"))?;
@@ -3050,8 +3210,16 @@ fn encode_cursor(
     store: StoreIdentity,
     projection: ProjectionIdentity,
     key: Option<&EventKey>,
-) -> PageCursor {
-    let mut bytes = Vec::with_capacity(CURSOR_BYTES);
+    guard: &dyn WorkGuard,
+) -> Result<PageCursor, AnalysisError> {
+    consume_analysis_work(guard, CURSOR_BYTES)?;
+    let mut bytes = Vec::new();
+    try_reserve_analysis(
+        &mut bytes,
+        CURSOR_BYTES,
+        guard,
+        "cursor payload allocation failed",
+    )?;
     bytes.push(CURSOR_VERSION);
     bytes.extend_from_slice(&store.0);
     bytes.extend_from_slice(&projection.0);
@@ -3076,34 +3244,47 @@ fn encode_cursor(
     debug_assert_eq!(bytes.len(), CURSOR_PAYLOAD_BYTES);
     let checksum = Sha256::digest(&bytes);
     bytes.extend_from_slice(&checksum);
-    PageCursor(URL_SAFE_NO_PAD.encode(bytes))
+    let mut encoded = [0_u8; CURSOR_ENCODED_BYTES];
+    let written = URL_SAFE_NO_PAD
+        .encode_slice(&bytes, &mut encoded)
+        .map_err(|_| AnalysisError::resource_exhausted("cursor encoding buffer is too small"))?;
+    let encoded = try_clone_slice(&encoded[..written], guard, "cursor text allocation failed")?;
+    let encoded = String::from_utf8(encoded)
+        .map_err(|_| AnalysisError::store_shape("cursor encoding is not UTF-8"))?;
+    Ok(PageCursor(encoded))
 }
 
-fn decode_cursor(cursor: &PageCursor) -> Result<DecodedCursor, AnalysisError> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(cursor.as_str())
+fn decode_cursor(
+    cursor: &PageCursor,
+    guard: &dyn WorkGuard,
+) -> Result<DecodedCursor, AnalysisError> {
+    consume_analysis_work(guard, CURSOR_BYTES)?;
+    let mut decoded = [0_u8; CURSOR_BYTES];
+    let written = URL_SAFE_NO_PAD
+        .decode_slice(cursor.as_str(), &mut decoded)
         .map_err(|_| AnalysisError::cursor_mismatch("cursor is not URL-safe base64"))?;
-    if bytes.len() != CURSOR_BYTES || bytes[0] != CURSOR_VERSION {
+    if written != CURSOR_BYTES || decoded[0] != CURSOR_VERSION {
         return Err(AnalysisError::cursor_mismatch(
             "cursor version or length is invalid",
         ));
     }
+    let bytes = &decoded[..written];
     let expected = Sha256::digest(&bytes[..CURSOR_PAYLOAD_BYTES]);
     if expected.as_slice() != &bytes[CURSOR_PAYLOAD_BYTES..] {
         return Err(AnalysisError::cursor_mismatch("cursor checksum is invalid"));
     }
     let mut offset = 1;
-    let store = StoreIdentity(read_array::<32>(&bytes, &mut offset)?);
-    let projection = ProjectionIdentity(read_array::<32>(&bytes, &mut offset)?);
-    let anchor_present = read_flag(&bytes, &mut offset)?;
-    let artifact = ArtifactDigest::new(read_array::<32>(&bytes, &mut offset)?);
-    let timeline = u64::from_le_bytes(read_array::<8>(&bytes, &mut offset)?);
-    let record_ordinal = u64::from_le_bytes(read_array::<8>(&bytes, &mut offset)?);
-    let source_offset = u64::from_le_bytes(read_array::<8>(&bytes, &mut offset)?);
-    let sequence_present = read_flag(&bytes, &mut offset)?;
-    let sequence_value = u64::from_le_bytes(read_array::<8>(&bytes, &mut offset)?);
-    let tid_present = read_flag(&bytes, &mut offset)?;
-    let tid_value = u32::from_le_bytes(read_array::<4>(&bytes, &mut offset)?);
+    let store = StoreIdentity(read_array::<32>(bytes, &mut offset)?);
+    let projection = ProjectionIdentity(read_array::<32>(bytes, &mut offset)?);
+    let anchor_present = read_flag(bytes, &mut offset)?;
+    let artifact = ArtifactDigest::new(read_array::<32>(bytes, &mut offset)?);
+    let timeline = u64::from_le_bytes(read_array::<8>(bytes, &mut offset)?);
+    let record_ordinal = u64::from_le_bytes(read_array::<8>(bytes, &mut offset)?);
+    let source_offset = u64::from_le_bytes(read_array::<8>(bytes, &mut offset)?);
+    let sequence_present = read_flag(bytes, &mut offset)?;
+    let sequence_value = u64::from_le_bytes(read_array::<8>(bytes, &mut offset)?);
+    let tid_present = read_flag(bytes, &mut offset)?;
+    let tid_value = u32::from_le_bytes(read_array::<4>(bytes, &mut offset)?);
     if offset != CURSOR_PAYLOAD_BYTES {
         return Err(AnalysisError::cursor_mismatch("cursor payload is invalid"));
     }
@@ -3280,6 +3461,246 @@ mod tests {
         }
     }
 
+    struct PageStore {
+        capabilities: qtrace_provider::ProviderCapabilities,
+    }
+
+    impl TraceStoreView for PageStore {
+        fn event_count(&self) -> usize {
+            0
+        }
+        fn event_key(&self, _: usize) -> Result<Option<EventKey>, qtrace_store::IndexError> {
+            Ok(None)
+        }
+        fn event_kind(&self, _: usize) -> Result<Option<EventKind>, qtrace_store::IndexError> {
+            Ok(None)
+        }
+        fn provenance(&self, _: usize) -> Result<Option<Provenance>, qtrace_store::IndexError> {
+            Ok(None)
+        }
+        fn capabilities(&self) -> &qtrace_provider::ProviderCapabilities {
+            &self.capabilities
+        }
+        fn instruction(&self, _: usize) -> Option<InstructionRow> {
+            None
+        }
+        fn memory(&self, _: usize) -> Option<MemoryRow> {
+            None
+        }
+        fn semantic(&self, _: usize) -> Option<SemanticRow> {
+            None
+        }
+        fn payload_bytes(&self, _: usize) -> Result<&[u8], qtrace_store::IndexError> {
+            Ok(&[])
+        }
+        fn string_bytes(&self, _: u32) -> Result<&[u8], qtrace_store::IndexError> {
+            Ok(&[])
+        }
+        fn blob_bytes(&self, _: u32) -> Result<&[u8], qtrace_store::IndexError> {
+            Ok(&[])
+        }
+        fn memory_before_bytes(&self, _: usize) -> Result<Option<&[u8]>, qtrace_store::IndexError> {
+            Ok(None)
+        }
+        fn memory_after_bytes(&self, _: usize) -> Result<Option<&[u8]>, qtrace_store::IndexError> {
+            Ok(None)
+        }
+        fn module(&self, _: u32) -> Option<&ModuleRow> {
+            None
+        }
+        fn definition(&self, _: u32) -> Option<&DefinitionRow> {
+            None
+        }
+        fn register_observations(&self, _: usize) -> Vec<RegisterObservationRow> {
+            Vec::new()
+        }
+        fn completeness(&self) -> &[CompletenessRow] {
+            &[]
+        }
+        fn rows_for_timeline(&self, _: u64) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_for_tids(&self, _: &[u32]) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_for_sequence_range(
+            &self,
+            _: u64,
+            _: u64,
+        ) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_of_kinds(&self, _: &[EventKind]) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_for_modules(&self, _: &[u32]) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_for_module_pc_range(
+            &self,
+            _: u32,
+            _: u64,
+            _: u64,
+        ) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_for_definitions(&self, _: &[u32]) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_observing_register(
+            &self,
+            _: RegisterSlot,
+        ) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn checkpoint_rows(&self) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn call_rows(&self) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn return_rows(&self) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_for_semantic_categories(
+            &self,
+            _: &[&[u8]],
+        ) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn rows_for_semantic_names(
+            &self,
+            _: &[&[u8]],
+        ) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn memory_overlaps(&self, _: u64, _: u64) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+        fn row_for_source_key(&self, _: &EventKey) -> Option<usize> {
+            None
+        }
+        fn source_key_for_row(
+            &self,
+            _: usize,
+        ) -> Result<Option<EventKey>, qtrace_store::IndexError> {
+            Ok(None)
+        }
+    }
+
+    impl NormalizedBulkView for PageStore {
+        fn normalized_layout_identity(&self) -> qtrace_store::NormalizedLayoutIdentity {
+            qtrace_store::NormalizedLayoutIdentity::new(2, [0; 32])
+        }
+        fn normalized_content_identity(&self) -> qtrace_store::NormalizedContentIdentity {
+            qtrace_store::NormalizedContentIdentity::new([0; 32])
+        }
+        fn normalized_source_format(&self) -> qtrace_store::NormalizedSourceFormat {
+            qtrace_store::NormalizedSourceFormat::Other
+        }
+        fn module_rows(&self) -> &[ModuleRow] {
+            &[]
+        }
+        fn definition_rows(&self) -> &[DefinitionRow] {
+            &[]
+        }
+        fn instruction_rows(&self) -> &[InstructionRow] {
+            &[]
+        }
+        fn memory_rows(&self) -> &[MemoryRow] {
+            &[]
+        }
+        fn semantic_rows(&self) -> &[SemanticRow] {
+            &[]
+        }
+        fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+            &[]
+        }
+        fn string_count(&self) -> usize {
+            0
+        }
+        fn blob_count(&self) -> usize {
+            0
+        }
+        fn bounded_row_count(
+            &self,
+            _: NormalizedPostingQuery<'_>,
+            _: usize,
+            _: &dyn WorkGuard,
+        ) -> Result<usize, qtrace_store::IndexError> {
+            Ok(0)
+        }
+        fn bounded_rows(
+            &self,
+            _: NormalizedPostingQuery<'_>,
+            _: usize,
+            _: &dyn WorkGuard,
+        ) -> Result<Vec<usize>, qtrace_store::IndexError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn completed_page_projection(size: usize) -> TimelineProjection {
+        let capabilities = qtrace_provider::ProviderCapabilities::qtrb_register_observations();
+        let keys = (0..size)
+            .map(|ordinal| {
+                EventKey::new(
+                    ArtifactDigest::new([1; 32]),
+                    TimelineId(1),
+                    ordinal as u64,
+                    ordinal as u64,
+                    Some(u64::MAX),
+                    Some(7),
+                )
+            })
+            .collect::<Vec<_>>();
+        let context = Arc::new(QueryContext {
+            store: Arc::new(PageStore {
+                capabilities: capabilities.clone(),
+            }),
+            identity: StoreIdentity([0; 32]),
+            kinds: vec![EventKind::Instruction; size],
+            provenances: vec![Provenance::Captured; size],
+            modules: Vec::new(),
+            definitions: Vec::new(),
+            instructions: vec![None; size],
+            memories: vec![None; size],
+            semantics: vec![None; size],
+            observations: Vec::new(),
+            observation_ranges: vec![(0, 0); size],
+            memory_pc: Vec::new(),
+            max_sequence_rows: (0..size).collect(),
+            completeness: Arc::new(CompletenessSummary::new(
+                Vec::new(),
+                &capabilities,
+                qtrace_store::NormalizedSourceFormat::Other,
+                None,
+            )),
+            discontinuities: Arc::new(vec![None; size]),
+            keys,
+        });
+        TimelineProjection {
+            context,
+            filter: Arc::new(EventFilter::default()),
+            plan: QueryPlan {
+                projection_identity: ProjectionIdentity([0; 32]),
+                candidate_rows: size,
+                indexed_fields: 0,
+                has_residual_scan: false,
+            },
+            state: Arc::new((
+                Mutex::new(ProjectionState {
+                    visible: (0..size).collect(),
+                    exact_total: true,
+                    completed: true,
+                    ..ProjectionState::default()
+                }),
+                Condvar::new(),
+            )),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct PassCounts {
         radix: u64,
@@ -3340,7 +3761,7 @@ mod tests {
                     TimelineId(1),
                     ordinal as u64,
                     ordinal as u64,
-                    Some(ordinal as u64),
+                    Some(u64::MAX),
                     Some(7),
                 )
             })
@@ -3375,10 +3796,92 @@ mod tests {
             assert!(two_n <= n * 2 + 65_536, "{n} -> {two_n}");
             assert!(four_n <= two_n * 2 + 65_536, "{two_n} -> {four_n}");
         }
+
+        for (size, counts) in [8_192_usize, 16_384, 32_768].into_iter().zip(probes) {
+            let stable_lower_bound =
+                size as u64 + STABLE_KEY_RADIX_PASSES as u64 * (2 * size as u64 + 256);
+            assert_eq!(
+                counts.stable, stable_lower_bound,
+                "stable-key boundary and every radix pass must be charged"
+            );
+        }
     }
 
     #[test]
-    fn discontinuity_decoder_uses_the_closed_tag_before_specialized_decode() {
+    fn candidate_work_formula_authorizes_declared_worst_cases_and_rejects_overflow() {
+        let limit = candidate_work_limit().expect("candidate work formula");
+        let stable_worst =
+            stable_key_work_bound(MAX_CANDIDATE_ROWS).expect("ten-million-row stable sort work");
+        assert!(limit >= stable_worst);
+        let semantic_worst = (MAX_SEMANTIC_SCAN_BYTES as u64)
+            .checked_mul(MAX_MATCHER_TRANSITION_WORK_PER_BYTE as u64)
+            .unwrap();
+        assert!(limit >= semantic_worst);
+        let realistic_projection = stable_key_work_bound(150_000).unwrap();
+        assert!(realistic_projection > 20_000_000);
+        assert!(limit >= realistic_projection);
+        assert!(candidate_work_limit_for(usize::MAX, usize::MAX).is_none());
+        let guard = CandidateGuard::with_limits(
+            Arc::new(AtomicBool::new(false)),
+            limit,
+            MAX_CANDIDATE_RESIDENT_BYTES as u64,
+        );
+        guard
+            .consume(WorkDelta {
+                rows: limit,
+                ..WorkDelta::default()
+            })
+            .unwrap();
+        assert_eq!(
+            AnalysisError::control(
+                guard
+                    .consume(WorkDelta {
+                        rows: 1,
+                        ..WorkDelta::default()
+                    })
+                    .unwrap_err()
+            )
+            .code(),
+            "analysis.resource_exhausted"
+        );
+    }
+
+    #[test]
+    fn semantic_needles_normalize_in_place_before_arc_sharing() {
+        let filter = EventFilter {
+            semantic_detail_contains: vec![format!(" {} ", "x".repeat(1024 * 1024 - 2))],
+            ..EventFilter::default()
+        };
+        let pointer = filter.semantic_detail_contains[0].as_ptr();
+        activate_allocation_oracle();
+        let normalized = filter.normalized().unwrap();
+        let allocation = finish_allocation_oracle();
+        assert_eq!(allocation.requested, 0);
+        assert_eq!(normalized.semantic_detail_contains[0].as_ptr(), pointer);
+        assert_eq!(
+            normalized.semantic_detail_contains[0].len(),
+            1024 * 1024 - 2
+        );
+    }
+
+    #[test]
+    fn semantic_scan_charges_internal_edge_visits() {
+        let patterns = (b'a'..=b'z').map(|byte| vec![byte]).collect::<Vec<_>>();
+        let matcher = DetailMatcher::new(&patterns).unwrap();
+        let guard = ProductionPassProbe::default();
+        let (matched, scanned) = matcher
+            .contains_guarded_with_probe(b"a", usize::MAX, &guard, |_| false)
+            .unwrap();
+        assert!(matched);
+        assert_eq!(scanned, 1);
+        assert!(
+            guard.work.load(Ordering::SeqCst) >= 26,
+            "linked transition edge visits were not charged"
+        );
+    }
+
+    #[test]
+    fn discontinuity_decoder_scans_raw_tag_before_zero_allocation_specialized_decode() {
         let evidence = qtrace_provider::CompletenessRange::captured_sequence_with_cause(
             7,
             9,
@@ -3393,13 +3896,25 @@ mod tests {
             },
         ))
         .unwrap();
+        activate_allocation_oracle();
         let decoded = decode_discontinuity_payload(&payload).unwrap();
+        let allocation = finish_allocation_oracle();
+        assert_eq!(
+            allocation.requested, 0,
+            "tag and Copy-only body must not allocate"
+        );
         assert_eq!(decoded.cause, qtrace_provider::DiscontinuityCause::Damage);
         assert_eq!(decoded.evidence, evidence);
 
         let mut wrong = b"{\"semantic_call\":\"".to_vec();
         wrong.resize(MAX_DISCONTINUITY_PAYLOAD_BYTES - 2, b'x');
         wrong.extend_from_slice(b"\"}");
+        activate_allocation_oracle();
+        assert_eq!(
+            scan_discontinuity_payload_tag(&wrong),
+            Err(RawDiscontinuityTagError::WrongVariant)
+        );
+        assert_eq!(finish_allocation_oracle().requested, 0);
         let error = decode_discontinuity_payload(&wrong).unwrap_err();
         assert_eq!(error.code(), "analysis.store");
         assert!(error.detail().contains("wrong event kind"));
@@ -3408,6 +3923,20 @@ mod tests {
         let error = decode_discontinuity_payload(malformed).unwrap_err();
         assert_eq!(error.code(), "analysis.store");
         assert!(error.detail().contains("invalid discontinuity payload"));
+
+        let extra = br#"{"discontinuity":{"cause":"damage","evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":7,"last":9}},"provenance":"damaged","cause":"lost"},"extra":0}}"#;
+        assert_eq!(
+            decode_discontinuity_payload(extra).unwrap_err().code(),
+            "analysis.store"
+        );
+        assert_eq!(
+            decode_discontinuity_payload(
+                br#"{"discontinuity":{"cause":"dam\u0061ge","evidence":{}}}"#
+            )
+            .unwrap_err()
+            .code(),
+            "analysis.store"
+        );
     }
 
     struct PlannerScopeProbe {
@@ -3732,14 +4261,61 @@ mod tests {
             let rows = (0..size).collect::<Vec<_>>();
             for limit in [1_usize, 32, 2_000] {
                 let mut comparisons = 0;
-                let index =
-                    locate_after_key_with_probe(&keys, &rows, &keys[size / 2], || comparisons += 1)
-                        .unwrap();
+                let index = locate_after_key_with_probe(&keys, &rows, &keys[size / 2], || {
+                    comparisons += 1;
+                    Ok(())
+                })
+                .unwrap();
                 assert_eq!(index, size / 2 + 1);
                 let projected = limit.min(size - index);
                 let logarithmic_bound = usize::BITS as usize - (size - 1).leading_zeros() as usize;
                 assert!(comparisons <= logarithmic_bound + 1);
                 assert!(comparisons + projected <= logarithmic_bound + 1 + limit);
+            }
+        }
+    }
+
+    #[test]
+    fn real_projection_page_charges_comparisons_copies_and_allocations_per_call() {
+        for size in [8_192_usize, 16_384, 32_768] {
+            let projection = completed_page_projection(size);
+            for limit in [1_usize, 32, MAX_PAGE_LIMIT] {
+                let first_guard = ProductionPassProbe::default();
+                let first = projection.page_guarded(None, limit, &first_guard).unwrap();
+                let cursor = first.next.as_ref().expect("next page cursor");
+
+                let second_guard = ProductionPassProbe::default();
+                activate_allocation_oracle();
+                let second = projection
+                    .page_guarded(Some(cursor), limit, &second_guard)
+                    .unwrap();
+                let allocation = finish_allocation_oracle();
+                assert_eq!(allocation.unauthorized, 0);
+                assert!(allocation.requested > 0);
+
+                let repeated_guard = ProductionPassProbe::default();
+                let repeated = projection
+                    .page_guarded(Some(cursor), limit, &repeated_guard)
+                    .unwrap();
+                assert_eq!(second, repeated);
+                assert_eq!(
+                    second_guard.work.load(Ordering::SeqCst),
+                    repeated_guard.work.load(Ordering::SeqCst),
+                    "operation-local page work must be deterministic"
+                );
+                assert_eq!(
+                    second_guard.resident.load(Ordering::SeqCst),
+                    repeated_guard.resident.load(Ordering::SeqCst),
+                    "operation-local page allocation accounting must be deterministic"
+                );
+                let comparisons_lower_bound = (usize::BITS - size.leading_zeros() - 1) as u64;
+                let independent_work_lower_bound =
+                    (2 * limit + 2 * CURSOR_BYTES + CURSOR_ENCODED_BYTES) as u64
+                        + comparisons_lower_bound;
+                assert!(
+                    second_guard.work.load(Ordering::SeqCst) >= independent_work_lower_bound,
+                    "page omitted a comparison, copy, projection, or cursor pass"
+                );
             }
         }
     }
