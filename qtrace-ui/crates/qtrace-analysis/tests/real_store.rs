@@ -257,6 +257,52 @@ fn nonmonotonic_posting_qtrb() -> Vec<u8> {
     bytes
 }
 
+fn large_semantic_dictionary_qtrb() -> Vec<u8> {
+    const NAMES: usize = 48_000;
+    const NAME_BYTES: usize = 255;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"QTRB");
+    bytes.extend_from_slice(&[1, 2, 1, 8, 2, 0]);
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+
+    let mut begin = Vec::new();
+    begin.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    begin.extend_from_slice(&0x100_u64.to_le_bytes());
+    begin.extend_from_slice(&0x7100_0100_u64.to_le_bytes());
+    begin.extend_from_slice(&4242_u32.to_le_bytes());
+    begin.extend_from_slice(&7_u32.to_le_bytes());
+    begin.extend_from_slice(&[2, 0]);
+    begin.extend_from_slice(&4096_u64.to_le_bytes());
+    begin.extend_from_slice(&1_u64.to_le_bytes());
+    begin.extend(qtrb_string(b"large-semantic-dictionary"));
+    begin.extend(qtrb_string(b"libtarget.so"));
+    bytes.extend(qtrb_record(1, &begin));
+
+    for ordinal in 0..NAMES {
+        let prefix = format!("name-{ordinal:05}-");
+        let mut name = prefix.into_bytes();
+        name.resize(NAME_BYTES, b'x');
+        let mut semantic = Vec::new();
+        semantic.extend(qtrb_string(b"bulk"));
+        semantic.extend(qtrb_string(&name));
+        semantic.extend(qtrb_string(b""));
+        bytes.extend(qtrb_record(6, &semantic));
+    }
+
+    let encoded_bytes = (bytes.len() + 8 + 97) as u64;
+    let mut terminal = Vec::new();
+    terminal.push(1);
+    terminal.extend_from_slice(&0_u64.to_le_bytes());
+    terminal.extend_from_slice(&1_u64.to_le_bytes());
+    for value in [0, encoded_bytes, encoded_bytes, 0, 0, 0, 0, 0, 0, 4096] {
+        terminal.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend(qtrb_record(9, &terminal));
+    bytes
+}
+
 fn flight_record(kind: u16, sequence: u64, generation: u32, payload: &[u8]) -> Vec<u8> {
     let total = qtrace_provider::FLIGHT_RECORD_HEADER_BYTES + payload.len();
     let mut record = vec![0; align(total, 8)];
@@ -339,6 +385,19 @@ where
         .collect::<Vec<_>>();
     rows.sort_unstable();
     (rows, indexed_fields)
+}
+
+fn assert_absent_semantic_term<T>(store: Arc<T>, filter: EventFilter)
+where
+    T: NormalizedBulkView + Send + Sync + 'static,
+{
+    let context = Arc::new(QueryContext::new(store).expect("large dictionary context"));
+    let projection = TimelineProjection::new(context, filter)
+        .expect("absent single semantic term must fit the derived work plan");
+    let page = query_events(&projection, None, 1).expect("empty exact page");
+    assert!(page.rows.is_empty());
+    assert_eq!(page.total, 0);
+    assert!(page.exact_total);
 }
 
 fn expected_module_rows(store: &dyn NormalizedBulkView, module: u32) -> Vec<usize> {
@@ -547,6 +606,24 @@ fn production_nonmonotonic_postings_intersect_without_loss_in_owned_and_mapped_s
     let mapped_rows = source_rows(Arc::new(mapped), filter).0;
     assert_eq!(owned_rows, vec![3, 4]);
     assert_eq!(mapped_rows, owned_rows);
+}
+
+#[test]
+fn production_large_semantic_dictionary_allows_an_absent_single_term() {
+    let bytes = large_semantic_dictionary_qtrb();
+    let (owned, mapped, _cache, _source) =
+        stores_for_bytes(&bytes, "large-semantic-dictionary.trace.bin");
+    let dictionary_bytes = (0..owned.string_count())
+        .map(|id| owned.string_bytes(id as u32).unwrap().len())
+        .sum::<usize>();
+    assert!((11 * 1024 * 1024..=16 * 1024 * 1024).contains(&dictionary_bytes));
+
+    let filter = EventFilter {
+        semantic_names: vec!["absent".into()],
+        ..EventFilter::default()
+    };
+    assert_absent_semantic_term(Arc::new(owned), filter.clone());
+    assert_absent_semantic_term(Arc::new(mapped), filter);
 }
 
 #[test]

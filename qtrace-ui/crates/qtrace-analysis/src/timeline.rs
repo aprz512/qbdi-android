@@ -38,7 +38,8 @@ const MAX_PENDING_SEMANTIC_JOBS: usize = 32;
 const MAX_MATCHER_BUILD_WORK: usize = 16 * 1024 * 1024;
 const STABLE_KEY_RADIX_PASSES: usize = 70;
 const MAX_INDEXED_FIELDS: usize = 13;
-const MAX_LINEAR_PASSES_PER_INDEXED_FIELD: usize = 4;
+const MAX_STORE_POSTING_PASSES: usize = 20;
+const MAX_ANALYSIS_GROUP_PASSES: usize = 20;
 const MAX_MATCHER_EDGE_COMPARISONS: usize = 9;
 const MAX_MATCHER_TRANSITION_WORK_PER_BYTE: usize = 2 * (MAX_MATCHER_EDGE_COMPARISONS + 1);
 const MAX_SYNC_RESIDUAL_PREDICATES: usize = 4;
@@ -63,34 +64,46 @@ struct ProjectionWorkPlan {
 
 impl ProjectionWorkPlan {
     fn derive(
-        indexed_fields: usize,
-        estimated_decode_rows: usize,
+        groups: &[Option<PlanGroup>],
         candidate_upper: usize,
         residual_predicates: usize,
         semantic: bool,
     ) -> Option<Self> {
-        if indexed_fields > MAX_INDEXED_FIELDS
-            || estimated_decode_rows > MAX_CANDIDATE_DECODE_ROWS
+        if groups.len() > MAX_INDEXED_FIELDS
             || candidate_upper > MAX_CANDIDATE_ROWS
             || residual_predicates > MAX_SYNC_RESIDUAL_PREDICATES
         {
             return None;
         }
-        let fields = u64::try_from(indexed_fields).ok()?;
-        let decoded = u64::try_from(estimated_decode_rows).ok()?;
+        let decoded_rows = groups.iter().flatten().try_fold(0_usize, |total, group| {
+            total.checked_add(group.estimated_rows)
+        })?;
+        if decoded_rows > MAX_CANDIDATE_DECODE_ROWS {
+            return None;
+        }
+        let fields = u64::try_from(groups.len()).ok()?;
         let candidates = u64::try_from(candidate_upper).ok()?;
         let residuals = u64::try_from(residual_predicates).ok()?;
-
-        // Store posting decode plus analysis radix/dedup/union work is bounded by four
-        // linear passes in each layer. Intersections visit both inputs once per field.
-        let indexed_passes = MAX_LINEAR_PASSES_PER_INDEXED_FIELD
-            .checked_mul(2)?
-            .checked_add(crate::filter::MAX_FILTER_TERMS)?;
-        let indexed = decoded.checked_mul(u64::try_from(indexed_passes).ok()?)?;
+        let indexed = groups.iter().flatten().try_fold(0_u64, |work, group| {
+            let rows = u64::try_from(group.estimated_rows).ok()?;
+            let list_boundaries = u64::try_from(group.list_count).ok()?.checked_mul(256)?;
+            let term_lookups = u64::try_from(group.term_count)
+                .ok()?
+                .checked_mul(MAX_PAGE_COMPARISONS as u64)?;
+            let analysis = if group.list_count > 1 {
+                rows.checked_mul(MAX_ANALYSIS_GROUP_PASSES as u64)?
+            } else {
+                0
+            };
+            work.checked_add(group.store_decode_work)?
+                .checked_add(analysis)?
+                .checked_add(list_boundaries)?
+                .checked_add(term_lookups)
+        })?;
         let field_boundaries = fields.checked_mul(4096)?;
         let intersections = candidates.checked_mul(fields.saturating_sub(1).checked_mul(2)?)?;
         let residual = candidates.checked_mul(residuals)?;
-        let materialize = if indexed_fields == 0 { candidates } else { 0 };
+        let materialize = if groups.is_empty() { candidates } else { 0 };
         let stable = stable_key_work_bound(candidate_upper)?;
         let semantic = if semantic {
             u64::try_from(MAX_SEMANTIC_SCAN_BYTES)
@@ -143,20 +156,14 @@ fn projection_planning_work_limit(context: &QueryContext, filter: &EventFilter) 
         .ok()?
         .checked_mul(u64::try_from(filter.mnemonic.len()).ok()?)?
         .checked_add(u64::try_from(context.definitions.len()).ok()?)?;
-    let semantic_terms = filter
-        .semantic_categories
-        .len()
-        .checked_add(filter.semantic_names.len())?;
-    let dictionary_per_term = context
-        .store
-        .string_count()
-        .checked_add(crate::filter::MAX_FILTER_TEXT_BYTES)?;
-    let semantic = u64::try_from(semantic_terms)
+    let semantic_fields = usize::from(!filter.semantic_categories.is_empty())
+        .checked_add(usize::from(!filter.semantic_names.is_empty()))?;
+    let semantic_metadata = u64::try_from(semantic_fields)
         .ok()?
-        .checked_mul(u64::try_from(dictionary_per_term).ok()?)?;
+        .checked_mul(u64::try_from(MAX_CONTEXT_DICTIONARY_ENTRIES).ok()?)?;
     field_estimates
         .checked_add(mnemonic)?
-        .checked_add(semantic)?
+        .checked_add(semantic_metadata)?
         .checked_add((MAX_INDEXED_FIELDS * MAX_INDEXED_FIELDS) as u64)
 }
 
@@ -537,11 +544,7 @@ impl TimelineProjection {
         state.completed
     }
 
-    pub fn page(
-        &self,
-        cursor: Option<&PageCursor>,
-        limit: usize,
-    ) -> Result<EventPage, AnalysisError> {
+    fn page(&self, cursor: Option<&PageCursor>, limit: usize) -> Result<EventPage, AnalysisError> {
         if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
             return Err(AnalysisError::invalid_limit());
         }
@@ -1178,6 +1181,15 @@ enum CandidateField {
     SemanticDetailKinds,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PlanGroup {
+    field: CandidateField,
+    term_count: usize,
+    list_count: usize,
+    estimated_rows: usize,
+    store_decode_work: u64,
+}
+
 struct CandidateLedger {
     work: AtomicU64,
     resident: AtomicU64,
@@ -1244,6 +1256,16 @@ impl CandidateGuard {
             .ok_or_else(|| AnalysisError::cpu_budget_exceeded("projection work budget overflow"))?;
         self.ledger.work_limit.store(limit, Ordering::Release);
         Ok(())
+    }
+
+    fn extend_work_limit(&self, additional: u64) -> Result<(), AnalysisError> {
+        self.ledger
+            .work_limit
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |limit| {
+                limit.checked_add(additional)
+            })
+            .map(|_| ())
+            .map_err(|_| AnalysisError::cpu_budget_exceeded("planning work budget overflow"))
     }
 
     #[cfg(test)]
@@ -1390,29 +1412,34 @@ fn plan_candidates(
         push_field(CandidateField::Memory)?;
     }
     if !filter.semantic_categories.is_empty() {
-        preflight_semantic_lookup(context, filter.semantic_categories.len())?;
         push_field(CandidateField::SemanticCategories)?;
     }
     if !filter.semantic_names.is_empty() {
-        preflight_semantic_lookup(context, filter.semantic_names.len())?;
         push_field(CandidateField::SemanticNames)?;
     }
     if filter.has_semantic_detail_residual() {
         push_field(CandidateField::SemanticDetailKinds)?;
     }
     let mut planned = [None; MAX_INDEXED_FIELDS];
-    let mut estimated_decode_rows = 0_usize;
     for (index, field) in fields[..field_count].iter().copied().flatten().enumerate() {
-        let count = estimate_candidate_field(context, filter, &field, guard)?;
-        checked_estimate_add(&mut estimated_decode_rows, count)?;
-        planned[index] = Some((count, field));
+        let group = estimate_candidate_field(context, filter, field, guard)?;
+        planned[index] = Some(group);
     }
+    let estimated_decode_rows =
+        planned[..field_count]
+            .iter()
+            .flatten()
+            .try_fold(0_usize, |mut total, group| {
+                checked_estimate_add(&mut total, group.estimated_rows)?;
+                Ok::<_, AnalysisError>(total)
+            })?;
+    debug_assert!(estimated_decode_rows <= MAX_CANDIDATE_DECODE_ROWS);
     for index in 1..field_count {
         let mut cursor = index;
         while cursor > 0 {
             consume_analysis_work(guard, 1)?;
-            if planned[cursor - 1].expect("planned field").0
-                <= planned[cursor].expect("planned field").0
+            if planned[cursor - 1].expect("planned field").estimated_rows
+                <= planned[cursor].expect("planned field").estimated_rows
             {
                 break;
             }
@@ -1422,11 +1449,10 @@ fn plan_candidates(
     }
     let indexed_fields = field_count;
     let candidate_upper = planned[0]
-        .map(|planned| planned.0)
+        .map(|planned| planned.estimated_rows)
         .unwrap_or_else(|| context.store.event_count());
     let work_plan = ProjectionWorkPlan::derive(
-        indexed_fields,
-        estimated_decode_rows,
+        &planned[..field_count],
         candidate_upper,
         synchronous_residual_predicates(filter),
         filter.has_semantic_detail_residual(),
@@ -1434,8 +1460,8 @@ fn plan_candidates(
     .ok_or_else(|| AnalysisError::cpu_budget_exceeded("projection work plan exceeds hard limit"))?;
     guard.authorize(work_plan)?;
 
-    let mut candidates = if let Some((_, field)) = planned[0] {
-        decode_candidate_field(context, filter, &field, guard)?
+    let mut candidates = if let Some(group) = planned[0] {
+        decode_candidate_field(context, filter, &group.field, guard)?
     } else {
         let count = context.store.event_count();
         if count > MAX_CANDIDATE_ROWS {
@@ -1450,12 +1476,12 @@ fn plan_candidates(
         rows
     };
     if field_count > 1 {
-        for (_, field) in planned[1..field_count].iter().copied().flatten() {
+        for group in planned[1..field_count].iter().copied().flatten() {
             if candidates.is_empty() {
                 break;
             }
-            let group = decode_candidate_field(context, filter, &field, guard)?;
-            candidates = intersect_rows_fallible_guarded(&candidates, &group, guard)?;
+            let rows = decode_candidate_field(context, filter, &group.field, guard)?;
+            candidates = intersect_rows_fallible_guarded(&candidates, &rows, guard)?;
         }
     }
     Ok((candidates, indexed_fields))
@@ -1549,11 +1575,13 @@ fn checked_estimate_add(total: &mut usize, value: usize) -> Result<(), AnalysisE
 fn estimate_candidate_field(
     context: &QueryContext,
     filter: &EventFilter,
-    field: &CandidateField,
+    field: CandidateField,
     guard: &CandidateGuard,
-) -> Result<usize, AnalysisError> {
+) -> Result<PlanGroup, AnalysisError> {
     let store = context.store.as_ref();
     let mut total = 0;
+    let mut semantic_lookup_work = 0_u64;
+    let mut semantic_shape = None;
     match field {
         CandidateField::Tids => {
             total = estimate_posting(store, NormalizedPostingQuery::Tids(&filter.tids), guard)?;
@@ -1665,6 +1693,19 @@ fn estimate_candidate_field(
         }
         CandidateField::SemanticCategories => {
             let (values, len) = borrowed_filter_bytes(&filter.semantic_categories);
+            let work = store
+                .semantic_dictionary_work(
+                    qtrace_store::SemanticDictionaryFamily::Categories,
+                    len,
+                    guard,
+                )
+                .map_err(map_store_query_error)?;
+            semantic_lookup_work = work
+                .lookup_items
+                .checked_add(work.lookup_bytes)
+                .ok_or_else(|| AnalysisError::cpu_budget_exceeded("semantic work overflow"))?;
+            semantic_shape = Some(checked_semantic_shape(work, len)?);
+            guard.extend_work_limit(semantic_lookup_work)?;
             total = estimate_posting(
                 store,
                 NormalizedPostingQuery::SemanticCategories(&values[..len]),
@@ -1673,6 +1714,15 @@ fn estimate_candidate_field(
         }
         CandidateField::SemanticNames => {
             let (values, len) = borrowed_filter_bytes(&filter.semantic_names);
+            let work = store
+                .semantic_dictionary_work(qtrace_store::SemanticDictionaryFamily::Names, len, guard)
+                .map_err(map_store_query_error)?;
+            semantic_lookup_work = work
+                .lookup_items
+                .checked_add(work.lookup_bytes)
+                .ok_or_else(|| AnalysisError::cpu_budget_exceeded("semantic work overflow"))?;
+            semantic_shape = Some(checked_semantic_shape(work, len)?);
+            guard.extend_work_limit(semantic_lookup_work)?;
             total = estimate_posting(
                 store,
                 NormalizedPostingQuery::SemanticNames(&values[..len]),
@@ -1691,7 +1741,93 @@ fn estimate_candidate_field(
             )?;
         }
     }
-    Ok(total)
+    let (term_count, list_count) = match semantic_shape {
+        Some(shape) => shape,
+        None => candidate_field_shape(context, filter, field)?,
+    };
+    let rows = u64::try_from(total)
+        .map_err(|_| AnalysisError::cpu_budget_exceeded("posting row work overflow"))?;
+    let mut store_decode_work = rows
+        .checked_mul(MAX_STORE_POSTING_PASSES as u64)
+        .and_then(|work| work.checked_add(semantic_lookup_work))
+        .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store decode work overflow"))?;
+    if matches!(field, CandidateField::Definitions) {
+        store_decode_work = store_decode_work
+            .checked_add(
+                u64::try_from(context.definitions.len())
+                    .ok()
+                    .and_then(|definitions| {
+                        definitions.checked_mul(u64::try_from(filter.mnemonic.len()).ok()?)
+                    })
+                    .ok_or_else(|| {
+                        AnalysisError::cpu_budget_exceeded("mnemonic scan work overflow")
+                    })?,
+            )
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store decode work overflow"))?;
+    }
+    Ok(PlanGroup {
+        field,
+        term_count,
+        list_count,
+        estimated_rows: total,
+        store_decode_work,
+    })
+}
+
+fn checked_semantic_shape(
+    work: qtrace_store::SemanticDictionaryWork,
+    expected_terms: usize,
+) -> Result<(usize, usize), AnalysisError> {
+    let term_count = usize::try_from(work.term_count)
+        .map_err(|_| AnalysisError::cpu_budget_exceeded("semantic term count overflow"))?;
+    if term_count != expected_terms {
+        return Err(AnalysisError::store_shape(
+            "semantic dictionary metadata term count disagrees with query",
+        ));
+    }
+    let posting_lists = usize::try_from(work.posting_lists)
+        .map_err(|_| AnalysisError::cpu_budget_exceeded("semantic posting-list count overflow"))?;
+    Ok((term_count, term_count.min(posting_lists)))
+}
+
+fn candidate_field_shape(
+    context: &QueryContext,
+    filter: &EventFilter,
+    field: CandidateField,
+) -> Result<(usize, usize), AnalysisError> {
+    let shape = match field {
+        CandidateField::Tids => (filter.tids.len(), 1),
+        CandidateField::Kinds => (filter.kinds.len(), 1),
+        CandidateField::Modules => (filter.modules.len(), filter.modules.len().saturating_add(1)),
+        CandidateField::Sequence => (filter.sequence.len(), filter.sequence.len()),
+        CandidateField::RelativePc => {
+            let pairs = filter
+                .modules
+                .len()
+                .checked_mul(filter.relative_pc.len())
+                .ok_or_else(|| AnalysisError::cpu_budget_exceeded("relative-PC shape overflow"))?;
+            (pairs, pairs.saturating_mul(2))
+        }
+        CandidateField::AbsolutePc => {
+            let modules = if filter.modules.is_empty() {
+                context.modules.len()
+            } else {
+                filter.modules.len()
+            };
+            let pairs = modules
+                .checked_mul(filter.absolute_pc.len())
+                .ok_or_else(|| AnalysisError::cpu_budget_exceeded("absolute-PC shape overflow"))?;
+            (pairs, pairs.saturating_mul(2))
+        }
+        CandidateField::Definitions => (filter.mnemonic.len(), 1),
+        CandidateField::RegisterReads => (filter.register.reads.len(), 1),
+        CandidateField::RegisterWrites => (filter.register.writes.len(), 1),
+        CandidateField::Memory => (filter.memory.len(), filter.memory.len()),
+        CandidateField::SemanticCategories => (filter.semantic_categories.len(), 1),
+        CandidateField::SemanticNames => (filter.semantic_names.len(), 1),
+        CandidateField::SemanticDetailKinds => (3, 1),
+    };
+    Ok(shape)
 }
 
 fn decode_candidate_field(
@@ -1958,17 +2094,10 @@ fn intersect_rows_fallible_guarded(
     Ok(result)
 }
 
-fn preflight_semantic_lookup(context: &QueryContext, terms: usize) -> Result<(), AnalysisError> {
-    context
-        .store
-        .string_count()
-        .checked_mul(terms)
-        .and_then(|work| u64::try_from(work).ok())
-        .map(|_| ())
-        .ok_or_else(|| AnalysisError::cpu_budget_exceeded("semantic lookup work overflow"))
-}
-
 fn map_store_query_error(error: qtrace_store::IndexError) -> AnalysisError {
+    if let Some(abort) = error.operation_abort() {
+        return AnalysisError::control(abort.clone());
+    }
     match error.code() {
         "job.cancelled" => AnalysisError {
             code: "job.cancelled",
@@ -2769,24 +2898,16 @@ fn parse_range_bounds(
     let key = cursor
         .member(&mut first)?
         .ok_or(RawDiscontinuityTagError::Malformed)?;
-    let bounds = match key {
-        b"inclusive_sequence" => {
-            let (first, last) = parse_number_pair(cursor, b"first", b"last")?;
-            qtrace_provider::RangeBounds::InclusiveSequence { first, last }
-        }
-        b"half_open" => {
-            let (start, end_exclusive) = parse_number_pair(cursor, b"start", b"end_exclusive")?;
-            qtrace_provider::RangeBounds::HalfOpen {
-                start,
-                end_exclusive,
-            }
-        }
+    let endpoints = match key {
+        b"inclusive_sequence" => parse_number_pair(cursor, b"first", b"last")?,
+        b"half_open" => parse_number_pair(cursor, b"start", b"end_exclusive")?,
         _ => return Err(RawDiscontinuityTagError::Malformed),
     };
     if cursor.member(&mut first)?.is_some() {
         return Err(RawDiscontinuityTagError::Malformed);
     }
-    Ok(bounds)
+    qtrace_provider::RangeBounds::from_wire_parts(key, endpoints)
+        .ok_or(RawDiscontinuityTagError::Malformed)
 }
 
 fn parse_number_pair(
@@ -2830,59 +2951,25 @@ fn set_field(fields: &mut u8, bit: u8) -> Result<(), RawDiscontinuityTagError> {
 fn parse_discontinuity_cause(
     token: &[u8],
 ) -> Result<qtrace_provider::DiscontinuityCause, RawDiscontinuityTagError> {
-    match token {
-        b"loss" => Ok(qtrace_provider::DiscontinuityCause::Loss),
-        b"damage" => Ok(qtrace_provider::DiscontinuityCause::Damage),
-        b"overwrite" => Ok(qtrace_provider::DiscontinuityCause::Overwrite),
-        b"truncation" => Ok(qtrace_provider::DiscontinuityCause::Truncation),
-        b"unknown" => Ok(qtrace_provider::DiscontinuityCause::Unknown),
-        _ => Err(RawDiscontinuityTagError::Malformed),
-    }
+    qtrace_provider::DiscontinuityCause::from_wire_name(token)
+        .ok_or(RawDiscontinuityTagError::Malformed)
 }
 
 fn parse_range_domain(
     token: &[u8],
 ) -> Result<qtrace_provider::RangeDomain, RawDiscontinuityTagError> {
-    match token {
-        b"captured_sequence" => Ok(qtrace_provider::RangeDomain::CapturedSequence),
-        b"source_bytes" => Ok(qtrace_provider::RangeDomain::SourceBytes),
-        b"memory_addresses" => Ok(qtrace_provider::RangeDomain::MemoryAddresses),
-        _ => Err(RawDiscontinuityTagError::Malformed),
-    }
+    qtrace_provider::RangeDomain::from_wire_name(token).ok_or(RawDiscontinuityTagError::Malformed)
 }
 
 fn parse_provenance(token: &[u8]) -> Result<Provenance, RawDiscontinuityTagError> {
-    match token {
-        b"captured" => Ok(Provenance::Captured),
-        b"derived" => Ok(Provenance::Derived),
-        b"heuristic" => Ok(Provenance::Heuristic),
-        b"unknown" => Ok(Provenance::Unknown),
-        b"damaged" => Ok(Provenance::Damaged),
-        _ => Err(RawDiscontinuityTagError::Malformed),
-    }
+    Provenance::from_wire_name(token).ok_or(RawDiscontinuityTagError::Malformed)
 }
 
 fn parse_completeness_cause(
     token: &[u8],
 ) -> Result<qtrace_provider::CompletenessCause, RawDiscontinuityTagError> {
-    use qtrace_provider::CompletenessCause;
-    match token {
-        b"retained" => Ok(CompletenessCause::Retained),
-        b"missing_terminal" => Ok(CompletenessCause::MissingTerminal),
-        b"active" => Ok(CompletenessCause::Active),
-        b"stale" => Ok(CompletenessCause::Stale),
-        b"rotating" => Ok(CompletenessCause::Rotating),
-        b"unreliable" => Ok(CompletenessCause::Unreliable),
-        b"incomplete" => Ok(CompletenessCause::Incomplete),
-        b"lost" => Ok(CompletenessCause::Lost),
-        b"overwritten" => Ok(CompletenessCause::Overwritten),
-        b"coverage_gap" => Ok(CompletenessCause::CoverageGap),
-        b"checksum" => Ok(CompletenessCause::Checksum),
-        b"unterminated_thread" => Ok(CompletenessCause::UnterminatedThread),
-        b"truncation" => Ok(CompletenessCause::Truncation),
-        b"unknown" => Ok(CompletenessCause::Unknown),
-        _ => Err(RawDiscontinuityTagError::Malformed),
-    }
+    qtrace_provider::CompletenessCause::from_wire_name(token)
+        .ok_or(RawDiscontinuityTagError::Malformed)
 }
 
 struct SemanticJob {
@@ -4372,10 +4459,16 @@ mod tests {
     #[test]
     fn projection_work_plan_is_dynamic_checked_and_cpu_specific() {
         let no_filter =
-            ProjectionWorkPlan::derive(0, 0, 150_000, 0, false).expect("150k no-filter work plan");
+            ProjectionWorkPlan::derive(&[], 150_000, 0, false).expect("150k no-filter work plan");
+        let largest_group = Some(PlanGroup {
+            field: CandidateField::Tids,
+            term_count: 1,
+            list_count: 1,
+            estimated_rows: MAX_CANDIDATE_DECODE_ROWS,
+            store_decode_work: (MAX_CANDIDATE_DECODE_ROWS * MAX_STORE_POSTING_PASSES) as u64,
+        });
         let limit = ProjectionWorkPlan::derive(
-            MAX_INDEXED_FIELDS,
-            MAX_CANDIDATE_DECODE_ROWS,
+            &[largest_group],
             MAX_CANDIDATE_ROWS,
             MAX_SYNC_RESIDUAL_PREDICATES,
             true,
@@ -4395,15 +4488,80 @@ mod tests {
             .unwrap();
         assert!(realistic_projection > 20_000_000);
         assert_eq!(no_filter.allowance, realistic_projection);
-        let semantic = ProjectionWorkPlan::derive(0, 0, 150_000, 0, true).unwrap();
+        let semantic = ProjectionWorkPlan::derive(&[], 150_000, 0, true).unwrap();
         assert!(semantic.allowance > no_filter.allowance * 10);
-        let one_field = ProjectionWorkPlan::derive(1, 150_000, 150_000, 0, false).unwrap();
-        let two_fields = ProjectionWorkPlan::derive(2, 300_000, 150_000, 0, false).unwrap();
-        assert!(two_fields.allowance > one_field.allowance);
-        assert!(
-            ProjectionWorkPlan::derive(usize::MAX, usize::MAX, usize::MAX, usize::MAX, true)
-                .is_none()
+        let group = PlanGroup {
+            field: CandidateField::Tids,
+            term_count: 1,
+            list_count: 1,
+            estimated_rows: 150_000,
+            store_decode_work: 3_000_000,
+        };
+        let one_field = ProjectionWorkPlan::derive(&[Some(group)], 150_000, 0, false).unwrap();
+        let two_fields =
+            ProjectionWorkPlan::derive(&[Some(group), Some(group)], 150_000, 0, false).unwrap();
+        let group_work = 3_000_000 + 256 + MAX_PAGE_COMPARISONS as u64;
+        assert_eq!(
+            two_fields.allowance - one_field.allowance,
+            group_work + 4096 + 2 * 150_000,
+            "each actual field adds its store, boundary, and intersection passes"
         );
+        let two_lists = Some(PlanGroup {
+            term_count: 2,
+            list_count: 2,
+            ..group
+        });
+        let two_list_plan = ProjectionWorkPlan::derive(&[two_lists], 150_000, 0, false).unwrap();
+        assert_eq!(
+            two_list_plan.allowance - one_field.allowance,
+            150_000 * MAX_ANALYSIS_GROUP_PASSES as u64 + 256 + MAX_PAGE_COMPARISONS as u64,
+            "actual extra list enables union/radix work and each actual term is charged"
+        );
+
+        let dictionary_work = 12 * 1024 * 1024_u64 + 48_001;
+        let absent_semantic = Some(PlanGroup {
+            field: CandidateField::SemanticNames,
+            term_count: 1,
+            list_count: 1,
+            estimated_rows: 0,
+            store_decode_work: dictionary_work,
+        });
+        let absent_plan = ProjectionWorkPlan::derive(&[absent_semantic], 0, 0, false).unwrap();
+        let independent_absent_work = dictionary_work
+            + 256
+            + MAX_PAGE_COMPARISONS as u64
+            + 4096
+            + 256 * STABLE_KEY_RADIX_PASSES as u64;
+        assert_eq!(absent_plan.allowance, independent_absent_work);
+        for allowance in [
+            independent_absent_work - 1,
+            independent_absent_work,
+            independent_absent_work + 1,
+        ] {
+            let guard = CandidateGuard::with_limits(
+                Arc::new(AtomicBool::new(false)),
+                allowance,
+                MAX_CANDIDATE_RESIDENT_BYTES as u64,
+            );
+            let result = guard.consume(WorkDelta {
+                nodes: independent_absent_work,
+                ..WorkDelta::default()
+            });
+            if allowance < independent_absent_work {
+                assert_eq!(
+                    AnalysisError::control(result.unwrap_err()).code(),
+                    "analysis.cpu_budget_exceeded"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(guard.consumed().0, independent_absent_work);
+            }
+        }
+        let overflow = Some(PlanGroup {
+            store_decode_work: u64::MAX,
+            ..group
+        });
+        assert!(ProjectionWorkPlan::derive(&[overflow], usize::MAX, usize::MAX, true).is_none());
         let guard = CandidateGuard::with_limits(
             Arc::new(AtomicBool::new(false)),
             limit,
@@ -4988,18 +5146,18 @@ mod tests {
         for size in [8_192_usize, 16_384, 32_768] {
             let projection = completed_page_projection(size);
             for limit in [1_usize, 32, MAX_PAGE_LIMIT] {
-                let first = projection.page(None, limit).unwrap();
+                let first = query_events(&projection, None, limit).unwrap();
                 let cursor = first.next.as_ref().expect("next page cursor");
 
                 arm_page_allocation_oracle();
-                let second = projection.page(Some(cursor), limit).unwrap();
+                let second = query_events(&projection, Some(cursor), limit).unwrap();
                 let allocation = finish_allocation_oracle();
                 let second_usage = LAST_PAGE_USAGE.take().expect("public page usage probe");
                 assert_eq!(allocation.unauthorized, 0);
                 assert!(allocation.requested > 0);
                 assert_eq!(allocation.requested, second_usage.1);
 
-                let repeated = projection.page(Some(cursor), limit).unwrap();
+                let repeated = query_events(&projection, Some(cursor), limit).unwrap();
                 let repeated_usage = LAST_PAGE_USAGE.take().expect("repeated page usage probe");
                 assert_eq!(second, repeated);
                 assert_eq!(
