@@ -1,8 +1,6 @@
 use std::{
-    collections::BTreeMap,
     error::Error,
     fmt,
-    io::Write,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -15,11 +13,11 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use qtrace_provider::{
     ArtifactDigest, EventKey, EventKind, EventPayload, MemoryDirection, Provenance, RegisterSlot,
-    TimelineId,
+    TimelineId, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
-    CompletenessRow, DefinitionRow, InstructionRow, MemoryRow, ModuleRow, RegisterAccess,
-    RegisterObservationRow, SemanticRow, TraceStoreView,
+    CompletenessRow, DefinitionRow, InstructionRow, MemoryRow, ModuleRow, NormalizedBulkView,
+    NormalizedPostingQuery, RegisterAccess, RegisterObservationRow, SemanticRow, TraceStoreView,
 };
 use sha2::{Digest, Sha256};
 
@@ -31,8 +29,12 @@ const CURSOR_BYTES: usize = CURSOR_PAYLOAD_BYTES + 32;
 const MAX_CANDIDATE_ROWS: usize = 10_000_000;
 const MAX_CANDIDATE_WORK: usize = 20_000_000;
 const MAX_SEMANTIC_DETAIL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SEMANTIC_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const SEMANTIC_WORKERS: usize = 4;
 const MAX_PENDING_SEMANTIC_JOBS: usize = 32;
+pub const MAX_CONTEXT_EVENTS: usize = 10_000_000;
+pub const MAX_CONTEXT_TYPED_ROWS: usize = 20_000_000;
+pub const MAX_CONTEXT_DICTIONARY_ENTRIES: usize = 20_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalysisError {
@@ -70,6 +72,13 @@ impl AnalysisError {
         }
     }
 
+    fn worker_panicked() -> Self {
+        Self {
+            code: "analysis.worker_panicked",
+            detail: "semantic analysis worker panicked".to_owned(),
+        }
+    }
+
     fn invalid_limit() -> Self {
         Self {
             code: "analysis.invalid_limit",
@@ -88,6 +97,18 @@ impl AnalysisError {
         Self {
             code: "analysis.store",
             detail: format!("{}: {error}", error.code()),
+        }
+    }
+
+    fn control(error: qtrace_provider::OperationAbort) -> Self {
+        match error {
+            qtrace_provider::OperationAbort::Cancelled => Self {
+                code: "job.cancelled",
+                detail: "query context construction cancelled".to_owned(),
+            },
+            error @ qtrace_provider::OperationAbort::BudgetExceeded { .. } => {
+                Self::resource_exhausted(error.to_string())
+            }
         }
     }
 }
@@ -119,7 +140,7 @@ impl ProjectionIdentity {
 }
 
 pub struct QueryContext {
-    store: Arc<dyn TraceStoreView + Send + Sync>,
+    store: Arc<dyn NormalizedBulkView + Send + Sync>,
     identity: StoreIdentity,
     keys: Vec<EventKey>,
     kinds: Vec<EventKind>,
@@ -131,28 +152,60 @@ pub struct QueryContext {
     semantics: Vec<Option<SemanticRow>>,
     observations: Vec<RegisterObservationRow>,
     observation_ranges: Vec<(usize, usize)>,
-    memory_by_module: BTreeMap<u32, Vec<usize>>,
-    memory_pc_by_module: BTreeMap<u32, Vec<(u64, usize)>>,
+    memory_pc: Vec<MemoryPcEntry>,
     max_sequence_rows: Vec<usize>,
     completeness: Arc<CompletenessSummary>,
-    discontinuities: Arc<BTreeMap<usize, (qtrace_provider::DiscontinuityCause, CompletenessRow)>>,
+    discontinuities: Arc<Vec<Option<(qtrace_provider::DiscontinuityCause, CompletenessRow)>>>,
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+struct MemoryPcEntry {
+    module: u32,
+    pc: u64,
+    row: usize,
+}
+
+type ObservationBuckets = (Vec<RegisterObservationRow>, Vec<(usize, usize)>);
 
 impl QueryContext {
     pub fn new<T>(store: Arc<T>) -> Result<Self, AnalysisError>
     where
-        T: TraceStoreView + Send + Sync + 'static,
+        T: NormalizedBulkView + Send + Sync + 'static,
     {
-        let store: Arc<dyn TraceStoreView + Send + Sync> = store;
-        Self::from_arc(store)
+        Self::new_with_guard(store, &AllowContextWork)
     }
 
-    pub fn from_arc(store: Arc<dyn TraceStoreView + Send + Sync>) -> Result<Self, AnalysisError> {
-        build_query_context(store)
+    pub fn new_with_guard<T>(store: Arc<T>, guard: &dyn WorkGuard) -> Result<Self, AnalysisError>
+    where
+        T: NormalizedBulkView + Send + Sync + 'static,
+    {
+        let store: Arc<dyn NormalizedBulkView + Send + Sync> = store;
+        Self::from_arc_with_guard(store, guard)
+    }
+
+    pub fn from_arc(
+        store: Arc<dyn NormalizedBulkView + Send + Sync>,
+    ) -> Result<Self, AnalysisError> {
+        Self::from_arc_with_guard(store, &AllowContextWork)
+    }
+
+    pub fn from_arc_with_guard(
+        store: Arc<dyn NormalizedBulkView + Send + Sync>,
+        guard: &dyn WorkGuard,
+    ) -> Result<Self, AnalysisError> {
+        build_query_context(store, guard)
     }
 
     pub fn identity(&self) -> StoreIdentity {
         self.identity
+    }
+}
+
+struct AllowContextWork;
+
+impl WorkGuard for AllowContextWork {
+    fn consume(&self, _delta: WorkDelta) -> Result<(), qtrace_provider::OperationAbort> {
+        Ok(())
     }
 }
 
@@ -289,6 +342,7 @@ impl TimelineProjection {
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        terminalize_projection(&self.state, false, None);
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -397,8 +451,9 @@ impl TimelineProjection {
             let (cause, evidence) = self
                 .context
                 .discontinuities
-                .get(&source_row)
+                .get(source_row)
                 .copied()
+                .flatten()
                 .ok_or_else(|| AnalysisError::store_shape("discontinuity evidence is absent"))?;
             return Ok(TimelineRow::Discontinuity(DiscontinuityRow {
                 source_row,
@@ -441,36 +496,92 @@ pub fn query_events(
 }
 
 fn build_query_context(
-    store: Arc<dyn TraceStoreView + Send + Sync>,
+    store: Arc<dyn NormalizedBulkView + Send + Sync>,
+    guard: &dyn WorkGuard,
 ) -> Result<QueryContext, AnalysisError> {
     let event_count = store.event_count();
+    if event_count > MAX_CONTEXT_EVENTS {
+        return Err(AnalysisError::resource_exhausted(
+            "store event count exceeds context hard limit",
+        ));
+    }
+    let typed_rows = store
+        .module_rows()
+        .len()
+        .checked_add(store.definition_rows().len())
+        .and_then(|count| count.checked_add(store.instruction_rows().len()))
+        .and_then(|count| count.checked_add(store.memory_rows().len()))
+        .and_then(|count| count.checked_add(store.semantic_rows().len()))
+        .and_then(|count| count.checked_add(store.register_observation_rows().len()))
+        .and_then(|count| count.checked_add(store.completeness().len()))
+        .ok_or_else(|| AnalysisError::resource_exhausted("typed row count overflow"))?;
+    if typed_rows > MAX_CONTEXT_TYPED_ROWS
+        || store.string_count() > MAX_CONTEXT_DICTIONARY_ENTRIES
+        || store.blob_count() > MAX_CONTEXT_DICTIONARY_ENTRIES
+    {
+        return Err(AnalysisError::resource_exhausted(
+            "normalized store exceeds context hard limits",
+        ));
+    }
+    guard
+        .consume(WorkDelta {
+            rows: event_count as u64,
+            nodes: typed_rows as u64,
+            ..WorkDelta::default()
+        })
+        .map_err(AnalysisError::control)?;
     let mut hash = Sha256::new();
-    hash.update(b"qtrace-analysis/store-identity/v2\0sha256\0normalized-observable-content");
-    hash.update(b"\0layout\0");
-    hash_serde(&mut hash, &store.normalized_layout_identity())?;
-    hash.update(b"\0events\0");
-    hash.update((event_count as u64).to_le_bytes());
+    hash.update(b"qtrace-analysis/store-identity/v3\0sha256\0normalized-content-identity");
+    let layout = store.normalized_layout_identity();
+    hash.update(layout.schema_version().to_le_bytes());
+    hash.update(layout.layout_fingerprint());
+    hash.update(store.normalized_content_identity().as_bytes());
+    hash.update([match store.normalized_source_format() {
+        qtrace_store::NormalizedSourceFormat::Qtrb => 0,
+        qtrace_store::NormalizedSourceFormat::Flight => 1,
+        qtrace_store::NormalizedSourceFormat::Other => 2,
+    }]);
     let mut keys = Vec::new();
     let mut kinds = Vec::new();
     let mut provenances = Vec::new();
-    keys.try_reserve_exact(event_count)
-        .map_err(|_| AnalysisError::resource_exhausted("event-key map allocation failed"))?;
-    kinds
-        .try_reserve_exact(event_count)
-        .map_err(|_| AnalysisError::resource_exhausted("event-kind map allocation failed"))?;
-    provenances
-        .try_reserve_exact(event_count)
-        .map_err(|_| AnalysisError::resource_exhausted("provenance map allocation failed"))?;
+    try_reserve_context(
+        &mut keys,
+        event_count,
+        guard,
+        "event-key map allocation failed",
+    )?;
+    try_reserve_context(
+        &mut kinds,
+        event_count,
+        guard,
+        "event-kind map allocation failed",
+    )?;
+    try_reserve_context(
+        &mut provenances,
+        event_count,
+        guard,
+        "provenance map allocation failed",
+    )?;
     let mut observed_first = None::<u64>;
     let mut observed_last = None::<u64>;
     let mut max_sequence_rows = Vec::new();
     for row in 0..event_count {
+        if row % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
         let key = required_event_key(store.as_ref(), row)?;
-        hash_event_key(&mut hash, &key);
         if let Some(sequence) = key.sequence {
             observed_first = Some(observed_first.map_or(sequence, |first| first.min(sequence)));
             observed_last = Some(observed_last.map_or(sequence, |last| last.max(sequence)));
             if sequence == u64::MAX {
+                try_reserve_context(
+                    &mut max_sequence_rows,
+                    1,
+                    guard,
+                    "maximum-sequence row allocation failed",
+                )?;
                 max_sequence_rows.push(row);
             }
         }
@@ -478,111 +589,73 @@ fn build_query_context(
             .event_kind(row)
             .map_err(AnalysisError::store)?
             .ok_or_else(|| AnalysisError::store_shape("event kind is absent"))?;
-        hash_len_prefixed(&mut hash, kind.external_tag());
         let provenance = store
             .provenance(row)
             .map_err(AnalysisError::store)?
             .ok_or_else(|| AnalysisError::store_shape("event provenance is absent"))?;
-        hash.update([provenance_tag(provenance)]);
-        hash_len_prefixed(
-            &mut hash,
-            store.payload_bytes(row).map_err(AnalysisError::store)?,
-        );
         keys.push(key);
         kinds.push(kind);
         provenances.push(provenance);
     }
-    hash.update(b"\0capabilities\0");
-    hash_serde(&mut hash, store.capabilities())?;
-    hash.update(b"\0completeness\0");
-    hash_serde(&mut hash, store.completeness())?;
-    hash.update(b"\0modules\0");
-    hash_serde(&mut hash, store.module_rows())?;
-    hash.update(b"\0definitions\0");
-    hash_serde(&mut hash, store.definition_rows())?;
-    hash.update(b"\0instructions\0");
-    hash_serde(&mut hash, store.instruction_rows())?;
-    hash.update(b"\0memory\0");
-    hash_serde(&mut hash, store.memory_rows())?;
-    hash.update(b"\0semantic\0");
-    hash_serde(&mut hash, store.semantic_rows())?;
-    hash.update(b"\0register-observations\0");
-    hash_serde(&mut hash, store.register_observation_rows())?;
-    hash.update(b"\0strings\0");
-    hash.update((store.string_count() as u64).to_le_bytes());
-    for id in 0..store.string_count() {
-        let id =
-            u32::try_from(id).map_err(|_| AnalysisError::store_shape("string ID exceeds u32"))?;
-        hash_len_prefixed(
-            &mut hash,
-            store.string_bytes(id).map_err(AnalysisError::store)?,
-        );
-    }
-    hash.update(b"\0blobs\0");
-    hash.update((store.blob_count() as u64).to_le_bytes());
-    for id in 0..store.blob_count() {
-        let id =
-            u32::try_from(id).map_err(|_| AnalysisError::store_shape("blob ID exceeds u32"))?;
-        hash_len_prefixed(
-            &mut hash,
-            store.blob_bytes(id).map_err(AnalysisError::store)?,
-        );
-    }
     let identity = StoreIdentity(hash.finalize().into());
 
-    let instructions = dense_owner_map(event_count, store.instruction_rows(), |row| row.owner_row)?;
-    let memories = dense_owner_map(event_count, store.memory_rows(), |row| row.owner_row)?;
-    let semantics = dense_owner_map(event_count, store.semantic_rows(), |row| row.owner_row)?;
-    let observations = try_clone_slice(
-        store.register_observation_rows(),
-        "register observation map allocation failed",
+    let instructions = dense_owner_map(
+        event_count,
+        store.instruction_rows(),
+        |row| row.owner_row,
+        guard,
     )?;
-    let mut observation_ranges = vec![(0, 0); event_count];
-    let mut cursor = 0;
-    while cursor < observations.len() {
-        let owner = observations[cursor].owner_row;
-        if owner >= event_count {
-            return Err(AnalysisError::store_shape(
-                "register observation owner is out of bounds",
-            ));
+    let memories = dense_owner_map(event_count, store.memory_rows(), |row| row.owner_row, guard)?;
+    let semantics = dense_owner_map(
+        event_count,
+        store.semantic_rows(),
+        |row| row.owner_row,
+        guard,
+    )?;
+    let (observations, observation_ranges) =
+        bucket_observations(event_count, store.register_observation_rows(), guard)?;
+    let mut memory_pc = Vec::new();
+    try_reserve_context(
+        &mut memory_pc,
+        store.memory_rows().len(),
+        guard,
+        "memory PC index allocation failed",
+    )?;
+    for (index, memory) in store.memory_rows().iter().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
         }
-        let start = cursor;
-        while cursor < observations.len() && observations[cursor].owner_row == owner {
-            cursor += 1;
-        }
-        observation_ranges[owner] = (start, cursor);
-    }
-    let mut memory_by_module: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-    let mut memory_pc_by_module: BTreeMap<u32, Vec<(u64, usize)>> = BTreeMap::new();
-    for memory in store.memory_rows() {
         if let Some(module) = memory.module {
-            memory_by_module
-                .entry(module)
-                .or_default()
-                .push(memory.owner_row);
-            memory_pc_by_module
-                .entry(module)
-                .or_default()
-                .push((memory.relative_pc, memory.owner_row));
+            memory_pc.push(MemoryPcEntry {
+                module,
+                pc: memory.relative_pc,
+                row: memory.owner_row,
+            });
         }
     }
-    for rows in memory_by_module.values_mut() {
-        rows.sort_unstable();
-        rows.dedup();
-    }
-    for rows in memory_pc_by_module.values_mut() {
-        rows.sort_unstable();
-        rows.dedup();
-    }
-    let completeness = Arc::new(CompletenessSummary::new(
+    radix_sort_memory_pc(&mut memory_pc, guard)?;
+    let mut completeness_rows = try_clone_slice(
         store.completeness(),
+        guard,
+        "completeness summary allocation failed",
+    )?;
+    radix_sort_completeness(&mut completeness_rows, guard)?;
+    let completeness = Arc::new(CompletenessSummary::new(
+        completeness_rows,
         store.capabilities(),
+        store.normalized_source_format(),
         observed_first.zip(observed_last),
     ));
-    let discontinuities = Arc::new(map_discontinuities(store.as_ref())?);
+    let discontinuities = Arc::new(map_discontinuities(store.as_ref(), event_count, guard)?);
     Ok(QueryContext {
-        modules: try_clone_slice(store.module_rows(), "module map allocation failed")?,
-        definitions: try_clone_slice(store.definition_rows(), "definition map allocation failed")?,
+        modules: try_clone_slice(store.module_rows(), guard, "module map allocation failed")?,
+        definitions: try_clone_slice(
+            store.definition_rows(),
+            guard,
+            "definition map allocation failed",
+        )?,
         store,
         identity,
         keys,
@@ -593,8 +666,7 @@ fn build_query_context(
         semantics,
         observations,
         observation_ranges,
-        memory_by_module,
-        memory_pc_by_module,
+        memory_pc,
         max_sequence_rows,
         completeness,
         discontinuities,
@@ -605,13 +677,22 @@ fn dense_owner_map<T: Copy>(
     event_count: usize,
     rows: &[T],
     owner: impl Fn(T) -> usize,
+    guard: &dyn WorkGuard,
 ) -> Result<Vec<Option<T>>, AnalysisError> {
     let mut result = Vec::new();
-    result
-        .try_reserve_exact(event_count)
-        .map_err(|_| AnalysisError::resource_exhausted("typed owner map allocation failed"))?;
+    try_reserve_context(
+        &mut result,
+        event_count,
+        guard,
+        "typed owner map allocation failed",
+    )?;
     result.resize(event_count, None);
-    for item in rows.iter().copied() {
+    for (index, item) in rows.iter().copied().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
         let owner = owner(item);
         let slot = result
             .get_mut(owner)
@@ -625,13 +706,228 @@ fn dense_owner_map<T: Copy>(
     Ok(result)
 }
 
-fn try_clone_slice<T: Clone>(rows: &[T], detail: &'static str) -> Result<Vec<T>, AnalysisError> {
+fn try_clone_slice<T: Clone>(
+    rows: &[T],
+    guard: &dyn WorkGuard,
+    detail: &'static str,
+) -> Result<Vec<T>, AnalysisError> {
     let mut result = Vec::new();
-    result
-        .try_reserve_exact(rows.len())
-        .map_err(|_| AnalysisError::resource_exhausted(detail))?;
-    result.extend_from_slice(rows);
+    try_reserve_context(&mut result, rows.len(), guard, detail)?;
+    for chunk in rows.chunks(4096) {
+        guard
+            .consume(WorkDelta::default())
+            .map_err(AnalysisError::control)?;
+        result.extend_from_slice(chunk);
+    }
     Ok(result)
+}
+
+fn try_reserve_context<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    guard: &dyn WorkGuard,
+    detail: &'static str,
+) -> Result<(), AnalysisError> {
+    let bytes = additional
+        .checked_mul(std::mem::size_of::<T>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| AnalysisError::resource_exhausted(detail))?;
+    guard
+        .consume(WorkDelta {
+            resident_bytes: bytes,
+            ..WorkDelta::default()
+        })
+        .map_err(AnalysisError::control)?;
+    values
+        .try_reserve_exact(additional)
+        .map_err(|_| AnalysisError::resource_exhausted(detail))
+}
+
+fn bucket_observations(
+    event_count: usize,
+    source: &[RegisterObservationRow],
+    guard: &dyn WorkGuard,
+) -> Result<ObservationBuckets, AnalysisError> {
+    let mut counts = Vec::new();
+    try_reserve_context(
+        &mut counts,
+        event_count,
+        guard,
+        "observation count allocation failed",
+    )?;
+    counts.resize(event_count, 0_usize);
+    for (index, row) in source.iter().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        let count = counts.get_mut(row.owner_row).ok_or_else(|| {
+            AnalysisError::store_shape("register observation owner is out of bounds")
+        })?;
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| AnalysisError::resource_exhausted("observation count overflow"))?;
+    }
+    let mut ranges = Vec::new();
+    try_reserve_context(
+        &mut ranges,
+        event_count,
+        guard,
+        "observation range allocation failed",
+    )?;
+    let mut next = 0_usize;
+    for count in &counts {
+        let end = next
+            .checked_add(*count)
+            .ok_or_else(|| AnalysisError::resource_exhausted("observation range overflow"))?;
+        ranges.push((next, end));
+        next = end;
+    }
+    let mut observations = Vec::new();
+    try_reserve_context(
+        &mut observations,
+        source.len(),
+        guard,
+        "observation bucket allocation failed",
+    )?;
+    observations.resize(
+        source.len(),
+        RegisterObservationRow {
+            owner_row: 0,
+            slot: 0,
+            captured_width: 0,
+            access: RegisterAccess::Read,
+            value: 0,
+            provenance: Provenance::Unknown,
+        },
+    );
+    let mut cursors = Vec::new();
+    try_reserve_context(
+        &mut cursors,
+        event_count,
+        guard,
+        "observation cursor allocation failed",
+    )?;
+    cursors.extend(ranges.iter().map(|(start, _)| *start));
+    for (index, row) in source.iter().copied().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        let cursor = &mut cursors[row.owner_row];
+        observations[*cursor] = row;
+        *cursor += 1;
+    }
+    Ok((observations, ranges))
+}
+
+fn radix_sort_memory_pc(
+    rows: &mut Vec<MemoryPcEntry>,
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError> {
+    if rows.len() < 2 {
+        return Ok(());
+    }
+    let mut scratch = Vec::new();
+    try_reserve_context(
+        &mut scratch,
+        rows.len(),
+        guard,
+        "memory PC radix allocation failed",
+    )?;
+    scratch.resize(rows.len(), MemoryPcEntry::default());
+    for pass in 0..12 {
+        let mut counts = [0_usize; 256];
+        for (index, row) in rows.iter().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
+            counts[memory_pc_byte(*row, pass) as usize] += 1;
+        }
+        let mut position = 0_usize;
+        for count in &mut counts {
+            let current = *count;
+            *count = position;
+            position += current;
+        }
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
+            let slot = &mut counts[memory_pc_byte(row, pass) as usize];
+            scratch[*slot] = row;
+            *slot += 1;
+        }
+        std::mem::swap(rows, &mut scratch);
+    }
+    Ok(())
+}
+
+fn memory_pc_byte(row: MemoryPcEntry, pass: usize) -> u8 {
+    if pass < 8 {
+        row.pc.to_le_bytes()[pass]
+    } else {
+        row.module.to_le_bytes()[pass - 8]
+    }
+}
+
+fn radix_sort_completeness(
+    rows: &mut Vec<CompletenessRow>,
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError> {
+    if rows.len() < 2 {
+        return Ok(());
+    }
+    let mut scratch = Vec::new();
+    try_reserve_context(
+        &mut scratch,
+        rows.len(),
+        guard,
+        "completeness radix allocation failed",
+    )?;
+    scratch.resize(rows.len(), rows[0]);
+    for pass in 0..19 {
+        let mut counts = [0_usize; 256];
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
+            counts[completeness_byte(row, pass) as usize] += 1;
+        }
+        let mut position = 0_usize;
+        for count in &mut counts {
+            let current = *count;
+            *count = position;
+            position += current;
+        }
+        for row in rows.iter().copied() {
+            let slot = &mut counts[completeness_byte(row, pass) as usize];
+            scratch[*slot] = row;
+            *slot += 1;
+        }
+        std::mem::swap(rows, &mut scratch);
+    }
+    Ok(())
+}
+
+fn completeness_byte(row: CompletenessRow, pass: usize) -> u8 {
+    let (domain, start, end, provenance, cause) = crate::provenance::completeness_key(&row);
+    match pass {
+        0 => cause,
+        1 => provenance,
+        2..=9 => end.to_le_bytes()[pass - 2],
+        10..=17 => start.to_le_bytes()[pass - 10],
+        18 => domain,
+        _ => unreachable!("completeness radix has exactly 19 passes"),
+    }
 }
 
 impl QueryContext {
@@ -645,28 +941,6 @@ impl QueryContext {
         let (start, end) = self.observation_ranges.get(row).copied().unwrap_or((0, 0));
         &self.observations[start..end]
     }
-}
-
-struct HashWriter<'a>(&'a mut Sha256);
-
-impl Write for HashWriter<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn hash_serde(
-    hash: &mut Sha256,
-    value: &(impl serde::Serialize + ?Sized),
-) -> Result<(), AnalysisError> {
-    serde_json::to_writer(HashWriter(hash), value).map_err(|error| {
-        AnalysisError::store_shape(format!("identity serialization failed: {error}"))
-    })
 }
 
 fn derive_projection_identity(store: StoreIdentity, filter: &EventFilter) -> ProjectionIdentity {
@@ -683,58 +957,98 @@ fn plan_candidates(
 ) -> Result<(Vec<usize>, usize), AnalysisError> {
     let store = context.store.as_ref();
     let mut groups = Vec::new();
+    groups
+        .try_reserve_exact(13)
+        .map_err(|_| AnalysisError::resource_exhausted("posting group allocation failed"))?;
     if !filter.tids.is_empty() {
-        groups.push(
-            store
-                .rows_for_tids(&filter.tids)
-                .map_err(AnalysisError::store)?,
-        );
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::Tids(&filter.tids),
+        )?);
     }
     if !filter.kinds.is_empty() {
-        groups.push(
-            store
-                .rows_of_kinds(&filter.kinds)
-                .map_err(AnalysisError::store)?,
-        );
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::Kinds(&filter.kinds),
+        )?);
     }
     if !filter.modules.is_empty() {
-        let mut lists = vec![
-            store
-                .rows_for_modules(&filter.modules)
-                .map_err(AnalysisError::store)?,
-        ];
-        lists.extend(
-            filter
-                .modules
-                .iter()
-                .filter_map(|module| context.memory_by_module.get(module).cloned()),
-        );
+        let mut lists = Vec::new();
+        lists
+            .try_reserve_exact(filter.modules.len() + 1)
+            .map_err(|_| {
+                AnalysisError::resource_exhausted("module posting group allocation failed")
+            })?;
+        lists.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::Modules(&filter.modules),
+        )?);
+        for module in &filter.modules {
+            lists.push(memory_module_rows(context, *module)?);
+        }
         groups.push(union_rows(lists)?);
     }
     if !filter.sequence.is_empty() {
         let mut lists = Vec::new();
+        lists
+            .try_reserve_exact(filter.sequence.len())
+            .map_err(|_| {
+                AnalysisError::resource_exhausted("sequence posting group allocation failed")
+            })?;
         for range in &filter.sequence {
             let end = range.last.saturating_add(1);
-            lists.push(
-                store
-                    .rows_for_sequence_range(range.first, end)
-                    .map_err(AnalysisError::store)?,
-            );
+            let mut rows = bounded_rows(
+                store,
+                NormalizedPostingQuery::Sequence {
+                    start: range.first,
+                    end_exclusive: end,
+                },
+            )?;
             if range.last == u64::MAX {
-                lists.push(context.max_sequence_rows.clone());
+                let work = rows
+                    .len()
+                    .checked_add(context.max_sequence_rows.len())
+                    .filter(|work| *work <= MAX_CANDIDATE_WORK)
+                    .ok_or_else(|| {
+                        AnalysisError::resource_exhausted(
+                            "maximum-sequence union exceeds work budget",
+                        )
+                    })?;
+                rows.try_reserve_exact(work - rows.len()).map_err(|_| {
+                    AnalysisError::resource_exhausted("maximum-sequence union allocation failed")
+                })?;
+                rows.extend_from_slice(&context.max_sequence_rows);
+                radix_sort_usize(&mut rows)?;
+                rows.dedup();
             }
+            lists.push(rows);
         }
         groups.push(union_rows(lists)?);
     }
     if !filter.relative_pc.is_empty() && !filter.modules.is_empty() {
         let mut lists = Vec::new();
+        let pairs = filter
+            .modules
+            .len()
+            .checked_mul(filter.relative_pc.len())
+            .ok_or_else(|| AnalysisError::filter_too_complex("relative-PC expansion overflow"))?;
+        lists.try_reserve_exact(pairs).map_err(|_| {
+            AnalysisError::resource_exhausted("relative-PC posting group allocation failed")
+        })?;
         for module in &filter.modules {
             for range in &filter.relative_pc {
-                let mut pair = vec![
-                    store
-                        .rows_for_module_pc_range(*module, range.start, range.end_exclusive)
-                        .map_err(AnalysisError::store)?,
-                ];
+                let mut pair = Vec::new();
+                pair.try_reserve_exact(2).map_err(|_| {
+                    AnalysisError::resource_exhausted("relative-PC pair allocation failed")
+                })?;
+                pair.push(bounded_rows(
+                    store,
+                    NormalizedPostingQuery::ModulePc {
+                        module: *module,
+                        start: range.start,
+                        end_exclusive: range.end_exclusive,
+                    },
+                )?);
                 pair.push(memory_pc_rows(
                     context,
                     *module,
@@ -758,31 +1072,43 @@ fn plan_candidates(
             ));
         }
         let mut lists = Vec::new();
-        for (module_id, module) in context.modules.iter().enumerate() {
-            let module_id = u32::try_from(module_id)
-                .map_err(|_| AnalysisError::store_shape("module ID exceeds u32"))?;
-            if !filter.modules.is_empty() && !filter.modules.contains(&module_id) {
-                continue;
+        lists
+            .try_reserve_exact(expanded_modules * filter.absolute_pc.len())
+            .map_err(|_| {
+                AnalysisError::resource_exhausted("absolute-PC posting group allocation failed")
+            })?;
+        if filter.modules.is_empty() {
+            for module_id in 0..context.modules.len() {
+                append_absolute_module(
+                    context,
+                    filter,
+                    u32::try_from(module_id)
+                        .map_err(|_| AnalysisError::store_shape("module ID exceeds u32"))?,
+                    &mut lists,
+                )?;
             }
-            for absolute in &filter.absolute_pc {
-                if absolute.end_exclusive <= module.base {
-                    continue;
-                }
-                let start = absolute.start.saturating_sub(module.base);
-                let end = absolute.end_exclusive - module.base;
-                let mut pair = vec![
-                    store
-                        .rows_for_module_pc_range(module_id, start, end)
-                        .map_err(AnalysisError::store)?,
-                ];
-                pair.push(memory_pc_rows(context, module_id, start, end)?);
-                lists.push(union_rows(pair)?);
+        } else {
+            for module_id in &filter.modules {
+                append_absolute_module(context, filter, *module_id, &mut lists)?;
             }
         }
         groups.push(union_rows(lists)?);
     }
     if !filter.mnemonic.is_empty() {
+        if context
+            .definitions
+            .len()
+            .checked_mul(filter.mnemonic.len())
+            .is_none_or(|work| work > MAX_CANDIDATE_WORK)
+        {
+            return Err(AnalysisError::resource_exhausted(
+                "mnemonic definition scan exceeds work budget",
+            ));
+        }
         let mut definitions = Vec::new();
+        definitions
+            .try_reserve_exact(context.definitions.len())
+            .map_err(|_| AnalysisError::resource_exhausted("definition match allocation failed"))?;
         for (definition_id, definition) in context.definitions.iter().enumerate() {
             let mnemonic = store
                 .string_bytes(definition.mnemonic)
@@ -794,64 +1120,83 @@ fn plan_candidates(
                 );
             }
         }
-        groups.push(
-            store
-                .rows_for_definitions(&definitions)
-                .map_err(AnalysisError::store)?,
-        );
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::Definitions(&definitions),
+        )?);
     }
     if !filter.register.reads.is_empty() {
-        groups.push(register_rows(store, &filter.register.reads)?);
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::Registers(&filter.register.reads),
+        )?);
     }
     if !filter.register.writes.is_empty() {
-        groups.push(register_rows(store, &filter.register.writes)?);
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::Registers(&filter.register.writes),
+        )?);
     }
     if !filter.memory.is_empty() {
+        if context
+            .store
+            .memory_rows()
+            .len()
+            .checked_mul(filter.memory.len())
+            .is_none_or(|work| work > MAX_CANDIDATE_WORK)
+        {
+            return Err(AnalysisError::resource_exhausted(
+                "memory overlap scan exceeds work budget",
+            ));
+        }
         let lists = filter
             .memory
             .iter()
             .map(|memory| {
-                store
-                    .memory_overlaps(memory.range.start, memory.range.end_exclusive)
-                    .map_err(AnalysisError::store)
+                bounded_rows(
+                    store,
+                    NormalizedPostingQuery::Memory {
+                        start: memory.range.start,
+                        end_exclusive: memory.range.end_exclusive,
+                    },
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         groups.push(union_rows(lists)?);
     }
     if !filter.semantic_categories.is_empty() {
+        preflight_semantic_lookup(context, filter.semantic_categories.len())?;
         let values = filter
             .semantic_categories
             .iter()
             .map(String::as_bytes)
             .collect::<Vec<_>>();
-        groups.push(
-            store
-                .rows_for_semantic_categories(&values)
-                .map_err(AnalysisError::store)?,
-        );
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::SemanticCategories(&values),
+        )?);
     }
     if !filter.semantic_names.is_empty() {
+        preflight_semantic_lookup(context, filter.semantic_names.len())?;
         let values = filter
             .semantic_names
             .iter()
             .map(String::as_bytes)
             .collect::<Vec<_>>();
-        groups.push(
-            store
-                .rows_for_semantic_names(&values)
-                .map_err(AnalysisError::store)?,
-        );
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::SemanticNames(&values),
+        )?);
     }
     if filter.has_semantic_detail_residual() {
-        groups.push(
-            store
-                .rows_of_kinds(&[
-                    EventKind::SemanticCall,
-                    EventKind::SemanticRule,
-                    EventKind::SemanticError,
-                ])
-                .map_err(AnalysisError::store)?,
-        );
+        groups.push(bounded_rows(
+            store,
+            NormalizedPostingQuery::Kinds(&[
+                EventKind::SemanticCall,
+                EventKind::SemanticRule,
+                EventKind::SemanticError,
+            ]),
+        )?);
     }
     for group in &mut groups {
         if group.len() > MAX_CANDIDATE_ROWS {
@@ -859,8 +1204,7 @@ fn plan_candidates(
                 "posting group exceeds 10000000 rows",
             ));
         }
-        group.sort_unstable();
-        group.dedup();
+        debug_assert!(group.windows(2).all(|pair| pair[0] < pair[1]));
     }
     groups.sort_by_key(Vec::len);
     let indexed_fields = groups.len();
@@ -891,6 +1235,70 @@ fn plan_candidates(
     Ok((candidates, indexed_fields))
 }
 
+fn preflight_semantic_lookup(context: &QueryContext, terms: usize) -> Result<(), AnalysisError> {
+    if context
+        .store
+        .string_count()
+        .checked_mul(terms)
+        .is_none_or(|work| work > MAX_CANDIDATE_WORK)
+    {
+        return Err(AnalysisError::resource_exhausted(
+            "semantic dictionary lookup exceeds work budget",
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_rows(
+    store: &dyn NormalizedBulkView,
+    query: NormalizedPostingQuery<'_>,
+) -> Result<Vec<usize>, AnalysisError> {
+    store
+        .bounded_rows(query, MAX_CANDIDATE_ROWS, &AllowContextWork)
+        .map_err(|error| {
+            if matches!(
+                error.code(),
+                "control.resource_exhausted" | "control.budget_exceeded"
+            ) {
+                AnalysisError::resource_exhausted(error.to_string())
+            } else {
+                AnalysisError::store(error)
+            }
+        })
+}
+
+fn append_absolute_module(
+    context: &QueryContext,
+    filter: &EventFilter,
+    module_id: u32,
+    lists: &mut Vec<Vec<usize>>,
+) -> Result<(), AnalysisError> {
+    let Some(module) = context.modules.get(module_id as usize) else {
+        return Ok(());
+    };
+    for absolute in &filter.absolute_pc {
+        if absolute.end_exclusive <= module.base {
+            continue;
+        }
+        let start = absolute.start.saturating_sub(module.base);
+        let end = absolute.end_exclusive - module.base;
+        let mut pair = Vec::new();
+        pair.try_reserve_exact(2)
+            .map_err(|_| AnalysisError::resource_exhausted("absolute-PC pair allocation failed"))?;
+        pair.push(bounded_rows(
+            context.store.as_ref(),
+            NormalizedPostingQuery::ModulePc {
+                module: module_id,
+                start,
+                end_exclusive: end,
+            },
+        )?);
+        pair.push(memory_pc_rows(context, module_id, start, end)?);
+        lists.push(union_rows(pair)?);
+    }
+    Ok(())
+}
+
 fn intersect_rows_fallible(left: &[usize], right: &[usize]) -> Result<Vec<usize>, AnalysisError> {
     let mut result = Vec::new();
     result
@@ -917,32 +1325,42 @@ fn memory_pc_rows(
     start: u64,
     end: u64,
 ) -> Result<Vec<usize>, AnalysisError> {
-    let Some(rows) = context.memory_pc_by_module.get(&module) else {
-        return Ok(Vec::new());
-    };
-    let first = rows.partition_point(|(pc, _)| *pc < start);
-    let last = rows.partition_point(|(pc, _)| *pc < end);
+    let first = context.memory_pc.partition_point(|entry| {
+        entry.module < module || entry.module == module && entry.pc < start
+    });
+    let last = context
+        .memory_pc
+        .partition_point(|entry| entry.module < module || entry.module == module && entry.pc < end);
     let mut result = Vec::new();
     result
         .try_reserve_exact(last - first)
         .map_err(|_| AnalysisError::resource_exhausted("memory PC posting allocation failed"))?;
-    result.extend(rows[first..last].iter().map(|(_, row)| *row));
+    result.extend(context.memory_pc[first..last].iter().map(|entry| entry.row));
+    radix_sort_usize(&mut result)?;
+    result.dedup();
     Ok(result)
 }
 
-fn register_rows(
-    store: &dyn TraceStoreView,
-    slots: &[RegisterSlot],
-) -> Result<Vec<usize>, AnalysisError> {
-    let lists = slots
-        .iter()
-        .map(|slot| {
-            store
-                .rows_observing_register(*slot)
-                .map_err(AnalysisError::store)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    union_rows(lists)
+fn memory_module_rows(context: &QueryContext, module: u32) -> Result<Vec<usize>, AnalysisError> {
+    let first = context
+        .memory_pc
+        .partition_point(|entry| entry.module < module);
+    let last = context
+        .memory_pc
+        .partition_point(|entry| entry.module <= module);
+    if last - first > MAX_CANDIDATE_ROWS {
+        return Err(AnalysisError::resource_exhausted(
+            "memory module posting exceeds row limit",
+        ));
+    }
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(last - first).map_err(|_| {
+        AnalysisError::resource_exhausted("memory module posting allocation failed")
+    })?;
+    rows.extend(context.memory_pc[first..last].iter().map(|entry| entry.row));
+    radix_sort_usize(&mut rows)?;
+    rows.dedup();
+    Ok(rows)
 }
 
 fn union_rows(lists: Vec<Vec<usize>>) -> Result<Vec<usize>, AnalysisError> {
@@ -958,9 +1376,39 @@ fn union_rows(lists: Vec<Vec<usize>>) -> Result<Vec<usize>, AnalysisError> {
     rows.try_reserve_exact(work)
         .map_err(|_| AnalysisError::resource_exhausted("posting union allocation failed"))?;
     rows.extend(lists.into_iter().flatten());
-    rows.sort_unstable();
+    radix_sort_usize(&mut rows)?;
     rows.dedup();
     Ok(rows)
+}
+
+fn radix_sort_usize(rows: &mut Vec<usize>) -> Result<(), AnalysisError> {
+    if rows.len() < 2 {
+        return Ok(());
+    }
+    let mut scratch = Vec::new();
+    scratch
+        .try_reserve_exact(rows.len())
+        .map_err(|_| AnalysisError::resource_exhausted("row radix allocation failed"))?;
+    scratch.resize(rows.len(), 0);
+    for pass in 0..std::mem::size_of::<usize>() {
+        let mut counts = [0_usize; 256];
+        for row in rows.iter().copied() {
+            counts[row.to_le_bytes()[pass] as usize] += 1;
+        }
+        let mut position = 0;
+        for count in &mut counts {
+            let current = *count;
+            *count = position;
+            position += current;
+        }
+        for row in rows.iter().copied() {
+            let slot = &mut counts[row.to_le_bytes()[pass] as usize];
+            scratch[*slot] = row;
+            *slot += 1;
+        }
+        std::mem::swap(rows, &mut scratch);
+    }
+    Ok(())
 }
 
 fn apply_synchronous_residuals(
@@ -1170,81 +1618,196 @@ fn sort_rows_by_stable_key(
     context: &QueryContext,
     rows: Vec<usize>,
 ) -> Result<Vec<usize>, AnalysisError> {
-    let mut keyed = Vec::new();
-    keyed
+    radix_sort_rows_by_keys(&context.keys, rows)
+}
+
+fn radix_sort_rows_by_keys(
+    keys: &[EventKey],
+    mut rows: Vec<usize>,
+) -> Result<Vec<usize>, AnalysisError> {
+    if rows.len() < 2 {
+        return Ok(rows);
+    }
+    if rows.iter().any(|row| *row >= keys.len()) {
+        return Err(AnalysisError::store_shape(
+            "candidate row is outside the event-key map",
+        ));
+    }
+    let mut scratch = Vec::new();
+    scratch
         .try_reserve_exact(rows.len())
         .map_err(|_| AnalysisError::resource_exhausted("stable-key sort allocation failed"))?;
-    for row in rows {
-        keyed.push((context.key(row)?.clone(), row));
+    scratch.resize(rows.len(), 0);
+    for pass in 0..70 {
+        let mut counts = [0_usize; 256];
+        for row in rows.iter().copied() {
+            counts[stable_key_byte(&keys[row], pass) as usize] += 1;
+        }
+        let mut position = 0;
+        for count in &mut counts {
+            let current = *count;
+            *count = position;
+            position += current;
+        }
+        for row in rows.iter().copied() {
+            let slot = &mut counts[stable_key_byte(&keys[row], pass) as usize];
+            scratch[*slot] = row;
+            *slot += 1;
+        }
+        std::mem::swap(&mut rows, &mut scratch);
     }
-    keyed.sort_by(|(left, _), (right, _)| compare_event_keys(left, right));
-    Ok(keyed.into_iter().map(|(_, row)| row).collect())
+    Ok(rows)
+}
+
+fn stable_key_byte(key: &EventKey, pass: usize) -> u8 {
+    match pass {
+        0..=3 => key.tid.unwrap_or_default().to_le_bytes()[pass],
+        4 => u8::from(key.tid.is_some()),
+        5..=12 => key.sequence.unwrap_or_default().to_le_bytes()[pass - 5],
+        13 => u8::from(key.sequence.is_some()),
+        14..=21 => key.source_offset.to_le_bytes()[pass - 14],
+        22..=29 => key.record_ordinal.to_le_bytes()[pass - 22],
+        30..=37 => key.timeline.0.to_le_bytes()[pass - 30],
+        38..=69 => key.artifact.as_bytes()[69 - pass],
+        _ => unreachable!("stable key radix has exactly 70 passes"),
+    }
 }
 
 fn map_discontinuities(
-    store: &dyn TraceStoreView,
-) -> Result<BTreeMap<usize, (qtrace_provider::DiscontinuityCause, CompletenessRow)>, AnalysisError>
-{
+    store: &dyn NormalizedBulkView,
+    event_count: usize,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<Option<(qtrace_provider::DiscontinuityCause, CompletenessRow)>>, AnalysisError> {
     let rows = store
-        .rows_of_kinds(&[EventKind::Discontinuity])
+        .bounded_rows(
+            NormalizedPostingQuery::Kinds(&[EventKind::Discontinuity]),
+            event_count.min(MAX_CANDIDATE_ROWS),
+            guard,
+        )
         .map_err(AnalysisError::store)?;
-    let mut rows = rows
-        .into_iter()
-        .map(|row| Ok((required_event_key(store, row)?, row)))
-        .collect::<Result<Vec<_>, AnalysisError>>()?;
-    rows.sort_by(|(left, _), (right, _)| compare_event_keys(left, right));
-    rows.into_iter()
-        .map(|(_, row)| {
-            let payload = store.payload_bytes(row).map_err(AnalysisError::store)?;
-            let payload: EventPayload = serde_json::from_slice(payload).map_err(|error| {
-                AnalysisError::store_shape(format!("invalid discontinuity payload: {error}"))
-            })?;
-            let EventPayload::Discontinuity(discontinuity) = payload else {
-                return Err(AnalysisError::store_shape(
-                    "discontinuity row payload has the wrong event kind",
-                ));
-            };
-            let evidence = CompletenessRow {
-                domain: discontinuity.evidence.domain(),
-                bounds: discontinuity.evidence.bounds(),
-                provenance: discontinuity.evidence.provenance(),
-                cause: discontinuity.evidence.cause(),
-            };
-            Ok((row, (discontinuity.cause, evidence)))
-        })
-        .collect()
+    let mut result = Vec::new();
+    try_reserve_context(
+        &mut result,
+        event_count,
+        guard,
+        "discontinuity map allocation failed",
+    )?;
+    result.resize(event_count, None);
+    for (index, row) in rows.into_iter().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        let payload = store.payload_bytes(row).map_err(AnalysisError::store)?;
+        let payload: EventPayload = serde_json::from_slice(payload).map_err(|error| {
+            AnalysisError::store_shape(format!("invalid discontinuity payload: {error}"))
+        })?;
+        let EventPayload::Discontinuity(discontinuity) = payload else {
+            return Err(AnalysisError::store_shape(
+                "discontinuity row payload has the wrong event kind",
+            ));
+        };
+        let evidence = CompletenessRow {
+            domain: discontinuity.evidence.domain(),
+            bounds: discontinuity.evidence.bounds(),
+            provenance: discontinuity.evidence.provenance(),
+            cause: discontinuity.evidence.cause(),
+        };
+        let slot = result
+            .get_mut(row)
+            .ok_or_else(|| AnalysisError::store_shape("discontinuity row is out of bounds"))?;
+        *slot = Some((discontinuity.cause, evidence));
+    }
+    Ok(result)
 }
 
-type SemanticJob = Box<dyn FnOnce() + Send + 'static>;
+struct SemanticJob {
+    run: Option<Box<dyn FnOnce() + Send + 'static>>,
+    on_failure: Option<Box<dyn FnOnce(AnalysisError) + Send + 'static>>,
+}
+
+impl SemanticJob {
+    fn new(
+        run: impl FnOnce() + Send + 'static,
+        on_failure: impl FnOnce(AnalysisError) + Send + 'static,
+    ) -> Self {
+        Self {
+            run: Some(Box::new(run)),
+            on_failure: Some(Box::new(on_failure)),
+        }
+    }
+
+    #[cfg(test)]
+    fn plain(run: impl FnOnce() + Send + 'static) -> Self {
+        Self::new(run, |_| {})
+    }
+
+    fn execute(mut self) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run.take().expect("semantic job is run once")();
+        }));
+        if result.is_err()
+            && let Some(on_failure) = self.on_failure.take()
+        {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                on_failure(AnalysisError::worker_panicked());
+            }));
+        }
+    }
+
+    fn fail(mut self, error: AnalysisError) {
+        if let Some(on_failure) = self.on_failure.take() {
+            on_failure(error);
+        }
+    }
+}
 
 struct SemanticExecutor {
-    sender: SyncSender<SemanticJob>,
+    sender: Option<SyncSender<SemanticJob>>,
+    workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl SemanticExecutor {
     fn new(workers: usize, queue_capacity: usize) -> Result<Self, AnalysisError> {
         let (sender, receiver) = mpsc::sync_channel::<SemanticJob>(queue_capacity);
         let receiver = Arc::new(Mutex::new(receiver));
+        let mut handles = Vec::new();
+        handles.try_reserve_exact(workers).map_err(|_| {
+            AnalysisError::resource_exhausted("semantic worker handle allocation failed")
+        })?;
         for worker in 0..workers {
             let receiver = receiver.clone();
-            thread::Builder::new()
+            match thread::Builder::new()
                 .name(format!("qtrace-semantic-{worker}"))
                 .spawn(move || {
                     loop {
-                        let job = receiver.lock().expect("semantic executor poisoned").recv();
+                        let job = receiver
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .recv();
                         match job {
-                            Ok(job) => job(),
+                            Ok(job) => job.execute(),
                             Err(_) => break,
                         }
                     }
-                })
-                .map_err(|error| {
-                    AnalysisError::resource_exhausted(format!(
+                }) {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    drop(sender);
+                    for handle in handles {
+                        let _ = handle.join();
+                    }
+                    return Err(AnalysisError::resource_exhausted(format!(
                         "semantic executor thread creation failed: {error}"
-                    ))
-                })?;
+                    )));
+                }
+            }
         }
-        Ok(Self { sender })
+        Ok(Self {
+            sender: Some(sender),
+            workers: handles,
+        })
     }
 
     fn global() -> Result<&'static Self, AnalysisError> {
@@ -1256,14 +1819,43 @@ impl SemanticExecutor {
     }
 
     fn submit(&self, job: SemanticJob) -> Result<(), AnalysisError> {
-        self.sender.try_send(job).map_err(|error| match error {
+        let Some(sender) = &self.sender else {
+            let error = AnalysisError::resource_exhausted("semantic executor is shut down");
+            job.fail(error.clone());
+            return Err(error);
+        };
+        sender.try_send(job).map_err(|error| match error {
             TrySendError::Full(_) => {
                 AnalysisError::resource_exhausted("semantic executor queue is full")
             }
-            TrySendError::Disconnected(_) => {
-                AnalysisError::resource_exhausted("semantic executor is unavailable")
+            TrySendError::Disconnected(job) => {
+                let analysis_error =
+                    AnalysisError::resource_exhausted("semantic executor is unavailable");
+                job.fail(analysis_error.clone());
+                analysis_error
             }
         })
+    }
+
+    #[cfg(test)]
+    fn shutdown(mut self) -> Result<(), AnalysisError> {
+        self.join_workers()
+    }
+
+    fn join_workers(&mut self) -> Result<(), AnalysisError> {
+        self.sender.take();
+        for worker in self.workers.drain(..) {
+            if worker.join().is_err() {
+                return Err(AnalysisError::worker_panicked());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SemanticExecutor {
+    fn drop(&mut self) {
+        let _ = self.join_workers();
     }
 }
 
@@ -1274,105 +1866,308 @@ fn submit_semantic_scan(
     state: Arc<(Mutex<ProjectionState>, Condvar)>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), AnalysisError> {
-    SemanticExecutor::global()?.submit(Box::new(move || {
-        for row in candidates {
-            if cancelled.load(Ordering::Acquire) {
-                finish_projection(&state, false);
-                return;
-            }
-            let result = context
-                .semantics
-                .get(row)
-                .copied()
-                .flatten()
-                .ok_or_else(|| {
-                    AnalysisError::store_shape("semantic posting row has no semantic fact")
-                })
-                .and_then(|semantic| {
-                    context
-                        .store
-                        .blob_bytes(semantic.detail_blob)
-                        .map_err(AnalysisError::store)
-                });
-            match result {
-                Ok(detail) => {
-                    if detail.len() > MAX_SEMANTIC_DETAIL_BYTES {
-                        let mut projection = state.0.lock().expect("projection state poisoned");
-                        projection.error = Some(AnalysisError::resource_exhausted(
-                            "semantic detail blob exceeds 8 MiB",
-                        ));
-                        projection.completed = true;
-                        state.1.notify_all();
-                        return;
-                    }
-                    let matched = needles.iter().any(|needle| {
-                        contains_bytes_cancellable(detail, needle.as_bytes(), &cancelled)
-                    });
-                    if cancelled.load(Ordering::Acquire) {
-                        finish_projection(&state, false);
-                        return;
-                    }
-                    let key = match context.key(row) {
-                        Ok(key) => key.clone(),
-                        Err(error) => {
-                            let mut projection = state.0.lock().expect("projection state poisoned");
-                            projection.error = Some(error);
-                            projection.completed = true;
-                            state.1.notify_all();
-                            return;
-                        }
-                    };
-                    let mut projection = state.0.lock().expect("projection state poisoned");
-                    if matched {
-                        projection.visible.push(row);
-                    }
-                    projection.watermark = Some(key);
-                    state.1.notify_all();
-                }
+    let failure_state = state.clone();
+    SemanticExecutor::global()?.submit(SemanticJob::new(
+        move || {
+            let mut terminal = ProjectionTerminalizer::new(state.clone());
+            let matcher = match DetailMatcher::new(&needles) {
+                Ok(matcher) => matcher,
                 Err(error) => {
-                    let mut projection = state.0.lock().expect("projection state poisoned");
-                    projection.error = Some(error);
-                    projection.completed = true;
-                    state.1.notify_all();
+                    terminal.fail(error);
                     return;
                 }
+            };
+            let mut remaining_scan = MAX_SEMANTIC_SCAN_BYTES;
+            for row in candidates {
+                if cancelled.load(Ordering::Acquire) {
+                    terminal.finish(false);
+                    return;
+                }
+                let result = context
+                    .semantics
+                    .get(row)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| {
+                        AnalysisError::store_shape("semantic posting row has no semantic fact")
+                    })
+                    .and_then(|semantic| {
+                        context
+                            .store
+                            .blob_bytes(semantic.detail_blob)
+                            .map_err(AnalysisError::store)
+                    });
+                match result {
+                    Ok(detail) => {
+                        if detail.len() > MAX_SEMANTIC_DETAIL_BYTES {
+                            terminal.fail(AnalysisError::resource_exhausted(
+                                "semantic detail blob exceeds 8 MiB",
+                            ));
+                            return;
+                        }
+                        let matched =
+                            match matcher.contains_with_probe(detail, remaining_scan, |_| {
+                                cancelled.load(Ordering::Acquire)
+                            }) {
+                                Ok(matched) => matched,
+                                Err(error) if error.code() == "job.cancelled" => {
+                                    terminal.finish(false);
+                                    return;
+                                }
+                                Err(error) => {
+                                    terminal.fail(error);
+                                    return;
+                                }
+                            };
+                        remaining_scan = remaining_scan.saturating_sub(detail.len());
+                        if cancelled.load(Ordering::Acquire) {
+                            terminal.finish(false);
+                            return;
+                        }
+                        let key = match context.key(row) {
+                            Ok(key) => key.clone(),
+                            Err(error) => {
+                                terminal.fail(error);
+                                return;
+                            }
+                        };
+                        let mut projection = state
+                            .0
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if !projection.completed {
+                            if matched {
+                                projection.visible.push(row);
+                            }
+                            projection.watermark = Some(key);
+                        }
+                        state.1.notify_all();
+                    }
+                    Err(error) => {
+                        terminal.fail(error);
+                        return;
+                    }
+                }
             }
-        }
-        finish_projection(&state, !cancelled.load(Ordering::Acquire));
-    }))
+            terminal.finish(!cancelled.load(Ordering::Acquire));
+        },
+        move |error| terminalize_projection(&failure_state, false, Some(error)),
+    ))
 }
 
-fn finish_projection(state: &(Mutex<ProjectionState>, Condvar), exact: bool) {
-    let mut projection = state.0.lock().expect("projection state poisoned");
+struct ProjectionTerminalizer {
+    state: Arc<(Mutex<ProjectionState>, Condvar)>,
+    finished: bool,
+}
+
+impl ProjectionTerminalizer {
+    fn new(state: Arc<(Mutex<ProjectionState>, Condvar)>) -> Self {
+        Self {
+            state,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, exact: bool) {
+        terminalize_projection(&self.state, exact, None);
+        self.finished = true;
+    }
+
+    fn fail(&mut self, error: AnalysisError) {
+        terminalize_projection(&self.state, false, Some(error));
+        self.finished = true;
+    }
+}
+
+impl Drop for ProjectionTerminalizer {
+    fn drop(&mut self) {
+        if !self.finished {
+            terminalize_projection(&self.state, false, Some(AnalysisError::worker_panicked()));
+        }
+    }
+}
+
+fn terminalize_projection(
+    state: &(Mutex<ProjectionState>, Condvar),
+    exact: bool,
+    error: Option<AnalysisError>,
+) {
+    let mut projection = state
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if projection.completed {
+        return;
+    }
     projection.exact_total = exact;
     projection.completed = true;
+    projection.error = error;
     state.1.notify_all();
 }
 
-fn contains_bytes_cancellable(haystack: &[u8], needle: &[u8], cancelled: &AtomicBool) -> bool {
-    contains_bytes_with_cancel_check(haystack, needle, || cancelled.load(Ordering::Acquire))
+const NO_EDGE: u32 = u32::MAX;
+
+#[derive(Clone, Copy)]
+struct DetailNode {
+    first_edge: u32,
+    failure: u32,
+    terminal: bool,
 }
 
-fn contains_bytes_with_cancel_check(
-    haystack: &[u8],
-    needle: &[u8],
-    mut cancelled: impl FnMut() -> bool,
-) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    for offset in 0..=haystack.len() - needle.len() {
-        if offset % 4_096 == 0 && cancelled() {
-            return false;
-        }
-        if &haystack[offset..offset + needle.len()] == needle {
-            return true;
+impl Default for DetailNode {
+    fn default() -> Self {
+        Self {
+            first_edge: NO_EDGE,
+            failure: 0,
+            terminal: false,
         }
     }
-    false
+}
+
+#[derive(Clone, Copy)]
+struct DetailEdge {
+    byte: u8,
+    target: u32,
+    next: u32,
+}
+
+struct DetailMatcher {
+    nodes: Vec<DetailNode>,
+    edges: Vec<DetailEdge>,
+}
+
+impl DetailMatcher {
+    fn new<T: AsRef<[u8]>>(patterns: &[T]) -> Result<Self, AnalysisError> {
+        let total_bytes = patterns.iter().try_fold(0_usize, |total, pattern| {
+            total.checked_add(pattern.as_ref().len())
+        });
+        let total_bytes = total_bytes
+            .filter(|bytes| *bytes <= crate::filter::MAX_FILTER_TEXT_BYTES)
+            .ok_or_else(|| AnalysisError::filter_too_complex("semantic patterns exceed 1 MiB"))?;
+        let mut nodes = Vec::new();
+        nodes
+            .try_reserve_exact(total_bytes.saturating_add(1))
+            .map_err(|_| {
+                AnalysisError::resource_exhausted("semantic automaton node allocation failed")
+            })?;
+        nodes.push(DetailNode::default());
+        let mut edges = Vec::new();
+        edges.try_reserve_exact(total_bytes).map_err(|_| {
+            AnalysisError::resource_exhausted("semantic automaton edge allocation failed")
+        })?;
+        let mut matcher = Self { nodes, edges };
+        for pattern in patterns {
+            let mut state = 0_usize;
+            for byte in pattern.as_ref() {
+                state = if let Some(target) = matcher.transition(state, *byte) {
+                    target
+                } else {
+                    let target = matcher.nodes.len();
+                    let target_u32 = u32::try_from(target).map_err(|_| {
+                        AnalysisError::resource_exhausted("semantic automaton exceeds u32")
+                    })?;
+                    let edge = u32::try_from(matcher.edges.len()).map_err(|_| {
+                        AnalysisError::resource_exhausted("semantic automaton exceeds u32")
+                    })?;
+                    matcher.nodes.push(DetailNode::default());
+                    matcher.edges.push(DetailEdge {
+                        byte: *byte,
+                        target: target_u32,
+                        next: matcher.nodes[state].first_edge,
+                    });
+                    matcher.nodes[state].first_edge = edge;
+                    target
+                };
+            }
+            matcher.nodes[state].terminal = true;
+        }
+        matcher.build_failures()?;
+        Ok(matcher)
+    }
+
+    fn transition(&self, state: usize, byte: u8) -> Option<usize> {
+        let mut edge = self.nodes[state].first_edge;
+        while edge != NO_EDGE {
+            let candidate = self.edges[edge as usize];
+            if candidate.byte == byte {
+                return Some(candidate.target as usize);
+            }
+            edge = candidate.next;
+        }
+        None
+    }
+
+    fn build_failures(&mut self) -> Result<(), AnalysisError> {
+        let mut queue = std::collections::VecDeque::new();
+        queue.try_reserve(self.nodes.len()).map_err(|_| {
+            AnalysisError::resource_exhausted("semantic automaton queue allocation failed")
+        })?;
+        let mut edge = self.nodes[0].first_edge;
+        while edge != NO_EDGE {
+            let target = self.edges[edge as usize].target;
+            queue.push_back(target);
+            edge = self.edges[edge as usize].next;
+        }
+        while let Some(state) = queue.pop_front() {
+            let mut edge = self.nodes[state as usize].first_edge;
+            while edge != NO_EDGE {
+                let candidate = self.edges[edge as usize];
+                queue.push_back(candidate.target);
+                let mut failure = self.nodes[state as usize].failure as usize;
+                while failure != 0 && self.transition(failure, candidate.byte).is_none() {
+                    failure = self.nodes[failure].failure as usize;
+                }
+                let target_failure = self.transition(failure, candidate.byte).unwrap_or(0);
+                let target = candidate.target as usize;
+                self.nodes[target].failure = target_failure as u32;
+                self.nodes[target].terminal |= self.nodes[target_failure].terminal;
+                edge = candidate.next;
+            }
+        }
+        Ok(())
+    }
+
+    fn contains_with_probe(
+        &self,
+        haystack: &[u8],
+        max_bytes: usize,
+        mut cancelled: impl FnMut(usize) -> bool,
+    ) -> Result<bool, AnalysisError> {
+        if cancelled(0) {
+            return Err(AnalysisError {
+                code: "job.cancelled",
+                detail: "semantic detail scan cancelled".to_owned(),
+            });
+        }
+        let mut state = 0_usize;
+        let mut processed = 0_usize;
+        for chunk in haystack.chunks(4096) {
+            processed = processed
+                .checked_add(chunk.len())
+                .ok_or_else(|| AnalysisError::resource_exhausted("semantic scan work overflow"))?;
+            if processed > max_bytes {
+                return Err(AnalysisError::resource_exhausted(
+                    "semantic scan exceeds 64 MiB work budget",
+                ));
+            }
+            for byte in chunk {
+                while state != 0 && self.transition(state, *byte).is_none() {
+                    state = self.nodes[state].failure as usize;
+                }
+                state = self.transition(state, *byte).unwrap_or(0);
+                if self.nodes[state].terminal {
+                    return Ok(true);
+                }
+            }
+            if cancelled(processed) {
+                return Err(AnalysisError {
+                    code: "job.cancelled",
+                    detail: "semantic detail scan cancelled".to_owned(),
+                });
+            }
+        }
+        Ok(false)
+    }
 }
 
 fn locate_after_key(
@@ -1394,7 +2189,10 @@ fn locate_after_key(
     Ok(left)
 }
 
-fn required_event_key(store: &dyn TraceStoreView, row: usize) -> Result<EventKey, AnalysisError> {
+fn required_event_key(
+    store: &(impl TraceStoreView + ?Sized),
+    row: usize,
+) -> Result<EventKey, AnalysisError> {
     store
         .event_key(row)
         .map_err(AnalysisError::store)?
@@ -1517,32 +2315,6 @@ fn read_flag(bytes: &[u8], offset: &mut usize) -> Result<bool, AnalysisError> {
     }
 }
 
-fn hash_event_key(hash: &mut Sha256, key: &EventKey) {
-    hash.update(key.artifact.as_bytes());
-    hash.update(key.timeline.0.to_le_bytes());
-    hash.update(key.record_ordinal.to_le_bytes());
-    hash.update(key.source_offset.to_le_bytes());
-    hash.update([u8::from(key.sequence.is_some())]);
-    hash.update(key.sequence.unwrap_or_default().to_le_bytes());
-    hash.update([u8::from(key.tid.is_some())]);
-    hash.update(key.tid.unwrap_or_default().to_le_bytes());
-}
-
-fn hash_len_prefixed(hash: &mut Sha256, bytes: &[u8]) {
-    hash.update((bytes.len() as u64).to_le_bytes());
-    hash.update(bytes);
-}
-
-fn provenance_tag(provenance: Provenance) -> u8 {
-    match provenance {
-        Provenance::Captured => 0,
-        Provenance::Derived => 1,
-        Provenance::Heuristic => 2,
-        Provenance::Unknown => 3,
-        Provenance::Damaged => 4,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,7 +2333,7 @@ mod tests {
         let state = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
         let job = || {
             let state = state.clone();
-            Box::new(move || {
+            SemanticJob::plain(move || {
                 let mut guard = state.0.lock().unwrap();
                 guard.active += 1;
                 guard.max_active = guard.max_active.max(guard.active);
@@ -1572,7 +2344,7 @@ mod tests {
                 guard.active -= 1;
                 guard.completed += 1;
                 state.1.notify_all();
-            }) as SemanticJob
+            })
         };
 
         executor.submit(job()).unwrap();
@@ -1603,14 +2375,138 @@ mod tests {
     }
 
     #[test]
-    fn long_blob_scan_observes_cancellation_between_bounded_chunks() {
-        let haystack = vec![b'x'; 8_193];
-        let mut checks = 0;
-        let matched = contains_bytes_with_cancel_check(&haystack, b"needle", || {
-            checks += 1;
-            checks == 2
+    fn semantic_executor_survives_a_panicking_job_and_joins_on_shutdown() {
+        let executor = SemanticExecutor::new(1, 2).unwrap();
+        let projection = Arc::new((Mutex::new(ProjectionState::default()), Condvar::new()));
+        let failed = projection.clone();
+        let running = projection.clone();
+        executor
+            .submit(SemanticJob::new(
+                move || {
+                    let _terminal = ProjectionTerminalizer::new(running);
+                    panic!("deterministic worker panic");
+                },
+                move |error| terminalize_projection(&failed, false, Some(error)),
+            ))
+            .unwrap();
+        let state = projection.0.lock().unwrap();
+        let (state, timeout) = projection
+            .1
+            .wait_timeout_while(state, Duration::from_millis(100), |state| !state.completed)
+            .unwrap();
+        assert!(!timeout.timed_out());
+        assert_eq!(
+            state.error.as_ref().unwrap().code(),
+            "analysis.worker_panicked"
+        );
+        drop(state);
+        let completed = Arc::new((Mutex::new(false), Condvar::new()));
+        let signal = completed.clone();
+        executor
+            .submit(SemanticJob::plain(move || {
+                *signal.0.lock().unwrap() = true;
+                signal.1.notify_all();
+            }))
+            .unwrap();
+        let done = completed.0.lock().unwrap();
+        let (done, timeout) = completed
+            .1
+            .wait_timeout_while(done, Duration::from_millis(100), |done| !*done)
+            .unwrap();
+        assert!(!timeout.timed_out() && *done, "worker retired after panic");
+        drop(done);
+        executor.shutdown().unwrap();
+    }
+
+    #[test]
+    fn disconnected_executor_terminalizes_the_rejected_job() {
+        let executor = SemanticExecutor {
+            sender: None,
+            workers: Vec::new(),
+        };
+        let failure = Arc::new(Mutex::new(None));
+        let observed = failure.clone();
+        let error = executor
+            .submit(SemanticJob::new(
+                || panic!("disconnected jobs must not run"),
+                move |error| *observed.lock().unwrap() = Some(error),
+            ))
+            .unwrap_err();
+        assert_eq!(error.code(), "analysis.resource_exhausted");
+        assert_eq!(
+            failure.lock().unwrap().as_ref().unwrap().code(),
+            "analysis.resource_exhausted"
+        );
+    }
+
+    #[test]
+    fn long_needle_scan_cancels_after_at_most_one_actual_input_chunk() {
+        let haystack = vec![b'x'; 8 * 1024 * 1024];
+        let mut needle = vec![b'x'; 1024 * 1024];
+        *needle.last_mut().unwrap() = b'y';
+        let matcher = DetailMatcher::new(&[needle]).unwrap();
+        let mut last_processed = 0;
+        let result = matcher.contains_with_probe(&haystack, usize::MAX, |processed| {
+            last_processed = processed;
+            processed >= 4096
         });
-        assert!(!matched);
-        assert_eq!(checks, 2);
+        assert_eq!(result.unwrap_err().code(), "job.cancelled");
+        assert_eq!(last_processed, 4096);
+    }
+
+    #[test]
+    fn multi_pattern_scan_matches_across_input_chunk_boundaries() {
+        let mut haystack = vec![b'x'; 8192];
+        haystack[4094..4102].copy_from_slice(b"boundary");
+        let matcher = DetailMatcher::new(&[b"missing".to_vec(), b"boundary".to_vec()]).unwrap();
+        assert!(
+            matcher
+                .contains_with_probe(&haystack, haystack.len(), |_| false)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn stable_key_radix_matches_the_public_total_order_at_numeric_extremes() {
+        let keys = vec![
+            EventKey::new(
+                ArtifactDigest::new([1; 32]),
+                TimelineId(u64::MAX),
+                0,
+                u64::MAX,
+                Some(u64::MAX),
+                Some(u32::MAX),
+            ),
+            EventKey::new(
+                ArtifactDigest::new([0xff; 32]),
+                TimelineId(0),
+                u64::MAX,
+                0,
+                None,
+                None,
+            ),
+            EventKey::new(
+                ArtifactDigest::new([1; 32]),
+                TimelineId(u64::MAX),
+                0,
+                u64::MAX,
+                None,
+                Some(0),
+            ),
+            EventKey::new(
+                ArtifactDigest::new([1; 32]),
+                TimelineId(u64::MAX),
+                0,
+                u64::MAX,
+                Some(0),
+                None,
+            ),
+        ];
+        let mut expected = (0..keys.len()).collect::<Vec<_>>();
+        expected.sort_by(|left, right| compare_event_keys(&keys[*left], &keys[*right]));
+        assert_eq!(
+            radix_sort_rows_by_keys(&keys, (0..keys.len()).rev().collect()).unwrap(),
+            expected
+        );
     }
 }

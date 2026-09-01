@@ -2,7 +2,7 @@ use qtrace_provider::ProviderCapabilities;
 use qtrace_provider::{
     CompletenessCause, DiscontinuityCause, EventKey, Provenance, RangeBounds, RangeDomain,
 };
-use qtrace_store::CompletenessRow;
+use qtrace_store::{CompletenessRow, NormalizedSourceFormat};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletenessStatus {
@@ -15,19 +15,22 @@ pub enum CompletenessStatus {
 pub struct CompletenessSummary {
     pub retained_ranges: usize,
     pub incomplete_ranges: usize,
-    pub complete: bool,
     pub status: CompletenessStatus,
     pub ranges: Vec<CompletenessRow>,
 }
 
 impl CompletenessSummary {
     pub(crate) fn new(
-        rows: &[CompletenessRow],
+        ranges: Vec<CompletenessRow>,
         capabilities: &ProviderCapabilities,
+        source_format: NormalizedSourceFormat,
         observed_sequence: Option<(u64, u64)>,
     ) -> Self {
-        let mut ranges = rows.to_vec();
-        ranges.sort_by_key(completeness_key);
+        debug_assert!(
+            ranges
+                .windows(2)
+                .all(|pair| { completeness_key(&pair[0]) <= completeness_key(&pair[1]) })
+        );
         let retained_ranges = ranges
             .iter()
             .filter(|row| row.cause == CompletenessCause::Retained)
@@ -36,8 +39,12 @@ impl CompletenessSummary {
         let status = if incomplete_ranges != 0 {
             CompletenessStatus::Incomplete
         } else if capabilities.loss_and_damage_ranges
-            && observed_sequence
-                .is_some_and(|(first, last)| retained_covers_sequence(&ranges, first, last))
+            && match source_format {
+                NormalizedSourceFormat::Qtrb => retained_covers_source_bytes(&ranges),
+                NormalizedSourceFormat::Flight => observed_sequence
+                    .is_some_and(|(first, last)| retained_covers_sequence(&ranges, first, last)),
+                NormalizedSourceFormat::Other => false,
+            }
         {
             CompletenessStatus::Complete
         } else {
@@ -46,11 +53,40 @@ impl CompletenessSummary {
         Self {
             retained_ranges,
             incomplete_ranges,
-            complete: status == CompletenessStatus::Complete,
             status,
             ranges,
         }
     }
+
+    pub const fn is_complete(&self) -> bool {
+        matches!(self.status, CompletenessStatus::Complete)
+    }
+}
+
+fn retained_covers_source_bytes(rows: &[CompletenessRow]) -> bool {
+    let mut next = 0_u64;
+    let mut saw_nonempty = false;
+    for row in rows {
+        let RangeBounds::HalfOpen {
+            start,
+            end_exclusive,
+        } = row.bounds
+        else {
+            continue;
+        };
+        if row.domain != RangeDomain::SourceBytes || row.cause != CompletenessCause::Retained {
+            continue;
+        }
+        if end_exclusive <= next {
+            continue;
+        }
+        if start > next {
+            return false;
+        }
+        saw_nonempty = true;
+        next = end_exclusive;
+    }
+    saw_nonempty
 }
 
 fn retained_covers_sequence(rows: &[CompletenessRow], first: u64, last: u64) -> bool {

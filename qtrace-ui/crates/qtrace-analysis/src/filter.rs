@@ -5,7 +5,7 @@ use crate::AnalysisError;
 
 const MAX_FILTER_TERMS: usize = 512;
 const MAX_FILTER_CARTESIAN_PAIRS: usize = 4_096;
-const MAX_FILTER_TEXT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_FILTER_TEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SequenceRange {
@@ -303,6 +303,11 @@ fn normalize_memory_ranges(ranges: &mut Vec<MemoryFilter>) {
         }
         directions.sort_by_key(|direction| direction_tag(*direction));
         directions.dedup();
+        if directions.contains(&MemoryDirection::Read)
+            || directions.contains(&MemoryDirection::Write)
+        {
+            directions.retain(|direction| *direction != MemoryDirection::ReadWrite);
+        }
         if wildcard {
             directions.clear();
         }

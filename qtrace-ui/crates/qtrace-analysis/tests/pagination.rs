@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -17,8 +17,11 @@ use qtrace_provider::{
 };
 use qtrace_store::{
     CompletenessRow, DefinitionRow, IndexError, InstructionRow, MemoryRow, ModuleRow,
-    NormalizedLayoutIdentity, RegisterObservationRow, SemanticRow, TraceStoreView,
+    NormalizedBulkView, NormalizedContentIdentity, NormalizedLayoutIdentity,
+    NormalizedPostingQuery, NormalizedSourceFormat, RegisterObservationRow, SemanticRow,
+    TraceStoreView,
 };
+use sha2::Digest;
 
 struct CountingStore {
     keys: Vec<EventKey>,
@@ -26,6 +29,7 @@ struct CountingStore {
     release: (Mutex<bool>, Condvar),
     scan_progress: (Mutex<usize>, Condvar),
     event_key_calls: AtomicUsize,
+    payload_calls: AtomicUsize,
     blob_calls: AtomicUsize,
     typed_lookup_calls: AtomicUsize,
     capabilities: ProviderCapabilities,
@@ -34,6 +38,7 @@ struct CountingStore {
     semantics: Vec<SemanticRow>,
     oversized_blob: Option<Vec<u8>>,
     unblocked_scan_calls: usize,
+    event_count_override: Option<usize>,
 }
 
 impl CountingStore {
@@ -66,6 +71,7 @@ impl CountingStore {
             release: (Mutex::new(!semantic), Condvar::new()),
             scan_progress: (Mutex::new(0), Condvar::new()),
             event_key_calls: AtomicUsize::new(0),
+            payload_calls: AtomicUsize::new(0),
             blob_calls: AtomicUsize::new(0),
             typed_lookup_calls: AtomicUsize::new(0),
             capabilities: ProviderCapabilities::qtrb_register_observations(),
@@ -107,6 +113,7 @@ impl CountingStore {
             },
             oversized_blob: None,
             unblocked_scan_calls: 1,
+            event_count_override: None,
         }
     }
 
@@ -141,15 +148,8 @@ impl CountingStore {
 }
 
 impl TraceStoreView for CountingStore {
-    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
-        serde_json::from_value(serde_json::json!({
-            "schema_version": 2,
-            "layout_fingerprint": vec![1_u8; 32],
-        }))
-        .unwrap()
-    }
     fn event_count(&self) -> usize {
-        self.keys.len()
+        self.event_count_override.unwrap_or(self.keys.len())
     }
     fn event_key(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
         self.event_key_calls.fetch_add(1, Ordering::Relaxed);
@@ -188,6 +188,7 @@ impl TraceStoreView for CountingStore {
         })
     }
     fn payload_bytes(&self, row: usize) -> Result<&[u8], IndexError> {
+        self.payload_calls.fetch_add(1, Ordering::Relaxed);
         Ok(if !self.semantic && row + 1 == self.keys.len() {
             &self.discontinuity_payload
         } else {
@@ -206,10 +207,7 @@ impl TraceStoreView for CountingStore {
         } else {
             b"detail matches needle future"
         };
-        let blob_call = self.blob_calls.fetch_add(1, Ordering::Relaxed);
-        if blob_call < self.blob_count() {
-            return Ok(detail);
-        }
+        self.blob_calls.fetch_add(1, Ordering::Relaxed);
         let call = {
             let mut progress = self.scan_progress.0.lock().unwrap();
             *progress += 1;
@@ -236,30 +234,6 @@ impl TraceStoreView for CountingStore {
     }
     fn definition(&self, _id: u32) -> Option<&DefinitionRow> {
         None
-    }
-    fn module_rows(&self) -> &[ModuleRow] {
-        &[]
-    }
-    fn definition_rows(&self) -> &[DefinitionRow] {
-        &[]
-    }
-    fn instruction_rows(&self) -> &[InstructionRow] {
-        &[]
-    }
-    fn memory_rows(&self) -> &[MemoryRow] {
-        &[]
-    }
-    fn semantic_rows(&self) -> &[SemanticRow] {
-        &self.semantics
-    }
-    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
-        &[]
-    }
-    fn string_count(&self) -> usize {
-        1
-    }
-    fn blob_count(&self) -> usize {
-        self.keys.len().max(1)
     }
     fn register_observations(&self, _row: usize) -> Vec<RegisterObservationRow> {
         self.typed_lookup_calls.fetch_add(1, Ordering::Relaxed);
@@ -329,6 +303,126 @@ impl TraceStoreView for CountingStore {
     }
     fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
         self.event_key(row)
+    }
+}
+
+struct CancelContext;
+
+impl qtrace_provider::WorkGuard for CancelContext {
+    fn consume(
+        &self,
+        _delta: qtrace_provider::WorkDelta,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        Err(qtrace_provider::OperationAbort::Cancelled)
+    }
+}
+
+struct CancelDuringContext {
+    armed: AtomicBool,
+    checkpoints: AtomicUsize,
+}
+
+impl qtrace_provider::WorkGuard for CancelDuringContext {
+    fn consume(
+        &self,
+        delta: qtrace_provider::WorkDelta,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        if delta.rows != 0 {
+            self.armed.store(true, Ordering::Release);
+            return Ok(());
+        }
+        if self.armed.load(Ordering::Acquire)
+            && delta == qtrace_provider::WorkDelta::default()
+            && self.checkpoints.fetch_add(1, Ordering::Relaxed) == 1
+        {
+            return Err(qtrace_provider::OperationAbort::Cancelled);
+        }
+        Ok(())
+    }
+}
+
+impl NormalizedBulkView for CountingStore {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
+        NormalizedLayoutIdentity::new(2, [1; 32])
+    }
+
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity {
+        let mut digest = sha2::Sha256::new();
+        for key in &self.keys {
+            sha2::Digest::update(&mut digest, key.artifact.as_bytes());
+        }
+        NormalizedContentIdentity::new(sha2::Digest::finalize(digest).into())
+    }
+
+    fn normalized_source_format(&self) -> NormalizedSourceFormat {
+        NormalizedSourceFormat::Flight
+    }
+
+    fn module_rows(&self) -> &[ModuleRow] {
+        &[]
+    }
+    fn definition_rows(&self) -> &[DefinitionRow] {
+        &[]
+    }
+    fn instruction_rows(&self) -> &[InstructionRow] {
+        &[]
+    }
+    fn memory_rows(&self) -> &[MemoryRow] {
+        &[]
+    }
+    fn semantic_rows(&self) -> &[SemanticRow] {
+        &self.semantics
+    }
+    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+        &[]
+    }
+    fn string_count(&self) -> usize {
+        1
+    }
+    fn blob_count(&self) -> usize {
+        self.keys.len().max(1)
+    }
+
+    fn bounded_rows(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        _guard: &dyn qtrace_provider::WorkGuard,
+    ) -> Result<Vec<usize>, IndexError> {
+        let rows = match query {
+            NormalizedPostingQuery::Tids(values) => self.rows_for_tids(values)?,
+            NormalizedPostingQuery::Kinds(values) => self.rows_of_kinds(values)?,
+            NormalizedPostingQuery::Modules(values) => self.rows_for_modules(values)?,
+            NormalizedPostingQuery::Sequence {
+                start,
+                end_exclusive,
+            } => self.rows_for_sequence_range(start, end_exclusive)?,
+            NormalizedPostingQuery::ModulePc {
+                module,
+                start,
+                end_exclusive,
+            } => self.rows_for_module_pc_range(module, start, end_exclusive)?,
+            NormalizedPostingQuery::Definitions(values) => self.rows_for_definitions(values)?,
+            NormalizedPostingQuery::Registers(values) => {
+                let mut rows = Vec::new();
+                for slot in values {
+                    rows.extend(self.rows_observing_register(*slot)?);
+                }
+                rows
+            }
+            NormalizedPostingQuery::SemanticCategories(values) => {
+                self.rows_for_semantic_categories(values)?
+            }
+            NormalizedPostingQuery::SemanticNames(values) => {
+                self.rows_for_semantic_names(values)?
+            }
+            NormalizedPostingQuery::Memory {
+                start,
+                end_exclusive,
+            } => self.memory_overlaps(start, end_exclusive)?,
+        };
+        assert!(rows.len() <= max_rows, "mock posting exceeded test budget");
+        Ok(rows)
     }
 }
 
@@ -449,6 +543,45 @@ fn context_builds_owner_maps_once_and_pages_share_store_wide_artifacts() {
 }
 
 #[test]
+fn context_hard_preflight_and_cancel_stop_before_event_or_payload_reads() {
+    let mut oversized = CountingStore::new(1, 9, false);
+    oversized.event_count_override = Some(qtrace_analysis::MAX_CONTEXT_EVENTS + 1);
+    let oversized = Arc::new(oversized);
+    let error = match QueryContext::new(oversized.clone()) {
+        Ok(_) => panic!("oversized context was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "analysis.resource_exhausted");
+    assert_eq!(oversized.event_key_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(oversized.payload_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(oversized.blob_calls.load(Ordering::Relaxed), 0);
+
+    let cancelled = Arc::new(CountingStore::new(32, 9, false));
+    let error = match QueryContext::new_with_guard(cancelled.clone(), &CancelContext) {
+        Ok(_) => panic!("cancelled context was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "job.cancelled");
+    assert_eq!(cancelled.event_key_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(cancelled.payload_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(cancelled.blob_calls.load(Ordering::Relaxed), 0);
+
+    let interrupted = Arc::new(CountingStore::new(8_192, 9, false));
+    let guard = CancelDuringContext {
+        armed: AtomicBool::new(false),
+        checkpoints: AtomicUsize::new(0),
+    };
+    let error = match QueryContext::new_with_guard(interrupted.clone(), &guard) {
+        Ok(_) => panic!("mid-context cancellation was ignored"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "job.cancelled");
+    assert_eq!(interrupted.event_key_calls.load(Ordering::Relaxed), 4_096);
+    assert_eq!(interrupted.payload_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(interrupted.blob_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn validates_limits_reports_exact_total_and_projects_completeness_and_discontinuity() {
     let projection = projection(
         Arc::new(CountingStore::new(7, 4, false)),
@@ -517,6 +650,7 @@ fn semantic_detail_background_scan_is_cancellable() {
         },
     );
     projection.cancel();
+    assert!(projection.wait_until_complete(Duration::ZERO));
     store.release_semantic_scan();
     assert!(projection.wait_until_complete(Duration::from_secs(2)));
     assert!(projection.is_cancelled());
@@ -656,7 +790,7 @@ fn completeness_is_unknown_without_capability_or_full_domain_coverage() {
     empty.completeness.clear();
     let page = completeness_page(empty);
     assert_eq!(page.completeness.status, CompletenessStatus::Unknown);
-    assert!(!page.completeness.complete);
+    assert!(!page.completeness.is_complete());
 
     let mut partial = CountingStore::new(7, 9, true);
     partial.release_semantic_scan();
@@ -684,11 +818,11 @@ fn completeness_requires_full_retained_coverage_and_marks_damage_incomplete() {
     complete.completeness.truncate(1);
     let page = completeness_page(complete);
     assert_eq!(page.completeness.status, CompletenessStatus::Complete);
-    assert!(page.completeness.complete);
+    assert!(page.completeness.is_complete());
 
     let damaged = CountingStore::new(7, 9, true);
     damaged.release_semantic_scan();
     let page = completeness_page(damaged);
     assert_eq!(page.completeness.status, CompletenessStatus::Incomplete);
-    assert!(!page.completeness.complete);
+    assert!(!page.completeness.is_complete());
 }

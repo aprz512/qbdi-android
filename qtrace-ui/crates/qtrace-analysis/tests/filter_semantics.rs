@@ -10,8 +10,11 @@ use qtrace_provider::{
 };
 use qtrace_store::{
     CompletenessRow, DefinitionRow, IndexError, InstructionRow, MemoryRow, ModuleRow,
-    NormalizedLayoutIdentity, RegisterAccess, RegisterObservationRow, SemanticRow, TraceStoreView,
+    NormalizedBulkView, NormalizedContentIdentity, NormalizedLayoutIdentity,
+    NormalizedPostingQuery, NormalizedSourceFormat, RegisterAccess, RegisterObservationRow,
+    SemanticRow, TraceStoreView,
 };
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 struct EventFact {
@@ -239,9 +242,6 @@ fn definition(source_event_row: usize, mnemonic: u32) -> DefinitionRow {
 }
 
 impl TraceStoreView for FixtureStore {
-    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
-        self.layout
-    }
     fn event_count(&self) -> usize {
         self.events.len()
     }
@@ -286,30 +286,6 @@ impl TraceStoreView for FixtureStore {
     }
     fn definition(&self, id: u32) -> Option<&DefinitionRow> {
         self.definitions.get(id as usize)
-    }
-    fn module_rows(&self) -> &[ModuleRow] {
-        &self.modules
-    }
-    fn definition_rows(&self) -> &[DefinitionRow] {
-        &self.definitions
-    }
-    fn instruction_rows(&self) -> &[InstructionRow] {
-        &self.instructions
-    }
-    fn memory_rows(&self) -> &[MemoryRow] {
-        &self.memories
-    }
-    fn semantic_rows(&self) -> &[SemanticRow] {
-        &self.semantics
-    }
-    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
-        &self.observations
-    }
-    fn string_count(&self) -> usize {
-        self.strings.len()
-    }
-    fn blob_count(&self) -> usize {
-        self.blobs.len()
     }
     fn register_observations(&self, row: usize) -> Vec<RegisterObservationRow> {
         self.events
@@ -411,6 +387,111 @@ impl TraceStoreView for FixtureStore {
     }
     fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
         self.event_key(row)
+    }
+}
+
+impl NormalizedBulkView for FixtureStore {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
+        self.layout
+    }
+
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity {
+        let mut hash = Sha256::new();
+        for event in &self.events {
+            hash.update(serde_json::to_vec(&event.key).unwrap());
+            hash.update(event.kind.external_tag());
+            hash.update([event.provenance as u8]);
+        }
+        for value in [
+            serde_json::to_vec(&self.modules).unwrap(),
+            serde_json::to_vec(&self.definitions).unwrap(),
+            serde_json::to_vec(&self.instructions).unwrap(),
+            serde_json::to_vec(&self.memories).unwrap(),
+            serde_json::to_vec(&self.semantics).unwrap(),
+            serde_json::to_vec(&self.observations).unwrap(),
+            serde_json::to_vec(&self.capabilities).unwrap(),
+            serde_json::to_vec(&self.completeness).unwrap(),
+            serde_json::to_vec(&self.payloads).unwrap(),
+            serde_json::to_vec(&self.strings).unwrap(),
+            serde_json::to_vec(&self.blobs).unwrap(),
+        ] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value);
+        }
+        NormalizedContentIdentity::new(hash.finalize().into())
+    }
+
+    fn normalized_source_format(&self) -> NormalizedSourceFormat {
+        NormalizedSourceFormat::Other
+    }
+
+    fn module_rows(&self) -> &[ModuleRow] {
+        &self.modules
+    }
+    fn definition_rows(&self) -> &[DefinitionRow] {
+        &self.definitions
+    }
+    fn instruction_rows(&self) -> &[InstructionRow] {
+        &self.instructions
+    }
+    fn memory_rows(&self) -> &[MemoryRow] {
+        &self.memories
+    }
+    fn semantic_rows(&self) -> &[SemanticRow] {
+        &self.semantics
+    }
+    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+        &self.observations
+    }
+    fn string_count(&self) -> usize {
+        self.strings.len()
+    }
+    fn blob_count(&self) -> usize {
+        self.blobs.len()
+    }
+
+    fn bounded_rows(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        _guard: &dyn qtrace_provider::WorkGuard,
+    ) -> Result<Vec<usize>, IndexError> {
+        let mut rows = match query {
+            NormalizedPostingQuery::Tids(values) => self.rows_for_tids(values)?,
+            NormalizedPostingQuery::Kinds(values) => self.rows_of_kinds(values)?,
+            NormalizedPostingQuery::Modules(values) => self.rows_for_modules(values)?,
+            NormalizedPostingQuery::Sequence {
+                start,
+                end_exclusive,
+            } => self.rows_for_sequence_range(start, end_exclusive)?,
+            NormalizedPostingQuery::ModulePc {
+                module,
+                start,
+                end_exclusive,
+            } => self.rows_for_module_pc_range(module, start, end_exclusive)?,
+            NormalizedPostingQuery::Definitions(values) => self.rows_for_definitions(values)?,
+            NormalizedPostingQuery::Registers(values) => {
+                let mut rows = Vec::new();
+                for slot in values {
+                    rows.extend(self.rows_observing_register(*slot)?);
+                }
+                rows
+            }
+            NormalizedPostingQuery::SemanticCategories(values) => {
+                self.rows_for_semantic_categories(values)?
+            }
+            NormalizedPostingQuery::SemanticNames(values) => {
+                self.rows_for_semantic_names(values)?
+            }
+            NormalizedPostingQuery::Memory {
+                start,
+                end_exclusive,
+            } => self.memory_overlaps(start, end_exclusive)?,
+        };
+        rows.sort_unstable();
+        rows.dedup();
+        assert!(rows.len() <= max_rows, "mock posting exceeded test budget");
+        Ok(rows)
     }
 }
 
@@ -554,6 +635,40 @@ fn every_structured_field_uses_approved_range_and_match_semantics() {
 }
 
 #[test]
+fn noncontiguous_register_observation_owners_preserve_all_reads_and_writes() {
+    let mut store = FixtureStore::new();
+    store.observations = vec![
+        store.observations[0],
+        store.observations[2],
+        store.observations[1],
+        store.observations[3],
+    ];
+    let context = Arc::new(QueryContext::new(Arc::new(store)).unwrap());
+    for (reads, writes, expected) in [
+        (vec![RegisterSlot::X0], vec![], vec![0]),
+        (vec![], vec![RegisterSlot::X1], vec![0]),
+        (vec![RegisterSlot::X2], vec![], vec![1]),
+        (vec![], vec![RegisterSlot::X3], vec![1]),
+    ] {
+        let projection = TimelineProjection::new(
+            context.clone(),
+            EventFilter {
+                register: RegisterFilter { reads, writes },
+                ..EventFilter::default()
+            },
+        )
+        .unwrap();
+        let actual = query_events(&projection, None, 10)
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| row.source_row())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
 fn values_within_a_field_are_ored_and_populated_fields_are_anded() {
     assert_eq!(
         ordinals(EventFilter {
@@ -665,7 +780,7 @@ fn cursor_accepts_equivalent_union_normal_forms_for_ranges_and_memory_directions
             memory: vec![
                 MemoryFilter {
                     range: AddressRange::new(0x2000, 0x2005).unwrap(),
-                    directions: vec![MemoryDirection::Read],
+                    directions: vec![MemoryDirection::Read, MemoryDirection::ReadWrite],
                 },
                 MemoryFilter {
                     range: AddressRange::new(0x2000, 0x2005).unwrap(),
