@@ -10,10 +10,10 @@ use crate::ArtifactSource;
 
 use super::{
     BuildOptions, ByteArena, CompletenessRow, DefinitionRow, EventColumn, IndexCatalog, IndexError,
-    InstructionRow, MemoryRow, ModuleRow, NormalizedCatalog, OwnedTraceStore, SemanticRow,
-    SortedMap, SourceKeyRow, checkpoints::RegisterAccess, checkpoints::RegisterObservationRow,
-    intervals::IntervalEntry, intervals::IntervalIndex, postings::PostingList,
-    validation::validate_external_payload_tag,
+    InstructionRow, MemoryRow, ModuleRow, NormalizedCatalog, NormalizedSourceFormat,
+    OwnedTraceStore, SemanticRow, SortedMap, SourceKeyRow, checkpoints::RegisterAccess,
+    checkpoints::RegisterObservationRow, intervals::IntervalEntry, intervals::IntervalIndex,
+    postings::PostingList, validation::validate_external_payload_tag,
 };
 
 pub struct IndexBuilder;
@@ -35,6 +35,7 @@ impl IndexBuilder {
         options: &BuildOptions,
         guard: &dyn WorkGuard,
     ) -> Result<OwnedTraceStore, IndexError> {
+        let source_format = NormalizedSourceFormat::parse(&provider.identity().format)?;
         let mut capabilities = provider.capabilities().clone();
         let mut cursor = {
             let resident = provider.cursor_resident_bytes()?;
@@ -55,7 +56,7 @@ impl IndexBuilder {
         guard.consume(WorkDelta::default())?;
         state.append_completeness(summary.completeness, guard)?;
         capabilities.full_register_checkpoint &= state.saw_complete_checkpoint;
-        state.finish(capabilities, options, guard)
+        state.finish(capabilities, options, source_format, guard)
     }
 }
 
@@ -573,6 +574,7 @@ impl<'a> BuildState<'a> {
         self,
         mut capabilities: ProviderCapabilities,
         options: &BuildOptions,
+        source_format: NormalizedSourceFormat,
         guard: &dyn WorkGuard,
     ) -> Result<OwnedTraceStore, IndexError> {
         capabilities.register_read_write_observation &= self.saw_register_observation;
@@ -613,7 +615,7 @@ impl<'a> BuildState<'a> {
             indexes,
         };
         guard.consume(WorkDelta::default())?;
-        OwnedTraceStore::new(self.keys, self.kinds, catalog, guard)
+        OwnedTraceStore::new(self.keys, self.kinds, catalog, source_format, guard)
     }
 }
 
@@ -2031,6 +2033,7 @@ mod tests {
                     loss_and_damage_ranges: false,
                 },
                 &options,
+                super::NormalizedSourceFormat::Other,
                 &guard,
             )
             .expect("finish");

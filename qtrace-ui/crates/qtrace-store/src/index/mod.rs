@@ -44,15 +44,22 @@ pub(crate) fn validate_binary_sections(
     guard: &dyn WorkGuard,
 ) -> Result<ValidatedCatalog, IndexError> {
     let catalog = wire::decode(sections, keys, kinds, source_format, true, guard)?;
-    Ok(ValidatedCatalog(crate::allocation::try_box(
-        catalog,
-        guard,
-        "validated normalized catalog",
-    )?))
+    let source_format = NormalizedSourceFormat::parse(source_format)?;
+    let content_identity =
+        derive_normalized_content_identity(&catalog, keys, kinds, source_format, guard)?;
+    Ok(ValidatedCatalog {
+        catalog: crate::allocation::try_box(catalog, guard, "validated normalized catalog")?,
+        content_identity,
+        source_format,
+    })
 }
 
 #[derive(Debug)]
-pub(crate) struct ValidatedCatalog(Box<NormalizedCatalog>);
+pub(crate) struct ValidatedCatalog {
+    catalog: Box<NormalizedCatalog>,
+    content_identity: NormalizedContentIdentity,
+    source_format: NormalizedSourceFormat,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexError {
@@ -216,7 +223,7 @@ impl BuildOptions {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct ByteSpan {
     offset: u64,
     length: u64,
@@ -596,12 +603,52 @@ pub struct NormalizedLayoutIdentity {
 }
 
 impl NormalizedLayoutIdentity {
+    pub const fn new(schema_version: u32, layout_fingerprint: [u8; 32]) -> Self {
+        Self {
+            schema_version,
+            layout_fingerprint,
+        }
+    }
+
     pub const fn schema_version(self) -> u32 {
         self.schema_version
     }
 
     pub const fn layout_fingerprint(self) -> [u8; 32] {
         self.layout_fingerprint
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NormalizedSourceFormat {
+    Qtrb,
+    Flight,
+    Other,
+}
+
+impl NormalizedSourceFormat {
+    pub(crate) fn parse(value: &str) -> Result<Self, IndexError> {
+        if value.eq_ignore_ascii_case("qtrb") {
+            Ok(Self::Qtrb)
+        } else if value.eq_ignore_ascii_case("flight") {
+            Ok(Self::Flight)
+        } else {
+            Ok(Self::Other)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct NormalizedContentIdentity([u8; 32]);
+
+impl NormalizedContentIdentity {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -731,6 +778,225 @@ struct NormalizedCatalog {
     observations: Vec<RegisterObservationRow>,
     completeness: Vec<CompletenessRow>,
     indexes: IndexCatalog,
+}
+
+struct GuardedDigest<'a> {
+    digest: Sha256,
+    guard: &'a dyn WorkGuard,
+    pending_bytes: usize,
+}
+
+impl GuardedDigest<'_> {
+    fn bytes(&mut self, mut bytes: &[u8]) -> Result<(), IndexError> {
+        while !bytes.is_empty() {
+            let count = bytes.len().min(4096 - self.pending_bytes);
+            self.digest.update(&bytes[..count]);
+            self.pending_bytes += count;
+            bytes = &bytes[count..];
+            if self.pending_bytes == 4096 {
+                self.guard.consume(WorkDelta {
+                    input_bytes: 4096,
+                    ..WorkDelta::default()
+                })?;
+                self.pending_bytes = 0;
+            }
+        }
+        Ok(())
+    }
+
+    fn u8(&mut self, value: u8) -> Result<(), IndexError> {
+        self.bytes(&[value])
+    }
+
+    fn u16(&mut self, value: u16) -> Result<(), IndexError> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn u32(&mut self, value: u32) -> Result<(), IndexError> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn u64(&mut self, value: u64) -> Result<(), IndexError> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn usize(&mut self, value: usize) -> Result<(), IndexError> {
+        self.u64(
+            u64::try_from(value).map_err(|_| {
+                IndexError::resource("normalized digest row index does not fit u64")
+            })?,
+        )
+    }
+
+    fn option_u32(&mut self, value: Option<u32>) -> Result<(), IndexError> {
+        self.u8(u8::from(value.is_some()))?;
+        self.u32(value.unwrap_or_default())
+    }
+
+    fn option_u64(&mut self, value: Option<u64>) -> Result<(), IndexError> {
+        self.u8(u8::from(value.is_some()))?;
+        self.u64(value.unwrap_or_default())
+    }
+
+    fn finish(self) -> Result<NormalizedContentIdentity, IndexError> {
+        if self.pending_bytes != 0 {
+            self.guard.consume(WorkDelta {
+                input_bytes: self.pending_bytes as u64,
+                ..WorkDelta::default()
+            })?;
+        }
+        Ok(NormalizedContentIdentity(self.digest.finalize().into()))
+    }
+}
+
+fn derive_normalized_content_identity(
+    catalog: &NormalizedCatalog,
+    keys: &[EventKey],
+    kinds: &[EventKind],
+    source_format: NormalizedSourceFormat,
+    guard: &dyn WorkGuard,
+) -> Result<NormalizedContentIdentity, IndexError> {
+    let mut out = GuardedDigest {
+        digest: Sha256::new(),
+        guard,
+        pending_bytes: 0,
+    };
+    out.bytes(b"qtrace-store/normalized-content/v1\0sha256\0canonical-logical-catalog")?;
+    out.u32(catalog.schema)?;
+    out.u8(match source_format {
+        NormalizedSourceFormat::Qtrb => 0,
+        NormalizedSourceFormat::Flight => 1,
+        NormalizedSourceFormat::Other => 2,
+    })?;
+
+    out.usize(keys.len())?;
+    for (key, kind) in keys.iter().zip(kinds) {
+        out.bytes(key.artifact.as_bytes())?;
+        out.u64(key.timeline.0)?;
+        out.u64(key.record_ordinal)?;
+        out.u64(key.source_offset)?;
+        out.option_u64(key.sequence)?;
+        out.option_u32(key.tid)?;
+        out.u8(crate::layout::encode_event_kind(*kind))?;
+    }
+
+    for bit in [
+        catalog.capabilities.global_ordering,
+        catalog.capabilities.per_thread_ordering,
+        catalog.capabilities.full_register_checkpoint,
+        catalog.capabilities.register_read_write_observation,
+        catalog.capabilities.memory_metadata,
+        catalog.capabilities.memory_before_after,
+        catalog.capabilities.lifecycle,
+        catalog.capabilities.signal_and_termination,
+        catalog.capabilities.loss_and_damage_ranges,
+    ] {
+        out.u8(u8::from(bit))?;
+    }
+    out.usize(catalog.events.len())?;
+    for row in &catalog.events {
+        out.u64(row.timeline)?;
+        out.option_u32(row.tid)?;
+        out.option_u64(row.sequence)?;
+        match row.scope {
+            EventScope::Artifact => out.u8(0)?,
+            EventScope::FlightChunk {
+                chunk_index,
+                generation,
+                tid,
+            } => {
+                out.u8(1)?;
+                out.u32(chunk_index)?;
+                out.u32(generation)?;
+                out.u32(tid)?;
+            }
+        }
+        out.u8(wire::provenance(row.provenance))?;
+        out.u32(row.payload_blob)?;
+    }
+    for arena in [&catalog.payloads, &catalog.strings, &catalog.blobs] {
+        out.usize(arena.spans().len())?;
+        for span in arena.spans() {
+            out.u64(span.length)?;
+        }
+        out.usize(arena.bytes.as_slice().len())?;
+        out.bytes(arena.bytes.as_slice())?;
+    }
+    out.usize(catalog.modules.len())?;
+    for row in &catalog.modules {
+        out.usize(row.source_event_row)?;
+        out.u8(wire::provenance(row.provenance))?;
+        out.u32(row.source_id)?;
+        out.u64(row.base)?;
+        out.u32(row.name)?;
+    }
+    out.usize(catalog.definitions.len())?;
+    for row in &catalog.definitions {
+        out.usize(row.source_event_row)?;
+        out.u8(wire::provenance(row.provenance))?;
+        out.u32(row.source_id)?;
+        out.u32(row.opcode)?;
+        out.u64(row.read_mask)?;
+        out.u64(row.write_mask)?;
+        out.u64(row.pc_displacement as u64)?;
+        out.u32(row.flags)?;
+        out.u8(wire::pc_kind(row.pc_kind))?;
+        out.u8(row.condition)?;
+        out.u8(u8::from(row.slow_memory_path))?;
+        out.u32(row.mnemonic)?;
+        out.u32(row.operands)?;
+        out.u32(row.disassembly)?;
+        out.u32(row.exact_blob)?;
+    }
+    out.usize(catalog.instructions.len())?;
+    for row in &catalog.instructions {
+        out.usize(row.owner_row)?;
+        out.option_u32(row.module)?;
+        out.u64(row.relative_pc)?;
+        out.option_u32(row.definition)?;
+    }
+    out.usize(catalog.memories.len())?;
+    for row in &catalog.memories {
+        out.usize(row.owner_row)?;
+        out.option_u32(row.module)?;
+        out.u64(row.relative_pc)?;
+        out.u64(row.address)?;
+        out.u64(row.end_exclusive)?;
+        out.u32(row.size)?;
+        out.u8(wire::memory_direction(row.direction))?;
+        out.u8(u8::from(row.metadata_available))?;
+        out.u16(row.flags)?;
+        out.u64(row.value)?;
+        out.u32(row.before_blob)?;
+        out.u32(row.after_blob)?;
+    }
+    out.usize(catalog.semantics.len())?;
+    for row in &catalog.semantics {
+        out.usize(row.owner_row)?;
+        out.option_u32(row.category)?;
+        out.u32(row.name)?;
+        out.u32(row.detail_blob)?;
+    }
+    out.usize(catalog.observations.len())?;
+    for row in &catalog.observations {
+        out.usize(row.owner_row)?;
+        out.u8(row.slot)?;
+        out.u8(row.captured_width)?;
+        out.u8(wire::register_access(row.access))?;
+        out.u64(row.value)?;
+        out.u8(wire::provenance(row.provenance))?;
+    }
+    out.usize(catalog.completeness.len())?;
+    for row in &catalog.completeness {
+        out.u8(wire::range_domain(row.domain))?;
+        let (kind, start, end) = wire::range_bounds(row.bounds);
+        out.u8(kind)?;
+        out.u64(start)?;
+        out.u64(end)?;
+        out.u8(wire::provenance(row.provenance))?;
+        out.u8(wire::completeness_cause(row.cause))?;
+    }
+    out.finish()
 }
 
 impl NormalizedCatalog {
@@ -880,7 +1146,6 @@ fn checkpoint_chunks(rows: usize, guard: &dyn WorkGuard) -> Result<(), IndexErro
 
 /// Stable, read-only normalized facts and eager-index primitives shared by owned and mapped stores.
 pub trait TraceStoreView {
-    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity;
     fn event_count(&self) -> usize;
     fn event_key(&self, row: usize) -> Result<Option<EventKey>, IndexError>;
     fn event_kind(&self, row: usize) -> Result<Option<EventKind>, IndexError>;
@@ -896,14 +1161,6 @@ pub trait TraceStoreView {
     fn memory_after_bytes(&self, event_row: usize) -> Result<Option<&[u8]>, IndexError>;
     fn module(&self, module: u32) -> Option<&ModuleRow>;
     fn definition(&self, definition: u32) -> Option<&DefinitionRow>;
-    fn module_rows(&self) -> &[ModuleRow];
-    fn definition_rows(&self) -> &[DefinitionRow];
-    fn instruction_rows(&self) -> &[InstructionRow];
-    fn memory_rows(&self) -> &[MemoryRow];
-    fn semantic_rows(&self) -> &[SemanticRow];
-    fn register_observation_rows(&self) -> &[RegisterObservationRow];
-    fn string_count(&self) -> usize;
-    fn blob_count(&self) -> usize;
     fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow>;
     fn completeness(&self) -> &[CompletenessRow];
     fn rows_for_timeline(&self, timeline: u64) -> Result<Vec<usize>, IndexError>;
@@ -933,6 +1190,51 @@ pub trait TraceStoreView {
     fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError>;
 }
 
+/// Optional zero-copy normalized catalog seam for consumers that need bulk analysis.
+pub trait NormalizedBulkView: TraceStoreView {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity;
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity;
+    fn normalized_source_format(&self) -> NormalizedSourceFormat;
+    fn module_rows(&self) -> &[ModuleRow];
+    fn definition_rows(&self) -> &[DefinitionRow];
+    fn instruction_rows(&self) -> &[InstructionRow];
+    fn memory_rows(&self) -> &[MemoryRow];
+    fn semantic_rows(&self) -> &[SemanticRow];
+    fn register_observation_rows(&self) -> &[RegisterObservationRow];
+    fn string_count(&self) -> usize;
+    fn blob_count(&self) -> usize;
+    fn bounded_rows(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<Vec<usize>, IndexError>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum NormalizedPostingQuery<'a> {
+    Tids(&'a [u32]),
+    Kinds(&'a [EventKind]),
+    Modules(&'a [u32]),
+    Sequence {
+        start: u64,
+        end_exclusive: u64,
+    },
+    ModulePc {
+        module: u32,
+        start: u64,
+        end_exclusive: u64,
+    },
+    Definitions(&'a [u32]),
+    Registers(&'a [RegisterSlot]),
+    SemanticCategories(&'a [&'a [u8]]),
+    SemanticNames(&'a [&'a [u8]]),
+    Memory {
+        start: u64,
+        end_exclusive: u64,
+    },
+}
+
 fn rows_for_posting_keys<K: Ord>(
     map: &SortedMap<K, PostingList>,
     keys: &[K],
@@ -943,6 +1245,131 @@ fn rows_for_posting_keys<K: Ord>(
         .map(PostingList::rows)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(postings::union_rows(&lists))
+}
+
+fn bounded_posting_union(
+    lists: &[&PostingList],
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, IndexError> {
+    let total = lists.iter().try_fold(0_usize, |total, list| {
+        total.checked_add(list.deltas().len())
+    });
+    let Some(total) = total.filter(|total| *total <= max_rows) else {
+        return Err(IndexError::resource(
+            "bounded posting result exceeds row limit",
+        ));
+    };
+    guard.consume(WorkDelta::default())?;
+    let mut rows = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut rows,
+        total,
+        guard,
+        "bounded posting decode allocation",
+    )?;
+    for list in lists {
+        let mut previous = None::<u64>;
+        for (index, delta) in list.deltas().iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            if delta == 0 {
+                return Err(IndexError::corrupt("posting delta is zero"));
+            }
+            let row = match previous {
+                None => delta
+                    .checked_sub(1)
+                    .ok_or_else(|| IndexError::corrupt("first posting delta underflow"))?,
+                Some(previous) => previous
+                    .checked_add(delta)
+                    .ok_or_else(|| IndexError::corrupt("posting delta overflow"))?,
+            };
+            rows.push(
+                usize::try_from(row)
+                    .map_err(|_| IndexError::corrupt("posting row does not fit usize"))?,
+            );
+            previous = Some(row);
+        }
+    }
+    builder::cancellable_sort_by(&mut rows, guard, usize::cmp)?;
+    rows.dedup();
+    Ok(rows)
+}
+
+fn bounded_map_rows<'a, K, I>(
+    map: &'a SortedMap<K, PostingList>,
+    keys: I,
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, IndexError>
+where
+    K: Ord + 'a,
+    I: Iterator<Item = K> + Clone,
+{
+    let mut encoded_rows = 0_usize;
+    for key in keys.clone() {
+        guard.consume(WorkDelta::default())?;
+        if let Some(list) = map.get(&key) {
+            encoded_rows = encoded_rows
+                .checked_add(list.deltas().len())
+                .ok_or_else(|| IndexError::resource("bounded posting row count overflow"))?;
+            if encoded_rows > max_rows {
+                return Err(IndexError::resource(
+                    "bounded posting result exceeds row limit",
+                ));
+            }
+        }
+    }
+    let mut lists = Vec::new();
+    for key in keys {
+        guard.consume(WorkDelta::default())?;
+        if let Some(list) = map.get(&key) {
+            crate::allocation::try_reserve_vec(
+                &mut lists,
+                1,
+                guard,
+                "bounded posting list references",
+            )?;
+            lists.push(list);
+        }
+    }
+    bounded_posting_union(&lists, max_rows, guard)
+}
+
+fn bounded_pair_rows(
+    rows: &[(u64, usize)],
+    start: u64,
+    end: u64,
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, IndexError> {
+    if start >= end {
+        return Ok(Vec::new());
+    }
+    let first = rows.partition_point(|(value, _)| *value < start);
+    let last = rows.partition_point(|(value, _)| *value < end);
+    let count = last - first;
+    if count > max_rows {
+        return Err(IndexError::resource(
+            "bounded posting result exceeds row limit",
+        ));
+    }
+    guard.consume(WorkDelta::default())?;
+    let mut result = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut result,
+        count,
+        guard,
+        "bounded pair posting allocation",
+    )?;
+    for (index, (_, row)) in rows[first..last].iter().enumerate() {
+        if index % 4096 == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        result.push(*row);
+    }
+    Ok(result)
 }
 
 fn rows_for_semantic_bytes(
@@ -1021,6 +1448,8 @@ fn rows_for_module_pc(
 pub struct OwnedTraceStore {
     base: OwnedStoreView,
     catalog: Box<NormalizedCatalog>,
+    content_identity: NormalizedContentIdentity,
+    source_format: NormalizedSourceFormat,
 }
 
 impl OwnedTraceStore {
@@ -1028,12 +1457,17 @@ impl OwnedTraceStore {
         keys: Vec<EventKey>,
         kinds: Vec<EventKind>,
         catalog: NormalizedCatalog,
+        source_format: NormalizedSourceFormat,
         guard: &dyn WorkGuard,
     ) -> Result<Self, IndexError> {
         catalog.validate(&keys, &kinds, guard)?;
+        let content_identity =
+            derive_normalized_content_identity(&catalog, &keys, &kinds, source_format, guard)?;
         Ok(Self {
             base: OwnedStoreView::new(keys, kinds)?,
             catalog: crate::allocation::try_box(catalog, guard, "owned normalized catalog")?,
+            content_identity,
+            source_format,
         })
     }
 
@@ -1141,15 +1575,26 @@ impl OwnedTraceStore {
 pub struct MappedTraceStore {
     view: MappedStoreView,
     catalog: Box<NormalizedCatalog>,
+    content_identity: NormalizedContentIdentity,
+    source_format: NormalizedSourceFormat,
 }
 
 impl MappedTraceStore {
     fn open(mut view: MappedStoreView, guard: &dyn WorkGuard) -> Result<Self, IndexError> {
         guard.consume(WorkDelta::default())?;
-        let ValidatedCatalog(catalog) = view.take_validated_catalog().ok_or_else(|| {
+        let ValidatedCatalog {
+            catalog,
+            content_identity,
+            source_format,
+        } = view.take_validated_catalog().ok_or_else(|| {
             IndexError::corrupt("schema-two cache did not transfer its validated catalog")
         })?;
-        Ok(Self { view, catalog })
+        Ok(Self {
+            view,
+            catalog,
+            content_identity,
+            source_format,
+        })
     }
 
     pub fn event_count(&self) -> usize {
@@ -1199,6 +1644,8 @@ pub enum TraceStore {
 
 trait HasNormalizedCatalog {
     fn normalized_catalog(&self) -> &NormalizedCatalog;
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity;
+    fn normalized_source_format(&self) -> NormalizedSourceFormat;
     fn base_event_count(&self) -> usize;
     fn base_event_key(&self, row: usize) -> Result<EventKey, IndexError>;
     fn base_event_kind(&self, row: usize) -> Result<EventKind, IndexError>;
@@ -1207,6 +1654,12 @@ trait HasNormalizedCatalog {
 impl HasNormalizedCatalog for OwnedTraceStore {
     fn normalized_catalog(&self) -> &NormalizedCatalog {
         &self.catalog
+    }
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity {
+        self.content_identity
+    }
+    fn normalized_source_format(&self) -> NormalizedSourceFormat {
+        self.source_format
     }
     fn base_event_count(&self) -> usize {
         self.base.event_count()
@@ -1222,6 +1675,12 @@ impl HasNormalizedCatalog for OwnedTraceStore {
 impl HasNormalizedCatalog for MappedTraceStore {
     fn normalized_catalog(&self) -> &NormalizedCatalog {
         &self.catalog
+    }
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity {
+        self.content_identity
+    }
+    fn normalized_source_format(&self) -> NormalizedSourceFormat {
+        self.source_format
     }
     fn base_event_count(&self) -> usize {
         self.view.event_count()
@@ -1239,6 +1698,18 @@ impl HasNormalizedCatalog for TraceStore {
         match self {
             Self::Owned(store) => &store.catalog,
             Self::Mapped(store) => &store.catalog,
+        }
+    }
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity {
+        match self {
+            Self::Owned(store) => store.content_identity,
+            Self::Mapped(store) => store.content_identity,
+        }
+    }
+    fn normalized_source_format(&self) -> NormalizedSourceFormat {
+        match self {
+            Self::Owned(store) => store.source_format,
+            Self::Mapped(store) => store.source_format,
         }
     }
     fn base_event_count(&self) -> usize {
@@ -1262,12 +1733,6 @@ impl HasNormalizedCatalog for TraceStore {
 }
 
 impl<T: HasNormalizedCatalog> TraceStoreView for T {
-    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
-        NormalizedLayoutIdentity {
-            schema_version: self.normalized_catalog().schema,
-            layout_fingerprint: NORMALIZED_LAYOUT_FINGERPRINT,
-        }
-    }
     fn event_count(&self) -> usize {
         self.base_event_count()
     }
@@ -1375,30 +1840,6 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
             .definitions
             .get(definition as usize)
     }
-    fn module_rows(&self) -> &[ModuleRow] {
-        &self.normalized_catalog().modules
-    }
-    fn definition_rows(&self) -> &[DefinitionRow] {
-        &self.normalized_catalog().definitions
-    }
-    fn instruction_rows(&self) -> &[InstructionRow] {
-        &self.normalized_catalog().instructions
-    }
-    fn memory_rows(&self) -> &[MemoryRow] {
-        &self.normalized_catalog().memories
-    }
-    fn semantic_rows(&self) -> &[SemanticRow] {
-        &self.normalized_catalog().semantics
-    }
-    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
-        &self.normalized_catalog().observations
-    }
-    fn string_count(&self) -> usize {
-        self.normalized_catalog().strings.spans().len()
-    }
-    fn blob_count(&self) -> usize {
-        self.normalized_catalog().blobs.spans().len()
-    }
     fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow> {
         self.normalized_catalog()
             .observations
@@ -1477,6 +1918,166 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
     }
     fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
         TraceStoreView::event_key(self, row)
+    }
+}
+
+impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
+        NormalizedLayoutIdentity::new(
+            self.normalized_catalog().schema,
+            NORMALIZED_LAYOUT_FINGERPRINT,
+        )
+    }
+
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity {
+        HasNormalizedCatalog::normalized_content_identity(self)
+    }
+
+    fn normalized_source_format(&self) -> NormalizedSourceFormat {
+        HasNormalizedCatalog::normalized_source_format(self)
+    }
+
+    fn module_rows(&self) -> &[ModuleRow] {
+        &self.normalized_catalog().modules
+    }
+    fn definition_rows(&self) -> &[DefinitionRow] {
+        &self.normalized_catalog().definitions
+    }
+    fn instruction_rows(&self) -> &[InstructionRow] {
+        &self.normalized_catalog().instructions
+    }
+    fn memory_rows(&self) -> &[MemoryRow] {
+        &self.normalized_catalog().memories
+    }
+    fn semantic_rows(&self) -> &[SemanticRow] {
+        &self.normalized_catalog().semantics
+    }
+    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+        &self.normalized_catalog().observations
+    }
+    fn string_count(&self) -> usize {
+        self.normalized_catalog().strings.spans().len()
+    }
+    fn blob_count(&self) -> usize {
+        self.normalized_catalog().blobs.spans().len()
+    }
+
+    fn bounded_rows(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<Vec<usize>, IndexError> {
+        let catalog = self.normalized_catalog();
+        match query {
+            NormalizedPostingQuery::Tids(values) => bounded_map_rows(
+                &catalog.indexes.tid,
+                values.iter().copied(),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Kinds(values) => bounded_map_rows(
+                &catalog.indexes.kind,
+                values
+                    .iter()
+                    .map(|kind| crate::layout::encode_event_kind(*kind)),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Modules(values) => bounded_map_rows(
+                &catalog.indexes.module,
+                values.iter().copied(),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Sequence {
+                start,
+                end_exclusive,
+            } => bounded_pair_rows(
+                &catalog.indexes.sequence,
+                start,
+                end_exclusive,
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::ModulePc {
+                module,
+                start,
+                end_exclusive,
+            } => bounded_pair_rows(
+                catalog
+                    .indexes
+                    .module_pc
+                    .get(&module)
+                    .map_or(&[], Vec::as_slice),
+                start,
+                end_exclusive,
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Definitions(values) => bounded_map_rows(
+                &catalog.indexes.definition,
+                values.iter().copied(),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Registers(values) => bounded_map_rows(
+                &catalog.indexes.register,
+                values.iter().map(|slot| slot.index() as u8),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::SemanticCategories(values) => {
+                bounded_semantic_rows(catalog, values, true, max_rows, guard)
+            }
+            NormalizedPostingQuery::SemanticNames(values) => {
+                bounded_semantic_rows(catalog, values, false, max_rows, guard)
+            }
+            NormalizedPostingQuery::Memory {
+                start,
+                end_exclusive,
+            } => catalog
+                .indexes
+                .memory
+                .overlaps_bounded(start, end_exclusive, max_rows, guard),
+        }
+    }
+}
+
+fn bounded_semantic_rows(
+    catalog: &NormalizedCatalog,
+    values: &[&[u8]],
+    categories: bool,
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, IndexError> {
+    let mut ids = Vec::new();
+    crate::allocation::try_reserve_vec(&mut ids, values.len(), guard, "bounded semantic IDs")?;
+    for value in values {
+        for (id, _) in catalog.strings.spans().iter().enumerate() {
+            if id % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            if catalog.strings.get(id as u32)? == *value {
+                ids.push(id as u32);
+                break;
+            }
+        }
+    }
+    if categories {
+        bounded_map_rows(
+            &catalog.indexes.semantic_category,
+            ids.into_iter(),
+            max_rows,
+            guard,
+        )
+    } else {
+        bounded_map_rows(
+            &catalog.indexes.semantic_name,
+            ids.into_iter(),
+            max_rows,
+            guard,
+        )
     }
 }
 

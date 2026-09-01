@@ -137,4 +137,66 @@ impl IntervalIndex {
         rows.dedup();
         Ok(rows)
     }
+
+    pub(crate) fn overlaps_bounded(
+        &self,
+        start: u64,
+        end: u64,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<Vec<usize>, IndexError> {
+        if start > end {
+            return Err(IndexError::invalid(
+                "memory query is not a valid half-open range",
+            ));
+        }
+        if start == end {
+            return Ok(Vec::new());
+        }
+        let upper = self.entries.partition_point(|entry| entry.start < end);
+        if upper == 0 {
+            return Ok(Vec::new());
+        }
+        let first_block = self
+            .block_prefix_max_end
+            .partition_point(|maximum| *maximum <= start);
+        let mut first = first_block.saturating_mul(self.block_rows).min(upper);
+        while first < upper && self.prefix_max_end[first] <= start {
+            first += 1;
+        }
+        let mut count = 0_usize;
+        for (index, entry) in self.entries[first..upper].iter().enumerate() {
+            if index % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            if entry.end_exclusive > start {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| IndexError::resource("memory result count overflow"))?;
+                if count > max_rows {
+                    return Err(IndexError::resource(
+                        "bounded memory result exceeds row limit",
+                    ));
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        crate::allocation::try_reserve_vec(
+            &mut rows,
+            count,
+            guard,
+            "bounded memory result allocation",
+        )?;
+        for (index, entry) in self.entries[first..upper].iter().enumerate() {
+            if index % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            if entry.end_exclusive > start {
+                rows.push(entry.row);
+            }
+        }
+        super::builder::cancellable_sort_by(&mut rows, guard, usize::cmp)?;
+        rows.dedup();
+        Ok(rows)
+    }
 }

@@ -695,7 +695,7 @@ fn checkpoint(guard: &dyn WorkGuard, index: usize) -> Result<(), IndexError> {
     }
     Ok(())
 }
-fn provenance(v: Provenance) -> u8 {
+pub(super) fn provenance(v: Provenance) -> u8 {
     match v {
         Provenance::Captured => 0,
         Provenance::Derived => 1,
@@ -704,14 +704,14 @@ fn provenance(v: Provenance) -> u8 {
         Provenance::Damaged => 4,
     }
 }
-fn pc_kind(v: PcRelativeKind) -> u8 {
+pub(super) fn pc_kind(v: PcRelativeKind) -> u8 {
     match v {
         PcRelativeKind::None => 0,
         PcRelativeKind::Instruction => 1,
         PcRelativeKind::Page => 2,
     }
 }
-fn memory_direction(v: MemoryDirection) -> u8 {
+pub(super) fn memory_direction(v: MemoryDirection) -> u8 {
     match v {
         MemoryDirection::Read => 0,
         MemoryDirection::Write => 1,
@@ -719,7 +719,7 @@ fn memory_direction(v: MemoryDirection) -> u8 {
         MemoryDirection::Unknown => 3,
     }
 }
-fn register_access(v: RegisterAccess) -> u8 {
+pub(super) fn register_access(v: RegisterAccess) -> u8 {
     match v {
         RegisterAccess::Read => 0,
         RegisterAccess::Write => 1,
@@ -727,14 +727,14 @@ fn register_access(v: RegisterAccess) -> u8 {
         RegisterAccess::Delta => 3,
     }
 }
-fn range_domain(v: RangeDomain) -> u8 {
+pub(super) fn range_domain(v: RangeDomain) -> u8 {
     match v {
         RangeDomain::CapturedSequence => 0,
         RangeDomain::SourceBytes => 1,
         RangeDomain::MemoryAddresses => 2,
     }
 }
-fn range_bounds(v: RangeBounds) -> (u8, u64, u64) {
+pub(super) fn range_bounds(v: RangeBounds) -> (u8, u64, u64) {
     match v {
         RangeBounds::InclusiveSequence { first, last } => (0, first, last),
         RangeBounds::HalfOpen {
@@ -743,7 +743,7 @@ fn range_bounds(v: RangeBounds) -> (u8, u64, u64) {
         } => (1, start, end_exclusive),
     }
 }
-fn completeness_cause(v: CompletenessCause) -> u8 {
+pub(super) fn completeness_cause(v: CompletenessCause) -> u8 {
     match v {
         CompletenessCause::Retained => 0,
         CompletenessCause::MissingTerminal => 1,

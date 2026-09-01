@@ -4,8 +4,8 @@ use qtrace_provider::{
     BudgetDimension, EventKind, OperationAbort, RegisterSlot, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
-    AuthorizedPath, BuildOptions, IndexBuilder, OpenPolicy, SessionLoader, TraceStore,
-    TraceStoreView,
+    AuthorizedPath, BuildOptions, IndexBuilder, NormalizedBulkView, NormalizedPostingQuery,
+    NormalizedSourceFormat, OpenPolicy, SessionLoader, TraceStore, TraceStoreView,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -33,6 +33,32 @@ struct AllocationProbe {
 struct RejectAllocation {
     watched: u64,
     rejected_count: Mutex<usize>,
+}
+
+struct CancelWithoutAllocation {
+    allocation_calls: Mutex<usize>,
+}
+
+impl WorkGuard for CancelWithoutAllocation {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.resident_bytes != 0 {
+            *self.allocation_calls.lock().expect("allocation calls") += 1;
+        }
+        Err(OperationAbort::Cancelled)
+    }
+}
+
+struct RecordAllocations {
+    allocation_calls: Mutex<usize>,
+}
+
+impl WorkGuard for RecordAllocations {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.resident_bytes != 0 {
+            *self.allocation_calls.lock().expect("allocation calls") += 1;
+        }
+        Ok(())
+    }
 }
 
 impl WorkGuard for RejectAllocation {
@@ -577,8 +603,8 @@ fn normalized_row_views_and_layout_identity_are_zero_copy_owned_mapped_equivalen
     let root = private_root();
     let mapped =
         TraceStore::open_or_build(root.path(), source, &options, &AllowAll).expect("mapped store");
-    let owned: &dyn TraceStoreView = &owned;
-    let mapped: &dyn TraceStoreView = &mapped;
+    let owned: &dyn NormalizedBulkView = &owned;
+    let mapped: &dyn NormalizedBulkView = &mapped;
 
     assert_eq!(
         owned.normalized_layout_identity(),
@@ -595,6 +621,18 @@ fn normalized_row_views_and_layout_identity_are_zero_copy_owned_mapped_equivalen
     );
     assert_eq!(owned.string_count(), mapped.string_count());
     assert_eq!(owned.blob_count(), mapped.blob_count());
+    assert_eq!(
+        owned.normalized_content_identity(),
+        mapped.normalized_content_identity()
+    );
+    assert_eq!(
+        owned.normalized_source_format(),
+        NormalizedSourceFormat::Qtrb
+    );
+    assert_eq!(
+        mapped.normalized_source_format(),
+        NormalizedSourceFormat::Qtrb
+    );
 
     assert!(
         owned
@@ -638,6 +676,54 @@ fn normalized_row_views_and_layout_identity_are_zero_copy_owned_mapped_equivalen
             mapped.blob_bytes(id as u32).expect("mapped blob")
         );
     }
+}
+
+#[test]
+fn bounded_postings_reject_oversize_and_cancel_before_row_allocation() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let store =
+        IndexBuilder::build(source, &BuildOptions::default(), &AllowAll).expect("owned store");
+    let view: &dyn NormalizedBulkView = &store;
+    let tid = view
+        .event_key(0)
+        .expect("event key")
+        .and_then(|key| key.tid)
+        .expect("fixture tid");
+
+    let allocations = RecordAllocations {
+        allocation_calls: Mutex::new(0),
+    };
+    let error = view
+        .bounded_rows(NormalizedPostingQuery::Tids(&[tid]), 0, &allocations)
+        .expect_err("nonempty posting exceeds zero row budget");
+    assert_eq!(error.code(), "control.resource_exhausted");
+    assert_eq!(*allocations.allocation_calls.lock().unwrap(), 0);
+
+    let cancelled = CancelWithoutAllocation {
+        allocation_calls: Mutex::new(0),
+    };
+    let error = view
+        .bounded_rows(
+            NormalizedPostingQuery::Sequence {
+                start: 0,
+                end_exclusive: u64::MAX,
+            },
+            usize::MAX,
+            &cancelled,
+        )
+        .expect_err("cancel before posting copy");
+    assert_eq!(error.code(), "job.cancelled");
+    assert_eq!(*cancelled.allocation_calls.lock().unwrap(), 0);
 }
 
 #[test]

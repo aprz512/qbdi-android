@@ -17,9 +17,10 @@ pub use cache::{
 pub use identity::{FileIdentity, SourceIdentity};
 pub use index::{
     BuildOptions, CompletenessRow, DefinitionRow, IndexBuilder, IndexError, InstructionRow,
-    MappedTraceStore, MemoryRow, ModuleRow, NormalizedLayoutIdentity, OwnedTraceStore, PostingList,
-    RegisterAccess, RegisterObservationRow, Rows, SemanticRow, TraceStore, TraceStoreView,
-    intersect_rows,
+    MappedTraceStore, MemoryRow, ModuleRow, NormalizedBulkView, NormalizedContentIdentity,
+    NormalizedLayoutIdentity, NormalizedPostingQuery, NormalizedSourceFormat, OwnedTraceStore,
+    PostingList, RegisterAccess, RegisterObservationRow, Rows, SemanticRow, TraceStore,
+    TraceStoreView, intersect_rows,
 };
 pub use session::{
     ArtifactFailure, ArtifactFormat, ArtifactMetadata, ArtifactSource, AuthorizedPath, OpenPolicy,
