@@ -864,26 +864,37 @@ fn planner_shared_budget_rejects_before_any_posting_decode() {
 }
 
 #[test]
-fn typed_store_node_abort_has_the_same_cpu_code_during_estimate_and_decode() {
-    for during_estimate in [true, false] {
-        let mut store = CountingStore::new(8, 9, false);
-        if during_estimate {
-            store.posting_count_abort = Some(qtrace_provider::BudgetDimension::Nodes);
-        } else {
-            store.posting_decode_abort = Some(qtrace_provider::BudgetDimension::Nodes);
+fn typed_store_aborts_have_stable_codes_during_estimate_and_decode() {
+    for (dimension, expected_code) in [
+        (
+            qtrace_provider::BudgetDimension::Nodes,
+            "analysis.cpu_budget_exceeded",
+        ),
+        (
+            qtrace_provider::BudgetDimension::ResidentBytes,
+            "analysis.resource_exhausted",
+        ),
+    ] {
+        for during_estimate in [true, false] {
+            let mut store = CountingStore::new(8, 9, false);
+            if during_estimate {
+                store.posting_count_abort = Some(dimension);
+            } else {
+                store.posting_decode_abort = Some(dimension);
+            }
+            let context = Arc::new(QueryContext::new(Arc::new(store)).unwrap());
+            let error = match TimelineProjection::new(
+                context,
+                EventFilter {
+                    tids: vec![7],
+                    ..EventFilter::default()
+                },
+            ) {
+                Ok(_) => panic!("typed store abort was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), expected_code);
         }
-        let context = Arc::new(QueryContext::new(Arc::new(store)).unwrap());
-        let error = match TimelineProjection::new(
-            context,
-            EventFilter {
-                tids: vec![7],
-                ..EventFilter::default()
-            },
-        ) {
-            Ok(_) => panic!("typed Nodes abort was accepted"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code(), "analysis.cpu_budget_exceeded");
     }
 }
 

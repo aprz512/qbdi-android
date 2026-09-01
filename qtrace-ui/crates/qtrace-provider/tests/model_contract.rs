@@ -197,59 +197,6 @@ fn external_payload_tags_have_one_exhaustive_provider_contract() {
 }
 
 #[test]
-fn discontinuity_wire_tokens_round_trip_through_exhaustive_provider_helpers() {
-    for value in Provenance::ALL {
-        assert_eq!(Provenance::from_wire_name(value.wire_name()), Some(value));
-        assert_eq!(
-            serde_json::to_vec(&value).unwrap(),
-            [b"\"".as_slice(), value.wire_name(), b"\"".as_slice()].concat()
-        );
-    }
-    for value in qtrace_provider::DiscontinuityCause::ALL {
-        assert_eq!(
-            qtrace_provider::DiscontinuityCause::from_wire_name(value.wire_name()),
-            Some(value)
-        );
-        assert_eq!(
-            serde_json::to_vec(&value).unwrap(),
-            [b"\"".as_slice(), value.wire_name(), b"\"".as_slice()].concat()
-        );
-    }
-    for value in qtrace_provider::RangeDomain::ALL {
-        assert_eq!(
-            qtrace_provider::RangeDomain::from_wire_name(value.wire_name()),
-            Some(value)
-        );
-        assert_eq!(
-            serde_json::to_vec(&value).unwrap(),
-            [b"\"".as_slice(), value.wire_name(), b"\"".as_slice()].concat()
-        );
-    }
-    for value in qtrace_provider::CompletenessCause::ALL {
-        assert_eq!(
-            qtrace_provider::CompletenessCause::from_wire_name(value.wire_name()),
-            Some(value)
-        );
-        assert_eq!(
-            serde_json::to_vec(&value).unwrap(),
-            [b"\"".as_slice(), value.wire_name(), b"\"".as_slice()].concat()
-        );
-    }
-    for value in [
-        qtrace_provider::RangeBounds::InclusiveSequence { first: 1, last: 2 },
-        qtrace_provider::RangeBounds::HalfOpen {
-            start: 3,
-            end_exclusive: 4,
-        },
-    ] {
-        assert_eq!(
-            qtrace_provider::RangeBounds::from_wire_parts(value.wire_name(), value.endpoints()),
-            Some(value)
-        );
-    }
-}
-
-#[test]
 fn captured_sequence_range_includes_u64_max_without_overflow() {
     let coverage =
         CompletenessRange::captured_sequence(u64::MAX - 2, u64::MAX, Provenance::Captured).unwrap();

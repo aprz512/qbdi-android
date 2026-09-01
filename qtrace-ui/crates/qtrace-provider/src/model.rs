@@ -15,7 +15,7 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    pub const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Captured,
         Self::Derived,
         Self::Heuristic,
@@ -23,7 +23,7 @@ impl Provenance {
         Self::Damaged,
     ];
 
-    pub const fn wire_name(self) -> &'static [u8] {
+    pub(crate) const fn wire_name(self) -> &'static [u8] {
         match self {
             Self::Captured => b"captured",
             Self::Derived => b"derived",
@@ -506,7 +506,7 @@ pub enum DiscontinuityCause {
 }
 
 impl DiscontinuityCause {
-    pub const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Loss,
         Self::Damage,
         Self::Overwrite,
@@ -514,7 +514,7 @@ impl DiscontinuityCause {
         Self::Unknown,
     ];
 
-    pub const fn wire_name(self) -> &'static [u8] {
+    pub(crate) const fn wire_name(self) -> &'static [u8] {
         match self {
             Self::Loss => b"loss",
             Self::Damage => b"damage",
@@ -838,13 +838,13 @@ pub enum RangeDomain {
 }
 
 impl RangeDomain {
-    pub const ALL: [Self; 3] = [
+    pub(crate) const ALL: [Self; 3] = [
         Self::CapturedSequence,
         Self::SourceBytes,
         Self::MemoryAddresses,
     ];
 
-    pub const fn wire_name(self) -> &'static [u8] {
+    pub(crate) const fn wire_name(self) -> &'static [u8] {
         match self {
             Self::CapturedSequence => b"captured_sequence",
             Self::SourceBytes => b"source_bytes",
@@ -867,14 +867,16 @@ pub enum RangeBounds {
 }
 
 impl RangeBounds {
-    pub const fn wire_name(self) -> &'static [u8] {
+    #[cfg(test)]
+    pub(crate) const fn wire_name(self) -> &'static [u8] {
         match self {
             Self::InclusiveSequence { .. } => b"inclusive_sequence",
             Self::HalfOpen { .. } => b"half_open",
         }
     }
 
-    pub const fn endpoints(self) -> (u64, u64) {
+    #[cfg(test)]
+    pub(crate) const fn endpoints(self) -> (u64, u64) {
         match self {
             Self::InclusiveSequence { first, last } => (first, last),
             Self::HalfOpen {
@@ -920,7 +922,7 @@ pub enum CompletenessCause {
 }
 
 impl CompletenessCause {
-    pub const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Retained,
         Self::MissingTerminal,
         Self::Active,
@@ -937,7 +939,7 @@ impl CompletenessCause {
         Self::Unknown,
     ];
 
-    pub const fn wire_name(self) -> &'static [u8] {
+    pub(crate) const fn wire_name(self) -> &'static [u8] {
         match self {
             Self::Retained => b"retained",
             Self::MissingTerminal => b"missing_terminal",
@@ -1339,6 +1341,70 @@ impl EventKey {
             source_offset,
             sequence,
             tid,
+        }
+    }
+}
+
+#[cfg(test)]
+mod wire_helper_tests {
+    use super::*;
+
+    fn assert_wire_round_trip<T>(values: impl IntoIterator<Item = T>)
+    where
+        T: Copy + std::fmt::Debug + Eq + Serialize,
+        T: WireToken,
+    {
+        for value in values {
+            assert_eq!(T::from_wire(value.wire()), Some(value));
+            assert_eq!(
+                serde_json::to_vec(&value).unwrap(),
+                [b"\"".as_slice(), value.wire(), b"\"".as_slice()].concat()
+            );
+        }
+    }
+
+    trait WireToken: Sized {
+        fn wire(self) -> &'static [u8];
+        fn from_wire(bytes: &[u8]) -> Option<Self>;
+    }
+
+    macro_rules! wire_token {
+        ($type:ty) => {
+            impl WireToken for $type {
+                fn wire(self) -> &'static [u8] {
+                    self.wire_name()
+                }
+
+                fn from_wire(bytes: &[u8]) -> Option<Self> {
+                    Self::from_wire_name(bytes)
+                }
+            }
+        };
+    }
+
+    wire_token!(Provenance);
+    wire_token!(DiscontinuityCause);
+    wire_token!(RangeDomain);
+    wire_token!(CompletenessCause);
+
+    #[test]
+    fn closed_discontinuity_tokens_match_serde_exhaustively() {
+        assert_wire_round_trip(Provenance::ALL);
+        assert_wire_round_trip(DiscontinuityCause::ALL);
+        assert_wire_round_trip(RangeDomain::ALL);
+        assert_wire_round_trip(CompletenessCause::ALL);
+
+        for bounds in [
+            RangeBounds::InclusiveSequence { first: 1, last: 2 },
+            RangeBounds::HalfOpen {
+                start: 3,
+                end_exclusive: 4,
+            },
+        ] {
+            assert_eq!(
+                RangeBounds::from_wire_parts(bounds.wire_name(), bounds.endpoints()),
+                Some(bounds)
+            );
         }
     }
 }

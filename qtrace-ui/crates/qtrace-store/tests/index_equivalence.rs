@@ -870,6 +870,86 @@ fn semantic_dictionary_work_metadata_is_checked_exact_and_owned_mapped_equal() {
 }
 
 #[test]
+fn posting_estimate_reports_only_local_radixes_that_decode_will_execute() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let options = BuildOptions::default();
+    let owned = IndexBuilder::build(source, &options, &AllowAll).expect("owned store");
+    let root = private_root();
+    let mapped =
+        TraceStore::open_or_build(root.path(), source, &options, &AllowAll).expect("mapped store");
+
+    let tid = TraceStoreView::event_key(&owned, 0)
+        .unwrap()
+        .and_then(|key| key.tid)
+        .expect("fixture tid");
+    let single_list = NormalizedPostingQuery::Tids(&[tid]);
+    let owned_single = owned
+        .bounded_row_estimate(single_list, usize::MAX, &AllowAll)
+        .unwrap();
+    let mapped_single = mapped
+        .bounded_row_estimate(single_list, usize::MAX, &AllowAll)
+        .unwrap();
+    assert_eq!(owned_single, mapped_single);
+    assert!(owned_single.rows >= 2);
+    assert_eq!(owned_single.matched_lists, 1);
+    assert_eq!(owned_single.local_radix_sorts, 0);
+    assert_eq!(owned_single.local_radix_rows, 0);
+
+    let pair = NormalizedPostingQuery::Tids(&[tid, tid]);
+    let owned_pair = owned
+        .bounded_row_estimate(pair, usize::MAX, &AllowAll)
+        .unwrap();
+    let mapped_pair = mapped
+        .bounded_row_estimate(pair, usize::MAX, &AllowAll)
+        .unwrap();
+    assert_eq!(owned_pair, mapped_pair);
+    assert!(owned_pair.rows >= 2);
+    assert_eq!(owned_pair.local_radix_sorts, 1);
+    assert_eq!(owned_pair.local_radix_rows, owned_pair.rows);
+    let decode_guard = WorkAccounting::default();
+    let decoded = owned
+        .bounded_rows(pair, usize::MAX, &decode_guard)
+        .expect("duplicate-list decode");
+    assert_eq!(decoded.len(), owned_single.rows);
+    let encoded_rows = 2 * owned_single.rows as u64;
+    let expected_decode_work = 2
+        + 2
+        + 2
+        + encoded_rows
+        + std::mem::size_of::<usize>() as u64 * (2 * encoded_rows + 256)
+        + encoded_rows
+        - 1;
+    assert_eq!(
+        decode_guard.rows.load(Ordering::SeqCst),
+        expected_decode_work
+    );
+
+    let empty = owned
+        .bounded_row_estimate(
+            NormalizedPostingQuery::Sequence {
+                start: u64::MAX,
+                end_exclusive: u64::MAX,
+            },
+            usize::MAX,
+            &AllowAll,
+        )
+        .unwrap();
+    assert_eq!(empty.rows, 0);
+    assert_eq!(empty.local_radix_sorts, 0);
+    assert_eq!(empty.local_radix_rows, 0);
+}
+
+#[test]
 fn index_error_exposes_its_typed_abort_read_only() {
     let abort = OperationAbort::budget_exceeded(BudgetDimension::Nodes, 7, 8);
     let error = IndexError::from(abort.clone());

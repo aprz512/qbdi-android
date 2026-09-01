@@ -1270,6 +1270,18 @@ pub trait NormalizedBulkView: TraceStoreView {
         }
         semantic_dictionary_work_from_counts(term_count, self.string_count(), dictionary_bytes, 0)
     }
+    /// Returns allocation-free posting cardinality and the local radix work performed by
+    /// [`Self::bounded_rows`]. The default is conservative for external implementations;
+    /// normalized owned and mapped stores provide exact metadata.
+    fn bounded_row_estimate(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<NormalizedPostingEstimate, IndexError> {
+        let rows = self.bounded_row_count(query, max_rows, guard)?;
+        Ok(NormalizedPostingEstimate::conservative(rows))
+    }
     /// Returns an allocation-free upper bound for the ascending-unique row IDs returned by
     /// [`Self::bounded_rows`], rejecting before decode when that bound exceeds `max_rows`.
     fn bounded_row_count(
@@ -1285,6 +1297,40 @@ pub trait NormalizedBulkView: TraceStoreView {
         max_rows: usize,
         guard: &dyn WorkGuard,
     ) -> Result<Vec<usize>, IndexError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NormalizedPostingEstimate {
+    /// Upper bound for decoded rows before duplicate removal.
+    pub rows: usize,
+    /// Posting lists that are known to contribute rows to the decode.
+    pub matched_lists: usize,
+    /// Store-local radix invocations that receive at least two rows.
+    pub local_radix_sorts: usize,
+    /// Sum of input lengths across `local_radix_sorts`.
+    pub local_radix_rows: usize,
+}
+
+impl NormalizedPostingEstimate {
+    fn conservative(rows: usize) -> Self {
+        let local_radix_sorts = usize::from(rows >= 2);
+        Self {
+            rows,
+            matched_lists: local_radix_sorts,
+            local_radix_sorts,
+            local_radix_rows: rows * local_radix_sorts,
+        }
+    }
+
+    fn exact(rows: usize, matched_lists: usize, radix: bool) -> Self {
+        let local_radix_sorts = usize::from(radix && rows >= 2);
+        Self {
+            rows,
+            matched_lists,
+            local_radix_sorts,
+            local_radix_rows: rows * local_radix_sorts,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1425,10 +1471,27 @@ where
     K: Ord + 'a,
     I: Iterator<Item = K>,
 {
+    Ok(bounded_map_estimate(map, keys, max_rows, guard)?.rows)
+}
+
+fn bounded_map_estimate<'a, K, I>(
+    map: &'a SortedMap<K, PostingList>,
+    keys: I,
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<NormalizedPostingEstimate, IndexError>
+where
+    K: Ord + 'a,
+    I: Iterator<Item = K>,
+{
     let mut encoded_rows = 0_usize;
+    let mut matched_lists = 0_usize;
     for key in keys {
         consume_row_work(guard, 1)?;
         if let Some(list) = map.get(&key) {
+            matched_lists = matched_lists
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("bounded posting list count overflow"))?;
             encoded_rows = encoded_rows
                 .checked_add(list.deltas().len())
                 .ok_or_else(|| IndexError::resource("bounded posting row count overflow"))?;
@@ -1439,7 +1502,11 @@ where
             }
         }
     }
-    Ok(encoded_rows)
+    Ok(NormalizedPostingEstimate::exact(
+        encoded_rows,
+        matched_lists,
+        matched_lists > 1,
+    ))
 }
 
 fn bounded_map_rows<'a, K, I>(
@@ -2228,21 +2295,21 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
         )
     }
 
-    fn bounded_row_count(
+    fn bounded_row_estimate(
         &self,
         query: NormalizedPostingQuery<'_>,
         max_rows: usize,
         guard: &dyn WorkGuard,
-    ) -> Result<usize, IndexError> {
+    ) -> Result<NormalizedPostingEstimate, IndexError> {
         let catalog = self.normalized_catalog();
         match query {
-            NormalizedPostingQuery::Tids(values) => bounded_map_count(
+            NormalizedPostingQuery::Tids(values) => bounded_map_estimate(
                 &catalog.indexes.tid,
                 values.iter().copied(),
                 max_rows,
                 guard,
             ),
-            NormalizedPostingQuery::Kinds(values) => bounded_map_count(
+            NormalizedPostingQuery::Kinds(values) => bounded_map_estimate(
                 &catalog.indexes.kind,
                 values
                     .iter()
@@ -2250,7 +2317,7 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
                 max_rows,
                 guard,
             ),
-            NormalizedPostingQuery::Modules(values) => bounded_map_count(
+            NormalizedPostingQuery::Modules(values) => bounded_map_estimate(
                 &catalog.indexes.module,
                 values.iter().copied(),
                 max_rows,
@@ -2259,56 +2326,86 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
             NormalizedPostingQuery::Sequence {
                 start,
                 end_exclusive,
-            } => bounded_pair_count(
-                &catalog.indexes.sequence,
-                start,
-                end_exclusive,
-                max_rows,
-                guard,
-            ),
+            } => {
+                let rows = bounded_pair_count(
+                    &catalog.indexes.sequence,
+                    start,
+                    end_exclusive,
+                    max_rows,
+                    guard,
+                )?;
+                Ok(NormalizedPostingEstimate::exact(
+                    rows,
+                    usize::from(rows != 0),
+                    true,
+                ))
+            }
             NormalizedPostingQuery::ModulePc {
                 module,
                 start,
                 end_exclusive,
-            } => bounded_pair_count(
-                catalog
-                    .indexes
-                    .module_pc
-                    .get(&module)
-                    .map_or(&[], Vec::as_slice),
-                start,
-                end_exclusive,
-                max_rows,
-                guard,
-            ),
-            NormalizedPostingQuery::Definitions(values) => bounded_map_count(
+            } => {
+                let rows = bounded_pair_count(
+                    catalog
+                        .indexes
+                        .module_pc
+                        .get(&module)
+                        .map_or(&[], Vec::as_slice),
+                    start,
+                    end_exclusive,
+                    max_rows,
+                    guard,
+                )?;
+                Ok(NormalizedPostingEstimate::exact(
+                    rows,
+                    usize::from(rows != 0),
+                    true,
+                ))
+            }
+            NormalizedPostingQuery::Definitions(values) => bounded_map_estimate(
                 &catalog.indexes.definition,
                 values.iter().copied(),
                 max_rows,
                 guard,
             ),
-            NormalizedPostingQuery::Registers(values) => bounded_map_count(
+            NormalizedPostingQuery::Registers(values) => bounded_map_estimate(
                 &catalog.indexes.register,
                 values.iter().map(|slot| slot.index() as u8),
                 max_rows,
                 guard,
             ),
             NormalizedPostingQuery::SemanticCategories(values) => {
-                bounded_semantic_count(catalog, values, true, max_rows, guard)
+                bounded_semantic_estimate(catalog, values, true, max_rows, guard)
             }
             NormalizedPostingQuery::SemanticNames(values) => {
-                bounded_semantic_count(catalog, values, false, max_rows, guard)
+                bounded_semantic_estimate(catalog, values, false, max_rows, guard)
             }
             NormalizedPostingQuery::Memory {
                 start,
                 end_exclusive,
             } => {
-                catalog
-                    .indexes
-                    .memory
-                    .overlap_count_bounded(start, end_exclusive, max_rows, guard)
+                let rows = catalog.indexes.memory.overlap_count_bounded(
+                    start,
+                    end_exclusive,
+                    max_rows,
+                    guard,
+                )?;
+                Ok(NormalizedPostingEstimate::exact(
+                    rows,
+                    usize::from(rows != 0),
+                    true,
+                ))
             }
         }
+    }
+
+    fn bounded_row_count(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<usize, IndexError> {
+        Ok(self.bounded_row_estimate(query, max_rows, guard)?.rows)
     }
 
     fn bounded_rows(
@@ -2393,21 +2490,25 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
     }
 }
 
-fn bounded_semantic_count(
+fn bounded_semantic_estimate(
     catalog: &NormalizedCatalog,
     values: &[&[u8]],
     categories: bool,
     max_rows: usize,
     guard: &dyn WorkGuard,
-) -> Result<usize, IndexError> {
+) -> Result<NormalizedPostingEstimate, IndexError> {
     let map = if categories {
         &catalog.indexes.semantic_category
     } else {
         &catalog.indexes.semantic_name
     };
     let mut count = 0_usize;
+    let mut matched_lists = 0_usize;
     visit_semantic_dictionary_matches(catalog, values, guard, |id| {
         if let Some(list) = map.get(&id) {
+            matched_lists = matched_lists
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("bounded posting list count overflow"))?;
             count = count
                 .checked_add(list.deltas().len())
                 .ok_or_else(|| IndexError::resource("bounded posting row count overflow"))?;
@@ -2419,7 +2520,11 @@ fn bounded_semantic_count(
         }
         Ok(())
     })?;
-    Ok(count)
+    Ok(NormalizedPostingEstimate::exact(
+        count,
+        matched_lists,
+        matched_lists > 1,
+    ))
 }
 
 fn bounded_semantic_rows(

@@ -38,8 +38,6 @@ const MAX_PENDING_SEMANTIC_JOBS: usize = 32;
 const MAX_MATCHER_BUILD_WORK: usize = 16 * 1024 * 1024;
 const STABLE_KEY_RADIX_PASSES: usize = 70;
 const MAX_INDEXED_FIELDS: usize = 13;
-const MAX_STORE_POSTING_PASSES: usize = 20;
-const MAX_ANALYSIS_GROUP_PASSES: usize = 20;
 const MAX_MATCHER_EDGE_COMPARISONS: usize = 9;
 const MAX_MATCHER_TRANSITION_WORK_PER_BYTE: usize = 2 * (MAX_MATCHER_EDGE_COMPARISONS + 1);
 const MAX_SYNC_RESIDUAL_PREDICATES: usize = 4;
@@ -55,6 +53,22 @@ fn stable_key_work_bound(rows: usize) -> Option<u64> {
     let rows = u64::try_from(rows).ok()?;
     let per_pass = rows.checked_mul(2)?.checked_add(256)?;
     rows.checked_add(per_pass.checked_mul(STABLE_KEY_RADIX_PASSES as u64)?)
+}
+
+fn local_radix_work_bound(sorts: usize, rows: usize) -> Option<u64> {
+    if sorts == 0 {
+        return (rows == 0).then_some(0);
+    }
+    if rows < sorts.checked_mul(2)? {
+        return None;
+    }
+    let sorts = u64::try_from(sorts).ok()?;
+    let rows = u64::try_from(rows).ok()?;
+    let passes = u64::try_from(std::mem::size_of::<usize>()).ok()?;
+    let per_pass = rows.checked_mul(2)?.checked_add(sorts.checked_mul(256)?)?;
+    passes
+        .checked_mul(per_pass)?
+        .checked_add(rows.checked_sub(sorts)?)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,20 +99,23 @@ impl ProjectionWorkPlan {
         let candidates = u64::try_from(candidate_upper).ok()?;
         let residuals = u64::try_from(residual_predicates).ok()?;
         let indexed = groups.iter().flatten().try_fold(0_u64, |work, group| {
-            let rows = u64::try_from(group.estimated_rows).ok()?;
-            let list_boundaries = u64::try_from(group.list_count).ok()?.checked_mul(256)?;
-            let term_lookups = u64::try_from(group.term_count)
-                .ok()?
-                .checked_mul(MAX_PAGE_COMPARISONS as u64)?;
-            let analysis = if group.list_count > 1 {
-                rows.checked_mul(MAX_ANALYSIS_GROUP_PASSES as u64)?
-            } else {
-                0
-            };
+            if group.term_count > MAX_CANDIDATE_DECODE_ROWS
+                || group.list_count > MAX_CANDIDATE_DECODE_ROWS
+            {
+                return None;
+            }
+            let store_radix = local_radix_work_bound(
+                group.store_local_radix_sorts,
+                group.store_local_radix_rows,
+            )?;
+            let analysis_radix = local_radix_work_bound(
+                group.analysis_local_radix_sorts,
+                group.analysis_local_radix_rows,
+            )?;
             work.checked_add(group.store_decode_work)?
-                .checked_add(analysis)?
-                .checked_add(list_boundaries)?
-                .checked_add(term_lookups)
+                .checked_add(store_radix)?
+                .checked_add(group.analysis_decode_work)?
+                .checked_add(analysis_radix)
         })?;
         let field_boundaries = fields.checked_mul(4096)?;
         let intersections = candidates.checked_mul(fields.saturating_sub(1).checked_mul(2)?)?;
@@ -440,6 +457,15 @@ thread_local! {
     static LAST_PAGE_USAGE: std::cell::Cell<Option<(u64, u64)>> = const {
         std::cell::Cell::new(None)
     };
+    static PROJECTION_ALLOWANCE_OVERRIDE: std::cell::Cell<Option<u64>> = const {
+        std::cell::Cell::new(None)
+    };
+    static LAST_PROJECTION_WORK: std::cell::Cell<Option<u64>> = const {
+        std::cell::Cell::new(None)
+    };
+    static LAST_PROJECTION_ALLOWANCE: std::cell::Cell<Option<u64>> = const {
+        std::cell::Cell::new(None)
+    };
 }
 
 impl TimelineProjection {
@@ -462,6 +488,8 @@ impl TimelineProjection {
         let residual = synchronous_residual_filter(filter.as_ref());
         let candidates = apply_synchronous_residuals(&context, &residual, candidates, &guard)?;
         let candidates = sort_rows_by_stable_key(&context, candidates, &guard)?;
+        #[cfg(test)]
+        LAST_PROJECTION_WORK.set(Some(guard.consumed().0));
         let has_residual_scan = filter.has_semantic_detail_residual();
         let state = Arc::new((Mutex::new(ProjectionState::default()), Condvar::new()));
         let plan = QueryPlan {
@@ -1188,6 +1216,11 @@ struct PlanGroup {
     list_count: usize,
     estimated_rows: usize,
     store_decode_work: u64,
+    store_local_radix_sorts: usize,
+    store_local_radix_rows: usize,
+    analysis_decode_work: u64,
+    analysis_local_radix_sorts: usize,
+    analysis_local_radix_rows: usize,
 }
 
 struct CandidateLedger {
@@ -1251,8 +1284,14 @@ impl CandidateGuard {
 
     fn authorize(&self, plan: ProjectionWorkPlan) -> Result<(), AnalysisError> {
         let current = self.ledger.work.load(Ordering::Acquire);
+        let allowance = plan.allowance;
+        #[cfg(test)]
+        let allowance = {
+            LAST_PROJECTION_ALLOWANCE.set(Some(allowance));
+            PROJECTION_ALLOWANCE_OVERRIDE.take().unwrap_or(allowance)
+        };
         let limit = current
-            .checked_add(plan.allowance)
+            .checked_add(allowance)
             .ok_or_else(|| AnalysisError::cpu_budget_exceeded("projection work budget overflow"))?;
         self.ledger.work_limit.store(limit, Ordering::Release);
         Ok(())
@@ -1552,14 +1591,68 @@ fn borrowed_filter_bytes(values: &[String]) -> ([&[u8]; crate::filter::MAX_FILTE
     (bytes, values.len())
 }
 
+#[derive(Default)]
+struct PostingPlanWork {
+    store_local_radix_sorts: usize,
+    store_local_radix_rows: usize,
+    analysis_decode_work: u64,
+    analysis_local_radix_sorts: usize,
+    analysis_local_radix_rows: usize,
+}
+
+impl PostingPlanWork {
+    fn add_store(
+        &mut self,
+        estimate: qtrace_store::NormalizedPostingEstimate,
+    ) -> Result<usize, AnalysisError> {
+        self.store_local_radix_sorts = self
+            .store_local_radix_sorts
+            .checked_add(estimate.local_radix_sorts)
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store radix count overflow"))?;
+        self.store_local_radix_rows = self
+            .store_local_radix_rows
+            .checked_add(estimate.local_radix_rows)
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store radix row overflow"))?;
+        Ok(estimate.rows)
+    }
+
+    fn add_analysis_copy(&mut self, rows: usize) -> Result<(), AnalysisError> {
+        self.analysis_decode_work = self
+            .analysis_decode_work
+            .checked_add(
+                u64::try_from(rows)
+                    .map_err(|_| AnalysisError::cpu_budget_exceeded("analysis copy overflow"))?,
+            )
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("analysis copy overflow"))?;
+        Ok(())
+    }
+
+    fn add_analysis_radix(&mut self, rows: usize) -> Result<(), AnalysisError> {
+        if rows < 2 {
+            return Ok(());
+        }
+        self.analysis_local_radix_sorts = self
+            .analysis_local_radix_sorts
+            .checked_add(1)
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("analysis radix count overflow"))?;
+        self.analysis_local_radix_rows = self
+            .analysis_local_radix_rows
+            .checked_add(rows)
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("analysis radix row overflow"))?;
+        Ok(())
+    }
+}
+
 fn estimate_posting(
     store: &dyn NormalizedBulkView,
     query: NormalizedPostingQuery<'_>,
     guard: &CandidateGuard,
+    work: &mut PostingPlanWork,
 ) -> Result<usize, AnalysisError> {
-    store
-        .bounded_row_count(query, MAX_CANDIDATE_ROWS, guard)
-        .map_err(map_store_query_error)
+    let estimate = store
+        .bounded_row_estimate(query, MAX_CANDIDATE_ROWS, guard)
+        .map_err(map_store_query_error)?;
+    work.add_store(estimate)
 }
 
 fn checked_estimate_add(total: &mut usize, value: usize) -> Result<(), AnalysisError> {
@@ -1582,12 +1675,23 @@ fn estimate_candidate_field(
     let mut total = 0;
     let mut semantic_lookup_work = 0_u64;
     let mut semantic_shape = None;
+    let mut plan_work = PostingPlanWork::default();
     match field {
         CandidateField::Tids => {
-            total = estimate_posting(store, NormalizedPostingQuery::Tids(&filter.tids), guard)?;
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::Tids(&filter.tids),
+                guard,
+                &mut plan_work,
+            )?;
         }
         CandidateField::Kinds => {
-            total = estimate_posting(store, NormalizedPostingQuery::Kinds(&filter.kinds), guard)?;
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::Kinds(&filter.kinds),
+                guard,
+                &mut plan_work,
+            )?;
         }
         CandidateField::Modules => {
             checked_estimate_add(
@@ -1596,27 +1700,37 @@ fn estimate_candidate_field(
                     store,
                     NormalizedPostingQuery::Modules(&filter.modules),
                     guard,
+                    &mut plan_work,
                 )?,
             )?;
             for module in &filter.modules {
-                checked_estimate_add(&mut total, memory_module_count(context, *module))?;
+                let rows = memory_module_count(context, *module);
+                checked_estimate_add(&mut total, rows)?;
+                plan_work.add_analysis_copy(rows)?;
+                plan_work.add_analysis_radix(rows)?;
             }
         }
         CandidateField::Sequence => {
             for range in &filter.sequence {
-                checked_estimate_add(
-                    &mut total,
-                    estimate_posting(
-                        store,
-                        NormalizedPostingQuery::Sequence {
-                            start: range.first,
-                            end_exclusive: range.last.saturating_add(1),
-                        },
-                        guard,
-                    )?,
+                let store_rows = estimate_posting(
+                    store,
+                    NormalizedPostingQuery::Sequence {
+                        start: range.first,
+                        end_exclusive: range.last.saturating_add(1),
+                    },
+                    guard,
+                    &mut plan_work,
                 )?;
+                checked_estimate_add(&mut total, store_rows)?;
                 if range.last == u64::MAX {
-                    checked_estimate_add(&mut total, context.max_sequence_rows.len())?;
+                    let maximum_rows = context.max_sequence_rows.len();
+                    checked_estimate_add(&mut total, maximum_rows)?;
+                    plan_work.add_analysis_copy(maximum_rows)?;
+                    plan_work.add_analysis_radix(
+                        store_rows.checked_add(maximum_rows).ok_or_else(|| {
+                            AnalysisError::cpu_budget_exceeded("maximum sequence work overflow")
+                        })?,
+                    )?;
                 }
             }
         }
@@ -1633,12 +1747,13 @@ fn estimate_candidate_field(
                                 end_exclusive: range.end_exclusive,
                             },
                             guard,
+                            &mut plan_work,
                         )?,
                     )?;
-                    checked_estimate_add(
-                        &mut total,
-                        memory_pc_count(context, *module, range.start, range.end_exclusive),
-                    )?;
+                    let rows = memory_pc_count(context, *module, range.start, range.end_exclusive);
+                    checked_estimate_add(&mut total, rows)?;
+                    plan_work.add_analysis_copy(rows)?;
+                    plan_work.add_analysis_radix(rows)?;
                 }
             }
         }
@@ -1654,19 +1769,28 @@ fn estimate_candidate_field(
                             end_exclusive: end,
                         },
                         guard,
+                        &mut plan_work,
                     )?,
                 )?;
-                checked_estimate_add(&mut total, memory_pc_count(context, module, start, end))
+                let rows = memory_pc_count(context, module, start, end);
+                checked_estimate_add(&mut total, rows)?;
+                plan_work.add_analysis_copy(rows)?;
+                plan_work.add_analysis_radix(rows)
             })?;
         }
         CandidateField::Definitions => {
             total = context.store.event_count().min(MAX_CANDIDATE_ROWS);
+            if total >= 2 {
+                plan_work.store_local_radix_sorts = 1;
+                plan_work.store_local_radix_rows = total;
+            }
         }
         CandidateField::RegisterReads => {
             total = estimate_posting(
                 store,
                 NormalizedPostingQuery::Registers(&filter.register.reads),
                 guard,
+                &mut plan_work,
             )?;
         }
         CandidateField::RegisterWrites => {
@@ -1674,6 +1798,7 @@ fn estimate_candidate_field(
                 store,
                 NormalizedPostingQuery::Registers(&filter.register.writes),
                 guard,
+                &mut plan_work,
             )?;
         }
         CandidateField::Memory => {
@@ -1687,6 +1812,7 @@ fn estimate_candidate_field(
                             end_exclusive: memory.range.end_exclusive,
                         },
                         guard,
+                        &mut plan_work,
                     )?,
                 )?;
             }
@@ -1710,6 +1836,7 @@ fn estimate_candidate_field(
                 store,
                 NormalizedPostingQuery::SemanticCategories(&values[..len]),
                 guard,
+                &mut plan_work,
             )?;
         }
         CandidateField::SemanticNames => {
@@ -1727,6 +1854,7 @@ fn estimate_candidate_field(
                 store,
                 NormalizedPostingQuery::SemanticNames(&values[..len]),
                 guard,
+                &mut plan_work,
             )?;
         }
         CandidateField::SemanticDetailKinds => {
@@ -1738,8 +1866,20 @@ fn estimate_candidate_field(
                     EventKind::SemanticError,
                 ]),
                 guard,
+                &mut plan_work,
             )?;
         }
+    }
+    if matches!(
+        field,
+        CandidateField::Modules
+            | CandidateField::Sequence
+            | CandidateField::RelativePc
+            | CandidateField::AbsolutePc
+            | CandidateField::Memory
+    ) {
+        plan_work.add_analysis_copy(total)?;
+        plan_work.add_analysis_radix(total)?;
     }
     let (term_count, list_count) = match semantic_shape {
         Some(shape) => shape,
@@ -1748,7 +1888,14 @@ fn estimate_candidate_field(
     let rows = u64::try_from(total)
         .map_err(|_| AnalysisError::cpu_budget_exceeded("posting row work overflow"))?;
     let mut store_decode_work = rows
-        .checked_mul(MAX_STORE_POSTING_PASSES as u64)
+        .checked_mul(3)
+        .and_then(|work| {
+            work.checked_add(
+                u64::try_from(term_count)
+                    .ok()?
+                    .checked_mul(MAX_PAGE_COMPARISONS as u64)?,
+            )
+        })
         .and_then(|work| work.checked_add(semantic_lookup_work))
         .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store decode work overflow"))?;
     if matches!(field, CandidateField::Definitions) {
@@ -1771,6 +1918,11 @@ fn estimate_candidate_field(
         list_count,
         estimated_rows: total,
         store_decode_work,
+        store_local_radix_sorts: plan_work.store_local_radix_sorts,
+        store_local_radix_rows: plan_work.store_local_radix_rows,
+        analysis_decode_work: plan_work.analysis_decode_work,
+        analysis_local_radix_sorts: plan_work.analysis_local_radix_sorts,
+        analysis_local_radix_rows: plan_work.analysis_local_radix_rows,
     })
 }
 
@@ -4085,6 +4237,7 @@ mod tests {
 
     struct PageStore {
         capabilities: qtrace_provider::ProviderCapabilities,
+        sequence_pairs: usize,
     }
 
     impl TraceStoreView for PageStore {
@@ -4246,19 +4399,51 @@ mod tests {
         }
         fn bounded_row_count(
             &self,
-            _: NormalizedPostingQuery<'_>,
+            query: NormalizedPostingQuery<'_>,
             _: usize,
             _: &dyn WorkGuard,
         ) -> Result<usize, qtrace_store::IndexError> {
-            Ok(0)
+            Ok(match query {
+                NormalizedPostingQuery::Sequence {
+                    start,
+                    end_exclusive,
+                } if self.sequence_pairs != 0
+                    && start % 4 == 0
+                    && end_exclusive == start + 2
+                    && start / 4 < self.sequence_pairs as u64 =>
+                {
+                    2
+                }
+                _ => 0,
+            })
         }
         fn bounded_rows(
             &self,
-            _: NormalizedPostingQuery<'_>,
+            query: NormalizedPostingQuery<'_>,
             _: usize,
-            _: &dyn WorkGuard,
+            guard: &dyn WorkGuard,
         ) -> Result<Vec<usize>, qtrace_store::IndexError> {
-            Ok(Vec::new())
+            let NormalizedPostingQuery::Sequence {
+                start,
+                end_exclusive,
+            } = query
+            else {
+                return Ok(Vec::new());
+            };
+            if self.sequence_pairs == 0
+                || start % 4 != 0
+                || end_exclusive != start + 2
+                || start / 4 >= self.sequence_pairs as u64
+            {
+                return Ok(Vec::new());
+            }
+            let radix_passes = std::mem::size_of::<usize>() as u64;
+            guard.consume(WorkDelta {
+                rows: 2 + radix_passes * (2 * 2 + 256) + 1,
+                ..WorkDelta::default()
+            })?;
+            let first = usize::try_from(start / 2).unwrap();
+            Ok(vec![first, first + 1])
         }
     }
 
@@ -4279,6 +4464,7 @@ mod tests {
         let context = Arc::new(QueryContext {
             store: Arc::new(PageStore {
                 capabilities: capabilities.clone(),
+                sequence_pairs: 0,
             }),
             identity: StoreIdentity([0; 32]),
             kinds: vec![EventKind::Instruction; size],
@@ -4321,6 +4507,48 @@ mod tests {
             )),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn sequence_pair_context(pair_count: usize) -> Arc<QueryContext> {
+        let capabilities = qtrace_provider::ProviderCapabilities::qtrb_register_observations();
+        let event_count = pair_count * 2;
+        Arc::new(QueryContext {
+            store: Arc::new(PageStore {
+                capabilities: capabilities.clone(),
+                sequence_pairs: pair_count,
+            }),
+            identity: StoreIdentity([0; 32]),
+            kinds: vec![EventKind::Instruction; event_count],
+            provenances: vec![Provenance::Captured; event_count],
+            modules: Vec::new(),
+            definitions: Vec::new(),
+            instructions: vec![None; event_count],
+            memories: vec![None; event_count],
+            semantics: vec![None; event_count],
+            observations: Vec::new(),
+            observation_ranges: vec![(0, 0); event_count],
+            memory_pc: Vec::new(),
+            max_sequence_rows: Vec::new(),
+            completeness: Arc::new(CompletenessSummary::new(
+                Vec::new(),
+                &capabilities,
+                qtrace_store::NormalizedSourceFormat::Other,
+                None,
+            )),
+            discontinuities: Arc::new(vec![None; event_count]),
+            keys: (0..event_count)
+                .map(|row| {
+                    EventKey::new(
+                        ArtifactDigest::new([1; 32]),
+                        TimelineId(1),
+                        row as u64,
+                        row as u64,
+                        Some((row / 2 * 4 + row % 2) as u64),
+                        Some(7),
+                    )
+                })
+                .collect(),
+        })
     }
 
     #[derive(Clone, Copy)]
@@ -4465,7 +4693,12 @@ mod tests {
             term_count: 1,
             list_count: 1,
             estimated_rows: MAX_CANDIDATE_DECODE_ROWS,
-            store_decode_work: (MAX_CANDIDATE_DECODE_ROWS * MAX_STORE_POSTING_PASSES) as u64,
+            store_decode_work: (MAX_CANDIDATE_DECODE_ROWS * 3) as u64,
+            store_local_radix_sorts: 1,
+            store_local_radix_rows: MAX_CANDIDATE_DECODE_ROWS,
+            analysis_decode_work: 0,
+            analysis_local_radix_sorts: 0,
+            analysis_local_radix_rows: 0,
         });
         let limit = ProjectionWorkPlan::derive(
             &[largest_group],
@@ -4496,11 +4729,16 @@ mod tests {
             list_count: 1,
             estimated_rows: 150_000,
             store_decode_work: 3_000_000,
+            store_local_radix_sorts: 0,
+            store_local_radix_rows: 0,
+            analysis_decode_work: 0,
+            analysis_local_radix_sorts: 0,
+            analysis_local_radix_rows: 0,
         };
         let one_field = ProjectionWorkPlan::derive(&[Some(group)], 150_000, 0, false).unwrap();
         let two_fields =
             ProjectionWorkPlan::derive(&[Some(group), Some(group)], 150_000, 0, false).unwrap();
-        let group_work = 3_000_000 + 256 + MAX_PAGE_COMPARISONS as u64;
+        let group_work = 3_000_000;
         assert_eq!(
             two_fields.allowance - one_field.allowance,
             group_work + 4096 + 2 * 150_000,
@@ -4509,12 +4747,19 @@ mod tests {
         let two_lists = Some(PlanGroup {
             term_count: 2,
             list_count: 2,
+            store_decode_work: group.store_decode_work + MAX_PAGE_COMPARISONS as u64,
+            analysis_decode_work: 150_000,
+            analysis_local_radix_sorts: 1,
+            analysis_local_radix_rows: 150_000,
             ..group
         });
         let two_list_plan = ProjectionWorkPlan::derive(&[two_lists], 150_000, 0, false).unwrap();
         assert_eq!(
             two_list_plan.allowance - one_field.allowance,
-            150_000 * MAX_ANALYSIS_GROUP_PASSES as u64 + 256 + MAX_PAGE_COMPARISONS as u64,
+            MAX_PAGE_COMPARISONS as u64
+                + 150_000
+                + std::mem::size_of::<usize>() as u64 * (2 * 150_000 + 256)
+                + 149_999,
             "actual extra list enables union/radix work and each actual term is charged"
         );
 
@@ -4525,13 +4770,14 @@ mod tests {
             list_count: 1,
             estimated_rows: 0,
             store_decode_work: dictionary_work,
+            store_local_radix_sorts: 0,
+            store_local_radix_rows: 0,
+            analysis_decode_work: 0,
+            analysis_local_radix_sorts: 0,
+            analysis_local_radix_rows: 0,
         });
         let absent_plan = ProjectionWorkPlan::derive(&[absent_semantic], 0, 0, false).unwrap();
-        let independent_absent_work = dictionary_work
-            + 256
-            + MAX_PAGE_COMPARISONS as u64
-            + 4096
-            + 256 * STABLE_KEY_RADIX_PASSES as u64;
+        let independent_absent_work = dictionary_work + 4096 + 256 * STABLE_KEY_RADIX_PASSES as u64;
         assert_eq!(absent_plan.allowance, independent_absent_work);
         for allowance in [
             independent_absent_work - 1,
@@ -4617,6 +4863,55 @@ mod tests {
                 result.unwrap();
                 assert_eq!(guard.consumed().0, no_filter.allowance);
             }
+        }
+    }
+
+    #[test]
+    fn public_projection_authorizes_each_nontrivial_sequence_local_radix() {
+        let filter = || EventFilter {
+            sequence: (0..512)
+                .map(|range| crate::SequenceRange::new(range * 4, range * 4 + 1).unwrap())
+                .collect(),
+            ..EventFilter::default()
+        };
+        let local_radix_passes = std::mem::size_of::<usize>() as u64;
+        let store_work = 512 * (2 + local_radix_passes * (2 * 2 + 256) + 1);
+        let analysis_union_work = 1_024 + local_radix_passes * (2 * 1_024 + 256) + 1_023;
+        let stable_work = 1_024 + 70 * (2 * 1_024 + 256);
+        let exact_work = store_work + analysis_union_work + stable_work;
+        let expected_allowance = 3 * 1_024
+            + 512 * 65
+            + local_radix_passes * (2 * 1_024 + 512 * 256)
+            + (1_024 - 512)
+            + analysis_union_work
+            + 4_096
+            + stable_work;
+
+        let projection = TimelineProjection::new(sequence_pair_context(512), filter())
+            .expect("derived production allowance");
+        assert_eq!(LAST_PROJECTION_ALLOWANCE.take(), Some(expected_allowance));
+        assert_eq!(LAST_PROJECTION_WORK.take(), Some(exact_work));
+        assert_eq!(
+            query_events(&projection, None, 2_000).unwrap().rows.len(),
+            1_024
+        );
+
+        PROJECTION_ALLOWANCE_OVERRIDE.set(Some(exact_work - 1));
+        let error = match TimelineProjection::new(sequence_pair_context(512), filter()) {
+            Ok(_) => panic!("W-1 projection work was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "analysis.cpu_budget_exceeded");
+
+        for allowance in [exact_work, exact_work + 1] {
+            PROJECTION_ALLOWANCE_OVERRIDE.set(Some(allowance));
+            let projection = TimelineProjection::new(sequence_pair_context(512), filter())
+                .expect("each two-row store-local radix must fit its exact work allowance");
+            assert_eq!(LAST_PROJECTION_WORK.take(), Some(exact_work));
+            let page = query_events(&projection, None, 2_000).unwrap();
+            assert_eq!(page.rows.len(), 1_024);
+            assert_eq!(page.total, 1_024);
+            assert!(page.exact_total);
         }
     }
 
