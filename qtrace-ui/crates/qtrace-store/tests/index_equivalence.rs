@@ -1,4 +1,12 @@
-use std::{fs, path::Path, path::PathBuf, sync::Mutex};
+use std::{
+    fs,
+    path::Path,
+    path::PathBuf,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use qtrace_provider::{
     BudgetDimension, EventKind, OperationAbort, RegisterSlot, WorkDelta, WorkGuard,
@@ -50,6 +58,21 @@ impl WorkGuard for CancelWithoutAllocation {
 
 struct RecordAllocations {
     allocation_calls: Mutex<usize>,
+}
+
+#[derive(Default)]
+struct WorkAccounting {
+    rows: AtomicU64,
+    input_bytes: AtomicU64,
+}
+
+impl WorkGuard for WorkAccounting {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        self.rows.fetch_add(delta.rows, Ordering::SeqCst);
+        self.input_bytes
+            .fetch_add(delta.input_bytes, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl WorkGuard for RecordAllocations {
@@ -730,6 +753,66 @@ fn bounded_postings_reject_oversize_and_cancel_before_row_allocation() {
         .expect_err("cancel before posting copy");
     assert_eq!(error.code(), "job.cancelled");
     assert_eq!(*cancelled.allocation_calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn bounded_semantic_dictionary_queries_charge_each_item_and_its_bytes() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let store =
+        IndexBuilder::build(source, &BuildOptions::default(), &AllowAll).expect("owned store");
+    let view: &dyn NormalizedBulkView = &store;
+    let dictionary_bytes = (0..view.string_count())
+        .map(|id| {
+            view.string_bytes(id as u32)
+                .expect("dictionary entry")
+                .len() as u64
+        })
+        .sum::<u64>();
+
+    for query in [
+        NormalizedPostingQuery::SemanticCategories(&[b"does-not-exist"]),
+        NormalizedPostingQuery::SemanticNames(&[b"does-not-exist"]),
+    ] {
+        let count_guard = WorkAccounting::default();
+        assert_eq!(
+            view.bounded_row_count(query, usize::MAX, &count_guard)
+                .expect("semantic estimate"),
+            0
+        );
+        assert_eq!(
+            count_guard.rows.load(Ordering::SeqCst),
+            view.string_count() as u64
+        );
+        assert_eq!(
+            count_guard.input_bytes.load(Ordering::SeqCst),
+            dictionary_bytes
+        );
+
+        let decode_guard = WorkAccounting::default();
+        assert!(
+            view.bounded_rows(query, usize::MAX, &decode_guard)
+                .expect("semantic decode")
+                .is_empty()
+        );
+        assert_eq!(
+            decode_guard.rows.load(Ordering::SeqCst),
+            view.string_count() as u64
+        );
+        assert_eq!(
+            decode_guard.input_bytes.load(Ordering::SeqCst),
+            dictionary_bytes
+        );
+    }
 }
 
 #[test]

@@ -314,8 +314,19 @@ mod tests {
 
         let count = 8_192;
         let index = dense_reverse_rows(count);
+        // For 8,192 dense entries on 64-bit targets: two 13-comparison entry searches,
+        // two 6-comparison block searches, two prefix probes, two full interval scans,
+        // eight radix passes of two row scans plus 256 bucket transitions, and N-1 dedup
+        // comparisons. This oracle is independent of a successful production measurement.
+        let expected_work = 2 * 13
+            + 2 * 6
+            + 2
+            + 2 * count
+            + (usize::BITS as usize / 8) * (2 * count + 256)
+            + (count - 1);
+        assert_eq!(probes[0], expected_work as u64);
         let guard = RowBudget {
-            limit: probes[0] - 1,
+            limit: expected_work as u64 - 1,
             consumed: AtomicU64::new(0),
         };
         let error = index
