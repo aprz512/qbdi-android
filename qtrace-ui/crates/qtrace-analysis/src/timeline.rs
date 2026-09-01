@@ -1200,6 +1200,14 @@ fn try_reserve_analysis<T>(
     try_reserve_context(values, additional, guard, detail)
 }
 
+fn try_reserve_posting_lists(
+    lists: &mut Vec<Vec<usize>>,
+    capacity: usize,
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError> {
+    try_reserve_analysis(lists, capacity, guard, "posting list allocation failed")
+}
+
 fn estimate_posting(
     store: &dyn NormalizedBulkView,
     query: NormalizedPostingQuery<'_>,
@@ -1386,6 +1394,29 @@ fn decode_candidate_field(
     let store = context.store.as_ref();
     let direct = |query| bounded_rows_guarded(store, query, guard);
     let mut lists = Vec::new();
+    let list_capacity = match field {
+        CandidateField::Modules => filter.modules.len().checked_add(1),
+        CandidateField::Sequence => Some(filter.sequence.len()),
+        CandidateField::RelativePc => filter
+            .modules
+            .len()
+            .checked_mul(filter.relative_pc.len())
+            .and_then(|pairs| pairs.checked_mul(2)),
+        CandidateField::AbsolutePc => {
+            let modules = if filter.modules.is_empty() {
+                context.modules.len()
+            } else {
+                filter.modules.len()
+            };
+            modules
+                .checked_mul(filter.absolute_pc.len())
+                .and_then(|pairs| pairs.checked_mul(2))
+        }
+        CandidateField::Memory => Some(filter.memory.len()),
+        _ => Some(0),
+    }
+    .ok_or_else(|| AnalysisError::resource_exhausted("posting list count overflow"))?;
+    try_reserve_posting_lists(&mut lists, list_capacity, guard)?;
     match field {
         CandidateField::Tids => return direct(NormalizedPostingQuery::Tids(&filter.tids)),
         CandidateField::Kinds => return direct(NormalizedPostingQuery::Kinds(&filter.kinds)),
@@ -1994,10 +2025,11 @@ fn direction_matches(query: MemoryDirection, actual: MemoryDirection) -> bool {
 }
 
 fn mnemonic_matches(filters: &[MnemonicFilter], mnemonic: &[u8]) -> bool {
-    let mnemonic = String::from_utf8_lossy(mnemonic).to_ascii_lowercase();
     filters.iter().any(|filter| match filter {
-        MnemonicFilter::Exact(value) => mnemonic == *value,
-        MnemonicFilter::Contains(value) => mnemonic.contains(value),
+        MnemonicFilter::Exact(value) => mnemonic.eq_ignore_ascii_case(value.as_bytes()),
+        MnemonicFilter::Contains(value) => mnemonic
+            .windows(value.len())
+            .any(|window| window.eq_ignore_ascii_case(value.as_bytes())),
     })
 }
 
@@ -2932,12 +2964,58 @@ fn read_flag(bytes: &[u8], offset: &mut usize) -> Result<bool, AnalysisError> {
 mod tests {
     use super::*;
 
+    struct PlannerScopeProbe {
+        scopes: AtomicU64,
+        active: AtomicBool,
+    }
+
+    impl WorkGuard for PlannerScopeProbe {
+        fn consume(&self, delta: WorkDelta) -> Result<(), qtrace_provider::OperationAbort> {
+            if delta.resident_bytes == 0 {
+                Ok(())
+            } else {
+                Err(qtrace_provider::OperationAbort::budget_exceeded(
+                    qtrace_provider::BudgetDimension::ResidentBytes,
+                    0,
+                    delta.resident_bytes,
+                ))
+            }
+        }
+
+        fn begin_allocation_scope(
+            &self,
+            _delta: WorkDelta,
+            _allowed_slack: u64,
+        ) -> Result<(), qtrace_provider::OperationAbort> {
+            assert!(!self.active.swap(true, Ordering::SeqCst));
+            self.scopes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn end_allocation_scope(&self) {
+            assert!(self.active.swap(false, Ordering::SeqCst));
+        }
+    }
+
     #[derive(Default)]
     struct WorkerState {
         active: usize,
         max_active: usize,
         completed: usize,
         released: bool,
+    }
+
+    #[test]
+    fn posting_list_container_growth_uses_one_allocation_scope() {
+        let guard = PlannerScopeProbe {
+            scopes: AtomicU64::new(0),
+            active: AtomicBool::new(false),
+        };
+        let mut lists = Vec::<Vec<usize>>::new();
+        try_reserve_posting_lists(&mut lists, 4_096, &guard).unwrap();
+        assert!(lists.capacity() >= 4_096);
+        assert_eq!(guard.scopes.load(Ordering::SeqCst), 1);
+        assert!(!guard.active.load(Ordering::SeqCst));
     }
 
     #[test]
