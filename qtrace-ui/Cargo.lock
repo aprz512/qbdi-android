@@ -2425,7 +2425,12 @@ dependencies = [
 name = "qtrace-analysis"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "qtrace-provider",
  "qtrace-store",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
