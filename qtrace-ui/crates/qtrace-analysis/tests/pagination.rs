@@ -38,6 +38,7 @@ struct CountingStore {
     discontinuity_payload: Vec<u8>,
     semantics: Vec<SemanticRow>,
     oversized_blob: Option<Vec<u8>>,
+    oversized_blob_after: Option<u32>,
     unblocked_scan_calls: usize,
     event_count_override: Option<usize>,
     discontinuity_rows: usize,
@@ -120,6 +121,7 @@ impl CountingStore {
                 Vec::new()
             },
             oversized_blob: None,
+            oversized_blob_after: None,
             unblocked_scan_calls: 1,
             event_count_override: None,
             discontinuity_rows: usize::from(!semantic),
@@ -194,6 +196,46 @@ impl CountingStore {
         }
     }
 
+    fn posting_count(&self, query: NormalizedPostingQuery<'_>) -> usize {
+        match query {
+            NormalizedPostingQuery::Tids(values) => self
+                .keys
+                .iter()
+                .filter(|key| key.tid.is_some_and(|tid| values.contains(&tid)))
+                .count(),
+            NormalizedPostingQuery::Kinds(values) => (0..self.keys.len())
+                .filter(|row| {
+                    let kind = if self.semantic {
+                        EventKind::SemanticCall
+                    } else if row + self.discontinuity_rows >= self.keys.len() {
+                        EventKind::Discontinuity
+                    } else {
+                        EventKind::OpaqueOptional
+                    };
+                    values.contains(&kind)
+                })
+                .count(),
+            NormalizedPostingQuery::Sequence {
+                start,
+                end_exclusive,
+            } => self
+                .keys
+                .iter()
+                .filter(|key| {
+                    key.sequence
+                        .is_some_and(|sequence| start <= sequence && sequence < end_exclusive)
+                })
+                .count(),
+            NormalizedPostingQuery::Modules(_)
+            | NormalizedPostingQuery::ModulePc { .. }
+            | NormalizedPostingQuery::Definitions(_)
+            | NormalizedPostingQuery::Registers(_)
+            | NormalizedPostingQuery::SemanticCategories(_)
+            | NormalizedPostingQuery::SemanticNames(_)
+            | NormalizedPostingQuery::Memory { .. } => 0,
+        }
+    }
+
     fn posting_label(query: NormalizedPostingQuery<'_>) -> &'static str {
         match query {
             NormalizedPostingQuery::Tids(_) => "tids",
@@ -264,9 +306,6 @@ impl TraceStoreView for CountingStore {
         Ok(b"event")
     }
     fn blob_bytes(&self, id: u32) -> Result<&[u8], IndexError> {
-        if let Some(blob) = &self.oversized_blob {
-            return Ok(blob);
-        }
         let detail: &[u8] = if id == 0 {
             b"detail matches needle"
         } else {
@@ -279,12 +318,16 @@ impl TraceStoreView for CountingStore {
             self.scan_progress.1.notify_all();
             *progress
         };
-        if call <= self.unblocked_scan_calls {
-            return Ok(detail);
+        if call > self.unblocked_scan_calls {
+            let mut released = self.release.0.lock().unwrap();
+            while !*released {
+                released = self.release.1.wait(released).unwrap();
+            }
         }
-        let mut released = self.release.0.lock().unwrap();
-        while !*released {
-            released = self.release.1.wait(released).unwrap();
+        if let Some(blob) = &self.oversized_blob
+            && self.oversized_blob_after.is_none_or(|first| id >= first)
+        {
+            return Ok(blob);
         }
         Ok(detail)
     }
@@ -511,13 +554,9 @@ impl qtrace_provider::WorkGuard for CancelDuringContext {
     ) -> Result<(), qtrace_provider::OperationAbort> {
         if delta.rows != 0 {
             self.armed.store(true, Ordering::Release);
-            return Ok(());
-        }
-        if self.armed.load(Ordering::Acquire)
-            && delta == qtrace_provider::WorkDelta::default()
-            && self.checkpoints.fetch_add(1, Ordering::Relaxed) == 1
-        {
-            return Err(qtrace_provider::OperationAbort::Cancelled);
+            if self.checkpoints.fetch_add(1, Ordering::Relaxed) == 1 {
+                return Err(qtrace_provider::OperationAbort::Cancelled);
+            }
         }
         Ok(())
     }
@@ -575,7 +614,7 @@ impl NormalizedBulkView for CountingStore {
         guard.consume(qtrace_provider::WorkDelta::default())?;
         let count = match self.posting_count_override {
             Some(count) => count,
-            None => self.posting_rows(query)?.len(),
+            None => self.posting_count(query),
         };
         if count > max_rows {
             return Err(IndexError::from(
@@ -593,7 +632,7 @@ impl NormalizedBulkView for CountingStore {
         &self,
         query: NormalizedPostingQuery<'_>,
         max_rows: usize,
-        _guard: &dyn qtrace_provider::WorkGuard,
+        guard: &dyn qtrace_provider::WorkGuard,
     ) -> Result<Vec<usize>, IndexError> {
         if self.cancel_discontinuity_posting
             && matches!(
@@ -605,6 +644,11 @@ impl NormalizedBulkView for CountingStore {
             return Err(IndexError::from(qtrace_provider::OperationAbort::Cancelled));
         }
         let label = Self::posting_label(query);
+        let count = self.posting_count(query);
+        guard.consume(qtrace_provider::WorkDelta {
+            rows: count as u64,
+            ..qtrace_provider::WorkDelta::default()
+        })?;
         let rows = self.posting_rows(query)?;
         assert!(rows.len() <= max_rows, "mock posting exceeded test budget");
         self.posting_decode_calls.fetch_add(1, Ordering::Relaxed);
@@ -701,7 +745,7 @@ fn cursor_rejects_tampering_other_filters_and_same_shape_other_store_content() {
 
 #[test]
 fn stable_cursor_traversal_has_no_duplicates_or_omissions_and_second_page_is_bounded() {
-    let store = Arc::new(CountingStore::new(512, 9, false));
+    let store = Arc::new(CountingStore::new(8_192, 9, false));
     let projection = projection(store.clone(), EventFilter::default());
     let planned_calls = store.event_key_calls.load(Ordering::Relaxed);
 
@@ -727,7 +771,7 @@ fn stable_cursor_traversal_has_no_duplicates_or_omissions_and_second_page_is_bou
         ordinals.extend(page.rows.into_iter().map(|row| row.key().record_ordinal));
         next = page.next;
     }
-    assert_eq!(ordinals, (0..512).collect::<Vec<_>>());
+    assert_eq!(ordinals, (0..8_192).collect::<Vec<_>>());
     assert_eq!(store.typed_lookup_calls.load(Ordering::Relaxed), 0);
 }
 
@@ -1042,12 +1086,65 @@ fn semantic_detail_background_scan_is_cancellable() {
             ..EventFilter::default()
         },
     );
+    store.wait_for_semantic_calls(2);
+    let pending = query_events(&projection, None, 10).unwrap();
+    assert_eq!(pending.total, 1);
+    assert!(!pending.exact_total);
     projection.cancel();
     assert!(projection.wait_until_complete(Duration::ZERO));
     store.release_semantic_scan();
     assert!(projection.wait_until_complete(Duration::from_secs(2)));
     assert!(projection.is_cancelled());
-    assert!(!query_events(&projection, None, 10).unwrap().exact_total);
+    assert_eq!(
+        query_events(&projection, None, 10).unwrap_err().code(),
+        "job.cancelled"
+    );
+    assert_eq!(
+        projection.total_visible_rows().unwrap_err().code(),
+        "job.cancelled"
+    );
+    let terminal_blob_calls = store.blob_calls.load(Ordering::Relaxed);
+    assert_eq!(terminal_blob_calls, 2);
+    assert_eq!(
+        store.blob_calls.load(Ordering::Relaxed),
+        terminal_blob_calls
+    );
+}
+
+#[test]
+fn semantic_resource_failure_hides_partial_rows_and_stops_terminal_growth() {
+    let mut store = CountingStore::new(4, 9, true);
+    store.oversized_blob = Some(vec![b'x'; 8 * 1024 * 1024 + 1]);
+    store.oversized_blob_after = Some(1);
+    let store = Arc::new(store);
+    let projection = projection(
+        store.clone(),
+        EventFilter {
+            semantic_detail_contains: vec!["needle".into()],
+            ..EventFilter::default()
+        },
+    );
+    store.wait_for_semantic_calls(2);
+    let pending = query_events(&projection, None, 10).unwrap();
+    assert_eq!(pending.total, 1);
+    assert!(!pending.exact_total);
+
+    store.release_semantic_scan();
+    assert!(projection.wait_until_complete(Duration::from_secs(2)));
+    assert_eq!(
+        query_events(&projection, None, 10).unwrap_err().code(),
+        "analysis.resource_exhausted"
+    );
+    assert_eq!(
+        projection.total_visible_rows().unwrap_err().code(),
+        "analysis.resource_exhausted"
+    );
+    let terminal_blob_calls = store.blob_calls.load(Ordering::Relaxed);
+    assert_eq!(terminal_blob_calls, 2);
+    assert_eq!(
+        store.blob_calls.load(Ordering::Relaxed),
+        terminal_blob_calls
+    );
 }
 
 #[test]

@@ -12,13 +12,14 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use qtrace_provider::{
-    AllocationScope, ArtifactDigest, EventKey, EventKind, EventPayload, MemoryDirection,
-    Provenance, RegisterSlot, TimelineId, WorkDelta, WorkGuard,
+    AllocationScope, ArtifactDigest, EventKey, EventKind, MemoryDirection, Provenance,
+    RegisterSlot, TimelineId, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
     CompletenessRow, DefinitionRow, InstructionRow, MemoryRow, ModuleRow, NormalizedBulkView,
     NormalizedPostingQuery, RegisterAccess, RegisterObservationRow, SemanticRow, TraceStoreView,
 };
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{CompletenessSummary, DiscontinuityRow, EventFilter, MemoryFilter, MnemonicFilter};
@@ -80,6 +81,13 @@ impl AnalysisError {
         Self {
             code: "analysis.worker_panicked",
             detail: "semantic analysis worker panicked".to_owned(),
+        }
+    }
+
+    fn cancelled(detail: impl Into<String>) -> Self {
+        Self {
+            code: "job.cancelled",
+            detail: detail.into(),
         }
     }
 
@@ -288,19 +296,21 @@ pub struct TimelineProjection {
     plan: QueryPlan,
     state: Arc<(Mutex<ProjectionState>, Condvar)>,
     cancelled: Arc<AtomicBool>,
+    guard: CandidateGuard,
 }
 
 impl TimelineProjection {
     pub fn new(context: Arc<QueryContext>, filter: EventFilter) -> Result<Self, AnalysisError> {
         let filter = filter.normalized()?;
         let projection_identity = derive_projection_identity(context.identity, &filter);
-        let (candidates, indexed_fields, guard) = plan_candidates(&context, &filter)?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let guard = CandidateGuard::new(cancelled.clone());
+        let (candidates, indexed_fields) = plan_candidates(&context, &filter, &guard)?;
         let residual = synchronous_residual_filter(&filter);
         let candidates = apply_synchronous_residuals(&context, &residual, candidates, &guard)?;
         let candidates = sort_rows_by_stable_key(&context, candidates, &guard)?;
         let has_residual_scan = filter.has_semantic_detail_residual();
         let state = Arc::new((Mutex::new(ProjectionState::default()), Condvar::new()));
-        let cancelled = Arc::new(AtomicBool::new(false));
         let plan = QueryPlan {
             projection_identity,
             candidate_rows: candidates.len(),
@@ -315,6 +325,7 @@ impl TimelineProjection {
                 candidates,
                 state.clone(),
                 cancelled.clone(),
+                guard.clone(),
             )?;
         } else {
             let mut projection_state = state.0.lock().expect("projection state poisoned");
@@ -329,6 +340,7 @@ impl TimelineProjection {
             plan,
             state,
             cancelled,
+            guard,
         })
     }
 
@@ -340,14 +352,21 @@ impl TimelineProjection {
         &self.filter
     }
 
-    pub fn total_visible_rows(&self) -> (usize, bool) {
+    pub fn total_visible_rows(&self) -> Result<(usize, bool), AnalysisError> {
         let state = self.state.0.lock().expect("projection state poisoned");
-        (state.visible.len(), state.exact_total)
+        if let Some(error) = &state.error {
+            return Err(error.clone());
+        }
+        Ok((state.visible.len(), state.exact_total))
     }
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
-        terminalize_projection(&self.state, false, None);
+        terminalize_projection(
+            &self.state,
+            false,
+            Some(AnalysisError::cancelled("semantic analysis cancelled")),
+        );
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -368,8 +387,11 @@ impl TimelineProjection {
         if !(1..=2_000).contains(&limit) {
             return Err(AnalysisError::invalid_limit());
         }
-        let (page_rows, total, exact_total, has_more, analysis_pending, watermark, error) = {
+        let (page_rows, total, exact_total, has_more, analysis_pending, watermark) = {
             let state = self.state.0.lock().expect("projection state poisoned");
+            if let Some(error) = &state.error {
+                return Err(error.clone());
+            }
             let start = match cursor {
                 None => 0,
                 Some(cursor) => {
@@ -388,23 +410,30 @@ impl TimelineProjection {
             };
             let end = start.saturating_add(limit).min(state.visible.len());
             (
-                state.visible[start..end].to_vec(),
+                try_clone_slice(
+                    &state.visible[start..end],
+                    &self.guard,
+                    "page source-row allocation failed",
+                )?,
                 state.visible.len(),
                 state.exact_total,
                 end < state.visible.len(),
                 !state.completed,
                 state.watermark.clone(),
-                state.error.clone(),
             )
         };
-        if let Some(error) = error {
-            return Err(error);
-        }
         let mut rows = Vec::new();
-        rows.try_reserve_exact(page_rows.len())
-            .map_err(|_| AnalysisError::resource_exhausted("page row allocation failed"))?;
-        for source_row in page_rows {
-            rows.push(self.project_row(source_row)?);
+        try_reserve_analysis(
+            &mut rows,
+            page_rows.len(),
+            &self.guard,
+            "page row allocation failed",
+        )?;
+        for chunk in page_rows.chunks(4096) {
+            consume_analysis_work(&self.guard, chunk.len())?;
+            for source_row in chunk {
+                rows.push(self.project_row(*source_row)?);
+            }
         }
         let next = if has_more || analysis_pending {
             let last_returned = rows.last().map(|row| row.key().clone());
@@ -528,13 +557,6 @@ fn build_query_context(
             "normalized store exceeds context hard limits",
         ));
     }
-    guard
-        .consume(WorkDelta {
-            rows: event_count as u64,
-            nodes: typed_rows as u64,
-            ..WorkDelta::default()
-        })
-        .map_err(AnalysisError::control)?;
     let mut hash = Sha256::new();
     hash.update(b"qtrace-analysis/store-identity/v3\0sha256\0normalized-content-identity");
     let layout = store.normalized_layout_identity();
@@ -572,9 +594,7 @@ fn build_query_context(
     let mut max_sequence_count = 0_usize;
     for row in 0..event_count {
         if row % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (event_count - row).min(4096))?;
         }
         let key = required_event_key(store.as_ref(), row)?;
         if let Some(sequence) = key.sequence {
@@ -607,9 +627,7 @@ fn build_query_context(
     )?;
     for (row, key) in keys.iter().enumerate() {
         if row % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (keys.len() - row).min(4096))?;
         }
         if key.sequence == Some(u64::MAX) {
             max_sequence_rows.push(row);
@@ -641,9 +659,7 @@ fn build_query_context(
     )?;
     for (index, memory) in store.memory_rows().iter().enumerate() {
         if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (store.memory_rows().len() - index).min(4096))?;
         }
         if let Some(module) = memory.module {
             memory_pc.push(MemoryPcEntry {
@@ -707,9 +723,7 @@ fn dense_owner_map<T: Copy>(
     result.resize(event_count, None);
     for (index, item) in rows.iter().copied().enumerate() {
         if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (rows.len() - index).min(4096))?;
         }
         let owner = owner(item);
         let slot = result
@@ -732,9 +746,7 @@ fn try_clone_slice<T: Clone>(
     let mut result = Vec::new();
     try_reserve_context(&mut result, rows.len(), guard, detail)?;
     for chunk in rows.chunks(4096) {
-        guard
-            .consume(WorkDelta::default())
-            .map_err(AnalysisError::control)?;
+        consume_analysis_work(guard, chunk.len())?;
         result.extend_from_slice(chunk);
     }
     Ok(result)
@@ -778,9 +790,7 @@ fn bucket_observations(
     counts.resize(event_count, 0_usize);
     for (index, row) in source.iter().enumerate() {
         if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (source.len() - index).min(4096))?;
         }
         let count = counts.get_mut(row.owner_row).ok_or_else(|| {
             AnalysisError::store_shape("register observation owner is out of bounds")
@@ -799,9 +809,7 @@ fn bucket_observations(
     let mut next = 0_usize;
     for (index, count) in counts.iter().enumerate() {
         if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (counts.len() - index).min(4096))?;
         }
         let end = next
             .checked_add(*count)
@@ -836,17 +844,13 @@ fn bucket_observations(
     )?;
     for (index, (start, _)) in ranges.iter().copied().enumerate() {
         if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (ranges.len() - index).min(4096))?;
         }
         cursors.push(start);
     }
     for (index, row) in source.iter().copied().enumerate() {
         if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (source.len() - index).min(4096))?;
         }
         let cursor = &mut cursors[row.owner_row];
         observations[*cursor] = row;
@@ -872,29 +876,26 @@ fn radix_sort_memory_pc(
     scratch.resize(rows.len(), MemoryPcEntry::default());
     for pass in 0..12 {
         let mut counts = [0_usize; 256];
-        for (index, row) in rows.iter().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk {
+                counts[memory_pc_byte(*row, pass) as usize] += 1;
             }
-            counts[memory_pc_byte(*row, pass) as usize] += 1;
         }
+        consume_analysis_work(guard, counts.len())?;
         let mut position = 0_usize;
         for count in &mut counts {
             let current = *count;
             *count = position;
             position += current;
         }
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                let slot = &mut counts[memory_pc_byte(row, pass) as usize];
+                scratch[*slot] = row;
+                *slot += 1;
             }
-            let slot = &mut counts[memory_pc_byte(row, pass) as usize];
-            scratch[*slot] = row;
-            *slot += 1;
         }
         std::mem::swap(rows, &mut scratch);
     }
@@ -926,29 +927,26 @@ fn radix_sort_completeness(
     scratch.resize(rows.len(), rows[0]);
     for pass in 0..19 {
         let mut counts = [0_usize; 256];
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                counts[completeness_byte(row, pass) as usize] += 1;
             }
-            counts[completeness_byte(row, pass) as usize] += 1;
         }
+        consume_analysis_work(guard, counts.len())?;
         let mut position = 0_usize;
         for count in &mut counts {
             let current = *count;
             *count = position;
             position += current;
         }
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                let slot = &mut counts[completeness_byte(row, pass) as usize];
+                scratch[*slot] = row;
+                *slot += 1;
             }
-            let slot = &mut counts[completeness_byte(row, pass) as usize];
-            scratch[*slot] = row;
-            *slot += 1;
         }
         std::mem::swap(rows, &mut scratch);
     }
@@ -1005,16 +1003,25 @@ enum CandidateField {
     SemanticDetailKinds,
 }
 
-struct CandidateGuard {
+struct CandidateLedger {
     work: AtomicU64,
     resident: AtomicU64,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct CandidateGuard {
+    ledger: Arc<CandidateLedger>,
 }
 
 impl CandidateGuard {
-    fn new() -> Self {
+    fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self {
-            work: AtomicU64::new(0),
-            resident: AtomicU64::new(0),
+            ledger: Arc::new(CandidateLedger {
+                work: AtomicU64::new(0),
+                resident: AtomicU64::new(0),
+                cancelled,
+            }),
         }
     }
 
@@ -1029,13 +1036,23 @@ impl CandidateGuard {
 
 impl WorkGuard for CandidateGuard {
     fn consume(&self, delta: WorkDelta) -> Result<(), qtrace_provider::OperationAbort> {
+        if self.ledger.cancelled.load(Ordering::Acquire) {
+            return Err(qtrace_provider::OperationAbort::Cancelled);
+        }
         let work_delta = delta
             .rows
             .saturating_add(delta.events)
             .saturating_add(delta.nodes)
             .saturating_add(delta.input_bytes)
             .saturating_add(delta.decompressed_bytes);
-        let work = self.work.fetch_add(work_delta, Ordering::AcqRel) + work_delta;
+        let work = self
+            .ledger
+            .work
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |work| {
+                Some(work.saturating_add(work_delta))
+            })
+            .unwrap_or_else(|work| work)
+            .saturating_add(work_delta);
         if work > MAX_CANDIDATE_WORK as u64 {
             return Err(qtrace_provider::OperationAbort::budget_exceeded(
                 qtrace_provider::BudgetDimension::Rows,
@@ -1045,9 +1062,13 @@ impl WorkGuard for CandidateGuard {
         }
         if delta.resident_bytes != 0 {
             let resident = self
+                .ledger
                 .resident
-                .fetch_add(delta.resident_bytes, Ordering::AcqRel)
-                + delta.resident_bytes;
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |resident| {
+                    Some(resident.saturating_add(delta.resident_bytes))
+                })
+                .unwrap_or_else(|resident| resident)
+                .saturating_add(delta.resident_bytes);
             if resident > MAX_CANDIDATE_RESIDENT_BYTES as u64 {
                 return Err(qtrace_provider::OperationAbort::budget_exceeded(
                     qtrace_provider::BudgetDimension::ResidentBytes,
@@ -1063,10 +1084,10 @@ impl WorkGuard for CandidateGuard {
 fn plan_candidates(
     context: &QueryContext,
     filter: &EventFilter,
-) -> Result<(Vec<usize>, usize, CandidateGuard), AnalysisError> {
-    let guard = CandidateGuard::new();
+    guard: &CandidateGuard,
+) -> Result<(Vec<usize>, usize), AnalysisError> {
     let mut fields = Vec::new();
-    try_reserve_analysis(&mut fields, 13, &guard, "posting plan allocation failed")?;
+    try_reserve_analysis(&mut fields, 13, guard, "posting plan allocation failed")?;
     if !filter.tids.is_empty() {
         fields.push(CandidateField::Tids);
     }
@@ -1109,14 +1130,15 @@ fn plan_candidates(
         try_reserve_analysis(
             &mut definitions,
             context.definitions.len(),
-            &guard,
+            guard,
             "definition match allocation failed",
         )?;
         for (definition_id, definition) in context.definitions.iter().enumerate() {
             if definition_id % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+                consume_analysis_work(
+                    guard,
+                    (context.definitions.len() - definition_id).min(4096),
+                )?;
             }
             let mnemonic = context
                 .store
@@ -1156,18 +1178,30 @@ fn plan_candidates(
     try_reserve_analysis(
         &mut planned,
         fields.len(),
-        &guard,
+        guard,
         "posting estimate allocation failed",
     )?;
+    let mut estimated_decode_rows = 0_usize;
     for field in fields {
-        let count = estimate_candidate_field(context, filter, &field, &guard)?;
+        let count = estimate_candidate_field(context, filter, &field, guard)?;
+        checked_estimate_add(&mut estimated_decode_rows, count)?;
         planned.push((count, field));
     }
-    planned.sort_by_key(|(count, _)| *count);
+    for index in 1..planned.len() {
+        let mut cursor = index;
+        while cursor > 0 {
+            consume_analysis_work(guard, 1)?;
+            if planned[cursor - 1].0 <= planned[cursor].0 {
+                break;
+            }
+            planned.swap(cursor - 1, cursor);
+            cursor -= 1;
+        }
+    }
     let indexed_fields = planned.len();
 
     let mut candidates = if let Some((_, field)) = planned.first() {
-        decode_candidate_field(context, filter, field, &guard)?
+        decode_candidate_field(context, filter, field, guard)?
     } else {
         let count = context.store.event_count();
         if count > MAX_CANDIDATE_ROWS {
@@ -1177,7 +1211,7 @@ fn plan_candidates(
         }
         guard.consume_rows(count)?;
         let mut rows = Vec::new();
-        try_reserve_analysis(&mut rows, count, &guard, "candidate row allocation failed")?;
+        try_reserve_analysis(&mut rows, count, guard, "candidate row allocation failed")?;
         rows.extend(0..count);
         rows
     };
@@ -1185,10 +1219,10 @@ fn plan_candidates(
         if candidates.is_empty() {
             break;
         }
-        let group = decode_candidate_field(context, filter, field, &guard)?;
-        candidates = intersect_rows_fallible_guarded(&candidates, &group, &guard)?;
+        let group = decode_candidate_field(context, filter, field, guard)?;
+        candidates = intersect_rows_fallible_guarded(&candidates, &group, guard)?;
     }
-    Ok((candidates, indexed_fields, guard))
+    Ok((candidates, indexed_fields))
 }
 
 fn try_reserve_analysis<T>(
@@ -1200,12 +1234,60 @@ fn try_reserve_analysis<T>(
     try_reserve_context(values, additional, guard, detail)
 }
 
+fn consume_analysis_work(guard: &dyn WorkGuard, work: usize) -> Result<(), AnalysisError> {
+    guard
+        .consume(WorkDelta {
+            rows: u64::try_from(work).unwrap_or(u64::MAX),
+            ..WorkDelta::default()
+        })
+        .map_err(AnalysisError::control)
+}
+
+fn dedup_sorted_rows_guarded(
+    rows: &mut Vec<usize>,
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError> {
+    if rows.len() < 2 {
+        return Ok(());
+    }
+    let mut output = 1_usize;
+    let mut input = 1_usize;
+    while input < rows.len() {
+        let end = (input + 4096).min(rows.len());
+        consume_analysis_work(guard, end - input)?;
+        while input < end {
+            if rows[input] != rows[output - 1] {
+                rows[output] = rows[input];
+                output += 1;
+            }
+            input += 1;
+        }
+    }
+    rows.truncate(output);
+    Ok(())
+}
+
 fn try_reserve_posting_lists(
     lists: &mut Vec<Vec<usize>>,
     capacity: usize,
     guard: &dyn WorkGuard,
 ) -> Result<(), AnalysisError> {
     try_reserve_analysis(lists, capacity, guard, "posting list allocation failed")
+}
+
+fn borrowed_filter_bytes<'a>(
+    values: &'a [String],
+    guard: &dyn WorkGuard,
+) -> Result<Vec<&'a [u8]>, AnalysisError> {
+    let mut bytes = Vec::new();
+    try_reserve_analysis(
+        &mut bytes,
+        values.len(),
+        guard,
+        "semantic filter reference allocation failed",
+    )?;
+    bytes.extend(values.iter().map(String::as_bytes));
+    Ok(bytes)
 }
 
 fn estimate_posting(
@@ -1350,11 +1432,7 @@ fn estimate_candidate_field(
             }
         }
         CandidateField::SemanticCategories => {
-            let values = filter
-                .semantic_categories
-                .iter()
-                .map(String::as_bytes)
-                .collect::<Vec<_>>();
+            let values = borrowed_filter_bytes(&filter.semantic_categories, guard)?;
             total = estimate_posting(
                 store,
                 NormalizedPostingQuery::SemanticCategories(&values),
@@ -1362,11 +1440,7 @@ fn estimate_candidate_field(
             )?;
         }
         CandidateField::SemanticNames => {
-            let values = filter
-                .semantic_names
-                .iter()
-                .map(String::as_bytes)
-                .collect::<Vec<_>>();
+            let values = borrowed_filter_bytes(&filter.semantic_names, guard)?;
             total = estimate_posting(store, NormalizedPostingQuery::SemanticNames(&values), guard)?;
         }
         CandidateField::SemanticDetailKinds => {
@@ -1381,7 +1455,6 @@ fn estimate_candidate_field(
             )?;
         }
     }
-    guard.consume_rows(total)?;
     Ok(total)
 }
 
@@ -1441,7 +1514,7 @@ fn decode_candidate_field(
                     )?;
                     rows.extend_from_slice(&context.max_sequence_rows);
                     radix_sort_usize_guarded(&mut rows, guard)?;
-                    rows.dedup();
+                    dedup_sorted_rows_guarded(&mut rows, guard)?;
                 }
                 lists.push(rows);
             }
@@ -1493,19 +1566,11 @@ fn decode_candidate_field(
             }
         }
         CandidateField::SemanticCategories => {
-            let values = filter
-                .semantic_categories
-                .iter()
-                .map(String::as_bytes)
-                .collect::<Vec<_>>();
+            let values = borrowed_filter_bytes(&filter.semantic_categories, guard)?;
             return direct(NormalizedPostingQuery::SemanticCategories(&values));
         }
         CandidateField::SemanticNames => {
-            let values = filter
-                .semantic_names
-                .iter()
-                .map(String::as_bytes)
-                .collect::<Vec<_>>();
+            let values = borrowed_filter_bytes(&filter.semantic_names, guard)?;
             return direct(NormalizedPostingQuery::SemanticNames(&values));
         }
         CandidateField::SemanticDetailKinds => {
@@ -1516,7 +1581,6 @@ fn decode_candidate_field(
             ]));
         }
     }
-    guard.consume_rows(lists.iter().map(Vec::len).sum())?;
     union_rows_guarded(lists, guard)
 }
 
@@ -1589,12 +1653,6 @@ fn bounded_rows_guarded(
             "posting result exceeds row limit",
         ));
     }
-    guard
-        .consume(WorkDelta {
-            rows: rows.len() as u64,
-            ..WorkDelta::default()
-        })
-        .map_err(AnalysisError::control)?;
     Ok(rows)
 }
 
@@ -1611,12 +1669,8 @@ fn intersect_rows_fallible_guarded(
         "posting intersection allocation failed",
     )?;
     let (mut left_index, mut right_index) = (0, 0);
+    let mut pending_work = 0_usize;
     while left_index < left.len() && right_index < right.len() {
-        if (left_index + right_index) % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
-        }
         match left[left_index].cmp(&right[right_index]) {
             std::cmp::Ordering::Less => left_index += 1,
             std::cmp::Ordering::Greater => right_index += 1,
@@ -1626,7 +1680,13 @@ fn intersect_rows_fallible_guarded(
                 right_index += 1;
             }
         }
+        pending_work += 1;
+        if pending_work == 4096 {
+            consume_analysis_work(guard, pending_work)?;
+            pending_work = 0;
+        }
     }
+    consume_analysis_work(guard, pending_work)?;
     Ok(result)
 }
 
@@ -1677,16 +1737,12 @@ fn memory_pc_rows_guarded(
         guard,
         "memory PC posting allocation failed",
     )?;
-    for (index, entry) in context.memory_pc[first..last].iter().enumerate() {
-        if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
-        }
-        result.push(entry.row);
+    for chunk in context.memory_pc[first..last].chunks(4096) {
+        consume_analysis_work(guard, chunk.len())?;
+        result.extend(chunk.iter().map(|entry| entry.row));
     }
     radix_sort_usize_guarded(&mut result, guard)?;
-    result.dedup();
+    dedup_sorted_rows_guarded(&mut result, guard)?;
     Ok(result)
 }
 
@@ -1713,16 +1769,12 @@ fn memory_module_rows_guarded(
         guard,
         "memory module posting allocation failed",
     )?;
-    for (index, entry) in context.memory_pc[first..last].iter().enumerate() {
-        if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
-        }
-        rows.push(entry.row);
+    for chunk in context.memory_pc[first..last].chunks(4096) {
+        consume_analysis_work(guard, chunk.len())?;
+        rows.extend(chunk.iter().map(|entry| entry.row));
     }
     radix_sort_usize_guarded(&mut rows, guard)?;
-    rows.dedup();
+    dedup_sorted_rows_guarded(&mut rows, guard)?;
     Ok(rows)
 }
 
@@ -1742,14 +1794,12 @@ fn union_rows_guarded(
     try_reserve_analysis(&mut rows, work, guard, "posting union allocation failed")?;
     for list in lists {
         for chunk in list.chunks(4096) {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, chunk.len())?;
             rows.extend_from_slice(chunk);
         }
     }
     radix_sort_usize_guarded(&mut rows, guard)?;
-    rows.dedup();
+    dedup_sorted_rows_guarded(&mut rows, guard)?;
     Ok(rows)
 }
 
@@ -1770,29 +1820,26 @@ fn radix_sort_usize_guarded(
     scratch.resize(rows.len(), 0);
     for pass in 0..std::mem::size_of::<usize>() {
         let mut counts = [0_usize; 256];
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                counts[row.to_le_bytes()[pass] as usize] += 1;
             }
-            counts[row.to_le_bytes()[pass] as usize] += 1;
         }
+        consume_analysis_work(guard, counts.len())?;
         let mut position = 0;
         for count in &mut counts {
             let current = *count;
             *count = position;
             position += current;
         }
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                let slot = &mut counts[row.to_le_bytes()[pass] as usize];
+                scratch[*slot] = row;
+                *slot += 1;
             }
-            let slot = &mut counts[row.to_le_bytes()[pass] as usize];
-            scratch[*slot] = row;
-            *slot += 1;
         }
         std::mem::swap(rows, &mut scratch);
     }
@@ -1812,7 +1859,16 @@ fn apply_synchronous_residuals(
     {
         return Ok(candidates);
     }
-    guard.consume_rows(candidates.len())?;
+    retain_rows_guarded(candidates, guard, |row| {
+        matches_non_detail(context, filter, row)
+    })
+}
+
+fn retain_rows_guarded(
+    candidates: Vec<usize>,
+    guard: &dyn WorkGuard,
+    mut predicate: impl FnMut(usize) -> Result<bool, AnalysisError>,
+) -> Result<Vec<usize>, AnalysisError> {
     let mut matched = Vec::new();
     try_reserve_analysis(
         &mut matched,
@@ -1820,14 +1876,14 @@ fn apply_synchronous_residuals(
         guard,
         "residual result allocation failed",
     )?;
-    for (index, row) in candidates.into_iter().enumerate() {
-        if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
-        }
-        if matches_non_detail(context, filter, row)? {
-            matched.push(row);
+    let mut candidates = candidates.into_iter();
+    while !candidates.as_slice().is_empty() {
+        let chunk = candidates.as_slice().len().min(4096);
+        consume_analysis_work(guard, chunk)?;
+        for row in candidates.by_ref().take(chunk) {
+            if predicate(row)? {
+                matched.push(row);
+            }
         }
     }
     Ok(matched)
@@ -2072,29 +2128,26 @@ fn radix_sort_rows_by_keys_guarded(
     scratch.resize(rows.len(), 0);
     for pass in 0..70 {
         let mut counts = [0_usize; 256];
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                counts[stable_key_byte(&keys[row], pass) as usize] += 1;
             }
-            counts[stable_key_byte(&keys[row], pass) as usize] += 1;
         }
+        consume_analysis_work(guard, counts.len())?;
         let mut position = 0;
         for count in &mut counts {
             let current = *count;
             *count = position;
             position += current;
         }
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard
-                    .consume(WorkDelta::default())
-                    .map_err(AnalysisError::control)?;
+        for chunk in rows.chunks(4096) {
+            consume_analysis_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                let slot = &mut counts[stable_key_byte(&keys[row], pass) as usize];
+                scratch[*slot] = row;
+                *slot += 1;
             }
-            let slot = &mut counts[stable_key_byte(&keys[row], pass) as usize];
-            scratch[*slot] = row;
-            *slot += 1;
         }
         std::mem::swap(&mut rows, &mut scratch);
     }
@@ -2136,11 +2189,10 @@ fn map_discontinuities(
     )?;
     result.resize(event_count, None);
     let mut payload_bytes = 0_usize;
+    let row_count = rows.len();
     for (index, row) in rows.into_iter().enumerate() {
         if index % 4096 == 0 {
-            guard
-                .consume(WorkDelta::default())
-                .map_err(AnalysisError::control)?;
+            consume_analysis_work(guard, (row_count - index).min(4096))?;
         }
         let payload = store.payload_bytes(row).map_err(AnalysisError::store)?;
         if payload.len() > MAX_DISCONTINUITY_PAYLOAD_BYTES {
@@ -2164,14 +2216,16 @@ fn map_discontinuities(
                 })
                 .map_err(AnalysisError::control)?;
         }
-        let payload: EventPayload = serde_json::from_slice(payload).map_err(|error| {
-            AnalysisError::store_shape(format!("invalid discontinuity payload: {error}"))
-        })?;
-        let EventPayload::Discontinuity(discontinuity) = payload else {
-            return Err(AnalysisError::store_shape(
-                "discontinuity row payload has the wrong event kind",
-            ));
-        };
+        validate_discontinuity_payload_tag(payload)?;
+        for chunk in payload.chunks(4096) {
+            guard
+                .consume(WorkDelta {
+                    input_bytes: chunk.len() as u64,
+                    ..WorkDelta::default()
+                })
+                .map_err(AnalysisError::control)?;
+        }
+        let discontinuity = decode_discontinuity_payload_body(payload)?;
         let evidence = CompletenessRow {
             domain: discontinuity.evidence.domain(),
             bounds: discontinuity.evidence.bounds(),
@@ -2184,6 +2238,71 @@ fn map_discontinuities(
         *slot = Some((discontinuity.cause, evidence));
     }
     Ok(result)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClosedPayloadTag {
+    Begin(serde::de::IgnoredAny),
+    ModuleDefinition(serde::de::IgnoredAny),
+    InstructionDefinition(serde::de::IgnoredAny),
+    Instruction(serde::de::IgnoredAny),
+    Memory(serde::de::IgnoredAny),
+    SemanticCall(serde::de::IgnoredAny),
+    SemanticRule(serde::de::IgnoredAny),
+    SemanticError(serde::de::IgnoredAny),
+    ThreadLifecycle(serde::de::IgnoredAny),
+    Syscall(serde::de::IgnoredAny),
+    Signal(serde::de::IgnoredAny),
+    SignalHandlerBoundary(serde::de::IgnoredAny),
+    Termination(serde::de::IgnoredAny),
+    RegisterCheckpoint(serde::de::IgnoredAny),
+    RegisterDelta(serde::de::IgnoredAny),
+    StringDefinition(serde::de::IgnoredAny),
+    CoverageGap(serde::de::IgnoredAny),
+    Discontinuity(serde::de::IgnoredAny),
+    OpaqueOptional(serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum BorrowedDiscontinuityPayload {
+    Discontinuity(BorrowedDiscontinuity),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BorrowedDiscontinuity {
+    cause: qtrace_provider::DiscontinuityCause,
+    evidence: qtrace_provider::CompletenessRange,
+}
+
+#[cfg(test)]
+fn decode_discontinuity_payload(payload: &[u8]) -> Result<BorrowedDiscontinuity, AnalysisError> {
+    validate_discontinuity_payload_tag(payload)?;
+    decode_discontinuity_payload_body(payload)
+}
+
+fn validate_discontinuity_payload_tag(payload: &[u8]) -> Result<(), AnalysisError> {
+    let tag: ClosedPayloadTag = serde_json::from_slice(payload).map_err(|error| {
+        AnalysisError::store_shape(format!("invalid discontinuity payload tag: {error}"))
+    })?;
+    if !matches!(tag, ClosedPayloadTag::Discontinuity(_)) {
+        return Err(AnalysisError::store_shape(
+            "discontinuity row payload has the wrong event kind",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_discontinuity_payload_body(
+    payload: &[u8],
+) -> Result<BorrowedDiscontinuity, AnalysisError> {
+    let BorrowedDiscontinuityPayload::Discontinuity(discontinuity) =
+        serde_json::from_slice(payload).map_err(|error| {
+            AnalysisError::store_shape(format!("invalid discontinuity payload: {error}"))
+        })?;
+    Ok(discontinuity)
 }
 
 struct SemanticJob {
@@ -2329,29 +2448,51 @@ fn submit_semantic_scan(
     candidates: Vec<usize>,
     state: Arc<(Mutex<ProjectionState>, Condvar)>,
     cancelled: Arc<AtomicBool>,
+    guard: CandidateGuard,
 ) -> Result<(), AnalysisError> {
     let failure_state = state.clone();
     SemanticExecutor::global()?.submit(SemanticJob::new(
         move || {
             let mut terminal = ProjectionTerminalizer::new(state.clone());
-            let matcher =
-                match DetailMatcher::new_with_probe(&needles, MAX_MATCHER_BUILD_WORK, |_| {
+            let mut charged_matcher_work = 0_usize;
+            let mut matcher_ledger_error = None;
+            let matcher_result = DetailMatcher::new_guarded_with_probe(
+                &needles,
+                MAX_MATCHER_BUILD_WORK,
+                &guard,
+                |work| {
+                    let additional = work.saturating_sub(charged_matcher_work);
+                    charged_matcher_work = work;
+                    if let Err(error) = consume_analysis_work(&guard, additional) {
+                        matcher_ledger_error = Some(error);
+                        return true;
+                    }
                     cancelled.load(Ordering::Acquire)
-                }) {
-                    Ok(matcher) => matcher,
-                    Err(error) if error.code() == "job.cancelled" => {
-                        terminal.finish(false);
-                        return;
-                    }
-                    Err(error) => {
-                        terminal.fail(error);
-                        return;
-                    }
-                };
+                },
+            );
+            if let Some(error) = matcher_ledger_error {
+                terminal.fail(error);
+                return;
+            }
+            let matcher = match matcher_result {
+                Ok(matcher) => matcher,
+                Err(error) if error.code() == "job.cancelled" => {
+                    terminal.fail(error);
+                    return;
+                }
+                Err(error) => {
+                    terminal.fail(error);
+                    return;
+                }
+            };
             let mut remaining_scan = MAX_SEMANTIC_SCAN_BYTES;
             for row in candidates {
                 if cancelled.load(Ordering::Acquire) {
-                    terminal.finish(false);
+                    terminal.fail(AnalysisError::cancelled("semantic analysis cancelled"));
+                    return;
+                }
+                if let Err(error) = guard.consume_rows(1) {
+                    terminal.fail(error);
                     return;
                 }
                 let result = context
@@ -2376,23 +2517,25 @@ fn submit_semantic_scan(
                             ));
                             return;
                         }
-                        let matched =
-                            match matcher.contains_with_probe(detail, remaining_scan, |_| {
-                                cancelled.load(Ordering::Acquire)
-                            }) {
-                                Ok(matched) => matched,
-                                Err(error) if error.code() == "job.cancelled" => {
-                                    terminal.finish(false);
-                                    return;
-                                }
-                                Err(error) => {
-                                    terminal.fail(error);
-                                    return;
-                                }
-                            };
-                        remaining_scan = remaining_scan.saturating_sub(detail.len());
+                        let (matched, scanned) = match matcher.contains_guarded_with_probe(
+                            detail,
+                            remaining_scan,
+                            &guard,
+                            |_| cancelled.load(Ordering::Acquire),
+                        ) {
+                            Ok(matched) => matched,
+                            Err(error) if error.code() == "job.cancelled" => {
+                                terminal.fail(error);
+                                return;
+                            }
+                            Err(error) => {
+                                terminal.fail(error);
+                                return;
+                            }
+                        };
+                        remaining_scan = remaining_scan.saturating_sub(scanned);
                         if cancelled.load(Ordering::Acquire) {
-                            terminal.finish(false);
+                            terminal.fail(AnalysisError::cancelled("semantic analysis cancelled"));
                             return;
                         }
                         let key = match context.key(row) {
@@ -2438,15 +2581,14 @@ fn submit_semantic_scan(
                                         ));
                                         return;
                                     };
-                                    let scope =
-                                        match AllocationScope::begin(&AllowContextWork, bytes, 0) {
-                                            Ok(scope) => scope,
-                                            Err(error) => {
-                                                drop(projection);
-                                                terminal.fail(AnalysisError::control(error));
-                                                return;
-                                            }
-                                        };
+                                    let scope = match AllocationScope::begin(&guard, bytes, 0) {
+                                        Ok(scope) => scope,
+                                        Err(error) => {
+                                            drop(projection);
+                                            terminal.fail(AnalysisError::control(error));
+                                            return;
+                                        }
+                                    };
                                     if projection.visible.try_reserve(1).is_err() {
                                         drop(scope);
                                         drop(projection);
@@ -2469,7 +2611,11 @@ fn submit_semantic_scan(
                     }
                 }
             }
-            terminal.finish(!cancelled.load(Ordering::Acquire));
+            if cancelled.load(Ordering::Acquire) {
+                terminal.fail(AnalysisError::cancelled("semantic analysis cancelled"));
+            } else {
+                terminal.finish(true);
+            }
         },
         move |error| terminalize_projection(&failure_state, false, Some(error)),
     ))
@@ -2519,6 +2665,10 @@ fn terminalize_projection(
     if projection.completed {
         return;
     }
+    if error.is_some() {
+        projection.visible.clear();
+        projection.watermark = None;
+    }
     projection.exact_total = exact;
     projection.completed = true;
     projection.error = error;
@@ -2562,9 +2712,19 @@ impl DetailMatcher {
         Self::new_with_probe(patterns, MAX_MATCHER_BUILD_WORK, |_| false)
     }
 
+    #[cfg(test)]
     fn new_with_probe<T: AsRef<[u8]>>(
         patterns: &[T],
         max_work: usize,
+        cancelled: impl FnMut(usize) -> bool,
+    ) -> Result<Self, AnalysisError> {
+        Self::new_guarded_with_probe(patterns, max_work, &AllowContextWork, cancelled)
+    }
+
+    fn new_guarded_with_probe<T: AsRef<[u8]>>(
+        patterns: &[T],
+        max_work: usize,
+        guard: &dyn WorkGuard,
         mut cancelled: impl FnMut(usize) -> bool,
     ) -> Result<Self, AnalysisError> {
         if cancelled(0) {
@@ -2597,7 +2757,7 @@ impl DetailMatcher {
         try_reserve_analysis(
             &mut nodes,
             total_bytes.saturating_add(1),
-            &AllowContextWork,
+            guard,
             "semantic automaton node allocation failed",
         )?;
         nodes.push(DetailNode::default());
@@ -2605,7 +2765,7 @@ impl DetailMatcher {
         try_reserve_analysis(
             &mut edges,
             total_bytes,
-            &AllowContextWork,
+            guard,
             "semantic automaton edge allocation failed",
         )?;
         let mut matcher = Self { nodes, edges };
@@ -2642,7 +2802,7 @@ impl DetailMatcher {
             }
             matcher.nodes[state].terminal = true;
         }
-        matcher.build_failures(&mut work, max_work, &mut cancelled)?;
+        matcher.build_failures(&mut work, max_work, guard, &mut cancelled)?;
         if cancelled(work) {
             return Err(AnalysisError {
                 code: "job.cancelled",
@@ -2688,6 +2848,7 @@ impl DetailMatcher {
         &mut self,
         work: &mut usize,
         max_work: usize,
+        guard: &dyn WorkGuard,
         cancelled: &mut impl FnMut(usize) -> bool,
     ) -> Result<(), AnalysisError> {
         let mut queue = std::collections::VecDeque::new();
@@ -2699,8 +2860,8 @@ impl DetailMatcher {
             .ok_or_else(|| {
                 AnalysisError::resource_exhausted("semantic automaton queue size overflow")
             })?;
-        let scope = AllocationScope::begin(&AllowContextWork, queue_bytes, 0)
-            .map_err(AnalysisError::control)?;
+        let scope =
+            AllocationScope::begin(guard, queue_bytes, 0).map_err(AnalysisError::control)?;
         queue.try_reserve(self.nodes.len()).map_err(|_| {
             AnalysisError::resource_exhausted("semantic automaton queue allocation failed")
         })?;
@@ -2740,12 +2901,24 @@ impl DetailMatcher {
         Ok(())
     }
 
+    #[cfg(test)]
     fn contains_with_probe(
         &self,
         haystack: &[u8],
         max_bytes: usize,
-        mut cancelled: impl FnMut(usize) -> bool,
+        cancelled: impl FnMut(usize) -> bool,
     ) -> Result<bool, AnalysisError> {
+        self.contains_guarded_with_probe(haystack, max_bytes, &AllowContextWork, cancelled)
+            .map(|(matched, _)| matched)
+    }
+
+    fn contains_guarded_with_probe(
+        &self,
+        haystack: &[u8],
+        max_bytes: usize,
+        guard: &dyn WorkGuard,
+        mut cancelled: impl FnMut(usize) -> bool,
+    ) -> Result<(bool, usize), AnalysisError> {
         if cancelled(0) {
             return Err(AnalysisError {
                 code: "job.cancelled",
@@ -2763,14 +2936,26 @@ impl DetailMatcher {
                     "semantic scan exceeds 64 MiB work budget",
                 ));
             }
+            let mut transitions = 0_usize;
+            let mut matched = false;
             for byte in chunk {
-                while state != 0 && self.transition(state, *byte).is_none() {
+                while state != 0 {
+                    transitions += 1;
+                    if self.transition(state, *byte).is_some() {
+                        break;
+                    }
                     state = self.nodes[state].failure as usize;
                 }
+                transitions += 1;
                 state = self.transition(state, *byte).unwrap_or(0);
                 if self.nodes[state].terminal {
-                    return Ok(true);
+                    matched = true;
+                    break;
                 }
+            }
+            consume_analysis_work(guard, transitions)?;
+            if matched {
+                return Ok((true, processed));
             }
             if cancelled(processed) {
                 return Err(AnalysisError {
@@ -2779,7 +2964,7 @@ impl DetailMatcher {
                 });
             }
         }
-        Ok(false)
+        Ok((false, processed))
     }
 }
 
@@ -2962,7 +3147,268 @@ fn read_flag(bytes: &[u8], offset: &mut usize) -> Result<bool, AnalysisError> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+    };
+
     use super::*;
+
+    #[derive(Clone, Copy, Default)]
+    struct AllocationOracleState {
+        active: bool,
+        scope_active: bool,
+        unauthorized: u64,
+        requested: u64,
+    }
+
+    thread_local! {
+        static ALLOCATION_ORACLE: Cell<AllocationOracleState> = const {
+            Cell::new(AllocationOracleState {
+                active: false,
+                scope_active: false,
+                unauthorized: 0,
+                requested: 0,
+            })
+        };
+    }
+
+    struct TrackingAllocator;
+
+    unsafe impl GlobalAlloc for TrackingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record_test_allocation(layout.size());
+            // SAFETY: forwards the allocator request unchanged.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_test_allocation(layout.size());
+            // SAFETY: forwards the allocator request unchanged.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            // SAFETY: forwards the matching deallocation unchanged.
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            record_test_allocation(size);
+            // SAFETY: forwards the allocator request unchanged.
+            unsafe { System.realloc(pointer, layout, size) }
+        }
+    }
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+    fn record_test_allocation(bytes: usize) {
+        ALLOCATION_ORACLE.with(|oracle| {
+            let mut state = oracle.get();
+            if state.active {
+                state.requested = state.requested.saturating_add(bytes as u64);
+                state.unauthorized += u64::from(!state.scope_active);
+                oracle.set(state);
+            }
+        });
+    }
+
+    fn activate_allocation_oracle() {
+        ALLOCATION_ORACLE.with(|oracle| {
+            oracle.set(AllocationOracleState {
+                active: true,
+                ..AllocationOracleState::default()
+            });
+        });
+    }
+
+    fn finish_allocation_oracle() -> AllocationOracleState {
+        ALLOCATION_ORACLE.with(|oracle| {
+            let mut state = oracle.get();
+            state.active = false;
+            oracle.set(state);
+            state
+        })
+    }
+
+    #[derive(Default)]
+    struct ProductionPassProbe {
+        work: AtomicU64,
+        resident: AtomicU64,
+        allocations: AtomicU64,
+    }
+
+    impl WorkGuard for ProductionPassProbe {
+        fn consume(&self, delta: WorkDelta) -> Result<(), qtrace_provider::OperationAbort> {
+            self.work.fetch_add(
+                delta
+                    .rows
+                    .saturating_add(delta.nodes)
+                    .saturating_add(delta.events)
+                    .saturating_add(delta.input_bytes)
+                    .saturating_add(delta.decompressed_bytes),
+                Ordering::SeqCst,
+            );
+            self.resident
+                .fetch_add(delta.resident_bytes, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn begin_allocation_scope(
+            &self,
+            delta: WorkDelta,
+            _allowed_slack: u64,
+        ) -> Result<(), qtrace_provider::OperationAbort> {
+            self.allocations.fetch_add(1, Ordering::SeqCst);
+            ALLOCATION_ORACLE.with(|oracle| {
+                let mut state = oracle.get();
+                assert!(!state.scope_active, "allocation scopes must not nest");
+                state.scope_active = true;
+                oracle.set(state);
+            });
+            self.consume(delta)
+        }
+
+        fn end_allocation_scope(&self) {
+            ALLOCATION_ORACLE.with(|oracle| {
+                let mut state = oracle.get();
+                assert!(state.scope_active, "allocation scope must be active");
+                state.scope_active = false;
+                oracle.set(state);
+            });
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct PassCounts {
+        radix: u64,
+        intersection: u64,
+        union: u64,
+        residual: u64,
+        stable: u64,
+    }
+
+    fn production_pass_counts(size: usize) -> PassCounts {
+        let radix_probe = ProductionPassProbe::default();
+        let mut radix_rows = (0..size).rev().collect::<Vec<_>>();
+        activate_allocation_oracle();
+        radix_sort_usize_guarded(&mut radix_rows, &radix_probe).unwrap();
+        let allocation = finish_allocation_oracle();
+        assert_eq!(radix_rows, (0..size).collect::<Vec<_>>());
+        assert_eq!(allocation.unauthorized, 0);
+        assert!(
+            allocation.requested >= std::alloc::Layout::array::<usize>(size).unwrap().size() as u64
+        );
+        assert_eq!(radix_probe.allocations.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            radix_probe.resident.load(Ordering::SeqCst),
+            std::alloc::Layout::array::<usize>(size).unwrap().size() as u64,
+            "allocation authorization must use the independent Layout size"
+        );
+
+        let intersection_probe = ProductionPassProbe::default();
+        let left = (0..size).collect::<Vec<_>>();
+        let right = (0..size).step_by(2).collect::<Vec<_>>();
+        let intersection =
+            intersect_rows_fallible_guarded(&left, &right, &intersection_probe).unwrap();
+        assert_eq!(intersection, right);
+        assert_eq!(intersection_probe.allocations.load(Ordering::SeqCst), 1);
+
+        let union_probe = ProductionPassProbe::default();
+        let union = union_rows_guarded(
+            vec![
+                (0..size).step_by(2).collect(),
+                (1..size).step_by(2).collect(),
+            ],
+            &union_probe,
+        )
+        .unwrap();
+        assert_eq!(union, (0..size).collect::<Vec<_>>());
+        assert_eq!(union_probe.allocations.load(Ordering::SeqCst), 2);
+
+        let residual_probe = ProductionPassProbe::default();
+        let residual = retain_rows_guarded(left, &residual_probe, |row| Ok(row % 2 == 0)).unwrap();
+        assert_eq!(residual.len(), size.div_ceil(2));
+        assert_eq!(residual_probe.allocations.load(Ordering::SeqCst), 1);
+
+        let stable_probe = ProductionPassProbe::default();
+        let keys = (0..size)
+            .map(|ordinal| {
+                EventKey::new(
+                    ArtifactDigest::new([ordinal as u8; 32]),
+                    TimelineId(1),
+                    ordinal as u64,
+                    ordinal as u64,
+                    Some(ordinal as u64),
+                    Some(7),
+                )
+            })
+            .collect::<Vec<_>>();
+        let sorted =
+            radix_sort_rows_by_keys_guarded(&keys, (0..size).rev().collect(), &stable_probe)
+                .unwrap();
+        assert_eq!(sorted.len(), size);
+        assert_eq!(stable_probe.allocations.load(Ordering::SeqCst), 1);
+
+        PassCounts {
+            radix: radix_probe.work.load(Ordering::SeqCst),
+            intersection: intersection_probe.work.load(Ordering::SeqCst),
+            union: union_probe.work.load(Ordering::SeqCst),
+            residual: residual_probe.work.load(Ordering::SeqCst),
+            stable: stable_probe.work.load(Ordering::SeqCst),
+        }
+    }
+
+    #[test]
+    fn production_pass_counters_are_linear_across_real_chunk_boundaries() {
+        let probes = [8_192, 16_384, 32_768].map(production_pass_counts);
+        for field in [
+            |counts: PassCounts| counts.radix,
+            |counts: PassCounts| counts.intersection,
+            |counts: PassCounts| counts.union,
+            |counts: PassCounts| counts.residual,
+            |counts: PassCounts| counts.stable,
+        ] {
+            let [n, two_n, four_n] = probes.map(field);
+            assert!(n > 0);
+            assert!(two_n <= n * 2 + 65_536, "{n} -> {two_n}");
+            assert!(four_n <= two_n * 2 + 65_536, "{two_n} -> {four_n}");
+        }
+    }
+
+    #[test]
+    fn discontinuity_decoder_uses_the_closed_tag_before_specialized_decode() {
+        let evidence = qtrace_provider::CompletenessRange::captured_sequence_with_cause(
+            7,
+            9,
+            qtrace_provider::Provenance::Damaged,
+            qtrace_provider::CompletenessCause::Lost,
+        )
+        .unwrap();
+        let payload = serde_json::to_vec(&qtrace_provider::EventPayload::Discontinuity(
+            qtrace_provider::Discontinuity {
+                cause: qtrace_provider::DiscontinuityCause::Damage,
+                evidence,
+            },
+        ))
+        .unwrap();
+        let decoded = decode_discontinuity_payload(&payload).unwrap();
+        assert_eq!(decoded.cause, qtrace_provider::DiscontinuityCause::Damage);
+        assert_eq!(decoded.evidence, evidence);
+
+        let mut wrong = b"{\"semantic_call\":\"".to_vec();
+        wrong.resize(MAX_DISCONTINUITY_PAYLOAD_BYTES - 2, b'x');
+        wrong.extend_from_slice(b"\"}");
+        let error = decode_discontinuity_payload(&wrong).unwrap_err();
+        assert_eq!(error.code(), "analysis.store");
+        assert!(error.detail().contains("wrong event kind"));
+
+        let malformed = br#"{"discontinuity":{"cause":"loss"}}"#;
+        let error = decode_discontinuity_payload(malformed).unwrap_err();
+        assert_eq!(error.code(), "analysis.store");
+        assert!(error.detail().contains("invalid discontinuity payload"));
+    }
 
     struct PlannerScopeProbe {
         scopes: AtomicU64,
@@ -3270,7 +3716,7 @@ mod tests {
 
     #[test]
     fn cursor_lookup_and_page_projection_work_is_log_n_plus_limit() {
-        for size in [128_usize, 256, 512] {
+        for size in [8_192_usize, 16_384, 32_768] {
             let keys = (0..size)
                 .map(|ordinal| {
                     EventKey::new(
