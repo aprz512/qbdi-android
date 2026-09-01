@@ -8,6 +8,9 @@ mod model;
 mod qtrb;
 mod source;
 
+#[doc(hidden)]
+pub use allocation::checked_geometric_capacity as checked_provider_geometric_capacity;
+
 pub use control::{
     AllocationScope, BudgetDimension, MAX_UNGUARDED_BYTES, MAX_UNGUARDED_RECORDS, OperationAbort,
     WorkDelta, WorkGuard,

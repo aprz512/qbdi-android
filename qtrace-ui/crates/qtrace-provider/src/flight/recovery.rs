@@ -4,9 +4,10 @@ use crate::{
     CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause, EventKey,
     EventPayload, EventRecord, MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance,
     ProviderCounters, ProviderError, RangeBounds, ReadAtSource, SourceCoordinate, TimelineId,
-    WorkDelta, WorkGuard, allocation, completeness_canonical_key, merge_canonical_completeness,
+    WorkDelta, WorkGuard, completeness_canonical_key, merge_canonical_completeness,
 };
 
+use super::allocation;
 use super::wire::{
     ChunkHeader, EMERGENCY_COMMITTED, EmergencyCell, FLIGHT_CHUNK_HEADER_BYTES,
     FLIGHT_DIRECTORY_ENTRY_BYTES, FLIGHT_EMERGENCY_RECORD_BYTES, FLIGHT_EMERGENCY_SLOT_BYTES,

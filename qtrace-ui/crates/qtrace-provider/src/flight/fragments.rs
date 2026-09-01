@@ -2,12 +2,13 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     EventKey, EventPayload, EventRecord, Provenance, ProviderError, SemanticEvent, WorkDelta,
-    WorkGuard, allocation,
+    WorkGuard,
 };
 
-use super::recovery::MERGED_TIMELINE_ID;
 use super::{
+    allocation,
     recovery::ChunkIdentity,
+    recovery::MERGED_TIMELINE_ID,
     wire::{FLIGHT_CHUNK_HEADER_BYTES, Superblock},
 };
 

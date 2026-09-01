@@ -9,10 +9,11 @@ use std::{
 };
 
 use qtrace_provider::{
-    AllocationScope, ArtifactDigest, BudgetDimension, ByteSource, FLIGHT_CHUNK_HEADER_BYTES,
-    FLIGHT_DIRECTORY_ENTRY_BYTES, FLIGHT_EMERGENCY_SLOT_BYTES, FLIGHT_RECORD_HEADER_BYTES,
-    FLIGHT_SUPERBLOCK_BYTES, FlightProvider, OpenMode, OperationAbort, ProviderError, QtrbProvider,
-    SourceIdentity, TraceProvider, WorkDelta, WorkGuard,
+    AllocationScope, ArtifactDigest, BudgetDimension, ByteSource, EventPayload, EventRecord,
+    FLIGHT_CHUNK_HEADER_BYTES, FLIGHT_DIRECTORY_ENTRY_BYTES, FLIGHT_EMERGENCY_SLOT_BYTES,
+    FLIGHT_RECORD_HEADER_BYTES, FLIGHT_SUPERBLOCK_BYTES, FlightProvider, OpenMode, OperationAbort,
+    Provenance, ProviderError, ProviderSummary, QtrbProvider, SourceIdentity, TraceProvider,
+    WorkDelta, WorkGuard, checked_provider_geometric_capacity,
 };
 
 const QTRB_HEADER_BYTES: usize = 16;
@@ -278,7 +279,7 @@ impl Prepared {
         }
     }
 
-    fn run(self, guard: &AllocationGuard) -> Result<(), ProviderError> {
+    fn run(self, guard: &AllocationGuard) -> Result<DrainedProvider, ProviderError> {
         if self.shape.is_qtrb() {
             let provider = QtrbProvider::open(
                 self.source,
@@ -305,18 +306,47 @@ impl Prepared {
 fn drain_provider(
     provider: Box<dyn TraceProvider>,
     guard: &AllocationGuard,
-) -> Result<(), ProviderError> {
+) -> Result<DrainedProvider, ProviderError> {
     let cursor_bytes = provider.cursor_resident_bytes()?;
     let mut cursor = {
         let _scope = AllocationScope::begin(guard, cursor_bytes, 0)?;
         provider.into_cursor()?
     };
-    while cursor.next_event(guard)?.is_some() {}
-    cursor.finish()?;
-    Ok(())
+    let mut events = Vec::new();
+    while let Some(event) = cursor.next_event(guard)? {
+        with_oracle_paused(|| events.push(event));
+    }
+    let summary = cursor.finish()?;
+    Ok(DrainedProvider { events, summary })
 }
 
-fn oracle_run(shape: Shape, guard: &AllocationGuard) -> (Result<(), ProviderError>, OracleState) {
+#[derive(Debug)]
+struct DrainedProvider {
+    events: Vec<EventRecord>,
+    summary: ProviderSummary,
+}
+
+fn with_oracle_paused<T>(operation: impl FnOnce() -> T) -> T {
+    let active = ORACLE.with(|slot| {
+        let mut state = slot.get();
+        let active = state.active;
+        state.active = false;
+        slot.set(state);
+        active
+    });
+    let output = operation();
+    ORACLE.with(|slot| {
+        let mut state = slot.get();
+        state.active = active;
+        slot.set(state);
+    });
+    output
+}
+
+fn oracle_run(
+    shape: Shape,
+    guard: &AllocationGuard,
+) -> (Result<DrainedProvider, ProviderError>, OracleState) {
     let prepared = Prepared::new(shape);
     ORACLE.with(|slot| {
         slot.set(OracleState {
@@ -334,13 +364,13 @@ fn oracle_run(shape: Shape, guard: &AllocationGuard) -> (Result<(), ProviderErro
     (result, state)
 }
 
-fn assert_clean(state: OracleState, label: &str) {
+fn assert_clean(state: OracleState, total_resident_work: u64, label: &str) {
     assert_eq!(state.unauthorized, 0, "{label}: unauthorized allocation");
     assert_eq!(state.nested, 0, "{label}: nested allocation scope");
     assert_eq!(state.scope_violations, 0, "{label}: scope slack/leak");
     assert!(!state.scope_active, "{label}: live allocation scope");
     assert!(
-        state.requested_bytes <= state.authorized_bytes,
+        state.requested_bytes <= total_resident_work,
         "{label}: allocator requested more than authorized"
     );
     assert!(
@@ -349,9 +379,9 @@ fn assert_clean(state: OracleState, label: &str) {
         state.max_scope_slack
     );
     assert!(
-        state.authorized_bytes.saturating_mul(10) <= state.requested_bytes.saturating_mul(11),
+        total_resident_work.saturating_mul(10) <= state.requested_bytes.saturating_mul(11),
         "{label}: synthetic authorization {} requested {} slack {}",
-        state.authorized_bytes,
+        total_resident_work,
         state.requested_bytes,
         state.max_scope_slack,
     );
@@ -382,19 +412,27 @@ fn exercise_shape(shape: Shape) -> (u64, u64) {
     let label = shape.label();
     let count = AllocationGuard::counting();
     let (result, state) = oracle_run(shape, &count);
-    result.unwrap_or_else(|error| panic!("{label}: baseline failed: {error}"));
-    assert_clean(state, &label);
-    let measurement = (state.authorized_bytes, state.requested_bytes);
+    let drained = result.unwrap_or_else(|error| panic!("{label}: baseline failed: {error}"));
     let exact = count.consumed.load(Ordering::Relaxed);
+    assert_clean(state, exact, &label);
+    assert_eq!(
+        exact, state.authorized_bytes,
+        "{label}: resident work was consumed outside an allocation scope"
+    );
+    assert_shape_semantics(shape, &drained);
+    let measurement = (exact, state.requested_bytes);
     let ordinals = count.resident_calls.load(Ordering::Relaxed);
     assert!(exact > 0, "{label}: no resident work");
     assert!(ordinals > 0, "{label}: no resident ordinals");
 
     let exact_guard = AllocationGuard::limited(exact);
     let (result, state) = oracle_run(shape, &exact_guard);
-    result.unwrap_or_else(|error| panic!("{label}: exact budget failed: {error}"));
-    assert_clean(state, &format!("{label} exact"));
-    assert_eq!(exact_guard.consumed.load(Ordering::Relaxed), exact);
+    let drained = result.unwrap_or_else(|error| panic!("{label}: exact budget failed: {error}"));
+    let exact_consumed = exact_guard.consumed.load(Ordering::Relaxed);
+    assert_clean(state, exact_consumed, &format!("{label} exact"));
+    assert_eq!(exact_consumed, exact);
+    assert_eq!(exact_consumed, state.authorized_bytes);
+    assert_shape_semantics(shape, &drained);
 
     let below = exact - 1;
     let below_guard = AllocationGuard::limited(below);
@@ -453,6 +491,152 @@ fn exercise_shape(shape: Shape) -> (u64, u64) {
     measurement
 }
 
+fn assert_shape_semantics(shape: Shape, drained: &DrainedProvider) {
+    let DrainedProvider { events, summary } = drained;
+    assert_eq!(summary.counters.events_emitted, events.len() as u64);
+    assert_eq!(summary.counters.opaque_records, 0);
+    assert_eq!(summary.counters.damaged_records, 0);
+    assert!(events.iter().all(|event| {
+        event.provenance != Provenance::Damaged
+            && !matches!(event.payload, EventPayload::OpaqueOptional(_))
+    }));
+
+    match shape {
+        Shape::QtrbRead0 => assert_qtrb_semantics(events, 0, 1),
+        Shape::QtrbRead34 => assert_qtrb_semantics(events, 34, 1),
+        Shape::QtrbWrite0 => assert_qtrb_semantics(events, 1, 0),
+        Shape::QtrbWrite34 => assert_qtrb_semantics(events, 1, 34),
+        Shape::FlightDefinitions(count) => {
+            assert_eq!(events.len(), count + 2);
+            assert_flight_base(events);
+            let definitions = events
+                .iter()
+                .filter_map(|event| match &event.payload {
+                    EventPayload::InstructionDefinition(definition) => Some(definition),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(definitions.len(), count);
+            assert!(
+                definitions.iter().all(|definition| {
+                    definition.reads.is_empty() && definition.writes.is_empty()
+                })
+            );
+            for (index, definition) in definitions.iter().enumerate() {
+                assert_eq!(definition.definition_id as usize, index + 1);
+            }
+        }
+        Shape::FlightStrings(count) => {
+            assert_eq!(events.len(), count + 2);
+            assert_flight_base(events);
+            let strings = events
+                .iter()
+                .filter_map(|event| match &event.payload {
+                    EventPayload::StringDefinition(value) => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(strings.len(), count);
+            for (index, value) in strings.iter().enumerate() {
+                let id = u32::try_from(index + 1).expect("bounded string ID");
+                assert_eq!(value.id, id);
+                assert_eq!(value.bytes, format!("string-{id}").as_bytes());
+            }
+        }
+        Shape::FlightFragments(fragment_count) => {
+            assert_eq!(events.len(), 2 + 3 + fragment_count / 2);
+            assert_flight_base(events);
+            let strings = events
+                .iter()
+                .filter_map(|event| match &event.payload {
+                    EventPayload::StringDefinition(value) => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(strings.len(), 3, "fixed fragment string definitions");
+            assert_eq!(strings[0].bytes, b"name");
+            assert_eq!(strings[1].bytes, b"a");
+            assert_eq!(strings[2].bytes, b"b");
+            let semantics = events
+                .iter()
+                .filter_map(|event| match &event.payload {
+                    EventPayload::SemanticRule(value) => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(semantics.len(), fragment_count / 2);
+            assert_eq!(
+                semantics
+                    .iter()
+                    .map(|semantic| semantic.fragment_sequences.len())
+                    .sum::<usize>(),
+                fragment_count
+            );
+            assert!(semantics.iter().all(|semantic| {
+                semantic.category.is_none()
+                    && semantic.name == "name"
+                    && semantic.detail == "ab"
+                    && semantic.fragment_sequences.len() == 2
+            }));
+        }
+    }
+}
+
+fn assert_flight_base(events: &[EventRecord]) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload, EventPayload::Begin(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload, EventPayload::RegisterCheckpoint(_)))
+            .count(),
+        1
+    );
+}
+
+fn assert_qtrb_semantics(events: &[EventRecord], reads: usize, writes: usize) {
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload, EventPayload::Begin(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.payload, EventPayload::ModuleDefinition(_)))
+            .count(),
+        1
+    );
+    let definition = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::InstructionDefinition(definition) => Some(definition),
+            _ => None,
+        })
+        .expect("decoded instruction definition");
+    assert_eq!(definition.reads.len(), reads);
+    assert_eq!(definition.writes.len(), writes);
+    assert_eq!(definition.read_mask, mask(reads));
+    assert_eq!(definition.write_mask, mask(writes));
+    let instruction = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::Instruction(instruction) => Some(instruction),
+            _ => None,
+        })
+        .expect("decoded instruction event");
+    assert_eq!(instruction.read_before.len(), reads);
+    assert_eq!(instruction.write_after.len(), writes);
+}
+
 trait ResultExt<T, E> {
     fn unwrap_err_or_else(self, success: impl FnOnce() -> E) -> E;
 }
@@ -479,6 +663,32 @@ fn qtrb_zero_and_full_read_write_shapes_use_only_actual_allocation_work() {
 }
 
 #[test]
+fn total_resident_accounting_detects_a_direct_precharge() {
+    let guard = AllocationGuard::counting();
+    ORACLE.with(|slot| {
+        slot.set(OracleState {
+            active: true,
+            ..OracleState::default()
+        });
+    });
+    guard
+        .consume(WorkDelta {
+            resident_bytes: 1,
+            ..WorkDelta::default()
+        })
+        .expect("direct resident precharge");
+    let _scope = AllocationScope::begin(&guard, 8, 0).expect("scoped allocation work");
+    let state = ORACLE.with(Cell::get);
+    ORACLE.with(|slot| slot.set(OracleState::default()));
+
+    assert_ne!(
+        guard.consumed.load(Ordering::Relaxed),
+        state.authorized_bytes,
+        "a direct resident precharge must not satisfy the scoped-accounting invariant"
+    );
+}
+
+#[test]
 fn flight_high_cardinality_families_scale_linearly_through_public_provider() {
     for family in [
         FlightFamily::Definitions,
@@ -488,6 +698,15 @@ fn flight_high_cardinality_families_scale_linearly_through_public_provider() {
         let mut measurements = Vec::new();
         for count in [8, 16, 32] {
             measurements.push(exercise_shape(family.shape(count)));
+            let mut terminal = 0;
+            while terminal < count {
+                terminal = checked_provider_geometric_capacity(terminal, terminal + 1, 4)
+                    .expect("production geometric capacity");
+            }
+            assert!(
+                terminal < 2 * count,
+                "{family:?}: terminal capacity {terminal}"
+            );
         }
         for field in [0, 1] {
             let n = [measurements[0].0, measurements[0].1][field];
@@ -495,10 +714,12 @@ fn flight_high_cardinality_families_scale_linearly_through_public_provider() {
             let four_n = [measurements[2].0, measurements[2].1][field];
             let first_slope = two_n.saturating_sub(n);
             let second_slope = four_n.saturating_sub(two_n);
+            let expected_second_slope = first_slope.saturating_mul(2);
+            let allowance = 512_u64;
             assert!(first_slope > 0, "{family:?}: flat N→2N allocation slope");
             assert!(
-                second_slope <= first_slope.saturating_mul(3),
-                "{family:?}: superlinear allocation slope {first_slope} then {second_slope}"
+                second_slope.abs_diff(expected_second_slope) <= allowance,
+                "{family:?}: allocation slope {first_slope} then {second_slope}, expected {expected_second_slope} ± {allowance} bytes of alignment/hash slack"
             );
         }
     }

@@ -10,10 +10,11 @@ use crate::{
     ProviderError, RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot,
     RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase,
     SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, WorkDelta,
-    WorkGuard, allocation,
+    WorkGuard,
 };
 
 use super::{
+    allocation,
     fragments::{self, Fragment},
     recovery::ChunkIdentity,
     wire::Superblock,

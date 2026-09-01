@@ -3,12 +3,115 @@ mod fragments;
 mod recovery;
 mod wire;
 
+mod allocation {
+    use std::{
+        collections::HashMap,
+        hash::{BuildHasher, Hash},
+    };
+
+    use crate::{ProviderError, WorkGuard, allocation as shared};
+
+    pub(super) fn try_reserve_vec_exact<T>(
+        values: &mut Vec<T>,
+        capacity: usize,
+        guard: &dyn WorkGuard,
+        detail: &'static str,
+    ) -> Result<(), ProviderError> {
+        shared::try_reserve_vec_exact_in(
+            values,
+            capacity,
+            guard,
+            detail,
+            shared::FLIGHT_RECOVERY_ALLOCATION,
+        )
+    }
+
+    pub(super) fn try_vec_with_capacity<T>(
+        capacity: usize,
+        guard: &dyn WorkGuard,
+        detail: &'static str,
+    ) -> Result<Vec<T>, ProviderError> {
+        shared::try_vec_with_capacity_in(
+            capacity,
+            guard,
+            detail,
+            shared::FLIGHT_RECOVERY_ALLOCATION,
+        )
+    }
+
+    pub(super) fn try_push_vec<T>(
+        output: &mut Vec<T>,
+        value: T,
+        guard: &dyn WorkGuard,
+        detail: &'static str,
+    ) -> Result<(), ProviderError> {
+        shared::try_push_vec_in(
+            output,
+            value,
+            guard,
+            detail,
+            shared::FLIGHT_RECOVERY_ALLOCATION,
+        )
+    }
+
+    pub(super) fn try_copy_bytes(
+        bytes: &[u8],
+        guard: &dyn WorkGuard,
+        detail: &'static str,
+    ) -> Result<Vec<u8>, ProviderError> {
+        shared::try_copy_bytes_in(bytes, guard, detail, shared::FLIGHT_RECOVERY_ALLOCATION)
+    }
+
+    pub(super) fn try_copy_string(
+        value: &str,
+        guard: &dyn WorkGuard,
+        detail: &'static str,
+    ) -> Result<String, ProviderError> {
+        shared::try_copy_string_in(value, guard, detail, shared::FLIGHT_RECOVERY_ALLOCATION)
+    }
+
+    pub(super) fn try_reserve_hash_map<K, V, S>(
+        values: &mut HashMap<K, V, S>,
+        additional: usize,
+        guard: &dyn WorkGuard,
+        detail: &'static str,
+    ) -> Result<(), ProviderError>
+    where
+        K: Eq + Hash,
+        S: BuildHasher,
+    {
+        shared::try_reserve_hash_map_in(
+            values,
+            additional,
+            guard,
+            detail,
+            shared::FLIGHT_RECOVERY_ALLOCATION,
+        )
+    }
+
+    pub(super) fn try_hash_map_with_capacity<K, V>(
+        capacity: usize,
+        guard: &dyn WorkGuard,
+        detail: &'static str,
+    ) -> Result<HashMap<K, V>, ProviderError>
+    where
+        K: Eq + Hash,
+    {
+        shared::try_hash_map_with_capacity_in(
+            capacity,
+            guard,
+            detail,
+            shared::FLIGHT_RECOVERY_ALLOCATION,
+        )
+    }
+}
+
 use std::{fmt, sync::Arc, vec};
 
 use crate::{
     EventCursor, EventKey, EventRecord, MAX_UNGUARDED_RECORDS, ProviderCapabilities, ProviderError,
     ProviderSummary, ReadAtSource, RegisterSnapshot, SourceIdentity, TimelineDescriptor,
-    TimelineId, TraceProvider, WorkDelta, WorkGuard, allocation,
+    TimelineId, TraceProvider, WorkDelta, WorkGuard, allocation as shared_allocation,
 };
 
 pub use wire::{
@@ -80,25 +183,28 @@ impl FlightProvider {
         identity.format_major = 2;
         identity.format_minor = 0;
         identity.source_bytes = recovered.source_bytes;
-        let mut timelines = allocation::try_vec_with_capacity(
+        let mut timelines = shared_allocation::try_vec_with_capacity_in(
             recovered.tids.len().saturating_add(1),
             guard,
             "Flight timeline allocation failed",
+            shared_allocation::FLIGHT_OPEN_ALLOCATION,
         )?;
         timelines.push(TimelineDescriptor {
             id: recovery::MERGED_TIMELINE_ID,
             tid: None,
             label: Some(fallible_string("Flight", guard)?),
         });
-        let mut projections = allocation::try_vec_with_capacity(
+        let mut projections = shared_allocation::try_vec_with_capacity_in(
             recovered.tids.len(),
             guard,
             "Flight projection allocation failed",
+            shared_allocation::FLIGHT_OPEN_ALLOCATION,
         )?;
-        let mut projection_by_tid = allocation::try_hash_map_with_capacity(
+        let mut projection_by_tid = shared_allocation::try_hash_map_with_capacity_in(
             recovered.tids.len(),
             guard,
             "Flight projection map allocation failed",
+            shared_allocation::FLIGHT_OPEN_ALLOCATION,
         )?;
         for (index, tid) in recovered.tids.iter().copied().enumerate() {
             guard_checkpoint(guard, index)?;
@@ -123,10 +229,11 @@ impl FlightProvider {
                 return Err(resource_error("duplicate Flight projection TID"));
             }
         }
-        let mut projection_counts = allocation::try_vec_with_capacity(
+        let mut projection_counts = shared_allocation::try_vec_with_capacity_in(
             projections.len(),
             guard,
             "Flight projection count allocation failed",
+            shared_allocation::FLIGHT_OPEN_ALLOCATION,
         )?;
         projection_counts.resize(projections.len(), 0_usize);
         for (event_index, event) in recovered.events.iter().enumerate() {
@@ -149,11 +256,12 @@ impl FlightProvider {
             projections.iter_mut().zip(projection_counts).enumerate()
         {
             guard_checkpoint(guard, index)?;
-            allocation::try_reserve_vec_exact(
+            shared_allocation::try_reserve_vec_exact_in(
                 &mut projection.event_keys,
                 count,
                 guard,
                 "Flight projection key allocation failed",
+                shared_allocation::FLIGHT_OPEN_ALLOCATION,
             )?;
         }
         for (event_index, event) in recovered.events.iter().enumerate() {
@@ -168,17 +276,19 @@ impl FlightProvider {
             let projection = projections
                 .get_mut(index)
                 .ok_or_else(|| resource_error("Flight projection index is invalid"))?;
-            allocation::try_push_vec(
+            shared_allocation::try_push_vec_in(
                 &mut projection.event_keys,
                 event.key.clone(),
                 guard,
                 "Flight projection key growth failed",
+                shared_allocation::FLIGHT_OPEN_ALLOCATION,
             )?;
         }
-        let mut summary_timelines = allocation::try_vec_with_capacity(
+        let mut summary_timelines = shared_allocation::try_vec_with_capacity_in(
             timelines.len(),
             guard,
             "Flight summary timeline allocation failed",
+            shared_allocation::FLIGHT_OPEN_ALLOCATION,
         )?;
         for (index, timeline) in timelines.iter().enumerate() {
             guard_checkpoint(guard, index)?;
@@ -305,7 +415,12 @@ impl EventCursor for FlightCursor {
 }
 
 fn fallible_string(value: &str, guard: &dyn WorkGuard) -> Result<String, ProviderError> {
-    allocation::try_copy_string(value, guard, "Flight provider allocation failed")
+    shared_allocation::try_copy_string_in(
+        value,
+        guard,
+        "Flight provider allocation failed",
+        shared_allocation::FLIGHT_OPEN_ALLOCATION,
+    )
 }
 
 fn resource_error(detail: &'static str) -> ProviderError {
