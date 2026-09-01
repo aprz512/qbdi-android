@@ -99,7 +99,7 @@ impl IndexError {
         }
     }
 
-    pub(crate) fn operation_abort(&self) -> Option<&qtrace_provider::OperationAbort> {
+    pub fn operation_abort(&self) -> Option<&qtrace_provider::OperationAbort> {
         match &self.detail {
             IndexErrorDetail::Abort(abort) => Some(abort),
             IndexErrorDetail::Cache(error) => error.operation_abort(),
@@ -1245,6 +1245,31 @@ pub trait NormalizedBulkView: TraceStoreView {
     fn register_observation_rows(&self) -> &[RegisterObservationRow];
     fn string_count(&self) -> usize;
     fn blob_count(&self) -> usize;
+    fn semantic_dictionary_work(
+        &self,
+        _family: SemanticDictionaryFamily,
+        term_count: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<SemanticDictionaryWork, IndexError> {
+        let mut dictionary_bytes = 0_u64;
+        for start in (0..self.string_count()).step_by(4096) {
+            let end = start.saturating_add(4096).min(self.string_count());
+            consume_row_work(guard, end - start)?;
+            for id in start..end {
+                dictionary_bytes = dictionary_bytes
+                    .checked_add(
+                        self.string_bytes(u32::try_from(id).map_err(|_| {
+                            IndexError::resource("semantic dictionary ID overflow")
+                        })?)?
+                        .len() as u64,
+                    )
+                    .ok_or_else(|| {
+                        IndexError::resource("semantic dictionary byte count overflow")
+                    })?;
+            }
+        }
+        semantic_dictionary_work_from_counts(term_count, self.string_count(), dictionary_bytes, 0)
+    }
     /// Returns an allocation-free upper bound for the ascending-unique row IDs returned by
     /// [`Self::bounded_rows`], rejecting before decode when that bound exceeds `max_rows`.
     fn bounded_row_count(
@@ -1260,6 +1285,47 @@ pub trait NormalizedBulkView: TraceStoreView {
         max_rows: usize,
         guard: &dyn WorkGuard,
     ) -> Result<Vec<usize>, IndexError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticDictionaryFamily {
+    Categories,
+    Names,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticDictionaryWork {
+    pub term_count: u64,
+    pub dictionary_items: u64,
+    pub dictionary_bytes: u64,
+    pub posting_lists: u64,
+    pub lookup_items: u64,
+    pub lookup_bytes: u64,
+}
+
+fn semantic_dictionary_work_from_counts(
+    term_count: usize,
+    dictionary_items: usize,
+    dictionary_bytes: u64,
+    posting_lists: usize,
+) -> Result<SemanticDictionaryWork, IndexError> {
+    let term_count = u64::try_from(term_count)
+        .map_err(|_| IndexError::resource("semantic term count overflow"))?;
+    let dictionary_items = u64::try_from(dictionary_items)
+        .map_err(|_| IndexError::resource("semantic dictionary item count overflow"))?;
+    Ok(SemanticDictionaryWork {
+        term_count,
+        dictionary_items,
+        dictionary_bytes,
+        posting_lists: u64::try_from(posting_lists)
+            .map_err(|_| IndexError::resource("semantic posting-list count overflow"))?,
+        lookup_items: dictionary_items
+            .checked_mul(term_count)
+            .ok_or_else(|| IndexError::resource("semantic dictionary item work overflow"))?,
+        lookup_bytes: dictionary_bytes
+            .checked_mul(term_count)
+            .ok_or_else(|| IndexError::resource("semantic dictionary byte work overflow"))?,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2131,6 +2197,35 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
     }
     fn blob_count(&self) -> usize {
         self.normalized_catalog().blobs.spans().len()
+    }
+
+    fn semantic_dictionary_work(
+        &self,
+        family: SemanticDictionaryFamily,
+        term_count: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<SemanticDictionaryWork, IndexError> {
+        let catalog = self.normalized_catalog();
+        let spans = catalog.strings.spans();
+        let mut dictionary_bytes = 0_u64;
+        for chunk in spans.chunks(4096) {
+            consume_row_work(guard, chunk.len())?;
+            for span in chunk {
+                dictionary_bytes = dictionary_bytes.checked_add(span.length).ok_or_else(|| {
+                    IndexError::resource("semantic dictionary byte count overflow")
+                })?;
+            }
+        }
+        let posting_lists = match family {
+            SemanticDictionaryFamily::Categories => catalog.indexes.semantic_category.entries.len(),
+            SemanticDictionaryFamily::Names => catalog.indexes.semantic_name.entries.len(),
+        };
+        semantic_dictionary_work_from_counts(
+            term_count,
+            spans.len(),
+            dictionary_bytes,
+            posting_lists,
+        )
     }
 
     fn bounded_row_count(

@@ -14,6 +14,32 @@ pub enum Provenance {
     Damaged,
 }
 
+impl Provenance {
+    pub const ALL: [Self; 5] = [
+        Self::Captured,
+        Self::Derived,
+        Self::Heuristic,
+        Self::Unknown,
+        Self::Damaged,
+    ];
+
+    pub const fn wire_name(self) -> &'static [u8] {
+        match self {
+            Self::Captured => b"captured",
+            Self::Derived => b"derived",
+            Self::Heuristic => b"heuristic",
+            Self::Unknown => b"unknown",
+            Self::Damaged => b"damaged",
+        }
+    }
+
+    pub fn from_wire_name(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|value| value.wire_name() == name)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderCapabilities {
@@ -479,6 +505,32 @@ pub enum DiscontinuityCause {
     Unknown,
 }
 
+impl DiscontinuityCause {
+    pub const ALL: [Self; 5] = [
+        Self::Loss,
+        Self::Damage,
+        Self::Overwrite,
+        Self::Truncation,
+        Self::Unknown,
+    ];
+
+    pub const fn wire_name(self) -> &'static [u8] {
+        match self {
+            Self::Loss => b"loss",
+            Self::Damage => b"damage",
+            Self::Overwrite => b"overwrite",
+            Self::Truncation => b"truncation",
+            Self::Unknown => b"unknown",
+        }
+    }
+
+    pub fn from_wire_name(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|value| value.wire_name() == name)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Discontinuity {
     pub cause: DiscontinuityCause,
@@ -785,11 +837,66 @@ pub enum RangeDomain {
     MemoryAddresses,
 }
 
+impl RangeDomain {
+    pub const ALL: [Self; 3] = [
+        Self::CapturedSequence,
+        Self::SourceBytes,
+        Self::MemoryAddresses,
+    ];
+
+    pub const fn wire_name(self) -> &'static [u8] {
+        match self {
+            Self::CapturedSequence => b"captured_sequence",
+            Self::SourceBytes => b"source_bytes",
+            Self::MemoryAddresses => b"memory_addresses",
+        }
+    }
+
+    pub fn from_wire_name(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|value| value.wire_name() == name)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RangeBounds {
     InclusiveSequence { first: u64, last: u64 },
     HalfOpen { start: u64, end_exclusive: u64 },
+}
+
+impl RangeBounds {
+    pub const fn wire_name(self) -> &'static [u8] {
+        match self {
+            Self::InclusiveSequence { .. } => b"inclusive_sequence",
+            Self::HalfOpen { .. } => b"half_open",
+        }
+    }
+
+    pub const fn endpoints(self) -> (u64, u64) {
+        match self {
+            Self::InclusiveSequence { first, last } => (first, last),
+            Self::HalfOpen {
+                start,
+                end_exclusive,
+            } => (start, end_exclusive),
+        }
+    }
+
+    pub fn from_wire_parts(name: &[u8], endpoints: (u64, u64)) -> Option<Self> {
+        match name {
+            b"inclusive_sequence" => Some(Self::InclusiveSequence {
+                first: endpoints.0,
+                last: endpoints.1,
+            }),
+            b"half_open" => Some(Self::HalfOpen {
+                start: endpoints.0,
+                end_exclusive: endpoints.1,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -810,6 +917,50 @@ pub enum CompletenessCause {
     Truncation,
     #[default]
     Unknown,
+}
+
+impl CompletenessCause {
+    pub const ALL: [Self; 14] = [
+        Self::Retained,
+        Self::MissingTerminal,
+        Self::Active,
+        Self::Stale,
+        Self::Rotating,
+        Self::Unreliable,
+        Self::Incomplete,
+        Self::Lost,
+        Self::Overwritten,
+        Self::CoverageGap,
+        Self::Checksum,
+        Self::UnterminatedThread,
+        Self::Truncation,
+        Self::Unknown,
+    ];
+
+    pub const fn wire_name(self) -> &'static [u8] {
+        match self {
+            Self::Retained => b"retained",
+            Self::MissingTerminal => b"missing_terminal",
+            Self::Active => b"active",
+            Self::Stale => b"stale",
+            Self::Rotating => b"rotating",
+            Self::Unreliable => b"unreliable",
+            Self::Incomplete => b"incomplete",
+            Self::Lost => b"lost",
+            Self::Overwritten => b"overwritten",
+            Self::CoverageGap => b"coverage_gap",
+            Self::Checksum => b"checksum",
+            Self::UnterminatedThread => b"unterminated_thread",
+            Self::Truncation => b"truncation",
+            Self::Unknown => b"unknown",
+        }
+    }
+
+    pub fn from_wire_name(name: &[u8]) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|value| value.wire_name() == name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]

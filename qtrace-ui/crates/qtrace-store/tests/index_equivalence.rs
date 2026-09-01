@@ -12,8 +12,9 @@ use qtrace_provider::{
     BudgetDimension, EventKind, OperationAbort, RegisterSlot, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
-    AuthorizedPath, BuildOptions, IndexBuilder, NormalizedBulkView, NormalizedPostingQuery,
-    NormalizedSourceFormat, OpenPolicy, SessionLoader, TraceStore, TraceStoreView,
+    AuthorizedPath, BuildOptions, IndexBuilder, IndexError, NormalizedBulkView,
+    NormalizedPostingQuery, NormalizedSourceFormat, OpenPolicy, SemanticDictionaryFamily,
+    SessionLoader, TraceStore, TraceStoreView,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -813,6 +814,66 @@ fn bounded_semantic_dictionary_queries_charge_each_item_and_its_bytes() {
             dictionary_bytes
         );
     }
+}
+
+#[test]
+fn semantic_dictionary_work_metadata_is_checked_exact_and_owned_mapped_equal() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let options = BuildOptions::default();
+    let owned = IndexBuilder::build(source, &options, &AllowAll).expect("owned store");
+    let root = private_root();
+    let mapped =
+        TraceStore::open_or_build(root.path(), source, &options, &AllowAll).expect("mapped store");
+    let dictionary_bytes = (0..owned.string_count())
+        .map(|id| owned.string_bytes(id as u32).unwrap().len() as u64)
+        .sum::<u64>();
+
+    for family in [
+        SemanticDictionaryFamily::Categories,
+        SemanticDictionaryFamily::Names,
+    ] {
+        let guard = WorkAccounting::default();
+        let owned_work = owned
+            .semantic_dictionary_work(family, 2, &guard)
+            .expect("owned semantic dictionary metadata");
+        let mapped_work = mapped
+            .semantic_dictionary_work(family, 2, &AllowAll)
+            .expect("mapped semantic dictionary metadata");
+        assert_eq!(owned_work, mapped_work);
+        assert_eq!(owned_work.term_count, 2);
+        assert_eq!(owned_work.dictionary_items, owned.string_count() as u64);
+        assert_eq!(owned_work.dictionary_bytes, dictionary_bytes);
+        assert_eq!(owned_work.lookup_items, 2 * owned.string_count() as u64);
+        assert_eq!(owned_work.lookup_bytes, 2 * dictionary_bytes);
+        assert_eq!(
+            guard.rows.load(Ordering::SeqCst),
+            owned.string_count() as u64
+        );
+        assert_eq!(guard.input_bytes.load(Ordering::SeqCst), 0);
+    }
+
+    assert!(
+        owned
+            .semantic_dictionary_work(SemanticDictionaryFamily::Names, usize::MAX, &AllowAll)
+            .is_err()
+    );
+}
+
+#[test]
+fn index_error_exposes_its_typed_abort_read_only() {
+    let abort = OperationAbort::budget_exceeded(BudgetDimension::Nodes, 7, 8);
+    let error = IndexError::from(abort.clone());
+    assert_eq!(error.operation_abort(), Some(&abort));
 }
 
 #[test]
