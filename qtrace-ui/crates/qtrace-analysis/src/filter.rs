@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::AnalysisError;
 
-const MAX_FILTER_TERMS: usize = 512;
+pub(crate) const MAX_FILTER_TERMS: usize = 512;
 const MAX_FILTER_CARTESIAN_PAIRS: usize = 4_096;
 pub(crate) const MAX_FILTER_TEXT_BYTES: usize = 1024 * 1024;
 

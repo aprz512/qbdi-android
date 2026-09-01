@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     error::Error,
     fmt,
     sync::{
@@ -19,7 +20,6 @@ use qtrace_store::{
     CompletenessRow, DefinitionRow, InstructionRow, MemoryRow, ModuleRow, NormalizedBulkView,
     NormalizedPostingQuery, RegisterAccess, RegisterObservationRow, SemanticRow, TraceStoreView,
 };
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{CompletenessSummary, DiscontinuityRow, EventFilter, MemoryFilter, MnemonicFilter};
@@ -39,11 +39,9 @@ const MAX_MATCHER_BUILD_WORK: usize = 16 * 1024 * 1024;
 const STABLE_KEY_RADIX_PASSES: usize = 70;
 const MAX_INDEXED_FIELDS: usize = 13;
 const MAX_LINEAR_PASSES_PER_INDEXED_FIELD: usize = 4;
-const MAX_GLOBAL_CANDIDATE_LINEAR_PASSES: usize = 12;
-const MAX_CANDIDATE_LINEAR_PASSES: usize =
-    MAX_INDEXED_FIELDS * MAX_LINEAR_PASSES_PER_INDEXED_FIELD + MAX_GLOBAL_CANDIDATE_LINEAR_PASSES;
-const MATCHER_ALPHABET_SIZE: usize = u8::MAX as usize + 1;
-const MAX_MATCHER_TRANSITION_WORK_PER_BYTE: usize = 2 * MATCHER_ALPHABET_SIZE + 2;
+const MAX_MATCHER_EDGE_COMPARISONS: usize = 9;
+const MAX_MATCHER_TRANSITION_WORK_PER_BYTE: usize = 2 * (MAX_MATCHER_EDGE_COMPARISONS + 1);
+const MAX_SYNC_RESIDUAL_PREDICATES: usize = 4;
 const MAX_PAGE_LIMIT: usize = 2_000;
 const MAX_PAGE_COMPARISONS: usize = usize::BITS as usize + 1;
 pub const MAX_CONTEXT_EVENTS: usize = 10_000_000;
@@ -58,22 +56,61 @@ fn stable_key_work_bound(rows: usize) -> Option<u64> {
     rows.checked_add(per_pass.checked_mul(STABLE_KEY_RADIX_PASSES as u64)?)
 }
 
-fn candidate_work_limit_for(candidate_rows: usize, semantic_bytes: usize) -> Option<u64> {
-    let stable = stable_key_work_bound(candidate_rows)?;
-    let linear = u64::try_from(candidate_rows)
-        .ok()?
-        .checked_mul(MAX_CANDIDATE_LINEAR_PASSES as u64)?;
-    let semantic = u64::try_from(semantic_bytes)
-        .ok()?
-        .checked_mul(MAX_MATCHER_TRANSITION_WORK_PER_BYTE as u64)?;
-    stable
-        .checked_add(linear)?
-        .checked_add(semantic)?
-        .checked_add(MAX_MATCHER_BUILD_WORK as u64)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProjectionWorkPlan {
+    allowance: u64,
 }
 
-fn candidate_work_limit() -> Option<u64> {
-    candidate_work_limit_for(MAX_CANDIDATE_ROWS, MAX_SEMANTIC_SCAN_BYTES)
+impl ProjectionWorkPlan {
+    fn derive(
+        indexed_fields: usize,
+        estimated_decode_rows: usize,
+        candidate_upper: usize,
+        residual_predicates: usize,
+        semantic: bool,
+    ) -> Option<Self> {
+        if indexed_fields > MAX_INDEXED_FIELDS
+            || estimated_decode_rows > MAX_CANDIDATE_DECODE_ROWS
+            || candidate_upper > MAX_CANDIDATE_ROWS
+            || residual_predicates > MAX_SYNC_RESIDUAL_PREDICATES
+        {
+            return None;
+        }
+        let fields = u64::try_from(indexed_fields).ok()?;
+        let decoded = u64::try_from(estimated_decode_rows).ok()?;
+        let candidates = u64::try_from(candidate_upper).ok()?;
+        let residuals = u64::try_from(residual_predicates).ok()?;
+
+        // Store posting decode plus analysis radix/dedup/union work is bounded by four
+        // linear passes in each layer. Intersections visit both inputs once per field.
+        let indexed_passes = MAX_LINEAR_PASSES_PER_INDEXED_FIELD
+            .checked_mul(2)?
+            .checked_add(crate::filter::MAX_FILTER_TERMS)?;
+        let indexed = decoded.checked_mul(u64::try_from(indexed_passes).ok()?)?;
+        let field_boundaries = fields.checked_mul(4096)?;
+        let intersections = candidates.checked_mul(fields.saturating_sub(1).checked_mul(2)?)?;
+        let residual = candidates.checked_mul(residuals)?;
+        let materialize = if indexed_fields == 0 { candidates } else { 0 };
+        let stable = stable_key_work_bound(candidate_upper)?;
+        let semantic = if semantic {
+            u64::try_from(MAX_SEMANTIC_SCAN_BYTES)
+                .ok()?
+                .checked_mul(MAX_MATCHER_TRANSITION_WORK_PER_BYTE as u64)?
+                .checked_add(MAX_MATCHER_BUILD_WORK as u64)?
+                .checked_add(candidates)?
+        } else {
+            0
+        };
+        Some(Self {
+            allowance: materialize
+                .checked_add(indexed)?
+                .checked_add(field_boundaries)?
+                .checked_add(intersections)?
+                .checked_add(residual)?
+                .checked_add(stable)?
+                .checked_add(semantic)?,
+        })
+    }
 }
 
 fn page_work_limit(limit: usize) -> Option<u64> {
@@ -85,10 +122,48 @@ fn page_work_limit(limit: usize) -> Option<u64> {
         .checked_add((CURSOR_BYTES * 2 + CURSOR_ENCODED_BYTES) as u64)
 }
 
+fn projection_planning_work_limit(context: &QueryContext, filter: &EventFilter) -> Option<u64> {
+    let indexed_fields = usize::from(!filter.tids.is_empty())
+        + usize::from(!filter.kinds.is_empty())
+        + usize::from(!filter.modules.is_empty())
+        + usize::from(!filter.sequence.is_empty())
+        + usize::from(!filter.relative_pc.is_empty() && !filter.modules.is_empty())
+        + usize::from(!filter.absolute_pc.is_empty())
+        + usize::from(!filter.mnemonic.is_empty())
+        + usize::from(!filter.register.reads.is_empty())
+        + usize::from(!filter.register.writes.is_empty())
+        + usize::from(!filter.memory.is_empty())
+        + usize::from(!filter.semantic_categories.is_empty())
+        + usize::from(!filter.semantic_names.is_empty())
+        + usize::from(filter.has_semantic_detail_residual());
+    let field_estimates = u64::try_from(indexed_fields)
+        .ok()?
+        .checked_mul(u64::try_from(MAX_CANDIDATE_ROWS).ok()?)?;
+    let mnemonic = u64::try_from(context.definitions.len())
+        .ok()?
+        .checked_mul(u64::try_from(filter.mnemonic.len()).ok()?)?
+        .checked_add(u64::try_from(context.definitions.len()).ok()?)?;
+    let semantic_terms = filter
+        .semantic_categories
+        .len()
+        .checked_add(filter.semantic_names.len())?;
+    let dictionary_per_term = context
+        .store
+        .string_count()
+        .checked_add(crate::filter::MAX_FILTER_TEXT_BYTES)?;
+    let semantic = u64::try_from(semantic_terms)
+        .ok()?
+        .checked_mul(u64::try_from(dictionary_per_term).ok()?)?;
+    field_estimates
+        .checked_add(mnemonic)?
+        .checked_add(semantic)?
+        .checked_add((MAX_INDEXED_FIELDS * MAX_INDEXED_FIELDS) as u64)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalysisError {
     code: &'static str,
-    detail: String,
+    detail: Cow<'static, str>,
 }
 
 impl AnalysisError {
@@ -100,23 +175,30 @@ impl AnalysisError {
         &self.detail
     }
 
-    pub(crate) fn invalid_filter(detail: impl Into<String>) -> Self {
+    pub(crate) fn invalid_filter(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "analysis.invalid_filter",
             detail: detail.into(),
         }
     }
 
-    pub(crate) fn filter_too_complex(detail: impl Into<String>) -> Self {
+    pub(crate) fn filter_too_complex(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "analysis.filter_too_complex",
             detail: detail.into(),
         }
     }
 
-    fn resource_exhausted(detail: impl Into<String>) -> Self {
+    fn resource_exhausted(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "analysis.resource_exhausted",
+            detail: detail.into(),
+        }
+    }
+
+    fn cpu_budget_exceeded(detail: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            code: "analysis.cpu_budget_exceeded",
             detail: detail.into(),
         }
     }
@@ -124,11 +206,11 @@ impl AnalysisError {
     fn worker_panicked() -> Self {
         Self {
             code: "analysis.worker_panicked",
-            detail: "semantic analysis worker panicked".to_owned(),
+            detail: Cow::Borrowed("semantic analysis worker panicked"),
         }
     }
 
-    fn cancelled(detail: impl Into<String>) -> Self {
+    fn cancelled(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "job.cancelled",
             detail: detail.into(),
@@ -138,11 +220,11 @@ impl AnalysisError {
     fn invalid_limit() -> Self {
         Self {
             code: "analysis.invalid_limit",
-            detail: "page limit must be in 1..=2000".to_owned(),
+            detail: Cow::Borrowed("page limit must be in 1..=2000"),
         }
     }
 
-    fn cursor_mismatch(detail: impl Into<String>) -> Self {
+    fn cursor_mismatch(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "analysis.cursor_mismatch",
             detail: detail.into(),
@@ -152,7 +234,7 @@ impl AnalysisError {
     fn store(error: qtrace_store::IndexError) -> Self {
         Self {
             code: "analysis.store",
-            detail: format!("{}: {error}", error.code()),
+            detail: format!("{}: {error}", error.code()).into(),
         }
     }
 
@@ -160,8 +242,12 @@ impl AnalysisError {
         match error {
             qtrace_provider::OperationAbort::Cancelled => Self {
                 code: "job.cancelled",
-                detail: "query context construction cancelled".to_owned(),
+                detail: Cow::Borrowed("query context construction cancelled"),
             },
+            error @ qtrace_provider::OperationAbort::BudgetExceeded {
+                dimension: qtrace_provider::BudgetDimension::Nodes,
+                ..
+            } => Self::cpu_budget_exceeded(error.to_string()),
             error @ qtrace_provider::OperationAbort::BudgetExceeded { .. } => {
                 Self::resource_exhausted(error.to_string())
             }
@@ -342,11 +428,20 @@ pub struct TimelineProjection {
     cancelled: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static LAST_PAGE_USAGE: std::cell::Cell<Option<(u64, u64)>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
 impl TimelineProjection {
     pub fn new(context: Arc<QueryContext>, filter: EventFilter) -> Result<Self, AnalysisError> {
         let filter = filter.normalized()?;
         let cancelled = Arc::new(AtomicBool::new(false));
-        let guard = CandidateGuard::new(cancelled.clone());
+        let planning_limit = projection_planning_work_limit(&context, &filter)
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("planning work budget overflow"))?;
+        let guard = CandidateGuard::new(cancelled.clone(), planning_limit);
         let filter_arc_bytes = std::mem::size_of::<EventFilter>()
             .checked_add(2 * std::mem::size_of::<usize>())
             .and_then(|bytes| u64::try_from(bytes).ok())
@@ -442,12 +537,21 @@ impl TimelineProjection {
         state.completed
     }
 
-    fn page(&self, cursor: Option<&PageCursor>, limit: usize) -> Result<EventPage, AnalysisError> {
+    pub fn page(
+        &self,
+        cursor: Option<&PageCursor>,
+        limit: usize,
+    ) -> Result<EventPage, AnalysisError> {
         if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
             return Err(AnalysisError::invalid_limit());
         }
         let guard = CandidateGuard::page(self.cancelled.clone(), limit)?;
-        self.page_guarded(cursor, limit, &guard)
+        #[cfg(test)]
+        tests::activate_armed_page_oracle();
+        let result = self.page_guarded(cursor, limit, &guard);
+        #[cfg(test)]
+        LAST_PAGE_USAGE.set(Some(guard.consumed()));
+        result
     }
 
     fn page_guarded(
@@ -584,7 +688,7 @@ impl Drop for TimelineProjection {
 }
 
 impl AnalysisError {
-    fn store_shape(detail: impl Into<String>) -> Self {
+    fn store_shape(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "analysis.store",
             detail: detail.into(),
@@ -1057,7 +1161,7 @@ fn derive_projection_identity(store: StoreIdentity, filter: &EventFilter) -> Pro
     ProjectionIdentity(hash.finalize().into())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum CandidateField {
     Tids,
     Kinds,
@@ -1065,7 +1169,7 @@ enum CandidateField {
     Sequence,
     RelativePc,
     AbsolutePc,
-    Definitions(Vec<u32>),
+    Definitions,
     RegisterReads,
     RegisterWrites,
     Memory,
@@ -1078,7 +1182,7 @@ struct CandidateLedger {
     work: AtomicU64,
     resident: AtomicU64,
     cancelled: Arc<AtomicBool>,
-    work_limit: u64,
+    work_limit: AtomicU64,
     resident_limit: u64,
 }
 
@@ -1088,10 +1192,10 @@ struct CandidateGuard {
 }
 
 impl CandidateGuard {
-    fn new(cancelled: Arc<AtomicBool>) -> Self {
+    fn new(cancelled: Arc<AtomicBool>, planning_limit: u64) -> Self {
         Self::with_limits(
             cancelled,
-            candidate_work_limit().expect("candidate work constants must fit u64"),
+            planning_limit,
             MAX_CANDIDATE_RESIDENT_BYTES as u64,
         )
     }
@@ -1119,7 +1223,7 @@ impl CandidateGuard {
                 work: AtomicU64::new(0),
                 resident: AtomicU64::new(0),
                 cancelled,
-                work_limit,
+                work_limit: AtomicU64::new(work_limit),
                 resident_limit,
             }),
         }
@@ -1131,6 +1235,23 @@ impl CandidateGuard {
             ..WorkDelta::default()
         })
         .map_err(AnalysisError::control)
+    }
+
+    fn authorize(&self, plan: ProjectionWorkPlan) -> Result<(), AnalysisError> {
+        let current = self.ledger.work.load(Ordering::Acquire);
+        let limit = current
+            .checked_add(plan.allowance)
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("projection work budget overflow"))?;
+        self.ledger.work_limit.store(limit, Ordering::Release);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn consumed(&self) -> (u64, u64) {
+        (
+            self.ledger.work.load(Ordering::Acquire),
+            self.ledger.resident.load(Ordering::Acquire),
+        )
     }
 }
 
@@ -1145,25 +1266,26 @@ impl WorkGuard for CandidateGuard {
             .saturating_add(delta.nodes)
             .saturating_add(delta.input_bytes)
             .saturating_add(delta.decompressed_bytes);
+        let work_limit = self.ledger.work_limit.load(Ordering::Acquire);
         let work = self
             .ledger
             .work
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |work| {
                 work.checked_add(work_delta)
-                    .filter(|work| *work <= self.ledger.work_limit)
+                    .filter(|work| *work <= work_limit)
             })
             .map(|prior| prior + work_delta)
             .map_err(|prior| {
                 qtrace_provider::OperationAbort::budget_exceeded(
-                    qtrace_provider::BudgetDimension::Rows,
-                    self.ledger.work_limit,
+                    qtrace_provider::BudgetDimension::Nodes,
+                    work_limit,
                     prior.saturating_add(work_delta),
                 )
             })?;
-        if work > self.ledger.work_limit {
+        if work > work_limit {
             return Err(qtrace_provider::OperationAbort::budget_exceeded(
-                qtrace_provider::BudgetDimension::Rows,
-                self.ledger.work_limit,
+                qtrace_provider::BudgetDimension::Nodes,
+                work_limit,
                 work,
             ));
         }
@@ -1194,6 +1316,22 @@ impl WorkGuard for CandidateGuard {
         }
         Ok(())
     }
+
+    fn begin_allocation_scope(
+        &self,
+        delta: WorkDelta,
+        _allowed_slack: u64,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        self.consume(delta)?;
+        #[cfg(test)]
+        tests::begin_allocation_oracle_scope();
+        Ok(())
+    }
+
+    fn end_allocation_scope(&self) {
+        #[cfg(test)]
+        tests::end_allocation_oracle_scope();
+    }
 }
 
 fn plan_candidates(
@@ -1201,27 +1339,30 @@ fn plan_candidates(
     filter: &EventFilter,
     guard: &CandidateGuard,
 ) -> Result<(Vec<usize>, usize), AnalysisError> {
-    let mut fields = Vec::new();
-    try_reserve_analysis(
-        &mut fields,
-        MAX_INDEXED_FIELDS,
-        guard,
-        "posting plan allocation failed",
-    )?;
+    let mut fields = [None; MAX_INDEXED_FIELDS];
+    let mut field_count = 0_usize;
+    let mut push_field = |field| -> Result<(), AnalysisError> {
+        let slot = fields.get_mut(field_count).ok_or_else(|| {
+            AnalysisError::filter_too_complex("indexed field count exceeds hard limit")
+        })?;
+        *slot = Some(field);
+        field_count += 1;
+        Ok(())
+    };
     if !filter.tids.is_empty() {
-        fields.push(CandidateField::Tids);
+        push_field(CandidateField::Tids)?;
     }
     if !filter.kinds.is_empty() {
-        fields.push(CandidateField::Kinds);
+        push_field(CandidateField::Kinds)?;
     }
     if !filter.modules.is_empty() {
-        fields.push(CandidateField::Modules);
+        push_field(CandidateField::Modules)?;
     }
     if !filter.sequence.is_empty() {
-        fields.push(CandidateField::Sequence);
+        push_field(CandidateField::Sequence)?;
     }
     if !filter.relative_pc.is_empty() && !filter.modules.is_empty() {
-        fields.push(CandidateField::RelativePc);
+        push_field(CandidateField::RelativePc)?;
     }
     if !filter.absolute_pc.is_empty() {
         let modules = if filter.modules.is_empty() {
@@ -1234,93 +1375,67 @@ fn plan_candidates(
                 "absolute-PC module/range expansion exceeds 4096 pairs",
             ));
         }
-        fields.push(CandidateField::AbsolutePc);
+        push_field(CandidateField::AbsolutePc)?;
     }
     if !filter.mnemonic.is_empty() {
-        let work = context
-            .definitions
-            .len()
-            .checked_mul(filter.mnemonic.len())
-            .ok_or_else(|| {
-                AnalysisError::resource_exhausted("mnemonic definition scan exceeds work budget")
-            })?;
-        guard.consume_rows(work)?;
-        let mut definitions = Vec::new();
-        try_reserve_analysis(
-            &mut definitions,
-            context.definitions.len(),
-            guard,
-            "definition match allocation failed",
-        )?;
-        for (definition_id, definition) in context.definitions.iter().enumerate() {
-            if definition_id % 4096 == 0 {
-                consume_analysis_work(
-                    guard,
-                    (context.definitions.len() - definition_id).min(4096),
-                )?;
-            }
-            let mnemonic = context
-                .store
-                .string_bytes(definition.mnemonic)
-                .map_err(AnalysisError::store)?;
-            if mnemonic_matches(&filter.mnemonic, mnemonic) {
-                definitions.push(
-                    u32::try_from(definition_id)
-                        .map_err(|_| AnalysisError::store_shape("definition ID exceeds u32"))?,
-                );
-            }
-        }
-        fields.push(CandidateField::Definitions(definitions));
+        push_field(CandidateField::Definitions)?;
     }
     if !filter.register.reads.is_empty() {
-        fields.push(CandidateField::RegisterReads);
+        push_field(CandidateField::RegisterReads)?;
     }
     if !filter.register.writes.is_empty() {
-        fields.push(CandidateField::RegisterWrites);
+        push_field(CandidateField::RegisterWrites)?;
     }
     if !filter.memory.is_empty() {
-        fields.push(CandidateField::Memory);
+        push_field(CandidateField::Memory)?;
     }
     if !filter.semantic_categories.is_empty() {
         preflight_semantic_lookup(context, filter.semantic_categories.len())?;
-        fields.push(CandidateField::SemanticCategories);
+        push_field(CandidateField::SemanticCategories)?;
     }
     if !filter.semantic_names.is_empty() {
         preflight_semantic_lookup(context, filter.semantic_names.len())?;
-        fields.push(CandidateField::SemanticNames);
+        push_field(CandidateField::SemanticNames)?;
     }
     if filter.has_semantic_detail_residual() {
-        fields.push(CandidateField::SemanticDetailKinds);
+        push_field(CandidateField::SemanticDetailKinds)?;
     }
-
-    let mut planned = Vec::new();
-    try_reserve_analysis(
-        &mut planned,
-        fields.len(),
-        guard,
-        "posting estimate allocation failed",
-    )?;
+    let mut planned = [None; MAX_INDEXED_FIELDS];
     let mut estimated_decode_rows = 0_usize;
-    for field in fields {
+    for (index, field) in fields[..field_count].iter().copied().flatten().enumerate() {
         let count = estimate_candidate_field(context, filter, &field, guard)?;
         checked_estimate_add(&mut estimated_decode_rows, count)?;
-        planned.push((count, field));
+        planned[index] = Some((count, field));
     }
-    for index in 1..planned.len() {
+    for index in 1..field_count {
         let mut cursor = index;
         while cursor > 0 {
             consume_analysis_work(guard, 1)?;
-            if planned[cursor - 1].0 <= planned[cursor].0 {
+            if planned[cursor - 1].expect("planned field").0
+                <= planned[cursor].expect("planned field").0
+            {
                 break;
             }
             planned.swap(cursor - 1, cursor);
             cursor -= 1;
         }
     }
-    let indexed_fields = planned.len();
+    let indexed_fields = field_count;
+    let candidate_upper = planned[0]
+        .map(|planned| planned.0)
+        .unwrap_or_else(|| context.store.event_count());
+    let work_plan = ProjectionWorkPlan::derive(
+        indexed_fields,
+        estimated_decode_rows,
+        candidate_upper,
+        synchronous_residual_predicates(filter),
+        filter.has_semantic_detail_residual(),
+    )
+    .ok_or_else(|| AnalysisError::cpu_budget_exceeded("projection work plan exceeds hard limit"))?;
+    guard.authorize(work_plan)?;
 
-    let mut candidates = if let Some((_, field)) = planned.first() {
-        decode_candidate_field(context, filter, field, guard)?
+    let mut candidates = if let Some((_, field)) = planned[0] {
+        decode_candidate_field(context, filter, &field, guard)?
     } else {
         let count = context.store.event_count();
         if count > MAX_CANDIDATE_ROWS {
@@ -1334,14 +1449,23 @@ fn plan_candidates(
         rows.extend(0..count);
         rows
     };
-    for (_, field) in planned.iter().skip(1) {
-        if candidates.is_empty() {
-            break;
+    if field_count > 1 {
+        for (_, field) in planned[1..field_count].iter().copied().flatten() {
+            if candidates.is_empty() {
+                break;
+            }
+            let group = decode_candidate_field(context, filter, &field, guard)?;
+            candidates = intersect_rows_fallible_guarded(&candidates, &group, guard)?;
         }
-        let group = decode_candidate_field(context, filter, field, guard)?;
-        candidates = intersect_rows_fallible_guarded(&candidates, &group, guard)?;
     }
     Ok((candidates, indexed_fields))
+}
+
+fn synchronous_residual_predicates(filter: &EventFilter) -> usize {
+    usize::from(filter.modules.is_empty() && !filter.relative_pc.is_empty())
+        + usize::from(!filter.register.reads.is_empty())
+        + usize::from(!filter.register.writes.is_empty())
+        + usize::from(!filter.memory.is_empty())
 }
 
 fn try_reserve_analysis<T>(
@@ -1394,19 +1518,12 @@ fn try_reserve_posting_lists(
     try_reserve_analysis(lists, capacity, guard, "posting list allocation failed")
 }
 
-fn borrowed_filter_bytes<'a>(
-    values: &'a [String],
-    guard: &dyn WorkGuard,
-) -> Result<Vec<&'a [u8]>, AnalysisError> {
-    let mut bytes = Vec::new();
-    try_reserve_analysis(
-        &mut bytes,
-        values.len(),
-        guard,
-        "semantic filter reference allocation failed",
-    )?;
-    bytes.extend(values.iter().map(String::as_bytes));
-    Ok(bytes)
+fn borrowed_filter_bytes(values: &[String]) -> ([&[u8]; crate::filter::MAX_FILTER_TERMS], usize) {
+    let mut bytes = [&[][..]; crate::filter::MAX_FILTER_TERMS];
+    for (slot, value) in bytes.iter_mut().zip(values) {
+        *slot = value.as_bytes();
+    }
+    (bytes, values.len())
 }
 
 fn estimate_posting(
@@ -1514,12 +1631,8 @@ fn estimate_candidate_field(
                 checked_estimate_add(&mut total, memory_pc_count(context, module, start, end))
             })?;
         }
-        CandidateField::Definitions(definitions) => {
-            total = estimate_posting(
-                store,
-                NormalizedPostingQuery::Definitions(definitions),
-                guard,
-            )?;
+        CandidateField::Definitions => {
+            total = context.store.event_count().min(MAX_CANDIDATE_ROWS);
         }
         CandidateField::RegisterReads => {
             total = estimate_posting(
@@ -1551,16 +1664,20 @@ fn estimate_candidate_field(
             }
         }
         CandidateField::SemanticCategories => {
-            let values = borrowed_filter_bytes(&filter.semantic_categories, guard)?;
+            let (values, len) = borrowed_filter_bytes(&filter.semantic_categories);
             total = estimate_posting(
                 store,
-                NormalizedPostingQuery::SemanticCategories(&values),
+                NormalizedPostingQuery::SemanticCategories(&values[..len]),
                 guard,
             )?;
         }
         CandidateField::SemanticNames => {
-            let values = borrowed_filter_bytes(&filter.semantic_names, guard)?;
-            total = estimate_posting(store, NormalizedPostingQuery::SemanticNames(&values), guard)?;
+            let (values, len) = borrowed_filter_bytes(&filter.semantic_names);
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::SemanticNames(&values[..len]),
+                guard,
+            )?;
         }
         CandidateField::SemanticDetailKinds => {
             total = estimate_posting(
@@ -1631,7 +1748,10 @@ fn decode_candidate_field(
                         guard,
                         "maximum-sequence union allocation failed",
                     )?;
-                    rows.extend_from_slice(&context.max_sequence_rows);
+                    for chunk in context.max_sequence_rows.chunks(4096) {
+                        consume_analysis_work(guard, chunk.len())?;
+                        rows.extend_from_slice(chunk);
+                    }
                     radix_sort_usize_guarded(&mut rows, guard)?;
                     dedup_sorted_rows_guarded(&mut rows, guard)?;
                 }
@@ -1667,8 +1787,37 @@ fn decode_candidate_field(
                 Ok(())
             })?;
         }
-        CandidateField::Definitions(definitions) => {
-            return direct(NormalizedPostingQuery::Definitions(definitions));
+        CandidateField::Definitions => {
+            let mut definitions = Vec::new();
+            try_reserve_analysis(
+                &mut definitions,
+                context.definitions.len(),
+                guard,
+                "definition match allocation failed",
+            )?;
+            for (chunk_index, chunk) in context.definitions.chunks(4096).enumerate() {
+                let comparisons =
+                    chunk
+                        .len()
+                        .checked_mul(filter.mnemonic.len())
+                        .ok_or_else(|| {
+                            AnalysisError::cpu_budget_exceeded("mnemonic scan work overflow")
+                        })?;
+                consume_analysis_work(guard, comparisons)?;
+                for (within_chunk, definition) in chunk.iter().enumerate() {
+                    let mnemonic = context
+                        .store
+                        .string_bytes(definition.mnemonic)
+                        .map_err(AnalysisError::store)?;
+                    if mnemonic_matches(&filter.mnemonic, mnemonic) {
+                        let definition_id = chunk_index * 4096 + within_chunk;
+                        definitions.push(u32::try_from(definition_id).map_err(|_| {
+                            AnalysisError::store_shape("definition ID exceeds u32")
+                        })?);
+                    }
+                }
+            }
+            return direct(NormalizedPostingQuery::Definitions(&definitions));
         }
         CandidateField::RegisterReads => {
             return direct(NormalizedPostingQuery::Registers(&filter.register.reads));
@@ -1685,12 +1834,12 @@ fn decode_candidate_field(
             }
         }
         CandidateField::SemanticCategories => {
-            let values = borrowed_filter_bytes(&filter.semantic_categories, guard)?;
-            return direct(NormalizedPostingQuery::SemanticCategories(&values));
+            let (values, len) = borrowed_filter_bytes(&filter.semantic_categories);
+            return direct(NormalizedPostingQuery::SemanticCategories(&values[..len]));
         }
         CandidateField::SemanticNames => {
-            let values = borrowed_filter_bytes(&filter.semantic_names, guard)?;
-            return direct(NormalizedPostingQuery::SemanticNames(&values));
+            let (values, len) = borrowed_filter_bytes(&filter.semantic_names);
+            return direct(NormalizedPostingQuery::SemanticNames(&values[..len]));
         }
         CandidateField::SemanticDetailKinds => {
             return direct(NormalizedPostingQuery::Kinds(&[
@@ -1810,24 +1959,20 @@ fn intersect_rows_fallible_guarded(
 }
 
 fn preflight_semantic_lookup(context: &QueryContext, terms: usize) -> Result<(), AnalysisError> {
-    let work = context
+    context
         .store
         .string_count()
         .checked_mul(terms)
-        .and_then(|work| u64::try_from(work).ok());
-    if work.is_none_or(|work| work > candidate_work_limit().unwrap_or(0)) {
-        return Err(AnalysisError::resource_exhausted(
-            "semantic dictionary lookup exceeds work budget",
-        ));
-    }
-    Ok(())
+        .and_then(|work| u64::try_from(work).ok())
+        .map(|_| ())
+        .ok_or_else(|| AnalysisError::cpu_budget_exceeded("semantic lookup work overflow"))
 }
 
 fn map_store_query_error(error: qtrace_store::IndexError) -> AnalysisError {
     match error.code() {
         "job.cancelled" => AnalysisError {
             code: "job.cancelled",
-            detail: error.to_string(),
+            detail: error.to_string().into(),
         },
         "control.resource_exhausted" | "control.budget_exceeded" => {
             AnalysisError::resource_exhausted(error.to_string())
@@ -2338,16 +2483,7 @@ fn map_discontinuities(
                 })
                 .map_err(AnalysisError::control)?;
         }
-        validate_discontinuity_payload_tag(payload)?;
-        for chunk in payload.chunks(4096) {
-            guard
-                .consume(WorkDelta {
-                    input_bytes: chunk.len() as u64,
-                    ..WorkDelta::default()
-                })
-                .map_err(AnalysisError::control)?;
-        }
-        let discontinuity = decode_discontinuity_payload_body(payload)?;
+        let discontinuity = decode_discontinuity_payload(payload)?;
         let evidence = CompletenessRow {
             domain: discontinuity.evidence.domain(),
             bounds: discontinuity.evidence.bounds(),
@@ -2362,27 +2498,18 @@ fn map_discontinuities(
     Ok(result)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum BorrowedDiscontinuityPayload {
-    Discontinuity(BorrowedDiscontinuity),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BorrowedDiscontinuity {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParsedDiscontinuity {
     cause: qtrace_provider::DiscontinuityCause,
     evidence: qtrace_provider::CompletenessRange,
 }
 
-#[cfg(test)]
-fn decode_discontinuity_payload(payload: &[u8]) -> Result<BorrowedDiscontinuity, AnalysisError> {
-    validate_discontinuity_payload_tag(payload)?;
-    decode_discontinuity_payload_body(payload)
+fn decode_discontinuity_payload(payload: &[u8]) -> Result<ParsedDiscontinuity, AnalysisError> {
+    parse_discontinuity_payload(payload).map_err(discontinuity_parse_error)
 }
 
-fn validate_discontinuity_payload_tag(payload: &[u8]) -> Result<(), AnalysisError> {
-    scan_discontinuity_payload_tag(payload).map_err(|error| match error {
+fn discontinuity_parse_error(error: RawDiscontinuityTagError) -> AnalysisError {
+    match error {
         RawDiscontinuityTagError::WrongVariant => {
             AnalysisError::store_shape("discontinuity row payload has the wrong event kind")
         }
@@ -2392,7 +2519,7 @@ fn validate_discontinuity_payload_tag(payload: &[u8]) -> Result<(), AnalysisErro
         RawDiscontinuityTagError::Escape => {
             AnalysisError::store_shape("discontinuity payload must use canonical unescaped JSON")
         }
-    })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2402,42 +2529,360 @@ enum RawDiscontinuityTagError {
     Escape,
 }
 
-fn scan_discontinuity_payload_tag(payload: &[u8]) -> Result<(), RawDiscontinuityTagError> {
-    const PREFIX: &[u8] = b"{\"";
-    if !payload.starts_with(PREFIX) {
-        return Err(RawDiscontinuityTagError::Malformed);
+struct CanonicalJsonCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> CanonicalJsonCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
     }
-    let key_start = PREFIX.len();
-    let mut cursor = key_start;
-    while let Some(byte) = payload.get(cursor).copied() {
-        match byte {
-            b'\\' => return Err(RawDiscontinuityTagError::Escape),
-            b'"' => break,
-            0x00..=0x1f => return Err(RawDiscontinuityTagError::Malformed),
-            _ => cursor += 1,
+
+    fn skip_whitespace(&mut self) {
+        while self
+            .bytes
+            .get(self.offset)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            self.offset += 1;
         }
     }
-    let key_end = cursor;
-    if payload.get(key_end) != Some(&b'"') || payload.get(key_end + 1) != Some(&b':') {
-        return Err(RawDiscontinuityTagError::Malformed);
+
+    fn expect(&mut self, expected: u8) -> Result<(), RawDiscontinuityTagError> {
+        self.skip_whitespace();
+        if self.bytes.get(self.offset) != Some(&expected) {
+            return Err(RawDiscontinuityTagError::Malformed);
+        }
+        self.offset += 1;
+        Ok(())
     }
-    if payload.get(key_start..key_end) != Some(b"discontinuity".as_slice()) {
+
+    fn token(&mut self) -> Result<&'a [u8], RawDiscontinuityTagError> {
+        self.skip_whitespace();
+        if self.bytes.get(self.offset) != Some(&b'"') {
+            return Err(RawDiscontinuityTagError::Malformed);
+        }
+        self.offset += 1;
+        let start = self.offset;
+        while let Some(byte) = self.bytes.get(self.offset).copied() {
+            match byte {
+                b'"' => {
+                    let token = &self.bytes[start..self.offset];
+                    self.offset += 1;
+                    return Ok(token);
+                }
+                b'\\' => return Err(RawDiscontinuityTagError::Escape),
+                0x20..=0x7f => self.offset += 1,
+                _ => return Err(RawDiscontinuityTagError::Malformed),
+            }
+        }
+        Err(RawDiscontinuityTagError::Malformed)
+    }
+
+    fn member(&mut self, first: &mut bool) -> Result<Option<&'a [u8]>, RawDiscontinuityTagError> {
+        self.skip_whitespace();
+        if self.bytes.get(self.offset) == Some(&b'}') {
+            self.offset += 1;
+            return Ok(None);
+        }
+        if !*first {
+            self.expect(b',')?;
+        }
+        *first = false;
+        let key = self.token()?;
+        self.expect(b':')?;
+        Ok(Some(key))
+    }
+
+    fn number(&mut self) -> Result<u64, RawDiscontinuityTagError> {
+        self.skip_whitespace();
+        let start = self.offset;
+        let first = self
+            .bytes
+            .get(self.offset)
+            .copied()
+            .filter(u8::is_ascii_digit)
+            .ok_or(RawDiscontinuityTagError::Malformed)?;
+        self.offset += 1;
+        if first == b'0' && self.bytes.get(self.offset).is_some_and(u8::is_ascii_digit) {
+            return Err(RawDiscontinuityTagError::Malformed);
+        }
+        let mut value = u64::from(first - b'0');
+        while let Some(byte) = self
+            .bytes
+            .get(self.offset)
+            .copied()
+            .filter(u8::is_ascii_digit)
+        {
+            if self.offset - start == 20 {
+                return Err(RawDiscontinuityTagError::Malformed);
+            }
+            value = value
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+                .ok_or(RawDiscontinuityTagError::Malformed)?;
+            self.offset += 1;
+        }
+        Ok(value)
+    }
+
+    fn finish(mut self) -> Result<(), RawDiscontinuityTagError> {
+        self.skip_whitespace();
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(RawDiscontinuityTagError::Malformed)
+        }
+    }
+}
+
+fn parse_discontinuity_payload(
+    payload: &[u8],
+) -> Result<ParsedDiscontinuity, RawDiscontinuityTagError> {
+    let mut cursor = CanonicalJsonCursor::new(payload);
+    cursor.expect(b'{')?;
+    let mut first = true;
+    let key = cursor
+        .member(&mut first)?
+        .ok_or(RawDiscontinuityTagError::Malformed)?;
+    if key != b"discontinuity" {
         return Err(RawDiscontinuityTagError::WrongVariant);
     }
-    if payload[key_end + 2..].contains(&b'\\') {
-        return Err(RawDiscontinuityTagError::Escape);
+    let discontinuity = parse_discontinuity_object(&mut cursor)?;
+    if cursor.member(&mut first)?.is_some() {
+        return Err(RawDiscontinuityTagError::Malformed);
     }
+    cursor.finish()?;
+    Ok(discontinuity)
+}
+
+fn parse_discontinuity_object(
+    cursor: &mut CanonicalJsonCursor<'_>,
+) -> Result<ParsedDiscontinuity, RawDiscontinuityTagError> {
+    cursor.expect(b'{')?;
+    let mut first = true;
+    let mut fields = 0_u8;
+    let mut cause = None;
+    let mut evidence = None;
+    while let Some(key) = cursor.member(&mut first)? {
+        match key {
+            b"cause" => {
+                set_field(&mut fields, 1)?;
+                cause = Some(parse_discontinuity_cause(cursor.token()?)?);
+            }
+            b"evidence" => {
+                set_field(&mut fields, 2)?;
+                evidence = Some(parse_completeness_range(cursor)?);
+            }
+            _ => return Err(RawDiscontinuityTagError::Malformed),
+        }
+    }
+    if fields != 3 {
+        return Err(RawDiscontinuityTagError::Malformed);
+    }
+    Ok(ParsedDiscontinuity {
+        cause: cause.ok_or(RawDiscontinuityTagError::Malformed)?,
+        evidence: evidence.ok_or(RawDiscontinuityTagError::Malformed)?,
+    })
+}
+
+fn parse_completeness_range(
+    cursor: &mut CanonicalJsonCursor<'_>,
+) -> Result<qtrace_provider::CompletenessRange, RawDiscontinuityTagError> {
+    cursor.expect(b'{')?;
+    let mut first = true;
+    let mut fields = 0_u8;
+    let mut domain = None;
+    let mut bounds = None;
+    let mut provenance = None;
+    let mut cause = None;
+    while let Some(key) = cursor.member(&mut first)? {
+        match key {
+            b"domain" => {
+                set_field(&mut fields, 1)?;
+                domain = Some(parse_range_domain(cursor.token()?)?);
+            }
+            b"bounds" => {
+                set_field(&mut fields, 2)?;
+                bounds = Some(parse_range_bounds(cursor)?);
+            }
+            b"provenance" => {
+                set_field(&mut fields, 4)?;
+                provenance = Some(parse_provenance(cursor.token()?)?);
+            }
+            b"cause" => {
+                set_field(&mut fields, 8)?;
+                cause = Some(parse_completeness_cause(cursor.token()?)?);
+            }
+            _ => return Err(RawDiscontinuityTagError::Malformed),
+        }
+    }
+    if fields != 15 {
+        return Err(RawDiscontinuityTagError::Malformed);
+    }
+    let domain = domain.ok_or(RawDiscontinuityTagError::Malformed)?;
+    let bounds = bounds.ok_or(RawDiscontinuityTagError::Malformed)?;
+    let provenance = provenance.ok_or(RawDiscontinuityTagError::Malformed)?;
+    let cause = cause.ok_or(RawDiscontinuityTagError::Malformed)?;
+    match (domain, bounds) {
+        (
+            qtrace_provider::RangeDomain::CapturedSequence,
+            qtrace_provider::RangeBounds::InclusiveSequence { first, last },
+        ) => qtrace_provider::CompletenessRange::captured_sequence_with_cause(
+            first, last, provenance, cause,
+        ),
+        (
+            qtrace_provider::RangeDomain::SourceBytes,
+            qtrace_provider::RangeBounds::HalfOpen {
+                start,
+                end_exclusive,
+            },
+        ) => qtrace_provider::CompletenessRange::source_bytes_with_cause(
+            start,
+            end_exclusive,
+            provenance,
+            cause,
+        ),
+        (
+            qtrace_provider::RangeDomain::MemoryAddresses,
+            qtrace_provider::RangeBounds::HalfOpen {
+                start,
+                end_exclusive,
+            },
+        ) => qtrace_provider::CompletenessRange::memory_addresses_with_cause(
+            start,
+            end_exclusive,
+            provenance,
+            cause,
+        ),
+        _ => None,
+    }
+    .ok_or(RawDiscontinuityTagError::Malformed)
+}
+
+fn parse_range_bounds(
+    cursor: &mut CanonicalJsonCursor<'_>,
+) -> Result<qtrace_provider::RangeBounds, RawDiscontinuityTagError> {
+    cursor.expect(b'{')?;
+    let mut first = true;
+    let key = cursor
+        .member(&mut first)?
+        .ok_or(RawDiscontinuityTagError::Malformed)?;
+    let bounds = match key {
+        b"inclusive_sequence" => {
+            let (first, last) = parse_number_pair(cursor, b"first", b"last")?;
+            qtrace_provider::RangeBounds::InclusiveSequence { first, last }
+        }
+        b"half_open" => {
+            let (start, end_exclusive) = parse_number_pair(cursor, b"start", b"end_exclusive")?;
+            qtrace_provider::RangeBounds::HalfOpen {
+                start,
+                end_exclusive,
+            }
+        }
+        _ => return Err(RawDiscontinuityTagError::Malformed),
+    };
+    if cursor.member(&mut first)?.is_some() {
+        return Err(RawDiscontinuityTagError::Malformed);
+    }
+    Ok(bounds)
+}
+
+fn parse_number_pair(
+    cursor: &mut CanonicalJsonCursor<'_>,
+    left_key: &[u8],
+    right_key: &[u8],
+) -> Result<(u64, u64), RawDiscontinuityTagError> {
+    cursor.expect(b'{')?;
+    let mut first = true;
+    let mut fields = 0_u8;
+    let mut left = None;
+    let mut right = None;
+    while let Some(key) = cursor.member(&mut first)? {
+        if key == left_key {
+            set_field(&mut fields, 1)?;
+            left = Some(cursor.number()?);
+        } else if key == right_key {
+            set_field(&mut fields, 2)?;
+            right = Some(cursor.number()?);
+        } else {
+            return Err(RawDiscontinuityTagError::Malformed);
+        }
+    }
+    if fields != 3 {
+        return Err(RawDiscontinuityTagError::Malformed);
+    }
+    Ok((
+        left.ok_or(RawDiscontinuityTagError::Malformed)?,
+        right.ok_or(RawDiscontinuityTagError::Malformed)?,
+    ))
+}
+
+fn set_field(fields: &mut u8, bit: u8) -> Result<(), RawDiscontinuityTagError> {
+    if *fields & bit != 0 {
+        return Err(RawDiscontinuityTagError::Malformed);
+    }
+    *fields |= bit;
     Ok(())
 }
 
-fn decode_discontinuity_payload_body(
-    payload: &[u8],
-) -> Result<BorrowedDiscontinuity, AnalysisError> {
-    let BorrowedDiscontinuityPayload::Discontinuity(discontinuity) =
-        serde_json::from_slice(payload).map_err(|error| {
-            AnalysisError::store_shape(format!("invalid discontinuity payload: {error}"))
-        })?;
-    Ok(discontinuity)
+fn parse_discontinuity_cause(
+    token: &[u8],
+) -> Result<qtrace_provider::DiscontinuityCause, RawDiscontinuityTagError> {
+    match token {
+        b"loss" => Ok(qtrace_provider::DiscontinuityCause::Loss),
+        b"damage" => Ok(qtrace_provider::DiscontinuityCause::Damage),
+        b"overwrite" => Ok(qtrace_provider::DiscontinuityCause::Overwrite),
+        b"truncation" => Ok(qtrace_provider::DiscontinuityCause::Truncation),
+        b"unknown" => Ok(qtrace_provider::DiscontinuityCause::Unknown),
+        _ => Err(RawDiscontinuityTagError::Malformed),
+    }
+}
+
+fn parse_range_domain(
+    token: &[u8],
+) -> Result<qtrace_provider::RangeDomain, RawDiscontinuityTagError> {
+    match token {
+        b"captured_sequence" => Ok(qtrace_provider::RangeDomain::CapturedSequence),
+        b"source_bytes" => Ok(qtrace_provider::RangeDomain::SourceBytes),
+        b"memory_addresses" => Ok(qtrace_provider::RangeDomain::MemoryAddresses),
+        _ => Err(RawDiscontinuityTagError::Malformed),
+    }
+}
+
+fn parse_provenance(token: &[u8]) -> Result<Provenance, RawDiscontinuityTagError> {
+    match token {
+        b"captured" => Ok(Provenance::Captured),
+        b"derived" => Ok(Provenance::Derived),
+        b"heuristic" => Ok(Provenance::Heuristic),
+        b"unknown" => Ok(Provenance::Unknown),
+        b"damaged" => Ok(Provenance::Damaged),
+        _ => Err(RawDiscontinuityTagError::Malformed),
+    }
+}
+
+fn parse_completeness_cause(
+    token: &[u8],
+) -> Result<qtrace_provider::CompletenessCause, RawDiscontinuityTagError> {
+    use qtrace_provider::CompletenessCause;
+    match token {
+        b"retained" => Ok(CompletenessCause::Retained),
+        b"missing_terminal" => Ok(CompletenessCause::MissingTerminal),
+        b"active" => Ok(CompletenessCause::Active),
+        b"stale" => Ok(CompletenessCause::Stale),
+        b"rotating" => Ok(CompletenessCause::Rotating),
+        b"unreliable" => Ok(CompletenessCause::Unreliable),
+        b"incomplete" => Ok(CompletenessCause::Incomplete),
+        b"lost" => Ok(CompletenessCause::Lost),
+        b"overwritten" => Ok(CompletenessCause::Overwritten),
+        b"coverage_gap" => Ok(CompletenessCause::CoverageGap),
+        b"checksum" => Ok(CompletenessCause::Checksum),
+        b"unterminated_thread" => Ok(CompletenessCause::UnterminatedThread),
+        b"truncation" => Ok(CompletenessCause::Truncation),
+        b"unknown" => Ok(CompletenessCause::Unknown),
+        _ => Err(RawDiscontinuityTagError::Malformed),
+    }
 }
 
 struct SemanticJob {
@@ -2815,6 +3260,7 @@ const NO_EDGE: u32 = u32::MAX;
 #[derive(Clone, Copy)]
 struct DetailNode {
     first_edge: u32,
+    edge_count: u16,
     failure: u32,
     terminal: bool,
 }
@@ -2823,6 +3269,7 @@ impl Default for DetailNode {
     fn default() -> Self {
         Self {
             first_edge: NO_EDGE,
+            edge_count: 0,
             failure: 0,
             terminal: false,
         }
@@ -2865,7 +3312,7 @@ impl DetailMatcher {
         if cancelled(0) {
             return Err(AnalysisError {
                 code: "job.cancelled",
-                detail: "semantic matcher build cancelled".to_owned(),
+                detail: Cow::Borrowed("semantic matcher build cancelled"),
             });
         }
         if patterns.iter().any(|pattern| pattern.as_ref().is_empty()) {
@@ -2938,10 +3385,11 @@ impl DetailMatcher {
             matcher.nodes[state].terminal = true;
         }
         matcher.build_failures(&mut work, max_work, guard, &mut cancelled)?;
+        matcher.normalize_edges(&mut work, max_work, guard, &mut cancelled)?;
         if cancelled(work) {
             return Err(AnalysisError {
                 code: "job.cancelled",
-                detail: "semantic matcher build cancelled".to_owned(),
+                detail: Cow::Borrowed("semantic matcher build cancelled"),
             });
         }
         Ok(matcher)
@@ -2968,17 +3416,75 @@ impl DetailMatcher {
     }
 
     fn transition(&self, state: usize, byte: u8) -> (Option<usize>, usize) {
-        let mut edge = self.nodes[state].first_edge;
-        let mut visits = 0_usize;
-        while edge != NO_EDGE {
-            visits += 1;
-            let candidate = self.edges[edge as usize];
-            if candidate.byte == byte {
-                return (Some(candidate.target as usize), visits);
+        let node = self.nodes[state];
+        let start = node.first_edge as usize;
+        let mut left = 0_usize;
+        let mut right = node.edge_count as usize;
+        let mut comparisons = 0_usize;
+        while left < right {
+            let middle = left + (right - left) / 2;
+            comparisons += 1;
+            let candidate = self.edges[start + middle];
+            match candidate.byte.cmp(&byte) {
+                std::cmp::Ordering::Less => left = middle + 1,
+                std::cmp::Ordering::Greater => right = middle,
+                std::cmp::Ordering::Equal => {
+                    return (Some(candidate.target as usize), comparisons);
+                }
             }
-            edge = candidate.next;
         }
-        (None, visits)
+        (None, comparisons)
+    }
+
+    fn normalize_edges(
+        &mut self,
+        work: &mut usize,
+        max_work: usize,
+        guard: &dyn WorkGuard,
+        cancelled: &mut impl FnMut(usize) -> bool,
+    ) -> Result<(), AnalysisError> {
+        let mut sorted = Vec::new();
+        try_reserve_analysis(
+            &mut sorted,
+            self.edges.len(),
+            guard,
+            "semantic sorted edge allocation failed",
+        )?;
+        for node in &mut self.nodes {
+            let start = u32::try_from(sorted.len())
+                .map_err(|_| AnalysisError::resource_exhausted("semantic automaton exceeds u32"))?;
+            let mut local: [Option<DetailEdge>; 256] = [None; 256];
+            let mut len = 0_usize;
+            let mut edge = node.first_edge;
+            while edge != NO_EDGE {
+                matcher_build_work(work, 1, max_work, cancelled)?;
+                let candidate = self.edges[edge as usize];
+                let mut cursor = len;
+                while cursor > 0 {
+                    matcher_build_work(work, 1, max_work, cancelled)?;
+                    if local[cursor - 1].expect("initialized edge").byte <= candidate.byte {
+                        break;
+                    }
+                    local[cursor] = local[cursor - 1];
+                    cursor -= 1;
+                }
+                local[cursor] = Some(candidate);
+                len += 1;
+                edge = candidate.next;
+            }
+            for candidate in local[..len].iter().copied().flatten() {
+                sorted.push(DetailEdge {
+                    next: NO_EDGE,
+                    ..candidate
+                });
+            }
+            node.first_edge = start;
+            node.edge_count = u16::try_from(len).map_err(|_| {
+                AnalysisError::resource_exhausted("semantic node exceeds byte alphabet")
+            })?;
+        }
+        self.edges = sorted;
+        Ok(())
     }
 
     fn build_failures(
@@ -3059,7 +3565,7 @@ impl DetailMatcher {
         if cancelled(0) {
             return Err(AnalysisError {
                 code: "job.cancelled",
-                detail: "semantic detail scan cancelled".to_owned(),
+                detail: Cow::Borrowed("semantic detail scan cancelled"),
             });
         }
         let mut state = 0_usize;
@@ -3119,7 +3625,7 @@ impl DetailMatcher {
             if cancelled(processed) {
                 return Err(AnalysisError {
                     code: "job.cancelled",
-                    detail: "semantic detail scan cancelled".to_owned(),
+                    detail: Cow::Borrowed("semantic detail scan cancelled"),
                 });
             }
         }
@@ -3141,7 +3647,7 @@ fn matcher_build_work(
     if *work / 4096 != prior_checkpoint && cancelled(*work) {
         return Err(AnalysisError {
             code: "job.cancelled",
-            detail: "semantic matcher build cancelled".to_owned(),
+            detail: Cow::Borrowed("semantic matcher build cancelled"),
         });
     }
     Ok(())
@@ -3352,6 +3858,7 @@ mod tests {
                 requested: 0,
             })
         };
+        static PAGE_ORACLE_ARMED: Cell<bool> = const { Cell::new(false) };
     }
 
     struct TrackingAllocator;
@@ -3401,6 +3908,34 @@ mod tests {
                 active: true,
                 ..AllocationOracleState::default()
             });
+        });
+    }
+
+    fn arm_page_allocation_oracle() {
+        PAGE_ORACLE_ARMED.set(true);
+    }
+
+    pub(super) fn activate_armed_page_oracle() {
+        if PAGE_ORACLE_ARMED.replace(false) {
+            activate_allocation_oracle();
+        }
+    }
+
+    pub(super) fn begin_allocation_oracle_scope() {
+        ALLOCATION_ORACLE.with(|oracle| {
+            let mut state = oracle.get();
+            assert!(!state.scope_active, "allocation scopes must not nest");
+            state.scope_active = true;
+            oracle.set(state);
+        });
+    }
+
+    pub(super) fn end_allocation_oracle_scope() {
+        ALLOCATION_ORACLE.with(|oracle| {
+            let mut state = oracle.get();
+            assert!(state.scope_active, "allocation scope must be active");
+            state.scope_active = false;
+            oracle.set(state);
         });
     }
 
@@ -3808,8 +4343,45 @@ mod tests {
     }
 
     #[test]
-    fn candidate_work_formula_authorizes_declared_worst_cases_and_rejects_overflow() {
-        let limit = candidate_work_limit().expect("candidate work formula");
+    fn maximum_sequence_production_copy_and_radix_are_charged_at_real_boundaries() {
+        for size in [8_192_usize, 16_384, 32_768] {
+            let projection = completed_page_projection(size);
+            let filter = EventFilter {
+                sequence: vec![crate::SequenceRange::new(u64::MAX, u64::MAX).unwrap()],
+                ..EventFilter::default()
+            };
+            let guard = CandidateGuard::with_limits(
+                Arc::new(AtomicBool::new(false)),
+                u64::MAX,
+                MAX_CANDIDATE_RESIDENT_BYTES as u64,
+            );
+            let rows = decode_candidate_field(
+                &projection.context,
+                &filter,
+                &CandidateField::Sequence,
+                &guard,
+            )
+            .unwrap();
+            assert_eq!(rows, (0..size).collect::<Vec<_>>());
+            let radix = std::mem::size_of::<usize>() as u64 * (2 * size as u64 + 256);
+            let independent_work = 2 * size as u64 + 2 * radix + 2 * (size - 1) as u64;
+            assert_eq!(guard.consumed().0, independent_work);
+        }
+    }
+
+    #[test]
+    fn projection_work_plan_is_dynamic_checked_and_cpu_specific() {
+        let no_filter =
+            ProjectionWorkPlan::derive(0, 0, 150_000, 0, false).expect("150k no-filter work plan");
+        let limit = ProjectionWorkPlan::derive(
+            MAX_INDEXED_FIELDS,
+            MAX_CANDIDATE_DECODE_ROWS,
+            MAX_CANDIDATE_ROWS,
+            MAX_SYNC_RESIDUAL_PREDICATES,
+            true,
+        )
+        .expect("declared worst-case work plan")
+        .allowance;
         let stable_worst =
             stable_key_work_bound(MAX_CANDIDATE_ROWS).expect("ten-million-row stable sort work");
         assert!(limit >= stable_worst);
@@ -3817,10 +4389,21 @@ mod tests {
             .checked_mul(MAX_MATCHER_TRANSITION_WORK_PER_BYTE as u64)
             .unwrap();
         assert!(limit >= semantic_worst);
-        let realistic_projection = stable_key_work_bound(150_000).unwrap();
+        let realistic_projection = stable_key_work_bound(150_000)
+            .unwrap()
+            .checked_add(150_000)
+            .unwrap();
         assert!(realistic_projection > 20_000_000);
-        assert!(limit >= realistic_projection);
-        assert!(candidate_work_limit_for(usize::MAX, usize::MAX).is_none());
+        assert_eq!(no_filter.allowance, realistic_projection);
+        let semantic = ProjectionWorkPlan::derive(0, 0, 150_000, 0, true).unwrap();
+        assert!(semantic.allowance > no_filter.allowance * 10);
+        let one_field = ProjectionWorkPlan::derive(1, 150_000, 150_000, 0, false).unwrap();
+        let two_fields = ProjectionWorkPlan::derive(2, 300_000, 150_000, 0, false).unwrap();
+        assert!(two_fields.allowance > one_field.allowance);
+        assert!(
+            ProjectionWorkPlan::derive(usize::MAX, usize::MAX, usize::MAX, usize::MAX, true)
+                .is_none()
+        );
         let guard = CandidateGuard::with_limits(
             Arc::new(AtomicBool::new(false)),
             limit,
@@ -3828,7 +4411,7 @@ mod tests {
         );
         guard
             .consume(WorkDelta {
-                rows: limit,
+                nodes: limit,
                 ..WorkDelta::default()
             })
             .unwrap();
@@ -3836,14 +4419,47 @@ mod tests {
             AnalysisError::control(
                 guard
                     .consume(WorkDelta {
-                        rows: 1,
+                        nodes: 1,
                         ..WorkDelta::default()
                     })
                     .unwrap_err()
             )
             .code(),
-            "analysis.resource_exhausted"
+            "analysis.cpu_budget_exceeded"
         );
+
+        let keys = (0..150_000)
+            .map(|ordinal| {
+                EventKey::new(
+                    ArtifactDigest::new([1; 32]),
+                    TimelineId(1),
+                    ordinal,
+                    ordinal,
+                    Some(ordinal),
+                    Some(1),
+                )
+            })
+            .collect::<Vec<_>>();
+        for allowance in [
+            no_filter.allowance - 1,
+            no_filter.allowance,
+            no_filter.allowance + 1,
+        ] {
+            let guard = CandidateGuard::with_limits(
+                Arc::new(AtomicBool::new(false)),
+                allowance,
+                MAX_CANDIDATE_RESIDENT_BYTES as u64,
+            );
+            guard.consume_rows(150_000).unwrap();
+            let result =
+                radix_sort_rows_by_keys_guarded(&keys, (0..150_000).rev().collect(), &guard);
+            if allowance < no_filter.allowance {
+                assert_eq!(result.unwrap_err().code(), "analysis.cpu_budget_exceeded");
+            } else {
+                result.unwrap();
+                assert_eq!(guard.consumed().0, no_filter.allowance);
+            }
+        }
     }
 
     #[test]
@@ -3865,7 +4481,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_scan_charges_internal_edge_visits() {
+    fn semantic_scan_uses_and_charges_bounded_binary_edge_search() {
         let patterns = (b'a'..=b'z').map(|byte| vec![byte]).collect::<Vec<_>>();
         let matcher = DetailMatcher::new(&patterns).unwrap();
         let guard = ProductionPassProbe::default();
@@ -3874,9 +4490,11 @@ mod tests {
             .unwrap();
         assert!(matched);
         assert_eq!(scanned, 1);
+        let work = guard.work.load(Ordering::SeqCst);
+        assert!(work >= 1, "edge comparisons were not charged");
         assert!(
-            guard.work.load(Ordering::SeqCst) >= 26,
-            "linked transition edge visits were not charged"
+            work <= MAX_MATCHER_EDGE_COMPARISONS as u64 + 1,
+            "one transition exceeded the audited binary-search bound: {work}"
         );
     }
 
@@ -3906,12 +4524,78 @@ mod tests {
         assert_eq!(decoded.cause, qtrace_provider::DiscontinuityCause::Damage);
         assert_eq!(decoded.evidence, evidence);
 
+        let discontinuity_causes = [
+            qtrace_provider::DiscontinuityCause::Loss,
+            qtrace_provider::DiscontinuityCause::Damage,
+            qtrace_provider::DiscontinuityCause::Overwrite,
+            qtrace_provider::DiscontinuityCause::Truncation,
+            qtrace_provider::DiscontinuityCause::Unknown,
+        ];
+        let completeness_causes = [
+            qtrace_provider::CompletenessCause::Retained,
+            qtrace_provider::CompletenessCause::MissingTerminal,
+            qtrace_provider::CompletenessCause::Active,
+            qtrace_provider::CompletenessCause::Stale,
+            qtrace_provider::CompletenessCause::Rotating,
+            qtrace_provider::CompletenessCause::Unreliable,
+            qtrace_provider::CompletenessCause::Incomplete,
+            qtrace_provider::CompletenessCause::Lost,
+            qtrace_provider::CompletenessCause::Overwritten,
+            qtrace_provider::CompletenessCause::CoverageGap,
+            qtrace_provider::CompletenessCause::Checksum,
+            qtrace_provider::CompletenessCause::UnterminatedThread,
+            qtrace_provider::CompletenessCause::Truncation,
+            qtrace_provider::CompletenessCause::Unknown,
+        ];
+        for discontinuity_cause in discontinuity_causes {
+            for completeness_cause in completeness_causes {
+                for evidence in [
+                    qtrace_provider::CompletenessRange::captured_sequence_with_cause(
+                        7,
+                        u64::MAX,
+                        Provenance::Captured,
+                        completeness_cause,
+                    )
+                    .unwrap(),
+                    qtrace_provider::CompletenessRange::source_bytes_with_cause(
+                        7,
+                        u64::MAX,
+                        Provenance::Derived,
+                        completeness_cause,
+                    )
+                    .unwrap(),
+                    qtrace_provider::CompletenessRange::memory_addresses_with_cause(
+                        7,
+                        u64::MAX,
+                        Provenance::Heuristic,
+                        completeness_cause,
+                    )
+                    .unwrap(),
+                ] {
+                    let payload =
+                        serde_json::to_vec(&qtrace_provider::EventPayload::Discontinuity(
+                            qtrace_provider::Discontinuity {
+                                cause: discontinuity_cause,
+                                evidence,
+                            },
+                        ))
+                        .unwrap();
+                    activate_allocation_oracle();
+                    let decoded = decode_discontinuity_payload(&payload).unwrap();
+                    let allocation = finish_allocation_oracle();
+                    assert_eq!(allocation.requested, 0);
+                    assert_eq!(decoded.cause, discontinuity_cause);
+                    assert_eq!(decoded.evidence, evidence);
+                }
+            }
+        }
+
         let mut wrong = b"{\"semantic_call\":\"".to_vec();
         wrong.resize(MAX_DISCONTINUITY_PAYLOAD_BYTES - 2, b'x');
         wrong.extend_from_slice(b"\"}");
         activate_allocation_oracle();
         assert_eq!(
-            scan_discontinuity_payload_tag(&wrong),
+            parse_discontinuity_payload(&wrong),
             Err(RawDiscontinuityTagError::WrongVariant)
         );
         assert_eq!(finish_allocation_oracle().requested, 0);
@@ -3937,6 +4621,30 @@ mod tests {
             .code(),
             "analysis.store"
         );
+
+        let mut long_number = br#"{"discontinuity":{"cause":"loss","evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":"#.to_vec();
+        long_number.resize(MAX_DISCONTINUITY_PAYLOAD_BYTES - 80, b'9');
+        long_number.extend_from_slice(br#", "last":9}},"provenance":"damaged","cause":"lost"}}}"#);
+        let invalid_payloads: &[&[u8]] = &[
+            &long_number,
+            br#"{"discontinuity":{"cause":"loss","cause":"damage","evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":1,"last":2}},"provenance":"damaged","cause":"lost"}}}"#,
+            br#"{"discontinuity":{"cause":"loss","unknown":0,"evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":1,"last":2}},"provenance":"damaged","cause":"lost"}}}"#,
+            br#"{"discontinuity":{"cause":"loss"}}"#,
+            br#"{"discontinuity":{"cause":"loss","evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":1,"last":2}},"provenance":"damaged","cause":"lost"}},"extra":{}}"#,
+            br#"{"discontinuity":{"cause":"loss","evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":1,"last":2}},"provenance":"damaged","cause":"lost"}}} trailing"#,
+            br#"{"discontinuity":{"cause":"loss","evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":01,"last":2}},"provenance":"damaged","cause":"lost"}}}"#,
+            br#"{"discontinuity":{"cause":"loss","evidence":{"domain":"captured_sequence","bounds":{"inclusive_sequence":{"first":18446744073709551616,"last":2}},"provenance":"damaged","cause":"lost"}}}"#,
+        ];
+        for payload in invalid_payloads {
+            activate_allocation_oracle();
+            let result = decode_discontinuity_payload(payload);
+            let allocation = finish_allocation_oracle();
+            assert!(result.is_err(), "malformed payload was accepted");
+            assert_eq!(
+                allocation.requested, 0,
+                "malformed discontinuity parsing allocated"
+            );
+        }
     }
 
     struct PlannerScopeProbe {
@@ -4280,32 +4988,26 @@ mod tests {
         for size in [8_192_usize, 16_384, 32_768] {
             let projection = completed_page_projection(size);
             for limit in [1_usize, 32, MAX_PAGE_LIMIT] {
-                let first_guard = ProductionPassProbe::default();
-                let first = projection.page_guarded(None, limit, &first_guard).unwrap();
+                let first = projection.page(None, limit).unwrap();
                 let cursor = first.next.as_ref().expect("next page cursor");
 
-                let second_guard = ProductionPassProbe::default();
-                activate_allocation_oracle();
-                let second = projection
-                    .page_guarded(Some(cursor), limit, &second_guard)
-                    .unwrap();
+                arm_page_allocation_oracle();
+                let second = projection.page(Some(cursor), limit).unwrap();
                 let allocation = finish_allocation_oracle();
+                let second_usage = LAST_PAGE_USAGE.take().expect("public page usage probe");
                 assert_eq!(allocation.unauthorized, 0);
                 assert!(allocation.requested > 0);
+                assert_eq!(allocation.requested, second_usage.1);
 
-                let repeated_guard = ProductionPassProbe::default();
-                let repeated = projection
-                    .page_guarded(Some(cursor), limit, &repeated_guard)
-                    .unwrap();
+                let repeated = projection.page(Some(cursor), limit).unwrap();
+                let repeated_usage = LAST_PAGE_USAGE.take().expect("repeated page usage probe");
                 assert_eq!(second, repeated);
                 assert_eq!(
-                    second_guard.work.load(Ordering::SeqCst),
-                    repeated_guard.work.load(Ordering::SeqCst),
+                    second_usage.0, repeated_usage.0,
                     "operation-local page work must be deterministic"
                 );
                 assert_eq!(
-                    second_guard.resident.load(Ordering::SeqCst),
-                    repeated_guard.resident.load(Ordering::SeqCst),
+                    second_usage.1, repeated_usage.1,
                     "operation-local page allocation accounting must be deterministic"
                 );
                 let comparisons_lower_bound = (usize::BITS - size.leading_zeros() - 1) as u64;
@@ -4313,9 +5015,26 @@ mod tests {
                     (2 * limit + 2 * CURSOR_BYTES + CURSOR_ENCODED_BYTES) as u64
                         + comparisons_lower_bound;
                 assert!(
-                    second_guard.work.load(Ordering::SeqCst) >= independent_work_lower_bound,
+                    second_usage.0 >= independent_work_lower_bound,
                     "page omitted a comparison, copy, projection, or cursor pass"
                 );
+
+                let independent_resident = u64::try_from(
+                    std::alloc::Layout::array::<usize>(limit).unwrap().size()
+                        + std::alloc::Layout::array::<TimelineRow>(limit)
+                            .unwrap()
+                            .size()
+                        + CURSOR_BYTES
+                        + CURSOR_ENCODED_BYTES,
+                )
+                .unwrap();
+                assert_eq!(second_usage.1, independent_resident);
+                let w_minus_one = CandidateGuard::with_limits(
+                    Arc::new(AtomicBool::new(false)),
+                    u64::MAX,
+                    independent_resident - 1,
+                );
+                assert!(AllocationScope::begin(&w_minus_one, independent_resident, 0).is_err());
             }
         }
     }
