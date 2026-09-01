@@ -4,7 +4,7 @@ use qtrace_analysis::{
     AddressRange, CompletenessStatus, EventFilter, QueryContext, SequenceRange, TimelineProjection,
     query_events,
 };
-use qtrace_provider::{OperationAbort, WorkDelta, WorkGuard};
+use qtrace_provider::{EventKind, OperationAbort, WorkDelta, WorkGuard};
 use qtrace_store::{
     AuthorizedPath, BuildOptions, IndexBuilder, NormalizedBulkView, OpenPolicy, SessionLoader,
     TraceStore, TraceStoreView,
@@ -178,6 +178,82 @@ fn max_sequence_flight_bytes() -> Vec<u8> {
     put_u32(&mut bytes, directory_offset + 24, 0);
     put_u32(&mut bytes, directory_offset + 28, generation);
     bytes[chunk_offset..chunk_offset + CHUNK_BYTES].copy_from_slice(&chunk);
+    bytes
+}
+
+fn qtrb_record(kind: u16, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&kind.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn qtrb_string(value: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn nonmonotonic_posting_qtrb() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"QTRB");
+    bytes.extend_from_slice(&[1, 2, 1, 8, 2, 0]);
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+
+    let mut begin = Vec::new();
+    begin.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    begin.extend_from_slice(&0x100_u64.to_le_bytes());
+    begin.extend_from_slice(&0x7100_0100_u64.to_le_bytes());
+    begin.extend_from_slice(&4242_u32.to_le_bytes());
+    begin.extend_from_slice(&7_u32.to_le_bytes());
+    begin.extend_from_slice(&[2, 0]);
+    begin.extend_from_slice(&4096_u64.to_le_bytes());
+    begin.extend_from_slice(&1_u64.to_le_bytes());
+    begin.extend(qtrb_string(b"analysis-posting-order"));
+    begin.extend(qtrb_string(b"libtarget.so"));
+    bytes.extend(qtrb_record(1, &begin));
+
+    let mut module = Vec::new();
+    module.extend_from_slice(&1_u32.to_le_bytes());
+    module.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    module.extend(qtrb_string(b"libtarget.so"));
+    bytes.extend(qtrb_record(2, &module));
+
+    let mut definition = Vec::new();
+    definition.extend_from_slice(&7_u32.to_le_bytes());
+    definition.extend_from_slice(&0xd503_201f_u32.to_le_bytes());
+    definition.extend_from_slice(&0_u64.to_le_bytes());
+    definition.extend_from_slice(&0_u64.to_le_bytes());
+    definition.extend_from_slice(&0_i64.to_le_bytes());
+    definition.extend_from_slice(&0_u32.to_le_bytes());
+    definition.extend_from_slice(&[0, 0, 0, 0]);
+    definition.extend(qtrb_string(b"nop"));
+    definition.extend(qtrb_string(b""));
+    definition.extend(qtrb_string(b"nop"));
+    bytes.extend(qtrb_record(3, &definition));
+
+    for (sequence, pc) in [(1_u64, 0x30_u64), (2, 0x10)] {
+        let mut instruction = Vec::new();
+        instruction.extend_from_slice(&sequence.to_le_bytes());
+        instruction.extend_from_slice(&1_u32.to_le_bytes());
+        instruction.extend_from_slice(&pc.to_le_bytes());
+        instruction.extend_from_slice(&7_u32.to_le_bytes());
+        instruction.extend_from_slice(&[0, 0]);
+        bytes.extend(qtrb_record(4, &instruction));
+    }
+    let encoded_bytes = (bytes.len() + 8 + 97) as u64;
+    let mut terminal = Vec::new();
+    terminal.push(1);
+    terminal.extend_from_slice(&0x55_u64.to_le_bytes());
+    terminal.extend_from_slice(&17_u64.to_le_bytes());
+    for value in [2, encoded_bytes, encoded_bytes, 0, 0, 0, 0, 0, 0, 4096] {
+        terminal.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend(qtrb_record(9, &terminal));
     bytes
 }
 
@@ -454,6 +530,23 @@ fn production_max_sequence_row_is_indexed_in_owned_and_mapped_stores() {
             Some(u64::MAX)
         );
     }
+}
+
+#[test]
+fn production_nonmonotonic_postings_intersect_without_loss_in_owned_and_mapped_stores() {
+    let bytes = nonmonotonic_posting_qtrb();
+    let (owned, mapped, _cache, _source) = stores_for_bytes(&bytes, "nonmonotonic.trace.bin");
+    let filter = EventFilter {
+        kinds: vec![EventKind::Instruction],
+        sequence: vec![SequenceRange::new(1, 2).unwrap()],
+        modules: vec![0],
+        relative_pc: vec![AddressRange::new(0x10, 0x31).unwrap()],
+        ..EventFilter::default()
+    };
+    let owned_rows = source_rows(Arc::new(owned), filter.clone()).0;
+    let mapped_rows = source_rows(Arc::new(mapped), filter).0;
+    assert_eq!(owned_rows, vec![3, 4]);
+    assert_eq!(mapped_rows, owned_rows);
 }
 
 #[test]

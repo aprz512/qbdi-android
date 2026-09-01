@@ -7,8 +7,9 @@ use std::{
 };
 
 use qtrace_analysis::{
-    AddressRange, CompletenessStatus, EventFilter, PageCursor, QueryContext, TimelineProjection,
-    TimelineRow, query_events,
+    AddressRange, CompletenessStatus, EventFilter, MAX_DISCONTINUITY_PAYLOAD_BYTES,
+    MAX_DISCONTINUITY_TOTAL_BYTES, PageCursor, QueryContext, TimelineProjection, TimelineRow,
+    query_events,
 };
 use qtrace_provider::{
     ArtifactDigest, CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause,
@@ -39,6 +40,13 @@ struct CountingStore {
     oversized_blob: Option<Vec<u8>>,
     unblocked_scan_calls: usize,
     event_count_override: Option<usize>,
+    discontinuity_rows: usize,
+    cancel_discontinuity_posting: bool,
+    posting_count_calls: AtomicUsize,
+    posting_count_override: Option<usize>,
+    posting_decode_calls: AtomicUsize,
+    posting_decoded_rows: AtomicUsize,
+    posting_decode_order: Mutex<Vec<&'static str>>,
 }
 
 impl CountingStore {
@@ -114,6 +122,13 @@ impl CountingStore {
             oversized_blob: None,
             unblocked_scan_calls: 1,
             event_count_override: None,
+            discontinuity_rows: usize::from(!semantic),
+            cancel_discontinuity_posting: false,
+            posting_count_calls: AtomicUsize::new(0),
+            posting_count_override: None,
+            posting_decode_calls: AtomicUsize::new(0),
+            posting_decoded_rows: AtomicUsize::new(0),
+            posting_decode_order: Mutex::new(Vec::new()),
         }
     }
 
@@ -145,6 +160,54 @@ impl CountingStore {
             .filter_map(|(row, key)| predicate(row, key).then_some(row))
             .collect()
     }
+
+    fn posting_rows(&self, query: NormalizedPostingQuery<'_>) -> Result<Vec<usize>, IndexError> {
+        match query {
+            NormalizedPostingQuery::Tids(values) => self.rows_for_tids(values),
+            NormalizedPostingQuery::Kinds(values) => self.rows_of_kinds(values),
+            NormalizedPostingQuery::Modules(values) => self.rows_for_modules(values),
+            NormalizedPostingQuery::Sequence {
+                start,
+                end_exclusive,
+            } => self.rows_for_sequence_range(start, end_exclusive),
+            NormalizedPostingQuery::ModulePc {
+                module,
+                start,
+                end_exclusive,
+            } => self.rows_for_module_pc_range(module, start, end_exclusive),
+            NormalizedPostingQuery::Definitions(values) => self.rows_for_definitions(values),
+            NormalizedPostingQuery::Registers(values) => {
+                let mut rows = Vec::new();
+                for slot in values {
+                    rows.extend(self.rows_observing_register(*slot)?);
+                }
+                Ok(rows)
+            }
+            NormalizedPostingQuery::SemanticCategories(values) => {
+                self.rows_for_semantic_categories(values)
+            }
+            NormalizedPostingQuery::SemanticNames(values) => self.rows_for_semantic_names(values),
+            NormalizedPostingQuery::Memory {
+                start,
+                end_exclusive,
+            } => self.memory_overlaps(start, end_exclusive),
+        }
+    }
+
+    fn posting_label(query: NormalizedPostingQuery<'_>) -> &'static str {
+        match query {
+            NormalizedPostingQuery::Tids(_) => "tids",
+            NormalizedPostingQuery::Kinds(_) => "kinds",
+            NormalizedPostingQuery::Modules(_) => "modules",
+            NormalizedPostingQuery::Sequence { .. } => "sequence",
+            NormalizedPostingQuery::ModulePc { .. } => "module_pc",
+            NormalizedPostingQuery::Definitions(_) => "definitions",
+            NormalizedPostingQuery::Registers(_) => "registers",
+            NormalizedPostingQuery::SemanticCategories(_) => "semantic_categories",
+            NormalizedPostingQuery::SemanticNames(_) => "semantic_names",
+            NormalizedPostingQuery::Memory { .. } => "memory",
+        }
+    }
 }
 
 impl TraceStoreView for CountingStore {
@@ -158,7 +221,7 @@ impl TraceStoreView for CountingStore {
     fn event_kind(&self, row: usize) -> Result<Option<EventKind>, IndexError> {
         Ok((row < self.keys.len()).then_some(if self.semantic {
             EventKind::SemanticCall
-        } else if row + 1 == self.keys.len() {
+        } else if row + self.discontinuity_rows >= self.keys.len() {
             EventKind::Discontinuity
         } else {
             EventKind::OpaqueOptional
@@ -189,11 +252,13 @@ impl TraceStoreView for CountingStore {
     }
     fn payload_bytes(&self, row: usize) -> Result<&[u8], IndexError> {
         self.payload_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(if !self.semantic && row + 1 == self.keys.len() {
-            &self.discontinuity_payload
-        } else {
-            b"{}"
-        })
+        Ok(
+            if !self.semantic && row + self.discontinuity_rows >= self.keys.len() {
+                &self.discontinuity_payload
+            } else {
+                b"{}"
+            },
+        )
     }
     fn string_bytes(&self, _id: u32) -> Result<&[u8], IndexError> {
         Ok(b"event")
@@ -322,6 +387,123 @@ struct CancelDuringContext {
     checkpoints: AtomicUsize,
 }
 
+struct ScopeOnlyGuard {
+    scopes: AtomicUsize,
+    active: AtomicBool,
+}
+
+impl qtrace_provider::WorkGuard for ScopeOnlyGuard {
+    fn consume(
+        &self,
+        delta: qtrace_provider::WorkDelta,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        if delta.resident_bytes != 0 {
+            return Err(qtrace_provider::OperationAbort::budget_exceeded(
+                qtrace_provider::BudgetDimension::ResidentBytes,
+                0,
+                delta.resident_bytes,
+            ));
+        }
+        Ok(())
+    }
+
+    fn begin_allocation_scope(
+        &self,
+        _delta: qtrace_provider::WorkDelta,
+        _allowed_slack: u64,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        assert!(!self.active.swap(true, Ordering::SeqCst));
+        self.scopes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn end_allocation_scope(&self) {
+        assert!(self.active.swap(false, Ordering::SeqCst));
+    }
+}
+
+struct AllocationCountGuard {
+    allocations: AtomicUsize,
+    checkpoints: AtomicUsize,
+}
+
+struct ResidentBudgetGuard {
+    limit: usize,
+    consumed: AtomicUsize,
+    scopes: AtomicUsize,
+    rejected_scope: AtomicUsize,
+    requests: Mutex<Vec<usize>>,
+}
+
+impl ResidentBudgetGuard {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            consumed: AtomicUsize::new(0),
+            scopes: AtomicUsize::new(0),
+            rejected_scope: AtomicUsize::new(usize::MAX),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl qtrace_provider::WorkGuard for ResidentBudgetGuard {
+    fn consume(
+        &self,
+        _delta: qtrace_provider::WorkDelta,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        Ok(())
+    }
+
+    fn begin_allocation_scope(
+        &self,
+        delta: qtrace_provider::WorkDelta,
+        _allowed_slack: u64,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        let ordinal = self.scopes.fetch_add(1, Ordering::SeqCst);
+        let bytes = usize::try_from(delta.resident_bytes).unwrap_or(usize::MAX);
+        self.requests.lock().unwrap().push(bytes);
+        let previous = self.consumed.fetch_add(bytes, Ordering::SeqCst);
+        let consumed = previous.saturating_add(bytes);
+        if consumed > self.limit {
+            self.consumed.fetch_sub(bytes, Ordering::SeqCst);
+            self.rejected_scope.store(ordinal, Ordering::SeqCst);
+            return Err(qtrace_provider::OperationAbort::budget_exceeded(
+                qtrace_provider::BudgetDimension::ResidentBytes,
+                self.limit as u64,
+                consumed as u64,
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl qtrace_provider::WorkGuard for AllocationCountGuard {
+    fn consume(
+        &self,
+        delta: qtrace_provider::WorkDelta,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        if delta == qtrace_provider::WorkDelta::default() {
+            self.checkpoints.fetch_add(1, Ordering::Relaxed);
+        }
+        if delta.resident_bytes != 0 {
+            self.allocations.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn begin_allocation_scope(
+        &self,
+        delta: qtrace_provider::WorkDelta,
+        _allowed_slack: u64,
+    ) -> Result<(), qtrace_provider::OperationAbort> {
+        if delta.resident_bytes != 0 {
+            self.allocations.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
 impl qtrace_provider::WorkGuard for CancelDuringContext {
     fn consume(
         &self,
@@ -383,51 +565,76 @@ impl NormalizedBulkView for CountingStore {
         self.keys.len().max(1)
     }
 
+    fn bounded_row_count(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn qtrace_provider::WorkGuard,
+    ) -> Result<usize, IndexError> {
+        self.posting_count_calls.fetch_add(1, Ordering::Relaxed);
+        guard.consume(qtrace_provider::WorkDelta::default())?;
+        let count = match self.posting_count_override {
+            Some(count) => count,
+            None => self.posting_rows(query)?.len(),
+        };
+        if count > max_rows {
+            return Err(IndexError::from(
+                qtrace_provider::OperationAbort::budget_exceeded(
+                    qtrace_provider::BudgetDimension::Rows,
+                    max_rows as u64,
+                    count as u64,
+                ),
+            ));
+        }
+        Ok(count)
+    }
+
     fn bounded_rows(
         &self,
         query: NormalizedPostingQuery<'_>,
         max_rows: usize,
         _guard: &dyn qtrace_provider::WorkGuard,
     ) -> Result<Vec<usize>, IndexError> {
-        let rows = match query {
-            NormalizedPostingQuery::Tids(values) => self.rows_for_tids(values)?,
-            NormalizedPostingQuery::Kinds(values) => self.rows_of_kinds(values)?,
-            NormalizedPostingQuery::Modules(values) => self.rows_for_modules(values)?,
-            NormalizedPostingQuery::Sequence {
-                start,
-                end_exclusive,
-            } => self.rows_for_sequence_range(start, end_exclusive)?,
-            NormalizedPostingQuery::ModulePc {
-                module,
-                start,
-                end_exclusive,
-            } => self.rows_for_module_pc_range(module, start, end_exclusive)?,
-            NormalizedPostingQuery::Definitions(values) => self.rows_for_definitions(values)?,
-            NormalizedPostingQuery::Registers(values) => {
-                let mut rows = Vec::new();
-                for slot in values {
-                    rows.extend(self.rows_observing_register(*slot)?);
-                }
-                rows
-            }
-            NormalizedPostingQuery::SemanticCategories(values) => {
-                self.rows_for_semantic_categories(values)?
-            }
-            NormalizedPostingQuery::SemanticNames(values) => {
-                self.rows_for_semantic_names(values)?
-            }
-            NormalizedPostingQuery::Memory {
-                start,
-                end_exclusive,
-            } => self.memory_overlaps(start, end_exclusive)?,
-        };
+        if self.cancel_discontinuity_posting
+            && matches!(
+                query,
+                NormalizedPostingQuery::Kinds(kinds)
+                    if kinds.contains(&EventKind::Discontinuity)
+            )
+        {
+            return Err(IndexError::from(qtrace_provider::OperationAbort::Cancelled));
+        }
+        let label = Self::posting_label(query);
+        let rows = self.posting_rows(query)?;
         assert!(rows.len() <= max_rows, "mock posting exceeded test budget");
+        self.posting_decode_calls.fetch_add(1, Ordering::Relaxed);
+        self.posting_decoded_rows
+            .fetch_add(rows.len(), Ordering::Relaxed);
+        self.posting_decode_order.lock().unwrap().push(label);
         Ok(rows)
     }
 }
 
 fn projection(store: Arc<CountingStore>, filter: EventFilter) -> TimelineProjection {
     TimelineProjection::new(Arc::new(QueryContext::new(store).unwrap()), filter).unwrap()
+}
+
+fn context_error(store: CountingStore, message: &str) -> qtrace_analysis::AnalysisError {
+    match QueryContext::new(Arc::new(store)) {
+        Ok(_) => panic!("{message}"),
+        Err(error) => error,
+    }
+}
+
+fn context_error_with_guard(
+    store: CountingStore,
+    guard: &dyn qtrace_provider::WorkGuard,
+    message: &str,
+) -> qtrace_analysis::AnalysisError {
+    match QueryContext::new_with_guard(Arc::new(store), guard) {
+        Ok(_) => panic!("{message}"),
+        Err(error) => error,
+    }
 }
 
 #[test]
@@ -543,6 +750,58 @@ fn context_builds_owner_maps_once_and_pages_share_store_wide_artifacts() {
 }
 
 #[test]
+fn planner_counts_fields_then_decodes_the_smallest_posting_first() {
+    let store = Arc::new(CountingStore::new(512, 9, false));
+    let context = Arc::new(QueryContext::new(store.clone()).unwrap());
+    store.posting_count_calls.store(0, Ordering::Relaxed);
+    store.posting_decode_calls.store(0, Ordering::Relaxed);
+    store.posting_decoded_rows.store(0, Ordering::Relaxed);
+    store.posting_decode_order.lock().unwrap().clear();
+
+    let projection = TimelineProjection::new(
+        context,
+        EventFilter {
+            tids: vec![7, 8],
+            kinds: vec![EventKind::Discontinuity],
+            ..EventFilter::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(projection.plan().candidate_rows, 1);
+    assert!(store.posting_count_calls.load(Ordering::Relaxed) >= 2);
+    assert_eq!(
+        store.posting_decode_order.lock().unwrap().first().copied(),
+        Some("kinds")
+    );
+    assert!(store.posting_decoded_rows.load(Ordering::Relaxed) <= 513);
+}
+
+#[test]
+fn planner_shared_budget_rejects_before_any_posting_decode() {
+    let mut store = CountingStore::new(8, 9, false);
+    store.posting_count_override = Some(7_000_000);
+    let store = Arc::new(store);
+    let context = Arc::new(QueryContext::new(store.clone()).unwrap());
+    store.posting_count_calls.store(0, Ordering::Relaxed);
+    store.posting_decode_calls.store(0, Ordering::Relaxed);
+    let error = match TimelineProjection::new(
+        context,
+        EventFilter {
+            tids: vec![7],
+            kinds: vec![EventKind::Instruction],
+            sequence: vec![qtrace_analysis::SequenceRange::new(1, 8).unwrap()],
+            ..EventFilter::default()
+        },
+    ) {
+        Ok(_) => panic!("candidate work above the shared budget was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "analysis.resource_exhausted");
+    assert_eq!(store.posting_count_calls.load(Ordering::Relaxed), 3);
+    assert_eq!(store.posting_decode_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn context_hard_preflight_and_cancel_stop_before_event_or_payload_reads() {
     let mut oversized = CountingStore::new(1, 9, false);
     oversized.event_count_override = Some(qtrace_analysis::MAX_CONTEXT_EVENTS + 1);
@@ -579,6 +838,140 @@ fn context_hard_preflight_and_cancel_stop_before_event_or_payload_reads() {
     assert_eq!(interrupted.event_key_calls.load(Ordering::Relaxed), 4_096);
     assert_eq!(interrupted.payload_calls.load(Ordering::Relaxed), 0);
     assert_eq!(interrupted.blob_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn context_heap_growth_uses_raii_allocation_scopes() {
+    let guard = ScopeOnlyGuard {
+        scopes: AtomicUsize::new(0),
+        active: AtomicBool::new(false),
+    };
+    QueryContext::new_with_guard(Arc::new(CountingStore::new(32, 9, true)), &guard)
+        .expect("scoped context allocation");
+    assert!(guard.scopes.load(Ordering::SeqCst) > 0);
+    assert!(!guard.active.load(Ordering::SeqCst));
+}
+
+#[test]
+fn context_allocation_budget_accepts_exact_and_rejects_minus_one_before_growth() {
+    let measure = ResidentBudgetGuard::new(usize::MAX);
+    QueryContext::new_with_guard(Arc::new(CountingStore::new(64, 9, true)), &measure)
+        .expect("measure context allocation");
+    let exact = measure.consumed.load(Ordering::SeqCst);
+    let expected_scopes = measure.scopes.load(Ordering::SeqCst);
+    let requests = measure.requests.lock().unwrap().clone();
+    assert!(exact > 0 && expected_scopes > 1);
+
+    let exact_guard = ResidentBudgetGuard::new(exact);
+    QueryContext::new_with_guard(Arc::new(CountingStore::new(64, 9, true)), &exact_guard)
+        .expect("exact resident budget");
+    assert_eq!(exact_guard.consumed.load(Ordering::SeqCst), exact);
+    assert_eq!(exact_guard.scopes.load(Ordering::SeqCst), expected_scopes);
+    assert_eq!(
+        exact_guard.rejected_scope.load(Ordering::SeqCst),
+        usize::MAX
+    );
+
+    let minus_one = ResidentBudgetGuard::new(exact - 1);
+    let error = context_error_with_guard(
+        CountingStore::new(64, 9, true),
+        &minus_one,
+        "minus-one resident budget was accepted",
+    );
+    assert_eq!(error.code(), "analysis.resource_exhausted");
+    assert_eq!(
+        minus_one.rejected_scope.load(Ordering::SeqCst) + 1,
+        expected_scopes
+    );
+    assert!(minus_one.consumed.load(Ordering::SeqCst) < exact);
+
+    for reject_at in [0, expected_scopes / 2, expected_scopes - 1] {
+        let prefix = requests[..reject_at].iter().sum();
+        let guard = ResidentBudgetGuard::new(prefix);
+        let error = context_error_with_guard(
+            CountingStore::new(64, 9, true),
+            &guard,
+            "representative allocation rejection was ignored",
+        );
+        assert_eq!(error.code(), "analysis.resource_exhausted");
+        assert_eq!(guard.rejected_scope.load(Ordering::SeqCst), reject_at);
+        assert_eq!(guard.consumed.load(Ordering::SeqCst), prefix);
+        assert_eq!(guard.scopes.load(Ordering::SeqCst), reject_at + 1);
+    }
+}
+
+fn maximum_sequence_complexity(events: usize) -> (usize, usize) {
+    let mut store = CountingStore::new(events, 9, true);
+    for key in &mut store.keys {
+        key.sequence = Some(u64::MAX);
+    }
+    let guard = AllocationCountGuard {
+        allocations: AtomicUsize::new(0),
+        checkpoints: AtomicUsize::new(0),
+    };
+    QueryContext::new_with_guard(Arc::new(store), &guard).expect("maximum-sequence context");
+    (
+        guard.allocations.load(Ordering::Relaxed),
+        guard.checkpoints.load(Ordering::Relaxed),
+    )
+}
+
+#[test]
+fn maximum_sequence_rows_reserve_once_instead_of_once_per_event() {
+    let (n, n_work) = maximum_sequence_complexity(128);
+    let (two_n, two_n_work) = maximum_sequence_complexity(256);
+    let (four_n, four_n_work) = maximum_sequence_complexity(512);
+    assert!(two_n <= n + 4, "allocation calls grew from {n} to {two_n}");
+    assert!(
+        four_n <= two_n + 4,
+        "allocation calls grew from {two_n} to {four_n}"
+    );
+    assert!(
+        two_n_work <= n_work.saturating_mul(2).saturating_add(16),
+        "context checkpoints grew superlinearly: {n_work} -> {two_n_work}"
+    );
+    assert!(
+        four_n_work <= two_n_work.saturating_mul(2).saturating_add(16),
+        "context checkpoints grew superlinearly: {two_n_work} -> {four_n_work}"
+    );
+}
+
+#[test]
+fn discontinuity_payload_and_context_byte_limits_fail_before_decode() {
+    let mut single = CountingStore::new(1, 9, false);
+    let encoded = single.discontinuity_payload.clone();
+    single.discontinuity_payload = vec![b' '; MAX_DISCONTINUITY_PAYLOAD_BYTES + 1];
+    single.discontinuity_payload.extend_from_slice(&encoded);
+    let error = context_error(single, "oversized discontinuity payload was accepted");
+    assert_eq!(error.code(), "analysis.resource_exhausted");
+
+    let mut cumulative = CountingStore::new(17, 9, false);
+    cumulative.discontinuity_rows = 17;
+    let encoded = cumulative.discontinuity_payload.clone();
+    cumulative.discontinuity_payload = vec![
+        b' ';
+        MAX_DISCONTINUITY_PAYLOAD_BYTES
+            .checked_sub(encoded.len())
+            .expect("payload bound exceeds encoded evidence")
+    ];
+    cumulative.discontinuity_payload.extend_from_slice(&encoded);
+    assert!(
+        cumulative.discontinuity_payload.len() * cumulative.discontinuity_rows
+            > MAX_DISCONTINUITY_TOTAL_BYTES
+    );
+    let error = context_error(
+        cumulative,
+        "cumulative discontinuity bytes exceed context bound",
+    );
+    assert_eq!(error.code(), "analysis.resource_exhausted");
+}
+
+#[test]
+fn discontinuity_posting_preserves_cancel_code() {
+    let mut store = CountingStore::new(1, 9, false);
+    store.cancel_discontinuity_posting = true;
+    let error = context_error(store, "posting cancellation was accepted");
+    assert_eq!(error.code(), "job.cancelled");
 }
 
 #[test]

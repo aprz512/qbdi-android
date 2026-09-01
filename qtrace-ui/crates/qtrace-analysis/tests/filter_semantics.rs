@@ -450,6 +450,16 @@ impl NormalizedBulkView for FixtureStore {
         self.blobs.len()
     }
 
+    fn bounded_row_count(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn qtrace_provider::WorkGuard,
+    ) -> Result<usize, IndexError> {
+        self.bounded_rows(query, max_rows, guard)
+            .map(|rows| rows.len())
+    }
+
     fn bounded_rows(
         &self,
         query: NormalizedPostingQuery<'_>,

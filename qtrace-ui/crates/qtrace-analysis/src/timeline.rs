@@ -3,7 +3,7 @@ use std::{
     fmt,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender, TrySendError},
     },
     thread,
@@ -12,8 +12,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use qtrace_provider::{
-    ArtifactDigest, EventKey, EventKind, EventPayload, MemoryDirection, Provenance, RegisterSlot,
-    TimelineId, WorkDelta, WorkGuard,
+    AllocationScope, ArtifactDigest, EventKey, EventKind, EventPayload, MemoryDirection,
+    Provenance, RegisterSlot, TimelineId, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
     CompletenessRow, DefinitionRow, InstructionRow, MemoryRow, ModuleRow, NormalizedBulkView,
@@ -28,13 +28,17 @@ const CURSOR_PAYLOAD_BYTES: usize = 136;
 const CURSOR_BYTES: usize = CURSOR_PAYLOAD_BYTES + 32;
 const MAX_CANDIDATE_ROWS: usize = 10_000_000;
 const MAX_CANDIDATE_WORK: usize = 20_000_000;
+const MAX_CANDIDATE_RESIDENT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SEMANTIC_DETAIL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SEMANTIC_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const SEMANTIC_WORKERS: usize = 4;
 const MAX_PENDING_SEMANTIC_JOBS: usize = 32;
+const MAX_MATCHER_BUILD_WORK: usize = 16 * 1024 * 1024;
 pub const MAX_CONTEXT_EVENTS: usize = 10_000_000;
 pub const MAX_CONTEXT_TYPED_ROWS: usize = 20_000_000;
 pub const MAX_CONTEXT_DICTIONARY_ENTRIES: usize = 20_000_000;
+pub const MAX_DISCONTINUITY_PAYLOAD_BYTES: usize = 1024 * 1024;
+pub const MAX_DISCONTINUITY_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalysisError {
@@ -290,9 +294,10 @@ impl TimelineProjection {
     pub fn new(context: Arc<QueryContext>, filter: EventFilter) -> Result<Self, AnalysisError> {
         let filter = filter.normalized()?;
         let projection_identity = derive_projection_identity(context.identity, &filter);
-        let (candidates, indexed_fields) = plan_candidates(&context, &filter)?;
-        let candidates = apply_synchronous_residuals(&context, &filter, candidates)?;
-        let candidates = sort_rows_by_stable_key(&context, candidates)?;
+        let (candidates, indexed_fields, guard) = plan_candidates(&context, &filter)?;
+        let residual = synchronous_residual_filter(&filter);
+        let candidates = apply_synchronous_residuals(&context, &residual, candidates, &guard)?;
+        let candidates = sort_rows_by_stable_key(&context, candidates, &guard)?;
         let has_residual_scan = filter.has_semantic_detail_residual();
         let state = Arc::new((Mutex::new(ProjectionState::default()), Condvar::new()));
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -564,7 +569,7 @@ fn build_query_context(
     )?;
     let mut observed_first = None::<u64>;
     let mut observed_last = None::<u64>;
-    let mut max_sequence_rows = Vec::new();
+    let mut max_sequence_count = 0_usize;
     for row in 0..event_count {
         if row % 4096 == 0 {
             guard
@@ -576,13 +581,9 @@ fn build_query_context(
             observed_first = Some(observed_first.map_or(sequence, |first| first.min(sequence)));
             observed_last = Some(observed_last.map_or(sequence, |last| last.max(sequence)));
             if sequence == u64::MAX {
-                try_reserve_context(
-                    &mut max_sequence_rows,
-                    1,
-                    guard,
-                    "maximum-sequence row allocation failed",
-                )?;
-                max_sequence_rows.push(row);
+                max_sequence_count = max_sequence_count.checked_add(1).ok_or_else(|| {
+                    AnalysisError::resource_exhausted("maximum-sequence row count overflow")
+                })?;
             }
         }
         let kind = store
@@ -596,6 +597,23 @@ fn build_query_context(
         keys.push(key);
         kinds.push(kind);
         provenances.push(provenance);
+    }
+    let mut max_sequence_rows = Vec::new();
+    try_reserve_context(
+        &mut max_sequence_rows,
+        max_sequence_count,
+        guard,
+        "maximum-sequence row allocation failed",
+    )?;
+    for (row, key) in keys.iter().enumerate() {
+        if row % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        if key.sequence == Some(u64::MAX) {
+            max_sequence_rows.push(row);
+        }
     }
     let identity = StoreIdentity(hash.finalize().into());
 
@@ -728,16 +746,18 @@ fn try_reserve_context<T>(
     guard: &dyn WorkGuard,
     detail: &'static str,
 ) -> Result<(), AnalysisError> {
-    let bytes = additional
+    let required = values
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| AnalysisError::resource_exhausted(detail))?;
+    if required <= values.capacity() {
+        return Ok(());
+    }
+    let bytes = required
         .checked_mul(std::mem::size_of::<T>())
         .and_then(|bytes| u64::try_from(bytes).ok())
         .ok_or_else(|| AnalysisError::resource_exhausted(detail))?;
-    guard
-        .consume(WorkDelta {
-            resident_bytes: bytes,
-            ..WorkDelta::default()
-        })
-        .map_err(AnalysisError::control)?;
+    let _scope = AllocationScope::begin(guard, bytes, 0).map_err(AnalysisError::control)?;
     values
         .try_reserve_exact(additional)
         .map_err(|_| AnalysisError::resource_exhausted(detail))
@@ -777,7 +797,12 @@ fn bucket_observations(
         "observation range allocation failed",
     )?;
     let mut next = 0_usize;
-    for count in &counts {
+    for (index, count) in counts.iter().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
         let end = next
             .checked_add(*count)
             .ok_or_else(|| AnalysisError::resource_exhausted("observation range overflow"))?;
@@ -809,7 +834,14 @@ fn bucket_observations(
         guard,
         "observation cursor allocation failed",
     )?;
-    cursors.extend(ranges.iter().map(|(start, _)| *start));
+    for (index, (start, _)) in ranges.iter().copied().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        cursors.push(start);
+    }
     for (index, row) in source.iter().copied().enumerate() {
         if index % 4096 == 0 {
             guard
@@ -908,7 +940,12 @@ fn radix_sort_completeness(
             *count = position;
             position += current;
         }
-        for row in rows.iter().copied() {
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
             let slot = &mut counts[completeness_byte(row, pass) as usize];
             scratch[*slot] = row;
             *slot += 1;
@@ -951,166 +988,138 @@ fn derive_projection_identity(store: StoreIdentity, filter: &EventFilter) -> Pro
     ProjectionIdentity(hash.finalize().into())
 }
 
+#[derive(Debug)]
+enum CandidateField {
+    Tids,
+    Kinds,
+    Modules,
+    Sequence,
+    RelativePc,
+    AbsolutePc,
+    Definitions(Vec<u32>),
+    RegisterReads,
+    RegisterWrites,
+    Memory,
+    SemanticCategories,
+    SemanticNames,
+    SemanticDetailKinds,
+}
+
+struct CandidateGuard {
+    work: AtomicU64,
+    resident: AtomicU64,
+}
+
+impl CandidateGuard {
+    fn new() -> Self {
+        Self {
+            work: AtomicU64::new(0),
+            resident: AtomicU64::new(0),
+        }
+    }
+
+    fn consume_rows(&self, rows: usize) -> Result<(), AnalysisError> {
+        self.consume(WorkDelta {
+            rows: u64::try_from(rows).unwrap_or(u64::MAX),
+            ..WorkDelta::default()
+        })
+        .map_err(AnalysisError::control)
+    }
+}
+
+impl WorkGuard for CandidateGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), qtrace_provider::OperationAbort> {
+        let work_delta = delta
+            .rows
+            .saturating_add(delta.events)
+            .saturating_add(delta.nodes)
+            .saturating_add(delta.input_bytes)
+            .saturating_add(delta.decompressed_bytes);
+        let work = self.work.fetch_add(work_delta, Ordering::AcqRel) + work_delta;
+        if work > MAX_CANDIDATE_WORK as u64 {
+            return Err(qtrace_provider::OperationAbort::budget_exceeded(
+                qtrace_provider::BudgetDimension::Rows,
+                MAX_CANDIDATE_WORK as u64,
+                work,
+            ));
+        }
+        if delta.resident_bytes != 0 {
+            let resident = self
+                .resident
+                .fetch_add(delta.resident_bytes, Ordering::AcqRel)
+                + delta.resident_bytes;
+            if resident > MAX_CANDIDATE_RESIDENT_BYTES as u64 {
+                return Err(qtrace_provider::OperationAbort::budget_exceeded(
+                    qtrace_provider::BudgetDimension::ResidentBytes,
+                    MAX_CANDIDATE_RESIDENT_BYTES as u64,
+                    resident,
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn plan_candidates(
     context: &QueryContext,
     filter: &EventFilter,
-) -> Result<(Vec<usize>, usize), AnalysisError> {
-    let store = context.store.as_ref();
-    let mut groups = Vec::new();
-    groups
-        .try_reserve_exact(13)
-        .map_err(|_| AnalysisError::resource_exhausted("posting group allocation failed"))?;
+) -> Result<(Vec<usize>, usize, CandidateGuard), AnalysisError> {
+    let guard = CandidateGuard::new();
+    let mut fields = Vec::new();
+    try_reserve_analysis(&mut fields, 13, &guard, "posting plan allocation failed")?;
     if !filter.tids.is_empty() {
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::Tids(&filter.tids),
-        )?);
+        fields.push(CandidateField::Tids);
     }
     if !filter.kinds.is_empty() {
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::Kinds(&filter.kinds),
-        )?);
+        fields.push(CandidateField::Kinds);
     }
     if !filter.modules.is_empty() {
-        let mut lists = Vec::new();
-        lists
-            .try_reserve_exact(filter.modules.len() + 1)
-            .map_err(|_| {
-                AnalysisError::resource_exhausted("module posting group allocation failed")
-            })?;
-        lists.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::Modules(&filter.modules),
-        )?);
-        for module in &filter.modules {
-            lists.push(memory_module_rows(context, *module)?);
-        }
-        groups.push(union_rows(lists)?);
+        fields.push(CandidateField::Modules);
     }
     if !filter.sequence.is_empty() {
-        let mut lists = Vec::new();
-        lists
-            .try_reserve_exact(filter.sequence.len())
-            .map_err(|_| {
-                AnalysisError::resource_exhausted("sequence posting group allocation failed")
-            })?;
-        for range in &filter.sequence {
-            let end = range.last.saturating_add(1);
-            let mut rows = bounded_rows(
-                store,
-                NormalizedPostingQuery::Sequence {
-                    start: range.first,
-                    end_exclusive: end,
-                },
-            )?;
-            if range.last == u64::MAX {
-                let work = rows
-                    .len()
-                    .checked_add(context.max_sequence_rows.len())
-                    .filter(|work| *work <= MAX_CANDIDATE_WORK)
-                    .ok_or_else(|| {
-                        AnalysisError::resource_exhausted(
-                            "maximum-sequence union exceeds work budget",
-                        )
-                    })?;
-                rows.try_reserve_exact(work - rows.len()).map_err(|_| {
-                    AnalysisError::resource_exhausted("maximum-sequence union allocation failed")
-                })?;
-                rows.extend_from_slice(&context.max_sequence_rows);
-                radix_sort_usize(&mut rows)?;
-                rows.dedup();
-            }
-            lists.push(rows);
-        }
-        groups.push(union_rows(lists)?);
+        fields.push(CandidateField::Sequence);
     }
     if !filter.relative_pc.is_empty() && !filter.modules.is_empty() {
-        let mut lists = Vec::new();
-        let pairs = filter
-            .modules
-            .len()
-            .checked_mul(filter.relative_pc.len())
-            .ok_or_else(|| AnalysisError::filter_too_complex("relative-PC expansion overflow"))?;
-        lists.try_reserve_exact(pairs).map_err(|_| {
-            AnalysisError::resource_exhausted("relative-PC posting group allocation failed")
-        })?;
-        for module in &filter.modules {
-            for range in &filter.relative_pc {
-                let mut pair = Vec::new();
-                pair.try_reserve_exact(2).map_err(|_| {
-                    AnalysisError::resource_exhausted("relative-PC pair allocation failed")
-                })?;
-                pair.push(bounded_rows(
-                    store,
-                    NormalizedPostingQuery::ModulePc {
-                        module: *module,
-                        start: range.start,
-                        end_exclusive: range.end_exclusive,
-                    },
-                )?);
-                pair.push(memory_pc_rows(
-                    context,
-                    *module,
-                    range.start,
-                    range.end_exclusive,
-                )?);
-                lists.push(union_rows(pair)?);
-            }
-        }
-        groups.push(union_rows(lists)?);
+        fields.push(CandidateField::RelativePc);
     }
     if !filter.absolute_pc.is_empty() {
-        let expanded_modules = if filter.modules.is_empty() {
+        let modules = if filter.modules.is_empty() {
             context.modules.len()
         } else {
             filter.modules.len()
         };
-        if expanded_modules.saturating_mul(filter.absolute_pc.len()) > 4_096 {
+        if modules.saturating_mul(filter.absolute_pc.len()) > 4_096 {
             return Err(AnalysisError::filter_too_complex(
                 "absolute-PC module/range expansion exceeds 4096 pairs",
             ));
         }
-        let mut lists = Vec::new();
-        lists
-            .try_reserve_exact(expanded_modules * filter.absolute_pc.len())
-            .map_err(|_| {
-                AnalysisError::resource_exhausted("absolute-PC posting group allocation failed")
-            })?;
-        if filter.modules.is_empty() {
-            for module_id in 0..context.modules.len() {
-                append_absolute_module(
-                    context,
-                    filter,
-                    u32::try_from(module_id)
-                        .map_err(|_| AnalysisError::store_shape("module ID exceeds u32"))?,
-                    &mut lists,
-                )?;
-            }
-        } else {
-            for module_id in &filter.modules {
-                append_absolute_module(context, filter, *module_id, &mut lists)?;
-            }
-        }
-        groups.push(union_rows(lists)?);
+        fields.push(CandidateField::AbsolutePc);
     }
     if !filter.mnemonic.is_empty() {
-        if context
+        let work = context
             .definitions
             .len()
             .checked_mul(filter.mnemonic.len())
-            .is_none_or(|work| work > MAX_CANDIDATE_WORK)
-        {
-            return Err(AnalysisError::resource_exhausted(
-                "mnemonic definition scan exceeds work budget",
-            ));
-        }
+            .filter(|work| *work <= MAX_CANDIDATE_WORK)
+            .ok_or_else(|| {
+                AnalysisError::resource_exhausted("mnemonic definition scan exceeds work budget")
+            })?;
+        guard.consume_rows(work)?;
         let mut definitions = Vec::new();
-        definitions
-            .try_reserve_exact(context.definitions.len())
-            .map_err(|_| AnalysisError::resource_exhausted("definition match allocation failed"))?;
+        try_reserve_analysis(
+            &mut definitions,
+            context.definitions.len(),
+            &guard,
+            "definition match allocation failed",
+        )?;
         for (definition_id, definition) in context.definitions.iter().enumerate() {
-            let mnemonic = store
+            if definition_id % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
+            let mnemonic = context
+                .store
                 .string_bytes(definition.mnemonic)
                 .map_err(AnalysisError::store)?;
             if mnemonic_matches(&filter.mnemonic, mnemonic) {
@@ -1120,119 +1129,474 @@ fn plan_candidates(
                 );
             }
         }
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::Definitions(&definitions),
-        )?);
+        fields.push(CandidateField::Definitions(definitions));
     }
     if !filter.register.reads.is_empty() {
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::Registers(&filter.register.reads),
-        )?);
+        fields.push(CandidateField::RegisterReads);
     }
     if !filter.register.writes.is_empty() {
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::Registers(&filter.register.writes),
-        )?);
+        fields.push(CandidateField::RegisterWrites);
     }
     if !filter.memory.is_empty() {
-        if context
-            .store
-            .memory_rows()
-            .len()
-            .checked_mul(filter.memory.len())
-            .is_none_or(|work| work > MAX_CANDIDATE_WORK)
-        {
-            return Err(AnalysisError::resource_exhausted(
-                "memory overlap scan exceeds work budget",
-            ));
-        }
-        let lists = filter
-            .memory
-            .iter()
-            .map(|memory| {
-                bounded_rows(
-                    store,
-                    NormalizedPostingQuery::Memory {
-                        start: memory.range.start,
-                        end_exclusive: memory.range.end_exclusive,
-                    },
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        groups.push(union_rows(lists)?);
+        fields.push(CandidateField::Memory);
     }
     if !filter.semantic_categories.is_empty() {
         preflight_semantic_lookup(context, filter.semantic_categories.len())?;
-        let values = filter
-            .semantic_categories
-            .iter()
-            .map(String::as_bytes)
-            .collect::<Vec<_>>();
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::SemanticCategories(&values),
-        )?);
+        fields.push(CandidateField::SemanticCategories);
     }
     if !filter.semantic_names.is_empty() {
         preflight_semantic_lookup(context, filter.semantic_names.len())?;
-        let values = filter
-            .semantic_names
-            .iter()
-            .map(String::as_bytes)
-            .collect::<Vec<_>>();
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::SemanticNames(&values),
-        )?);
+        fields.push(CandidateField::SemanticNames);
     }
     if filter.has_semantic_detail_residual() {
-        groups.push(bounded_rows(
-            store,
-            NormalizedPostingQuery::Kinds(&[
-                EventKind::SemanticCall,
-                EventKind::SemanticRule,
-                EventKind::SemanticError,
-            ]),
-        )?);
+        fields.push(CandidateField::SemanticDetailKinds);
     }
-    for group in &mut groups {
-        if group.len() > MAX_CANDIDATE_ROWS {
-            return Err(AnalysisError::resource_exhausted(
-                "posting group exceeds 10000000 rows",
-            ));
-        }
-        debug_assert!(group.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let mut planned = Vec::new();
+    try_reserve_analysis(
+        &mut planned,
+        fields.len(),
+        &guard,
+        "posting estimate allocation failed",
+    )?;
+    for field in fields {
+        let count = estimate_candidate_field(context, filter, &field, &guard)?;
+        planned.push((count, field));
     }
-    groups.sort_by_key(Vec::len);
-    let indexed_fields = groups.len();
-    let candidates = if groups.is_empty() {
-        if store.event_count() > MAX_CANDIDATE_ROWS {
+    planned.sort_by_key(|(count, _)| *count);
+    let indexed_fields = planned.len();
+
+    let mut candidates = if let Some((_, field)) = planned.first() {
+        decode_candidate_field(context, filter, field, &guard)?
+    } else {
+        let count = context.store.event_count();
+        if count > MAX_CANDIDATE_ROWS {
             return Err(AnalysisError::resource_exhausted(
                 "unindexed candidate set exceeds 10000000 rows",
             ));
         }
+        guard.consume_rows(count)?;
         let mut rows = Vec::new();
-        rows.try_reserve_exact(store.event_count())
-            .map_err(|_| AnalysisError::resource_exhausted("candidate row allocation failed"))?;
-        rows.extend(0..store.event_count());
+        try_reserve_analysis(&mut rows, count, &guard, "candidate row allocation failed")?;
+        rows.extend(0..count);
         rows
-    } else {
-        let mut groups = groups.into_iter();
-        let mut candidates = groups.next().expect("non-empty groups");
-        for group in groups {
-            candidates = intersect_rows_fallible(&candidates, &group)?;
-        }
-        candidates
     };
-    if candidates.len() > MAX_CANDIDATE_ROWS {
+    for (_, field) in planned.iter().skip(1) {
+        if candidates.is_empty() {
+            break;
+        }
+        let group = decode_candidate_field(context, filter, field, &guard)?;
+        candidates = intersect_rows_fallible_guarded(&candidates, &group, &guard)?;
+    }
+    Ok((candidates, indexed_fields, guard))
+}
+
+fn try_reserve_analysis<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    guard: &dyn WorkGuard,
+    detail: &'static str,
+) -> Result<(), AnalysisError> {
+    try_reserve_context(values, additional, guard, detail)
+}
+
+fn estimate_posting(
+    store: &dyn NormalizedBulkView,
+    query: NormalizedPostingQuery<'_>,
+    guard: &CandidateGuard,
+) -> Result<usize, AnalysisError> {
+    store
+        .bounded_row_count(query, MAX_CANDIDATE_ROWS, guard)
+        .map_err(map_store_query_error)
+}
+
+fn checked_estimate_add(total: &mut usize, value: usize) -> Result<(), AnalysisError> {
+    *total = total
+        .checked_add(value)
+        .filter(|total| *total <= MAX_CANDIDATE_WORK)
+        .ok_or_else(|| {
+            AnalysisError::resource_exhausted("posting estimate exceeds candidate work budget")
+        })?;
+    Ok(())
+}
+
+fn estimate_candidate_field(
+    context: &QueryContext,
+    filter: &EventFilter,
+    field: &CandidateField,
+    guard: &CandidateGuard,
+) -> Result<usize, AnalysisError> {
+    let store = context.store.as_ref();
+    let mut total = 0;
+    match field {
+        CandidateField::Tids => {
+            total = estimate_posting(store, NormalizedPostingQuery::Tids(&filter.tids), guard)?;
+        }
+        CandidateField::Kinds => {
+            total = estimate_posting(store, NormalizedPostingQuery::Kinds(&filter.kinds), guard)?;
+        }
+        CandidateField::Modules => {
+            checked_estimate_add(
+                &mut total,
+                estimate_posting(
+                    store,
+                    NormalizedPostingQuery::Modules(&filter.modules),
+                    guard,
+                )?,
+            )?;
+            for module in &filter.modules {
+                checked_estimate_add(&mut total, memory_module_count(context, *module))?;
+            }
+        }
+        CandidateField::Sequence => {
+            for range in &filter.sequence {
+                checked_estimate_add(
+                    &mut total,
+                    estimate_posting(
+                        store,
+                        NormalizedPostingQuery::Sequence {
+                            start: range.first,
+                            end_exclusive: range.last.saturating_add(1),
+                        },
+                        guard,
+                    )?,
+                )?;
+                if range.last == u64::MAX {
+                    checked_estimate_add(&mut total, context.max_sequence_rows.len())?;
+                }
+            }
+        }
+        CandidateField::RelativePc => {
+            for module in &filter.modules {
+                for range in &filter.relative_pc {
+                    checked_estimate_add(
+                        &mut total,
+                        estimate_posting(
+                            store,
+                            NormalizedPostingQuery::ModulePc {
+                                module: *module,
+                                start: range.start,
+                                end_exclusive: range.end_exclusive,
+                            },
+                            guard,
+                        )?,
+                    )?;
+                    checked_estimate_add(
+                        &mut total,
+                        memory_pc_count(context, *module, range.start, range.end_exclusive),
+                    )?;
+                }
+            }
+        }
+        CandidateField::AbsolutePc => {
+            visit_absolute_pairs(context, filter, |module, start, end| {
+                checked_estimate_add(
+                    &mut total,
+                    estimate_posting(
+                        store,
+                        NormalizedPostingQuery::ModulePc {
+                            module,
+                            start,
+                            end_exclusive: end,
+                        },
+                        guard,
+                    )?,
+                )?;
+                checked_estimate_add(&mut total, memory_pc_count(context, module, start, end))
+            })?;
+        }
+        CandidateField::Definitions(definitions) => {
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::Definitions(definitions),
+                guard,
+            )?;
+        }
+        CandidateField::RegisterReads => {
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::Registers(&filter.register.reads),
+                guard,
+            )?;
+        }
+        CandidateField::RegisterWrites => {
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::Registers(&filter.register.writes),
+                guard,
+            )?;
+        }
+        CandidateField::Memory => {
+            for memory in &filter.memory {
+                checked_estimate_add(
+                    &mut total,
+                    estimate_posting(
+                        store,
+                        NormalizedPostingQuery::Memory {
+                            start: memory.range.start,
+                            end_exclusive: memory.range.end_exclusive,
+                        },
+                        guard,
+                    )?,
+                )?;
+            }
+        }
+        CandidateField::SemanticCategories => {
+            let values = filter
+                .semantic_categories
+                .iter()
+                .map(String::as_bytes)
+                .collect::<Vec<_>>();
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::SemanticCategories(&values),
+                guard,
+            )?;
+        }
+        CandidateField::SemanticNames => {
+            let values = filter
+                .semantic_names
+                .iter()
+                .map(String::as_bytes)
+                .collect::<Vec<_>>();
+            total = estimate_posting(store, NormalizedPostingQuery::SemanticNames(&values), guard)?;
+        }
+        CandidateField::SemanticDetailKinds => {
+            total = estimate_posting(
+                store,
+                NormalizedPostingQuery::Kinds(&[
+                    EventKind::SemanticCall,
+                    EventKind::SemanticRule,
+                    EventKind::SemanticError,
+                ]),
+                guard,
+            )?;
+        }
+    }
+    guard.consume_rows(total)?;
+    Ok(total)
+}
+
+fn decode_candidate_field(
+    context: &QueryContext,
+    filter: &EventFilter,
+    field: &CandidateField,
+    guard: &CandidateGuard,
+) -> Result<Vec<usize>, AnalysisError> {
+    let store = context.store.as_ref();
+    let direct = |query| bounded_rows_guarded(store, query, guard);
+    let mut lists = Vec::new();
+    match field {
+        CandidateField::Tids => return direct(NormalizedPostingQuery::Tids(&filter.tids)),
+        CandidateField::Kinds => return direct(NormalizedPostingQuery::Kinds(&filter.kinds)),
+        CandidateField::Modules => {
+            lists.push(direct(NormalizedPostingQuery::Modules(&filter.modules))?);
+            for module in &filter.modules {
+                lists.push(memory_module_rows_guarded(context, *module, guard)?);
+            }
+        }
+        CandidateField::Sequence => {
+            for range in &filter.sequence {
+                let mut rows = direct(NormalizedPostingQuery::Sequence {
+                    start: range.first,
+                    end_exclusive: range.last.saturating_add(1),
+                })?;
+                if range.last == u64::MAX {
+                    try_reserve_analysis(
+                        &mut rows,
+                        context.max_sequence_rows.len(),
+                        guard,
+                        "maximum-sequence union allocation failed",
+                    )?;
+                    rows.extend_from_slice(&context.max_sequence_rows);
+                    radix_sort_usize_guarded(&mut rows, guard)?;
+                    rows.dedup();
+                }
+                lists.push(rows);
+            }
+        }
+        CandidateField::RelativePc => {
+            for module in &filter.modules {
+                for range in &filter.relative_pc {
+                    lists.push(direct(NormalizedPostingQuery::ModulePc {
+                        module: *module,
+                        start: range.start,
+                        end_exclusive: range.end_exclusive,
+                    })?);
+                    lists.push(memory_pc_rows_guarded(
+                        context,
+                        *module,
+                        range.start,
+                        range.end_exclusive,
+                        guard,
+                    )?);
+                }
+            }
+        }
+        CandidateField::AbsolutePc => {
+            visit_absolute_pairs(context, filter, |module, start, end| {
+                lists.push(direct(NormalizedPostingQuery::ModulePc {
+                    module,
+                    start,
+                    end_exclusive: end,
+                })?);
+                lists.push(memory_pc_rows_guarded(context, module, start, end, guard)?);
+                Ok(())
+            })?;
+        }
+        CandidateField::Definitions(definitions) => {
+            return direct(NormalizedPostingQuery::Definitions(definitions));
+        }
+        CandidateField::RegisterReads => {
+            return direct(NormalizedPostingQuery::Registers(&filter.register.reads));
+        }
+        CandidateField::RegisterWrites => {
+            return direct(NormalizedPostingQuery::Registers(&filter.register.writes));
+        }
+        CandidateField::Memory => {
+            for memory in &filter.memory {
+                lists.push(direct(NormalizedPostingQuery::Memory {
+                    start: memory.range.start,
+                    end_exclusive: memory.range.end_exclusive,
+                })?);
+            }
+        }
+        CandidateField::SemanticCategories => {
+            let values = filter
+                .semantic_categories
+                .iter()
+                .map(String::as_bytes)
+                .collect::<Vec<_>>();
+            return direct(NormalizedPostingQuery::SemanticCategories(&values));
+        }
+        CandidateField::SemanticNames => {
+            let values = filter
+                .semantic_names
+                .iter()
+                .map(String::as_bytes)
+                .collect::<Vec<_>>();
+            return direct(NormalizedPostingQuery::SemanticNames(&values));
+        }
+        CandidateField::SemanticDetailKinds => {
+            return direct(NormalizedPostingQuery::Kinds(&[
+                EventKind::SemanticCall,
+                EventKind::SemanticRule,
+                EventKind::SemanticError,
+            ]));
+        }
+    }
+    guard.consume_rows(lists.iter().map(Vec::len).sum())?;
+    union_rows_guarded(lists, guard)
+}
+
+fn visit_absolute_pairs(
+    context: &QueryContext,
+    filter: &EventFilter,
+    mut visit: impl FnMut(u32, u64, u64) -> Result<(), AnalysisError>,
+) -> Result<(), AnalysisError> {
+    let mut visit_module = |module_id: u32| -> Result<(), AnalysisError> {
+        let Some(module) = context.modules.get(module_id as usize) else {
+            return Ok(());
+        };
+        for absolute in &filter.absolute_pc {
+            if absolute.end_exclusive <= module.base {
+                continue;
+            }
+            visit(
+                module_id,
+                absolute.start.saturating_sub(module.base),
+                absolute.end_exclusive - module.base,
+            )?;
+        }
+        Ok(())
+    };
+    if filter.modules.is_empty() {
+        for module in 0..context.modules.len() {
+            visit_module(
+                u32::try_from(module)
+                    .map_err(|_| AnalysisError::store_shape("module ID exceeds u32"))?,
+            )?;
+        }
+    } else {
+        for module in &filter.modules {
+            visit_module(*module)?;
+        }
+    }
+    Ok(())
+}
+
+fn memory_pc_count(context: &QueryContext, module: u32, start: u64, end: u64) -> usize {
+    let first = context.memory_pc.partition_point(|entry| {
+        entry.module < module || entry.module == module && entry.pc < start
+    });
+    let last = context
+        .memory_pc
+        .partition_point(|entry| entry.module < module || entry.module == module && entry.pc < end);
+    last - first
+}
+
+fn memory_module_count(context: &QueryContext, module: u32) -> usize {
+    let first = context
+        .memory_pc
+        .partition_point(|entry| entry.module < module);
+    let last = context
+        .memory_pc
+        .partition_point(|entry| entry.module <= module);
+    last - first
+}
+
+fn bounded_rows_guarded(
+    store: &dyn NormalizedBulkView,
+    query: NormalizedPostingQuery<'_>,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, AnalysisError> {
+    let rows = store
+        .bounded_rows(query, MAX_CANDIDATE_ROWS, guard)
+        .map_err(map_store_query_error)?;
+    if rows.len() > MAX_CANDIDATE_ROWS {
         return Err(AnalysisError::resource_exhausted(
-            "candidate set exceeds 10000000 rows",
+            "posting result exceeds row limit",
         ));
     }
-    Ok((candidates, indexed_fields))
+    guard
+        .consume(WorkDelta {
+            rows: rows.len() as u64,
+            ..WorkDelta::default()
+        })
+        .map_err(AnalysisError::control)?;
+    Ok(rows)
+}
+
+fn intersect_rows_fallible_guarded(
+    left: &[usize],
+    right: &[usize],
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, AnalysisError> {
+    let mut result = Vec::new();
+    try_reserve_analysis(
+        &mut result,
+        left.len().min(right.len()),
+        guard,
+        "posting intersection allocation failed",
+    )?;
+    let (mut left_index, mut right_index) = (0, 0);
+    while left_index < left.len() && right_index < right.len() {
+        if (left_index + right_index) % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        match left[left_index].cmp(&right[right_index]) {
+            std::cmp::Ordering::Less => left_index += 1,
+            std::cmp::Ordering::Greater => right_index += 1,
+            std::cmp::Ordering::Equal => {
+                result.push(left[left_index]);
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn preflight_semantic_lookup(context: &QueryContext, terms: usize) -> Result<(), AnalysisError> {
@@ -1249,81 +1613,25 @@ fn preflight_semantic_lookup(context: &QueryContext, terms: usize) -> Result<(),
     Ok(())
 }
 
-fn bounded_rows(
-    store: &dyn NormalizedBulkView,
-    query: NormalizedPostingQuery<'_>,
-) -> Result<Vec<usize>, AnalysisError> {
-    store
-        .bounded_rows(query, MAX_CANDIDATE_ROWS, &AllowContextWork)
-        .map_err(|error| {
-            if matches!(
-                error.code(),
-                "control.resource_exhausted" | "control.budget_exceeded"
-            ) {
-                AnalysisError::resource_exhausted(error.to_string())
-            } else {
-                AnalysisError::store(error)
-            }
-        })
-}
-
-fn append_absolute_module(
-    context: &QueryContext,
-    filter: &EventFilter,
-    module_id: u32,
-    lists: &mut Vec<Vec<usize>>,
-) -> Result<(), AnalysisError> {
-    let Some(module) = context.modules.get(module_id as usize) else {
-        return Ok(());
-    };
-    for absolute in &filter.absolute_pc {
-        if absolute.end_exclusive <= module.base {
-            continue;
+fn map_store_query_error(error: qtrace_store::IndexError) -> AnalysisError {
+    match error.code() {
+        "job.cancelled" => AnalysisError {
+            code: "job.cancelled",
+            detail: error.to_string(),
+        },
+        "control.resource_exhausted" | "control.budget_exceeded" => {
+            AnalysisError::resource_exhausted(error.to_string())
         }
-        let start = absolute.start.saturating_sub(module.base);
-        let end = absolute.end_exclusive - module.base;
-        let mut pair = Vec::new();
-        pair.try_reserve_exact(2)
-            .map_err(|_| AnalysisError::resource_exhausted("absolute-PC pair allocation failed"))?;
-        pair.push(bounded_rows(
-            context.store.as_ref(),
-            NormalizedPostingQuery::ModulePc {
-                module: module_id,
-                start,
-                end_exclusive: end,
-            },
-        )?);
-        pair.push(memory_pc_rows(context, module_id, start, end)?);
-        lists.push(union_rows(pair)?);
+        _ => AnalysisError::store(error),
     }
-    Ok(())
 }
 
-fn intersect_rows_fallible(left: &[usize], right: &[usize]) -> Result<Vec<usize>, AnalysisError> {
-    let mut result = Vec::new();
-    result
-        .try_reserve_exact(left.len().min(right.len()))
-        .map_err(|_| AnalysisError::resource_exhausted("posting intersection allocation failed"))?;
-    let (mut left_index, mut right_index) = (0, 0);
-    while left_index < left.len() && right_index < right.len() {
-        match left[left_index].cmp(&right[right_index]) {
-            std::cmp::Ordering::Less => left_index += 1,
-            std::cmp::Ordering::Greater => right_index += 1,
-            std::cmp::Ordering::Equal => {
-                result.push(left[left_index]);
-                left_index += 1;
-                right_index += 1;
-            }
-        }
-    }
-    Ok(result)
-}
-
-fn memory_pc_rows(
+fn memory_pc_rows_guarded(
     context: &QueryContext,
     module: u32,
     start: u64,
     end: u64,
+    guard: &dyn WorkGuard,
 ) -> Result<Vec<usize>, AnalysisError> {
     let first = context.memory_pc.partition_point(|entry| {
         entry.module < module || entry.module == module && entry.pc < start
@@ -1332,16 +1640,30 @@ fn memory_pc_rows(
         .memory_pc
         .partition_point(|entry| entry.module < module || entry.module == module && entry.pc < end);
     let mut result = Vec::new();
-    result
-        .try_reserve_exact(last - first)
-        .map_err(|_| AnalysisError::resource_exhausted("memory PC posting allocation failed"))?;
-    result.extend(context.memory_pc[first..last].iter().map(|entry| entry.row));
-    radix_sort_usize(&mut result)?;
+    try_reserve_analysis(
+        &mut result,
+        last - first,
+        guard,
+        "memory PC posting allocation failed",
+    )?;
+    for (index, entry) in context.memory_pc[first..last].iter().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        result.push(entry.row);
+    }
+    radix_sort_usize_guarded(&mut result, guard)?;
     result.dedup();
     Ok(result)
 }
 
-fn memory_module_rows(context: &QueryContext, module: u32) -> Result<Vec<usize>, AnalysisError> {
+fn memory_module_rows_guarded(
+    context: &QueryContext,
+    module: u32,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, AnalysisError> {
     let first = context
         .memory_pc
         .partition_point(|entry| entry.module < module);
@@ -1354,16 +1676,29 @@ fn memory_module_rows(context: &QueryContext, module: u32) -> Result<Vec<usize>,
         ));
     }
     let mut rows = Vec::new();
-    rows.try_reserve_exact(last - first).map_err(|_| {
-        AnalysisError::resource_exhausted("memory module posting allocation failed")
-    })?;
-    rows.extend(context.memory_pc[first..last].iter().map(|entry| entry.row));
-    radix_sort_usize(&mut rows)?;
+    try_reserve_analysis(
+        &mut rows,
+        last - first,
+        guard,
+        "memory module posting allocation failed",
+    )?;
+    for (index, entry) in context.memory_pc[first..last].iter().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
+        rows.push(entry.row);
+    }
+    radix_sort_usize_guarded(&mut rows, guard)?;
     rows.dedup();
     Ok(rows)
 }
 
-fn union_rows(lists: Vec<Vec<usize>>) -> Result<Vec<usize>, AnalysisError> {
+fn union_rows_guarded(
+    lists: Vec<Vec<usize>>,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, AnalysisError> {
     let work = lists
         .iter()
         .try_fold(0_usize, |total, rows| total.checked_add(rows.len()));
@@ -1373,26 +1708,43 @@ fn union_rows(lists: Vec<Vec<usize>>) -> Result<Vec<usize>, AnalysisError> {
         ));
     };
     let mut rows = Vec::new();
-    rows.try_reserve_exact(work)
-        .map_err(|_| AnalysisError::resource_exhausted("posting union allocation failed"))?;
-    rows.extend(lists.into_iter().flatten());
-    radix_sort_usize(&mut rows)?;
+    try_reserve_analysis(&mut rows, work, guard, "posting union allocation failed")?;
+    for list in lists {
+        for chunk in list.chunks(4096) {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+            rows.extend_from_slice(chunk);
+        }
+    }
+    radix_sort_usize_guarded(&mut rows, guard)?;
     rows.dedup();
     Ok(rows)
 }
 
-fn radix_sort_usize(rows: &mut Vec<usize>) -> Result<(), AnalysisError> {
+fn radix_sort_usize_guarded(
+    rows: &mut Vec<usize>,
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError> {
     if rows.len() < 2 {
         return Ok(());
     }
     let mut scratch = Vec::new();
-    scratch
-        .try_reserve_exact(rows.len())
-        .map_err(|_| AnalysisError::resource_exhausted("row radix allocation failed"))?;
+    try_reserve_analysis(
+        &mut scratch,
+        rows.len(),
+        guard,
+        "row radix allocation failed",
+    )?;
     scratch.resize(rows.len(), 0);
     for pass in 0..std::mem::size_of::<usize>() {
         let mut counts = [0_usize; 256];
-        for row in rows.iter().copied() {
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
             counts[row.to_le_bytes()[pass] as usize] += 1;
         }
         let mut position = 0;
@@ -1401,7 +1753,12 @@ fn radix_sort_usize(rows: &mut Vec<usize>) -> Result<(), AnalysisError> {
             *count = position;
             position += current;
         }
-        for row in rows.iter().copied() {
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
             let slot = &mut counts[row.to_le_bytes()[pass] as usize];
             scratch[*slot] = row;
             *slot += 1;
@@ -1415,17 +1772,47 @@ fn apply_synchronous_residuals(
     context: &QueryContext,
     filter: &EventFilter,
     candidates: Vec<usize>,
+    guard: &CandidateGuard,
 ) -> Result<Vec<usize>, AnalysisError> {
+    if filter.relative_pc.is_empty()
+        && filter.register.reads.is_empty()
+        && filter.register.writes.is_empty()
+        && filter.memory.is_empty()
+    {
+        return Ok(candidates);
+    }
+    guard.consume_rows(candidates.len())?;
     let mut matched = Vec::new();
-    matched
-        .try_reserve_exact(candidates.len())
-        .map_err(|_| AnalysisError::resource_exhausted("residual result allocation failed"))?;
-    for row in candidates {
+    try_reserve_analysis(
+        &mut matched,
+        candidates.len(),
+        guard,
+        "residual result allocation failed",
+    )?;
+    for (index, row) in candidates.into_iter().enumerate() {
+        if index % 4096 == 0 {
+            guard
+                .consume(WorkDelta::default())
+                .map_err(AnalysisError::control)?;
+        }
         if matches_non_detail(context, filter, row)? {
             matched.push(row);
         }
     }
     Ok(matched)
+}
+
+fn synchronous_residual_filter(filter: &EventFilter) -> EventFilter {
+    EventFilter {
+        relative_pc: if filter.modules.is_empty() {
+            filter.relative_pc.clone()
+        } else {
+            Vec::new()
+        },
+        register: filter.register.clone(),
+        memory: filter.memory.clone(),
+        ..EventFilter::default()
+    }
 }
 
 fn matches_non_detail(
@@ -1617,13 +2004,23 @@ fn mnemonic_matches(filters: &[MnemonicFilter], mnemonic: &[u8]) -> bool {
 fn sort_rows_by_stable_key(
     context: &QueryContext,
     rows: Vec<usize>,
+    guard: &CandidateGuard,
 ) -> Result<Vec<usize>, AnalysisError> {
-    radix_sort_rows_by_keys(&context.keys, rows)
+    radix_sort_rows_by_keys_guarded(&context.keys, rows, guard)
 }
 
+#[cfg(test)]
 fn radix_sort_rows_by_keys(
     keys: &[EventKey],
+    rows: Vec<usize>,
+) -> Result<Vec<usize>, AnalysisError> {
+    radix_sort_rows_by_keys_guarded(keys, rows, &AllowContextWork)
+}
+
+fn radix_sort_rows_by_keys_guarded(
+    keys: &[EventKey],
     mut rows: Vec<usize>,
+    guard: &dyn WorkGuard,
 ) -> Result<Vec<usize>, AnalysisError> {
     if rows.len() < 2 {
         return Ok(rows);
@@ -1634,13 +2031,21 @@ fn radix_sort_rows_by_keys(
         ));
     }
     let mut scratch = Vec::new();
-    scratch
-        .try_reserve_exact(rows.len())
-        .map_err(|_| AnalysisError::resource_exhausted("stable-key sort allocation failed"))?;
+    try_reserve_analysis(
+        &mut scratch,
+        rows.len(),
+        guard,
+        "stable-key sort allocation failed",
+    )?;
     scratch.resize(rows.len(), 0);
     for pass in 0..70 {
         let mut counts = [0_usize; 256];
-        for row in rows.iter().copied() {
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
             counts[stable_key_byte(&keys[row], pass) as usize] += 1;
         }
         let mut position = 0;
@@ -1649,7 +2054,12 @@ fn radix_sort_rows_by_keys(
             *count = position;
             position += current;
         }
-        for row in rows.iter().copied() {
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard
+                    .consume(WorkDelta::default())
+                    .map_err(AnalysisError::control)?;
+            }
             let slot = &mut counts[stable_key_byte(&keys[row], pass) as usize];
             scratch[*slot] = row;
             *slot += 1;
@@ -1684,7 +2094,7 @@ fn map_discontinuities(
             event_count.min(MAX_CANDIDATE_ROWS),
             guard,
         )
-        .map_err(AnalysisError::store)?;
+        .map_err(map_store_query_error)?;
     let mut result = Vec::new();
     try_reserve_context(
         &mut result,
@@ -1693,6 +2103,7 @@ fn map_discontinuities(
         "discontinuity map allocation failed",
     )?;
     result.resize(event_count, None);
+    let mut payload_bytes = 0_usize;
     for (index, row) in rows.into_iter().enumerate() {
         if index % 4096 == 0 {
             guard
@@ -1700,6 +2111,27 @@ fn map_discontinuities(
                 .map_err(AnalysisError::control)?;
         }
         let payload = store.payload_bytes(row).map_err(AnalysisError::store)?;
+        if payload.len() > MAX_DISCONTINUITY_PAYLOAD_BYTES {
+            return Err(AnalysisError::resource_exhausted(
+                "discontinuity payload exceeds 1 MiB",
+            ));
+        }
+        payload_bytes = payload_bytes
+            .checked_add(payload.len())
+            .filter(|bytes| *bytes <= MAX_DISCONTINUITY_TOTAL_BYTES)
+            .ok_or_else(|| {
+                AnalysisError::resource_exhausted(
+                    "discontinuity payloads exceed 16 MiB context limit",
+                )
+            })?;
+        for chunk in payload.chunks(4096) {
+            guard
+                .consume(WorkDelta {
+                    input_bytes: chunk.len() as u64,
+                    ..WorkDelta::default()
+                })
+                .map_err(AnalysisError::control)?;
+        }
         let payload: EventPayload = serde_json::from_slice(payload).map_err(|error| {
             AnalysisError::store_shape(format!("invalid discontinuity payload: {error}"))
         })?;
@@ -1870,13 +2302,20 @@ fn submit_semantic_scan(
     SemanticExecutor::global()?.submit(SemanticJob::new(
         move || {
             let mut terminal = ProjectionTerminalizer::new(state.clone());
-            let matcher = match DetailMatcher::new(&needles) {
-                Ok(matcher) => matcher,
-                Err(error) => {
-                    terminal.fail(error);
-                    return;
-                }
-            };
+            let matcher =
+                match DetailMatcher::new_with_probe(&needles, MAX_MATCHER_BUILD_WORK, |_| {
+                    cancelled.load(Ordering::Acquire)
+                }) {
+                    Ok(matcher) => matcher,
+                    Err(error) if error.code() == "job.cancelled" => {
+                        terminal.finish(false);
+                        return;
+                    }
+                    Err(error) => {
+                        terminal.fail(error);
+                        return;
+                    }
+                };
             let mut remaining_scan = MAX_SEMANTIC_SCAN_BYTES;
             for row in candidates {
                 if cancelled.load(Ordering::Acquire) {
@@ -1937,6 +2376,55 @@ fn submit_semantic_scan(
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if !projection.completed {
                             if matched {
+                                if projection.visible.len() == MAX_CANDIDATE_ROWS {
+                                    drop(projection);
+                                    terminal.fail(AnalysisError::resource_exhausted(
+                                        "semantic result exceeds row limit",
+                                    ));
+                                    return;
+                                }
+                                if projection.visible.len() == projection.visible.capacity() {
+                                    let required = projection
+                                        .visible
+                                        .len()
+                                        .checked_add(1)
+                                        .and_then(|required| {
+                                            projection
+                                                .visible
+                                                .capacity()
+                                                .checked_mul(2)
+                                                .map(|doubled| required.max(doubled.max(4)))
+                                        })
+                                        .and_then(|capacity| {
+                                            capacity.checked_mul(std::mem::size_of::<usize>())
+                                        })
+                                        .and_then(|bytes| u64::try_from(bytes).ok());
+                                    let Some(bytes) = required else {
+                                        drop(projection);
+                                        terminal.fail(AnalysisError::resource_exhausted(
+                                            "semantic result allocation size overflow",
+                                        ));
+                                        return;
+                                    };
+                                    let scope =
+                                        match AllocationScope::begin(&AllowContextWork, bytes, 0) {
+                                            Ok(scope) => scope,
+                                            Err(error) => {
+                                                drop(projection);
+                                                terminal.fail(AnalysisError::control(error));
+                                                return;
+                                            }
+                                        };
+                                    if projection.visible.try_reserve(1).is_err() {
+                                        drop(scope);
+                                        drop(projection);
+                                        terminal.fail(AnalysisError::resource_exhausted(
+                                            "semantic result allocation failed",
+                                        ));
+                                        return;
+                                    }
+                                    drop(scope);
+                                }
                                 projection.visible.push(row);
                             }
                             projection.watermark = Some(key);
@@ -2037,31 +2525,72 @@ struct DetailMatcher {
 }
 
 impl DetailMatcher {
+    #[cfg(test)]
     fn new<T: AsRef<[u8]>>(patterns: &[T]) -> Result<Self, AnalysisError> {
-        let total_bytes = patterns.iter().try_fold(0_usize, |total, pattern| {
-            total.checked_add(pattern.as_ref().len())
-        });
-        let total_bytes = total_bytes
-            .filter(|bytes| *bytes <= crate::filter::MAX_FILTER_TEXT_BYTES)
-            .ok_or_else(|| AnalysisError::filter_too_complex("semantic patterns exceed 1 MiB"))?;
+        Self::new_with_probe(patterns, MAX_MATCHER_BUILD_WORK, |_| false)
+    }
+
+    fn new_with_probe<T: AsRef<[u8]>>(
+        patterns: &[T],
+        max_work: usize,
+        mut cancelled: impl FnMut(usize) -> bool,
+    ) -> Result<Self, AnalysisError> {
+        if cancelled(0) {
+            return Err(AnalysisError {
+                code: "job.cancelled",
+                detail: "semantic matcher build cancelled".to_owned(),
+            });
+        }
+        if patterns.iter().any(|pattern| pattern.as_ref().is_empty()) {
+            return Err(AnalysisError::invalid_filter(
+                "semantic detail needles must not be empty",
+            ));
+        }
+        let mut work = 0_usize;
+        let mut total_bytes = 0_usize;
+        for pattern in patterns {
+            for chunk in pattern.as_ref().chunks(4096) {
+                matcher_build_work(&mut work, chunk.len(), max_work, &mut cancelled)?;
+                total_bytes = total_bytes.checked_add(chunk.len()).ok_or_else(|| {
+                    AnalysisError::filter_too_complex("semantic pattern byte count overflow")
+                })?;
+            }
+        }
+        if total_bytes > crate::filter::MAX_FILTER_TEXT_BYTES {
+            return Err(AnalysisError::filter_too_complex(
+                "semantic patterns exceed 1 MiB",
+            ));
+        }
         let mut nodes = Vec::new();
-        nodes
-            .try_reserve_exact(total_bytes.saturating_add(1))
-            .map_err(|_| {
-                AnalysisError::resource_exhausted("semantic automaton node allocation failed")
-            })?;
+        try_reserve_analysis(
+            &mut nodes,
+            total_bytes.saturating_add(1),
+            &AllowContextWork,
+            "semantic automaton node allocation failed",
+        )?;
         nodes.push(DetailNode::default());
         let mut edges = Vec::new();
-        edges.try_reserve_exact(total_bytes).map_err(|_| {
-            AnalysisError::resource_exhausted("semantic automaton edge allocation failed")
-        })?;
+        try_reserve_analysis(
+            &mut edges,
+            total_bytes,
+            &AllowContextWork,
+            "semantic automaton edge allocation failed",
+        )?;
         let mut matcher = Self { nodes, edges };
         for pattern in patterns {
             let mut state = 0_usize;
             for byte in pattern.as_ref() {
-                state = if let Some(target) = matcher.transition(state, *byte) {
+                matcher_build_work(&mut work, 1, max_work, &mut cancelled)?;
+                state = if let Some(target) = matcher.transition_for_build(
+                    state,
+                    *byte,
+                    &mut work,
+                    max_work,
+                    &mut cancelled,
+                )? {
                     target
                 } else {
+                    matcher_build_work(&mut work, 2, max_work, &mut cancelled)?;
                     let target = matcher.nodes.len();
                     let target_u32 = u32::try_from(target).map_err(|_| {
                         AnalysisError::resource_exhausted("semantic automaton exceeds u32")
@@ -2081,8 +2610,34 @@ impl DetailMatcher {
             }
             matcher.nodes[state].terminal = true;
         }
-        matcher.build_failures()?;
+        matcher.build_failures(&mut work, max_work, &mut cancelled)?;
+        if cancelled(work) {
+            return Err(AnalysisError {
+                code: "job.cancelled",
+                detail: "semantic matcher build cancelled".to_owned(),
+            });
+        }
         Ok(matcher)
+    }
+
+    fn transition_for_build(
+        &self,
+        state: usize,
+        byte: u8,
+        work: &mut usize,
+        max_work: usize,
+        cancelled: &mut impl FnMut(usize) -> bool,
+    ) -> Result<Option<usize>, AnalysisError> {
+        let mut edge = self.nodes[state].first_edge;
+        while edge != NO_EDGE {
+            matcher_build_work(work, 1, max_work, cancelled)?;
+            let candidate = self.edges[edge as usize];
+            if candidate.byte == byte {
+                return Ok(Some(candidate.target as usize));
+            }
+            edge = candidate.next;
+        }
+        Ok(None)
     }
 
     fn transition(&self, state: usize, byte: u8) -> Option<usize> {
@@ -2097,27 +2652,53 @@ impl DetailMatcher {
         None
     }
 
-    fn build_failures(&mut self) -> Result<(), AnalysisError> {
+    fn build_failures(
+        &mut self,
+        work: &mut usize,
+        max_work: usize,
+        cancelled: &mut impl FnMut(usize) -> bool,
+    ) -> Result<(), AnalysisError> {
         let mut queue = std::collections::VecDeque::new();
+        let queue_bytes = self
+            .nodes
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| {
+                AnalysisError::resource_exhausted("semantic automaton queue size overflow")
+            })?;
+        let scope = AllocationScope::begin(&AllowContextWork, queue_bytes, 0)
+            .map_err(AnalysisError::control)?;
         queue.try_reserve(self.nodes.len()).map_err(|_| {
             AnalysisError::resource_exhausted("semantic automaton queue allocation failed")
         })?;
+        drop(scope);
         let mut edge = self.nodes[0].first_edge;
         while edge != NO_EDGE {
+            matcher_build_work(work, 1, max_work, cancelled)?;
             let target = self.edges[edge as usize].target;
             queue.push_back(target);
             edge = self.edges[edge as usize].next;
         }
         while let Some(state) = queue.pop_front() {
+            matcher_build_work(work, 1, max_work, cancelled)?;
             let mut edge = self.nodes[state as usize].first_edge;
             while edge != NO_EDGE {
+                matcher_build_work(work, 1, max_work, cancelled)?;
                 let candidate = self.edges[edge as usize];
                 queue.push_back(candidate.target);
                 let mut failure = self.nodes[state as usize].failure as usize;
-                while failure != 0 && self.transition(failure, candidate.byte).is_none() {
+                while failure != 0
+                    && self
+                        .transition_for_build(failure, candidate.byte, work, max_work, cancelled)?
+                        .is_none()
+                {
+                    matcher_build_work(work, 1, max_work, cancelled)?;
                     failure = self.nodes[failure].failure as usize;
                 }
-                let target_failure = self.transition(failure, candidate.byte).unwrap_or(0);
+                let target_failure = self
+                    .transition_for_build(failure, candidate.byte, work, max_work, cancelled)?
+                    .unwrap_or(0);
                 let target = candidate.target as usize;
                 self.nodes[target].failure = target_failure as u32;
                 self.nodes[target].terminal |= self.nodes[target_failure].terminal;
@@ -2170,16 +2751,48 @@ impl DetailMatcher {
     }
 }
 
+fn matcher_build_work(
+    work: &mut usize,
+    additional: usize,
+    max_work: usize,
+    cancelled: &mut impl FnMut(usize) -> bool,
+) -> Result<(), AnalysisError> {
+    let prior_checkpoint = *work / 4096;
+    *work = work
+        .checked_add(additional)
+        .filter(|work| *work <= max_work)
+        .ok_or_else(|| AnalysisError::resource_exhausted("semantic matcher build work exceeded"))?;
+    if *work / 4096 != prior_checkpoint && cancelled(*work) {
+        return Err(AnalysisError {
+            code: "job.cancelled",
+            detail: "semantic matcher build cancelled".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn locate_after_key(
     context: &QueryContext,
     rows: &[usize],
     key: &EventKey,
 ) -> Result<usize, AnalysisError> {
+    locate_after_key_with_probe(&context.keys, rows, key, || {})
+}
+
+fn locate_after_key_with_probe(
+    keys: &[EventKey],
+    rows: &[usize],
+    key: &EventKey,
+    mut comparison: impl FnMut(),
+) -> Result<usize, AnalysisError> {
     let mut left = 0;
     let mut right = rows.len();
     while left < right {
         let middle = left + (right - left) / 2;
-        let candidate = context.key(rows[middle])?;
+        comparison();
+        let candidate = keys
+            .get(rows[middle])
+            .ok_or_else(|| AnalysisError::store_shape("cursor row is outside event-key map"))?;
         match compare_event_keys(candidate, key) {
             std::cmp::Ordering::Less => left = middle + 1,
             std::cmp::Ordering::Greater => right = middle,
@@ -2467,6 +3080,73 @@ mod tests {
     }
 
     #[test]
+    fn matcher_handles_overlap_prefix_utf8_bytes_and_rejects_empty_needles() {
+        let matcher = DetailMatcher::new(&[
+            b"aba".to_vec(),
+            b"ababa".to_vec(),
+            "界限".as_bytes().to_vec(),
+        ])
+        .unwrap();
+        assert!(
+            matcher
+                .contains_with_probe(b"xxababa", 7, |_| false)
+                .unwrap()
+        );
+        assert!(
+            matcher
+                .contains_with_probe("xx界限yy".as_bytes(), 12, |_| false)
+                .unwrap()
+        );
+        let error = match DetailMatcher::new(&[Vec::<u8>::new()]) {
+            Ok(_) => panic!("empty semantic needle was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "analysis.invalid_filter");
+    }
+
+    #[test]
+    fn matcher_build_cancels_before_allocating_the_first_node() {
+        let mut observed = None;
+        let error = match DetailMatcher::new_with_probe(
+            &[vec![b'a'; 1024 * 1024]],
+            8 * 1024 * 1024,
+            |work| {
+                observed = Some(work);
+                work == 0
+            },
+        ) {
+            Ok(_) => panic!("pre-cancelled matcher build was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "job.cancelled");
+        assert_eq!(observed, Some(0));
+    }
+
+    #[test]
+    fn adversarial_prefix_matcher_build_work_scales_linearly() {
+        fn work(depth: usize) -> (usize, usize) {
+            let patterns = (1..=depth)
+                .map(|length| vec![b'a'; length])
+                .collect::<Vec<_>>();
+            let input = patterns.iter().map(Vec::len).sum::<usize>();
+            let mut observed = 0_usize;
+            DetailMatcher::new_with_probe(&patterns, input * 8 + 4096, |work| {
+                observed = work;
+                false
+            })
+            .unwrap();
+            (input, observed)
+        }
+        let probes = [work(64), work(90), work(128)];
+        for (input, observed) in probes {
+            assert!(
+                observed <= input * 8 + 4096,
+                "matcher used {observed} work for {input} input bytes"
+            );
+        }
+    }
+
+    #[test]
     fn stable_key_radix_matches_the_public_total_order_at_numeric_extremes() {
         let keys = vec![
             EventKey::new(
@@ -2508,5 +3188,35 @@ mod tests {
             radix_sort_rows_by_keys(&keys, (0..keys.len()).rev().collect()).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn cursor_lookup_and_page_projection_work_is_log_n_plus_limit() {
+        for size in [128_usize, 256, 512] {
+            let keys = (0..size)
+                .map(|ordinal| {
+                    EventKey::new(
+                        ArtifactDigest::new([1; 32]),
+                        TimelineId(1),
+                        ordinal as u64,
+                        ordinal as u64,
+                        Some(ordinal as u64),
+                        Some(7),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let rows = (0..size).collect::<Vec<_>>();
+            for limit in [1_usize, 32, 2_000] {
+                let mut comparisons = 0;
+                let index =
+                    locate_after_key_with_probe(&keys, &rows, &keys[size / 2], || comparisons += 1)
+                        .unwrap();
+                assert_eq!(index, size / 2 + 1);
+                let projected = limit.min(size - index);
+                let logarithmic_bound = usize::BITS as usize - (size - 1).leading_zeros() as usize;
+                assert!(comparisons <= logarithmic_bound + 1);
+                assert!(comparisons + projected <= logarithmic_bound + 1 + limit);
+            }
+        }
     }
 }

@@ -10,8 +10,9 @@ pub use filter::{
 pub use provenance::{CompletenessStatus, CompletenessSummary, DiscontinuityRow};
 pub use timeline::{
     AnalysisError, EventPage, EventRow, MAX_CONTEXT_DICTIONARY_ENTRIES, MAX_CONTEXT_EVENTS,
-    MAX_CONTEXT_TYPED_ROWS, PageCursor, ProjectionIdentity, QueryContext, QueryPlan, StoreIdentity,
-    TimelineProjection, TimelineRow, query_events,
+    MAX_CONTEXT_TYPED_ROWS, MAX_DISCONTINUITY_PAYLOAD_BYTES, MAX_DISCONTINUITY_TOTAL_BYTES,
+    PageCursor, ProjectionIdentity, QueryContext, QueryPlan, StoreIdentity, TimelineProjection,
+    TimelineRow, query_events,
 };
 
 pub use qtrace_provider::{EventKind, MemoryDirection, RegisterSlot};
