@@ -1,18 +1,31 @@
+use qtrace_provider::ProviderCapabilities;
 use qtrace_provider::{
     CompletenessCause, DiscontinuityCause, EventKey, Provenance, RangeBounds, RangeDomain,
 };
 use qtrace_store::CompletenessRow;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompletenessStatus {
+    Complete,
+    Incomplete,
+    Unknown,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletenessSummary {
     pub retained_ranges: usize,
     pub incomplete_ranges: usize,
     pub complete: bool,
+    pub status: CompletenessStatus,
     pub ranges: Vec<CompletenessRow>,
 }
 
 impl CompletenessSummary {
-    pub(crate) fn new(rows: &[CompletenessRow]) -> Self {
+    pub(crate) fn new(
+        rows: &[CompletenessRow],
+        capabilities: &ProviderCapabilities,
+        observed_sequence: Option<(u64, u64)>,
+    ) -> Self {
         let mut ranges = rows.to_vec();
         ranges.sort_by_key(completeness_key);
         let retained_ranges = ranges
@@ -20,13 +33,51 @@ impl CompletenessSummary {
             .filter(|row| row.cause == CompletenessCause::Retained)
             .count();
         let incomplete_ranges = ranges.len() - retained_ranges;
+        let status = if incomplete_ranges != 0 {
+            CompletenessStatus::Incomplete
+        } else if capabilities.loss_and_damage_ranges
+            && observed_sequence
+                .is_some_and(|(first, last)| retained_covers_sequence(&ranges, first, last))
+        {
+            CompletenessStatus::Complete
+        } else {
+            CompletenessStatus::Unknown
+        };
         Self {
             retained_ranges,
             incomplete_ranges,
-            complete: incomplete_ranges == 0,
+            complete: status == CompletenessStatus::Complete,
+            status,
             ranges,
         }
     }
+}
+
+fn retained_covers_sequence(rows: &[CompletenessRow], first: u64, last: u64) -> bool {
+    let mut next = first;
+    for row in rows {
+        let RangeBounds::InclusiveSequence {
+            first: range_first,
+            last: range_last,
+        } = row.bounds
+        else {
+            continue;
+        };
+        if row.domain != RangeDomain::CapturedSequence || row.cause != CompletenessCause::Retained {
+            continue;
+        }
+        if range_last < next {
+            continue;
+        }
+        if range_first > next {
+            return false;
+        }
+        if range_last >= last {
+            return true;
+        }
+        next = range_last.saturating_add(1);
+    }
+    false
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

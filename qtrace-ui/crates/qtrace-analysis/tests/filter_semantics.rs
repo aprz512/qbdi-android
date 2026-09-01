@@ -10,7 +10,7 @@ use qtrace_provider::{
 };
 use qtrace_store::{
     CompletenessRow, DefinitionRow, IndexError, InstructionRow, MemoryRow, ModuleRow,
-    RegisterAccess, RegisterObservationRow, SemanticRow, TraceStoreView,
+    NormalizedLayoutIdentity, RegisterAccess, RegisterObservationRow, SemanticRow, TraceStoreView,
 };
 
 #[derive(Clone)]
@@ -24,12 +24,19 @@ struct EventFact {
     observations: Vec<RegisterObservationRow>,
 }
 
+#[derive(Clone)]
 struct FixtureStore {
     events: Vec<EventFact>,
     modules: Vec<ModuleRow>,
     definitions: Vec<DefinitionRow>,
+    instructions: Vec<InstructionRow>,
+    memories: Vec<MemoryRow>,
+    semantics: Vec<SemanticRow>,
+    observations: Vec<RegisterObservationRow>,
     strings: Vec<Vec<u8>>,
     blobs: Vec<Vec<u8>>,
+    payloads: Vec<Vec<u8>>,
+    layout: NormalizedLayoutIdentity,
     capabilities: ProviderCapabilities,
     completeness: Vec<CompletenessRow>,
 }
@@ -79,79 +86,90 @@ impl FixtureStore {
             provenance: Provenance::Captured,
         };
 
+        let events = vec![
+            EventFact {
+                key: key(0, 7, 10),
+                kind: EventKind::Instruction,
+                provenance: Provenance::Captured,
+                instruction: Some(instruction(0, 0, 0x10, 0)),
+                memory: None,
+                semantic: None,
+                observations: vec![
+                    observation(0, RegisterSlot::X0, RegisterAccess::Read),
+                    observation(0, RegisterSlot::X1, RegisterAccess::Write),
+                ],
+            },
+            EventFact {
+                key: key(1, 8, 11),
+                kind: EventKind::Instruction,
+                provenance: Provenance::Derived,
+                instruction: Some(instruction(1, 0, 0x20, 1)),
+                memory: None,
+                semantic: None,
+                observations: vec![
+                    observation(1, RegisterSlot::X2, RegisterAccess::Read),
+                    observation(1, RegisterSlot::X3, RegisterAccess::Write),
+                ],
+            },
+            EventFact {
+                key: key(2, 7, 12),
+                kind: EventKind::Memory,
+                provenance: Provenance::Captured,
+                instruction: None,
+                memory: Some(memory(2, 0, 0x14, 0x2000, 0x2004, MemoryDirection::Read)),
+                semantic: None,
+                observations: vec![],
+            },
+            EventFact {
+                key: key(3, 8, 13),
+                kind: EventKind::Memory,
+                provenance: Provenance::Captured,
+                instruction: None,
+                memory: Some(memory(3, 1, 0x30, 0x2004, 0x200c, MemoryDirection::Write)),
+                semantic: None,
+                observations: vec![],
+            },
+            EventFact {
+                key: key(4, 7, 14),
+                kind: EventKind::SemanticCall,
+                provenance: Provenance::Captured,
+                instruction: None,
+                memory: None,
+                semantic: Some(SemanticRow {
+                    owner_row: 4,
+                    category: Some(4),
+                    name: 6,
+                    detail_blob: 0,
+                }),
+                observations: vec![],
+            },
+            EventFact {
+                key: key(5, 8, 15),
+                kind: EventKind::SemanticRule,
+                provenance: Provenance::Heuristic,
+                instruction: None,
+                memory: None,
+                semantic: Some(SemanticRow {
+                    owner_row: 5,
+                    category: Some(5),
+                    name: 7,
+                    detail_blob: 1,
+                }),
+                observations: vec![],
+            },
+        ];
+        let instructions = events
+            .iter()
+            .filter_map(|event| event.instruction)
+            .collect();
+        let memories = events.iter().filter_map(|event| event.memory).collect();
+        let semantics = events.iter().filter_map(|event| event.semantic).collect();
+        let observations = events
+            .iter()
+            .flat_map(|event| event.observations.iter().copied())
+            .collect();
         Self {
-            events: vec![
-                EventFact {
-                    key: key(0, 7, 10),
-                    kind: EventKind::Instruction,
-                    provenance: Provenance::Captured,
-                    instruction: Some(instruction(0, 0, 0x10, 0)),
-                    memory: None,
-                    semantic: None,
-                    observations: vec![
-                        observation(0, RegisterSlot::X0, RegisterAccess::Read),
-                        observation(0, RegisterSlot::X1, RegisterAccess::Write),
-                    ],
-                },
-                EventFact {
-                    key: key(1, 8, 11),
-                    kind: EventKind::Instruction,
-                    provenance: Provenance::Derived,
-                    instruction: Some(instruction(1, 0, 0x20, 1)),
-                    memory: None,
-                    semantic: None,
-                    observations: vec![
-                        observation(1, RegisterSlot::X2, RegisterAccess::Read),
-                        observation(1, RegisterSlot::X3, RegisterAccess::Write),
-                    ],
-                },
-                EventFact {
-                    key: key(2, 7, 12),
-                    kind: EventKind::Memory,
-                    provenance: Provenance::Captured,
-                    instruction: None,
-                    memory: Some(memory(2, 0, 0x14, 0x2000, 0x2004, MemoryDirection::Read)),
-                    semantic: None,
-                    observations: vec![],
-                },
-                EventFact {
-                    key: key(3, 8, 13),
-                    kind: EventKind::Memory,
-                    provenance: Provenance::Captured,
-                    instruction: None,
-                    memory: Some(memory(3, 1, 0x30, 0x2004, 0x200c, MemoryDirection::Write)),
-                    semantic: None,
-                    observations: vec![],
-                },
-                EventFact {
-                    key: key(4, 7, 14),
-                    kind: EventKind::SemanticCall,
-                    provenance: Provenance::Captured,
-                    instruction: None,
-                    memory: None,
-                    semantic: Some(SemanticRow {
-                        owner_row: 4,
-                        category: Some(4),
-                        name: 6,
-                        detail_blob: 0,
-                    }),
-                    observations: vec![],
-                },
-                EventFact {
-                    key: key(5, 8, 15),
-                    kind: EventKind::SemanticRule,
-                    provenance: Provenance::Heuristic,
-                    instruction: None,
-                    memory: None,
-                    semantic: Some(SemanticRow {
-                        owner_row: 5,
-                        category: Some(5),
-                        name: 7,
-                        detail_blob: 1,
-                    }),
-                    observations: vec![],
-                },
-            ],
+            events,
             modules: vec![
                 ModuleRow {
                     source_event_row: 0,
@@ -169,6 +187,10 @@ impl FixtureStore {
                 },
             ],
             definitions: vec![definition(0, 0), definition(1, 1)],
+            instructions,
+            memories,
+            semantics,
+            observations,
             strings: vec![
                 b"ADD".to_vec(),
                 b"SUB".to_vec(),
@@ -180,10 +202,20 @@ impl FixtureStore {
                 b"allow".to_vec(),
             ],
             blobs: vec![b"critical token".to_vec(), b"boring".to_vec()],
+            payloads: vec![b"{}".to_vec(); 6],
+            layout: layout_identity(2, 1),
             capabilities: ProviderCapabilities::qtrb_register_observations(),
             completeness: vec![],
         }
     }
+}
+
+fn layout_identity(schema_version: u32, fingerprint: u8) -> NormalizedLayoutIdentity {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": schema_version,
+        "layout_fingerprint": vec![fingerprint; 32],
+    }))
+    .unwrap()
 }
 
 fn definition(source_event_row: usize, mnemonic: u32) -> DefinitionRow {
@@ -207,6 +239,9 @@ fn definition(source_event_row: usize, mnemonic: u32) -> DefinitionRow {
 }
 
 impl TraceStoreView for FixtureStore {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
+        self.layout
+    }
     fn event_count(&self) -> usize {
         self.events.len()
     }
@@ -231,8 +266,8 @@ impl TraceStoreView for FixtureStore {
     fn semantic(&self, row: usize) -> Option<SemanticRow> {
         self.events.get(row)?.semantic
     }
-    fn payload_bytes(&self, _row: usize) -> Result<&[u8], IndexError> {
-        Ok(b"{}")
+    fn payload_bytes(&self, row: usize) -> Result<&[u8], IndexError> {
+        Ok(&self.payloads[row])
     }
     fn string_bytes(&self, id: u32) -> Result<&[u8], IndexError> {
         Ok(&self.strings[id as usize])
@@ -251,6 +286,30 @@ impl TraceStoreView for FixtureStore {
     }
     fn definition(&self, id: u32) -> Option<&DefinitionRow> {
         self.definitions.get(id as usize)
+    }
+    fn module_rows(&self) -> &[ModuleRow] {
+        &self.modules
+    }
+    fn definition_rows(&self) -> &[DefinitionRow] {
+        &self.definitions
+    }
+    fn instruction_rows(&self) -> &[InstructionRow] {
+        &self.instructions
+    }
+    fn memory_rows(&self) -> &[MemoryRow] {
+        &self.memories
+    }
+    fn semantic_rows(&self) -> &[SemanticRow] {
+        &self.semantics
+    }
+    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+        &self.observations
+    }
+    fn string_count(&self) -> usize {
+        self.strings.len()
+    }
+    fn blob_count(&self) -> usize {
+        self.blobs.len()
     }
     fn register_observations(&self, row: usize) -> Vec<RegisterObservationRow> {
         self.events
@@ -543,5 +602,108 @@ fn sequence_is_inclusive_while_pc_and_memory_ranges_are_half_open() {
             ..EventFilter::default()
         })
         .is_empty()
+    );
+}
+
+fn store_identity(store: FixtureStore) -> qtrace_analysis::StoreIdentity {
+    QueryContext::new(Arc::new(store)).unwrap().identity()
+}
+
+#[test]
+fn store_identity_binds_every_public_normalized_fact_and_byte_domain() {
+    let baseline = FixtureStore::new();
+    let expected = store_identity(baseline.clone());
+    let mut mutations = Vec::new();
+
+    let mut changed = baseline.clone();
+    changed.modules[0].base += 1;
+    mutations.push(("module", changed));
+    let mut changed = baseline.clone();
+    changed.definitions[0].opcode += 1;
+    mutations.push(("definition", changed));
+    let mut changed = baseline.clone();
+    changed.instructions[0].relative_pc += 1;
+    mutations.push(("instruction", changed));
+    let mut changed = baseline.clone();
+    changed.memories[0].address += 1;
+    mutations.push(("memory", changed));
+    let mut changed = baseline.clone();
+    changed.semantics[0].name = 7;
+    mutations.push(("semantic", changed));
+    let mut changed = baseline.clone();
+    changed.observations[0].value += 1;
+    mutations.push(("register observation", changed));
+    let mut changed = baseline.clone();
+    changed.payloads[0] = b"different payload".to_vec();
+    mutations.push(("event payload", changed));
+    let mut changed = baseline.clone();
+    changed.strings[0] = b"ADC".to_vec();
+    mutations.push(("string arena", changed));
+    let mut changed = baseline.clone();
+    changed.blobs[0] = b"different detail".to_vec();
+    mutations.push(("blob arena", changed));
+    let mut changed = baseline;
+    changed.layout = layout_identity(3, 2);
+    mutations.push(("schema/layout", changed));
+
+    for (label, changed) in mutations {
+        assert_ne!(store_identity(changed), expected, "unbound {label}");
+    }
+}
+
+#[test]
+fn cursor_accepts_equivalent_union_normal_forms_for_ranges_and_memory_directions() {
+    let store = Arc::new(FixtureStore::new());
+    let context = Arc::new(QueryContext::new(store).unwrap());
+    let split = TimelineProjection::new(
+        context.clone(),
+        EventFilter {
+            sequence: vec![
+                SequenceRange::new(12, 12).unwrap(),
+                SequenceRange::new(13, 13).unwrap(),
+            ],
+            memory: vec![
+                MemoryFilter {
+                    range: AddressRange::new(0x2000, 0x2005).unwrap(),
+                    directions: vec![MemoryDirection::Read],
+                },
+                MemoryFilter {
+                    range: AddressRange::new(0x2000, 0x2005).unwrap(),
+                    directions: vec![MemoryDirection::Write],
+                },
+                MemoryFilter {
+                    range: AddressRange::new(0x2004, 0x200d).unwrap(),
+                    directions: vec![MemoryDirection::Read],
+                },
+            ],
+            ..EventFilter::default()
+        },
+    )
+    .unwrap();
+    let cursor = query_events(&split, None, 1)
+        .unwrap()
+        .next
+        .expect("second matching row");
+    let merged = TimelineProjection::new(
+        context,
+        EventFilter {
+            sequence: vec![SequenceRange::new(12, 13).unwrap()],
+            memory: vec![
+                MemoryFilter {
+                    range: AddressRange::new(0x2000, 0x200d).unwrap(),
+                    directions: vec![MemoryDirection::Read],
+                },
+                MemoryFilter {
+                    range: AddressRange::new(0x2000, 0x2005).unwrap(),
+                    directions: vec![MemoryDirection::Write],
+                },
+            ],
+            ..EventFilter::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        query_events(&merged, Some(&cursor), 1).unwrap().rows.len(),
+        1
     );
 }

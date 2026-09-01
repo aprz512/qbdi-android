@@ -7,7 +7,7 @@ mod timeline;
 pub use filter::{
     AddressRange, EventFilter, MemoryFilter, MnemonicFilter, RegisterFilter, SequenceRange,
 };
-pub use provenance::{CompletenessSummary, DiscontinuityRow};
+pub use provenance::{CompletenessStatus, CompletenessSummary, DiscontinuityRow};
 pub use timeline::{
     AnalysisError, EventPage, EventRow, PageCursor, ProjectionIdentity, QueryContext, QueryPlan,
     StoreIdentity, TimelineProjection, TimelineRow, query_events,

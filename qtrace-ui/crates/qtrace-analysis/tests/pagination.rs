@@ -7,7 +7,8 @@ use std::{
 };
 
 use qtrace_analysis::{
-    EventFilter, PageCursor, QueryContext, TimelineProjection, TimelineRow, query_events,
+    AddressRange, CompletenessStatus, EventFilter, PageCursor, QueryContext, TimelineProjection,
+    TimelineRow, query_events,
 };
 use qtrace_provider::{
     ArtifactDigest, CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause,
@@ -16,7 +17,7 @@ use qtrace_provider::{
 };
 use qtrace_store::{
     CompletenessRow, DefinitionRow, IndexError, InstructionRow, MemoryRow, ModuleRow,
-    RegisterObservationRow, SemanticRow, TraceStoreView,
+    NormalizedLayoutIdentity, RegisterObservationRow, SemanticRow, TraceStoreView,
 };
 
 struct CountingStore {
@@ -25,9 +26,14 @@ struct CountingStore {
     release: (Mutex<bool>, Condvar),
     scan_progress: (Mutex<usize>, Condvar),
     event_key_calls: AtomicUsize,
+    blob_calls: AtomicUsize,
+    typed_lookup_calls: AtomicUsize,
     capabilities: ProviderCapabilities,
     completeness: Vec<CompletenessRow>,
     discontinuity_payload: Vec<u8>,
+    semantics: Vec<SemanticRow>,
+    oversized_blob: Option<Vec<u8>>,
+    unblocked_scan_calls: usize,
 }
 
 impl CountingStore {
@@ -60,6 +66,8 @@ impl CountingStore {
             release: (Mutex::new(!semantic), Condvar::new()),
             scan_progress: (Mutex::new(0), Condvar::new()),
             event_key_calls: AtomicUsize::new(0),
+            blob_calls: AtomicUsize::new(0),
+            typed_lookup_calls: AtomicUsize::new(0),
             capabilities: ProviderCapabilities::qtrb_register_observations(),
             completeness: vec![
                 CompletenessRow {
@@ -85,6 +93,20 @@ impl CountingStore {
                 },
             ))
             .unwrap(),
+            semantics: if semantic {
+                (0..count)
+                    .map(|owner_row| SemanticRow {
+                        owner_row,
+                        category: None,
+                        name: 0,
+                        detail_blob: owner_row as u32,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            oversized_blob: None,
+            unblocked_scan_calls: 1,
         }
     }
 
@@ -119,6 +141,13 @@ impl CountingStore {
 }
 
 impl TraceStoreView for CountingStore {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "layout_fingerprint": vec![1_u8; 32],
+        }))
+        .unwrap()
+    }
     fn event_count(&self) -> usize {
         self.keys.len()
     }
@@ -142,17 +171,20 @@ impl TraceStoreView for CountingStore {
         &self.capabilities
     }
     fn instruction(&self, _row: usize) -> Option<InstructionRow> {
+        self.typed_lookup_calls.fetch_add(1, Ordering::Relaxed);
         None
     }
     fn memory(&self, _row: usize) -> Option<MemoryRow> {
+        self.typed_lookup_calls.fetch_add(1, Ordering::Relaxed);
         None
     }
     fn semantic(&self, row: usize) -> Option<SemanticRow> {
+        self.typed_lookup_calls.fetch_add(1, Ordering::Relaxed);
         (self.semantic && row < self.keys.len()).then_some(SemanticRow {
             owner_row: row,
             category: None,
             name: 0,
-            detail_blob: 0,
+            detail_blob: row as u32,
         })
     }
     fn payload_bytes(&self, row: usize) -> Result<&[u8], IndexError> {
@@ -165,21 +197,33 @@ impl TraceStoreView for CountingStore {
     fn string_bytes(&self, _id: u32) -> Result<&[u8], IndexError> {
         Ok(b"event")
     }
-    fn blob_bytes(&self, _id: u32) -> Result<&[u8], IndexError> {
+    fn blob_bytes(&self, id: u32) -> Result<&[u8], IndexError> {
+        if let Some(blob) = &self.oversized_blob {
+            return Ok(blob);
+        }
+        let detail: &[u8] = if id == 0 {
+            b"detail matches needle"
+        } else {
+            b"detail matches needle future"
+        };
+        let blob_call = self.blob_calls.fetch_add(1, Ordering::Relaxed);
+        if blob_call < self.blob_count() {
+            return Ok(detail);
+        }
         let call = {
             let mut progress = self.scan_progress.0.lock().unwrap();
             *progress += 1;
             self.scan_progress.1.notify_all();
             *progress
         };
-        if call == 1 {
-            return Ok(b"detail matches needle");
+        if call <= self.unblocked_scan_calls {
+            return Ok(detail);
         }
         let mut released = self.release.0.lock().unwrap();
         while !*released {
             released = self.release.1.wait(released).unwrap();
         }
-        Ok(b"detail matches needle")
+        Ok(detail)
     }
     fn memory_before_bytes(&self, _row: usize) -> Result<Option<&[u8]>, IndexError> {
         Ok(None)
@@ -193,7 +237,32 @@ impl TraceStoreView for CountingStore {
     fn definition(&self, _id: u32) -> Option<&DefinitionRow> {
         None
     }
+    fn module_rows(&self) -> &[ModuleRow] {
+        &[]
+    }
+    fn definition_rows(&self) -> &[DefinitionRow] {
+        &[]
+    }
+    fn instruction_rows(&self) -> &[InstructionRow] {
+        &[]
+    }
+    fn memory_rows(&self) -> &[MemoryRow] {
+        &[]
+    }
+    fn semantic_rows(&self) -> &[SemanticRow] {
+        &self.semantics
+    }
+    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+        &[]
+    }
+    fn string_count(&self) -> usize {
+        1
+    }
+    fn blob_count(&self) -> usize {
+        self.keys.len().max(1)
+    }
     fn register_observations(&self, _row: usize) -> Vec<RegisterObservationRow> {
+        self.typed_lookup_calls.fetch_add(1, Ordering::Relaxed);
         vec![]
     }
     fn completeness(&self) -> &[CompletenessRow] {
@@ -358,6 +427,25 @@ fn stable_cursor_traversal_has_no_duplicates_or_omissions_and_second_page_is_bou
         next = page.next;
     }
     assert_eq!(ordinals, (0..512).collect::<Vec<_>>());
+    assert_eq!(store.typed_lookup_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn context_builds_owner_maps_once_and_pages_share_store_wide_artifacts() {
+    let store = Arc::new(CountingStore::new(512, 9, false));
+    let context = Arc::new(QueryContext::new(store.clone()).unwrap());
+    let context_key_calls = store.event_key_calls.load(Ordering::Relaxed);
+    assert!(context_key_calls <= 513);
+    assert_eq!(store.typed_lookup_calls.load(Ordering::Relaxed), 0);
+    let projection = TimelineProjection::new(context, EventFilter::default()).unwrap();
+    let first = query_events(&projection, None, 1).unwrap();
+    let second = query_events(&projection, first.next.as_ref(), 1).unwrap();
+    assert!(Arc::ptr_eq(&first.completeness, &second.completeness));
+    assert_eq!(
+        store.event_key_calls.load(Ordering::Relaxed),
+        context_key_calls
+    );
+    assert_eq!(store.typed_lookup_calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -433,4 +521,174 @@ fn semantic_detail_background_scan_is_cancellable() {
     assert!(projection.wait_until_complete(Duration::from_secs(2)));
     assert!(projection.is_cancelled());
     assert!(!query_events(&projection, None, 10).unwrap().exact_total);
+}
+
+#[test]
+fn pending_empty_page_returns_a_stable_watermark_cursor_and_resumes_after_progress() {
+    let store = Arc::new(CountingStore::new(8, 9, true));
+    let projection = projection(
+        store.clone(),
+        EventFilter {
+            semantic_detail_contains: vec!["future".into()],
+            ..EventFilter::default()
+        },
+    );
+    store.wait_for_semantic_calls(2);
+    let first_poll = query_events(&projection, None, 2).unwrap();
+    assert!(first_poll.rows.is_empty());
+    assert!(!first_poll.exact_total);
+    let watermark = first_poll.next.expect("pending watermark cursor");
+    let repeated = query_events(&projection, Some(&watermark), 2).unwrap();
+    assert!(repeated.rows.is_empty());
+    assert_eq!(repeated.next.as_ref(), Some(&watermark));
+
+    store.release_semantic_scan();
+    assert!(projection.wait_until_complete(Duration::from_secs(2)));
+    let resumed = query_events(&projection, Some(&watermark), 20).unwrap();
+    assert!(resumed.exact_total);
+    assert_eq!(
+        resumed
+            .rows
+            .iter()
+            .map(|row| row.key().record_ordinal)
+            .collect::<Vec<_>>(),
+        (1..8).collect::<Vec<_>>()
+    );
+    assert!(resumed.next.is_none());
+}
+
+#[test]
+fn pending_cursor_prefers_the_last_returned_row_when_more_visible_rows_exist() {
+    let mut store = CountingStore::new(8, 9, true);
+    store.unblocked_scan_calls = 5;
+    let store = Arc::new(store);
+    let projection = projection(
+        store.clone(),
+        EventFilter {
+            semantic_detail_contains: vec!["needle".into()],
+            ..EventFilter::default()
+        },
+    );
+    store.wait_for_semantic_calls(6);
+    let first = query_events(&projection, None, 2).unwrap();
+    assert_eq!(
+        first
+            .rows
+            .iter()
+            .map(|row| row.key().record_ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    let second = query_events(&projection, first.next.as_ref(), 2).unwrap();
+    assert_eq!(
+        second
+            .rows
+            .iter()
+            .map(|row| row.key().record_ordinal)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    store.release_semantic_scan();
+}
+
+#[test]
+fn excessive_filter_terms_fail_with_a_stable_error_code() {
+    let filter = EventFilter {
+        semantic_names: (0..513).map(|term| format!("name-{term}")).collect(),
+        ..EventFilter::default()
+    };
+    let error = match TimelineProjection::new(
+        Arc::new(QueryContext::new(Arc::new(CountingStore::new(1, 9, false))).unwrap()),
+        filter,
+    ) {
+        Ok(_) => panic!("over-limit filter was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "analysis.filter_too_complex");
+}
+
+#[test]
+fn excessive_module_range_expansion_fails_with_a_stable_error_code() {
+    let filter = EventFilter {
+        modules: (0..65).collect(),
+        relative_pc: (0..65)
+            .map(|term| AddressRange::new(term * 2, term * 2 + 1).unwrap())
+            .collect(),
+        ..EventFilter::default()
+    };
+    let error = match TimelineProjection::new(
+        Arc::new(QueryContext::new(Arc::new(CountingStore::new(1, 9, false))).unwrap()),
+        filter,
+    ) {
+        Ok(_) => panic!("over-limit module/range expansion was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "analysis.filter_too_complex");
+}
+
+#[test]
+fn oversized_semantic_detail_fails_with_a_stable_resource_error() {
+    let mut store = CountingStore::new(1, 9, true);
+    store.oversized_blob = Some(vec![b'x'; 8 * 1024 * 1024 + 1]);
+    let projection = projection(
+        Arc::new(store),
+        EventFilter {
+            semantic_detail_contains: vec!["needle".into()],
+            ..EventFilter::default()
+        },
+    );
+    assert!(projection.wait_until_complete(Duration::from_secs(2)));
+    assert_eq!(
+        query_events(&projection, None, 1).unwrap_err().code(),
+        "analysis.resource_exhausted"
+    );
+}
+
+fn completeness_page(store: CountingStore) -> qtrace_analysis::EventPage {
+    let projection = projection(Arc::new(store), EventFilter::default());
+    query_events(&projection, None, 10).unwrap()
+}
+
+#[test]
+fn completeness_is_unknown_without_capability_or_full_domain_coverage() {
+    let mut empty = CountingStore::new(7, 9, true);
+    empty.release_semantic_scan();
+    empty.completeness.clear();
+    let page = completeness_page(empty);
+    assert_eq!(page.completeness.status, CompletenessStatus::Unknown);
+    assert!(!page.completeness.complete);
+
+    let mut partial = CountingStore::new(7, 9, true);
+    partial.release_semantic_scan();
+    partial.completeness = vec![CompletenessRow {
+        domain: RangeDomain::CapturedSequence,
+        bounds: RangeBounds::InclusiveSequence { first: 1, last: 2 },
+        provenance: Provenance::Captured,
+        cause: CompletenessCause::Retained,
+    }];
+    let page = completeness_page(partial);
+    assert_eq!(page.completeness.status, CompletenessStatus::Unknown);
+
+    let mut no_capability = CountingStore::new(7, 9, true);
+    no_capability.release_semantic_scan();
+    no_capability.completeness.truncate(1);
+    no_capability.capabilities.loss_and_damage_ranges = false;
+    let page = completeness_page(no_capability);
+    assert_eq!(page.completeness.status, CompletenessStatus::Unknown);
+}
+
+#[test]
+fn completeness_requires_full_retained_coverage_and_marks_damage_incomplete() {
+    let mut complete = CountingStore::new(7, 9, true);
+    complete.release_semantic_scan();
+    complete.completeness.truncate(1);
+    let page = completeness_page(complete);
+    assert_eq!(page.completeness.status, CompletenessStatus::Complete);
+    assert!(page.completeness.complete);
+
+    let damaged = CountingStore::new(7, 9, true);
+    damaged.release_semantic_scan();
+    let page = completeness_page(damaged);
+    assert_eq!(page.completeness.status, CompletenessStatus::Incomplete);
+    assert!(!page.completeness.complete);
 }

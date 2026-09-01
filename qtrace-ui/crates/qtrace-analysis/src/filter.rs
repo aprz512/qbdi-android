@@ -3,6 +3,10 @@ use sha2::{Digest, Sha256};
 
 use crate::AnalysisError;
 
+const MAX_FILTER_TERMS: usize = 512;
+const MAX_FILTER_CARTESIAN_PAIRS: usize = 4_096;
+const MAX_FILTER_TEXT_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SequenceRange {
     pub first: u64,
@@ -76,6 +80,16 @@ pub struct EventFilter {
 
 impl EventFilter {
     pub(crate) fn normalized(&self) -> Result<Self, AnalysisError> {
+        if raw_term_count(self) > MAX_FILTER_TERMS {
+            return Err(AnalysisError::filter_too_complex(
+                "filter exceeds 512 terms",
+            ));
+        }
+        if raw_text_bytes(self).is_none_or(|bytes| bytes > MAX_FILTER_TEXT_BYTES) {
+            return Err(AnalysisError::filter_too_complex(
+                "filter text exceeds 1 MiB",
+            ));
+        }
         let mut filter = self.clone();
         filter.tids.sort_unstable();
         filter.tids.dedup();
@@ -85,13 +99,10 @@ impl EventFilter {
         filter.modules.dedup();
         normalize_address_ranges(&mut filter.relative_pc)?;
         normalize_address_ranges(&mut filter.absolute_pc)?;
-        filter
-            .sequence
-            .sort_by_key(|range| (range.first, range.last));
-        filter.sequence.dedup();
         if filter.sequence.iter().any(|range| range.first > range.last) {
             return Err(AnalysisError::invalid_filter("invalid sequence range"));
         }
+        normalize_sequence_ranges(&mut filter.sequence);
         for matcher in &mut filter.mnemonic {
             let value = match matcher {
                 MnemonicFilter::Exact(value) | MnemonicFilter::Contains(value) => value,
@@ -136,13 +147,42 @@ impl EventFilter {
                         )
                 })
         });
-        filter.memory.dedup();
+        normalize_memory_ranges(&mut filter.memory);
         normalize_text(&mut filter.semantic_categories, "semantic category")?;
         normalize_text(&mut filter.semantic_names, "semantic name")?;
         normalize_text(
             &mut filter.semantic_detail_contains,
             "semantic detail matcher",
         )?;
+        let terms = filter.tids.len()
+            + filter.kinds.len()
+            + filter.modules.len()
+            + filter.relative_pc.len()
+            + filter.absolute_pc.len()
+            + filter.sequence.len()
+            + filter.mnemonic.len()
+            + filter.register.reads.len()
+            + filter.register.writes.len()
+            + filter.memory.len()
+            + filter.semantic_categories.len()
+            + filter.semantic_names.len()
+            + filter.semantic_detail_contains.len();
+        if terms > MAX_FILTER_TERMS {
+            return Err(AnalysisError::filter_too_complex(
+                "normalized filter exceeds 512 terms",
+            ));
+        }
+        if filter.modules.len().saturating_mul(
+            filter
+                .relative_pc
+                .len()
+                .saturating_add(filter.absolute_pc.len()),
+        ) > MAX_FILTER_CARTESIAN_PAIRS
+        {
+            return Err(AnalysisError::filter_too_complex(
+                "module/range expansion exceeds 4096 pairs",
+            ));
+        }
         Ok(filter)
     }
 
@@ -204,8 +244,113 @@ fn normalize_address_ranges(ranges: &mut Vec<AddressRange>) -> Result<(), Analys
         return Err(AnalysisError::invalid_filter("invalid address range"));
     }
     ranges.sort_by_key(|range| (range.start, range.end_exclusive));
-    ranges.dedup();
+    let mut merged: Vec<AddressRange> = Vec::with_capacity(ranges.len());
+    for range in ranges.drain(..) {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end_exclusive
+        {
+            previous.end_exclusive = previous.end_exclusive.max(range.end_exclusive);
+            continue;
+        }
+        merged.push(range);
+    }
+    *ranges = merged;
     Ok(())
+}
+
+fn normalize_sequence_ranges(ranges: &mut Vec<SequenceRange>) {
+    ranges.sort_by_key(|range| (range.first, range.last));
+    let mut merged: Vec<SequenceRange> = Vec::with_capacity(ranges.len());
+    for range in ranges.drain(..) {
+        if let Some(previous) = merged.last_mut()
+            && range.first <= previous.last.saturating_add(1)
+        {
+            previous.last = previous.last.max(range.last);
+            continue;
+        }
+        merged.push(range);
+    }
+    *ranges = merged;
+}
+
+fn normalize_memory_ranges(ranges: &mut Vec<MemoryFilter>) {
+    let mut boundaries = ranges
+        .iter()
+        .flat_map(|range| [range.range.start, range.range.end_exclusive])
+        .collect::<Vec<_>>();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut canonical: Vec<MemoryFilter> = Vec::new();
+    for bounds in boundaries.windows(2) {
+        let start = bounds[0];
+        let end_exclusive = bounds[1];
+        let active = ranges.iter().filter(|range| {
+            range.range.start <= start && end_exclusive <= range.range.end_exclusive
+        });
+        let mut any = false;
+        let mut wildcard = false;
+        let mut directions = Vec::new();
+        for range in active {
+            any = true;
+            if range.directions.is_empty() {
+                wildcard = true;
+            } else {
+                directions.extend(range.directions.iter().copied());
+            }
+        }
+        if !any {
+            continue;
+        }
+        directions.sort_by_key(|direction| direction_tag(*direction));
+        directions.dedup();
+        if wildcard {
+            directions.clear();
+        }
+        if let Some(previous) = canonical.last_mut()
+            && previous.range.end_exclusive == start
+            && previous.directions == directions
+        {
+            previous.range.end_exclusive = end_exclusive;
+        } else {
+            canonical.push(MemoryFilter {
+                range: AddressRange {
+                    start,
+                    end_exclusive,
+                },
+                directions,
+            });
+        }
+    }
+    *ranges = canonical;
+}
+
+fn raw_term_count(filter: &EventFilter) -> usize {
+    filter.tids.len()
+        + filter.kinds.len()
+        + filter.modules.len()
+        + filter.relative_pc.len()
+        + filter.absolute_pc.len()
+        + filter.sequence.len()
+        + filter.mnemonic.len()
+        + filter.register.reads.len()
+        + filter.register.writes.len()
+        + filter.memory.len()
+        + filter.semantic_categories.len()
+        + filter.semantic_names.len()
+        + filter.semantic_detail_contains.len()
+}
+
+fn raw_text_bytes(filter: &EventFilter) -> Option<usize> {
+    filter
+        .mnemonic
+        .iter()
+        .map(|matcher| match matcher {
+            MnemonicFilter::Exact(value) | MnemonicFilter::Contains(value) => value.len(),
+        })
+        .chain(filter.semantic_categories.iter().map(String::len))
+        .chain(filter.semantic_names.iter().map(String::len))
+        .chain(filter.semantic_detail_contains.iter().map(String::len))
+        .try_fold(0_usize, usize::checked_add)
 }
 
 fn normalize_slots(slots: &mut Vec<RegisterSlot>) {
