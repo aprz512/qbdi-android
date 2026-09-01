@@ -124,6 +124,82 @@ fn flight_fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn qtrb_record(kind: u16, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&kind.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn qtrb_string(value: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn nonmonotonic_pc_qtrb() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"QTRB");
+    bytes.extend_from_slice(&[1, 2, 1, 8, 2, 0]);
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+
+    let mut begin = Vec::new();
+    begin.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    begin.extend_from_slice(&0x100_u64.to_le_bytes());
+    begin.extend_from_slice(&0x7100_0100_u64.to_le_bytes());
+    begin.extend_from_slice(&4242_u32.to_le_bytes());
+    begin.extend_from_slice(&7_u32.to_le_bytes());
+    begin.extend_from_slice(&[2, 0]);
+    begin.extend_from_slice(&4096_u64.to_le_bytes());
+    begin.extend_from_slice(&1_u64.to_le_bytes());
+    begin.extend(qtrb_string(b"posting-order"));
+    begin.extend(qtrb_string(b"libtarget.so"));
+    bytes.extend(qtrb_record(1, &begin));
+
+    let mut module = Vec::new();
+    module.extend_from_slice(&1_u32.to_le_bytes());
+    module.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    module.extend(qtrb_string(b"libtarget.so"));
+    bytes.extend(qtrb_record(2, &module));
+
+    let mut definition = Vec::new();
+    definition.extend_from_slice(&7_u32.to_le_bytes());
+    definition.extend_from_slice(&0xd503_201f_u32.to_le_bytes());
+    definition.extend_from_slice(&0_u64.to_le_bytes());
+    definition.extend_from_slice(&0_u64.to_le_bytes());
+    definition.extend_from_slice(&0_i64.to_le_bytes());
+    definition.extend_from_slice(&0_u32.to_le_bytes());
+    definition.extend_from_slice(&[0, 0, 0, 0]);
+    definition.extend(qtrb_string(b"nop"));
+    definition.extend(qtrb_string(b""));
+    definition.extend(qtrb_string(b"nop"));
+    bytes.extend(qtrb_record(3, &definition));
+
+    for (sequence, pc) in [(1_u64, 0x30_u64), (2, 0x10)] {
+        let mut instruction = Vec::new();
+        instruction.extend_from_slice(&sequence.to_le_bytes());
+        instruction.extend_from_slice(&1_u32.to_le_bytes());
+        instruction.extend_from_slice(&pc.to_le_bytes());
+        instruction.extend_from_slice(&7_u32.to_le_bytes());
+        instruction.extend_from_slice(&[0, 0]);
+        bytes.extend(qtrb_record(4, &instruction));
+    }
+    let encoded_bytes = (bytes.len() + 8 + 97) as u64;
+    let mut terminal = Vec::new();
+    terminal.push(1);
+    terminal.extend_from_slice(&0x55_u64.to_le_bytes());
+    terminal.extend_from_slice(&17_u64.to_le_bytes());
+    for value in [2, encoded_bytes, encoded_bytes, 0, 0, 0, 0, 0, 0, 4096] {
+        terminal.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend(qtrb_record(9, &terminal));
+    bytes
+}
+
 #[test]
 fn published_cache_reopens_as_mapped_store_with_equivalent_queries() {
     let session = SessionLoader::open_report(
@@ -135,8 +211,8 @@ fn published_cache_reopens_as_mapped_store_with_equivalent_queries() {
     let source = session
         .artifacts()
         .iter()
-        .find(|artifact| artifact.local_path().ends_with("capture.flight.bin"))
-        .expect("Flight artifact");
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
     let options = BuildOptions::default();
     let owned = IndexBuilder::build(source, &options, &AllowAll).expect("owned index");
     let root = private_root();
@@ -704,6 +780,12 @@ fn bounded_postings_reject_oversize_and_cancel_before_row_allocation() {
         allocation_calls: Mutex::new(0),
     };
     let error = view
+        .bounded_row_count(NormalizedPostingQuery::Tids(&[tid]), 0, &allocations)
+        .expect_err("nonempty posting count exceeds zero row budget");
+    assert_eq!(error.code(), "control.resource_exhausted");
+    assert_eq!(*allocations.allocation_calls.lock().unwrap(), 0);
+
+    let error = view
         .bounded_rows(NormalizedPostingQuery::Tids(&[tid]), 0, &allocations)
         .expect_err("nonempty posting exceeds zero row budget");
     assert_eq!(error.code(), "control.resource_exhausted");
@@ -724,6 +806,92 @@ fn bounded_postings_reject_oversize_and_cancel_before_row_allocation() {
         .expect_err("cancel before posting copy");
     assert_eq!(error.code(), "job.cancelled");
     assert_eq!(*cancelled.allocation_calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn bounded_pair_postings_are_ascending_unique_for_owned_and_mapped_stores() {
+    let source_root = TempDir::new().expect("source root");
+    let source_path = source_root.path().join("nonmonotonic.trace.bin");
+    fs::write(&source_path, nonmonotonic_pc_qtrb()).expect("write QTRB fixture");
+    let session = SessionLoader::open_artifact(
+        AuthorizedPath::new(source_path),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("production QTRB parser");
+    let source = &session.artifacts()[0];
+    let options = BuildOptions::default();
+    let owned = IndexBuilder::build(source, &options, &AllowAll).expect("owned store");
+    let root = private_root();
+    let mapped =
+        TraceStore::open_or_build(root.path(), source, &options, &AllowAll).expect("mapped store");
+
+    let query = NormalizedPostingQuery::Sequence {
+        start: 0,
+        end_exclusive: u64::MAX,
+    };
+    let owned_rows = owned
+        .bounded_rows(query, usize::MAX, &AllowAll)
+        .expect("owned sequence posting");
+    let mapped_rows = mapped
+        .bounded_rows(query, usize::MAX, &AllowAll)
+        .expect("mapped sequence posting");
+    assert_eq!(owned_rows, mapped_rows);
+    assert!(
+        owned_rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "bounded posting contract requires ascending unique row IDs: {owned_rows:?}"
+    );
+
+    let mut observed_module_pc_rows = false;
+    for module in 0..owned.module_rows().len() {
+        let module = module as u32;
+        let mut pcs = owned
+            .instruction_rows()
+            .iter()
+            .filter(|row| row.module == Some(module))
+            .map(|row| row.relative_pc);
+        let Some(first_pc) = pcs.next() else {
+            continue;
+        };
+        let (minimum, maximum) = pcs.fold((first_pc, first_pc), |(minimum, maximum), pc| {
+            (minimum.min(pc), maximum.max(pc))
+        });
+        let end = maximum.saturating_add(1);
+        if minimum >= end {
+            continue;
+        }
+        let query = NormalizedPostingQuery::ModulePc {
+            module,
+            start: minimum,
+            end_exclusive: end,
+        };
+        let owned_count = owned
+            .bounded_row_count(query, usize::MAX, &AllowAll)
+            .expect("owned module-PC count");
+        let mapped_count = mapped
+            .bounded_row_count(query, usize::MAX, &AllowAll)
+            .expect("mapped module-PC count");
+        assert_eq!(owned_count, mapped_count);
+        let owned_rows = owned
+            .bounded_rows(query, usize::MAX, &AllowAll)
+            .expect("owned module-PC posting");
+        let mapped_rows = mapped
+            .bounded_rows(query, usize::MAX, &AllowAll)
+            .expect("mapped module-PC posting");
+        assert_eq!(owned_rows, mapped_rows);
+        assert_eq!(owned_count, owned_rows.len());
+        if owned_rows.len() > 1 {
+            observed_module_pc_rows = true;
+        }
+        assert!(
+            owned_rows.windows(2).all(|pair| pair[0] < pair[1]),
+            "bounded posting contract requires ascending unique row IDs: {owned_rows:?}"
+        );
+    }
+    assert!(
+        observed_module_pc_rows,
+        "fixture needs a multi-row module-PC posting"
+    );
 }
 
 #[test]

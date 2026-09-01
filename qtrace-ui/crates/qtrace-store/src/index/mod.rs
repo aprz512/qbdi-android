@@ -458,21 +458,24 @@ impl<'a> ByteArena<'a> {
             .ok_or_else(|| IndexError::corrupt("arena span is outside its bytes"))
     }
 
-    fn validate(&self) -> Result<(), IndexError> {
+    fn validate(&self, guard: &dyn WorkGuard) -> Result<(), IndexError> {
         if self.bytes.as_slice().len() as u64 > self.max_bytes {
             return Err(IndexError::corrupt("arena exceeds its declared byte bound"));
         }
         let mut expected = 0_u64;
-        for span in self.spans.as_slice() {
-            if span.offset != expected {
-                return Err(IndexError::corrupt(
-                    "arena spans are not append-only contiguous",
-                ));
+        guarded_row_chunks(self.spans.as_slice(), guard, |chunk| {
+            for span in chunk {
+                if span.offset != expected {
+                    return Err(IndexError::corrupt(
+                        "arena spans are not append-only contiguous",
+                    ));
+                }
+                expected = expected
+                    .checked_add(span.length)
+                    .ok_or_else(|| IndexError::corrupt("arena span end overflow"))?;
             }
-            expected = expected
-                .checked_add(span.length)
-                .ok_or_else(|| IndexError::corrupt("arena span end overflow"))?;
-        }
+            Ok(())
+        })?;
         if expected != self.bytes.as_slice().len() as u64 {
             return Err(IndexError::corrupt("arena spans do not cover exact bytes"));
         }
@@ -783,6 +786,7 @@ struct NormalizedCatalog {
 struct GuardedDigest<'a> {
     digest: Sha256,
     guard: &'a dyn WorkGuard,
+    pending: [u8; 4096],
     pending_bytes: usize,
 }
 
@@ -790,17 +794,23 @@ impl GuardedDigest<'_> {
     fn bytes(&mut self, mut bytes: &[u8]) -> Result<(), IndexError> {
         while !bytes.is_empty() {
             let count = bytes.len().min(4096 - self.pending_bytes);
-            self.digest.update(&bytes[..count]);
+            self.pending[self.pending_bytes..self.pending_bytes + count]
+                .copy_from_slice(&bytes[..count]);
             self.pending_bytes += count;
             bytes = &bytes[count..];
             if self.pending_bytes == 4096 {
-                self.guard.consume(WorkDelta {
-                    input_bytes: 4096,
-                    ..WorkDelta::default()
-                })?;
-                self.pending_bytes = 0;
+                self.flush()?;
             }
         }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), IndexError> {
+        let count = self.pending_bytes;
+        guarded_byte_chunks(&self.pending[..count], self.guard, |chunk| {
+            self.digest.update(chunk);
+        })?;
+        self.pending_bytes = 0;
         Ok(())
     }
 
@@ -838,15 +848,37 @@ impl GuardedDigest<'_> {
         self.u64(value.unwrap_or_default())
     }
 
-    fn finish(self) -> Result<NormalizedContentIdentity, IndexError> {
-        if self.pending_bytes != 0 {
-            self.guard.consume(WorkDelta {
-                input_bytes: self.pending_bytes as u64,
-                ..WorkDelta::default()
-            })?;
-        }
+    fn finish(mut self) -> Result<NormalizedContentIdentity, IndexError> {
+        self.flush()?;
         Ok(NormalizedContentIdentity(self.digest.finalize().into()))
     }
+}
+
+fn guarded_byte_chunks(
+    bytes: &[u8],
+    guard: &dyn WorkGuard,
+    mut work: impl FnMut(&[u8]),
+) -> Result<(), IndexError> {
+    for chunk in bytes.chunks(4096) {
+        guard.consume(WorkDelta {
+            input_bytes: chunk.len() as u64,
+            ..WorkDelta::default()
+        })?;
+        work(chunk);
+    }
+    Ok(())
+}
+
+fn guarded_row_chunks<T>(
+    rows: &[T],
+    guard: &dyn WorkGuard,
+    mut work: impl FnMut(&[T]) -> Result<(), IndexError>,
+) -> Result<(), IndexError> {
+    for chunk in rows.chunks(4096) {
+        guard.consume(WorkDelta::default())?;
+        work(chunk)?;
+    }
+    Ok(())
 }
 
 fn derive_normalized_content_identity(
@@ -859,6 +891,7 @@ fn derive_normalized_content_identity(
     let mut out = GuardedDigest {
         digest: Sha256::new(),
         guard,
+        pending: [0; 4096],
         pending_bytes: 0,
     };
     out.bytes(b"qtrace-store/normalized-content/v1\0sha256\0canonical-logical-catalog")?;
@@ -1006,27 +1039,26 @@ impl NormalizedCatalog {
                 "normalized event-column row counts differ",
             ));
         }
-        self.strings.validate()?;
-        self.payloads.validate()?;
-        self.blobs.validate()?;
-        for chunk in self.events.chunks(4096) {
-            guard.consume(WorkDelta::default())?;
+        self.strings.validate(guard)?;
+        self.payloads.validate(guard)?;
+        self.blobs.validate(guard)?;
+        guarded_row_chunks(&self.events, guard, |chunk| {
             for event in chunk {
                 self.payloads.get(event.payload_blob).map_err(|error| {
                     IndexError::corrupt(format!("event payload reference is invalid: {error}"))
                 })?;
             }
-        }
-        for chunk in self.modules.chunks(4096) {
-            guard.consume(WorkDelta::default())?;
+            Ok(())
+        })?;
+        guarded_row_chunks(&self.modules, guard, |chunk| {
             for module in chunk {
                 self.strings.get(module.name).map_err(|error| {
                     IndexError::corrupt(format!("module name reference is invalid: {error}"))
                 })?;
             }
-        }
-        for chunk in self.definitions.chunks(4096) {
-            guard.consume(WorkDelta::default())?;
+            Ok(())
+        })?;
+        guarded_row_chunks(&self.definitions, guard, |chunk| {
             for definition in chunk {
                 self.strings.get(definition.mnemonic).map_err(|error| {
                     IndexError::corrupt(format!(
@@ -1047,41 +1079,58 @@ impl NormalizedCatalog {
                     IndexError::corrupt(format!("definition blob reference is invalid: {error}"))
                 })?;
             }
-        }
-        checkpoint_chunks(self.instructions.len(), guard)?;
-        checkpoint_chunks(self.memories.len(), guard)?;
-        checkpoint_chunks(self.semantics.len(), guard)?;
-        checkpoint_chunks(self.observations.len(), guard)?;
-        if self.instructions.iter().any(|row| {
-            row.owner_row >= event_count
-                || row
-                    .module
-                    .is_some_and(|id| id as usize >= self.modules.len())
-                || row
-                    .definition
-                    .is_some_and(|id| id as usize >= self.definitions.len())
-        }) || self.memories.iter().any(|row| {
-            row.owner_row >= event_count
-                || row
-                    .module
-                    .is_some_and(|id| id as usize >= self.modules.len())
-                || row.address.checked_add(u64::from(row.size)) != Some(row.end_exclusive)
-                || self.blobs.get(row.before_blob).is_err()
-                || self.blobs.get(row.after_blob).is_err()
-        }) || self.semantics.iter().any(|row| {
-            row.owner_row >= event_count
-                || row.category.is_some_and(|id| self.strings.get(id).is_err())
-                || self.strings.get(row.name).is_err()
-                || self.blobs.get(row.detail_blob).is_err()
-        }) || self.observations.iter().any(|row| {
-            row.owner_row >= event_count
-                || row.slot as usize >= RegisterSlot::COUNT
-                || row.captured_width == 0
-        }) {
-            return Err(IndexError::corrupt(
-                "normalized typed-table reference is invalid",
-            ));
-        }
+            Ok(())
+        })?;
+        let invalid = || IndexError::corrupt("normalized typed-table reference is invalid");
+        guarded_row_chunks(&self.instructions, guard, |chunk| {
+            if chunk.iter().any(|row| {
+                row.owner_row >= event_count
+                    || row
+                        .module
+                        .is_some_and(|id| id as usize >= self.modules.len())
+                    || row
+                        .definition
+                        .is_some_and(|id| id as usize >= self.definitions.len())
+            }) {
+                return Err(invalid());
+            }
+            Ok(())
+        })?;
+        guarded_row_chunks(&self.memories, guard, |chunk| {
+            if chunk.iter().any(|row| {
+                row.owner_row >= event_count
+                    || row
+                        .module
+                        .is_some_and(|id| id as usize >= self.modules.len())
+                    || row.address.checked_add(u64::from(row.size)) != Some(row.end_exclusive)
+                    || self.blobs.get(row.before_blob).is_err()
+                    || self.blobs.get(row.after_blob).is_err()
+            }) {
+                return Err(invalid());
+            }
+            Ok(())
+        })?;
+        guarded_row_chunks(&self.semantics, guard, |chunk| {
+            if chunk.iter().any(|row| {
+                row.owner_row >= event_count
+                    || row.category.is_some_and(|id| self.strings.get(id).is_err())
+                    || self.strings.get(row.name).is_err()
+                    || self.blobs.get(row.detail_blob).is_err()
+            }) {
+                return Err(invalid());
+            }
+            Ok(())
+        })?;
+        guarded_row_chunks(&self.observations, guard, |chunk| {
+            if chunk.iter().any(|row| {
+                row.owner_row >= event_count
+                    || row.slot as usize >= RegisterSlot::COUNT
+                    || row.captured_width == 0
+            }) {
+                return Err(invalid());
+            }
+            Ok(())
+        })?;
         if self.indexes.source_keys.len() != event_count {
             return Err(IndexError::corrupt(
                 "source row and EventKey mapping is not bijective",
@@ -1135,13 +1184,6 @@ impl NormalizedCatalog {
         })?;
         Ok(())
     }
-}
-
-fn checkpoint_chunks(rows: usize, guard: &dyn WorkGuard) -> Result<(), IndexError> {
-    for _ in (0..rows).step_by(4096) {
-        guard.consume(WorkDelta::default())?;
-    }
-    Ok(())
 }
 
 /// Stable, read-only normalized facts and eager-index primitives shared by owned and mapped stores.
@@ -1203,6 +1245,15 @@ pub trait NormalizedBulkView: TraceStoreView {
     fn register_observation_rows(&self) -> &[RegisterObservationRow];
     fn string_count(&self) -> usize;
     fn blob_count(&self) -> usize;
+    /// Returns an allocation-free upper bound for the ascending-unique row IDs returned by
+    /// [`Self::bounded_rows`], rejecting before decode when that bound exceeds `max_rows`.
+    fn bounded_row_count(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<usize, IndexError>;
+    /// Returns row IDs in strictly ascending order with duplicates removed.
     fn bounded_rows(
         &self,
         query: NormalizedPostingQuery<'_>,
@@ -1292,23 +1343,24 @@ fn bounded_posting_union(
             previous = Some(row);
         }
     }
-    builder::cancellable_sort_by(&mut rows, guard, usize::cmp)?;
-    rows.dedup();
+    if lists.len() > 1 {
+        radix_sort_unique_rows(&mut rows, guard)?;
+    }
     Ok(rows)
 }
 
-fn bounded_map_rows<'a, K, I>(
+fn bounded_map_count<'a, K, I>(
     map: &'a SortedMap<K, PostingList>,
     keys: I,
     max_rows: usize,
     guard: &dyn WorkGuard,
-) -> Result<Vec<usize>, IndexError>
+) -> Result<usize, IndexError>
 where
     K: Ord + 'a,
-    I: Iterator<Item = K> + Clone,
+    I: Iterator<Item = K>,
 {
     let mut encoded_rows = 0_usize;
-    for key in keys.clone() {
+    for key in keys {
         guard.consume(WorkDelta::default())?;
         if let Some(list) = map.get(&key) {
             encoded_rows = encoded_rows
@@ -1321,6 +1373,20 @@ where
             }
         }
     }
+    Ok(encoded_rows)
+}
+
+fn bounded_map_rows<'a, K, I>(
+    map: &'a SortedMap<K, PostingList>,
+    keys: I,
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<Vec<usize>, IndexError>
+where
+    K: Ord + 'a,
+    I: Iterator<Item = K> + Clone,
+{
+    bounded_map_count(map, keys.clone(), max_rows, guard)?;
     let mut lists = Vec::new();
     for key in keys {
         guard.consume(WorkDelta::default())?;
@@ -1369,7 +1435,80 @@ fn bounded_pair_rows(
         }
         result.push(*row);
     }
+    radix_sort_unique_rows(&mut result, guard)?;
     Ok(result)
+}
+
+fn bounded_pair_count(
+    rows: &[(u64, usize)],
+    start: u64,
+    end: u64,
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<usize, IndexError> {
+    if start >= end {
+        return Ok(0);
+    }
+    guard.consume(WorkDelta::default())?;
+    let first = rows.partition_point(|(value, _)| *value < start);
+    let last = rows.partition_point(|(value, _)| *value < end);
+    let count = last - first;
+    if count > max_rows {
+        return Err(IndexError::resource(
+            "bounded posting result exceeds row limit",
+        ));
+    }
+    Ok(count)
+}
+
+fn radix_sort_unique_rows(rows: &mut Vec<usize>, guard: &dyn WorkGuard) -> Result<(), IndexError> {
+    if rows.len() < 2 {
+        return Ok(());
+    }
+    let mut scratch = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut scratch,
+        rows.len(),
+        guard,
+        "bounded row radix scratch allocation",
+    )?;
+    scratch.resize(rows.len(), 0);
+    for pass in 0..(usize::BITS as usize / 8) {
+        let mut counts = [0_usize; 256];
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            counts[row.to_le_bytes()[pass] as usize] += 1;
+        }
+        let mut position = 0_usize;
+        for count in &mut counts {
+            let current = *count;
+            *count = position;
+            position += current;
+        }
+        for (index, row) in rows.iter().copied().enumerate() {
+            if index % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            let slot = &mut counts[row.to_le_bytes()[pass] as usize];
+            scratch[*slot] = row;
+            *slot += 1;
+        }
+        std::mem::swap(rows, &mut scratch);
+    }
+    let mut output = 1_usize;
+    for index in 1..rows.len() {
+        if index % 4096 == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        if rows[index] != rows[output - 1] {
+            rows[output] = rows[index];
+            output += 1;
+        }
+    }
+    rows.truncate(output);
+    Ok(())
 }
 
 fn rows_for_semantic_bytes(
@@ -1962,6 +2101,89 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
         self.normalized_catalog().blobs.spans().len()
     }
 
+    fn bounded_row_count(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<usize, IndexError> {
+        let catalog = self.normalized_catalog();
+        match query {
+            NormalizedPostingQuery::Tids(values) => bounded_map_count(
+                &catalog.indexes.tid,
+                values.iter().copied(),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Kinds(values) => bounded_map_count(
+                &catalog.indexes.kind,
+                values
+                    .iter()
+                    .map(|kind| crate::layout::encode_event_kind(*kind)),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Modules(values) => bounded_map_count(
+                &catalog.indexes.module,
+                values.iter().copied(),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Sequence {
+                start,
+                end_exclusive,
+            } => bounded_pair_count(
+                &catalog.indexes.sequence,
+                start,
+                end_exclusive,
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::ModulePc {
+                module,
+                start,
+                end_exclusive,
+            } => bounded_pair_count(
+                catalog
+                    .indexes
+                    .module_pc
+                    .get(&module)
+                    .map_or(&[], Vec::as_slice),
+                start,
+                end_exclusive,
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Definitions(values) => bounded_map_count(
+                &catalog.indexes.definition,
+                values.iter().copied(),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::Registers(values) => bounded_map_count(
+                &catalog.indexes.register,
+                values.iter().map(|slot| slot.index() as u8),
+                max_rows,
+                guard,
+            ),
+            NormalizedPostingQuery::SemanticCategories(values) => {
+                bounded_semantic_count(catalog, values, true, max_rows, guard)
+            }
+            NormalizedPostingQuery::SemanticNames(values) => {
+                bounded_semantic_count(catalog, values, false, max_rows, guard)
+            }
+            NormalizedPostingQuery::Memory {
+                start,
+                end_exclusive,
+            } => {
+                catalog
+                    .indexes
+                    .memory
+                    .overlap_count_bounded(start, end_exclusive, max_rows, guard)
+            }
+        }
+    }
+
     fn bounded_rows(
         &self,
         query: NormalizedPostingQuery<'_>,
@@ -2042,6 +2264,44 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
                 .overlaps_bounded(start, end_exclusive, max_rows, guard),
         }
     }
+}
+
+fn bounded_semantic_count(
+    catalog: &NormalizedCatalog,
+    values: &[&[u8]],
+    categories: bool,
+    max_rows: usize,
+    guard: &dyn WorkGuard,
+) -> Result<usize, IndexError> {
+    let map = if categories {
+        &catalog.indexes.semantic_category
+    } else {
+        &catalog.indexes.semantic_name
+    };
+    let mut count = 0_usize;
+    for value in values {
+        let mut matched_id = None;
+        for (id, _) in catalog.strings.spans().iter().enumerate() {
+            if id % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            if catalog.strings.get(id as u32)? == *value {
+                matched_id = Some(id as u32);
+                break;
+            }
+        }
+        if let Some(list) = matched_id.and_then(|id| map.get(&id)) {
+            count = count
+                .checked_add(list.deltas().len())
+                .ok_or_else(|| IndexError::resource("bounded posting row count overflow"))?;
+            if count > max_rows {
+                return Err(IndexError::resource(
+                    "bounded posting result exceeds row limit",
+                ));
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn bounded_semantic_rows(
@@ -2253,4 +2513,65 @@ pub(crate) fn compare_event_keys(left: &EventKey, right: &EventKey) -> std::cmp:
         .then_with(|| left.source_offset.cmp(&right.source_offset))
         .then_with(|| left.sequence.cmp(&right.sequence))
         .then_with(|| left.tid.cmp(&right.tid))
+}
+
+#[cfg(test)]
+mod guard_order_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use qtrace_provider::{OperationAbort, WorkDelta, WorkGuard};
+
+    use super::{guarded_byte_chunks, guarded_row_chunks};
+
+    struct RejectAt {
+        call: AtomicUsize,
+        reject_at: usize,
+    }
+
+    impl WorkGuard for RejectAt {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+            let call = self.call.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.reject_at {
+                Err(OperationAbort::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_bytes_authorize_each_chunk_before_hash_work() {
+        let mut processed = 0_usize;
+        let error = guarded_byte_chunks(
+            &[0_u8; 8192],
+            &RejectAt {
+                call: AtomicUsize::new(0),
+                reject_at: 1,
+            },
+            |chunk| processed += chunk.len(),
+        )
+        .expect_err("first guard rejects before hashing");
+        assert_eq!(error.code(), "job.cancelled");
+        assert_eq!(processed, 0);
+    }
+
+    #[test]
+    fn guarded_rows_cancel_inside_the_real_validation_loop() {
+        let rows = vec![0_u8; 10_000];
+        let mut processed = 0_usize;
+        let error = guarded_row_chunks(
+            &rows,
+            &RejectAt {
+                call: AtomicUsize::new(0),
+                reject_at: 2,
+            },
+            |chunk| {
+                processed += chunk.len();
+                Ok(())
+            },
+        )
+        .expect_err("second chunk cancelled");
+        assert_eq!(error.code(), "job.cancelled");
+        assert_eq!(processed, 4096);
+    }
 }

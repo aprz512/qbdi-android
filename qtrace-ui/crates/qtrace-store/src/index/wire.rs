@@ -1057,7 +1057,7 @@ fn decode_arena(
         ..WorkDelta::default()
     })?;
     let arena = ByteArena::from_owned_parts(bytes, decoded, max_bytes);
-    arena.validate()?;
+    arena.validate(guard)?;
     Ok(arena)
 }
 

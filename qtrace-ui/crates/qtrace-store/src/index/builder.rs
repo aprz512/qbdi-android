@@ -1507,6 +1507,7 @@ pub(super) fn cancellable_sort_by<T: Clone>(
             let middle = first.saturating_add(width).min(rows.len());
             let end = middle.saturating_add(width).min(rows.len());
             let (mut left, mut right) = (first, middle);
+            let mut output_since_checkpoint = 0_usize;
             while left < middle && right < end {
                 if compare(&rows[left], &rows[right]).is_le() {
                     scratch.push(rows[left].clone());
@@ -1515,9 +1516,30 @@ pub(super) fn cancellable_sort_by<T: Clone>(
                     scratch.push(rows[right].clone());
                     right += 1;
                 }
+                output_since_checkpoint += 1;
+                if output_since_checkpoint == 4096 {
+                    guard.consume(WorkDelta::default())?;
+                    output_since_checkpoint = 0;
+                }
             }
-            scratch.extend_from_slice(&rows[left..middle]);
-            scratch.extend_from_slice(&rows[right..end]);
+            while left < middle {
+                scratch.push(rows[left].clone());
+                left += 1;
+                output_since_checkpoint += 1;
+                if output_since_checkpoint == 4096 {
+                    guard.consume(WorkDelta::default())?;
+                    output_since_checkpoint = 0;
+                }
+            }
+            while right < end {
+                scratch.push(rows[right].clone());
+                right += 1;
+                output_since_checkpoint += 1;
+                if output_since_checkpoint == 4096 {
+                    guard.consume(WorkDelta::default())?;
+                    output_since_checkpoint = 0;
+                }
+            }
         }
         std::mem::swap(rows, &mut scratch);
         width = width.saturating_mul(2);
@@ -1580,7 +1602,7 @@ fn try_copy_bytes(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use qtrace_provider::{
         ArtifactDigest, BeginMetadata, EventCursor, EventKey, EventPayload, EventRecord,
@@ -1593,7 +1615,8 @@ mod tests {
 
     use super::super::validation::scan_external_payload_tag;
     use super::{
-        BuildOptions, BuildState, IndexBuilder, cancellable_sort, validate_external_payload_tag,
+        BuildOptions, BuildState, IndexBuilder, cancellable_sort, cancellable_sort_by,
+        validate_external_payload_tag,
     };
 
     struct AllowAll;
@@ -1798,6 +1821,55 @@ mod tests {
             .expect_err("sort checkpoint cancellation");
             assert_eq!(error.code(), "job.cancelled");
         }
+    }
+
+    struct CancelInsideMerge {
+        calls: AtomicUsize,
+        armed: AtomicBool,
+        comparisons: AtomicUsize,
+    }
+
+    impl WorkGuard for CancelInsideMerge {
+        fn consume(&self, _delta: WorkDelta) -> Result<(), qtrace_provider::OperationAbort> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 7 {
+                self.comparisons.store(0, Ordering::SeqCst);
+                self.armed.store(true, Ordering::SeqCst);
+                return Ok(());
+            }
+            if self.armed.load(Ordering::SeqCst) && self.comparisons.load(Ordering::SeqCst) > 0 {
+                return Err(qtrace_provider::OperationAbort::Cancelled);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn merge_sort_checks_cancel_within_each_4096_output_rows() {
+        let mut rows = (0..4096_u64).map(|value| value * 2).collect::<Vec<_>>();
+        rows.extend((0..4096_u64).map(|value| value * 2 + 1));
+        rows.extend(8192..20_000_u64);
+        let guard = CancelInsideMerge {
+            calls: AtomicUsize::new(0),
+            armed: AtomicBool::new(false),
+            comparisons: AtomicUsize::new(0),
+        };
+        let error = cancellable_sort_by(&mut rows, &guard, |left, right| {
+            if guard.armed.load(Ordering::SeqCst) {
+                guard.comparisons.fetch_add(1, Ordering::SeqCst);
+            }
+            left.cmp(right)
+        })
+        .expect_err("merge cancellation");
+        assert_eq!(error.code(), "job.cancelled");
+        assert!(
+            guard.comparisons.load(Ordering::SeqCst) > 0,
+            "test must cancel after merge comparisons begin"
+        );
+        assert!(
+            guard.comparisons.load(Ordering::SeqCst) <= 4096,
+            "merge ran more than 4096 output comparisons without a checkpoint"
+        );
     }
 
     #[test]
