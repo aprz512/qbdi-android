@@ -1303,14 +1303,14 @@ fn bounded_posting_union(
     max_rows: usize,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<usize>, IndexError> {
-    let total = lists.iter().try_fold(0_usize, |total, list| {
-        total.checked_add(list.deltas().len())
-    });
-    let Some(total) = total.filter(|total| *total <= max_rows) else {
-        return Err(IndexError::resource(
-            "bounded posting result exceeds row limit",
-        ));
-    };
+    let mut total = 0_usize;
+    for list in lists {
+        consume_row_work(guard, 1)?;
+        total = total
+            .checked_add(list.deltas().len())
+            .filter(|total| *total <= max_rows)
+            .ok_or_else(|| IndexError::resource("bounded posting result exceeds row limit"))?;
+    }
     guard.consume(WorkDelta::default())?;
     let mut rows = Vec::new();
     crate::allocation::try_reserve_vec(
@@ -1321,26 +1321,26 @@ fn bounded_posting_union(
     )?;
     for list in lists {
         let mut previous = None::<u64>;
-        for (index, delta) in list.deltas().iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard.consume(WorkDelta::default())?;
+        for chunk in list.deltas().chunks(4096) {
+            consume_row_work(guard, chunk.len())?;
+            for delta in chunk.iter().copied() {
+                if delta == 0 {
+                    return Err(IndexError::corrupt("posting delta is zero"));
+                }
+                let row = match previous {
+                    None => delta
+                        .checked_sub(1)
+                        .ok_or_else(|| IndexError::corrupt("first posting delta underflow"))?,
+                    Some(previous) => previous
+                        .checked_add(delta)
+                        .ok_or_else(|| IndexError::corrupt("posting delta overflow"))?,
+                };
+                rows.push(
+                    usize::try_from(row)
+                        .map_err(|_| IndexError::corrupt("posting row does not fit usize"))?,
+                );
+                previous = Some(row);
             }
-            if delta == 0 {
-                return Err(IndexError::corrupt("posting delta is zero"));
-            }
-            let row = match previous {
-                None => delta
-                    .checked_sub(1)
-                    .ok_or_else(|| IndexError::corrupt("first posting delta underflow"))?,
-                Some(previous) => previous
-                    .checked_add(delta)
-                    .ok_or_else(|| IndexError::corrupt("posting delta overflow"))?,
-            };
-            rows.push(
-                usize::try_from(row)
-                    .map_err(|_| IndexError::corrupt("posting row does not fit usize"))?,
-            );
-            previous = Some(row);
         }
     }
     if lists.len() > 1 {
@@ -1361,7 +1361,7 @@ where
 {
     let mut encoded_rows = 0_usize;
     for key in keys {
-        guard.consume(WorkDelta::default())?;
+        consume_row_work(guard, 1)?;
         if let Some(list) = map.get(&key) {
             encoded_rows = encoded_rows
                 .checked_add(list.deltas().len())
@@ -1389,7 +1389,7 @@ where
     bounded_map_count(map, keys.clone(), max_rows, guard)?;
     let mut lists = Vec::new();
     for key in keys {
-        guard.consume(WorkDelta::default())?;
+        consume_row_work(guard, 1)?;
         if let Some(list) = map.get(&key) {
             crate::allocation::try_reserve_vec(
                 &mut lists,
@@ -1413,8 +1413,8 @@ fn bounded_pair_rows(
     if start >= end {
         return Ok(Vec::new());
     }
-    let first = rows.partition_point(|(value, _)| *value < start);
-    let last = rows.partition_point(|(value, _)| *value < end);
+    let first = guarded_partition_point(rows, guard, |(value, _)| *value < start)?;
+    let last = guarded_partition_point(rows, guard, |(value, _)| *value < end)?;
     let count = last - first;
     if count > max_rows {
         return Err(IndexError::resource(
@@ -1429,11 +1429,9 @@ fn bounded_pair_rows(
         guard,
         "bounded pair posting allocation",
     )?;
-    for (index, (_, row)) in rows[first..last].iter().enumerate() {
-        if index % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        result.push(*row);
+    for chunk in rows[first..last].chunks(4096) {
+        consume_row_work(guard, chunk.len())?;
+        result.extend(chunk.iter().map(|(_, row)| *row));
     }
     radix_sort_unique_rows(&mut result, guard)?;
     Ok(result)
@@ -1449,9 +1447,8 @@ fn bounded_pair_count(
     if start >= end {
         return Ok(0);
     }
-    guard.consume(WorkDelta::default())?;
-    let first = rows.partition_point(|(value, _)| *value < start);
-    let last = rows.partition_point(|(value, _)| *value < end);
+    let first = guarded_partition_point(rows, guard, |(value, _)| *value < start)?;
+    let last = guarded_partition_point(rows, guard, |(value, _)| *value < end)?;
     let count = last - first;
     if count > max_rows {
         return Err(IndexError::resource(
@@ -1461,7 +1458,10 @@ fn bounded_pair_count(
     Ok(count)
 }
 
-fn radix_sort_unique_rows(rows: &mut Vec<usize>, guard: &dyn WorkGuard) -> Result<(), IndexError> {
+pub(super) fn radix_sort_unique_rows(
+    rows: &mut Vec<usize>,
+    guard: &dyn WorkGuard,
+) -> Result<(), IndexError> {
     if rows.len() < 2 {
         return Ok(());
     }
@@ -1475,40 +1475,72 @@ fn radix_sort_unique_rows(rows: &mut Vec<usize>, guard: &dyn WorkGuard) -> Resul
     scratch.resize(rows.len(), 0);
     for pass in 0..(usize::BITS as usize / 8) {
         let mut counts = [0_usize; 256];
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard.consume(WorkDelta::default())?;
+        for chunk in rows.chunks(4096) {
+            consume_row_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                counts[row.to_le_bytes()[pass] as usize] += 1;
             }
-            counts[row.to_le_bytes()[pass] as usize] += 1;
         }
+        consume_row_work(guard, counts.len())?;
         let mut position = 0_usize;
         for count in &mut counts {
             let current = *count;
             *count = position;
             position += current;
         }
-        for (index, row) in rows.iter().copied().enumerate() {
-            if index % 4096 == 0 {
-                guard.consume(WorkDelta::default())?;
+        for chunk in rows.chunks(4096) {
+            consume_row_work(guard, chunk.len())?;
+            for row in chunk.iter().copied() {
+                let slot = &mut counts[row.to_le_bytes()[pass] as usize];
+                scratch[*slot] = row;
+                *slot += 1;
             }
-            let slot = &mut counts[row.to_le_bytes()[pass] as usize];
-            scratch[*slot] = row;
-            *slot += 1;
         }
         std::mem::swap(rows, &mut scratch);
     }
     let mut output = 1_usize;
-    for index in 1..rows.len() {
-        if index % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        if rows[index] != rows[output - 1] {
-            rows[output] = rows[index];
-            output += 1;
+    let mut index = 1;
+    while index < rows.len() {
+        let end = (index + 4096).min(rows.len());
+        consume_row_work(guard, end - index)?;
+        while index < end {
+            if rows[index] != rows[output - 1] {
+                rows[output] = rows[index];
+                output += 1;
+            }
+            index += 1;
         }
     }
     rows.truncate(output);
     Ok(())
+}
+
+pub(super) fn consume_row_work(guard: &dyn WorkGuard, rows: usize) -> Result<(), IndexError> {
+    guard
+        .consume(WorkDelta {
+            rows: u64::try_from(rows).unwrap_or(u64::MAX),
+            ..WorkDelta::default()
+        })
+        .map_err(IndexError::from)
+}
+
+pub(super) fn guarded_partition_point<T>(
+    values: &[T],
+    guard: &dyn WorkGuard,
+    mut predicate: impl FnMut(&T) -> bool,
+) -> Result<usize, IndexError> {
+    let mut left = 0_usize;
+    let mut right = values.len();
+    while left < right {
+        consume_row_work(guard, 1)?;
+        let middle = left + (right - left) / 2;
+        if predicate(&values[middle]) {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    Ok(left)
 }
 
 fn rows_for_semantic_bytes(

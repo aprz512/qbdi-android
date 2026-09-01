@@ -1611,7 +1611,7 @@ mod tests {
         StringDefinition, TimelineDescriptor, TimelineId, TraceProvider, WorkDelta, WorkGuard,
     };
 
-    use crate::TraceStoreView;
+    use crate::{NormalizedBulkView, NormalizedPostingQuery, TraceStoreView};
 
     use super::super::validation::scan_external_payload_tag;
     use super::{
@@ -1883,6 +1883,75 @@ mod tests {
 
         assert_eq!(store.event_count(), 1);
         assert_eq!(store.memory_overlaps(0x1004, 0x1005).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn normalized_builder_fixture_sorts_nonmonotonic_pair_postings_by_row() {
+        let event = |ordinal, payload| {
+            EventRecord::new(
+                EventKey::new(
+                    ArtifactDigest::new([0x11; 32]),
+                    TimelineId(7),
+                    ordinal,
+                    ordinal * 8,
+                    Some(ordinal),
+                    Some(42),
+                ),
+                Provenance::Captured,
+                payload,
+            )
+        };
+        let events = vec![
+            event(
+                1,
+                EventPayload::ModuleDefinition(qtrace_provider::ModuleDefinition {
+                    module_id: 1,
+                    base: 0x7100_0000,
+                    name: "libtarget.so".to_owned(),
+                }),
+            ),
+            event(
+                2,
+                EventPayload::InstructionDefinition(InstructionDefinition {
+                    definition_id: 7,
+                    mnemonic: "nop".to_owned(),
+                    ..InstructionDefinition::default()
+                }),
+            ),
+            event(
+                3,
+                EventPayload::Instruction(Instruction {
+                    definition_id: 7,
+                    module_id: 1,
+                    relative_pc: 0x30,
+                    ..Instruction::default()
+                }),
+            ),
+            event(
+                4,
+                EventPayload::Instruction(Instruction {
+                    definition_id: 7,
+                    module_id: 1,
+                    relative_pc: 0x10,
+                    ..Instruction::default()
+                }),
+            ),
+        ];
+        let store =
+            IndexBuilder::build_provider(provider(events), &BuildOptions::default(), &AllowAll)
+                .expect("normalized builder fixture");
+        let rows = store
+            .bounded_rows(
+                NormalizedPostingQuery::ModulePc {
+                    module: 0,
+                    start: 0,
+                    end_exclusive: u64::MAX,
+                },
+                usize::MAX,
+                &AllowAll,
+            )
+            .expect("bounded module-PC rows");
+        assert_eq!(rows, vec![2, 3]);
     }
 
     #[test]
