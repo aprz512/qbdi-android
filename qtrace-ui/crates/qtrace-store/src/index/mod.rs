@@ -2311,16 +2311,8 @@ fn bounded_semantic_count(
         &catalog.indexes.semantic_name
     };
     let mut count = 0_usize;
-    for value in values {
-        let mut matched_id = None;
-        for (id, span) in catalog.strings.spans().iter().enumerate() {
-            consume_dictionary_entry_work(span, guard)?;
-            if catalog.strings.get(id as u32)? == *value {
-                matched_id = Some(id as u32);
-                break;
-            }
-        }
-        if let Some(list) = matched_id.and_then(|id| map.get(&id)) {
+    visit_semantic_dictionary_matches(catalog, values, guard, |id| {
+        if let Some(list) = map.get(&id) {
             count = count
                 .checked_add(list.deltas().len())
                 .ok_or_else(|| IndexError::resource("bounded posting row count overflow"))?;
@@ -2330,7 +2322,8 @@ fn bounded_semantic_count(
                 ));
             }
         }
-    }
+        Ok(())
+    })?;
     Ok(count)
 }
 
@@ -2343,15 +2336,10 @@ fn bounded_semantic_rows(
 ) -> Result<Vec<usize>, IndexError> {
     let mut ids = Vec::new();
     crate::allocation::try_reserve_vec(&mut ids, values.len(), guard, "bounded semantic IDs")?;
-    for value in values {
-        for (id, span) in catalog.strings.spans().iter().enumerate() {
-            consume_dictionary_entry_work(span, guard)?;
-            if catalog.strings.get(id as u32)? == *value {
-                ids.push(id as u32);
-                break;
-            }
-        }
-    }
+    visit_semantic_dictionary_matches(catalog, values, guard, |id| {
+        ids.push(id);
+        Ok(())
+    })?;
     if categories {
         bounded_map_rows(
             &catalog.indexes.semantic_category,
@@ -2367,6 +2355,24 @@ fn bounded_semantic_rows(
             guard,
         )
     }
+}
+
+fn visit_semantic_dictionary_matches(
+    catalog: &NormalizedCatalog,
+    values: &[&[u8]],
+    guard: &dyn WorkGuard,
+    mut visit: impl FnMut(u32) -> Result<(), IndexError>,
+) -> Result<(), IndexError> {
+    for value in values {
+        for (id, span) in catalog.strings.spans().iter().enumerate() {
+            consume_dictionary_entry_work(span, guard)?;
+            if catalog.strings.get(id as u32)? == *value {
+                visit(id as u32)?;
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn consume_dictionary_entry_work(span: &ByteSpan, guard: &dyn WorkGuard) -> Result<(), IndexError> {
