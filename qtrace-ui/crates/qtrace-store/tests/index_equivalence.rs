@@ -560,6 +560,87 @@ fn exact_byte_views_are_owned_mapped_equivalent_and_reject_invalid_ids() {
 }
 
 #[test]
+fn normalized_row_views_and_layout_identity_are_zero_copy_owned_mapped_equivalent() {
+    let session = SessionLoader::open_report(
+        AuthorizedPath::new(fixture()),
+        OpenPolicy::default(),
+        &AllowAll,
+    )
+    .expect("mixed fixture");
+    let source = session
+        .artifacts()
+        .iter()
+        .find(|artifact| artifact.local_path().ends_with("main.trace.bin"))
+        .expect("QTRB artifact");
+    let options = BuildOptions::default();
+    let owned = IndexBuilder::build(source, &options, &AllowAll).expect("owned store");
+    let root = private_root();
+    let mapped =
+        TraceStore::open_or_build(root.path(), source, &options, &AllowAll).expect("mapped store");
+    let owned: &dyn TraceStoreView = &owned;
+    let mapped: &dyn TraceStoreView = &mapped;
+
+    assert_eq!(
+        owned.normalized_layout_identity(),
+        mapped.normalized_layout_identity()
+    );
+    assert_eq!(owned.module_rows(), mapped.module_rows());
+    assert_eq!(owned.definition_rows(), mapped.definition_rows());
+    assert_eq!(owned.instruction_rows(), mapped.instruction_rows());
+    assert_eq!(owned.memory_rows(), mapped.memory_rows());
+    assert_eq!(owned.semantic_rows(), mapped.semantic_rows());
+    assert_eq!(
+        owned.register_observation_rows(),
+        mapped.register_observation_rows()
+    );
+    assert_eq!(owned.string_count(), mapped.string_count());
+    assert_eq!(owned.blob_count(), mapped.blob_count());
+
+    assert!(
+        owned
+            .instruction_rows()
+            .windows(2)
+            .all(|pair| pair[0].owner_row < pair[1].owner_row)
+    );
+    assert!(
+        owned
+            .memory_rows()
+            .windows(2)
+            .all(|pair| pair[0].owner_row < pair[1].owner_row)
+    );
+    assert!(
+        owned
+            .semantic_rows()
+            .windows(2)
+            .all(|pair| pair[0].owner_row < pair[1].owner_row)
+    );
+    assert!(
+        owned
+            .register_observation_rows()
+            .windows(2)
+            .all(|pair| pair[0].owner_row <= pair[1].owner_row)
+    );
+
+    assert_eq!(
+        owned.instruction_rows().as_ptr(),
+        owned.instruction_rows().as_ptr(),
+        "repeated typed views must borrow the same backing allocation"
+    );
+    for id in 0..owned.string_count() {
+        assert_eq!(
+            owned.string_bytes(id as u32).expect("owned string"),
+            mapped.string_bytes(id as u32).expect("mapped string")
+        );
+    }
+    for id in 0..owned.blob_count() {
+        assert_eq!(
+            owned.blob_bytes(id as u32).expect("owned blob"),
+            mapped.blob_bytes(id as u32).expect("mapped blob")
+        );
+    }
+}
+
+#[test]
 fn schema_two_cache_has_only_the_exact_binary_section_contract() {
     let session = SessionLoader::open_report(
         AuthorizedPath::new(fixture()),

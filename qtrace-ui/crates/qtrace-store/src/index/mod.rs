@@ -588,6 +588,28 @@ pub struct CompletenessRow {
     pub cause: CompletenessCause,
 }
 
+/// Versioned identity of the normalized facts and their persistent binary layout.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct NormalizedLayoutIdentity {
+    schema_version: u32,
+    layout_fingerprint: [u8; 32],
+}
+
+impl NormalizedLayoutIdentity {
+    pub const fn schema_version(self) -> u32 {
+        self.schema_version
+    }
+
+    pub const fn layout_fingerprint(self) -> [u8; 32] {
+        self.layout_fingerprint
+    }
+}
+
+const NORMALIZED_LAYOUT_FINGERPRINT: [u8; 32] = [
+    0x70, 0x9a, 0x76, 0x70, 0x96, 0x41, 0x78, 0x36, 0xfb, 0x0a, 0xde, 0x5a, 0xb4, 0xc6, 0xeb, 0x26,
+    0x36, 0xa3, 0xd0, 0x42, 0xa0, 0x5c, 0x1a, 0x4e, 0x35, 0x4d, 0xee, 0x23, 0x0d, 0x7a, 0xb8, 0xf2,
+];
+
 impl CompletenessRow {
     fn from_range(value: CompletenessRange) -> Self {
         Self {
@@ -858,6 +880,7 @@ fn checkpoint_chunks(rows: usize, guard: &dyn WorkGuard) -> Result<(), IndexErro
 
 /// Stable, read-only normalized facts and eager-index primitives shared by owned and mapped stores.
 pub trait TraceStoreView {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity;
     fn event_count(&self) -> usize;
     fn event_key(&self, row: usize) -> Result<Option<EventKey>, IndexError>;
     fn event_kind(&self, row: usize) -> Result<Option<EventKind>, IndexError>;
@@ -873,6 +896,14 @@ pub trait TraceStoreView {
     fn memory_after_bytes(&self, event_row: usize) -> Result<Option<&[u8]>, IndexError>;
     fn module(&self, module: u32) -> Option<&ModuleRow>;
     fn definition(&self, definition: u32) -> Option<&DefinitionRow>;
+    fn module_rows(&self) -> &[ModuleRow];
+    fn definition_rows(&self) -> &[DefinitionRow];
+    fn instruction_rows(&self) -> &[InstructionRow];
+    fn memory_rows(&self) -> &[MemoryRow];
+    fn semantic_rows(&self) -> &[SemanticRow];
+    fn register_observation_rows(&self) -> &[RegisterObservationRow];
+    fn string_count(&self) -> usize;
+    fn blob_count(&self) -> usize;
     fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow>;
     fn completeness(&self) -> &[CompletenessRow];
     fn rows_for_timeline(&self, timeline: u64) -> Result<Vec<usize>, IndexError>;
@@ -1231,6 +1262,12 @@ impl HasNormalizedCatalog for TraceStore {
 }
 
 impl<T: HasNormalizedCatalog> TraceStoreView for T {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
+        NormalizedLayoutIdentity {
+            schema_version: self.normalized_catalog().schema,
+            layout_fingerprint: NORMALIZED_LAYOUT_FINGERPRINT,
+        }
+    }
     fn event_count(&self) -> usize {
         self.base_event_count()
     }
@@ -1337,6 +1374,30 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
         self.normalized_catalog()
             .definitions
             .get(definition as usize)
+    }
+    fn module_rows(&self) -> &[ModuleRow] {
+        &self.normalized_catalog().modules
+    }
+    fn definition_rows(&self) -> &[DefinitionRow] {
+        &self.normalized_catalog().definitions
+    }
+    fn instruction_rows(&self) -> &[InstructionRow] {
+        &self.normalized_catalog().instructions
+    }
+    fn memory_rows(&self) -> &[MemoryRow] {
+        &self.normalized_catalog().memories
+    }
+    fn semantic_rows(&self) -> &[SemanticRow] {
+        &self.normalized_catalog().semantics
+    }
+    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+        &self.normalized_catalog().observations
+    }
+    fn string_count(&self) -> usize {
+        self.normalized_catalog().strings.spans().len()
+    }
+    fn blob_count(&self) -> usize {
+        self.normalized_catalog().blobs.spans().len()
     }
     fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow> {
         self.normalized_catalog()
