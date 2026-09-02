@@ -39,10 +39,41 @@ static NEXT_VFS_ID: AtomicU64 = AtomicU64::new(1);
 static PROCESS_LOCKS: OnceLock<Mutex<HashMap<(u64, u64), u64>>> = OnceLock::new();
 
 #[cfg(test)]
-type DeleteHook = Box<dyn Fn(&str) + Send>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeleteHookPhase {
+    BeforeProof,
+    AfterProof,
+}
+
+#[cfg(test)]
+type DeleteHook = Box<dyn Fn(DeleteHookPhase, &str) + Send>;
 
 #[cfg(test)]
 pub(super) static DELETE_HOOK: OnceLock<Mutex<Option<DeleteHook>>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DirectorySyncReason {
+    Rename(FileKind),
+    CreatedFile(FileKind),
+}
+
+#[cfg(test)]
+type DirectorySyncHook = Box<dyn Fn(DirectorySyncReason) -> Result<(), Errno> + Send>;
+
+#[cfg(test)]
+pub(super) static DIRECTORY_SYNC_HOOK: OnceLock<Mutex<Option<DirectorySyncHook>>> = OnceLock::new();
+
+#[cfg(test)]
+type SidecarSetupHook = Box<dyn Fn(&str) + Send>;
+
+#[cfg(test)]
+pub(super) static SIDECAR_SETUP_HOOK: OnceLock<Mutex<Option<SidecarSetupHook>>> = OnceLock::new();
+
+#[cfg(test)]
+type FileSyncHook = Box<dyn Fn(&str) + Send>;
+
+#[cfg(test)]
+pub(super) static FILE_SYNC_HOOK: OnceLock<Mutex<Option<FileSyncHook>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Identity {
@@ -88,7 +119,7 @@ impl Identity {
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FileKind {
+pub(super) enum FileKind {
     Main,
     Wal,
     Journal,
@@ -115,7 +146,7 @@ impl FileKind {
 struct Context {
     id: u64,
     directory: File,
-    main: Mutex<Option<File>>,
+    main: Mutex<Option<(File, bool)>>,
     identities: Mutex<[Option<Identity>; 3]>,
     open_fds: [AtomicI32; 3],
     tombstone_sequence: AtomicU64,
@@ -137,6 +168,12 @@ struct DescriptorFile {
     lock_level: c_int,
     owns_process_lock: bool,
     persist_wal: bool,
+    needs_dir_sync: bool,
+}
+
+struct RenameReceipt {
+    tombstone: String,
+    expected: Identity,
 }
 
 struct Registration {
@@ -151,7 +188,11 @@ pub(crate) struct DescriptorVfs {
 }
 
 impl DescriptorVfs {
-    pub(crate) fn register(directory: &File, main: File) -> Result<Self, AnnotationError> {
+    pub(crate) fn register(
+        directory: &File,
+        main: File,
+        main_needs_dir_sync: bool,
+    ) -> Result<Self, AnnotationError> {
         inspect_quarantines(directory).map_err(|error| {
             AnnotationError::path(format!("invalid SQLite quarantine directory: {error}"))
         })?;
@@ -171,7 +212,7 @@ impl DescriptorVfs {
         let context = Box::new(Context {
             id,
             directory,
-            main: Mutex::new(Some(main)),
+            main: Mutex::new(Some((main, main_needs_dir_sync))),
             identities: Mutex::new([Some(main_identity), None, None]),
             open_fds: std::array::from_fn(|_| AtomicI32::new(-1)),
             tombstone_sequence: AtomicU64::new(0),
@@ -230,6 +271,40 @@ impl DescriptorVfs {
         open_sidecar(&self.registration.context, FileKind::Journal)
             .map(|_| ())
             .map_err(|error| AnnotationError::vfs(format!("cannot create test journal: {error}")))
+    }
+
+    #[cfg(test)]
+    pub(super) fn sync_created_journal_twice_for_test(
+        &self,
+    ) -> Result<(c_int, bool, c_int, bool), AnnotationError> {
+        let (file, identity, created) = open_sidecar(&self.registration.context, FileKind::Journal)
+            .map_err(|error| {
+                AnnotationError::vfs(format!("cannot create test journal: {error}"))
+            })?;
+        if !created {
+            return Err(AnnotationError::vfs("test journal unexpectedly existed"));
+        }
+        let raw = file.into_raw_fd();
+        let mut descriptor = DescriptorFile {
+            base: ffi::sqlite3_file {
+                pMethods: &IO_METHODS,
+            },
+            context: &*self.registration.context,
+            fd: raw,
+            identity,
+            kind: FileKind::Journal,
+            lock_level: ffi::SQLITE_LOCK_NONE,
+            owns_process_lock: false,
+            persist_wal: false,
+            needs_dir_sync: true,
+        };
+        let first = unsafe { file_sync(&mut descriptor.base, ffi::SQLITE_SYNC_FULL) };
+        let first_pending = descriptor.needs_dir_sync;
+        let second = unsafe { file_sync(&mut descriptor.base, ffi::SQLITE_SYNC_FULL) };
+        let second_pending = descriptor.needs_dir_sync;
+        // SAFETY: this helper uniquely owns raw and neither xSync call consumes it.
+        drop(unsafe { File::from_raw_fd(raw) });
+        Ok((first, first_pending, second, second_pending))
     }
 
     pub(crate) fn verify_bindings(&self) -> Result<(), AnnotationError> {
@@ -402,7 +477,22 @@ fn path_exists(context: &Context, name: &str) -> Result<bool, Errno> {
     }
 }
 
-fn open_sidecar(context: &Context, kind: FileKind) -> Result<(File, Identity), Errno> {
+fn sync_directory(context: &Context, reason: DirectorySyncReason) -> Result<(), Errno> {
+    #[cfg(not(test))]
+    let _ = reason;
+    #[cfg(test)]
+    if let Some(hook) = DIRECTORY_SYNC_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("directory sync hook lock poisoned")
+        .as_ref()
+    {
+        hook(reason)?;
+    }
+    fsync(&context.directory)
+}
+
+fn open_sidecar(context: &Context, kind: FileKind) -> Result<(File, Identity, bool), Errno> {
     let common = OFlags::RDWR
         .union(OFlags::NONBLOCK)
         .union(OFlags::NOFOLLOW)
@@ -422,26 +512,24 @@ fn open_sidecar(context: &Context, kind: FileKind) -> Result<(File, Identity), E
         Err(error) => return Err(error),
     };
     let file = File::from(descriptor);
-    let setup = (|| {
-        if created {
-            fchmod(&file, Mode::RUSR | Mode::WUSR)?;
-        }
-        let identity = Identity::from_stat(&fstat(&file)?).map_err(|()| Errno::PERM)?;
-        let bound = path_identity(context, kind.name())?;
-        if identity != bound {
-            return Err(Errno::STALE);
-        }
-        Ok(identity)
-    })();
-    match setup {
-        Ok(identity) => Ok((file, identity)),
-        Err(error) => {
-            if created {
-                let _ = preserve_created_sidecar(context, kind, &file);
-            }
-            Err(error)
-        }
+    if created {
+        fchmod(&file, Mode::RUSR | Mode::WUSR)?;
     }
+    let identity = Identity::from_stat(&fstat(&file)?).map_err(|()| Errno::PERM)?;
+    #[cfg(test)]
+    if let Some(hook) = SIDECAR_SETUP_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("sidecar setup hook lock poisoned")
+        .as_ref()
+    {
+        hook(kind.name());
+    }
+    let bound = path_identity(context, kind.name())?;
+    if identity != bound {
+        return Err(Errno::STALE);
+    }
+    Ok((file, identity, created))
 }
 
 fn quarantine_name(context: &Context) -> Result<String, Errno> {
@@ -454,28 +542,27 @@ fn quarantine_name(context: &Context) -> Result<String, Errno> {
     ))
 }
 
-fn preserve_created_sidecar(context: &Context, kind: FileKind, held: &File) -> Result<(), Errno> {
-    if inspect_quarantines(&context.directory)? >= MAX_QUARANTINES {
-        return Err(Errno::NOSPC);
-    }
-    let expected = fstat(held)?;
-    let quarantine = quarantine_name(context)?;
+fn rename_to_quarantine(
+    context: &Context,
+    kind: FileKind,
+    expected: Identity,
+) -> Result<RenameReceipt, c_int> {
+    let tombstone = quarantine_name(context).map_err(|_| ffi::SQLITE_IOERR_DELETE)?;
     renameat_with(
         &context.directory,
         kind.name(),
         &context.directory,
-        quarantine.as_str(),
+        tombstone.as_str(),
         RenameFlags::NOREPLACE,
-    )?;
-    let captured = statat(
-        &context.directory,
-        quarantine.as_str(),
-        AtFlags::SYMLINK_NOFOLLOW,
-    )?;
-    if (captured.st_dev, captured.st_ino) != (expected.st_dev, expected.st_ino) {
-        return Err(Errno::STALE);
+    )
+    .map_err(|_| ffi::SQLITE_IOERR_DELETE)?;
+    if sync_directory(context, DirectorySyncReason::Rename(kind)).is_err() {
+        return Err(ffi::SQLITE_IOERR_DIR_FSYNC);
     }
-    fsync(&context.directory)
+    Ok(RenameReceipt {
+        tombstone,
+        expected,
+    })
 }
 
 fn verify_file(file: &DescriptorFile) -> Result<(), ()> {
@@ -519,7 +606,9 @@ unsafe extern "C" fn vfs_open(
         }
         let opened = match kind {
             FileKind::Main => {
-                let Some(file) = context.main.lock().ok().and_then(|mut slot| slot.take()) else {
+                let Some((file, needs_dir_sync)) =
+                    context.main.lock().ok().and_then(|mut slot| slot.take())
+                else {
                     return ffi::SQLITE_CANTOPEN;
                 };
                 let identity = match Identity::from_stat(&match fstat(&file) {
@@ -529,11 +618,11 @@ unsafe extern "C" fn vfs_open(
                     Ok(identity) => identity,
                     Err(()) => return ffi::SQLITE_CANTOPEN,
                 };
-                Ok((file, identity))
+                Ok((file, identity, needs_dir_sync))
             }
             FileKind::Wal | FileKind::Journal => open_sidecar(context, kind),
         };
-        let (file, identity) = match opened {
+        let (file, identity, needs_dir_sync) = match opened {
             Ok(value) => value,
             Err(_) => return ffi::SQLITE_CANTOPEN,
         };
@@ -544,7 +633,7 @@ unsafe extern "C" fn vfs_open(
         if path_identity(context, kind.name()).ok() != Some(identity) {
             if kind == FileKind::Main {
                 if let Ok(mut slot) = context.main.lock() {
-                    *slot = Some(file);
+                    *slot = Some((file, needs_dir_sync));
                 }
             }
             return ffi::SQLITE_CANTOPEN;
@@ -577,6 +666,7 @@ unsafe extern "C" fn vfs_open(
             lock_level: ffi::SQLITE_LOCK_NONE,
             owns_process_lock: false,
             persist_wal: false,
+            needs_dir_sync,
         };
         // SAFETY: SQLite allocated at least szOsFile bytes suitably aligned and output is live.
         unsafe { ptr::write(output.cast::<DescriptorFile>(), descriptor) };
@@ -706,6 +796,15 @@ unsafe extern "C" fn file_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_
         if verify_file(file).is_err() {
             return ffi::SQLITE_IOERR_FSYNC;
         }
+        #[cfg(test)]
+        if let Some(hook) = FILE_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("file sync hook lock poisoned")
+            .as_ref()
+        {
+            hook(file.kind.name());
+        }
         let held = unsafe { BorrowedFd::borrow_raw(file.fd) };
         let result = if flags & 0x0f == ffi::SQLITE_SYNC_FULL {
             fsync(held)
@@ -713,10 +812,16 @@ unsafe extern "C" fn file_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_
             fdatasync(held)
         };
         if result.is_err() || verify_file(file).is_err() {
-            ffi::SQLITE_IOERR_FSYNC
-        } else {
-            ffi::SQLITE_OK
+            return ffi::SQLITE_IOERR_FSYNC;
         }
+        if file.needs_dir_sync {
+            let context = unsafe { &*file.context };
+            if sync_directory(context, DirectorySyncReason::CreatedFile(file.kind)).is_err() {
+                return ffi::SQLITE_IOERR_DIR_FSYNC;
+            }
+            file.needs_dir_sync = false;
+        }
+        ffi::SQLITE_OK
     })
 }
 
@@ -1016,29 +1121,21 @@ unsafe extern "C" fn vfs_delete(
         if quarantines >= MAX_QUARANTINES {
             return ffi::SQLITE_IOERR_DELETE;
         }
-        let Ok(tombstone) = quarantine_name(context) else {
-            return ffi::SQLITE_IOERR_DELETE;
+        let receipt = match rename_to_quarantine(context, kind, expected) {
+            Ok(receipt) => receipt,
+            Err(status) => return status,
         };
-        if renameat_with(
-            &context.directory,
-            kind.name(),
-            &context.directory,
-            tombstone.as_str(),
-            RenameFlags::NOREPLACE,
-        )
-        .is_err()
+        #[cfg(test)]
+        if let Some(hook) = DELETE_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("delete hook lock poisoned")
+            .as_ref()
         {
-            return ffi::SQLITE_IOERR_DELETE;
+            hook(DeleteHookPhase::BeforeProof, &receipt.tombstone);
         }
-        let captured = path_identity(context, &tombstone);
-        if captured.ok() != Some(expected) {
-            let _ = renameat_with(
-                &context.directory,
-                tombstone.as_str(),
-                &context.directory,
-                kind.name(),
-                RenameFlags::NOREPLACE,
-            );
+        let captured = path_identity(context, &receipt.tombstone);
+        if captured.ok() != Some(receipt.expected) {
             return ffi::SQLITE_IOERR_DELETE;
         }
         #[cfg(test)]
@@ -1048,13 +1145,10 @@ unsafe extern "C" fn vfs_delete(
             .expect("delete hook lock poisoned")
             .as_ref()
         {
-            hook(&tombstone);
+            hook(DeleteHookPhase::AfterProof, &receipt.tombstone);
         }
-        if path_identity(context, &tombstone).ok() != Some(expected) {
+        if path_identity(context, &receipt.tombstone).ok() != Some(receipt.expected) {
             return ffi::SQLITE_IOERR_DELETE;
-        }
-        if fsync(&context.directory).is_err() {
-            return ffi::SQLITE_IOERR_DIR_FSYNC;
         }
         if let Ok(mut identities) = context.identities.lock() {
             identities[kind.slot()] = None;

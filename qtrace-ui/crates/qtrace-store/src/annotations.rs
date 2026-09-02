@@ -184,7 +184,7 @@ impl AnnotationStore {
             CacheDirectory::open_data(request.data_home.as_path(), &key, true, &AllowAll)
                 .map_err(AnnotationError::from_initial_cache)?
                 .ok_or_else(|| AnnotationError::io("annotation data directory was not created"))?;
-        let (database, _) = open_database_leaf(&directory)?;
+        let (database, _, database_created) = open_database_leaf(&directory)?;
         let sidecars = inspect_sidecars(&directory)?;
         if sidecars[1].is_some() {
             return Err(AnnotationError::path(
@@ -197,7 +197,7 @@ impl AnnotationStore {
             .join("qtrace-ui")
             .join(key)
             .join(DATABASE_NAME);
-        let vfs = DescriptorVfs::register(&directory.file, database)?;
+        let vfs = DescriptorVfs::register(&directory.file, database, database_created)?;
         let mut connection = Connection::open_with_flags_and_vfs(
             &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -721,7 +721,7 @@ fn encode_event_key(key: &EventKey) -> [u8; 70] {
 
 fn open_database_leaf(
     directory: &CacheDirectory,
-) -> Result<(File, ObjectIdentity), AnnotationError> {
+) -> Result<(File, ObjectIdentity, bool), AnnotationError> {
     for _ in 0..8 {
         let expected = inspect_database_leaf(directory)?;
         let (descriptor, created) = if expected.is_some() {
@@ -792,7 +792,7 @@ fn open_database_leaf(
                 "annotation database was replaced while opening",
             ));
         }
-        return Ok((database, actual));
+        return Ok((database, actual, created));
     }
     Err(AnnotationError::identity(
         "annotation database binding raced repeatedly while opening",
@@ -969,10 +969,29 @@ mod tests {
         AnnotationOpenRequest, AnnotationStore, AuthorizedPath, EventAnnotation, OPEN_HOOK,
         OpenHookPhase,
     };
-    use crate::annotation_vfs::DELETE_HOOK;
+    use crate::annotation_vfs::{
+        DELETE_HOOK, DIRECTORY_SYNC_HOOK, DeleteHookPhase, DirectorySyncReason, FILE_SYNC_HOOK,
+        FileKind, SIDECAR_SETUP_HOOK,
+    };
+
+    static VFS_HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn disable_persistent_wal(store: &AnnotationStore) {
+        let mut persist = 0 as c_int;
+        let status = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                store.connection.as_ref().unwrap().handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+                (&mut persist as *mut c_int).cast(),
+            )
+        };
+        assert_eq!(status, rusqlite::ffi::SQLITE_OK);
+    }
 
     #[test]
     fn sqlite_io_never_follows_an_aba_replacement_after_main_fd_is_held() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
         let root = TempDir::new().unwrap();
         let session = ArtifactDigest::new([0xa5; 32]);
         let request =
@@ -1033,6 +1052,7 @@ mod tests {
 
     #[test]
     fn sqlite_delete_never_unlinks_a_name_rebound_after_capture_proof() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
         let root = TempDir::new().unwrap();
         let session = ArtifactDigest::new([0xb6; 32]);
         let request =
@@ -1047,19 +1067,13 @@ mod tests {
             .mode(0o600)
             .open(&attacker_path)
             .unwrap();
-        let mut persist = 0 as c_int;
-        let status = unsafe {
-            rusqlite::ffi::sqlite3_file_control(
-                store.connection.as_ref().unwrap().handle(),
-                c"main".as_ptr(),
-                rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
-                (&mut persist as *mut c_int).cast(),
-            )
-        };
-        assert_eq!(status, rusqlite::ffi::SQLITE_OK);
+        disable_persistent_wal(&store);
         let hook_directory = directory.clone();
         *DELETE_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() =
-            Some(Box::new(move |quarantine| {
+            Some(Box::new(move |phase, quarantine| {
+                if phase != DeleteHookPhase::AfterProof {
+                    return;
+                }
                 fs::rename(
                     hook_directory.join(quarantine),
                     hook_directory.join("captured-original-wal"),
@@ -1080,7 +1094,386 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_delete_syncs_rename_before_any_capture_proof_can_fail() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xd8; 32]);
+        let request =
+            AnnotationOpenRequest::new(AuthorizedPath::new(root.path().to_owned()), session);
+        let store = AnnotationStore::open(request).unwrap();
+        let directory = store.database_path().parent().unwrap().to_owned();
+        let attacker_path = root.path().join("attacker-before-proof");
+        let attacker = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&attacker_path)
+            .unwrap();
+        disable_persistent_wal(&store);
+
+        let sync_attempts = Arc::new(Mutex::new(0_u8));
+        let hook_attempts = Arc::clone(&sync_attempts);
+        *DIRECTORY_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |_| {
+            *hook_attempts.lock().unwrap() += 1;
+            Ok(())
+        }));
+        let hook_directory = directory.clone();
+        *DELETE_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() =
+            Some(Box::new(move |phase, quarantine| {
+                if phase != DeleteHookPhase::BeforeProof {
+                    return;
+                }
+                fs::rename(
+                    hook_directory.join(quarantine),
+                    hook_directory.join("captured-before-proof"),
+                )
+                .unwrap();
+                fs::rename(&attacker_path, hook_directory.join(quarantine)).unwrap();
+            }));
+
+        drop(store);
+        *DELETE_HOOK.get().unwrap().lock().unwrap() = None;
+        *DIRECTORY_SYNC_HOOK.get().unwrap().lock().unwrap() = None;
+
+        assert_eq!(*sync_attempts.lock().unwrap(), 1);
+        assert_eq!(attacker.metadata().unwrap().nlink(), 1);
+        assert!(directory.join("captured-before-proof").exists());
+        assert!(!directory.join("annotations.sqlite3-wal").exists());
+    }
+
+    #[test]
+    fn sqlite_delete_durably_quarantines_once_on_the_normal_path() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xd9; 32]);
+        let store = AnnotationStore::open(AnnotationOpenRequest::new(
+            AuthorizedPath::new(root.path().to_owned()),
+            session,
+        ))
+        .unwrap();
+        let directory = store.database_path().parent().unwrap().to_owned();
+        disable_persistent_wal(&store);
+        let baseline_quarantines = fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".qtrace-sqlite-quarantine-")
+            })
+            .count();
+        let sync_attempts = Arc::new(Mutex::new(0_u8));
+        let hook_attempts = Arc::clone(&sync_attempts);
+        *DIRECTORY_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |reason| {
+            if reason == DirectorySyncReason::Rename(FileKind::Wal) {
+                *hook_attempts.lock().unwrap() += 1;
+            }
+            Ok(())
+        }));
+        let receipts = Arc::new(Mutex::new(0_u8));
+        let hook_receipts = Arc::clone(&receipts);
+        *DELETE_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() =
+            Some(Box::new(move |phase, _| {
+                if phase == DeleteHookPhase::BeforeProof {
+                    *hook_receipts.lock().unwrap() += 1;
+                }
+            }));
+
+        drop(store);
+        *DELETE_HOOK.get().unwrap().lock().unwrap() = None;
+        *DIRECTORY_SYNC_HOOK.get().unwrap().lock().unwrap() = None;
+
+        let sync_attempts = *sync_attempts.lock().unwrap();
+        let receipts = *receipts.lock().unwrap();
+        assert!(receipts > 0);
+        assert_eq!(
+            sync_attempts, receipts,
+            "every rename receipt needs one dirsync"
+        );
+        assert!(!directory.join("annotations.sqlite3-wal").exists());
+        assert_eq!(
+            fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".qtrace-sqlite-quarantine-"))
+                .count(),
+            baseline_quarantines + usize::from(receipts)
+        );
+    }
+
+    #[test]
+    fn sqlite_delete_dirsync_fault_preserves_rebound_evidence_without_more_mutation() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xda; 32]);
+        let store = AnnotationStore::open(AnnotationOpenRequest::new(
+            AuthorizedPath::new(root.path().to_owned()),
+            session,
+        ))
+        .unwrap();
+        let directory = store.database_path().parent().unwrap().to_owned();
+        let attacker_path = root.path().join("attacker-dirsync-fault");
+        let attacker = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&attacker_path)
+            .unwrap();
+        disable_persistent_wal(&store);
+        let sync_attempts = Arc::new(Mutex::new(0_u8));
+        let hook_attempts = Arc::clone(&sync_attempts);
+        let hook_directory = directory.clone();
+        *DIRECTORY_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |reason| {
+            if reason != DirectorySyncReason::Rename(FileKind::Wal) {
+                return Ok(());
+            }
+            *hook_attempts.lock().unwrap() += 1;
+            let quarantine = fs::read_dir(&hook_directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".qtrace-sqlite-quarantine-")
+                })
+                .unwrap()
+                .path();
+            fs::rename(&quarantine, hook_directory.join("captured-dirsync-fault")).unwrap();
+            fs::rename(&attacker_path, &quarantine).unwrap();
+            Err(rustix::io::Errno::IO)
+        }));
+
+        drop(store);
+        *DIRECTORY_SYNC_HOOK.get().unwrap().lock().unwrap() = None;
+
+        assert_eq!(*sync_attempts.lock().unwrap(), 1);
+        assert_eq!(attacker.metadata().unwrap().nlink(), 1);
+        assert!(directory.join("captured-dirsync-fault").exists());
+        assert!(!directory.join("annotations.sqlite3-wal").exists());
+    }
+
+    #[test]
+    fn sqlite_delete_syncs_rename_before_post_proof_rebinding_is_reported() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xe9; 32]);
+        let request =
+            AnnotationOpenRequest::new(AuthorizedPath::new(root.path().to_owned()), session);
+        let store = AnnotationStore::open(request).unwrap();
+        let directory = store.database_path().parent().unwrap().to_owned();
+        let attacker_path = root.path().join("attacker-after-proof");
+        let attacker = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&attacker_path)
+            .unwrap();
+        disable_persistent_wal(&store);
+
+        let sync_attempts = Arc::new(Mutex::new(0_u8));
+        let hook_attempts = Arc::clone(&sync_attempts);
+        *DIRECTORY_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |_| {
+            *hook_attempts.lock().unwrap() += 1;
+            Ok(())
+        }));
+        let hook_directory = directory.clone();
+        *DELETE_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() =
+            Some(Box::new(move |phase, quarantine| {
+                if phase != DeleteHookPhase::AfterProof {
+                    return;
+                }
+                fs::rename(
+                    hook_directory.join(quarantine),
+                    hook_directory.join("captured-after-proof"),
+                )
+                .unwrap();
+                fs::rename(&attacker_path, hook_directory.join(quarantine)).unwrap();
+            }));
+
+        drop(store);
+        *DELETE_HOOK.get().unwrap().lock().unwrap() = None;
+        *DIRECTORY_SYNC_HOOK.get().unwrap().lock().unwrap() = None;
+
+        assert_eq!(*sync_attempts.lock().unwrap(), 1);
+        assert_eq!(attacker.metadata().unwrap().nlink(), 1);
+        assert!(directory.join("captured-after-proof").exists());
+    }
+
+    #[test]
+    fn sidecar_setup_identity_failure_never_mutates_the_canonical_name() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xfa; 32]);
+        let session_directory = root.path().join("qtrace-ui").join(session.to_hex());
+        let canonical = session_directory.join("annotations.sqlite3-journal");
+        let captured = root.path().join("captured-setup-journal");
+        let store = AnnotationStore::open(AnnotationOpenRequest::new(
+            AuthorizedPath::new(root.path().to_owned()),
+            session,
+        ))
+        .unwrap();
+        let attacker_inode = Arc::new(Mutex::new(None));
+        let hook_attacker_inode = Arc::clone(&attacker_inode);
+        let hook_canonical = canonical.clone();
+        let hook_captured = captured.clone();
+        *SIDECAR_SETUP_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |name| {
+            if name != "annotations.sqlite3-journal" {
+                return;
+            }
+            fs::rename(&hook_canonical, &hook_captured).unwrap();
+            let attacker = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&hook_canonical)
+                .unwrap();
+            *hook_attacker_inode.lock().unwrap() = Some(attacker.metadata().unwrap().ino());
+        }));
+
+        let result = store.vfs.create_journal_for_test();
+        *SIDECAR_SETUP_HOOK.get().unwrap().lock().unwrap() = None;
+
+        assert!(result.is_err());
+        let canonical_metadata = fs::metadata(&canonical).unwrap();
+        assert_eq!(canonical_metadata.nlink(), 1);
+        assert_eq!(
+            Some(canonical_metadata.ino()),
+            *attacker_inode.lock().unwrap()
+        );
+        assert_eq!(fs::metadata(&captured).unwrap().nlink(), 1);
+    }
+
+    #[test]
+    fn newly_created_database_syncs_file_before_its_directory_entry() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let file_events = Arc::clone(&events);
+        *FILE_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |name| {
+            file_events.lock().unwrap().push(format!("file:{name}"));
+        }));
+        let directory_events = Arc::clone(&events);
+        *DIRECTORY_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |reason| {
+            directory_events
+                .lock()
+                .unwrap()
+                .push(format!("directory:{reason:?}"));
+            Ok(())
+        }));
+
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xab; 32]);
+        let store = AnnotationStore::open(AnnotationOpenRequest::new(
+            AuthorizedPath::new(root.path().to_owned()),
+            session,
+        ))
+        .unwrap();
+        *FILE_SYNC_HOOK.get().unwrap().lock().unwrap() = None;
+        *DIRECTORY_SYNC_HOOK.get().unwrap().lock().unwrap() = None;
+        drop(store);
+
+        let events = events.lock().unwrap();
+        for file in [
+            "file:annotations.sqlite3",
+            "file:annotations.sqlite3-wal",
+            "file:annotations.sqlite3-journal",
+        ] {
+            let directory = format!(
+                "directory:CreatedFile({})",
+                match file {
+                    "file:annotations.sqlite3" => "Main",
+                    "file:annotations.sqlite3-wal" => "Wal",
+                    _ => "Journal",
+                }
+            );
+            assert!(
+                events
+                    .windows(2)
+                    .any(|pair| pair[0] == file && pair[1] == directory),
+                "missing ordered created-file sync for {file}: {events:?}"
+            );
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("directory:CreatedFile("))
+                .count(),
+            3,
+            "each created main/WAL/journal entry must be synced exactly once: {events:?}"
+        );
+    }
+
+    #[test]
+    fn created_sidecar_dirsync_failure_is_retried_by_the_same_xsync_callback() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xac; 32]);
+        let store = AnnotationStore::open(AnnotationOpenRequest::new(
+            AuthorizedPath::new(root.path().to_owned()),
+            session,
+        ))
+        .unwrap();
+        let sync_attempts = Arc::new(Mutex::new(0_u8));
+        let hook_attempts = Arc::clone(&sync_attempts);
+        *DIRECTORY_SYNC_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Box::new(move |reason| {
+            if reason != DirectorySyncReason::CreatedFile(FileKind::Journal) {
+                return Ok(());
+            }
+            let mut attempts = hook_attempts.lock().unwrap();
+            *attempts += 1;
+            if *attempts == 1 {
+                Err(rustix::io::Errno::IO)
+            } else {
+                Ok(())
+            }
+        }));
+
+        let (first, first_pending, second, second_pending) =
+            store.vfs.sync_created_journal_twice_for_test().unwrap();
+        *DIRECTORY_SYNC_HOOK.get().unwrap().lock().unwrap() = None;
+
+        assert_eq!(first, rusqlite::ffi::SQLITE_IOERR_DIR_FSYNC);
+        assert!(first_pending);
+        assert_eq!(second, rusqlite::ffi::SQLITE_OK);
+        assert!(!second_pending);
+        assert_eq!(*sync_attempts.lock().unwrap(), 2);
+    }
+
+    #[test]
     fn sqlite_files_are_private_under_hostile_umask() {
+        let _hook_guard = VFS_HOOK_TEST_LOCK.lock().unwrap();
         const CHILD: &str = "QTRACE_SQLITE_UMASK_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
