@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt,
     fs::File,
-    os::unix::{fs::PermissionsExt, io::AsRawFd},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -13,8 +13,12 @@ use rusqlite::{
 use rustix::fs::{Mode, OFlags, openat};
 use rustix::io::Errno;
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 use crate::{
     AuthorizedPath,
+    annotation_vfs::DescriptorVfs,
     cache::{CacheDirectory, CacheError, ObjectIdentity},
 };
 
@@ -24,10 +28,35 @@ const SIDECAR_NAMES: [&str; 3] = [
     "annotations.sqlite3-shm",
     "annotations.sqlite3-journal",
 ];
-const CURRENT_SCHEMA: i64 = 2;
+const CURRENT_SCHEMA: i64 = 3;
 const MAX_COMMENT_BYTES: usize = 64 * 1024;
 const MAX_LOCAL_NAME_BYTES: usize = 4 * 1024;
 const MAX_HIGHLIGHT_BYTES: usize = 256;
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum OpenHookPhase {
+    BeforeSqliteOpen,
+    AfterSqliteOpen,
+}
+
+#[cfg(test)]
+type OpenHook = Box<dyn Fn(OpenHookPhase) + Send>;
+
+#[cfg(test)]
+static OPEN_HOOK: OnceLock<Mutex<Option<OpenHook>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(super) fn run_open_hook(phase: OpenHookPhase) {
+    if let Some(hook) = OPEN_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("annotation open hook lock poisoned")
+        .as_ref()
+    {
+        hook(phase);
+    }
+}
 
 struct AllowAll;
 
@@ -133,10 +162,8 @@ impl Highlight {
 
 pub struct AnnotationStore {
     directory: CacheDirectory,
-    database: File,
-    database_identity: ObjectIdentity,
-    sidecar_identities: [Option<ObjectIdentity>; 3],
-    connection: Connection,
+    vfs: DescriptorVfs,
+    connection: Option<Connection>,
     database_path: PathBuf,
 }
 
@@ -156,20 +183,36 @@ impl AnnotationStore {
             CacheDirectory::open_data(request.data_home.as_path(), &key, true, &AllowAll)
                 .map_err(AnnotationError::from_initial_cache)?
                 .ok_or_else(|| AnnotationError::io("annotation data directory was not created"))?;
-        let (database, identity) = open_database_leaf(&directory)?;
-        inspect_sidecars(&directory)?;
-        let proc_path = PathBuf::from(format!(
-            "/proc/self/fd/{}/{}",
-            directory.file.as_raw_fd(),
-            DATABASE_NAME
-        ));
-        let mut connection = Connection::open_with_flags(
-            &proc_path,
+        let (database, _) = open_database_leaf(&directory)?;
+        let sidecars = inspect_sidecars(&directory)?;
+        if sidecars[1].is_some() {
+            return Err(AnnotationError::path(
+                "preexisting SQLite shared-memory sidecar is forbidden",
+            ));
+        }
+        let database_path = request
+            .data_home
+            .as_path()
+            .join("qtrace-ui")
+            .join(key)
+            .join(DATABASE_NAME);
+        let vfs = DescriptorVfs::register(&directory.file, database)?;
+        let mut connection = Connection::open_with_flags_and_vfs(
+            &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            vfs.name(),
         )
         .map_err(AnnotationError::sqlite)?;
-        verify_database_binding(&directory, identity)
-            .map_err(|_| AnnotationError::identity("database binding changed while opening"))?;
+        configure_sqlite_limits(&connection)?;
+        let locking: String = connection
+            .query_row("PRAGMA locking_mode=EXCLUSIVE", [], |row| row.get(0))
+            .map_err(AnnotationError::sqlite)?;
+        if !locking.eq_ignore_ascii_case("exclusive") {
+            return Err(AnnotationError::vfs(
+                "SQLite refused exclusive locking mode",
+            ));
+        }
+        configure_sqlite_pragmas(&connection)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(AnnotationError::sqlite)?;
@@ -183,21 +226,11 @@ impl AnnotationStore {
             return Err(AnnotationError::io("SQLite refused WAL journal mode"));
         }
         migrate(&mut connection)?;
-        verify_database_binding(&directory, identity)
-            .map_err(|_| AnnotationError::identity("database binding changed during migration"))?;
-        let sidecar_identities = inspect_sidecars(&directory)?;
-        let database_path = request
-            .data_home
-            .as_path()
-            .join("qtrace-ui")
-            .join(key)
-            .join(DATABASE_NAME);
+        vfs.verify_bindings()?;
         Ok(Self {
             directory,
-            database,
-            database_identity: identity,
-            sidecar_identities,
-            connection,
+            vfs,
+            connection: Some(connection),
             database_path,
         })
     }
@@ -209,19 +242,17 @@ impl AnnotationStore {
     pub fn begin_transaction(&mut self) -> Result<AnnotationTransaction<'_>, AnnotationError> {
         self.verify_bindings()?;
         let directory = &self.directory;
-        let database = &self.database;
-        let database_identity = self.database_identity;
-        let sidecar_identities = self.sidecar_identities;
+        let vfs = &self.vfs;
         let transaction = self
             .connection
+            .as_mut()
+            .expect("annotation connection is present until drop")
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(AnnotationError::sqlite)?;
         Ok(AnnotationTransaction {
             transaction,
             directory,
-            database,
-            database_identity,
-            sidecar_identities,
+            vfs,
         })
     }
 
@@ -231,15 +262,19 @@ impl AnnotationStore {
     ) -> Result<Option<EventAnnotation>, AnnotationError> {
         self.verify_bindings()?;
         let key = encode_event_key(event);
-        let comment = self
+        let connection = self
             .connection
-            .query_row(
-                "SELECT comment FROM event_annotations WHERE event_key=?1",
-                [key.as_slice()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(AnnotationError::sqlite)?;
+            .as_ref()
+            .expect("annotation connection is present until drop");
+        let parameters: [&dyn rusqlite::ToSql; 1] = [&key.as_slice()];
+        let comment = read_bounded_text(
+            connection,
+            "event_annotations",
+            "comment",
+            "event_key=?1",
+            &parameters,
+            MAX_COMMENT_BYTES,
+        )?;
         comment
             .map(|comment| EventAnnotation::new(event.clone(), comment))
             .transpose()
@@ -252,15 +287,20 @@ impl AnnotationStore {
     ) -> Result<Option<LocalSymbolName>, AnnotationError> {
         self.verify_bindings()?;
         let pc = relative_pc.to_le_bytes();
-        let name = self
+        let connection = self
             .connection
-            .query_row(
-                "SELECT name FROM local_symbol_names WHERE module_digest=?1 AND relative_pc=?2",
-                params![module_digest.as_bytes().as_slice(), pc.as_slice()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(AnnotationError::sqlite)?;
+            .as_ref()
+            .expect("annotation connection is present until drop");
+        let digest = module_digest.as_bytes();
+        let parameters: [&dyn rusqlite::ToSql; 2] = [&digest.as_slice(), &pc.as_slice()];
+        let name = read_bounded_text(
+            connection,
+            "local_symbol_names",
+            "name",
+            "module_digest=?1 AND relative_pc=?2",
+            &parameters,
+            MAX_LOCAL_NAME_BYTES,
+        )?;
         name.map(|name| LocalSymbolName::new(module_digest, relative_pc, name))
             .transpose()
     }
@@ -268,15 +308,19 @@ impl AnnotationStore {
     pub fn highlight(&self, event: &EventKey) -> Result<Option<Highlight>, AnnotationError> {
         self.verify_bindings()?;
         let key = encode_event_key(event);
-        let value = self
+        let connection = self
             .connection
-            .query_row(
-                "SELECT value FROM highlights WHERE event_key=?1",
-                [key.as_slice()],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(AnnotationError::sqlite)?;
+            .as_ref()
+            .expect("annotation connection is present until drop");
+        let parameters: [&dyn rusqlite::ToSql; 1] = [&key.as_slice()];
+        let value = read_bounded_text(
+            connection,
+            "highlights",
+            "value",
+            "event_key=?1",
+            &parameters,
+            MAX_HIGHLIGHT_BYTES,
+        )?;
         value
             .map(|value| Highlight::new(event.clone(), value))
             .transpose()
@@ -286,25 +330,22 @@ impl AnnotationStore {
         self.directory
             .verify()
             .map_err(|_| AnnotationError::identity("annotation data directory was replaced"))?;
-        let held = ObjectIdentity::regular_file(&self.database)
-            .map_err(|_| AnnotationError::identity("held annotation database changed type"))?;
-        if held != self.database_identity {
-            return Err(AnnotationError::identity(
-                "held annotation database identity changed",
-            ));
+        self.vfs.verify_bindings()
+    }
+}
+
+impl Drop for AnnotationStore {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            let _ = connection.close();
         }
-        verify_database_binding(&self.directory, self.database_identity)
-            .map_err(|_| AnnotationError::identity("annotation database was replaced"))?;
-        verify_sidecars(&self.directory, self.sidecar_identities)
     }
 }
 
 pub struct AnnotationTransaction<'store> {
     transaction: Transaction<'store>,
     directory: &'store CacheDirectory,
-    database: &'store File,
-    database_identity: ObjectIdentity,
-    sidecar_identities: [Option<ObjectIdentity>; 3],
+    vfs: &'store DescriptorVfs,
 }
 
 impl AnnotationTransaction<'_> {
@@ -403,17 +444,95 @@ impl AnnotationTransaction<'_> {
         self.directory
             .verify()
             .map_err(|_| AnnotationError::identity("annotation data directory was replaced"))?;
-        let held = ObjectIdentity::regular_file(self.database)
-            .map_err(|_| AnnotationError::identity("held annotation database changed type"))?;
-        if held != self.database_identity {
-            return Err(AnnotationError::identity(
-                "held annotation database identity changed",
-            ));
-        }
-        verify_database_binding(self.directory, self.database_identity)
-            .map_err(|_| AnnotationError::identity("annotation database was replaced"))?;
-        verify_sidecars(self.directory, self.sidecar_identities)
+        self.vfs.verify_bindings()
     }
+}
+
+fn configure_sqlite_limits(connection: &Connection) -> Result<(), AnnotationError> {
+    // SAFETY: the connection is live and exclusively borrowed during initialization.
+    let handle = unsafe { connection.handle() };
+    for (category, limit) in [
+        (rusqlite::ffi::SQLITE_LIMIT_LENGTH, 128 * 1024),
+        (rusqlite::ffi::SQLITE_LIMIT_SQL_LENGTH, 64 * 1024),
+        (rusqlite::ffi::SQLITE_LIMIT_COLUMN, 32),
+        (rusqlite::ffi::SQLITE_LIMIT_VARIABLE_NUMBER, 16),
+        (rusqlite::ffi::SQLITE_LIMIT_ATTACHED, 0),
+    ] {
+        // SAFETY: sqlite3_limit accepts these documented categories and retains no pointers.
+        unsafe { rusqlite::ffi::sqlite3_limit(handle, category, limit) };
+    }
+    Ok(())
+}
+
+fn configure_sqlite_pragmas(connection: &Connection) -> Result<(), AnnotationError> {
+    for statement in [
+        "PRAGMA page_size=4096",
+        "PRAGMA max_page_count=262144",
+        "PRAGMA temp_store=MEMORY",
+        "PRAGMA recursive_triggers=OFF",
+        "PRAGMA journal_size_limit=67108864",
+        "PRAGMA wal_autocheckpoint=1000",
+    ] {
+        connection.execute_batch(statement).map_err(|error| {
+            AnnotationError::vfs(format!("SQLite limit setup `{statement}` failed: {error}"))
+        })?;
+    }
+    let page_size: i64 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(AnnotationError::sqlite)?;
+    let max_pages: i64 = connection
+        .query_row("PRAGMA max_page_count", [], |row| row.get(0))
+        .map_err(AnnotationError::sqlite)?;
+    if page_size != 4096 || max_pages <= 0 || max_pages > 262_144 {
+        return Err(AnnotationError::resource(
+            "SQLite page-size or page-count hard limit was not applied",
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_text(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    predicate: &str,
+    parameters: &[&dyn rusqlite::ToSql],
+    maximum: usize,
+) -> Result<Option<String>, AnnotationError> {
+    let metadata_sql = format!(
+        "SELECT typeof({column}), length(CAST({column} AS BLOB)) FROM {table} WHERE {predicate}"
+    );
+    let metadata = connection
+        .query_row(&metadata_sql, parameters, |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .optional()
+        .map_err(AnnotationError::sqlite)?;
+    let Some((kind, length)) = metadata else {
+        return Ok(None);
+    };
+    if kind != "text" || length < 0 {
+        return Err(AnnotationError::schema(
+            "annotation text has an invalid SQLite storage class",
+        ));
+    }
+    let length = usize::try_from(length)
+        .map_err(|_| AnnotationError::resource("annotation text length overflow"))?;
+    if length == 0 || length > maximum {
+        return Err(AnnotationError::resource(
+            "annotation text exceeds its UTF-8 byte limit",
+        ));
+    }
+    let value_sql = format!("SELECT {column} FROM {table} WHERE {predicate}");
+    let value = connection
+        .query_row(&value_sql, parameters, |row| row.get::<_, String>(0))
+        .map_err(AnnotationError::sqlite)?;
+    if value.len() != length || value.contains('\0') {
+        return Err(AnnotationError::schema(
+            "annotation text changed type or length while reading",
+        ));
+    }
+    Ok(Some(value))
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), AnnotationError> {
@@ -446,6 +565,30 @@ fn migrate(connection: &mut Connection) -> Result<(), AnnotationError> {
                     .execute("UPDATE schema_version SET version=?1", [CURRENT_SCHEMA])
                     .map_err(AnnotationError::sqlite)?;
             }
+            2 => {
+                validate_legacy_rows(&transaction)?;
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE event_annotations RENAME TO event_annotations_v2;
+                         ALTER TABLE local_symbol_names RENAME TO local_symbol_names_v2;
+                         ALTER TABLE highlights RENAME TO highlights_v2;",
+                    )
+                    .map_err(AnnotationError::sqlite)?;
+                create_annotation_tables(&transaction)?;
+                transaction
+                    .execute_batch(
+                        "INSERT INTO event_annotations SELECT * FROM event_annotations_v2;
+                         INSERT INTO local_symbol_names SELECT * FROM local_symbol_names_v2;
+                         INSERT INTO highlights SELECT * FROM highlights_v2;
+                         DROP TABLE event_annotations_v2;
+                         DROP TABLE local_symbol_names_v2;
+                         DROP TABLE highlights_v2;",
+                    )
+                    .map_err(AnnotationError::sqlite)?;
+                transaction
+                    .execute("UPDATE schema_version SET version=?1", [CURRENT_SCHEMA])
+                    .map_err(AnnotationError::sqlite)?;
+            }
             CURRENT_SCHEMA => create_annotation_tables(&transaction)?,
             _ => {
                 return Err(AnnotationError::new(
@@ -456,6 +599,42 @@ fn migrate(connection: &mut Connection) -> Result<(), AnnotationError> {
         }
     }
     transaction.commit().map_err(AnnotationError::sqlite)
+}
+
+fn validate_legacy_rows(transaction: &Transaction<'_>) -> Result<(), AnnotationError> {
+    let oversized: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM event_annotations WHERE length(CAST(comment AS BLOB)) NOT BETWEEN 1 AND 65536
+                 UNION ALL SELECT 1 FROM local_symbol_names WHERE length(CAST(name AS BLOB)) NOT BETWEEN 1 AND 4096
+                 UNION ALL SELECT 1 FROM highlights WHERE length(CAST(value AS BLOB)) NOT BETWEEN 1 AND 256
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(AnnotationError::sqlite)?;
+    if oversized {
+        return Err(AnnotationError::resource(
+            "legacy annotation text exceeds its byte limit",
+        ));
+    }
+    let wrong_type: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM event_annotations WHERE typeof(comment)!='text'
+                 UNION ALL SELECT 1 FROM local_symbol_names WHERE typeof(name)!='text'
+                 UNION ALL SELECT 1 FROM highlights WHERE typeof(value)!='text'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(AnnotationError::sqlite)?;
+    if wrong_type {
+        return Err(AnnotationError::schema(
+            "legacy annotation text has an invalid SQLite storage class",
+        ));
+    }
+    Ok(())
 }
 
 fn create_schema(transaction: &Transaction<'_>) -> Result<(), AnnotationError> {
@@ -469,18 +648,18 @@ fn create_annotation_tables(transaction: &Transaction<'_>) -> Result<(), Annotat
     transaction
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS event_annotations(\n\
-                 event_key BLOB PRIMARY KEY NOT NULL CHECK(length(event_key)=70),\n\
-                 comment TEXT NOT NULL\n\
+                 event_key BLOB PRIMARY KEY NOT NULL CHECK(typeof(event_key)='blob' AND length(event_key)=70),\n\
+                 comment TEXT NOT NULL CHECK(typeof(comment)='text' AND length(CAST(comment AS BLOB)) BETWEEN 1 AND 65536 AND instr(comment, char(0))=0)\n\
              );\n\
              CREATE TABLE IF NOT EXISTS local_symbol_names(\n\
-                 module_digest BLOB NOT NULL CHECK(length(module_digest)=32),\n\
-                 relative_pc BLOB NOT NULL CHECK(length(relative_pc)=8),\n\
-                 name TEXT NOT NULL,\n\
+                 module_digest BLOB NOT NULL CHECK(typeof(module_digest)='blob' AND length(module_digest)=32),\n\
+                 relative_pc BLOB NOT NULL CHECK(typeof(relative_pc)='blob' AND length(relative_pc)=8),\n\
+                 name TEXT NOT NULL CHECK(typeof(name)='text' AND length(CAST(name AS BLOB)) BETWEEN 1 AND 4096 AND instr(name, char(0))=0),\n\
                  PRIMARY KEY(module_digest, relative_pc)\n\
              );\n\
              CREATE TABLE IF NOT EXISTS highlights(\n\
-                 event_key BLOB PRIMARY KEY NOT NULL CHECK(length(event_key)=70),\n\
-                 value TEXT NOT NULL\n\
+                 event_key BLOB PRIMARY KEY NOT NULL CHECK(typeof(event_key)='blob' AND length(event_key)=70),\n\
+                 value TEXT NOT NULL CHECK(typeof(value)='text' AND length(CAST(value AS BLOB)) BETWEEN 1 AND 256 AND instr(value, char(0))=0)\n\
              );",
         )
         .map_err(AnnotationError::sqlite)
@@ -501,26 +680,6 @@ fn encode_event_key(key: &EventKey) -> [u8; 70] {
         out[66..70].copy_from_slice(&tid.to_le_bytes());
     }
     out
-}
-
-fn verify_database_binding(
-    directory: &CacheDirectory,
-    expected: ObjectIdentity,
-) -> Result<(), CacheError> {
-    let descriptor = openat(
-        &directory.file,
-        DATABASE_NAME,
-        OFlags::RDWR.union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC),
-        Mode::empty(),
-    )
-    .map_err(|error| CacheError::path(format!("annotation database binding changed: {error}")))?;
-    let actual = ObjectIdentity::regular_file(&File::from(descriptor))?;
-    if actual != expected {
-        return Err(CacheError::identity(
-            "annotation database identity changed during operation",
-        ));
-    }
-    Ok(())
 }
 
 fn open_database_leaf(
@@ -678,19 +837,6 @@ fn inspect_sidecars(
     Ok(identities)
 }
 
-fn verify_sidecars(
-    directory: &CacheDirectory,
-    expected: [Option<ObjectIdentity>; 3],
-) -> Result<(), AnnotationError> {
-    let actual = inspect_sidecars(directory)?;
-    if actual != expected {
-        return Err(AnnotationError::identity(
-            "SQLite sidecar identity changed during operation",
-        ));
-    }
-    Ok(())
-}
-
 fn validate_text(value: &str, maximum: usize, label: &str) -> Result<(), AnnotationError> {
     if value.is_empty() || value.len() > maximum || value.contains('\0') {
         return Err(AnnotationError::new(
@@ -715,15 +861,15 @@ impl AnnotationError {
         }
     }
 
-    fn path(detail: impl Into<String>) -> Self {
+    pub(crate) fn path(detail: impl Into<String>) -> Self {
         Self::new("annotation.path_escape", detail)
     }
 
-    fn identity(detail: impl Into<String>) -> Self {
+    pub(crate) fn identity(detail: impl Into<String>) -> Self {
         Self::new("annotation.identity_changed", detail)
     }
 
-    fn permission(detail: impl Into<String>) -> Self {
+    pub(crate) fn permission(detail: impl Into<String>) -> Self {
         Self::new("annotation.permission_denied", detail)
     }
 
@@ -733,6 +879,18 @@ impl AnnotationError {
 
     fn sqlite(error: rusqlite::Error) -> Self {
         Self::new("annotation.sqlite", error.to_string())
+    }
+
+    pub(crate) fn vfs(detail: impl Into<String>) -> Self {
+        Self::new("annotation.io", detail)
+    }
+
+    fn schema(detail: impl Into<String>) -> Self {
+        Self::new("annotation.schema_corrupt", detail)
+    }
+
+    fn resource(detail: impl Into<String>) -> Self {
+        Self::new("annotation.resource_exhausted", detail)
     }
 
     fn from_initial_cache(error: CacheError) -> Self {
@@ -757,3 +915,80 @@ impl fmt::Display for AnnotationError {
 }
 
 impl Error for AnnotationError {}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        sync::{Arc, Mutex},
+    };
+
+    use qtrace_provider::{ArtifactDigest, EventKey, TimelineId};
+    use tempfile::TempDir;
+
+    use super::{
+        AnnotationOpenRequest, AnnotationStore, AuthorizedPath, EventAnnotation, OPEN_HOOK,
+        OpenHookPhase,
+    };
+
+    #[test]
+    fn sqlite_io_never_follows_an_aba_replacement_after_main_fd_is_held() {
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xa5; 32]);
+        let request =
+            AnnotationOpenRequest::new(AuthorizedPath::new(root.path().to_owned()), session);
+        drop(AnnotationStore::open(request.clone()).unwrap());
+
+        let database = root
+            .path()
+            .join("qtrace-ui")
+            .join(session.to_hex())
+            .join("annotations.sqlite3");
+        let held = database.with_extension("held");
+        let attacker = database.with_extension("attacker");
+        let phases = Arc::new(Mutex::new(0_u8));
+        let hook_phases = Arc::clone(&phases);
+        let hook_database = database.clone();
+        let hook_held = held.clone();
+        let hook_attacker = attacker.clone();
+        *OPEN_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() =
+            Some(Box::new(move |phase| match phase {
+                OpenHookPhase::BeforeSqliteOpen => {
+                    fs::rename(&hook_database, &hook_held).unwrap();
+                    fs::write(&hook_database, []).unwrap();
+                    fs::set_permissions(&hook_database, fs::Permissions::from_mode(0o600)).unwrap();
+                    *hook_phases.lock().unwrap() |= 1;
+                }
+                OpenHookPhase::AfterSqliteOpen => {
+                    fs::rename(&hook_database, &hook_attacker).unwrap();
+                    fs::rename(&hook_held, &hook_database).unwrap();
+                    *hook_phases.lock().unwrap() |= 2;
+                }
+            }));
+
+        let mut store = AnnotationStore::open(request).unwrap();
+        *OPEN_HOOK.get().unwrap().lock().unwrap() = None;
+        assert_eq!(*phases.lock().unwrap(), 3);
+        {
+            let mut transaction = store.begin_transaction().unwrap();
+            transaction
+                .put_event_annotation(
+                    &EventAnnotation::new(
+                        EventKey::new(session, TimelineId(1), 2, 3, Some(4), Some(5)),
+                        "must stay on the held inode",
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        drop(store);
+
+        assert_eq!(
+            fs::metadata(&attacker).unwrap().len(),
+            0,
+            "SQLite wrote through the attacker-controlled pathname replacement"
+        );
+    }
+}

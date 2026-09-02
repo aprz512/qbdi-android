@@ -44,7 +44,7 @@ fn section(name: u32, kind: u32, offset: u64, size: u64, link: u32, entsize: u64
 fn elf() -> Vec<u8> {
     let shstr = b"\0.shstrtab\0.text\0.strtab\0.symtab\0.note.gnu.build-id\0";
     let strtab = b"\0native_work\0";
-    let mut bytes = vec![0; 64];
+    let mut bytes = vec![0; 64 + 56];
     let shstr_at = bytes.len();
     bytes.extend_from_slice(shstr);
     bytes.resize(bytes.len().next_multiple_of(8), 0);
@@ -86,11 +86,23 @@ fn elf() -> Vec<u8> {
     put16(&mut bytes, 16, 3);
     put16(&mut bytes, 18, 183);
     put32(&mut bytes, 20, 1);
+    put64(&mut bytes, 32, 64);
     put64(&mut bytes, 40, sections_at as u64);
     put16(&mut bytes, 52, 64);
+    put16(&mut bytes, 54, 56);
+    put16(&mut bytes, 56, 1);
     put16(&mut bytes, 58, 64);
     put16(&mut bytes, 60, 6);
     put16(&mut bytes, 62, 1);
+    put32(&mut bytes, 64, 1);
+    put32(&mut bytes, 68, 5);
+    put64(&mut bytes, 72, 0);
+    put64(&mut bytes, 80, 0);
+    put64(&mut bytes, 88, 0);
+    let file_size = bytes.len() as u64;
+    put64(&mut bytes, 96, file_size);
+    put64(&mut bytes, 104, file_size);
+    put64(&mut bytes, 112, 0x1000);
     bytes
 }
 

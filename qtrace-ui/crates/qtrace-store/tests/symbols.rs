@@ -1,4 +1,9 @@
-use std::{fs, os::unix::fs::symlink, path::Path};
+use std::{
+    fs,
+    os::unix::fs::symlink,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use qtrace_provider::{ArtifactDigest, OperationAbort, WorkDelta, WorkGuard};
 use qtrace_store::{
@@ -11,6 +16,28 @@ struct AllowAll;
 
 impl WorkGuard for AllowAll {
     fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
+        Ok(())
+    }
+}
+
+struct CancellingProbe {
+    work: AtomicU64,
+    cancel_after: u64,
+    maximum_nodes_delta: AtomicU64,
+    maximum_input_delta: AtomicU64,
+}
+
+impl WorkGuard for CancellingProbe {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        self.maximum_nodes_delta
+            .fetch_max(delta.nodes, Ordering::Relaxed);
+        self.maximum_input_delta
+            .fetch_max(delta.input_bytes, Ordering::Relaxed);
+        let increment = delta.nodes.saturating_add(delta.input_bytes);
+        let before = self.work.fetch_add(increment, Ordering::Relaxed);
+        if before.saturating_add(increment) > self.cancel_after {
+            return Err(OperationAbort::Cancelled);
+        }
         Ok(())
     }
 }
@@ -218,6 +245,26 @@ fn load_request(path: &Path, bytes: &[u8]) -> ElfLoadRequest {
     )
 }
 
+fn section_data_offset(bytes: &[u8], wanted_kind: u32) -> usize {
+    let table = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(bytes[60..62].try_into().unwrap()) as usize;
+    (0..count)
+        .find_map(|index| {
+            let at = table + index * 64;
+            let kind = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap());
+            (kind == wanted_kind)
+                .then(|| u64::from_le_bytes(bytes[at + 24..at + 32].try_into().unwrap()) as usize)
+        })
+        .unwrap()
+}
+
+fn load_fixture(bytes: Vec<u8>) -> Result<ElfSymbolIndex, qtrace_store::SymbolError> {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("libfixture.so");
+    fs::write(&path, &bytes).unwrap();
+    ElfSymbolIndex::load(load_request(&path, &bytes), &AllowAll)
+}
+
 #[test]
 fn loads_only_verified_aarch64_symbols_with_stable_relative_addresses() {
     let temp = TempDir::new().unwrap();
@@ -409,4 +456,73 @@ fn rejects_wrong_elf_shape_malformed_bounds_and_symlink_leaf() {
             .code(),
         "symbol.path_escape"
     );
+}
+
+#[test]
+fn requires_loadable_executable_images_and_filters_non_text_symbols() {
+    let mut relocatable = aarch64_elf();
+    put16(&mut relocatable, 16, 1);
+    assert_eq!(
+        load_fixture(relocatable).unwrap_err().code(),
+        "symbol.elf_type_unsupported"
+    );
+
+    let mut without_load = aarch64_elf();
+    put16(&mut without_load, 56, 0);
+    assert_eq!(
+        load_fixture(without_load).unwrap_err().code(),
+        "symbol.elf_segment_invalid"
+    );
+
+    let mut overflowing_load = aarch64_elf();
+    put64(&mut overflowing_load, 80, u64::MAX - 0x100);
+    put64(&mut overflowing_load, 88, u64::MAX - 0x100);
+    put64(&mut overflowing_load, 104, 0x200);
+    assert_eq!(
+        load_fixture(overflowing_load).unwrap_err().code(),
+        "symbol.elf_segment_invalid"
+    );
+
+    let mut outside_load = aarch64_elf();
+    put64(&mut outside_load, 80, 0x100);
+    put64(&mut outside_load, 88, 0x100);
+    put64(&mut outside_load, 96, 0x30);
+    put64(&mut outside_load, 104, 0x30);
+    let outside = load_fixture(outside_load).unwrap();
+    assert!(outside.resolve(0x120).is_none());
+    assert!(outside.resolve(0x180).is_none());
+
+    for symbol_kind in [1_u8, 6_u8] {
+        let mut non_text = aarch64_elf();
+        for section_kind in [11_u32, 2_u32] {
+            let table = section_data_offset(&non_text, section_kind);
+            non_text[table + 24 + 4] = 0x10 | symbol_kind;
+        }
+        let index = load_fixture(non_text).unwrap();
+        assert!(
+            index.resolve(0x120).is_none(),
+            "accepted ELF symbol kind {symbol_kind}"
+        );
+    }
+}
+
+#[test]
+fn hashing_parsing_and_skipped_entries_observe_chunked_cancellation() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("libfixture.so");
+    let mut bytes = aarch64_elf();
+    bytes.resize(1024 * 1024, 0);
+    fs::write(&path, &bytes).unwrap();
+    for cancel_after in [32 * 1024, bytes.len() as u64 * 2 + 20] {
+        let guard = CancellingProbe {
+            work: AtomicU64::new(0),
+            cancel_after,
+            maximum_nodes_delta: AtomicU64::new(0),
+            maximum_input_delta: AtomicU64::new(0),
+        };
+        let error = ElfSymbolIndex::load(load_request(&path, &bytes), &guard).unwrap_err();
+        assert_eq!(error.code(), "job.cancelled");
+        assert!(guard.maximum_nodes_delta.load(Ordering::Relaxed) <= 4096);
+        assert!(guard.maximum_input_delta.load(Ordering::Relaxed) <= 4096);
+    }
 }

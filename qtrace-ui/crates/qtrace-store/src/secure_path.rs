@@ -194,6 +194,45 @@ impl SecureFile {
         Ok(output)
     }
 
+    pub(crate) fn read_bounded_chunked(
+        &self,
+        maximum: u64,
+        chunk_size: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let before = self.identity()?;
+        if before.size == 0 || before.size > maximum || chunk_size == 0 || chunk_size > 4096 {
+            return Err(ProviderError::new(
+                "session.manifest_invalid",
+                "session.manifest",
+                None,
+                false,
+                "source is empty, exceeds its byte limit, or has an invalid chunk size",
+            ));
+        }
+        let size =
+            usize::try_from(before.size).map_err(|_| resource_error("file size overflow"))?;
+        let _scope = AllocationScope::begin(guard, before.size, 0)?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(size)
+            .map_err(|_| resource_error("file allocation failed"))?;
+        let mut offset = 0_usize;
+        let mut chunk = [0_u8; 4096];
+        while offset < size {
+            let amount = (size - offset).min(chunk_size);
+            guard.consume(WorkDelta {
+                input_bytes: amount as u64,
+                ..WorkDelta::default()
+            })?;
+            self.read_exact_at_unchecked(offset as u64, &mut chunk[..amount])?;
+            output.extend_from_slice(&chunk[..amount]);
+            offset += amount;
+        }
+        self.verify_unchanged(before, true)?;
+        Ok(output)
+    }
+
     pub(crate) fn read_all_held(&self, guard: &dyn WorkGuard) -> Result<Vec<u8>, ProviderError> {
         let before = self.identity()?;
         guard.consume(WorkDelta {

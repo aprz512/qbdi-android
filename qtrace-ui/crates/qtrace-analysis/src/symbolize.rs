@@ -65,9 +65,7 @@ impl SymbolResolver {
         let coordinate = elf
             .as_ref()
             .map_or(relative_pc, |symbol| symbol.relative_address());
-        let local = self.local_names.iter().find(|name| {
-            name.module_digest() == module.digest() && name.relative_pc() == coordinate
-        });
+        let local = find_local_name(&self.local_names, module.digest(), coordinate);
         match (elf, local) {
             (Some(symbol), local) => {
                 let elf_name = symbol.name().to_owned();
@@ -116,3 +114,46 @@ impl fmt::Display for SymbolResolveError {
 }
 
 impl Error for SymbolResolveError {}
+
+fn find_local_name(
+    names: &[LocalSymbolName],
+    digest: qtrace_provider::ArtifactDigest,
+    coordinate: u64,
+) -> Option<&LocalSymbolName> {
+    names
+        .binary_search_by(|name| {
+            #[cfg(test)]
+            LOCAL_LOOKUP_COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            name.module_digest()
+                .as_bytes()
+                .cmp(digest.as_bytes())
+                .then_with(|| name.relative_pc().cmp(&coordinate))
+        })
+        .ok()
+        .map(|index| &names[index])
+}
+
+#[cfg(test)]
+static LOCAL_LOOKUP_COMPARISONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+mod tests {
+    use qtrace_provider::ArtifactDigest;
+    use qtrace_store::LocalSymbolName;
+
+    use super::{LOCAL_LOOKUP_COMPARISONS, find_local_name};
+
+    #[test]
+    fn late_local_name_lookup_is_logarithmic_at_one_million_entries() {
+        let digest = ArtifactDigest::new([0x44; 32]);
+        let mut names = Vec::with_capacity(1_000_000);
+        for pc in 0..1_000_000_u64 {
+            names.push(LocalSymbolName::new(digest, pc, "x").unwrap());
+        }
+        LOCAL_LOOKUP_COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let found = find_local_name(&names, digest, 999_999).unwrap();
+        assert_eq!(found.relative_pc(), 999_999);
+        assert!(LOCAL_LOOKUP_COMPARISONS.load(std::sync::atomic::Ordering::Relaxed) <= 21);
+    }
+}

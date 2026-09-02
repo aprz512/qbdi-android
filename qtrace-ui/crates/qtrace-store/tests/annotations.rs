@@ -115,12 +115,13 @@ fn session_identity_isolates_databases_and_private_permissions() {
         fs::metadata(data_dir).unwrap().permissions().mode() & 0o777,
         0o700
     );
-    for suffix in ["-wal", "-shm"] {
-        let metadata =
-            fs::metadata(format!("{}{}", first.database_path().display(), suffix)).unwrap();
-        assert!(metadata.is_file());
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    }
+    let wal = fs::metadata(format!("{}-wal", first.database_path().display())).unwrap();
+    assert!(wal.is_file());
+    assert_eq!(wal.permissions().mode() & 0o777, 0o600);
+    assert!(
+        !std::path::PathBuf::from(format!("{}-shm", first.database_path().display())).exists(),
+        "exclusive WAL mode must keep the wal-index in heap memory"
+    );
     assert!(
         !std::path::PathBuf::from(format!("{}-journal", first.database_path().display())).exists()
     );
@@ -239,6 +240,7 @@ fn rejects_symlinked_data_root_database_leaf_and_root_replacement() {
         Err(error) => error,
     };
     assert_eq!(error.code(), "annotation.identity_changed");
+    assert_eq!(fs::read(&database).unwrap(), b"replacement");
 }
 
 #[test]
@@ -325,4 +327,81 @@ fn rejects_insecure_existing_database_mode_without_chmodding_the_leaf() {
         fs::metadata(database).unwrap().permissions().mode() & 0o777,
         0o644
     );
+}
+
+#[test]
+fn rejects_oversized_and_non_text_rows_before_materializing_strings() {
+    for (session_byte, corruption, expected) in [
+        (
+            13_u8,
+            "UPDATE event_annotations SET comment=CAST(printf('%.*c',70000,'x') AS TEXT)",
+            "annotation.resource_exhausted",
+        ),
+        (
+            14_u8,
+            "UPDATE event_annotations SET comment=zeroblob(16)",
+            "annotation.schema_corrupt",
+        ),
+    ] {
+        let root = TempDir::new().unwrap();
+        let session = digest(session_byte);
+        let mut store = AnnotationStore::open(request(&root, session)).unwrap();
+        {
+            let mut transaction = store.begin_transaction().unwrap();
+            transaction
+                .put_event_annotation(&EventAnnotation::new(event(), "valid").unwrap())
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        let path = store.database_path().to_owned();
+        drop(store);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA ignore_check_constraints=ON; {corruption};"
+            ))
+            .unwrap();
+        drop(connection);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let reopened = AnnotationStore::open(request(&root, session)).unwrap();
+        assert_eq!(
+            reopened.event_annotation(&event()).unwrap_err().code(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn corrupt_schema_two_migration_rolls_back_with_a_resource_error() {
+    let root = TempDir::new().unwrap();
+    let session = digest(15);
+    let mut store = AnnotationStore::open(request(&root, session)).unwrap();
+    {
+        let mut transaction = store.begin_transaction().unwrap();
+        transaction
+            .put_event_annotation(&EventAnnotation::new(event(), "valid").unwrap())
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    let path = store.database_path().to_owned();
+    drop(store);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON;
+             UPDATE schema_version SET version=2;
+             UPDATE event_annotations SET comment=CAST(printf('%.*c',70000,'x') AS TEXT);",
+        )
+        .unwrap();
+    drop(connection);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let error = AnnotationStore::open(request(&root, session)).unwrap_err();
+    assert_eq!(error.code(), "annotation.resource_exhausted");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = connection
+        .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2, "failed migration did not roll back atomically");
 }

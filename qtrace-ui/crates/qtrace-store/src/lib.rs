@@ -1,6 +1,7 @@
 //! Trace-storage boundary.
 
 mod allocation;
+mod annotation_vfs;
 mod annotations;
 mod cache;
 mod identity;
