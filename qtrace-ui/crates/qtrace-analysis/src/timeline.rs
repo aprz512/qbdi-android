@@ -104,16 +104,11 @@ impl ProjectionWorkPlan {
             {
                 return None;
             }
-            let store_radix = local_radix_work_bound(
-                group.store_local_radix_sorts,
-                group.store_local_radix_rows,
-            )?;
             let analysis_radix = local_radix_work_bound(
                 group.analysis_local_radix_sorts,
                 group.analysis_local_radix_rows,
             )?;
             work.checked_add(group.store_decode_work)?
-                .checked_add(store_radix)?
                 .checked_add(group.analysis_decode_work)?
                 .checked_add(analysis_radix)
         })?;
@@ -457,15 +452,6 @@ thread_local! {
     static LAST_PAGE_USAGE: std::cell::Cell<Option<(u64, u64)>> = const {
         std::cell::Cell::new(None)
     };
-    static PROJECTION_ALLOWANCE_OVERRIDE: std::cell::Cell<Option<u64>> = const {
-        std::cell::Cell::new(None)
-    };
-    static LAST_PROJECTION_WORK: std::cell::Cell<Option<u64>> = const {
-        std::cell::Cell::new(None)
-    };
-    static LAST_PROJECTION_ALLOWANCE: std::cell::Cell<Option<u64>> = const {
-        std::cell::Cell::new(None)
-    };
 }
 
 impl TimelineProjection {
@@ -488,8 +474,6 @@ impl TimelineProjection {
         let residual = synchronous_residual_filter(filter.as_ref());
         let candidates = apply_synchronous_residuals(&context, &residual, candidates, &guard)?;
         let candidates = sort_rows_by_stable_key(&context, candidates, &guard)?;
-        #[cfg(test)]
-        LAST_PROJECTION_WORK.set(Some(guard.consumed().0));
         let has_residual_scan = filter.has_semantic_detail_residual();
         let state = Arc::new((Mutex::new(ProjectionState::default()), Condvar::new()));
         let plan = QueryPlan {
@@ -1216,8 +1200,6 @@ struct PlanGroup {
     list_count: usize,
     estimated_rows: usize,
     store_decode_work: u64,
-    store_local_radix_sorts: usize,
-    store_local_radix_rows: usize,
     analysis_decode_work: u64,
     analysis_local_radix_sorts: usize,
     analysis_local_radix_rows: usize,
@@ -1285,11 +1267,6 @@ impl CandidateGuard {
     fn authorize(&self, plan: ProjectionWorkPlan) -> Result<(), AnalysisError> {
         let current = self.ledger.work.load(Ordering::Acquire);
         let allowance = plan.allowance;
-        #[cfg(test)]
-        let allowance = {
-            LAST_PROJECTION_ALLOWANCE.set(Some(allowance));
-            PROJECTION_ALLOWANCE_OVERRIDE.take().unwrap_or(allowance)
-        };
         let limit = current
             .checked_add(allowance)
             .ok_or_else(|| AnalysisError::cpu_budget_exceeded("projection work budget overflow"))?;
@@ -1593,8 +1570,7 @@ fn borrowed_filter_bytes(values: &[String]) -> ([&[u8]; crate::filter::MAX_FILTE
 
 #[derive(Default)]
 struct PostingPlanWork {
-    store_local_radix_sorts: usize,
-    store_local_radix_rows: usize,
+    store_decode_work: u64,
     analysis_decode_work: u64,
     analysis_local_radix_sorts: usize,
     analysis_local_radix_rows: usize,
@@ -1605,14 +1581,10 @@ impl PostingPlanWork {
         &mut self,
         estimate: qtrace_store::NormalizedPostingEstimate,
     ) -> Result<usize, AnalysisError> {
-        self.store_local_radix_sorts = self
-            .store_local_radix_sorts
-            .checked_add(estimate.local_radix_sorts)
-            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store radix count overflow"))?;
-        self.store_local_radix_rows = self
-            .store_local_radix_rows
-            .checked_add(estimate.local_radix_rows)
-            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store radix row overflow"))?;
+        self.store_decode_work = self
+            .store_decode_work
+            .checked_add(estimate.decode_work)
+            .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store decode work overflow"))?;
         Ok(estimate.rows)
     }
 
@@ -1673,7 +1645,6 @@ fn estimate_candidate_field(
 ) -> Result<PlanGroup, AnalysisError> {
     let store = context.store.as_ref();
     let mut total = 0;
-    let mut semantic_lookup_work = 0_u64;
     let mut semantic_shape = None;
     let mut plan_work = PostingPlanWork::default();
     match field {
@@ -1780,10 +1751,6 @@ fn estimate_candidate_field(
         }
         CandidateField::Definitions => {
             total = context.store.event_count().min(MAX_CANDIDATE_ROWS);
-            if total >= 2 {
-                plan_work.store_local_radix_sorts = 1;
-                plan_work.store_local_radix_rows = total;
-            }
         }
         CandidateField::RegisterReads => {
             total = estimate_posting(
@@ -1826,7 +1793,7 @@ fn estimate_candidate_field(
                     guard,
                 )
                 .map_err(map_store_query_error)?;
-            semantic_lookup_work = work
+            let semantic_lookup_work = work
                 .lookup_items
                 .checked_add(work.lookup_bytes)
                 .ok_or_else(|| AnalysisError::cpu_budget_exceeded("semantic work overflow"))?;
@@ -1844,7 +1811,7 @@ fn estimate_candidate_field(
             let work = store
                 .semantic_dictionary_work(qtrace_store::SemanticDictionaryFamily::Names, len, guard)
                 .map_err(map_store_query_error)?;
-            semantic_lookup_work = work
+            let semantic_lookup_work = work
                 .lookup_items
                 .checked_add(work.lookup_bytes)
                 .ok_or_else(|| AnalysisError::cpu_budget_exceeded("semantic work overflow"))?;
@@ -1885,20 +1852,11 @@ fn estimate_candidate_field(
         Some(shape) => shape,
         None => candidate_field_shape(context, filter, field)?,
     };
-    let rows = u64::try_from(total)
-        .map_err(|_| AnalysisError::cpu_budget_exceeded("posting row work overflow"))?;
-    let mut store_decode_work = rows
-        .checked_mul(3)
-        .and_then(|work| {
-            work.checked_add(
-                u64::try_from(term_count)
-                    .ok()?
-                    .checked_mul(MAX_PAGE_COMPARISONS as u64)?,
-            )
-        })
-        .and_then(|work| work.checked_add(semantic_lookup_work))
-        .ok_or_else(|| AnalysisError::cpu_budget_exceeded("store decode work overflow"))?;
+    let mut store_decode_work = plan_work.store_decode_work;
     if matches!(field, CandidateField::Definitions) {
+        store_decode_work = store
+            .bounded_definition_decode_work(context.definitions.len(), total)
+            .map_err(map_store_query_error)?;
         store_decode_work = store_decode_work
             .checked_add(
                 u64::try_from(context.definitions.len())
@@ -1918,8 +1876,6 @@ fn estimate_candidate_field(
         list_count,
         estimated_rows: total,
         store_decode_work,
-        store_local_radix_sorts: plan_work.store_local_radix_sorts,
-        store_local_radix_rows: plan_work.store_local_radix_rows,
         analysis_decode_work: plan_work.analysis_decode_work,
         analysis_local_radix_sorts: plan_work.analysis_local_radix_sorts,
         analysis_local_radix_rows: plan_work.analysis_local_radix_rows,
@@ -4237,7 +4193,6 @@ mod tests {
 
     struct PageStore {
         capabilities: qtrace_provider::ProviderCapabilities,
-        sequence_pairs: usize,
     }
 
     impl TraceStoreView for PageStore {
@@ -4399,51 +4354,19 @@ mod tests {
         }
         fn bounded_row_count(
             &self,
-            query: NormalizedPostingQuery<'_>,
+            _: NormalizedPostingQuery<'_>,
             _: usize,
             _: &dyn WorkGuard,
         ) -> Result<usize, qtrace_store::IndexError> {
-            Ok(match query {
-                NormalizedPostingQuery::Sequence {
-                    start,
-                    end_exclusive,
-                } if self.sequence_pairs != 0
-                    && start % 4 == 0
-                    && end_exclusive == start + 2
-                    && start / 4 < self.sequence_pairs as u64 =>
-                {
-                    2
-                }
-                _ => 0,
-            })
+            Ok(0)
         }
         fn bounded_rows(
             &self,
-            query: NormalizedPostingQuery<'_>,
+            _: NormalizedPostingQuery<'_>,
             _: usize,
-            guard: &dyn WorkGuard,
+            _: &dyn WorkGuard,
         ) -> Result<Vec<usize>, qtrace_store::IndexError> {
-            let NormalizedPostingQuery::Sequence {
-                start,
-                end_exclusive,
-            } = query
-            else {
-                return Ok(Vec::new());
-            };
-            if self.sequence_pairs == 0
-                || start % 4 != 0
-                || end_exclusive != start + 2
-                || start / 4 >= self.sequence_pairs as u64
-            {
-                return Ok(Vec::new());
-            }
-            let radix_passes = std::mem::size_of::<usize>() as u64;
-            guard.consume(WorkDelta {
-                rows: 2 + radix_passes * (2 * 2 + 256) + 1,
-                ..WorkDelta::default()
-            })?;
-            let first = usize::try_from(start / 2).unwrap();
-            Ok(vec![first, first + 1])
+            Ok(Vec::new())
         }
     }
 
@@ -4464,7 +4387,6 @@ mod tests {
         let context = Arc::new(QueryContext {
             store: Arc::new(PageStore {
                 capabilities: capabilities.clone(),
-                sequence_pairs: 0,
             }),
             identity: StoreIdentity([0; 32]),
             kinds: vec![EventKind::Instruction; size],
@@ -4507,48 +4429,6 @@ mod tests {
             )),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    fn sequence_pair_context(pair_count: usize) -> Arc<QueryContext> {
-        let capabilities = qtrace_provider::ProviderCapabilities::qtrb_register_observations();
-        let event_count = pair_count * 2;
-        Arc::new(QueryContext {
-            store: Arc::new(PageStore {
-                capabilities: capabilities.clone(),
-                sequence_pairs: pair_count,
-            }),
-            identity: StoreIdentity([0; 32]),
-            kinds: vec![EventKind::Instruction; event_count],
-            provenances: vec![Provenance::Captured; event_count],
-            modules: Vec::new(),
-            definitions: Vec::new(),
-            instructions: vec![None; event_count],
-            memories: vec![None; event_count],
-            semantics: vec![None; event_count],
-            observations: Vec::new(),
-            observation_ranges: vec![(0, 0); event_count],
-            memory_pc: Vec::new(),
-            max_sequence_rows: Vec::new(),
-            completeness: Arc::new(CompletenessSummary::new(
-                Vec::new(),
-                &capabilities,
-                qtrace_store::NormalizedSourceFormat::Other,
-                None,
-            )),
-            discontinuities: Arc::new(vec![None; event_count]),
-            keys: (0..event_count)
-                .map(|row| {
-                    EventKey::new(
-                        ArtifactDigest::new([1; 32]),
-                        TimelineId(1),
-                        row as u64,
-                        row as u64,
-                        Some((row / 2 * 4 + row % 2) as u64),
-                        Some(7),
-                    )
-                })
-                .collect(),
-        })
     }
 
     #[derive(Clone, Copy)]
@@ -4693,9 +4573,8 @@ mod tests {
             term_count: 1,
             list_count: 1,
             estimated_rows: MAX_CANDIDATE_DECODE_ROWS,
-            store_decode_work: (MAX_CANDIDATE_DECODE_ROWS * 3) as u64,
-            store_local_radix_sorts: 1,
-            store_local_radix_rows: MAX_CANDIDATE_DECODE_ROWS,
+            store_decode_work: (MAX_CANDIDATE_DECODE_ROWS * 3) as u64
+                + local_radix_work_bound(1, MAX_CANDIDATE_DECODE_ROWS).unwrap(),
             analysis_decode_work: 0,
             analysis_local_radix_sorts: 0,
             analysis_local_radix_rows: 0,
@@ -4729,8 +4608,6 @@ mod tests {
             list_count: 1,
             estimated_rows: 150_000,
             store_decode_work: 3_000_000,
-            store_local_radix_sorts: 0,
-            store_local_radix_rows: 0,
             analysis_decode_work: 0,
             analysis_local_radix_sorts: 0,
             analysis_local_radix_rows: 0,
@@ -4770,8 +4647,6 @@ mod tests {
             list_count: 1,
             estimated_rows: 0,
             store_decode_work: dictionary_work,
-            store_local_radix_sorts: 0,
-            store_local_radix_rows: 0,
             analysis_decode_work: 0,
             analysis_local_radix_sorts: 0,
             analysis_local_radix_rows: 0,
@@ -4863,55 +4738,6 @@ mod tests {
                 result.unwrap();
                 assert_eq!(guard.consumed().0, no_filter.allowance);
             }
-        }
-    }
-
-    #[test]
-    fn public_projection_authorizes_each_nontrivial_sequence_local_radix() {
-        let filter = || EventFilter {
-            sequence: (0..512)
-                .map(|range| crate::SequenceRange::new(range * 4, range * 4 + 1).unwrap())
-                .collect(),
-            ..EventFilter::default()
-        };
-        let local_radix_passes = std::mem::size_of::<usize>() as u64;
-        let store_work = 512 * (2 + local_radix_passes * (2 * 2 + 256) + 1);
-        let analysis_union_work = 1_024 + local_radix_passes * (2 * 1_024 + 256) + 1_023;
-        let stable_work = 1_024 + 70 * (2 * 1_024 + 256);
-        let exact_work = store_work + analysis_union_work + stable_work;
-        let expected_allowance = 3 * 1_024
-            + 512 * 65
-            + local_radix_passes * (2 * 1_024 + 512 * 256)
-            + (1_024 - 512)
-            + analysis_union_work
-            + 4_096
-            + stable_work;
-
-        let projection = TimelineProjection::new(sequence_pair_context(512), filter())
-            .expect("derived production allowance");
-        assert_eq!(LAST_PROJECTION_ALLOWANCE.take(), Some(expected_allowance));
-        assert_eq!(LAST_PROJECTION_WORK.take(), Some(exact_work));
-        assert_eq!(
-            query_events(&projection, None, 2_000).unwrap().rows.len(),
-            1_024
-        );
-
-        PROJECTION_ALLOWANCE_OVERRIDE.set(Some(exact_work - 1));
-        let error = match TimelineProjection::new(sequence_pair_context(512), filter()) {
-            Ok(_) => panic!("W-1 projection work was accepted"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code(), "analysis.cpu_budget_exceeded");
-
-        for allowance in [exact_work, exact_work + 1] {
-            PROJECTION_ALLOWANCE_OVERRIDE.set(Some(allowance));
-            let projection = TimelineProjection::new(sequence_pair_context(512), filter())
-                .expect("each two-row store-local radix must fit its exact work allowance");
-            assert_eq!(LAST_PROJECTION_WORK.take(), Some(exact_work));
-            let page = query_events(&projection, None, 2_000).unwrap();
-            assert_eq!(page.rows.len(), 1_024);
-            assert_eq!(page.total, 1_024);
-            assert!(page.exact_total);
         }
     }
 

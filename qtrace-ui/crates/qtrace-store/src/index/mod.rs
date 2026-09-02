@@ -737,6 +737,29 @@ impl<K: Ord, V> SortedMap<K, V> {
             .map(|index| &self.entries[index].1)
     }
 
+    fn guarded_get<'a>(
+        &'a self,
+        key: &K,
+        guard: &dyn WorkGuard,
+    ) -> Result<(Option<&'a V>, u64), IndexError> {
+        let mut left = 0_usize;
+        let mut right = self.entries.len();
+        let mut work = 0_u64;
+        while left < right {
+            consume_row_work(guard, 1)?;
+            work = work
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("sorted-map lookup work overflow"))?;
+            let middle = left + (right - left) / 2;
+            match self.entries[middle].0.cmp(key) {
+                std::cmp::Ordering::Less => left = middle + 1,
+                std::cmp::Ordering::Greater => right = middle,
+                std::cmp::Ordering::Equal => return Ok((Some(&self.entries[middle].1), work)),
+            }
+        }
+        Ok((None, work))
+    }
+
     fn values(&self) -> impl Iterator<Item = &V> {
         self.entries.iter().map(|(_, value)| value)
     }
@@ -1270,17 +1293,33 @@ pub trait NormalizedBulkView: TraceStoreView {
         }
         semantic_dictionary_work_from_counts(term_count, self.string_count(), dictionary_bytes, 0)
     }
-    /// Returns allocation-free posting cardinality and the local radix work performed by
-    /// [`Self::bounded_rows`]. The default is conservative for external implementations;
-    /// normalized owned and mapped stores provide exact metadata.
+    /// Returns allocation-free posting cardinality and a checked upper bound for the Nodes work
+    /// consumed by one subsequent [`Self::bounded_rows`] call for the same query.
+    ///
+    /// The estimate excludes work already consumed while producing the estimate. Implementations
+    /// whose decode can scan data not bounded by the returned row count must override this method;
+    /// the default fails closed so hidden scans cannot silently escape the analysis work plan.
     fn bounded_row_estimate(
         &self,
-        query: NormalizedPostingQuery<'_>,
-        max_rows: usize,
-        guard: &dyn WorkGuard,
+        _query: NormalizedPostingQuery<'_>,
+        _max_rows: usize,
+        _guard: &dyn WorkGuard,
     ) -> Result<NormalizedPostingEstimate, IndexError> {
-        let rows = self.bounded_row_count(query, max_rows, guard)?;
-        Ok(NormalizedPostingEstimate::conservative(rows))
+        Err(IndexError::resource(
+            "normalized bulk view does not provide a bounded decode-work estimate",
+        ))
+    }
+    /// Returns a checked store-owned work bound for a future definition posting query whose
+    /// allocation-free mnemonic planning can produce at most `query_terms` definition IDs and
+    /// at most `max_rows` encoded rows.
+    fn bounded_definition_decode_work(
+        &self,
+        _query_terms: usize,
+        _max_rows: usize,
+    ) -> Result<u64, IndexError> {
+        Err(IndexError::resource(
+            "normalized bulk view does not provide a definition decode-work bound",
+        ))
     }
     /// Returns an allocation-free upper bound for the ascending-unique row IDs returned by
     /// [`Self::bounded_rows`], rejecting before decode when that bound exceeds `max_rows`.
@@ -1303,33 +1342,13 @@ pub trait NormalizedBulkView: TraceStoreView {
 pub struct NormalizedPostingEstimate {
     /// Upper bound for decoded rows before duplicate removal.
     pub rows: usize,
-    /// Posting lists that are known to contribute rows to the decode.
-    pub matched_lists: usize,
-    /// Store-local radix invocations that receive at least two rows.
-    pub local_radix_sorts: usize,
-    /// Sum of input lengths across `local_radix_sorts`.
-    pub local_radix_rows: usize,
+    /// Checked Nodes-work upper bound for one subsequent production decode of this query.
+    pub decode_work: u64,
 }
 
 impl NormalizedPostingEstimate {
-    fn conservative(rows: usize) -> Self {
-        let local_radix_sorts = usize::from(rows >= 2);
-        Self {
-            rows,
-            matched_lists: local_radix_sorts,
-            local_radix_sorts,
-            local_radix_rows: rows * local_radix_sorts,
-        }
-    }
-
-    fn exact(rows: usize, matched_lists: usize, radix: bool) -> Self {
-        let local_radix_sorts = usize::from(radix && rows >= 2);
-        Self {
-            rows,
-            matched_lists,
-            local_radix_sorts,
-            local_radix_rows: rows * local_radix_sorts,
-        }
+    pub const fn new(rows: usize, decode_work: u64) -> Self {
+        Self { rows, decode_work }
     }
 }
 
@@ -1486,9 +1505,18 @@ where
 {
     let mut encoded_rows = 0_usize;
     let mut matched_lists = 0_usize;
+    let mut query_terms = 0_u64;
+    let mut lookup_work = 0_u64;
     for key in keys {
         consume_row_work(guard, 1)?;
-        if let Some(list) = map.get(&key) {
+        query_terms = query_terms
+            .checked_add(1)
+            .ok_or_else(|| IndexError::resource("bounded posting term work overflow"))?;
+        let (list, comparisons) = map.guarded_get(&key, guard)?;
+        lookup_work = lookup_work
+            .checked_add(comparisons)
+            .ok_or_else(|| IndexError::resource("bounded posting lookup work overflow"))?;
+        if let Some(list) = list {
             matched_lists = matched_lists
                 .checked_add(1)
                 .ok_or_else(|| IndexError::resource("bounded posting list count overflow"))?;
@@ -1502,11 +1530,56 @@ where
             }
         }
     }
-    Ok(NormalizedPostingEstimate::exact(
-        encoded_rows,
-        matched_lists,
-        matched_lists > 1,
-    ))
+    let decode_work = map_decode_work(query_terms, lookup_work, matched_lists, encoded_rows)?;
+    Ok(NormalizedPostingEstimate::new(encoded_rows, decode_work))
+}
+
+fn map_decode_work(
+    query_terms: u64,
+    lookup_work: u64,
+    matched_lists: usize,
+    encoded_rows: usize,
+) -> Result<u64, IndexError> {
+    let lookup_pass = query_terms
+        .checked_add(lookup_work)
+        .ok_or_else(|| IndexError::resource("bounded posting lookup pass overflow"))?;
+    let rows = u64::try_from(encoded_rows)
+        .map_err(|_| IndexError::resource("bounded posting row work overflow"))?;
+    let lists = u64::try_from(matched_lists)
+        .map_err(|_| IndexError::resource("bounded posting list work overflow"))?;
+    let radix = if matched_lists > 1 {
+        RadixWork::for_rows(encoded_rows).checked_total()?
+    } else {
+        0
+    };
+    lookup_pass
+        .checked_mul(2)
+        .and_then(|work| work.checked_add(lists))
+        .and_then(|work| work.checked_add(rows))
+        .and_then(|work| work.checked_add(radix))
+        .ok_or_else(|| IndexError::resource("bounded posting decode work overflow"))
+}
+
+fn map_decode_work_upper(
+    query_terms: usize,
+    map_entries: usize,
+    encoded_rows: usize,
+) -> Result<u64, IndexError> {
+    let query_terms = u64::try_from(query_terms)
+        .map_err(|_| IndexError::resource("bounded posting term work overflow"))?;
+    let comparisons_per_lookup = if map_entries == 0 {
+        0
+    } else {
+        u64::from(usize::BITS - map_entries.leading_zeros())
+    };
+    let lookup_work = query_terms
+        .checked_mul(comparisons_per_lookup)
+        .ok_or_else(|| IndexError::resource("bounded posting lookup work overflow"))?;
+    let map_entries = u64::try_from(map_entries)
+        .map_err(|_| IndexError::resource("bounded posting map size overflow"))?;
+    let matched_lists = usize::try_from(query_terms.min(map_entries))
+        .map_err(|_| IndexError::resource("bounded posting list count overflow"))?;
+    map_decode_work(query_terms, lookup_work, matched_lists, encoded_rows)
 }
 
 fn bounded_map_rows<'a, K, I>(
@@ -1523,7 +1596,7 @@ where
     let mut lists = Vec::new();
     for key in keys {
         consume_row_work(guard, 1)?;
-        if let Some(list) = map.get(&key) {
+        if let (Some(list), _) = map.guarded_get(&key, guard)? {
             crate::allocation::try_reserve_vec(
                 &mut lists,
                 1,
@@ -1570,32 +1643,71 @@ fn bounded_pair_rows(
     Ok(result)
 }
 
-fn bounded_pair_count(
+fn bounded_pair_estimate(
     rows: &[(u64, usize)],
     start: u64,
     end: u64,
     max_rows: usize,
     guard: &dyn WorkGuard,
-) -> Result<usize, IndexError> {
+) -> Result<NormalizedPostingEstimate, IndexError> {
     if start >= end {
-        return Ok(0);
+        return Ok(NormalizedPostingEstimate::new(0, 0));
     }
-    let first = guarded_partition_point(rows, guard, |(value, _)| *value < start)?;
-    let last = guarded_partition_point(rows, guard, |(value, _)| *value < end)?;
+    let (first, first_work) =
+        guarded_partition_point_with_work(rows, guard, |(value, _)| *value < start)?;
+    let (last, last_work) =
+        guarded_partition_point_with_work(rows, guard, |(value, _)| *value < end)?;
     let count = last - first;
     if count > max_rows {
         return Err(IndexError::resource(
             "bounded posting result exceeds row limit",
         ));
     }
-    Ok(count)
+    let decode_work = first_work
+        .checked_add(last_work)
+        .and_then(|work| work.checked_add(u64::try_from(count).ok()?))
+        .and_then(|work| work.checked_add(RadixWork::for_rows(count).checked_total().ok()?))
+        .ok_or_else(|| IndexError::resource("bounded pair decode work overflow"))?;
+    Ok(NormalizedPostingEstimate::new(count, decode_work))
+}
+
+#[derive(Clone, Copy)]
+struct RadixWork {
+    rows: usize,
+    passes: usize,
+    dedup: usize,
+}
+
+impl RadixWork {
+    fn for_rows(rows: usize) -> Self {
+        Self {
+            rows,
+            passes: usize::from(rows >= 2) * (usize::BITS as usize / 8),
+            dedup: rows.saturating_sub(1) * usize::from(rows >= 2),
+        }
+    }
+
+    fn checked_total(self) -> Result<u64, IndexError> {
+        let rows = u64::try_from(self.rows)
+            .map_err(|_| IndexError::resource("radix row work overflow"))?;
+        let passes = u64::try_from(self.passes)
+            .map_err(|_| IndexError::resource("radix pass work overflow"))?;
+        let dedup = u64::try_from(self.dedup)
+            .map_err(|_| IndexError::resource("radix dedup work overflow"))?;
+        rows.checked_mul(2)
+            .and_then(|per_pass| per_pass.checked_add(256))
+            .and_then(|per_pass| per_pass.checked_mul(passes))
+            .and_then(|work| work.checked_add(dedup))
+            .ok_or_else(|| IndexError::resource("radix work overflow"))
+    }
 }
 
 pub(super) fn radix_sort_unique_rows(
     rows: &mut Vec<usize>,
     guard: &dyn WorkGuard,
 ) -> Result<(), IndexError> {
-    if rows.len() < 2 {
+    let work = RadixWork::for_rows(rows.len());
+    if work.passes == 0 {
         return Ok(());
     }
     let mut scratch = Vec::new();
@@ -1606,7 +1718,7 @@ pub(super) fn radix_sort_unique_rows(
         "bounded row radix scratch allocation",
     )?;
     scratch.resize(rows.len(), 0);
-    for pass in 0..(usize::BITS as usize / 8) {
+    for pass in 0..work.passes {
         let mut counts = [0_usize; 256];
         for chunk in rows.chunks(4096) {
             consume_row_work(guard, chunk.len())?;
@@ -1660,12 +1772,24 @@ pub(super) fn consume_row_work(guard: &dyn WorkGuard, rows: usize) -> Result<(),
 pub(super) fn guarded_partition_point<T>(
     values: &[T],
     guard: &dyn WorkGuard,
-    mut predicate: impl FnMut(&T) -> bool,
+    predicate: impl FnMut(&T) -> bool,
 ) -> Result<usize, IndexError> {
+    Ok(guarded_partition_point_with_work(values, guard, predicate)?.0)
+}
+
+pub(super) fn guarded_partition_point_with_work<T>(
+    values: &[T],
+    guard: &dyn WorkGuard,
+    mut predicate: impl FnMut(&T) -> bool,
+) -> Result<(usize, u64), IndexError> {
     let mut left = 0_usize;
     let mut right = values.len();
+    let mut work = 0_u64;
     while left < right {
         consume_row_work(guard, 1)?;
+        work = work
+            .checked_add(1)
+            .ok_or_else(|| IndexError::resource("partition work overflow"))?;
         let middle = left + (right - left) / 2;
         if predicate(&values[middle]) {
             left = middle + 1;
@@ -1673,7 +1797,7 @@ pub(super) fn guarded_partition_point<T>(
             right = middle;
         }
     }
-    Ok(left)
+    Ok((left, work))
 }
 
 fn rows_for_semantic_bytes(
@@ -2295,6 +2419,18 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
         )
     }
 
+    fn bounded_definition_decode_work(
+        &self,
+        query_terms: usize,
+        max_rows: usize,
+    ) -> Result<u64, IndexError> {
+        map_decode_work_upper(
+            query_terms,
+            self.normalized_catalog().indexes.definition.entries.len(),
+            max_rows,
+        )
+    }
+
     fn bounded_row_estimate(
         &self,
         query: NormalizedPostingQuery<'_>,
@@ -2326,42 +2462,28 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
             NormalizedPostingQuery::Sequence {
                 start,
                 end_exclusive,
-            } => {
-                let rows = bounded_pair_count(
-                    &catalog.indexes.sequence,
-                    start,
-                    end_exclusive,
-                    max_rows,
-                    guard,
-                )?;
-                Ok(NormalizedPostingEstimate::exact(
-                    rows,
-                    usize::from(rows != 0),
-                    true,
-                ))
-            }
+            } => bounded_pair_estimate(
+                &catalog.indexes.sequence,
+                start,
+                end_exclusive,
+                max_rows,
+                guard,
+            ),
             NormalizedPostingQuery::ModulePc {
                 module,
                 start,
                 end_exclusive,
-            } => {
-                let rows = bounded_pair_count(
-                    catalog
-                        .indexes
-                        .module_pc
-                        .get(&module)
-                        .map_or(&[], Vec::as_slice),
-                    start,
-                    end_exclusive,
-                    max_rows,
-                    guard,
-                )?;
-                Ok(NormalizedPostingEstimate::exact(
-                    rows,
-                    usize::from(rows != 0),
-                    true,
-                ))
-            }
+            } => bounded_pair_estimate(
+                catalog
+                    .indexes
+                    .module_pc
+                    .get(&module)
+                    .map_or(&[], Vec::as_slice),
+                start,
+                end_exclusive,
+                max_rows,
+                guard,
+            ),
             NormalizedPostingQuery::Definitions(values) => bounded_map_estimate(
                 &catalog.indexes.definition,
                 values.iter().copied(),
@@ -2383,19 +2505,12 @@ impl<T: HasNormalizedCatalog> NormalizedBulkView for T {
             NormalizedPostingQuery::Memory {
                 start,
                 end_exclusive,
-            } => {
-                let rows = catalog.indexes.memory.overlap_count_bounded(
-                    start,
-                    end_exclusive,
-                    max_rows,
-                    guard,
-                )?;
-                Ok(NormalizedPostingEstimate::exact(
-                    rows,
-                    usize::from(rows != 0),
-                    true,
-                ))
-            }
+            } => catalog.indexes.memory.overlap_estimate_bounded(
+                start,
+                end_exclusive,
+                max_rows,
+                guard,
+            ),
         }
     }
 
@@ -2504,8 +2619,17 @@ fn bounded_semantic_estimate(
     };
     let mut count = 0_usize;
     let mut matched_lists = 0_usize;
-    visit_semantic_dictionary_matches(catalog, values, guard, |id| {
-        if let Some(list) = map.get(&id) {
+    let mut query_terms = 0_u64;
+    let mut lookup_work = 0_u64;
+    let dictionary_work = visit_semantic_dictionary_matches(catalog, values, guard, |id| {
+        query_terms = query_terms
+            .checked_add(1)
+            .ok_or_else(|| IndexError::resource("semantic matched-term work overflow"))?;
+        let (list, comparisons) = map.guarded_get(&id, guard)?;
+        lookup_work = lookup_work
+            .checked_add(comparisons)
+            .ok_or_else(|| IndexError::resource("semantic map lookup work overflow"))?;
+        if let Some(list) = list {
             matched_lists = matched_lists
                 .checked_add(1)
                 .ok_or_else(|| IndexError::resource("bounded posting list count overflow"))?;
@@ -2520,11 +2644,15 @@ fn bounded_semantic_estimate(
         }
         Ok(())
     })?;
-    Ok(NormalizedPostingEstimate::exact(
-        count,
-        matched_lists,
-        matched_lists > 1,
-    ))
+    let decode_work = dictionary_work
+        .checked_add(map_decode_work(
+            query_terms,
+            lookup_work,
+            matched_lists,
+            count,
+        )?)
+        .ok_or_else(|| IndexError::resource("semantic decode work overflow"))?;
+    Ok(NormalizedPostingEstimate::new(count, decode_work))
 }
 
 fn bounded_semantic_rows(
@@ -2562,20 +2690,26 @@ fn visit_semantic_dictionary_matches(
     values: &[&[u8]],
     guard: &dyn WorkGuard,
     mut visit: impl FnMut(u32) -> Result<(), IndexError>,
-) -> Result<(), IndexError> {
+) -> Result<u64, IndexError> {
+    let mut work = 0_u64;
     for value in values {
         for (id, span) in catalog.strings.spans().iter().enumerate() {
-            consume_dictionary_entry_work(span, guard)?;
+            work = work
+                .checked_add(consume_dictionary_entry_work(span, guard)?)
+                .ok_or_else(|| IndexError::resource("semantic dictionary work overflow"))?;
             if catalog.strings.get(id as u32)? == *value {
                 visit(id as u32)?;
                 break;
             }
         }
     }
-    Ok(())
+    Ok(work)
 }
 
-fn consume_dictionary_entry_work(span: &ByteSpan, guard: &dyn WorkGuard) -> Result<(), IndexError> {
+fn consume_dictionary_entry_work(
+    span: &ByteSpan,
+    guard: &dyn WorkGuard,
+) -> Result<u64, IndexError> {
     consume_row_work(guard, 1)?;
     let mut remaining = span.length;
     while remaining != 0 {
@@ -2586,7 +2720,9 @@ fn consume_dictionary_entry_work(span: &ByteSpan, guard: &dyn WorkGuard) -> Resu
         })?;
         remaining -= bytes;
     }
-    Ok(())
+    span.length
+        .checked_add(1)
+        .ok_or_else(|| IndexError::resource("semantic dictionary entry work overflow"))
 }
 
 impl TraceStore {

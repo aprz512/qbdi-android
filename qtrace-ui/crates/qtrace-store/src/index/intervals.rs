@@ -1,7 +1,14 @@
 use qtrace_provider::{WorkDelta, WorkGuard};
 use serde::{Deserialize, Serialize};
 
-use super::IndexError;
+use super::{IndexError, NormalizedPostingEstimate, RadixWork};
+
+#[derive(Clone, Copy)]
+struct LocatedOverlap {
+    first: usize,
+    upper: usize,
+    work: u64,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct IntervalEntry {
@@ -26,33 +33,32 @@ impl IntervalIndex {
         max_rows: usize,
         guard: &dyn WorkGuard,
     ) -> Result<usize, IndexError> {
+        Ok(self
+            .overlap_estimate_bounded(start, end, max_rows, guard)?
+            .rows)
+    }
+
+    pub(crate) fn overlap_estimate_bounded(
+        &self,
+        start: u64,
+        end: u64,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<NormalizedPostingEstimate, IndexError> {
         if start > end {
             return Err(IndexError::invalid(
                 "memory query is not a valid half-open range",
             ));
         }
         if start == end {
-            return Ok(0);
+            return Ok(NormalizedPostingEstimate::new(0, 0));
         }
-        let upper =
-            super::guarded_partition_point(&self.entries, guard, |entry| entry.start < end)?;
-        if upper == 0 {
-            return Ok(0);
-        }
-        let first_block =
-            super::guarded_partition_point(&self.block_prefix_max_end, guard, |maximum| {
-                *maximum <= start
-            })?;
-        let mut first = first_block.saturating_mul(self.block_rows).min(upper);
-        while first < upper {
-            super::consume_row_work(guard, 1)?;
-            if self.prefix_max_end[first] > start {
-                break;
-            }
-            first += 1;
+        let located = self.locate_bounded(start, end, guard)?;
+        if located.upper == 0 {
+            return Ok(NormalizedPostingEstimate::new(0, located.work));
         }
         let mut count = 0_usize;
-        for chunk in self.entries[first..upper].chunks(4096) {
+        for chunk in self.entries[located.first..located.upper].chunks(4096) {
             super::consume_row_work(guard, chunk.len())?;
             for entry in chunk {
                 if entry.end_exclusive > start {
@@ -67,7 +73,60 @@ impl IntervalIndex {
                 }
             }
         }
-        Ok(count)
+        let span = located.upper - located.first;
+        let span =
+            u64::try_from(span).map_err(|_| IndexError::resource("memory scan work overflow"))?;
+        let decode_work = located
+            .work
+            .checked_mul(2)
+            .and_then(|work| work.checked_add(span.checked_mul(2)?))
+            .and_then(|work| work.checked_add(RadixWork::for_rows(count).checked_total().ok()?))
+            .ok_or_else(|| IndexError::resource("memory decode work overflow"))?;
+        Ok(NormalizedPostingEstimate::new(count, decode_work))
+    }
+
+    fn locate_bounded(
+        &self,
+        start: u64,
+        end: u64,
+        guard: &dyn WorkGuard,
+    ) -> Result<LocatedOverlap, IndexError> {
+        let (upper, upper_work) =
+            super::guarded_partition_point_with_work(&self.entries, guard, |entry| {
+                entry.start < end
+            })?;
+        if upper == 0 {
+            return Ok(LocatedOverlap {
+                first: 0,
+                upper: 0,
+                work: upper_work,
+            });
+        }
+        let (first_block, block_work) = super::guarded_partition_point_with_work(
+            &self.block_prefix_max_end,
+            guard,
+            |maximum| *maximum <= start,
+        )?;
+        let mut first = first_block.saturating_mul(self.block_rows).min(upper);
+        let mut prefix_work = 0_u64;
+        while first < upper {
+            super::consume_row_work(guard, 1)?;
+            prefix_work = prefix_work
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("memory prefix work overflow"))?;
+            if self.prefix_max_end[first] > start {
+                break;
+            }
+            first += 1;
+        }
+        Ok(LocatedOverlap {
+            first,
+            upper,
+            work: upper_work
+                .checked_add(block_work)
+                .and_then(|work| work.checked_add(prefix_work))
+                .ok_or_else(|| IndexError::resource("memory locator work overflow"))?,
+        })
     }
 
     pub(super) fn encoded_parts(&self) -> (&[IntervalEntry], &[u64], &[u64]) {
@@ -204,22 +263,9 @@ impl IntervalIndex {
         if start == end {
             return Ok(Vec::new());
         }
-        let upper =
-            super::guarded_partition_point(&self.entries, guard, |entry| entry.start < end)?;
-        if upper == 0 {
+        let located = self.locate_bounded(start, end, guard)?;
+        if located.upper == 0 {
             return Ok(Vec::new());
-        }
-        let first_block =
-            super::guarded_partition_point(&self.block_prefix_max_end, guard, |maximum| {
-                *maximum <= start
-            })?;
-        let mut first = first_block.saturating_mul(self.block_rows).min(upper);
-        while first < upper {
-            super::consume_row_work(guard, 1)?;
-            if self.prefix_max_end[first] > start {
-                break;
-            }
-            first += 1;
         }
         let count = self.overlap_count_bounded(start, end, max_rows, guard)?;
         let mut rows = Vec::new();
@@ -229,7 +275,7 @@ impl IntervalIndex {
             guard,
             "bounded memory result allocation",
         )?;
-        for chunk in self.entries[first..upper].chunks(4096) {
+        for chunk in self.entries[located.first..located.upper].chunks(4096) {
             super::consume_row_work(guard, chunk.len())?;
             for entry in chunk {
                 if entry.end_exclusive > start {

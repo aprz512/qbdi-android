@@ -608,6 +608,27 @@ impl NormalizedBulkView for CountingStore {
         self.keys.len().max(1)
     }
 
+    fn bounded_row_estimate(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn qtrace_provider::WorkGuard,
+    ) -> Result<qtrace_store::NormalizedPostingEstimate, IndexError> {
+        let rows = self.bounded_row_count(query, max_rows, guard)?;
+        Ok(qtrace_store::NormalizedPostingEstimate::new(
+            rows,
+            rows as u64,
+        ))
+    }
+
+    fn bounded_definition_decode_work(
+        &self,
+        _query_terms: usize,
+        max_rows: usize,
+    ) -> Result<u64, IndexError> {
+        Ok(max_rows as u64)
+    }
+
     fn bounded_row_count(
         &self,
         query: NormalizedPostingQuery<'_>,

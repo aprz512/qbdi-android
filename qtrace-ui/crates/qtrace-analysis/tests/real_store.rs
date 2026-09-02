@@ -1,13 +1,27 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, sync::Arc};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use qtrace_analysis::{
-    AddressRange, CompletenessStatus, EventFilter, QueryContext, SequenceRange, TimelineProjection,
-    query_events,
+    AddressRange, CompletenessStatus, EventFilter, MemoryFilter, QueryContext, SequenceRange,
+    TimelineProjection, query_events,
 };
-use qtrace_provider::{EventKind, OperationAbort, WorkDelta, WorkGuard};
+use qtrace_provider::{
+    BudgetDimension, EventKey, EventKind, OperationAbort, Provenance, ProviderCapabilities,
+    RegisterSlot, WorkDelta, WorkGuard,
+};
 use qtrace_store::{
-    AuthorizedPath, BuildOptions, IndexBuilder, NormalizedBulkView, OpenPolicy, SessionLoader,
-    TraceStore, TraceStoreView,
+    AuthorizedPath, BuildOptions, CompletenessRow, DefinitionRow, IndexBuilder, IndexError,
+    InstructionRow, MemoryRow, ModuleRow, NormalizedBulkView, NormalizedContentIdentity,
+    NormalizedLayoutIdentity, NormalizedPostingEstimate, NormalizedPostingQuery,
+    NormalizedSourceFormat, OpenPolicy, RegisterObservationRow, SemanticDictionaryFamily,
+    SemanticDictionaryWork, SemanticRow, SessionLoader, TraceStore, TraceStoreView,
 };
 use tempfile::TempDir;
 
@@ -16,6 +30,269 @@ struct AllowAll;
 impl WorkGuard for AllowAll {
     fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
         Ok(())
+    }
+}
+
+struct DecodeBudgetGuard<'a> {
+    upstream: &'a dyn WorkGuard,
+    consumed: &'a AtomicU64,
+    limit: u64,
+}
+
+impl WorkGuard for DecodeBudgetGuard<'_> {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        let work = delta
+            .rows
+            .checked_add(delta.events)
+            .and_then(|work| work.checked_add(delta.nodes))
+            .and_then(|work| work.checked_add(delta.input_bytes))
+            .and_then(|work| work.checked_add(delta.decompressed_bytes))
+            .unwrap_or(u64::MAX);
+        let previous = self.consumed.fetch_add(work, Ordering::SeqCst);
+        let next = previous.saturating_add(work);
+        if next > self.limit {
+            self.consumed.fetch_sub(work, Ordering::SeqCst);
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::Nodes,
+                self.limit,
+                next,
+            ));
+        }
+        self.upstream.consume(delta)
+    }
+
+    fn begin_allocation_scope(
+        &self,
+        delta: WorkDelta,
+        allowed_slack: u64,
+    ) -> Result<(), OperationAbort> {
+        self.upstream.begin_allocation_scope(delta, allowed_slack)
+    }
+
+    fn end_allocation_scope(&self) {
+        self.upstream.end_allocation_scope();
+    }
+}
+
+struct DecodeBudgetView<T> {
+    inner: Arc<T>,
+    consumed: AtomicU64,
+    limit: AtomicU64,
+}
+
+impl<T> DecodeBudgetView<T> {
+    fn new(inner: Arc<T>, limit: u64) -> Self {
+        Self {
+            inner,
+            consumed: AtomicU64::new(0),
+            limit: AtomicU64::new(limit),
+        }
+    }
+
+    fn arm(&self, limit: u64) {
+        self.consumed.store(0, Ordering::SeqCst);
+        self.limit.store(limit, Ordering::SeqCst);
+    }
+
+    fn consumed(&self) -> u64 {
+        self.consumed.load(Ordering::SeqCst)
+    }
+}
+
+impl<T: TraceStoreView> TraceStoreView for DecodeBudgetView<T> {
+    fn event_count(&self) -> usize {
+        self.inner.event_count()
+    }
+    fn event_key(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
+        self.inner.event_key(row)
+    }
+    fn event_kind(&self, row: usize) -> Result<Option<EventKind>, IndexError> {
+        self.inner.event_kind(row)
+    }
+    fn provenance(&self, row: usize) -> Result<Option<Provenance>, IndexError> {
+        self.inner.provenance(row)
+    }
+    fn capabilities(&self) -> &ProviderCapabilities {
+        self.inner.capabilities()
+    }
+    fn instruction(&self, row: usize) -> Option<InstructionRow> {
+        self.inner.instruction(row)
+    }
+    fn memory(&self, row: usize) -> Option<MemoryRow> {
+        self.inner.memory(row)
+    }
+    fn semantic(&self, row: usize) -> Option<SemanticRow> {
+        self.inner.semantic(row)
+    }
+    fn payload_bytes(&self, row: usize) -> Result<&[u8], IndexError> {
+        self.inner.payload_bytes(row)
+    }
+    fn string_bytes(&self, id: u32) -> Result<&[u8], IndexError> {
+        self.inner.string_bytes(id)
+    }
+    fn blob_bytes(&self, id: u32) -> Result<&[u8], IndexError> {
+        self.inner.blob_bytes(id)
+    }
+    fn memory_before_bytes(&self, row: usize) -> Result<Option<&[u8]>, IndexError> {
+        self.inner.memory_before_bytes(row)
+    }
+    fn memory_after_bytes(&self, row: usize) -> Result<Option<&[u8]>, IndexError> {
+        self.inner.memory_after_bytes(row)
+    }
+    fn module(&self, module: u32) -> Option<&ModuleRow> {
+        self.inner.module(module)
+    }
+    fn definition(&self, definition: u32) -> Option<&DefinitionRow> {
+        self.inner.definition(definition)
+    }
+    fn register_observations(&self, row: usize) -> Vec<RegisterObservationRow> {
+        self.inner.register_observations(row)
+    }
+    fn completeness(&self) -> &[CompletenessRow] {
+        self.inner.completeness()
+    }
+    fn rows_for_timeline(&self, timeline: u64) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_for_timeline(timeline)
+    }
+    fn rows_for_tids(&self, tids: &[u32]) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_for_tids(tids)
+    }
+    fn rows_for_sequence_range(
+        &self,
+        start: u64,
+        end_exclusive: u64,
+    ) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_for_sequence_range(start, end_exclusive)
+    }
+    fn rows_of_kinds(&self, kinds: &[EventKind]) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_of_kinds(kinds)
+    }
+    fn rows_for_modules(&self, modules: &[u32]) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_for_modules(modules)
+    }
+    fn rows_for_module_pc_range(
+        &self,
+        module: u32,
+        start: u64,
+        end_exclusive: u64,
+    ) -> Result<Vec<usize>, IndexError> {
+        self.inner
+            .rows_for_module_pc_range(module, start, end_exclusive)
+    }
+    fn rows_for_definitions(&self, definitions: &[u32]) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_for_definitions(definitions)
+    }
+    fn rows_observing_register(&self, slot: RegisterSlot) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_observing_register(slot)
+    }
+    fn checkpoint_rows(&self) -> Result<Vec<usize>, IndexError> {
+        self.inner.checkpoint_rows()
+    }
+    fn call_rows(&self) -> Result<Vec<usize>, IndexError> {
+        self.inner.call_rows()
+    }
+    fn return_rows(&self) -> Result<Vec<usize>, IndexError> {
+        self.inner.return_rows()
+    }
+    fn rows_for_semantic_categories(&self, categories: &[&[u8]]) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_for_semantic_categories(categories)
+    }
+    fn rows_for_semantic_names(&self, names: &[&[u8]]) -> Result<Vec<usize>, IndexError> {
+        self.inner.rows_for_semantic_names(names)
+    }
+    fn memory_overlaps(&self, start: u64, end: u64) -> Result<Vec<usize>, IndexError> {
+        self.inner.memory_overlaps(start, end)
+    }
+    fn row_for_source_key(&self, key: &EventKey) -> Option<usize> {
+        self.inner.row_for_source_key(key)
+    }
+    fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
+        self.inner.source_key_for_row(row)
+    }
+}
+
+impl<T: NormalizedBulkView> NormalizedBulkView for DecodeBudgetView<T> {
+    fn normalized_layout_identity(&self) -> NormalizedLayoutIdentity {
+        self.inner.normalized_layout_identity()
+    }
+    fn normalized_content_identity(&self) -> NormalizedContentIdentity {
+        self.inner.normalized_content_identity()
+    }
+    fn normalized_source_format(&self) -> NormalizedSourceFormat {
+        self.inner.normalized_source_format()
+    }
+    fn module_rows(&self) -> &[ModuleRow] {
+        self.inner.module_rows()
+    }
+    fn definition_rows(&self) -> &[DefinitionRow] {
+        self.inner.definition_rows()
+    }
+    fn instruction_rows(&self) -> &[InstructionRow] {
+        self.inner.instruction_rows()
+    }
+    fn memory_rows(&self) -> &[MemoryRow] {
+        self.inner.memory_rows()
+    }
+    fn semantic_rows(&self) -> &[SemanticRow] {
+        self.inner.semantic_rows()
+    }
+    fn register_observation_rows(&self) -> &[RegisterObservationRow] {
+        self.inner.register_observation_rows()
+    }
+    fn string_count(&self) -> usize {
+        self.inner.string_count()
+    }
+    fn blob_count(&self) -> usize {
+        self.inner.blob_count()
+    }
+    fn semantic_dictionary_work(
+        &self,
+        family: SemanticDictionaryFamily,
+        term_count: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<SemanticDictionaryWork, IndexError> {
+        self.inner
+            .semantic_dictionary_work(family, term_count, guard)
+    }
+    fn bounded_row_estimate(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<NormalizedPostingEstimate, IndexError> {
+        self.inner.bounded_row_estimate(query, max_rows, guard)
+    }
+    fn bounded_definition_decode_work(
+        &self,
+        query_terms: usize,
+        max_rows: usize,
+    ) -> Result<u64, IndexError> {
+        self.inner
+            .bounded_definition_decode_work(query_terms, max_rows)
+    }
+    fn bounded_row_count(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<usize, IndexError> {
+        self.inner.bounded_row_count(query, max_rows, guard)
+    }
+    fn bounded_rows(
+        &self,
+        query: NormalizedPostingQuery<'_>,
+        max_rows: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<Vec<usize>, IndexError> {
+        self.inner.bounded_rows(
+            query,
+            max_rows,
+            &DecodeBudgetGuard {
+                upstream: guard,
+                consumed: &self.consumed,
+                limit: self.limit.load(Ordering::SeqCst),
+            },
+        )
     }
 }
 
@@ -195,6 +472,101 @@ fn qtrb_string(value: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(&(value.len() as u16).to_le_bytes());
     bytes.extend_from_slice(value);
     bytes
+}
+
+fn indexed_work_qtrb(instruction_count: usize, short_memory_count: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"QTRB");
+    bytes.extend_from_slice(&[1, 2, 1, 8, 2, 0]);
+    bytes.extend_from_slice(&16_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+
+    let mut begin = Vec::new();
+    begin.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    begin.extend_from_slice(&0x100_u64.to_le_bytes());
+    begin.extend_from_slice(&0x7100_0100_u64.to_le_bytes());
+    begin.extend_from_slice(&4242_u32.to_le_bytes());
+    begin.extend_from_slice(&7_u32.to_le_bytes());
+    begin.extend_from_slice(&[2, 0]);
+    begin.extend_from_slice(&4096_u64.to_le_bytes());
+    begin.extend_from_slice(&1_u64.to_le_bytes());
+    begin.extend(qtrb_string(b"indexed-work-contract"));
+    begin.extend(qtrb_string(b"libtarget.so"));
+    bytes.extend(qtrb_record(1, &begin));
+
+    let mut module = Vec::new();
+    module.extend_from_slice(&1_u32.to_le_bytes());
+    module.extend_from_slice(&0x7100_0000_u64.to_le_bytes());
+    module.extend(qtrb_string(b"libtarget.so"));
+    bytes.extend(qtrb_record(2, &module));
+
+    if instruction_count != 0 {
+        let mut definition = Vec::new();
+        definition.extend_from_slice(&7_u32.to_le_bytes());
+        definition.extend_from_slice(&0xd503_201f_u32.to_le_bytes());
+        definition.extend_from_slice(&0_u64.to_le_bytes());
+        definition.extend_from_slice(&0_u64.to_le_bytes());
+        definition.extend_from_slice(&0_i64.to_le_bytes());
+        definition.extend_from_slice(&0_u32.to_le_bytes());
+        definition.extend_from_slice(&[0, 0, 0, 0]);
+        definition.extend(qtrb_string(b"nop"));
+        definition.extend(qtrb_string(b""));
+        definition.extend(qtrb_string(b"nop"));
+        bytes.extend(qtrb_record(3, &definition));
+    }
+
+    for sequence in 1..=instruction_count as u64 {
+        let mut instruction = Vec::new();
+        instruction.extend_from_slice(&sequence.to_le_bytes());
+        instruction.extend_from_slice(&1_u32.to_le_bytes());
+        instruction.extend_from_slice(&sequence.to_le_bytes());
+        instruction.extend_from_slice(&7_u32.to_le_bytes());
+        instruction.extend_from_slice(&[0, 0]);
+        bytes.extend(qtrb_record(4, &instruction));
+    }
+
+    if short_memory_count != 0 {
+        bytes.extend(qtrb_memory_record(0, 1_000_000));
+        for ordinal in 0..short_memory_count {
+            let start = ordinal as u64 * 2 + 1;
+            bytes.extend(qtrb_memory_record(start, 1));
+        }
+    }
+
+    let encoded_bytes = (bytes.len() + 8 + 97) as u64;
+    let mut terminal = Vec::new();
+    terminal.push(1);
+    terminal.extend_from_slice(&0_u64.to_le_bytes());
+    terminal.extend_from_slice(&1_u64.to_le_bytes());
+    for value in [
+        instruction_count as u64,
+        encoded_bytes,
+        encoded_bytes,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        4096,
+    ] {
+        terminal.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend(qtrb_record(9, &terminal));
+    bytes
+}
+
+fn qtrb_memory_record(address: u64, size: u32) -> Vec<u8> {
+    let mut memory = Vec::new();
+    memory.extend_from_slice(&1_u32.to_le_bytes());
+    memory.extend_from_slice(&0_u64.to_le_bytes());
+    memory.extend_from_slice(&[1, 1]);
+    memory.extend_from_slice(&0_u16.to_le_bytes());
+    memory.extend_from_slice(&address.to_le_bytes());
+    memory.extend_from_slice(&size.to_le_bytes());
+    memory.extend_from_slice(&0_u64.to_le_bytes());
+    memory.extend_from_slice(&[0, 0, 0, 0]);
+    qtrb_record(5, &memory)
 }
 
 fn nonmonotonic_posting_qtrb() -> Vec<u8> {
@@ -385,6 +757,49 @@ where
         .collect::<Vec<_>>();
     rows.sort_unstable();
     (rows, indexed_fields)
+}
+
+fn measured_decode_work(run: impl FnOnce(&dyn WorkGuard) -> Result<(), IndexError>) -> u64 {
+    let consumed = AtomicU64::new(0);
+    run(&DecodeBudgetGuard {
+        upstream: &AllowAll,
+        consumed: &consumed,
+        limit: u64::MAX,
+    })
+    .expect("production posting decode");
+    consumed.load(Ordering::SeqCst)
+}
+
+fn assert_public_decode_boundary<T>(
+    store: Arc<T>,
+    filter: EventFilter,
+    measured_work: u64,
+    expected_rows: usize,
+) where
+    T: NormalizedBulkView + Send + Sync + 'static,
+{
+    assert!(measured_work > 1);
+    let rejected = Arc::new(DecodeBudgetView::new(store.clone(), u64::MAX));
+    let rejected_context = Arc::new(QueryContext::new(rejected.clone()).expect("W-1 context"));
+    rejected.arm(measured_work - 1);
+    let error = match TimelineProjection::new(rejected_context, filter.clone()) {
+        Ok(_) => panic!("W-1 production decode was accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "analysis.cpu_budget_exceeded");
+
+    for allowance in [measured_work, measured_work + 1] {
+        let view = Arc::new(DecodeBudgetView::new(store.clone(), u64::MAX));
+        let context = Arc::new(QueryContext::new(view.clone()).expect("bounded context"));
+        view.arm(allowance);
+        let projection = TimelineProjection::new(context, filter.clone())
+            .expect("production decode work must fit the derived plan");
+        let page = query_events(&projection, None, 2_000).expect("public page");
+        assert_eq!(page.rows.len(), expected_rows);
+        assert_eq!(page.total, expected_rows);
+        assert!(page.exact_total);
+        assert_eq!(view.consumed(), measured_work);
+    }
 }
 
 fn assert_absent_semantic_term<T>(store: Arc<T>, filter: EventFilter)
@@ -624,6 +1039,127 @@ fn production_large_semantic_dictionary_allows_an_absent_single_term() {
     };
     assert_absent_semantic_term(Arc::new(owned), filter.clone());
     assert_absent_semantic_term(Arc::new(mapped), filter);
+}
+
+#[test]
+fn production_memory_scan_work_bounds_public_owned_and_mapped_projection() {
+    const SHORT_INTERVALS: usize = 16_384;
+    const QUERY_START: u64 = 900_000;
+    let bytes = indexed_work_qtrb(0, SHORT_INTERVALS);
+    let (owned, mapped, _cache, _source) = stores_for_bytes(&bytes, "memory-work.trace.bin");
+    let filter = EventFilter {
+        memory: vec![MemoryFilter {
+            range: AddressRange::new(QUERY_START, QUERY_START + 1).unwrap(),
+            directions: Vec::new(),
+        }],
+        ..EventFilter::default()
+    };
+
+    let owned = Arc::new(owned);
+    let owned_work = measured_decode_work(|guard| {
+        let rows = owned.bounded_rows(
+            NormalizedPostingQuery::Memory {
+                start: QUERY_START,
+                end_exclusive: QUERY_START + 1,
+            },
+            usize::MAX,
+            guard,
+        )?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    });
+    let owned_estimate = owned
+        .bounded_row_estimate(
+            NormalizedPostingQuery::Memory {
+                start: QUERY_START,
+                end_exclusive: QUERY_START + 1,
+            },
+            usize::MAX,
+            &AllowAll,
+        )
+        .unwrap();
+    assert_eq!(owned_estimate.decode_work, owned_work);
+    assert!(owned_work > SHORT_INTERVALS as u64 * 2);
+    assert_public_decode_boundary(owned, filter.clone(), owned_work, 1);
+
+    let mapped = Arc::new(mapped);
+    let mapped_work = measured_decode_work(|guard| {
+        let rows = mapped.bounded_rows(
+            NormalizedPostingQuery::Memory {
+                start: QUERY_START,
+                end_exclusive: QUERY_START + 1,
+            },
+            usize::MAX,
+            guard,
+        )?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    });
+    let mapped_estimate = mapped
+        .bounded_row_estimate(
+            NormalizedPostingQuery::Memory {
+                start: QUERY_START,
+                end_exclusive: QUERY_START + 1,
+            },
+            usize::MAX,
+            &AllowAll,
+        )
+        .unwrap();
+    assert_eq!(mapped_estimate.decode_work, mapped_work);
+    assert_eq!(mapped_work, owned_work);
+    assert_public_decode_boundary(mapped, filter, mapped_work, 1);
+}
+
+#[test]
+fn production_sparse_sequence_work_bounds_public_owned_and_mapped_projection() {
+    const PAIRS: usize = 512;
+    let bytes = indexed_work_qtrb(PAIRS * 4, 0);
+    let (owned, mapped, _cache, _source) = stores_for_bytes(&bytes, "sequence-work.trace.bin");
+    let ranges = (0..PAIRS)
+        .map(|pair| {
+            let first = pair as u64 * 4 + 1;
+            SequenceRange::new(first, first + 1).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let filter = EventFilter {
+        sequence: ranges.clone(),
+        ..EventFilter::default()
+    };
+
+    let owned = Arc::new(owned);
+    let owned_work = measured_decode_work(|guard| {
+        for range in &ranges {
+            let rows = owned.bounded_rows(
+                NormalizedPostingQuery::Sequence {
+                    start: range.first,
+                    end_exclusive: range.last + 1,
+                },
+                usize::MAX,
+                guard,
+            )?;
+            assert_eq!(rows.len(), 2);
+        }
+        Ok(())
+    });
+    assert_public_decode_boundary(owned, filter.clone(), owned_work, PAIRS * 2);
+
+    let mapped = Arc::new(mapped);
+    let mapped_work = measured_decode_work(|guard| {
+        for range in &ranges {
+            let rows = mapped.bounded_rows(
+                NormalizedPostingQuery::Sequence {
+                    start: range.first,
+                    end_exclusive: range.last + 1,
+                },
+                usize::MAX,
+                guard,
+            )?;
+            assert_eq!(rows.len(), 2);
+        }
+        Ok(())
+    });
+    assert_eq!(mapped_work, owned_work);
+    assert_public_decode_boundary(mapped, filter, mapped_work, PAIRS * 2);
 }
 
 #[test]

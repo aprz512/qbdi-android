@@ -13,8 +13,8 @@ use qtrace_provider::{
 };
 use qtrace_store::{
     AuthorizedPath, BuildOptions, IndexBuilder, IndexError, NormalizedBulkView,
-    NormalizedPostingQuery, NormalizedSourceFormat, OpenPolicy, SemanticDictionaryFamily,
-    SessionLoader, TraceStore, TraceStoreView,
+    NormalizedPostingEstimate, NormalizedPostingQuery, NormalizedSourceFormat, OpenPolicy,
+    SemanticDictionaryFamily, SessionLoader, TraceStore, TraceStoreView,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -74,6 +74,26 @@ impl WorkGuard for WorkAccounting {
             .fetch_add(delta.input_bytes, Ordering::SeqCst);
         Ok(())
     }
+}
+
+impl WorkAccounting {
+    fn cpu_work(&self) -> u64 {
+        self.rows.load(Ordering::SeqCst) + self.input_bytes.load(Ordering::SeqCst)
+    }
+}
+
+fn assert_exact_decode_work(
+    view: &dyn NormalizedBulkView,
+    query: NormalizedPostingQuery<'_>,
+) -> NormalizedPostingEstimate {
+    let estimate = view
+        .bounded_row_estimate(query, usize::MAX, &AllowAll)
+        .expect("posting estimate");
+    let guard = WorkAccounting::default();
+    view.bounded_rows(query, usize::MAX, &guard)
+        .expect("posting decode");
+    assert_eq!(estimate.decode_work, guard.cpu_work());
+    estimate
 }
 
 impl WorkGuard for RecordAllocations {
@@ -870,7 +890,7 @@ fn semantic_dictionary_work_metadata_is_checked_exact_and_owned_mapped_equal() {
 }
 
 #[test]
-fn posting_estimate_reports_only_local_radixes_that_decode_will_execute() {
+fn posting_estimate_bounds_the_subsequent_production_decode_work() {
     let session = SessionLoader::open_report(
         AuthorizedPath::new(fixture()),
         OpenPolicy::default(),
@@ -901,9 +921,11 @@ fn posting_estimate_reports_only_local_radixes_that_decode_will_execute() {
         .unwrap();
     assert_eq!(owned_single, mapped_single);
     assert!(owned_single.rows >= 2);
-    assert_eq!(owned_single.matched_lists, 1);
-    assert_eq!(owned_single.local_radix_sorts, 0);
-    assert_eq!(owned_single.local_radix_rows, 0);
+    let single_guard = WorkAccounting::default();
+    owned
+        .bounded_rows(single_list, usize::MAX, &single_guard)
+        .unwrap();
+    assert_eq!(owned_single.decode_work, single_guard.cpu_work());
 
     let pair = NormalizedPostingQuery::Tids(&[tid, tid]);
     let owned_pair = owned
@@ -914,25 +936,72 @@ fn posting_estimate_reports_only_local_radixes_that_decode_will_execute() {
         .unwrap();
     assert_eq!(owned_pair, mapped_pair);
     assert!(owned_pair.rows >= 2);
-    assert_eq!(owned_pair.local_radix_sorts, 1);
-    assert_eq!(owned_pair.local_radix_rows, owned_pair.rows);
     let decode_guard = WorkAccounting::default();
     let decoded = owned
         .bounded_rows(pair, usize::MAX, &decode_guard)
         .expect("duplicate-list decode");
     assert_eq!(decoded.len(), owned_single.rows);
-    let encoded_rows = 2 * owned_single.rows as u64;
-    let expected_decode_work = 2
-        + 2
-        + 2
-        + encoded_rows
-        + std::mem::size_of::<usize>() as u64 * (2 * encoded_rows + 256)
-        + encoded_rows
-        - 1;
-    assert_eq!(
-        decode_guard.rows.load(Ordering::SeqCst),
-        expected_decode_work
-    );
+    assert_eq!(owned_pair.decode_work, decode_guard.cpu_work());
+
+    let first_key = owned.event_key(0).unwrap();
+    let first_kind = owned.event_kind(0).unwrap();
+    let sequence = first_key.sequence.unwrap_or(0);
+    let instruction = owned.instruction_rows().first().copied();
+    let module = instruction.and_then(|row| row.module).unwrap_or(0);
+    let relative_pc = instruction.map_or(0, |row| row.relative_pc);
+    let definition = instruction
+        .and_then(|row| row.definition)
+        .unwrap_or(u32::MAX);
+    let register = owned
+        .register_observation_rows()
+        .first()
+        .and_then(|row| RegisterSlot::from_index(row.slot as usize))
+        .unwrap_or(RegisterSlot::X0);
+    let memory = owned.memory_rows().first().copied();
+    let (memory_start, memory_end) = memory
+        .map(|row| (row.address, row.end_exclusive))
+        .unwrap_or((0, 1));
+
+    for view in [
+        &owned as &dyn NormalizedBulkView,
+        &mapped as &dyn NormalizedBulkView,
+    ] {
+        for query in [
+            NormalizedPostingQuery::Tids(&[tid]),
+            NormalizedPostingQuery::Kinds(&[first_kind]),
+            NormalizedPostingQuery::Modules(&[module]),
+            NormalizedPostingQuery::Sequence {
+                start: sequence,
+                end_exclusive: sequence.saturating_add(1),
+            },
+            NormalizedPostingQuery::ModulePc {
+                module,
+                start: relative_pc,
+                end_exclusive: relative_pc.saturating_add(1),
+            },
+            NormalizedPostingQuery::Definitions(&[definition]),
+            NormalizedPostingQuery::Registers(&[register]),
+            NormalizedPostingQuery::SemanticCategories(&[b"does-not-exist"]),
+            NormalizedPostingQuery::SemanticNames(&[b"does-not-exist"]),
+            NormalizedPostingQuery::Memory {
+                start: memory_start,
+                end_exclusive: memory_end,
+            },
+        ] {
+            assert_exact_decode_work(view, query);
+        }
+        let definition_bound = view
+            .bounded_definition_decode_work(view.definition_rows().len(), view.event_count())
+            .expect("definition decode upper bound");
+        let definition_guard = WorkAccounting::default();
+        view.bounded_rows(
+            NormalizedPostingQuery::Definitions(&[definition]),
+            usize::MAX,
+            &definition_guard,
+        )
+        .unwrap();
+        assert!(definition_guard.cpu_work() <= definition_bound);
+    }
 
     let empty = owned
         .bounded_row_estimate(
@@ -945,8 +1014,7 @@ fn posting_estimate_reports_only_local_radixes_that_decode_will_execute() {
         )
         .unwrap();
     assert_eq!(empty.rows, 0);
-    assert_eq!(empty.local_radix_sorts, 0);
-    assert_eq!(empty.local_radix_rows, 0);
+    assert_eq!(empty.decode_work, 0);
 }
 
 #[test]
