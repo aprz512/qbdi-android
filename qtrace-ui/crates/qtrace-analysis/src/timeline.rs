@@ -208,6 +208,37 @@ impl AnalysisError {
         }
     }
 
+    pub(crate) fn state_invalid(detail: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            code: "analysis.invalid_state_request",
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn state_budget(error: qtrace_provider::OperationAbort) -> Self {
+        match error {
+            qtrace_provider::OperationAbort::Cancelled => Self::cancelled("state query cancelled"),
+            error @ qtrace_provider::OperationAbort::BudgetExceeded { .. } => Self {
+                code: "analysis.budget_exceeded",
+                detail: error.to_string().into(),
+            },
+        }
+    }
+
+    pub(crate) fn state_hard_limit(detail: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            code: "analysis.budget_exceeded",
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn state_store(error: qtrace_store::IndexError) -> Self {
+        if let Some(abort) = error.operation_abort() {
+            return Self::state_budget(abort.clone());
+        }
+        Self::store(error)
+    }
+
     fn resource_exhausted(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "analysis.resource_exhausted",
