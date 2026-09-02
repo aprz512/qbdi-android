@@ -1,6 +1,7 @@
 //! Trace-storage boundary.
 
 mod allocation;
+mod annotations;
 mod cache;
 mod identity;
 mod index;
@@ -8,6 +9,12 @@ mod layout;
 mod manifest;
 mod secure_path;
 mod session;
+mod symbols;
+
+pub use annotations::{
+    AnnotationError, AnnotationOpenRequest, AnnotationStore, AnnotationTransaction,
+    EventAnnotation, Highlight, LocalSymbolName,
+};
 
 pub use cache::{
     CacheError, CacheIdentity, CacheIdentityField, CacheManifest, CacheOpen, CacheReader,
@@ -26,6 +33,10 @@ pub use index::{
 pub use session::{
     ArtifactFailure, ArtifactFormat, ArtifactMetadata, ArtifactSource, AuthorizedPath, OpenPolicy,
     SessionCapabilities, SessionCapability, SessionLoader, SessionSource, SessionWarning,
+};
+pub use symbols::{
+    ElfLoadRequest, ElfProducerIdentity, ElfSymbolIndex, ElfSymbolMatch, ModuleIdentity,
+    SymbolError,
 };
 
 pub const PROVIDER_CRATE: &str = qtrace_provider::CRATE_NAME;

@@ -436,6 +436,25 @@ impl CacheDirectory {
         create: bool,
         guard: &dyn WorkGuard,
     ) -> Result<Option<Self>, CacheError> {
+        Self::open_with_root_policy(root, key, create, true, guard)
+    }
+
+    pub(crate) fn open_data(
+        root: &Path,
+        key: &str,
+        create: bool,
+        guard: &dyn WorkGuard,
+    ) -> Result<Option<Self>, CacheError> {
+        Self::open_with_root_policy(root, key, create, false, guard)
+    }
+
+    fn open_with_root_policy(
+        root: &Path,
+        key: &str,
+        create: bool,
+        private_root: bool,
+        guard: &dyn WorkGuard,
+    ) -> Result<Option<Self>, CacheError> {
         if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(CacheError::invalid("cache key is not a SHA-256 hex digest"));
         }
@@ -492,7 +511,7 @@ impl CacheDirectory {
                         &current,
                         name,
                         create,
-                        normal_index == root_component_count,
+                        private_root && normal_index == root_component_count,
                         guard,
                     )?
                     else {

@@ -2,12 +2,14 @@
 
 mod filter;
 mod provenance;
+mod symbolize;
 mod timeline;
 
 pub use filter::{
     AddressRange, EventFilter, MemoryFilter, MnemonicFilter, RegisterFilter, SequenceRange,
 };
 pub use provenance::{CompletenessStatus, CompletenessSummary, DiscontinuityRow};
+pub use symbolize::{ResolvedSymbol, SymbolResolveError, SymbolResolver};
 pub use timeline::{
     AnalysisError, EventPage, EventRow, MAX_CONTEXT_DICTIONARY_ENTRIES, MAX_CONTEXT_EVENTS,
     MAX_CONTEXT_TYPED_ROWS, MAX_DISCONTINUITY_PAYLOAD_BYTES, MAX_DISCONTINUITY_TOTAL_BYTES,
