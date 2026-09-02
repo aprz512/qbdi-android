@@ -2,7 +2,8 @@ use std::{ops::Range, sync::Arc};
 
 use qtrace_analysis::MemoryAnalyzer;
 use qtrace_provider::{
-    ArtifactDigest, BudgetDimension, CaptureBytes, EventKey, EventKind, MemoryDirection,
+    ArtifactDigest, BudgetDimension, CaptureBytes, CompletenessCause, CompletenessRange,
+    Discontinuity, DiscontinuityCause, EventKey, EventKind, EventPayload, MemoryDirection,
     OperationAbort, Provenance, ProviderCapabilities, RegisterSlot, TimelineId, WorkDelta,
     WorkGuard,
 };
@@ -20,6 +21,10 @@ struct MemoryStore {
     after: Vec<Vec<u8>>,
     capabilities: ProviderCapabilities,
     completeness: Vec<qtrace_store::CompletenessRow>,
+    kinds: Vec<EventKind>,
+    payloads: Vec<Vec<u8>>,
+    estimate_rows_override: Option<usize>,
+    ignore_decode_max: bool,
 }
 
 fn memory_row(
@@ -76,6 +81,10 @@ impl MemoryStore {
                 loss_and_damage_ranges: true,
             },
             completeness: vec![],
+            kinds: vec![EventKind::Memory, EventKind::Memory],
+            payloads: vec![vec![], vec![]],
+            estimate_rows_override: None,
+            ignore_decode_max: false,
         }
     }
 
@@ -109,6 +118,8 @@ impl MemoryStore {
         store.after = (0..count)
             .map(|row| serde_json::to_vec(&CaptureBytes::Captured(vec![row as u8])).unwrap())
             .collect();
+        store.kinds = vec![EventKind::Memory; count];
+        store.payloads = vec![vec![]; count];
         store
     }
 }
@@ -121,7 +132,7 @@ impl TraceStoreView for MemoryStore {
         Ok(self.keys.get(row).cloned())
     }
     fn event_kind(&self, row: usize) -> Result<Option<EventKind>, IndexError> {
-        Ok((row < self.keys.len()).then_some(EventKind::Memory))
+        Ok(self.kinds.get(row).copied())
     }
     fn provenance(&self, row: usize) -> Result<Option<Provenance>, IndexError> {
         Ok((row < self.keys.len()).then_some(Provenance::Captured))
@@ -141,8 +152,8 @@ impl TraceStoreView for MemoryStore {
     fn semantic(&self, _: usize) -> Option<SemanticRow> {
         None
     }
-    fn payload_bytes(&self, _: usize) -> Result<&[u8], IndexError> {
-        Ok(&[])
+    fn payload_bytes(&self, row: usize) -> Result<&[u8], IndexError> {
+        Ok(self.payloads.get(row).map(Vec::as_slice).unwrap_or(&[]))
     }
     fn string_bytes(&self, _: u32) -> Result<&[u8], IndexError> {
         Ok(&[])
@@ -268,20 +279,24 @@ impl NormalizedBulkView for MemoryStore {
                 start,
                 end_exclusive,
             } => self.memory_overlaps(start, end_exclusive)?,
+            NormalizedPostingQuery::Kinds(kinds) => self
+                .kinds
+                .iter()
+                .enumerate()
+                .filter_map(|(row, kind)| kinds.contains(kind).then_some(row))
+                .collect(),
             _ => vec![],
         };
-        if rows.len() > max {
+        let estimated = self.estimate_rows_override.unwrap_or(rows.len());
+        if estimated > max {
             return Err(OperationAbort::budget_exceeded(
                 BudgetDimension::Rows,
                 max as u64,
-                rows.len() as u64,
+                estimated as u64,
             )
             .into());
         }
-        Ok(NormalizedPostingEstimate::new(
-            rows.len(),
-            rows.len() as u64,
-        ))
+        Ok(NormalizedPostingEstimate::new(estimated, estimated as u64))
     }
     fn bounded_row_count(
         &self,
@@ -294,16 +309,31 @@ impl NormalizedBulkView for MemoryStore {
     fn bounded_rows(
         &self,
         query: NormalizedPostingQuery<'_>,
-        _: usize,
+        max: usize,
         _: &dyn WorkGuard,
     ) -> Result<Vec<usize>, IndexError> {
-        match query {
+        let rows = match query {
             NormalizedPostingQuery::Memory {
                 start,
                 end_exclusive,
             } => self.memory_overlaps(start, end_exclusive),
+            NormalizedPostingQuery::Kinds(kinds) => Ok(self
+                .kinds
+                .iter()
+                .enumerate()
+                .filter_map(|(row, kind)| kinds.contains(kind).then_some(row))
+                .collect()),
             _ => Ok(vec![]),
+        }?;
+        if !self.ignore_decode_max && rows.len() > max {
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::Rows,
+                max as u64,
+                rows.len() as u64,
+            )
+            .into());
         }
+        Ok(rows)
     }
 }
 
@@ -468,6 +498,33 @@ fn address_damage_is_per_byte_and_a_later_captured_write_recovers_it() {
     assert_eq!(state.last_written[0].provenance, Provenance::Derived);
 }
 
+#[test]
+fn unscoped_completeness_rows_do_not_damage_an_unproved_timeline() {
+    let mut store = MemoryStore::overlapping_write_then_read();
+    store.rows.clear();
+    store.kinds = vec![EventKind::Begin, EventKind::Begin];
+    store.completeness.push(qtrace_store::CompletenessRow {
+        domain: qtrace_provider::RangeDomain::MemoryAddresses,
+        bounds: qtrace_provider::RangeBounds::HalfOpen {
+            start: 0x2002,
+            end_exclusive: 0x2004,
+        },
+        provenance: Provenance::Damaged,
+        cause: qtrace_provider::CompletenessCause::Lost,
+    });
+    let key = store.keys[1].clone();
+    let state = MemoryAnalyzer::new(Arc::new(store))
+        .unwrap()
+        .state_at(&key, 0x2002..0x2004)
+        .unwrap();
+    assert!(
+        state
+            .last_written
+            .iter()
+            .all(|byte| byte.provenance == Provenance::Unknown)
+    );
+}
+
 struct RejectGuard(OperationAbort);
 impl WorkGuard for RejectGuard {
     fn consume(&self, _: WorkDelta) -> Result<(), OperationAbort> {
@@ -615,5 +672,268 @@ fn production_normalized_qtrb_store_uses_real_overlap_posting() {
         history
             .iter()
             .any(|item| item.address == row.address && item.size == row.size)
+    );
+}
+
+fn discontinuity_payload(domain: qtrace_provider::RangeDomain) -> Vec<u8> {
+    let evidence = match domain {
+        qtrace_provider::RangeDomain::MemoryAddresses => {
+            CompletenessRange::memory_addresses_with_cause(
+                0x2002,
+                0x2004,
+                Provenance::Damaged,
+                CompletenessCause::Lost,
+            )
+            .unwrap()
+        }
+        qtrace_provider::RangeDomain::CapturedSequence => {
+            CompletenessRange::captured_sequence_with_cause(
+                1,
+                2,
+                Provenance::Damaged,
+                CompletenessCause::Lost,
+            )
+            .unwrap()
+        }
+        qtrace_provider::RangeDomain::SourceBytes => CompletenessRange::source_bytes_with_cause(
+            0,
+            10,
+            Provenance::Damaged,
+            CompletenessCause::Lost,
+        )
+        .unwrap(),
+    };
+    serde_json::to_vec(&EventPayload::Discontinuity(Discontinuity {
+        cause: DiscontinuityCause::Loss,
+        evidence,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn temporal_discontinuity_invalidates_old_write_and_later_write_recovers() {
+    let mut store = MemoryStore::overlapping_write_then_read();
+    let key = |row| {
+        EventKey::new(
+            ArtifactDigest::new([0x24; 32]),
+            TimelineId(2),
+            row,
+            row,
+            Some(row + 1),
+            Some(9),
+        )
+    };
+    store.keys = vec![key(0), key(1), key(2), key(3)];
+    store.kinds = vec![
+        EventKind::Memory,
+        EventKind::Discontinuity,
+        EventKind::Memory,
+        EventKind::Memory,
+    ];
+    store.payloads = vec![
+        vec![],
+        discontinuity_payload(qtrace_provider::RangeDomain::CapturedSequence),
+        vec![],
+        vec![],
+    ];
+    store.rows = vec![
+        memory_row(0, 0x2000, 4, MemoryDirection::Write, 0),
+        memory_row(2, 0x2002, 2, MemoryDirection::Read, 0),
+        memory_row(3, 0x2000, 4, MemoryDirection::Write, 0),
+    ];
+    store.before = vec![serde_json::to_vec(&CaptureBytes::NotCaptured).unwrap(); 4];
+    store.after = vec![
+        serde_json::to_vec(&CaptureBytes::Captured(vec![1, 2, 3, 4])).unwrap(),
+        vec![],
+        serde_json::to_vec(&CaptureBytes::NotCaptured).unwrap(),
+        serde_json::to_vec(&CaptureBytes::Captured(vec![7, 8, 9, 10])).unwrap(),
+    ];
+    let after_gap = store.keys[2].clone();
+    let after_recapture = store.keys[3].clone();
+    let analyzer = MemoryAnalyzer::new(Arc::new(store)).unwrap();
+    assert!(
+        analyzer
+            .state_at(&after_gap, 0x2002..0x2004)
+            .unwrap()
+            .last_written
+            .iter()
+            .all(|byte| byte.provenance == Provenance::Damaged)
+    );
+    assert_eq!(
+        analyzer
+            .state_at(&after_recapture, 0x2002..0x2004)
+            .unwrap()
+            .after
+            .iter()
+            .map(|byte| byte.value)
+            .collect::<Vec<_>>(),
+        vec![Some(9), Some(10)]
+    );
+}
+
+#[test]
+fn unavailable_target_cannot_fallback_to_old_last_written() {
+    let mut store = MemoryStore::overlapping_write_then_read();
+    store.before[1] = serde_json::to_vec(&CaptureBytes::Unavailable).unwrap();
+    let key = store.keys[1].clone();
+    let state = MemoryAnalyzer::new(Arc::new(store))
+        .unwrap()
+        .state_at(&key, 0x2002..0x2006)
+        .unwrap();
+    assert!(
+        state
+            .before
+            .iter()
+            .all(|byte| byte.provenance == Provenance::Damaged && byte.value.is_none())
+    );
+}
+
+#[test]
+fn unordered_future_write_conflicts_but_unordered_reads_never_do() {
+    let mut write_store = MemoryStore::overlapping_write_then_read();
+    write_store.capabilities.global_ordering = false;
+    write_store.keys.push(EventKey::new(
+        ArtifactDigest::new([0x24; 32]),
+        TimelineId(2),
+        2,
+        2,
+        Some(3),
+        Some(77),
+    ));
+    write_store.kinds.push(EventKind::Memory);
+    write_store.payloads.push(vec![]);
+    write_store
+        .rows
+        .push(memory_row(2, 0x2002, 4, MemoryDirection::Write, 0));
+    write_store
+        .before
+        .push(serde_json::to_vec(&CaptureBytes::NotCaptured).unwrap());
+    write_store
+        .after
+        .push(serde_json::to_vec(&CaptureBytes::Captured(vec![9; 4])).unwrap());
+    let target = write_store.keys[1].clone();
+    let state = MemoryAnalyzer::new(Arc::new(write_store))
+        .unwrap()
+        .state_at(&target, 0x2002..0x2006)
+        .unwrap();
+    assert!(
+        state
+            .last_written
+            .iter()
+            .all(|byte| byte.provenance == Provenance::Damaged)
+    );
+
+    let mut read_store = MemoryStore::overlapping_write_then_read();
+    read_store.capabilities.global_ordering = false;
+    read_store.keys[0].tid = Some(77);
+    read_store.rows[0].direction = MemoryDirection::Read;
+    let target = read_store.keys[1].clone();
+    let state = MemoryAnalyzer::new(Arc::new(read_store))
+        .unwrap()
+        .state_at(&target, 0x2002..0x2006)
+        .unwrap();
+    assert!(
+        state
+            .last_written
+            .iter()
+            .all(|byte| byte.value.is_none() && byte.provenance != Provenance::Damaged)
+    );
+}
+
+#[test]
+fn decode_row_limit_is_enforced_after_a_hostile_underestimate() {
+    let mut store = MemoryStore::repeated_writes(10_001);
+    store.estimate_rows_override = Some(10_000);
+    store.ignore_decode_max = true;
+    let key = store.keys[10_000].clone();
+    let analyzer = MemoryAnalyzer::new(Arc::new(store)).unwrap();
+    assert_eq!(
+        analyzer.history(&key, 0x3000..0x3001).unwrap_err().code(),
+        "analysis.budget_exceeded"
+    );
+    assert_eq!(
+        analyzer.state_at(&key, 0x3000..0x3001).unwrap_err().code(),
+        "analysis.budget_exceeded"
+    );
+}
+
+struct ResidentGuard {
+    limit: u64,
+    consumed: std::sync::atomic::AtomicU64,
+}
+impl ResidentGuard {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            consumed: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+impl WorkGuard for ResidentGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.resident_bytes == 0 {
+            return Ok(());
+        }
+        let prior = self.consumed.load(std::sync::atomic::Ordering::Relaxed);
+        let next = prior.saturating_add(delta.resident_bytes);
+        if next > self.limit {
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::ResidentBytes,
+                self.limit,
+                next,
+            ));
+        }
+        self.consumed
+            .store(next, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+#[test]
+fn five_live_memory_state_vectors_charge_their_checked_layout_exactly() {
+    let mut store = MemoryStore::overlapping_write_then_read();
+    store.rows.clear();
+    store.kinds = vec![EventKind::Begin, EventKind::Begin];
+    let key = store.keys[1].clone();
+    let analyzer = MemoryAnalyzer::new(Arc::new(store)).unwrap();
+    let length = 257_usize;
+    let state_bytes = std::alloc::Layout::array::<qtrace_analysis::ByteState>(length)
+        .unwrap()
+        .size() as u64;
+    let conflict_bytes =
+        std::alloc::Layout::array::<Option<qtrace_analysis::MemoryEvidence>>(length)
+            .unwrap()
+            .size() as u64;
+    let exact = state_bytes
+        .checked_mul(4)
+        .unwrap()
+        .checked_add(conflict_bytes)
+        .unwrap();
+    let below = ResidentGuard::new(exact - 1);
+    assert_eq!(
+        analyzer
+            .state_at_with_guard(&key, 0x5000..0x5000 + length as u64, &below)
+            .unwrap_err()
+            .code(),
+        "analysis.budget_exceeded"
+    );
+    let at = ResidentGuard::new(exact);
+    assert_eq!(
+        analyzer
+            .state_at_with_guard(&key, 0x5000..0x5000 + length as u64, &at)
+            .unwrap()
+            .observed
+            .len(),
+        length
+    );
+    assert_eq!(
+        at.consumed.load(std::sync::atomic::Ordering::Relaxed),
+        exact
+    );
+    let above = ResidentGuard::new(exact + 1);
+    assert!(
+        analyzer
+            .state_at_with_guard(&key, 0x5000..0x5000 + length as u64, &above)
+            .is_ok()
     );
 }

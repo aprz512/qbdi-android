@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use qtrace_analysis::{RegisterReplay, RegisterSlot};
 use qtrace_provider::{
-    ArtifactDigest, BudgetDimension, EventKey, EventKind, InstructionDefinition, OperationAbort,
+    ArtifactDigest, BudgetDimension, CompletenessCause, CompletenessRange, Discontinuity,
+    DiscontinuityCause, EventKey, EventKind, EventPayload, InstructionDefinition, OperationAbort,
     Provenance, ProviderCapabilities, RegisterDefinition, TimelineId, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
@@ -20,6 +21,7 @@ struct RegisterStore {
     capabilities: ProviderCapabilities,
     definitions: Vec<DefinitionRow>,
     blobs: Vec<Vec<u8>>,
+    payloads: Vec<Vec<u8>>,
     source: NormalizedSourceFormat,
 }
 
@@ -81,6 +83,7 @@ impl RegisterStore {
             capabilities: ProviderCapabilities::qtrb_register_observations(),
             definitions: vec![],
             blobs: vec![],
+            payloads: vec![vec![], vec![]],
             source: NormalizedSourceFormat::Qtrb,
         }
     }
@@ -114,8 +117,8 @@ impl TraceStoreView for RegisterStore {
     fn semantic(&self, _: usize) -> Option<SemanticRow> {
         None
     }
-    fn payload_bytes(&self, _: usize) -> Result<&[u8], IndexError> {
-        Ok(&[])
+    fn payload_bytes(&self, row: usize) -> Result<&[u8], IndexError> {
+        Ok(self.payloads.get(row).map(Vec::as_slice).unwrap_or(&[]))
     }
     fn string_bytes(&self, _: u32) -> Result<&[u8], IndexError> {
         Ok(&[])
@@ -678,4 +681,270 @@ fn production_normalized_qtrb_store_replays_registers() {
     let state = RegisterReplay::new(store).unwrap().state_at(&key).unwrap();
     assert_eq!(state.key, key);
     assert!(state.before.cell(RegisterSlot::X0).value.is_some());
+}
+
+#[test]
+fn timeline_wide_gap_invalidates_every_tid_until_each_native_checkpoint_recovers() {
+    let mut store = RegisterStore::qtrb();
+    store.source = NormalizedSourceFormat::Flight;
+    let key = |row, tid| {
+        EventKey::new(
+            ArtifactDigest::new([0x45; 32]),
+            TimelineId(5),
+            row,
+            row,
+            Some(row + 1),
+            tid,
+        )
+    };
+    store.keys = vec![
+        key(0, Some(1)),
+        key(1, Some(2)),
+        key(2, None),
+        key(3, Some(1)),
+        key(4, Some(2)),
+        key(5, Some(1)),
+    ];
+    store.kinds = vec![
+        EventKind::RegisterCheckpoint,
+        EventKind::RegisterCheckpoint,
+        EventKind::Discontinuity,
+        EventKind::Instruction,
+        EventKind::Instruction,
+        EventKind::RegisterCheckpoint,
+    ];
+    store.payloads = vec![vec![]; store.keys.len()];
+    store.payloads[2] = serde_json::to_vec(&EventPayload::Discontinuity(Discontinuity {
+        cause: DiscontinuityCause::Loss,
+        evidence: CompletenessRange::captured_sequence_with_cause(
+            3,
+            4,
+            Provenance::Damaged,
+            CompletenessCause::Lost,
+        )
+        .unwrap(),
+    }))
+    .unwrap();
+    store.instructions = vec![
+        InstructionRow {
+            owner_row: 3,
+            module: None,
+            relative_pc: 0,
+            definition: None,
+        },
+        InstructionRow {
+            owner_row: 4,
+            module: None,
+            relative_pc: 0,
+            definition: None,
+        },
+    ];
+    store.observations.clear();
+    for row in [0_usize, 1, 5] {
+        for slot in 0..RegisterSlot::COUNT {
+            store.observations.push(RegisterObservationRow {
+                owner_row: row,
+                slot: slot as u8,
+                captured_width: 8,
+                access: RegisterAccess::Checkpoint,
+                value: row as u64,
+                provenance: Provenance::Captured,
+            });
+        }
+    }
+    store.observations.sort_by_key(|row| row.owner_row);
+    let tid1_after_gap = store.keys[3].clone();
+    let tid2_after_gap = store.keys[4].clone();
+    let tid1_recaptured = store.keys[5].clone();
+    let global_gap = store.keys[2].clone();
+    let replay = RegisterReplay::new(Arc::new(store)).unwrap();
+    assert_eq!(
+        replay
+            .state_at(&global_gap)
+            .unwrap()
+            .after
+            .cell(RegisterSlot::X0)
+            .provenance,
+        Provenance::Damaged
+    );
+    assert_eq!(
+        replay
+            .state_at(&tid1_after_gap)
+            .unwrap()
+            .after
+            .cell(RegisterSlot::X0)
+            .provenance,
+        Provenance::Damaged
+    );
+    assert_eq!(
+        replay
+            .state_at(&tid2_after_gap)
+            .unwrap()
+            .after
+            .cell(RegisterSlot::X0)
+            .provenance,
+        Provenance::Damaged
+    );
+    assert_eq!(
+        replay
+            .state_at(&tid1_recaptured)
+            .unwrap()
+            .after
+            .cell(RegisterSlot::X0)
+            .value,
+        Some(5)
+    );
+}
+
+#[test]
+fn sparse_tid_query_work_is_independent_of_other_tid_rows() {
+    let mut measured = Vec::new();
+    for unrelated in [128_usize, 256, 512] {
+        let mut store = RegisterStore::qtrb();
+        let key = |row, tid| {
+            EventKey::new(
+                ArtifactDigest::new([0x46; 32]),
+                TimelineId(6),
+                row as u64,
+                row as u64,
+                Some(row as u64),
+                Some(tid),
+            )
+        };
+        store.keys = (0..unrelated + 2)
+            .map(|row| {
+                key(
+                    row,
+                    if row == 0 || row == unrelated + 1 {
+                        1
+                    } else {
+                        2
+                    },
+                )
+            })
+            .collect();
+        store.kinds = vec![EventKind::Instruction; unrelated + 2];
+        store.instructions = (0..unrelated + 2)
+            .map(|owner_row| InstructionRow {
+                owner_row,
+                module: None,
+                relative_pc: 0,
+                definition: None,
+            })
+            .collect();
+        store.observations = vec![RegisterObservationRow {
+            owner_row: 0,
+            slot: 0,
+            captured_width: 8,
+            access: RegisterAccess::Write,
+            value: 9,
+            provenance: Provenance::Captured,
+        }];
+        let target = store.keys[unrelated + 1].clone();
+        let replay = RegisterReplay::new(Arc::new(store)).unwrap();
+        let guard = CountingGuard::default();
+        assert_eq!(
+            replay
+                .state_at_with_guard(&target, &guard)
+                .unwrap()
+                .after
+                .cell(RegisterSlot::X0)
+                .value,
+            Some(9)
+        );
+        measured.push(guard.0.load(std::sync::atomic::Ordering::Relaxed));
+    }
+    assert!(
+        measured[2] <= measured[0] + 64,
+        "query work scaled with unrelated rows: {measured:?}"
+    );
+}
+
+#[derive(Default)]
+struct AllocationCountingGuard(std::sync::atomic::AtomicU64);
+impl WorkGuard for AllocationCountingGuard {
+    fn consume(&self, _: WorkDelta) -> Result<(), OperationAbort> {
+        Ok(())
+    }
+    fn begin_allocation_scope(&self, delta: WorkDelta, _: u64) -> Result<(), OperationAbort> {
+        if delta.resident_bytes != 0 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn replay_build_does_not_allocate_two_snapshots_per_event() {
+    let mut store = RegisterStore::qtrb();
+    let count = 1_000;
+    store.keys = (0..count)
+        .map(|row| {
+            EventKey::new(
+                ArtifactDigest::new([0x47; 32]),
+                TimelineId(7),
+                row as u64,
+                row as u64,
+                Some(row as u64),
+                Some(1),
+            )
+        })
+        .collect();
+    store.kinds = vec![EventKind::Instruction; count];
+    store.instructions = (0..count)
+        .map(|owner_row| InstructionRow {
+            owner_row,
+            module: None,
+            relative_pc: 0,
+            definition: None,
+        })
+        .collect();
+    store.observations = vec![];
+    let guard = AllocationCountingGuard::default();
+    RegisterReplay::new_with_guard(Arc::new(store), &guard).unwrap();
+    assert!(guard.0.load(std::sync::atomic::Ordering::Relaxed) < 20);
+}
+
+#[test]
+fn canonical_wsp_write_zero_extends_sp_but_partial_sp_does_not() {
+    let mut store = RegisterStore::qtrb();
+    store.observations = vec![RegisterObservationRow {
+        owner_row: 0,
+        slot: RegisterSlot::Sp.index() as u8,
+        captured_width: 4,
+        access: RegisterAccess::Write,
+        value: u64::MAX,
+        provenance: Provenance::Captured,
+    }];
+    let key = store.keys[0].clone();
+    let partial = RegisterReplay::new(Arc::new(store))
+        .unwrap()
+        .state_at(&key)
+        .unwrap();
+    assert_eq!(partial.after.cell(RegisterSlot::Sp).known_mask, 0xffff_ffff);
+
+    let mut store = RegisterStore::qtrb();
+    store.observations = vec![RegisterObservationRow {
+        owner_row: 0,
+        slot: RegisterSlot::Sp.index() as u8,
+        captured_width: 4,
+        access: RegisterAccess::Write,
+        value: u64::MAX,
+        provenance: Provenance::Captured,
+    }];
+    store.instructions[0].definition = Some(0);
+    let mut definition = InstructionDefinition::default();
+    definition.writes.push(RegisterDefinition {
+        slot: RegisterSlot::Sp.index() as u8,
+        captured_width: 4,
+        name: "wsp".into(),
+    });
+    store.blobs.push(serde_json::to_vec(&definition).unwrap());
+    store.definitions.push(serde_json::from_value(serde_json::json!({"source_event_row":0,"provenance":"captured","source_id":0,"opcode":0,"read_mask":0,"write_mask":2147483648_u64,"pc_displacement":0,"flags":0,"pc_kind":"none","condition":0,"slow_memory_path":false,"mnemonic":0,"operands":0,"disassembly":0,"exact_blob":0})).unwrap());
+    let key = store.keys[0].clone();
+    let canonical = RegisterReplay::new(Arc::new(store))
+        .unwrap()
+        .state_at(&key)
+        .unwrap();
+    assert_eq!(canonical.after.cell(RegisterSlot::Sp).known_mask, u64::MAX);
 }

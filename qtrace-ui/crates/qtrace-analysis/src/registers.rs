@@ -1,12 +1,20 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::{BuildHasher, Hash},
+    mem::{align_of, size_of},
+    sync::Arc,
+};
 
 use qtrace_provider::{
-    AllocationScope, EventKey, EventKind, OperationAbort, Provenance, RegisterSlot, WorkDelta,
-    WorkGuard,
+    AllocationScope, EventKey, EventKind, OperationAbort, Provenance, RegisterSlot, TimelineId,
+    WorkDelta, WorkGuard,
 };
 use qtrace_store::{NormalizedBulkView, RegisterAccess, RegisterObservationRow};
 
 use crate::AnalysisError;
+
+const CHECKPOINT_EVENTS: usize = 4_096;
+type ScopeKey = (TimelineId, Option<u32>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterCell {
@@ -19,7 +27,7 @@ pub struct RegisterCell {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegisterSnapshotState {
-    cells: Vec<RegisterCell>,
+    cells: [RegisterCell; RegisterSlot::COUNT],
 }
 
 impl RegisterSnapshotState {
@@ -35,25 +43,42 @@ pub struct RegisterStateAtEvent {
     pub after: RegisterSnapshotState,
 }
 
+#[derive(Clone, Copy)]
+struct ReplayEvent {
+    row: usize,
+    observations_start: usize,
+    observations_end: usize,
+    invalidates: bool,
+}
+
+struct ReplayCheckpoint {
+    event_index: usize,
+    row: usize,
+    state: RegisterSnapshotState,
+}
+
+struct ScopeReplay {
+    events: Vec<ReplayEvent>,
+    checkpoints: Vec<ReplayCheckpoint>,
+    build_state: RegisterSnapshotState,
+    since_checkpoint: usize,
+}
+
+impl ScopeReplay {
+    fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            checkpoints: Vec::new(),
+            build_state: unknown_snapshot(),
+            since_checkpoint: 0,
+        }
+    }
+}
+
 pub struct RegisterReplay {
     store: Arc<dyn NormalizedBulkView + Send + Sync>,
-    checkpoints: Vec<ReplayCheckpoint>,
+    scopes: HashMap<ScopeKey, ScopeReplay>,
 }
-
-#[derive(Clone)]
-struct ReplayCheckpoint {
-    row: usize,
-    timeline: qtrace_provider::TimelineId,
-    tid: Option<u32>,
-    state: RegisterSnapshotState,
-}
-
-struct BuildState {
-    instructions: usize,
-    state: RegisterSnapshotState,
-}
-
-const REPLAY_CHECKPOINT_ROWS: usize = 4_096;
 
 struct AllowStateWork;
 
@@ -88,10 +113,8 @@ impl RegisterReplay {
         store: Arc<dyn NormalizedBulkView + Send + Sync>,
         guard: &dyn WorkGuard,
     ) -> Result<Self, AnalysisError> {
-        for chunk in store
-            .register_observation_rows()
-            .chunks(REPLAY_CHECKPOINT_ROWS)
-        {
+        let observations = store.register_observation_rows();
+        for (chunk_index, chunk) in observations.chunks(CHECKPOINT_EVENTS).enumerate() {
             guard
                 .consume(WorkDelta {
                     rows: chunk.len() as u64,
@@ -99,25 +122,25 @@ impl RegisterReplay {
                     ..WorkDelta::default()
                 })
                 .map_err(AnalysisError::state_budget)?;
+            if chunk
+                .windows(2)
+                .any(|pair| pair[0].owner_row > pair[1].owner_row)
+                || (chunk_index != 0
+                    && observations[chunk_index * CHECKPOINT_EVENTS - 1].owner_row
+                        > chunk[0].owner_row)
+            {
+                return Err(AnalysisError::state_invalid(
+                    "register observations are not ordered by owner row",
+                ));
+            }
         }
-        if store
-            .register_observation_rows()
-            .windows(2)
-            .any(|rows| rows[0].owner_row > rows[1].owner_row)
-        {
-            return Err(AnalysisError::state_invalid(
-                "register observations are not ordered by owner row",
-            ));
-        }
-        let event_count = store.event_count();
-        let mut states = HashMap::new();
-        let mut checkpoints = Vec::new();
-        let observations = store.register_observation_rows();
+
+        let mut scopes = HashMap::<ScopeKey, ScopeReplay>::new();
         let mut observation = 0_usize;
-        for chunk_start in (0..event_count).step_by(REPLAY_CHECKPOINT_ROWS) {
+        for chunk_start in (0..store.event_count()).step_by(CHECKPOINT_EVENTS) {
             let chunk_end = chunk_start
-                .saturating_add(REPLAY_CHECKPOINT_ROWS)
-                .min(event_count);
+                .saturating_add(CHECKPOINT_EVENTS)
+                .min(store.event_count());
             guard
                 .consume(WorkDelta {
                     rows: (chunk_end - chunk_start) as u64,
@@ -130,7 +153,7 @@ impl RegisterReplay {
                 {
                     observation += 1;
                 }
-                let start = observation;
+                let observations_start = observation;
                 while observation < observations.len() && observations[observation].owner_row == row
                 {
                     observation += 1;
@@ -141,77 +164,79 @@ impl RegisterReplay {
                 let Some(kind) = store.event_kind(row).map_err(AnalysisError::state_store)? else {
                     continue;
                 };
-                if kind != EventKind::Instruction
-                    && kind != EventKind::RegisterCheckpoint
-                    && kind != EventKind::RegisterDelta
-                    && kind != EventKind::Discontinuity
-                {
+                if !matches!(
+                    kind,
+                    EventKind::Instruction
+                        | EventKind::RegisterCheckpoint
+                        | EventKind::RegisterDelta
+                        | EventKind::Discontinuity
+                ) {
                     continue;
                 }
-                let scope_key = (key.timeline, key.tid);
-                let state_map_grows = states.len() == states.capacity();
-                let state_map_growth = states.capacity().max(3);
-                if let std::collections::hash_map::Entry::Vacant(entry) = states.entry(scope_key) {
-                    let state = unknown_snapshot(guard)?;
-                    let allocation = if state_map_grows {
-                        let bytes = state_map_growth
-                            .checked_mul(std::mem::size_of::<(
-                                (qtrace_provider::TimelineId, Option<u32>),
-                                BuildState,
-                            )>())
-                            .and_then(|value| u64::try_from(value).ok())
-                            .ok_or_else(|| {
-                                AnalysisError::state_hard_limit(
-                                    "register replay index allocation overflows",
-                                )
-                            })?;
-                        Some(
-                            AllocationScope::begin(guard, bytes, bytes)
-                                .map_err(AnalysisError::state_budget)?,
-                        )
-                    } else {
-                        None
-                    };
-                    entry.insert(BuildState {
-                        instructions: 0,
-                        state,
+                let row_observations = &observations[observations_start..observation];
+                let invalidates = (kind == EventKind::Discontinuity
+                    && discontinuity_affects_registers(store.as_ref(), row, guard)?)
+                    || row_observations.iter().any(|item| {
+                        item.access == RegisterAccess::Delta
+                            && item.provenance == Provenance::Damaged
                     });
-                    drop(allocation);
-                }
-                let build = states.get_mut(&scope_key).expect("state inserted above");
-                let row_observations = &observations[start..observation];
-                let (_, after) = apply_event(
-                    store.as_ref(),
+                let event = ReplayEvent {
                     row,
-                    &build.state,
+                    observations_start,
+                    observations_end: observation,
+                    invalidates,
+                };
+
+                if kind == EventKind::Discontinuity && key.tid.is_none() && invalidates {
+                    let global_scope = (key.timeline, None);
+                    if !scopes.contains_key(&global_scope) {
+                        reserve_hash_map(&mut scopes, 1, guard)?;
+                        scopes.insert(global_scope, ScopeReplay::new());
+                    }
+                    for ((timeline, _), scope) in &mut scopes {
+                        if *timeline == key.timeline {
+                            guard
+                                .consume(WorkDelta {
+                                    nodes: 1,
+                                    ..WorkDelta::default()
+                                })
+                                .map_err(AnalysisError::state_budget)?;
+                            append_build_event(
+                                scope,
+                                event,
+                                &key,
+                                row_observations,
+                                store.as_ref(),
+                                guard,
+                                true,
+                            )?;
+                        }
+                    }
+                    continue;
+                }
+
+                let scope_key = (key.timeline, key.tid);
+                if !scopes.contains_key(&scope_key) {
+                    reserve_hash_map(&mut scopes, 1, guard)?;
+                    scopes.insert(scope_key, ScopeReplay::new());
+                }
+                let Some(scope) = scopes.get_mut(&scope_key) else {
+                    return Err(AnalysisError::state_invalid(
+                        "register replay scope insertion failed",
+                    ));
+                };
+                append_build_event(
+                    scope,
+                    event,
                     &key,
-                    kind,
                     row_observations,
+                    store.as_ref(),
                     guard,
+                    invalidates,
                 )?;
-                build.state = after;
-                if kind == EventKind::Instruction {
-                    build.instructions += 1;
-                }
-                let reliable_full = is_reliable_full_checkpoint(row_observations);
-                if reliable_full
-                    || (kind == EventKind::Instruction
-                        && build.instructions % REPLAY_CHECKPOINT_ROWS == 0)
-                {
-                    guarded_checkpoint_push(
-                        &mut checkpoints,
-                        ReplayCheckpoint {
-                            row,
-                            timeline: key.timeline,
-                            tid: key.tid,
-                            state: snapshot_clone(&build.state, guard)?,
-                        },
-                        guard,
-                    )?;
-                }
             }
         }
-        Ok(Self { store, checkpoints })
+        Ok(Self { store, scopes })
     }
 
     pub fn state_at(&self, key: &EventKey) -> Result<RegisterStateAtEvent, AnalysisError> {
@@ -227,120 +252,297 @@ impl RegisterReplay {
             .store
             .row_for_source_key(key)
             .ok_or_else(|| AnalysisError::state_invalid("event key is not in this trace"))?;
-        let mut state = unknown_snapshot(guard)?;
-        let mut replay_start = 0_usize;
-        let mut checkpoint_visits = 0_usize;
-        for checkpoint in self.checkpoints.iter().rev() {
-            checkpoint_visits += 1;
-            if checkpoint_visits == REPLAY_CHECKPOINT_ROWS {
-                guard
-                    .consume(WorkDelta {
-                        nodes: checkpoint_visits as u64,
-                        ..WorkDelta::default()
-                    })
-                    .map_err(AnalysisError::state_budget)?;
-                checkpoint_visits = 0;
-            }
-            if checkpoint.row < target
-                && checkpoint.timeline == key.timeline
-                && checkpoint.tid == key.tid
-            {
-                state = snapshot_clone(&checkpoint.state, guard)?;
-                replay_start = checkpoint.row.saturating_add(1);
-                break;
-            }
-        }
-        if checkpoint_visits != 0 {
-            guard
-                .consume(WorkDelta {
-                    nodes: checkpoint_visits as u64,
-                    ..WorkDelta::default()
-                })
-                .map_err(AnalysisError::state_budget)?;
-        }
+        let Some(scope) = self.scopes.get(&(key.timeline, key.tid)) else {
+            let state = unknown_snapshot();
+            return Ok(RegisterStateAtEvent {
+                key: key.clone(),
+                before: state.clone(),
+                after: state,
+            });
+        };
+        let event_end = guarded_upper_bound(scope.events.len(), guard, |index| {
+            scope.events[index].row <= target
+        })?;
+        let checkpoint_end = guarded_upper_bound(scope.checkpoints.len(), guard, |index| {
+            scope.checkpoints[index].row < target
+        })?;
+        let (mut state, replay_start) = if checkpoint_end == 0 {
+            (unknown_snapshot(), 0)
+        } else {
+            let checkpoint = &scope.checkpoints[checkpoint_end - 1];
+            (checkpoint.state.clone(), checkpoint.event_index + 1)
+        };
         let observations = self.store.register_observation_rows();
-        let mut observation = first_observation_at_or_after(observations, replay_start, guard)?;
-
-        for chunk_start in (replay_start..=target).step_by(REPLAY_CHECKPOINT_ROWS) {
-            let chunk_end = chunk_start
-                .saturating_add(REPLAY_CHECKPOINT_ROWS)
-                .min(target.saturating_add(1));
+        for chunk in scope.events[replay_start..event_end].chunks(CHECKPOINT_EVENTS) {
             guard
                 .consume(WorkDelta {
-                    rows: (chunk_end - chunk_start) as u64,
-                    nodes: (chunk_end - chunk_start) as u64,
+                    rows: chunk.len() as u64,
+                    nodes: chunk.len() as u64,
                     ..WorkDelta::default()
                 })
                 .map_err(AnalysisError::state_budget)?;
-            for row in chunk_start..chunk_end {
-                while observation < observations.len() && observations[observation].owner_row < row
-                {
-                    observation += 1;
-                }
-                let start = observation;
-                while observation < observations.len() && observations[observation].owner_row == row
-                {
-                    observation += 1;
-                }
+            for event in chunk {
                 let row_key = self
                     .store
-                    .event_key(row)
+                    .event_key(event.row)
                     .map_err(AnalysisError::state_store)?
                     .ok_or_else(|| AnalysisError::state_invalid("event row has no key"))?;
-                if row_key.timeline != key.timeline || row_key.tid != key.tid {
-                    continue;
+                let row_observations =
+                    &observations[event.observations_start..event.observations_end];
+                if event.row == target {
+                    let before =
+                        apply_before(state, &row_key, event.invalidates, row_observations)?;
+                    let mut after = before.clone();
+                    apply_writes(
+                        &mut after,
+                        self.store.as_ref(),
+                        event.row,
+                        &row_key,
+                        row_observations,
+                        guard,
+                    )?;
+                    return Ok(RegisterStateAtEvent {
+                        key: key.clone(),
+                        before,
+                        after,
+                    });
                 }
-                let kind = self
-                    .store
-                    .event_kind(row)
-                    .map_err(AnalysisError::state_store)?
-                    .ok_or_else(|| AnalysisError::state_invalid("event row has no kind"))?;
-                let row_observations = &observations[start..observation];
-                let (row_before, row_after) = apply_event(
+                apply_transition(
+                    &mut state,
                     self.store.as_ref(),
-                    row,
-                    &state,
+                    event,
                     &row_key,
-                    kind,
                     row_observations,
                     guard,
                 )?;
-                if row == target {
-                    return Ok(RegisterStateAtEvent {
-                        key: key.clone(),
-                        before: row_before,
-                        after: row_after,
-                    });
-                }
-                state = row_after;
             }
         }
-        Err(AnalysisError::state_invalid(
-            "target event could not be replayed",
-        ))
+        Ok(RegisterStateAtEvent {
+            key: key.clone(),
+            before: state.clone(),
+            after: state,
+        })
     }
 }
 
-fn guarded_checkpoint_push(
-    checkpoints: &mut Vec<ReplayCheckpoint>,
-    value: ReplayCheckpoint,
+fn append_build_event(
+    scope: &mut ScopeReplay,
+    event: ReplayEvent,
+    key: &EventKey,
+    observations: &[RegisterObservationRow],
+    store: &dyn NormalizedBulkView,
+    guard: &dyn WorkGuard,
+    force_checkpoint: bool,
+) -> Result<(), AnalysisError> {
+    guarded_vec_push(&mut scope.events, event, guard, "register event index")?;
+    apply_transition(
+        &mut scope.build_state,
+        store,
+        &event,
+        key,
+        observations,
+        guard,
+    )?;
+    scope.since_checkpoint = scope.since_checkpoint.saturating_add(1);
+    if force_checkpoint
+        || is_reliable_full_checkpoint(observations)
+        || scope.since_checkpoint == CHECKPOINT_EVENTS
+    {
+        let checkpoint = ReplayCheckpoint {
+            event_index: scope.events.len() - 1,
+            row: event.row,
+            state: scope.build_state.clone(),
+        };
+        guarded_vec_push(
+            &mut scope.checkpoints,
+            checkpoint,
+            guard,
+            "register checkpoint index",
+        )?;
+        scope.since_checkpoint = 0;
+    }
+    Ok(())
+}
+
+fn apply_transition(
+    state: &mut RegisterSnapshotState,
+    store: &dyn NormalizedBulkView,
+    event: &ReplayEvent,
+    key: &EventKey,
+    observations: &[RegisterObservationRow],
     guard: &dyn WorkGuard,
 ) -> Result<(), AnalysisError> {
-    if checkpoints.len() == checkpoints.capacity() {
-        let old = checkpoints.capacity();
-        let additional = old.max(1);
-        let bytes = additional
-            .checked_mul(std::mem::size_of::<ReplayCheckpoint>())
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or_else(|| AnalysisError::state_hard_limit("checkpoint allocation overflows"))?;
-        let scope =
-            AllocationScope::begin(guard, bytes, bytes).map_err(AnalysisError::state_budget)?;
-        checkpoints
-            .try_reserve_exact(additional)
-            .map_err(|_| AnalysisError::state_hard_limit("checkpoint allocation failed"))?;
-        drop(scope);
+    if event.invalidates {
+        invalidate(state, key);
     }
-    checkpoints.push(value);
+    mark_derived(state);
+    apply_non_writes(state, observations, key)?;
+    apply_writes(state, store, event.row, key, observations, guard)
+}
+
+fn apply_before(
+    mut state: RegisterSnapshotState,
+    key: &EventKey,
+    invalidates: bool,
+    observations: &[RegisterObservationRow],
+) -> Result<RegisterSnapshotState, AnalysisError> {
+    if invalidates {
+        invalidate(&mut state, key);
+    }
+    mark_derived(&mut state);
+    apply_non_writes(&mut state, observations, key)?;
+    Ok(state)
+}
+
+fn mark_derived(state: &mut RegisterSnapshotState) {
+    for cell in &mut state.cells {
+        if cell.known_mask != 0 && cell.provenance == Provenance::Captured {
+            cell.provenance = Provenance::Derived;
+        }
+    }
+}
+
+fn invalidate(state: &mut RegisterSnapshotState, key: &EventKey) {
+    for cell in &mut state.cells {
+        *cell = unknown_cell();
+        cell.provenance = Provenance::Damaged;
+        cell.evidence = Some(key.clone());
+    }
+}
+
+fn apply_non_writes(
+    state: &mut RegisterSnapshotState,
+    observations: &[RegisterObservationRow],
+    key: &EventKey,
+) -> Result<(), AnalysisError> {
+    for observation in observations.iter().filter(|item| {
+        matches!(
+            item.access,
+            RegisterAccess::Read | RegisterAccess::Checkpoint | RegisterAccess::Delta
+        ) && item.provenance != Provenance::Damaged
+    }) {
+        apply_observation(state, observation, key, false)?;
+    }
+    Ok(())
+}
+
+fn apply_writes(
+    state: &mut RegisterSnapshotState,
+    store: &dyn NormalizedBulkView,
+    owner_row: usize,
+    key: &EventKey,
+    observations: &[RegisterObservationRow],
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError> {
+    for observation in observations.iter().filter(|item| {
+        item.access == RegisterAccess::Write && item.provenance != Provenance::Damaged
+    }) {
+        apply_observation(
+            state,
+            observation,
+            key,
+            is_canonical_w_write(store, owner_row, observation, guard)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn guarded_upper_bound(
+    len: usize,
+    guard: &dyn WorkGuard,
+    before: impl Fn(usize) -> bool,
+) -> Result<usize, AnalysisError> {
+    let (mut low, mut high) = (0, len);
+    while low < high {
+        guard
+            .consume(WorkDelta {
+                nodes: 1,
+                ..WorkDelta::default()
+            })
+            .map_err(AnalysisError::state_budget)?;
+        let middle = low + (high - low) / 2;
+        if before(middle) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Ok(low)
+}
+
+fn guarded_vec_push<T>(
+    values: &mut Vec<T>,
+    value: T,
+    guard: &dyn WorkGuard,
+    detail: &'static str,
+) -> Result<(), AnalysisError> {
+    if values.len() == values.capacity() {
+        let required = values
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| AnalysisError::state_hard_limit("state index length overflows"))?;
+        let capacity = values
+            .capacity()
+            .checked_mul(2)
+            .map(|doubled| doubled.max(required).max(4))
+            .ok_or_else(|| AnalysisError::state_hard_limit("state index capacity overflows"))?;
+        let bytes = capacity
+            .checked_mul(size_of::<T>())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| AnalysisError::state_hard_limit("state index allocation overflows"))?;
+        let allocation =
+            AllocationScope::begin(guard, bytes, 0).map_err(AnalysisError::state_budget)?;
+        values
+            .try_reserve_exact(capacity - values.len())
+            .map_err(|_| AnalysisError::state_hard_limit(detail))?;
+        drop(allocation);
+    }
+    values.push(value);
+    Ok(())
+}
+
+fn reserve_hash_map<K, V, S>(
+    values: &mut HashMap<K, V, S>,
+    additional: usize,
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError>
+where
+    K: Eq + Hash,
+    S: BuildHasher,
+{
+    if values.capacity().saturating_sub(values.len()) >= additional {
+        return Ok(());
+    }
+    let required = values
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| AnalysisError::state_hard_limit("register scope count overflows"))?;
+    let buckets = if required < 4 {
+        4
+    } else if required < 8 {
+        8
+    } else {
+        required
+            .checked_mul(8)
+            .and_then(|scaled| scaled.checked_add(6))
+            .map(|scaled| scaled / 7)
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or_else(|| AnalysisError::state_hard_limit("register scope buckets overflow"))?
+    };
+    let alignment_slack = align_of::<(K, V)>().saturating_sub(1);
+    let bytes = buckets
+        .checked_mul(size_of::<(K, V)>())
+        .and_then(|value| value.checked_add(alignment_slack))
+        .and_then(|value| value.checked_add(buckets))
+        .and_then(|value| value.checked_add(16))
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| AnalysisError::state_hard_limit("register scope allocation overflows"))?;
+    let allocation = AllocationScope::begin(guard, bytes, alignment_slack as u64)
+        .map_err(AnalysisError::state_budget)?;
+    values
+        .try_reserve(additional)
+        .map_err(|_| AnalysisError::state_hard_limit("register scope allocation failed"))?;
+    drop(allocation);
     Ok(())
 }
 
@@ -361,29 +563,6 @@ fn is_reliable_full_checkpoint(observations: &[RegisterObservationRow]) -> bool 
     mask == (1_u64 << RegisterSlot::COUNT) - 1
 }
 
-fn first_observation_at_or_after(
-    observations: &[RegisterObservationRow],
-    row: usize,
-    guard: &dyn WorkGuard,
-) -> Result<usize, AnalysisError> {
-    let (mut low, mut high) = (0_usize, observations.len());
-    while low < high {
-        guard
-            .consume(WorkDelta {
-                nodes: 1,
-                ..WorkDelta::default()
-            })
-            .map_err(AnalysisError::state_budget)?;
-        let middle = low + (high - low) / 2;
-        if observations[middle].owner_row < row {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-    Ok(low)
-}
-
 fn unknown_cell() -> RegisterCell {
     RegisterCell {
         value: None,
@@ -394,77 +573,10 @@ fn unknown_cell() -> RegisterCell {
     }
 }
 
-fn unknown_snapshot(guard: &dyn WorkGuard) -> Result<RegisterSnapshotState, AnalysisError> {
-    let bytes = (RegisterSlot::COUNT * std::mem::size_of::<RegisterCell>()) as u64;
-    let scope = AllocationScope::begin(guard, bytes, 0).map_err(AnalysisError::state_budget)?;
-    let mut cells = Vec::new();
-    cells
-        .try_reserve_exact(RegisterSlot::COUNT)
-        .map_err(|_| AnalysisError::state_invalid("register-state allocation failed"))?;
-    cells.resize_with(RegisterSlot::COUNT, unknown_cell);
-    drop(scope);
-    Ok(RegisterSnapshotState { cells })
-}
-
-fn snapshot_clone(
-    state: &RegisterSnapshotState,
-    guard: &dyn WorkGuard,
-) -> Result<RegisterSnapshotState, AnalysisError> {
-    let bytes = (state.cells.len() * std::mem::size_of::<RegisterCell>()) as u64;
-    let scope = AllocationScope::begin(guard, bytes, 0).map_err(AnalysisError::state_budget)?;
-    let cells = state.cells.clone();
-    drop(scope);
-    Ok(RegisterSnapshotState { cells })
-}
-
-fn apply_event(
-    store: &dyn NormalizedBulkView,
-    owner_row: usize,
-    prior: &RegisterSnapshotState,
-    key: &EventKey,
-    kind: EventKind,
-    observations: &[RegisterObservationRow],
-    guard: &dyn WorkGuard,
-) -> Result<(RegisterSnapshotState, RegisterSnapshotState), AnalysisError> {
-    let mut before = snapshot_clone(prior, guard)?;
-    if (kind == EventKind::Discontinuity
-        && discontinuity_affects_registers(store, owner_row, guard)?)
-        || observations
-            .iter()
-            .any(|row| row.access == RegisterAccess::Delta && row.provenance == Provenance::Damaged)
-    {
-        before.cells.fill_with(unknown_cell);
-        for cell in &mut before.cells {
-            cell.provenance = Provenance::Damaged;
-            cell.evidence = Some(key.clone());
-        }
+fn unknown_snapshot() -> RegisterSnapshotState {
+    RegisterSnapshotState {
+        cells: std::array::from_fn(|_| unknown_cell()),
     }
-    for cell in &mut before.cells {
-        if cell.known_mask != 0 && cell.provenance == Provenance::Captured {
-            cell.provenance = Provenance::Derived;
-        }
-    }
-    for observation in observations.iter().filter(|row| {
-        matches!(
-            row.access,
-            RegisterAccess::Read | RegisterAccess::Checkpoint | RegisterAccess::Delta
-        ) && row.provenance != Provenance::Damaged
-    }) {
-        apply_observation(&mut before, observation, key, false)?;
-    }
-    let mut after = snapshot_clone(&before, guard)?;
-    for observation in observations
-        .iter()
-        .filter(|row| row.access == RegisterAccess::Write && row.provenance != Provenance::Damaged)
-    {
-        apply_observation(
-            &mut after,
-            observation,
-            key,
-            is_canonical_w_write(store, owner_row, observation, guard)?,
-        )?;
-    }
-    Ok((before, after))
 }
 
 fn discontinuity_affects_registers(
@@ -478,7 +590,7 @@ fn discontinuity_affects_registers(
     if bytes.is_empty() {
         return Ok(true);
     }
-    for chunk in bytes.chunks(REPLAY_CHECKPOINT_ROWS) {
+    for chunk in bytes.chunks(CHECKPOINT_EVENTS) {
         guard
             .consume(WorkDelta {
                 input_bytes: chunk.len() as u64,
@@ -487,17 +599,7 @@ fn discontinuity_affects_registers(
             })
             .map_err(AnalysisError::state_budget)?;
     }
-    let scratch = bytes.len().saturating_mul(4) as u64;
-    let allocation =
-        AllocationScope::begin(guard, scratch, scratch).map_err(AnalysisError::state_budget)?;
-    let payload: qtrace_provider::EventPayload = serde_json::from_slice(bytes)
-        .map_err(|_| AnalysisError::state_invalid("discontinuity payload is malformed"))?;
-    drop(allocation);
-    let qtrace_provider::EventPayload::Discontinuity(discontinuity) = payload else {
-        return Err(AnalysisError::state_invalid(
-            "discontinuity row has the wrong payload",
-        ));
-    };
+    let discontinuity = crate::timeline::decode_discontinuity_payload(bytes)?;
     Ok(discontinuity.evidence.domain() != qtrace_provider::RangeDomain::MemoryAddresses)
 }
 
@@ -524,26 +626,32 @@ fn is_canonical_w_write(
     let bytes = store
         .blob_bytes(definition.exact_blob)
         .map_err(AnalysisError::state_store)?;
-    guard
-        .consume(WorkDelta {
-            input_bytes: bytes.len() as u64,
-            nodes: bytes.len() as u64,
-            ..WorkDelta::default()
-        })
-        .map_err(AnalysisError::state_budget)?;
+    for chunk in bytes.chunks(CHECKPOINT_EVENTS) {
+        guard
+            .consume(WorkDelta {
+                input_bytes: chunk.len() as u64,
+                nodes: chunk.len() as u64,
+                ..WorkDelta::default()
+            })
+            .map_err(AnalysisError::state_budget)?;
+    }
     let scratch = bytes.len().saturating_mul(4) as u64;
-    let scope =
+    let allocation =
         AllocationScope::begin(guard, scratch, scratch).map_err(AnalysisError::state_budget)?;
     let definition: qtrace_provider::InstructionDefinition = serde_json::from_slice(bytes)
         .map_err(|_| AnalysisError::state_invalid("instruction definition payload is malformed"))?;
-    drop(scope);
+    drop(allocation);
     Ok(definition.writes.iter().any(|write| {
-        write.slot == observation.slot
-            && write.captured_width == 4
-            && write
-                .name
-                .strip_prefix(['w', 'W'])
-                .is_some_and(|suffix| suffix.parse::<u8>().ok() == Some(observation.slot))
+        if write.slot != observation.slot || write.captured_width != 4 {
+            return false;
+        }
+        if observation.slot as usize == RegisterSlot::Sp.index() {
+            return write.name.eq_ignore_ascii_case("wsp");
+        }
+        write
+            .name
+            .strip_prefix(['w', 'W'])
+            .is_some_and(|suffix| suffix.parse::<u8>().ok() == Some(observation.slot))
     }))
 }
 

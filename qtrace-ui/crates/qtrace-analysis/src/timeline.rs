@@ -2767,12 +2767,14 @@ fn map_discontinuities(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ParsedDiscontinuity {
-    cause: qtrace_provider::DiscontinuityCause,
-    evidence: qtrace_provider::CompletenessRange,
+pub(crate) struct ParsedDiscontinuity {
+    pub(crate) cause: qtrace_provider::DiscontinuityCause,
+    pub(crate) evidence: qtrace_provider::CompletenessRange,
 }
 
-fn decode_discontinuity_payload(payload: &[u8]) -> Result<ParsedDiscontinuity, AnalysisError> {
+pub(crate) fn decode_discontinuity_payload(
+    payload: &[u8],
+) -> Result<ParsedDiscontinuity, AnalysisError> {
     parse_discontinuity_payload(payload).map_err(discontinuity_parse_error)
 }
 
