@@ -15,8 +15,8 @@ use std::{
 use rusqlite::ffi;
 use rustix::{
     fs::{
-        AtFlags, FlockOperation, Mode, OFlags, RenameFlags, fcntl_lock, fdatasync, fstat, fsync,
-        ftruncate, openat, renameat_with, statat, unlinkat,
+        AtFlags, Dir, FlockOperation, Mode, OFlags, RenameFlags, fchmod, fcntl_lock, fdatasync,
+        fstat, fsync, ftruncate, openat, renameat_with, statat,
     },
     io::{Errno, pread, pwrite},
     process::geteuid,
@@ -31,9 +31,18 @@ const SHM_NAME: &str = "annotations.sqlite3-shm";
 const FILE_KIND_MASK: u32 = 0o170000;
 const REGULAR_FILE: u32 = 0o100000;
 const PRIVATE_MODE: u32 = 0o600;
+const QUARANTINE_PREFIX: &str = ".qtrace-sqlite-quarantine-";
+const MAX_QUARANTINES: usize = 8;
+const MAX_DIRECTORY_ENTRIES: usize = 2 + 4 + MAX_QUARANTINES;
 
 static NEXT_VFS_ID: AtomicU64 = AtomicU64::new(1);
 static PROCESS_LOCKS: OnceLock<Mutex<HashMap<(u64, u64), u64>>> = OnceLock::new();
+
+#[cfg(test)]
+type DeleteHook = Box<dyn Fn(&str) + Send>;
+
+#[cfg(test)]
+pub(super) static DELETE_HOOK: OnceLock<Mutex<Option<DeleteHook>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Identity {
@@ -127,6 +136,7 @@ struct DescriptorFile {
     kind: FileKind,
     lock_level: c_int,
     owns_process_lock: bool,
+    persist_wal: bool,
 }
 
 struct Registration {
@@ -142,6 +152,9 @@ pub(crate) struct DescriptorVfs {
 
 impl DescriptorVfs {
     pub(crate) fn register(directory: &File, main: File) -> Result<Self, AnnotationError> {
+        inspect_quarantines(directory).map_err(|error| {
+            AnnotationError::path(format!("invalid SQLite quarantine directory: {error}"))
+        })?;
         let main_identity = Identity::from_file(&main)?;
         let directory = directory.try_clone().map_err(|error| {
             AnnotationError::vfs(format!("cannot retain annotation directory: {error}"))
@@ -210,6 +223,13 @@ impl DescriptorVfs {
 
     pub(crate) fn name(&self) -> &CStr {
         self.registration.name.as_c_str()
+    }
+
+    #[cfg(test)]
+    pub(super) fn create_journal_for_test(&self) -> Result<(), AnnotationError> {
+        open_sidecar(&self.registration.context, FileKind::Journal)
+            .map(|_| ())
+            .map_err(|error| AnnotationError::vfs(format!("cannot create test journal: {error}")))
     }
 
     pub(crate) fn verify_bindings(&self) -> Result<(), AnnotationError> {
@@ -324,8 +344,54 @@ fn classify(flags: c_int) -> Option<FileKind> {
 }
 
 fn path_identity(context: &Context, name: &str) -> Result<Identity, Errno> {
-    let stat = statat(&context.directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    path_identity_at(&context.directory, name)
+}
+
+fn path_identity_at(directory: &File, name: &str) -> Result<Identity, Errno> {
+    let stat = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
     Identity::from_stat(&stat).map_err(|()| Errno::PERM)
+}
+
+fn is_quarantine_name(bytes: &[u8]) -> bool {
+    let Some(suffix) = bytes.strip_prefix(QUARANTINE_PREFIX.as_bytes()) else {
+        return false;
+    };
+    suffix.len() == 33
+        && suffix[16] == b'-'
+        && suffix[..16].iter().all(u8::is_ascii_hexdigit)
+        && suffix[17..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn inspect_quarantines(directory: &File) -> Result<usize, Errno> {
+    let mut stream = Dir::read_from(directory)?;
+    let mut entries = 0_usize;
+    let mut quarantines = 0_usize;
+    while let Some(entry) = stream.read() {
+        entries = entries.checked_add(1).ok_or(Errno::OVERFLOW)?;
+        if entries > MAX_DIRECTORY_ENTRIES {
+            return Err(Errno::NOSPC);
+        }
+        let entry = entry?;
+        let bytes = entry.file_name().to_bytes();
+        if matches!(bytes, b"." | b"..")
+            || matches!(bytes, name if name == MAIN_NAME.as_bytes()
+                || name == WAL_NAME.as_bytes()
+                || name == JOURNAL_NAME.as_bytes()
+                || name == SHM_NAME.as_bytes())
+        {
+            continue;
+        }
+        if !is_quarantine_name(bytes) {
+            return Err(Errno::PERM);
+        }
+        let name = std::str::from_utf8(bytes).map_err(|_| Errno::ILSEQ)?;
+        path_identity_at(directory, name)?;
+        quarantines = quarantines.checked_add(1).ok_or(Errno::OVERFLOW)?;
+        if quarantines > MAX_QUARANTINES {
+            return Err(Errno::NOSPC);
+        }
+    }
+    Ok(quarantines)
 }
 
 fn path_exists(context: &Context, name: &str) -> Result<bool, Errno> {
@@ -341,23 +407,75 @@ fn open_sidecar(context: &Context, kind: FileKind) -> Result<(File, Identity), E
         .union(OFlags::NONBLOCK)
         .union(OFlags::NOFOLLOW)
         .union(OFlags::CLOEXEC);
-    let descriptor = match openat(&context.directory, kind.name(), common, Mode::empty()) {
-        Ok(descriptor) => descriptor,
-        Err(Errno::NOENT) => openat(
-            &context.directory,
-            kind.name(),
-            common.union(OFlags::CREATE).union(OFlags::EXCL),
-            Mode::RUSR | Mode::WUSR,
-        )?,
+    let (descriptor, created) = match openat(&context.directory, kind.name(), common, Mode::empty())
+    {
+        Ok(descriptor) => (descriptor, false),
+        Err(Errno::NOENT) => (
+            openat(
+                &context.directory,
+                kind.name(),
+                common.union(OFlags::CREATE).union(OFlags::EXCL),
+                Mode::RUSR | Mode::WUSR,
+            )?,
+            true,
+        ),
         Err(error) => return Err(error),
     };
     let file = File::from(descriptor);
-    let identity = Identity::from_stat(&fstat(&file)?).map_err(|()| Errno::PERM)?;
-    let bound = path_identity(context, kind.name())?;
-    if identity != bound {
+    let setup = (|| {
+        if created {
+            fchmod(&file, Mode::RUSR | Mode::WUSR)?;
+        }
+        let identity = Identity::from_stat(&fstat(&file)?).map_err(|()| Errno::PERM)?;
+        let bound = path_identity(context, kind.name())?;
+        if identity != bound {
+            return Err(Errno::STALE);
+        }
+        Ok(identity)
+    })();
+    match setup {
+        Ok(identity) => Ok((file, identity)),
+        Err(error) => {
+            if created {
+                let _ = preserve_created_sidecar(context, kind, &file);
+            }
+            Err(error)
+        }
+    }
+}
+
+fn quarantine_name(context: &Context) -> Result<String, Errno> {
+    let sequence = context.tombstone_sequence.fetch_add(1, Ordering::Relaxed);
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random).map_err(|_| Errno::IO)?;
+    Ok(format!(
+        "{QUARANTINE_PREFIX}{:016x}-{sequence:016x}",
+        u64::from_le_bytes(random)
+    ))
+}
+
+fn preserve_created_sidecar(context: &Context, kind: FileKind, held: &File) -> Result<(), Errno> {
+    if inspect_quarantines(&context.directory)? >= MAX_QUARANTINES {
+        return Err(Errno::NOSPC);
+    }
+    let expected = fstat(held)?;
+    let quarantine = quarantine_name(context)?;
+    renameat_with(
+        &context.directory,
+        kind.name(),
+        &context.directory,
+        quarantine.as_str(),
+        RenameFlags::NOREPLACE,
+    )?;
+    let captured = statat(
+        &context.directory,
+        quarantine.as_str(),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?;
+    if (captured.st_dev, captured.st_ino) != (expected.st_dev, expected.st_ino) {
         return Err(Errno::STALE);
     }
-    Ok((file, identity))
+    fsync(&context.directory)
 }
 
 fn verify_file(file: &DescriptorFile) -> Result<(), ()> {
@@ -458,6 +576,7 @@ unsafe extern "C" fn vfs_open(
             kind,
             lock_level: ffi::SQLITE_LOCK_NONE,
             owns_process_lock: false,
+            persist_wal: false,
         };
         // SAFETY: SQLite allocated at least szOsFile bytes suitably aligned and output is live.
         unsafe { ptr::write(output.cast::<DescriptorFile>(), descriptor) };
@@ -769,8 +888,19 @@ unsafe extern "C" fn file_control(
                     ffi::SQLITE_IOERR
                 }
             }
+            ffi::SQLITE_FCNTL_PERSIST_WAL => {
+                if argument.is_null() || file.kind != FileKind::Main {
+                    return ffi::SQLITE_IOERR;
+                }
+                let value = unsafe { &mut *argument.cast::<c_int>() };
+                if *value < 0 {
+                    *value = c_int::from(file.persist_wal);
+                } else {
+                    file.persist_wal = *value != 0;
+                }
+                ffi::SQLITE_OK
+            }
             ffi::SQLITE_FCNTL_SIZE_HINT
-            | ffi::SQLITE_FCNTL_PERSIST_WAL
             | ffi::SQLITE_FCNTL_POWERSAFE_OVERWRITE
             | ffi::SQLITE_FCNTL_VFSNAME => ffi::SQLITE_NOTFOUND,
             _ => ffi::SQLITE_NOTFOUND,
@@ -857,7 +987,7 @@ unsafe extern "C" fn vfs_access(
 unsafe extern "C" fn vfs_delete(
     vfs: *mut ffi::sqlite3_vfs,
     z_name: *const c_char,
-    sync_directory: c_int,
+    _sync_directory: c_int,
 ) -> c_int {
     ffi_result(|| {
         if z_name.is_null() {
@@ -880,15 +1010,15 @@ unsafe extern "C" fn vfs_delete(
                 ffi::SQLITE_IOERR_DELETE
             };
         };
-        let sequence = context.tombstone_sequence.fetch_add(1, Ordering::Relaxed);
-        let mut random = [0_u8; 8];
-        if getrandom::fill(&mut random).is_err() {
+        let Ok(quarantines) = inspect_quarantines(&context.directory) else {
+            return ffi::SQLITE_IOERR_DELETE;
+        };
+        if quarantines >= MAX_QUARANTINES {
             return ffi::SQLITE_IOERR_DELETE;
         }
-        let tombstone = format!(
-            ".qtrace-sqlite-delete-{}-{sequence:016x}",
-            u64::from_le_bytes(random)
-        );
+        let Ok(tombstone) = quarantine_name(context) else {
+            return ffi::SQLITE_IOERR_DELETE;
+        };
         if renameat_with(
             &context.directory,
             kind.name(),
@@ -911,10 +1041,19 @@ unsafe extern "C" fn vfs_delete(
             );
             return ffi::SQLITE_IOERR_DELETE;
         }
-        if unlinkat(&context.directory, tombstone.as_str(), AtFlags::empty()).is_err() {
+        #[cfg(test)]
+        if let Some(hook) = DELETE_HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .expect("delete hook lock poisoned")
+            .as_ref()
+        {
+            hook(&tombstone);
+        }
+        if path_identity(context, &tombstone).ok() != Some(expected) {
             return ffi::SQLITE_IOERR_DELETE;
         }
-        if sync_directory != 0 && fsync(&context.directory).is_err() {
+        if fsync(&context.directory).is_err() {
             return ffi::SQLITE_IOERR_DIR_FSYNC;
         }
         if let Ok(mut identities) = context.identities.lock() {

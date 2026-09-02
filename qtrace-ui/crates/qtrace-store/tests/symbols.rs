@@ -265,6 +265,45 @@ fn load_fixture(bytes: Vec<u8>) -> Result<ElfSymbolIndex, qtrace_store::SymbolEr
     ElfSymbolIndex::load(load_request(&path, &bytes), &AllowAll)
 }
 
+fn note_record(name: &[u8], value: &[u8], kind: u32, alignment: usize) -> Vec<u8> {
+    let mut note = Vec::new();
+    note.extend_from_slice(&(name.len() as u32).to_le_bytes());
+    note.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    note.extend_from_slice(&kind.to_le_bytes());
+    note.extend_from_slice(name);
+    align(&mut note, alignment);
+    note.extend_from_slice(value);
+    align(&mut note, alignment);
+    note
+}
+
+fn replace_note_section(mut bytes: Vec<u8>, notes: &[u8], alignment: u64) -> Vec<u8> {
+    let old_sections = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
+    let note_header = old_sections + 7 * 64;
+    let old_note = u64::from_le_bytes(
+        bytes[note_header + 24..note_header + 32]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let sections = bytes[old_sections..].to_vec();
+    bytes.truncate(old_note);
+    align(&mut bytes, usize::try_from(alignment.max(1)).unwrap());
+    let note_at = bytes.len();
+    bytes.extend_from_slice(notes);
+    align(&mut bytes, 8);
+    let sections_at = bytes.len();
+    bytes.extend_from_slice(&sections);
+    put64(&mut bytes, 40, sections_at as u64);
+    let new_note_header = sections_at + 7 * 64;
+    put64(&mut bytes, new_note_header + 24, note_at as u64);
+    put64(&mut bytes, new_note_header + 32, notes.len() as u64);
+    put64(&mut bytes, new_note_header + 48, alignment);
+    let file_size = bytes.len() as u64;
+    put64(&mut bytes, 96, file_size);
+    put64(&mut bytes, 104, file_size);
+    bytes
+}
+
 #[test]
 fn loads_only_verified_aarch64_symbols_with_stable_relative_addresses() {
     let temp = TempDir::new().unwrap();
@@ -525,4 +564,36 @@ fn hashing_parsing_and_skipped_entries_observe_chunked_cancellation() {
         assert!(guard.maximum_nodes_delta.load(Ordering::Relaxed) <= 4096);
         assert!(guard.maximum_input_delta.load(Ordering::Relaxed) <= 4096);
     }
+}
+
+#[test]
+fn build_id_notes_honor_section_alignment_and_reject_ambiguity() {
+    let mut aligned = note_record(b"LLVM\0", &[1, 2, 3], 1, 8);
+    aligned.extend_from_slice(&note_record(b"GNU\0", &[0x42; 20], 3, 8));
+    let index = load_fixture(replace_note_section(aarch64_elf(), &aligned, 8)).unwrap();
+    assert_eq!(index.build_id(), Some(&[0x42; 20][..]));
+
+    let mut conflicting = note_record(b"GNU\0", &[0x42; 20], 3, 8);
+    conflicting.extend_from_slice(&note_record(b"GNU\0", &[0x43; 20], 3, 8));
+    assert_eq!(
+        load_fixture(replace_note_section(aarch64_elf(), &conflicting, 8))
+            .unwrap_err()
+            .code(),
+        "symbol.elf_malformed"
+    );
+
+    let invalid_alignment = replace_note_section(aarch64_elf(), &aligned, 16);
+    assert_eq!(
+        load_fixture(invalid_alignment).unwrap_err().code(),
+        "symbol.elf_malformed"
+    );
+
+    let mut malformed_padding = note_record(b"GNU\0", &[0x42; 20], 3, 8);
+    malformed_padding.pop();
+    assert_eq!(
+        load_fixture(replace_note_section(aarch64_elf(), &malformed_padding, 8))
+            .unwrap_err()
+            .code(),
+        "symbol.elf_malformed"
+    );
 }

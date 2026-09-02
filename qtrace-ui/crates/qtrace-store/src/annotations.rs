@@ -1,5 +1,6 @@
 use std::{
     error::Error,
+    ffi::c_int,
     fmt,
     fs::File,
     os::unix::fs::PermissionsExt,
@@ -212,6 +213,7 @@ impl AnnotationStore {
                 "SQLite refused exclusive locking mode",
             ));
         }
+        configure_persistent_wal(&connection)?;
         configure_sqlite_pragmas(&connection)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
@@ -460,6 +462,41 @@ fn configure_sqlite_limits(connection: &Connection) -> Result<(), AnnotationErro
     ] {
         // SAFETY: sqlite3_limit accepts these documented categories and retains no pointers.
         unsafe { rusqlite::ffi::sqlite3_limit(handle, category, limit) };
+    }
+    Ok(())
+}
+
+fn configure_persistent_wal(connection: &Connection) -> Result<(), AnnotationError> {
+    // SAFETY: the live connection owns its main sqlite3_file and the integer is valid for the
+    // duration of sqlite3_file_control.
+    let handle = unsafe { connection.handle() };
+    let mut enabled = 1 as c_int;
+    let status = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            handle,
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+            (&mut enabled as *mut c_int).cast(),
+        )
+    };
+    if status != rusqlite::ffi::SQLITE_OK {
+        return Err(AnnotationError::vfs(format!(
+            "SQLite refused persistent WAL mode: {status}"
+        )));
+    }
+    enabled = -1;
+    let status = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            handle,
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+            (&mut enabled as *mut c_int).cast(),
+        )
+    };
+    if status != rusqlite::ffi::SQLITE_OK || enabled != 1 {
+        return Err(AnnotationError::vfs(
+            "SQLite persistent WAL mode did not round-trip",
+        ));
     }
     Ok(())
 }
@@ -919,8 +956,9 @@ impl Error for AnnotationError {}
 #[cfg(test)]
 mod tests {
     use std::{
+        ffi::c_int,
         fs,
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
         sync::{Arc, Mutex},
     };
 
@@ -931,6 +969,7 @@ mod tests {
         AnnotationOpenRequest, AnnotationStore, AuthorizedPath, EventAnnotation, OPEN_HOOK,
         OpenHookPhase,
     };
+    use crate::annotation_vfs::DELETE_HOOK;
 
     #[test]
     fn sqlite_io_never_follows_an_aba_replacement_after_main_fd_is_held() {
@@ -990,5 +1029,93 @@ mod tests {
             0,
             "SQLite wrote through the attacker-controlled pathname replacement"
         );
+    }
+
+    #[test]
+    fn sqlite_delete_never_unlinks_a_name_rebound_after_capture_proof() {
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xb6; 32]);
+        let request =
+            AnnotationOpenRequest::new(AuthorizedPath::new(root.path().to_owned()), session);
+        let store = AnnotationStore::open(request).unwrap();
+        let directory = store.database_path().parent().unwrap().to_owned();
+        let attacker_path = root.path().join("attacker-held");
+        let attacker = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&attacker_path)
+            .unwrap();
+        let mut persist = 0 as c_int;
+        let status = unsafe {
+            rusqlite::ffi::sqlite3_file_control(
+                store.connection.as_ref().unwrap().handle(),
+                c"main".as_ptr(),
+                rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+                (&mut persist as *mut c_int).cast(),
+            )
+        };
+        assert_eq!(status, rusqlite::ffi::SQLITE_OK);
+        let hook_directory = directory.clone();
+        *DELETE_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() =
+            Some(Box::new(move |quarantine| {
+                fs::rename(
+                    hook_directory.join(quarantine),
+                    hook_directory.join("captured-original-wal"),
+                )
+                .unwrap();
+                fs::rename(&attacker_path, hook_directory.join(quarantine)).unwrap();
+            }));
+
+        drop(store);
+        *DELETE_HOOK.get().unwrap().lock().unwrap() = None;
+
+        assert_eq!(
+            attacker.metadata().unwrap().nlink(),
+            1,
+            "xDelete unlinked an inode rebound after its capture proof"
+        );
+        assert!(directory.join("captured-original-wal").exists());
+    }
+
+    #[test]
+    fn sqlite_files_are_private_under_hostile_umask() {
+        const CHILD: &str = "QTRACE_SQLITE_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("annotations::tests::sqlite_files_are_private_under_hostile_umask")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "hostile-umask child failed: {status}");
+            return;
+        }
+
+        let root = TempDir::new().unwrap();
+        let session = ArtifactDigest::new([0xc7; 32]);
+        let session_directory = root.path().join("qtrace-ui").join(session.to_hex());
+        fs::create_dir_all(&session_directory).unwrap();
+        fs::set_permissions(
+            root.path().join("qtrace-ui"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(&session_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
+        let store = AnnotationStore::open(AnnotationOpenRequest::new(
+            AuthorizedPath::new(root.path().to_owned()),
+            session,
+        ))
+        .unwrap();
+        store.vfs.create_journal_for_test().unwrap();
+        for suffix in ["", "-wal", "-journal"] {
+            let metadata =
+                fs::metadata(format!("{}{}", store.database_path().display(), suffix)).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600, "{suffix}");
+            assert_eq!(metadata.nlink(), 1, "{suffix}");
+        }
     }
 }

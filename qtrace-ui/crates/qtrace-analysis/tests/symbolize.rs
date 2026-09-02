@@ -78,7 +78,7 @@ fn elf() -> Vec<u8> {
     bytes.extend_from_slice(&text);
     bytes.extend_from_slice(&section(17, 3, strtab_at as u64, strtab.len() as u64, 0, 0));
     bytes.extend_from_slice(&section(25, 2, symtab_at as u64, 48, 3, 24));
-    bytes.extend_from_slice(&section(33, 7, note_at as u64, 36, 0, 0));
+    bytes.extend_from_slice(&section(33, 7, note_at as u64, 40, 0, 0));
     bytes[0..4].copy_from_slice(b"\x7fELF");
     bytes[4] = 2;
     bytes[5] = 1;

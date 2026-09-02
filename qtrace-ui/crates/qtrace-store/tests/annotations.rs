@@ -304,6 +304,29 @@ fn rejects_untrusted_sqlite_sidecars_before_the_vfs_can_follow_them() {
             .code(),
         "annotation.path_escape"
     );
+
+    let root = TempDir::new().unwrap();
+    let session = root.path().join("qtrace-ui").join(digest(18).to_hex());
+    fs::create_dir_all(&session).unwrap();
+    fs::set_permissions(
+        root.path().join("qtrace-ui"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o700)).unwrap();
+    let wal = session.join("annotations.sqlite3-wal");
+    fs::write(&wal, []).unwrap();
+    fs::set_permissions(&wal, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        AnnotationStore::open(request(&root, digest(18)))
+            .unwrap_err()
+            .code(),
+        "annotation.path_escape"
+    );
+    assert_eq!(
+        fs::metadata(wal).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
 }
 
 #[test]
@@ -404,4 +427,114 @@ fn corrupt_schema_two_migration_rolls_back_with_a_resource_error() {
         .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, 2, "failed migration did not roll back atomically");
+}
+
+#[test]
+fn persistent_wal_reopens_without_accumulating_quarantines() {
+    let root = TempDir::new().unwrap();
+    let session = digest(16);
+    let mut baseline_quarantines = None;
+    for iteration in 0..6 {
+        let mut store = AnnotationStore::open(request(&root, session)).unwrap();
+        {
+            let mut transaction = store.begin_transaction().unwrap();
+            transaction
+                .put_event_annotation(
+                    &EventAnnotation::new(event(), format!("iteration-{iteration}")).unwrap(),
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        let database = store.database_path().to_owned();
+        drop(store);
+        assert!(database.with_extension("sqlite3-wal").exists());
+        let quarantine_count = fs::read_dir(database.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".qtrace-sqlite-quarantine-")
+            })
+            .count();
+        let baseline = *baseline_quarantines.get_or_insert(quarantine_count);
+        assert!(
+            baseline <= 1,
+            "unexpected initial quarantine count {baseline}"
+        );
+        assert_eq!(quarantine_count, baseline, "iteration {iteration}");
+    }
+    let reopened = AnnotationStore::open(request(&root, session)).unwrap();
+    assert_eq!(
+        reopened
+            .event_annotation(&event())
+            .unwrap()
+            .unwrap()
+            .comment(),
+        "iteration-5"
+    );
+}
+
+#[test]
+fn quarantine_inventory_is_strict_and_bounded() {
+    let root = TempDir::new().unwrap();
+    let session = digest(17);
+    let store = AnnotationStore::open(request(&root, session)).unwrap();
+    let directory = store.database_path().parent().unwrap().to_owned();
+    drop(store);
+    let existing = fs::read_dir(&directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".qtrace-sqlite-quarantine-")
+        })
+        .count();
+    assert!(existing <= 1);
+    for index in existing as u64..8_u64 {
+        let path = directory.join(format!(
+            ".qtrace-sqlite-quarantine-{index:016x}-{index:016x}"
+        ));
+        fs::write(&path, []).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    drop(AnnotationStore::open(request(&root, session)).unwrap());
+
+    let ninth = directory.join(".qtrace-sqlite-quarantine-0000000000000008-0000000000000008");
+    fs::write(&ninth, []).unwrap();
+    fs::set_permissions(&ninth, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        AnnotationStore::open(request(&root, session))
+            .unwrap_err()
+            .code(),
+        "annotation.path_escape"
+    );
+}
+
+#[test]
+fn malformed_quarantine_names_fail_closed() {
+    use std::os::unix::ffi::OsStringExt;
+
+    for name in [
+        std::ffi::OsString::from(".qtrace-sqlite-quarantine-not-hex"),
+        std::ffi::OsString::from_vec(b".qtrace-sqlite-quarantine-\xff".to_vec()),
+    ] {
+        let root = TempDir::new().unwrap();
+        let session = digest(19);
+        let store = AnnotationStore::open(request(&root, session)).unwrap();
+        let directory = store.database_path().parent().unwrap().to_owned();
+        drop(store);
+        let path = directory.join(name);
+        fs::write(&path, []).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            AnnotationStore::open(request(&root, session))
+                .unwrap_err()
+                .code(),
+            "annotation.path_escape"
+        );
+    }
 }

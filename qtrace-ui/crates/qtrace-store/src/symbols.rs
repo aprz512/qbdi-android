@@ -139,6 +139,7 @@ struct Section {
     offset: usize,
     size: usize,
     link: usize,
+    alignment: usize,
     entry_size: usize,
 }
 
@@ -399,6 +400,7 @@ fn preflight(bytes: &[u8], guard: &dyn WorkGuard) -> Result<RawElf, SymbolError>
                 offset,
                 size,
                 link: u32_at(bytes, at + 40)? as usize,
+                alignment: usize_at(u64_at(bytes, at + 48)?, "section alignment")?,
                 entry_size: usize_at(u64_at(bytes, at + 56)?, "entry size")?,
             });
         }
@@ -477,6 +479,14 @@ fn build_id(
 ) -> Result<Option<Vec<u8>>, SymbolError> {
     let mut result: Option<Vec<u8>> = None;
     for section in sections.iter().filter(|section| section.kind == SHT_NOTE) {
+        let alignment = match section.alignment {
+            0 | 1 | 2 | 4 => 4,
+            8 => 8,
+            _ => return Err(SymbolError::malformed("invalid note section alignment")),
+        };
+        if section.offset % alignment != 0 {
+            return Err(SymbolError::malformed("misaligned note section offset"));
+        }
         let (mut at, limit) = (section.offset, section.offset + section.size);
         while at < limit {
             work(guard, 1)?;
@@ -490,11 +500,11 @@ fn build_id(
             let name_end = name_at
                 .checked_add(name_size)
                 .ok_or_else(|| SymbolError::malformed("note name overflow"))?;
-            let value_at = align4(name_end)?;
+            let value_at = align_relative(section.offset, name_end, alignment)?;
             let value_end = value_at
                 .checked_add(value_size)
                 .ok_or_else(|| SymbolError::malformed("note value overflow"))?;
-            let next = align4(value_end)?;
+            let next = align_relative(section.offset, value_end, alignment)?;
             if next > limit {
                 return Err(SymbolError::malformed("note exceeds section"));
             }
@@ -586,7 +596,7 @@ fn visit_candidates<'a>(
                     }
                     let absolute = u64_at(bytes, at + 8)?;
                     let size = u64_at(bytes, at + 16)?;
-                    if !contained(absolute, size, executable) {
+                    if !contained_guarded(absolute, size, executable, guard)? {
                         continue;
                     }
                     let relative = absolute
@@ -641,19 +651,36 @@ fn symbol_name<'a>(
     if length == 0 || length > MAX_NAME_BYTES {
         return Ok(None);
     }
+    work_bytes(guard, length)?;
     Ok(str::from_utf8(&bytes[at..at + length]).ok())
 }
 
-fn contained(address: u64, size: u64, executable: &[LoadRange]) -> bool {
-    let upper = executable.partition_point(|range| range.start <= address);
+fn contained_guarded(
+    address: u64,
+    size: u64,
+    executable: &[LoadRange],
+    guard: &dyn WorkGuard,
+) -> Result<bool, SymbolError> {
+    let mut left = 0_usize;
+    let mut right = executable.len();
+    while left < right {
+        work(guard, 1)?;
+        let middle = left + (right - left) / 2;
+        if executable[middle].start <= address {
+            left = middle + 1;
+        } else {
+            right = middle;
+        }
+    }
+    let upper = left;
     let Some(range) = upper.checked_sub(1).map(|index| executable[index]) else {
-        return false;
+        return Ok(false);
     };
-    address < range.end
+    Ok(address < range.end
         && (size == 0
             || address
                 .checked_add(size)
-                .is_some_and(|end| end <= range.end))
+                .is_some_and(|end| end <= range.end)))
 }
 
 fn fingerprint_candidate(hash: &mut Sha256, candidate: &Candidate<'_>) {
@@ -761,6 +788,19 @@ fn validate_object_view(
     if section_count != raw.sections.len() {
         return Err(SymbolError::malformed("raw/object section counts disagree"));
     }
+    for section in raw
+        .sections
+        .iter()
+        .filter(|section| section.kind == SHT_NOTE)
+    {
+        work_bytes(guard, section.size)?;
+    }
+    let object_build_id = file
+        .build_id()
+        .map_err(|error| SymbolError::malformed(format!("object rejected build-id: {error}")))?;
+    if object_build_id != raw.build_id.as_deref() {
+        return Err(SymbolError::malformed("raw/object build-id views disagree"));
+    }
     let mut count = 0_usize;
     let mut fingerprint = Sha256::new();
     object_symbols(
@@ -798,8 +838,10 @@ where
         if symbol.kind() != SymbolKind::Text
             || !symbol.is_definition()
             || symbol.section_index().is_none()
-            || !contained(symbol.address(), symbol.size(), &raw.executable)
         {
+            continue;
+        }
+        if !contained_guarded(symbol.address(), symbol.size(), &raw.executable, guard)? {
             continue;
         }
         let address = symbol
@@ -934,6 +976,9 @@ fn build_tree(
 }
 
 fn guarded_vec<T>(capacity: usize, guard: &dyn WorkGuard) -> Result<Vec<T>, SymbolError> {
+    if capacity == 0 {
+        return Ok(Vec::new());
+    }
     let bytes = Layout::array::<T>(capacity)
         .map_err(|_| SymbolError::resource("allocation layout overflow"))?
         .size();
@@ -984,10 +1029,15 @@ fn table_bounds(
     Ok(())
 }
 
-fn align4(value: usize) -> Result<usize, SymbolError> {
-    value
-        .checked_add(3)
-        .map(|value| value & !3)
+fn align_relative(base: usize, value: usize, alignment: usize) -> Result<usize, SymbolError> {
+    let relative = value
+        .checked_sub(base)
+        .ok_or_else(|| SymbolError::malformed("alignment precedes section"))?;
+    let aligned = relative
+        .checked_add(alignment - 1)
+        .map(|value| value & !(alignment - 1))
+        .ok_or_else(|| SymbolError::malformed("alignment overflow"))?;
+    base.checked_add(aligned)
         .ok_or_else(|| SymbolError::malformed("alignment overflow"))
 }
 
@@ -1085,15 +1135,98 @@ static LOOKUP_COMPARISONS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 #[cfg(test)]
 mod tests {
-    use qtrace_provider::{ArtifactDigest, OperationAbort, WorkDelta, WorkGuard};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{ElfSymbolIndex, IndexedSymbol, LOOKUP_COMPARISONS, ModuleIdentity, build_tree};
+    use qtrace_provider::{ArtifactDigest, BudgetDimension, OperationAbort, WorkDelta, WorkGuard};
+
+    use super::{
+        ElfSymbolIndex, IndexedSymbol, LOOKUP_COMPARISONS, LoadRange, ModuleIdentity, Section,
+        SymbolError, build_tree, contained_guarded, symbol_name,
+    };
 
     struct AllowAll;
 
     impl WorkGuard for AllowAll {
         fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct HardLimit {
+        limit: u64,
+        consumed: AtomicU64,
+        maximum_delta: AtomicU64,
+    }
+
+    impl WorkGuard for HardLimit {
+        fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+            let amount = delta.nodes + delta.input_bytes;
+            self.maximum_delta.fetch_max(amount, Ordering::Relaxed);
+            let before = self.consumed.fetch_add(amount, Ordering::Relaxed);
+            let consumed = before + amount;
+            if consumed > self.limit {
+                Err(OperationAbort::budget_exceeded(
+                    BudgetDimension::Nodes,
+                    self.limit,
+                    consumed,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn guarded_range_and_name_work(limit: u64) -> Result<HardLimit, SymbolError> {
+        const RANGES: usize = 8_192;
+        const NAME_BYTES: usize = 4_096;
+        let ranges = (0..RANGES)
+            .map(|index| LoadRange {
+                start: index as u64 * 2,
+                end: index as u64 * 2 + 1,
+                file_offset: 0,
+                file_size: 0,
+                flags: 1,
+            })
+            .collect::<Vec<_>>();
+        let mut bytes = vec![b'x'; NAME_BYTES];
+        bytes.push(0);
+        let strings = Section {
+            kind: super::SHT_STRTAB,
+            offset: 0,
+            size: bytes.len(),
+            link: 0,
+            alignment: 1,
+            entry_size: 0,
+        };
+        let guard = HardLimit {
+            limit,
+            consumed: AtomicU64::new(0),
+            maximum_delta: AtomicU64::new(0),
+        };
+        for _ in 0..2 {
+            assert!(contained_guarded(16_382, 1, &ranges, &guard)?);
+            assert_eq!(
+                symbol_name(&bytes, strings, 0, &guard)?.unwrap().len(),
+                NAME_BYTES
+            );
+        }
+        Ok(guard)
+    }
+
+    #[test]
+    fn multi_load_containment_and_max_names_have_exact_guarded_work() {
+        // 8192 sorted ranges require exactly 13 binary comparisons for the last range. Each
+        // 4096-byte name performs a 4097-byte NUL scan and a distinct 4096-byte UTF-8 pass.
+        const WORK: u64 = 2 * (13 + 4_097 + 4_096);
+        assert_eq!(
+            guarded_range_and_name_work(WORK - 1).unwrap_err().code(),
+            "control.budget_exceeded"
+        );
+        for limit in [WORK, WORK + 1] {
+            let guard = guarded_range_and_name_work(limit).unwrap();
+            assert_eq!(guard.consumed.load(Ordering::Relaxed), WORK);
+            assert!(guard.maximum_delta.load(Ordering::Relaxed) <= 4_096);
         }
     }
 
