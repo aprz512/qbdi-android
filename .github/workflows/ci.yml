@@ -19,3 +19,36 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Native, fixture, and tracer tests/builds
         run: ./gradlew nativeHostTest :app:testDebugUnitTest :app:assembleDebug :tracer:assembleDebug :tracer:copyTracerDebug --no-daemon
+  qtrace-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: qtrace-ui/src-web/package-lock.json
+      - name: Install Tauri Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Check generated sources
+        run: python3 qtrace-ui/tools/check_generated.py
+      - name: Rust format
+        run: cd qtrace-ui && cargo fmt --all --check
+      - name: Rust lint
+        run: cd qtrace-ui && cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust tests
+        run: cd qtrace-ui && cargo test --workspace
+      - name: Frontend dependencies
+        run: cd qtrace-ui/src-web && npm ci
+      - name: Frontend lint and unit tests
+        run: cd qtrace-ui/src-web && npm run lint && npm test
+      - name: Install Chromium
+        run: cd qtrace-ui/src-web && npx playwright install --with-deps chromium
+      - name: Desktop workflow tests
+        run: cd qtrace-ui/src-web && npm run e2e
+      - name: Production build and smoke
+        run: cd qtrace-ui/src-web && npm run build && npm run e2e:production

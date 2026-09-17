@@ -1,0 +1,38 @@
+name: qtrace-ui Linux package
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: qtrace-ui/src-web/package-lock.json
+      - name: Install Tauri Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: python3 qtrace-ui/tools/check_generated.py
+      - run: cd qtrace-ui && cargo fmt --all --check
+      - run: cd qtrace-ui && cargo clippy --workspace --all-targets -- -D warnings
+      - run: cd qtrace-ui && cargo test --workspace
+      - run: cd qtrace-ui/src-web && npm ci
+      - run: cd qtrace-ui/src-web && npm run lint && npm test
+      - run: cd qtrace-ui/src-web && npx playwright install --with-deps chromium
+      - run: cd qtrace-ui/src-web && npm run e2e
+      - run: cd qtrace-ui/src-web && npm run build && npm run e2e:production
+      - name: Build packages after every gate
+        run: cd qtrace-ui/src-web && npm run tauri -- build --bundles deb,appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qtrace-ui-linux
+          path: |
+            qtrace-ui/target/release/bundle/deb/*.deb
+            qtrace-ui/target/release/bundle/appimage/*.AppImage

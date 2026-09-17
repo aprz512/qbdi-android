@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.qbdi.qtrace-ui",
   "build": {
+    "features": ["desktop"],
     "beforeDevCommand": {
       "script": "npm run dev",
       "cwd": "../src-web",

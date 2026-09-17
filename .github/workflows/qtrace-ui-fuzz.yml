@@ -1,0 +1,27 @@
+name: qtrace-ui fuzz
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+permissions:
+  contents: read
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [qtrb, flight]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly-2026-08-15
+      - run: cargo install cargo-fuzz --locked --version 0.13.1
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: qtrace-ui
+        run: cargo +nightly-2026-08-15 fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- -max_total_time=1800 -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-${{ matrix.target }}-artifacts
+          path: qtrace-ui/fuzz/artifacts/${{ matrix.target }}/

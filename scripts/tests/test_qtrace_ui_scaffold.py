@@ -38,3 +38,11 @@ class QtraceUiScaffoldTests(unittest.TestCase):
         output = frontend / "dist/index.html"
         self.assertTrue(output.is_file())
         self.assertIn('<div id="root"></div>', output.read_text(encoding="utf-8"))
+
+    def test_tauri_two_cli_is_available_through_frontend_script(self):
+        frontend = Path(__file__).parents[2] / "qtrace-ui/src-web"
+        completed = subprocess.run(
+            ["npm", "run", "tauri", "--", "--version"], cwd=frontend,
+            check=True, capture_output=True, text=True, timeout=120,
+        )
+        self.assertRegex(completed.stdout, r"tauri-cli 2\.")

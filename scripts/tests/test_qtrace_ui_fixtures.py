@@ -16,6 +16,7 @@ from scripts.trace_binary import BinaryTraceError, convert_binary_stream
 ROOT = Path(__file__).parents[2]
 EXPORTER = ROOT / "qtrace-ui" / "tools" / "export_contract_fixtures.py"
 ORACLE = ROOT / "qtrace-ui" / "tools" / "oracle.py"
+GENERATED_CHECK = ROOT / "qtrace-ui" / "tools" / "check_generated.py"
 FIXTURES = ROOT / "qtrace-ui" / "fixtures"
 
 
@@ -59,6 +60,10 @@ class QtraceUiFixtureTests(unittest.TestCase):
 
     def test_manifest_matches_every_generated_fixture(self):
         completed = self.run_tool(str(EXPORTER), "--check")
+        self.assertEqual(0, completed.returncode, completed.stderr.decode())
+
+    def test_all_checked_in_generated_outputs_are_current(self):
+        completed = self.run_tool(str(GENERATED_CHECK), timeout=120)
         self.assertEqual(0, completed.returncode, completed.stderr.decode())
 
     def test_check_detects_fixture_byte_drift(self):
