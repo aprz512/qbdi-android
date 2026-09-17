@@ -15,6 +15,16 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 ts-rs = { version = "12", features = ["serde-compat"] }
+tiny_http = { version = "0.12", optional = true }
+
+[features]
+default = []
+e2e-fixture = ["dep:tiny_http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[bin]]
+name = "e2e_server"
+path = "src/bin/e2e_server.rs"
+required-features = ["e2e-fixture"]
