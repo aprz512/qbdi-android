@@ -1,0 +1,34 @@
+name: qtrace-ui reference performance
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '41 4 * * 2'
+permissions:
+  contents: read
+jobs:
+  performance:
+    runs-on: [self-hosted, linux, qtrace-ui-reference]
+    timeout-minutes: 90
+    env:
+      QTRACE_UI_REFERENCE_HOST: qtrace-ui-reference-v1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate deterministic corpus outside Git
+        run: python3 qtrace-ui/tools/generate_performance_fixtures.py --output "$RUNNER_TEMP/qtrace-ui-performance/corpus"
+      - name: Verify complete corpus with Python identities and Rust providers
+        run: python3 qtrace-ui/tools/generate_performance_fixtures.py --check "$RUNNER_TEMP/qtrace-ui-performance/corpus/manifest.json"
+      - name: Enforce host identity and performance thresholds
+        run: |
+          python3 qtrace-ui/tools/performance_gate.py \
+            --manifest "$RUNNER_TEMP/qtrace-ui-performance/corpus/manifest.json" \
+            --evidence "$RUNNER_TEMP/qtrace-ui-performance/run.json" \
+            --reference-summary docs/benchmarks/qtrace-ui-performance.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qtrace-ui-performance-evidence
+          path: ${{ runner.temp }}/qtrace-ui-performance/run.json

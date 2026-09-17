@@ -2,6 +2,8 @@
 
 `qbdi-android` 是一个面向 Android `arm64-v8a` 的 QBDI 注入式追踪演示项目。它展示如何在应用启动阶段通过 Frida 注入独立 tracer，使用 ShadowHook 接管 native 场景入口，再由 QBDI 动态执行并采集指令、寄存器与内存事件。
 
+离线分析端见 [qtrace-ui](qtrace-ui/README.md)：它以 Tauri 桌面应用打开 QTRB/Flight 文件及 session report，并独立记录构建、测试、真值、缓存、打包和性能流程；下文采集 CLI 保持不变。
+
 本仓库用于逆向分析、安全研究和插桩实验，不是通用 Android SDK，也不建议将示例 APK 或 tracer 直接用于生产环境。
 
 ```text
