@@ -12,6 +12,7 @@ import { useAppDispatch, useAppState } from "./state/AppStateProvider";
 import { emptyFilter } from "./state/model";
 import { NavigationHistory, type NavigationEntry } from "./state/navigation";
 import { VirtualTimeline } from "./timeline/VirtualTimeline";
+import { SegmentCache } from "./timeline/SegmentCache";
 
 const sameKey = (left: EventKeyDto, right: EventKeyDto) =>
   left.artifact_sha256 === right.artifact_sha256 && left.timeline_id === right.timeline_id && left.record_ordinal === right.record_ordinal;
@@ -31,6 +32,10 @@ export default function App() {
   const [, setHistoryVersion] = useState(0);
   const [hiddenHistoryTarget, setHiddenHistoryTarget] = useState<NavigationEntry | null>(null);
   const selectionRequest = useRef(0);
+  const projectionGeneration = useRef(0);
+  const paginationRequest = useRef(false);
+  const requestedCursors = useRef(new Set<string>());
+  const segmentCache = useRef(new SegmentCache<Awaited<ReturnType<typeof api.queryTimeline>>>());
   const navigation = useRef(new NavigationHistory());
   const rows = useMemo(() => state.timelinePages.flatMap((page) => page.rows), [state.timelinePages]);
   const tids = useMemo(() => [...new Set(rows.flatMap((row) => row.key.tid === null ? [] : [row.key.tid]))].sort((a, b) => a - b), [rows]);
@@ -45,7 +50,6 @@ export default function App() {
   }, [state.opened]);
 
   useEffect(() => {
-    if (state.opened === null) return;
     let active = true;
     const refresh = async () => {
       try {
@@ -56,23 +60,53 @@ export default function App() {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 1_000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [api, dispatch, state.opened]);
+  }, [api, dispatch]);
 
-  const applyFilter = async (filter: EventFilterDto) => {
+  useEffect(() => { projectionGeneration.current = Math.max(projectionGeneration.current, state.generation); }, [state.generation]);
+
+  const applyFilter = async (filter: EventFilterDto, artifactIndex = state.selectedArtifactIndex) => {
     if (state.opened === null) return;
-    const generation = state.generation + 1;
+    const generation = ++projectionGeneration.current;
     selectionRequest.current += 1;
     setSelectedRow(null); setDetail(null); setRegisters(null); setMemory(null);
     setMemoryHistory([]); setCallTree(null); setAnnotation(null); setPaneErrors([]);
     dispatch({ type: "filterChanged", filter });
     dispatch({ type: "indexingStarted", generation });
     try {
-      const projection = await api.createProjection(state.opened.workspace.id, 0, filter);
+      const projection = await api.createProjection(state.opened.workspace.id, artifactIndex, filter);
       dispatch({ type: "projectionReady", generation, projectionId: projection.projection_id });
       const page = await api.queryTimeline(state.opened.workspace.id, projection.projection_id, null, 2_000);
+      segmentCache.current.set(`${state.opened.workspace.id}:${projection.projection_id}:first`, page);
       dispatch({ type: "timelinePageReceived", generation, page });
     } catch (error) {
       dispatch({ type: "failed", generation, error: normalizeAppError(error) });
+    }
+  };
+
+  const selectArtifact = (artifactIndex: number) => {
+    dispatch({ type: "artifactSelected", artifactIndex });
+    void applyFilter(state.filter, artifactIndex);
+  };
+
+  const loadNextPage = async () => {
+    if (paginationRequest.current || state.opened === null || state.projectionId === null) return;
+    const cursor = state.timelinePages.at(-1)?.next_cursor ?? null;
+    if (cursor === null) return;
+    const cacheKey = `${state.opened.workspace.id}:${state.projectionId}:${cursor}`;
+    if (requestedCursors.current.has(cacheKey)) return;
+    requestedCursors.current.add(cacheKey);
+    paginationRequest.current = true;
+    const generation = state.generation;
+    try {
+      const cached = segmentCache.current.get(cacheKey);
+      const page = cached ?? await api.queryTimeline(state.opened.workspace.id, state.projectionId, cursor, 2_000);
+      if (cached === undefined) segmentCache.current.set(cacheKey, page);
+      dispatch({ type: "timelinePageReceived", generation, page });
+    } catch (error) {
+      requestedCursors.current.delete(cacheKey);
+      if (projectionGeneration.current === generation) setPaneErrors((values) => [...values, normalizeAppError(error)]);
+    } finally {
+      paginationRequest.current = false;
     }
   };
 
@@ -91,17 +125,18 @@ export default function App() {
     }
     const accept = (update: () => void) => { if (selectionRequest.current === request) update(); };
     const fail = (error: unknown) => accept(() => setPaneErrors((values) => [...values, normalizeAppError(error)]));
-    void api.getEventDetail(workspaceId, 0, row.source_row).then((value) => {
+    const artifactIndex = state.selectedArtifactIndex;
+    void api.getEventDetail(workspaceId, artifactIndex, row.source_row).then((value) => {
       accept(() => setDetail(value));
       if (value.memory_range !== null && selectionRequest.current === request) {
-        void api.getMemoryState(workspaceId, 0, row.source_row, value.memory_range.start, value.memory_range.end_exclusive).then((result) => accept(() => setMemory(result)), fail);
-        void api.getMemoryHistory(workspaceId, 0, row.source_row, value.memory_range.start, value.memory_range.end_exclusive).then((result) => accept(() => setMemoryHistory(result)), fail);
+        void api.getMemoryState(workspaceId, artifactIndex, row.source_row, value.memory_range.start, value.memory_range.end_exclusive).then((result) => accept(() => setMemory(result)), fail);
+        void api.getMemoryHistory(workspaceId, artifactIndex, row.source_row, value.memory_range.start, value.memory_range.end_exclusive).then((result) => accept(() => setMemoryHistory(result)), fail);
       }
     }, fail);
-    void api.getRegisterState(workspaceId, 0, row.source_row).then((value) => accept(() => setRegisters(value)), fail);
-    void api.getAnnotation(workspaceId, 0, row.source_row).then((value) => accept(() => setAnnotation(value)), fail);
+    void api.getRegisterState(workspaceId, artifactIndex, row.source_row).then((value) => accept(() => setRegisters(value)), fail);
+    void api.getAnnotation(workspaceId, artifactIndex, row.source_row).then((value) => accept(() => setAnnotation(value)), fail);
     if (row.key.tid === null) setCallTree(null);
-    else void api.getCallTree(workspaceId, 0, row.key.timeline_id, row.key.tid).then((value) => accept(() => setCallTree(value)), fail);
+    else void api.getCallTree(workspaceId, artifactIndex, row.key.timeline_id, row.key.tid).then((value) => accept(() => setCallTree(value)), fail);
   };
 
   const jumpToRow = (sourceRow: number) => {
@@ -121,12 +156,12 @@ export default function App() {
     if (state.opened === null || selectedRow === null) return;
     const workspaceId = state.opened.workspace.id;
     if (kind === "comment") {
-      if (value === undefined) await api.deleteAnnotation(workspaceId, 0, selectedRow.source_row);
-      else await api.upsertAnnotation(workspaceId, 0, selectedRow.source_row, value);
+      if (value === undefined) await api.deleteAnnotation(workspaceId, state.selectedArtifactIndex, selectedRow.source_row);
+      else await api.upsertAnnotation(workspaceId, state.selectedArtifactIndex, selectedRow.source_row, value);
       setAnnotation((current) => current === null ? { key: selectedRow.key, comment: value ?? "", highlight: null } : { ...current, comment: value ?? "" });
     } else {
-      if (value === undefined) await api.deleteHighlight(workspaceId, 0, selectedRow.source_row);
-      else await api.upsertHighlight(workspaceId, 0, selectedRow.source_row, value);
+      if (value === undefined) await api.deleteHighlight(workspaceId, state.selectedArtifactIndex, selectedRow.source_row);
+      else await api.upsertHighlight(workspaceId, state.selectedArtifactIndex, selectedRow.source_row, value);
       setAnnotation((current) => current === null ? { key: selectedRow.key, comment: "", highlight: value ?? null } : { ...current, highlight: value ?? null });
     }
   };
@@ -147,12 +182,12 @@ export default function App() {
         {state.phase === "failed" && state.error !== null ? (
           <section role="alert"><h1>{state.error.code}</h1><p>{state.error.detail}</p></section>
         ) : state.opened === null || state.projectionId === null ? (
-          <SessionOverview opened={state.opened} />
+          <SessionOverview opened={state.opened} selectedArtifactIndex={state.selectedArtifactIndex} onSelectArtifact={selectArtifact} />
         ) : (
-          <VirtualTimeline rows={rows} onSelect={selectRow} />
+          <VirtualTimeline rows={rows} totalRows={state.timelinePages.at(-1)?.total ?? rows.length} hasMore={state.timelinePages.at(-1)?.next_cursor !== null} workspaceId={state.opened.workspace.id} projectionId={state.projectionId} generation={state.generation} onLoadMore={() => void loadNextPage()} onSelect={selectRow} />
         )}
       </main>
-      <RightDock row={selectedRow} detail={detail} registers={registers} memory={memory} history={memoryHistory} annotation={annotation} errors={paneErrors} workspaceId={state.opened?.workspace.id ?? null} onSaveComment={(value) => writeAnnotation("comment", value)} onDeleteComment={() => writeAnnotation("comment")} onSaveHighlight={(value) => writeAnnotation("highlight", value)} onDeleteHighlight={() => writeAnnotation("highlight")} />
+      <RightDock row={selectedRow} detail={detail} registers={registers} memory={memory} history={memoryHistory} annotation={annotation} errors={paneErrors} workspaceId={state.opened?.workspace.id ?? null} completeness={state.opened?.artifacts.find((artifact) => artifact.index === state.selectedArtifactIndex)?.completeness ?? []} onSaveComment={(value) => writeAnnotation("comment", value)} onDeleteComment={() => writeAnnotation("comment")} onSaveHighlight={(value) => writeAnnotation("highlight", value)} onDeleteHighlight={() => writeAnnotation("highlight")} />
       <BottomDock pages={state.timelinePages} jobs={state.jobs} canGoBack={navigation.current.canGoBack} canGoForward={navigation.current.canGoForward} hiddenHistoryTarget={hiddenHistoryTarget !== null} onJump={jumpToRow} onCancel={(id) => void cancelJob(id)} onBack={() => visitHistory(navigation.current.back())} onForward={() => visitHistory(navigation.current.forward())} onReveal={reveal} />
     </div>
   );

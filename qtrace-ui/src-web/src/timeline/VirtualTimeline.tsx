@@ -1,13 +1,40 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EventRowDto } from "../api/generated";
 import { InteractionLayer } from "./InteractionLayer";
 import { TraceCanvasRenderer, type RenderRow } from "./TraceCanvasRenderer";
+import { ViewportController } from "./ViewportController";
 import "../styles/timeline.css";
 
-export function VirtualTimeline({ rows, onSelect }: { rows: EventRowDto[]; onSelect?(row: EventRowDto): void }) {
+interface Props {
+  rows: EventRowDto[];
+  totalRows?: number;
+  hasMore?: boolean;
+  workspaceId?: string;
+  projectionId?: string;
+  generation?: number;
+  onLoadMore?(): void;
+  onSelect?(row: EventRowDto): void;
+}
+
+export function VirtualTimeline({ rows, totalRows = rows.length, hasMore = false, workspaceId = "workspace", projectionId = "projection", generation = 0, onLoadMore, onSelect }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const viewport = useRef<HTMLElement>(null);
   const [selected, setSelected] = useState<number | null>(null);
-  const displayRows = useMemo(() => rows.map(toRenderRow), [rows]);
+  const [visible, setVisible] = useState({ start: 0, end: Math.min(rows.length, 64) });
+  const controller = useMemo(() => new ViewportController(async (request) => {
+    if (hasMore && request.end >= rows.length - 32) onLoadMore?.();
+    return { rows: [], next_cursor: null, total: totalRows, exact_total: !hasMore };
+  }), [hasMore, onLoadMore, rows.length, totalRows]);
+  useEffect(() => () => controller.cancel(), [controller]);
+  const displayRows = useMemo(() => rows.slice(visible.start, visible.end).map(toRenderRow), [rows, visible]);
+  const updateViewport = useCallback(() => {
+    const element = viewport.current;
+    if (element === null) return;
+    const range = ViewportController.rangeForViewport({ scrollOffset: element.scrollTop, canvasHeight: Math.max(320, element.clientHeight), rowHeight: 24, totalRows: rows.length });
+    setVisible(range);
+    controller.request({ workspaceId, projectionId, generation, ...range });
+  }, [controller, generation, projectionId, rows.length, workspaceId]);
+  useEffect(updateViewport, [updateViewport]);
   useEffect(() => {
     const element = canvas.current;
     const context = element?.getContext("2d");
@@ -27,9 +54,14 @@ export function VirtualTimeline({ rows, onSelect }: { rows: EventRowDto[]; onSel
     });
   }, [displayRows, selected]);
   return (
-    <section className="virtual-timeline" aria-label="Timeline">
-      <canvas ref={canvas} aria-hidden="true" />
-      <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
+    <section ref={viewport} className="virtual-timeline" aria-label="Timeline" onScroll={updateViewport}>
+      <div className="timeline-scroll-space" style={{ height: Math.max(320, rows.length * 24) }}>
+        <div className="timeline-window" style={{ transform: `translateY(${visible.start * 24}px)` }}>
+          <canvas ref={canvas} aria-hidden="true" />
+          <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
+        </div>
+      </div>
+      {hasMore && <button className="timeline-load-more" onClick={onLoadMore}>Load next 2,000 events</button>}
     </section>
   );
 }

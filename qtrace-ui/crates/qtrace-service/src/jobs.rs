@@ -33,8 +33,13 @@ struct Entry {
     cancel: JobCancellation,
 }
 impl JobRegistry {
-    pub fn record_completed(&self, workspace: WorkspaceId, kind: impl Into<String>) -> JobId {
+    pub(crate) fn begin(
+        &self,
+        workspace: WorkspaceId,
+        kind: impl Into<String>,
+    ) -> (JobId, JobCancellation) {
         let id = JobId::from_u64(self.inner.next.fetch_add(1, Ordering::Relaxed) + 1);
+        let cancel = JobCancellation::default();
         self.inner.jobs.lock().unwrap().insert(
             id.clone(),
             Entry {
@@ -42,16 +47,32 @@ impl JobRegistry {
                     id: id.clone(),
                     workspace_id: workspace,
                     kind: kind.into(),
-                    state: JobState::Completed,
+                    state: JobState::Queued,
                     progress: JobProgressDto {
-                        completed: DecimalU64Dto::new(1),
-                        total: Some(DecimalU64Dto::new(1)),
+                        completed: DecimalU64Dto::new(0),
+                        total: None,
                     },
                     error: None,
                 },
-                cancel: JobCancellation::default(),
+                cancel: cancel.clone(),
             },
         );
+        self.inner.changed.notify_waiters();
+        set_state(&self.inner, &id, JobState::Running, None);
+        (id, cancel)
+    }
+    pub(crate) fn finish(&self, id: &JobId, result: Result<(), AppError>, cancelled: bool) {
+        let (state, error) = match result {
+            Ok(()) if cancelled => (JobState::Cancelled, None),
+            Ok(()) => (JobState::Completed, None),
+            Err(error) if error.code == "job.cancelled" => (JobState::Cancelled, Some(error)),
+            Err(error) => (JobState::Failed, Some(error)),
+        };
+        set_state(&self.inner, id, state, error);
+    }
+    pub fn record_completed(&self, workspace: WorkspaceId, kind: impl Into<String>) -> JobId {
+        let (id, cancel) = self.begin(workspace, kind);
+        self.finish(&id, Ok(()), cancel.is_cancelled());
         id
     }
     pub fn spawn<F, Fut>(&self, workspace: WorkspaceId, kind: impl Into<String>, task: F) -> JobId
@@ -99,6 +120,32 @@ impl JobRegistry {
             if &e.dto.workspace_id == w {
                 e.cancel.cancel()
             }
+        }
+    }
+    pub fn remove_workspace(&self, workspace: &WorkspaceId) {
+        self.inner
+            .jobs
+            .lock()
+            .unwrap()
+            .retain(|_, entry| &entry.dto.workspace_id != workspace);
+    }
+    pub fn prune_workspace(&self, workspace: &WorkspaceId, keep: usize) {
+        let mut jobs = self.inner.jobs.lock().unwrap();
+        let mut terminal = jobs
+            .iter()
+            .filter(|(_, entry)| {
+                &entry.dto.workspace_id == workspace
+                    && matches!(
+                        entry.dto.state,
+                        JobState::Completed | JobState::Cancelled | JobState::Failed
+                    )
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        terminal.sort();
+        let remove = terminal.len().saturating_sub(keep);
+        for id in terminal.into_iter().take(remove) {
+            jobs.remove(&id);
         }
     }
     pub fn cancel_all(&self) {

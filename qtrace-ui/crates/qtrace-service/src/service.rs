@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -14,40 +15,47 @@ use qtrace_analysis::{
     query_events,
 };
 use qtrace_provider::{
-    ArtifactDigest, EventKey, EventKind, MemoryDirection, Provenance, RegisterSlot,
+    ArtifactDigest, CompletenessCause, EventKey, EventKind, MemoryDirection, Provenance,
+    RangeBounds, RangeDomain, RegisterSlot,
 };
 use qtrace_store::{
     AnnotationOpenRequest, AnnotationStore, AuthorizedPath, BuildOptions, ElfLoadRequest,
-    ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, Highlight, IndexBuilder, LocalSymbolName,
-    ModuleIdentity, OpenPolicy, SessionLoader, TraceStoreView,
+    ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, Highlight, LocalSymbolName,
+    ModuleIdentity, OpenPolicy, SessionLoader, TraceStore, TraceStoreView,
 };
 
 use crate::workspace::{ArtifactWorkspace, ProjectionWorkspace, Workspace};
 use crate::{
     AddressRangeDto, AnnotationDto, AppError, ArtifactSummaryDto, CallNodeDto, CallTreeDto,
-    DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto, HexU64Dto, JobId,
-    JobRegistry, LocalSymbolNameDto, MemoryByteDto, MemoryEvidenceDto, MemoryStateDto,
-    OpenWorkspaceDto, ProjectionId, ProjectionJobDto, RegisterCellDto, RegisterStateDto,
-    ServiceBudget, ServiceLimits, SymbolDto, TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
+    CompletenessRangeDto, DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto,
+    HexU64Dto, JobId, JobRegistry, LocalSymbolNameDto, MemoryByteDto, MemoryEvidenceDto,
+    MemoryStateDto, OpenWorkspaceDto, ProjectionId, ProjectionJobDto, RegisterCellDto,
+    RegisterStateDto, ServiceBudget, ServiceLimits, SymbolDto, TimelinePageDto, WorkspaceId,
+    WorkspaceSummaryDto,
 };
 
 pub struct QtraceService {
     next: AtomicU64,
+    cache_root: PathBuf,
     workspaces: Mutex<HashMap<WorkspaceId, Workspace>>,
     jobs: JobRegistry,
 }
 
 impl Default for QtraceService {
     fn default() -> Self {
-        Self {
-            next: AtomicU64::new(0),
-            workspaces: Mutex::new(HashMap::new()),
-            jobs: JobRegistry::default(),
-        }
+        Self::with_cache_root(default_cache_root())
     }
 }
 
 impl QtraceService {
+    pub fn with_cache_root(cache_root: PathBuf) -> Self {
+        Self {
+            next: AtomicU64::new(0),
+            cache_root,
+            workspaces: Mutex::new(HashMap::new()),
+            jobs: JobRegistry::default(),
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -56,19 +64,55 @@ impl QtraceService {
     }
 
     pub fn open_session(&self, selected: AuthorizedPath) -> Result<OpenWorkspaceDto, AppError> {
-        let budget = ServiceBudget::new(open_limits());
-        let session = SessionLoader::open_report(selected, OpenPolicy::default(), &budget)?;
-        self.publish_session(session, &budget)
+        self.open_selected(selected, true)
     }
 
     pub fn open_artifact(&self, selected: AuthorizedPath) -> Result<OpenWorkspaceDto, AppError> {
-        let budget = ServiceBudget::new(open_limits());
-        let session = SessionLoader::open_artifact(selected, OpenPolicy::default(), &budget)?;
-        self.publish_session(session, &budget)
+        self.open_selected(selected, false)
+    }
+
+    fn open_selected(
+        &self,
+        selected: AuthorizedPath,
+        session_report: bool,
+    ) -> Result<OpenWorkspaceDto, AppError> {
+        let workspace_id = WorkspaceId::from_u64(self.next_id());
+        let (job_id, cancellation) = self.jobs.begin(workspace_id.clone(), "open");
+        let result = (|| {
+            let discovery_bytes = selected
+                .as_path()
+                .metadata()
+                .ok()
+                .filter(|metadata| metadata.is_file())
+                .map_or(16 * 1024 * 1024, |metadata| metadata.len());
+            let discovery = ServiceBudget::with_cancellation(
+                open_limits(discovery_bytes),
+                cancellation.clone(),
+            );
+            let session = if session_report {
+                SessionLoader::open_report(selected, OpenPolicy::cache_aware(), &discovery)?
+            } else {
+                SessionLoader::open_artifact(selected, OpenPolicy::cache_aware(), &discovery)?
+            };
+            let budget = ServiceBudget::with_cancellation(
+                open_limits(session_input_bytes(&session)?),
+                cancellation.clone(),
+            );
+            self.publish_session(workspace_id.clone(), &job_id, session, &budget)
+        })();
+        self.jobs.finish(
+            &job_id,
+            result.as_ref().map(|_| ()).map_err(Clone::clone),
+            cancellation.is_cancelled(),
+        );
+        self.jobs.prune_workspace(&workspace_id, 64);
+        result
     }
 
     fn publish_session(
         &self,
+        id: WorkspaceId,
+        job_id: &JobId,
         session: qtrace_store::SessionSource,
         budget: &ServiceBudget,
     ) -> Result<OpenWorkspaceDto, AppError> {
@@ -85,8 +129,15 @@ impl QtraceService {
                 failure.error()
             )
         }));
-        for source in session.artifacts() {
-            match IndexBuilder::build(source, &BuildOptions::default(), budget) {
+        let artifact_total = u64::try_from(session.artifacts().len()).unwrap_or(u64::MAX);
+        self.jobs.set_progress(job_id, 0, Some(artifact_total))?;
+        for (artifact_position, source) in session.artifacts().iter().enumerate() {
+            match TraceStore::open_or_build(
+                &self.cache_root,
+                source,
+                &BuildOptions::default(),
+                budget,
+            ) {
                 Ok(store) => {
                     let store = Arc::new(store);
                     let context = Arc::new(QueryContext::new_with_guard(store.clone(), budget)?);
@@ -98,15 +149,20 @@ impl QtraceService {
                 }
                 Err(error) => warnings.push(format!("{}: {error}", source.local_path())),
             }
+            self.jobs.set_progress(
+                job_id,
+                u64::try_from(artifact_position + 1).unwrap_or(u64::MAX),
+                Some(artifact_total),
+            )?;
         }
         if artifacts.is_empty() {
-            return Err(AppError::new(
-                "workspace.no_valid_artifact",
-                "open",
-                "no artifact could be indexed",
-            ));
+            let detail = if warnings.is_empty() {
+                "no artifact could be indexed".to_owned()
+            } else {
+                format!("no artifact could be indexed: {}", warnings.join("; "))
+            };
+            return Err(AppError::new("workspace.no_valid_artifact", "open", detail));
         }
-        let id = WorkspaceId::from_u64(self.next_id());
         let artifact_count = u32::try_from(artifacts.len()).map_err(|_| {
             AppError::new(
                 "workspace.too_many_artifacts",
@@ -126,6 +182,13 @@ impl QtraceService {
                 index: u32::try_from(index).unwrap_or(u32::MAX),
                 name: artifact.name.clone(),
                 event_count: u32::try_from(artifact.store.event_count()).unwrap_or(u32::MAX),
+                completeness: artifact
+                    .store
+                    .completeness()
+                    .iter()
+                    .copied()
+                    .map(completeness_range)
+                    .collect(),
             })
             .collect();
         self.workspaces
@@ -141,7 +204,6 @@ impl QtraceService {
                     symbols: HashMap::new(),
                 },
             );
-        self.jobs.record_completed(id, "open");
         Ok(OpenWorkspaceDto {
             workspace: summary,
             artifacts: artifact_dtos,
@@ -179,21 +241,58 @@ impl QtraceService {
             })?;
             (artifact.context.clone(), item.generation)
         };
-        let projection = Arc::new(TimelineProjection::new(context, convert_filter(filter)?)?);
-        let projection_id = ProjectionId::from_u64(self.next_id());
-        let job_id = self.jobs.record_completed(workspace.clone(), "projection");
-        let mut all = self
-            .workspaces
-            .lock()
-            .map_err(|_| AppError::worker_failed())?;
-        let item = all
-            .get_mut(workspace)
-            .ok_or_else(AppError::stale_workspace)?;
-        if item.generation == generation {
-            item.current = Some(projection_id.clone());
-        }
-        item.projections
-            .insert(projection_id.clone(), ProjectionWorkspace { projection });
+        let (job_id, cancellation) = self.jobs.begin(workspace.clone(), "projection");
+        self.jobs.set_progress(&job_id, 0, Some(1))?;
+        let result = (|| {
+            if cancellation.is_cancelled() {
+                return Err(AppError::cancelled());
+            }
+            let projection = Arc::new(TimelineProjection::new(context, convert_filter(filter)?)?);
+            if cancellation.is_cancelled() {
+                projection.cancel();
+                return Err(AppError::cancelled());
+            }
+            let projection_id = ProjectionId::from_u64(self.next_id());
+            let mut all = self
+                .workspaces
+                .lock()
+                .map_err(|_| AppError::worker_failed())?;
+            let item = all
+                .get_mut(workspace)
+                .ok_or_else(AppError::stale_workspace)?;
+            if item.generation == generation {
+                item.current = Some(projection_id.clone());
+            }
+            item.projections.insert(
+                projection_id.clone(),
+                ProjectionWorkspace {
+                    projection,
+                    generation,
+                },
+            );
+            while item.projections.len() > 16 {
+                let oldest = item
+                    .projections
+                    .iter()
+                    .filter(|(id, _)| Some(*id) != item.current.as_ref())
+                    .min_by_key(|(_, value)| value.generation)
+                    .map(|(id, _)| id.clone());
+                match oldest {
+                    Some(id) => {
+                        item.projections.remove(&id);
+                    }
+                    None => break,
+                }
+            }
+            Ok(projection_id)
+        })();
+        self.jobs.finish(
+            &job_id,
+            result.as_ref().map(|_| ()).map_err(Clone::clone),
+            cancellation.is_cancelled(),
+        );
+        self.jobs.prune_workspace(workspace, 64);
+        let projection_id = result?;
         Ok(ProjectionJobDto {
             projection_id,
             job_id,
@@ -241,9 +340,9 @@ impl QtraceService {
     ) -> Result<EventDetailDto, AppError> {
         let store = self.artifact_store(workspace, artifact_index)?;
         let row_index = row as usize;
-        let key = store.event_key(row_index).ok_or_else(event_missing)?;
-        let kind = store.event_kind(row_index).ok_or_else(event_missing)?;
-        let provenance = store.provenance(row_index).ok_or_else(event_missing)?;
+        let key = store.event_key(row_index)?.ok_or_else(event_missing)?;
+        let kind = store.event_kind(row_index)?.ok_or_else(event_missing)?;
+        let provenance = store.provenance(row_index)?.ok_or_else(event_missing)?;
         let instruction = store.instruction(row_index);
         let memory = store.memory(row_index);
         let (module, relative_pc) = instruction
@@ -273,7 +372,7 @@ impl QtraceService {
         row: u32,
     ) -> Result<RegisterStateDto, AppError> {
         let store = self.artifact_store(workspace, artifact_index)?;
-        let key = store.event_key(row as usize).ok_or_else(event_missing)?;
+        let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
         let budget = ServiceBudget::new(ServiceLimits::interactive());
         let replay = RegisterReplay::new_with_guard(store, &budget)?;
         let state = replay.state_at_with_guard(&key, &budget)?;
@@ -293,7 +392,7 @@ impl QtraceService {
         end_exclusive: u64,
     ) -> Result<MemoryStateDto, AppError> {
         let store = self.artifact_store(workspace, artifact_index)?;
-        let key = store.event_key(row as usize).ok_or_else(event_missing)?;
+        let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
         let budget = ServiceBudget::new(ServiceLimits::interactive());
         let state = MemoryAnalyzer::new_with_guard(store, &budget)?.state_at_with_guard(
             &key,
@@ -320,7 +419,7 @@ impl QtraceService {
         end_exclusive: u64,
     ) -> Result<Vec<MemoryEvidenceDto>, AppError> {
         let store = self.artifact_store(workspace, artifact_index)?;
-        let key = store.event_key(row as usize).ok_or_else(event_missing)?;
+        let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
         let budget = ServiceBudget::new(ServiceLimits::interactive());
         MemoryAnalyzer::new_with_guard(store, &budget)?
             .history_with_guard(&key, start..end_exclusive, &budget)?
@@ -626,12 +725,15 @@ impl QtraceService {
     }
     pub fn close_workspace(&self, workspace: &WorkspaceId) -> Result<(), AppError> {
         self.jobs.cancel_workspace(workspace);
-        self.workspaces
+        let result = self
+            .workspaces
             .lock()
             .map_err(|_| AppError::worker_failed())?
             .remove(workspace)
             .map(|_| ())
-            .ok_or_else(AppError::stale_workspace)
+            .ok_or_else(AppError::stale_workspace);
+        self.jobs.remove_workspace(workspace);
+        result
     }
     pub fn workspace_summary(
         &self,
@@ -661,7 +763,7 @@ impl QtraceService {
         &self,
         workspace: &WorkspaceId,
         artifact_index: u32,
-    ) -> Result<Arc<qtrace_store::OwnedTraceStore>, AppError> {
+    ) -> Result<Arc<qtrace_store::TraceStore>, AppError> {
         self.workspaces
             .lock()
             .map_err(|_| AppError::worker_failed())?
@@ -677,9 +779,9 @@ impl QtraceService {
         row: u32,
     ) -> Result<(EventKey, ArtifactDigest), AppError> {
         let store = self.artifact_store(workspace, artifact_index)?;
-        let key = store.event_key(row as usize).ok_or_else(event_missing)?;
+        let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
         let identity = store
-            .event_key(0)
+            .event_key(0)?
             .map(|first| first.artifact)
             .unwrap_or(key.artifact);
         Ok((key, identity))
@@ -690,7 +792,7 @@ impl QtraceService {
         artifact_index: u32,
     ) -> Result<ArtifactDigest, AppError> {
         self.artifact_store(workspace, artifact_index)?
-            .event_key(0)
+            .event_key(0)?
             .map(|key| key.artifact)
             .ok_or_else(event_missing)
     }
@@ -709,15 +811,105 @@ fn parse_module_digest(value: &str) -> Result<ArtifactDigest, AppError> {
     })
 }
 
-fn open_limits() -> ServiceLimits {
+fn open_limits(input_bytes: u64) -> ServiceLimits {
     ServiceLimits {
         deadline: Instant::now() + Duration::from_secs(30 * 60),
-        input_bytes: u64::MAX,
+        // Cache validation/serialization is charged as input work too. Keep the raw selected
+        // size as the basis while allowing a bounded normalized-cache representation.
+        input_bytes: input_bytes.saturating_mul(3).max(64 * 1024 * 1024),
         decompressed_bytes: 4 * 1024 * 1024 * 1024,
         events: 20_000_000,
         nodes: u64::MAX,
         rows: u64::MAX,
         resident_bytes: 2 * 1024 * 1024 * 1024,
+    }
+}
+
+fn session_input_bytes(session: &qtrace_store::SessionSource) -> Result<u64, AppError> {
+    session
+        .artifacts()
+        .iter()
+        .try_fold(0_u64, |total, artifact| {
+            total
+                .checked_add(artifact.identity().file().size)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "workspace.input_size_overflow",
+                        "open",
+                        "selected artifact sizes overflow the input budget",
+                    )
+                })
+        })
+}
+
+fn default_cache_root() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|value| Path::new(value).is_absolute())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("qtrace-ui")
+        .join("indexes")
+}
+
+fn completeness_range(value: qtrace_store::CompletenessRow) -> CompletenessRangeDto {
+    let (domain, start, end, end_inclusive) = match (value.domain, value.bounds) {
+        (RangeDomain::CapturedSequence, RangeBounds::InclusiveSequence { first, last }) => {
+            ("captured_sequence", first, last, true)
+        }
+        (
+            RangeDomain::SourceBytes,
+            RangeBounds::HalfOpen {
+                start,
+                end_exclusive,
+            },
+        ) => ("source_bytes", start, end_exclusive, false),
+        (RangeDomain::MemoryAddresses, RangeBounds::InclusiveSequence { first, last }) => {
+            ("memory_addresses", first, last, true)
+        }
+        (
+            RangeDomain::MemoryAddresses,
+            RangeBounds::HalfOpen {
+                start,
+                end_exclusive,
+            },
+        ) => ("memory_addresses", start, end_exclusive, false),
+        (RangeDomain::SourceBytes, RangeBounds::InclusiveSequence { first, last }) => {
+            ("source_bytes", first, last, true)
+        }
+        (
+            RangeDomain::CapturedSequence,
+            RangeBounds::HalfOpen {
+                start,
+                end_exclusive,
+            },
+        ) => ("captured_sequence", start, end_exclusive, false),
+    };
+    CompletenessRangeDto {
+        domain: domain.into(),
+        start: DecimalU64Dto::new(start),
+        end: DecimalU64Dto::new(end),
+        end_inclusive,
+        cause: completeness_cause(value.cause).into(),
+        provenance: provenance_name(value.provenance).into(),
+    }
+}
+
+fn completeness_cause(value: CompletenessCause) -> &'static str {
+    match value {
+        CompletenessCause::Retained => "retained",
+        CompletenessCause::MissingTerminal => "missing_terminal",
+        CompletenessCause::Active => "active",
+        CompletenessCause::Stale => "stale",
+        CompletenessCause::Rotating => "rotating",
+        CompletenessCause::Unreliable => "unreliable",
+        CompletenessCause::Incomplete => "incomplete",
+        CompletenessCause::Lost => "lost",
+        CompletenessCause::Overwritten => "overwritten",
+        CompletenessCause::CoverageGap => "coverage_gap",
+        CompletenessCause::Checksum => "checksum",
+        CompletenessCause::UnterminatedThread => "unterminated_thread",
+        CompletenessCause::Truncation => "truncation",
+        CompletenessCause::Unknown => "unknown",
     }
 }
 fn convert_filter(value: EventFilterDto) -> Result<EventFilter, AppError> {

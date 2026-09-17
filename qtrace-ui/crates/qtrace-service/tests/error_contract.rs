@@ -77,7 +77,7 @@ fn typescript_export_is_deterministic_and_uses_string_integers() {
         r#"import type { AppError, OpenWorkspaceDto } from './generated';
 const opened: OpenWorkspaceDto = {
   workspace: { id: 'workspace-1', generation: 0, artifact_count: 1 },
-  artifacts: [{ index: 0, name: 'trace.qtrb', event_count: 1 }],
+  artifacts: [{ index: 0, name: 'trace.qtrb', event_count: 1, completeness: [] }],
   warnings: [],
 };
 const error: AppError = {

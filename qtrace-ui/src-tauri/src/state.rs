@@ -39,6 +39,21 @@ impl<P: NativePicker> CommandAdapter<P> {
             .transpose()
     }
 
+    #[cfg(feature = "desktop")]
+    pub(crate) fn pick_session_path(&self) -> Result<Option<PathBuf>, AppError> {
+        self.picker.pick_session()
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn pick_artifact_path(&self) -> Result<Option<PathBuf>, AppError> {
+        self.picker.pick_artifact()
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn service(&self) -> Arc<qtrace_service::QtraceService> {
+        self.service.clone()
+    }
+
     pub fn pick_and_open_artifact(&self) -> Result<Option<OpenWorkspaceDto>, AppError> {
         self.picker
             .pick_artifact()?

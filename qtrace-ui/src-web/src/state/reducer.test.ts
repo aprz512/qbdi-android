@@ -19,11 +19,15 @@ describe("application reducer", () => {
       type: "workspaceOpened",
       opened: {
         workspace: { id: "w", generation: 0, artifact_count: 1 },
-        artifacts: [{ index: 0, name: "trace", event_count: 2 }],
+        artifacts: [{ index: 0, name: "trace", event_count: 2, completeness: [] }],
         warnings: ["one artifact was isolated"],
       },
     });
     expect(opened.phase).toBe("partial");
+    const replacement = reducer(opened, { type: "openStarted" });
+    const cancelledReplacement = reducer(replacement, { type: "pickerCancelled" });
+    expect(cancelledReplacement.opened?.workspace.id).toBe("w");
+    expect(cancelledReplacement.phase).toBe("partial");
     const indexing = reducer(opened, { type: "indexingStarted", generation: 2 });
     expect(indexing.phase).toBe("indexing");
     const filtered = reducer(indexing, { type: "filterChanged", filter: { ...emptyFilter(), tids: [7] } });

@@ -131,19 +131,37 @@ mod desktop {
     use super::*;
 
     #[tauri::command]
-    pub fn pick_and_open_session(
+    pub async fn pick_and_open_session(
         _request: EmptyPickerRequest,
         state: State<'_, DesktopState>,
     ) -> Result<Option<OpenWorkspaceDto>, AppError> {
-        state.pick_and_open_session()
+        let Some(path) = state.pick_session_path()? else {
+            return Ok(None);
+        };
+        let service = state.service();
+        tauri::async_runtime::spawn_blocking(move || {
+            service.open_session(qtrace_store::AuthorizedPath::new(path))
+        })
+        .await
+        .map_err(|_| AppError::worker_failed())?
+        .map(Some)
     }
 
     #[tauri::command]
-    pub fn pick_and_open_artifact(
+    pub async fn pick_and_open_artifact(
         _request: EmptyPickerRequest,
         state: State<'_, DesktopState>,
     ) -> Result<Option<OpenWorkspaceDto>, AppError> {
-        state.pick_and_open_artifact()
+        let Some(path) = state.pick_artifact_path()? else {
+            return Ok(None);
+        };
+        let service = state.service();
+        tauri::async_runtime::spawn_blocking(move || {
+            service.open_artifact(qtrace_store::AuthorizedPath::new(path))
+        })
+        .await
+        .map_err(|_| AppError::worker_failed())?
+        .map(Some)
     }
 
     #[tauri::command]
@@ -163,11 +181,20 @@ mod desktop {
     }
 
     #[tauri::command]
-    pub fn create_projection(
+    pub async fn create_projection(
         request: CreateProjectionRequest,
         state: State<'_, DesktopState>,
     ) -> Result<ProjectionJobDto, AppError> {
-        state.create_projection(request)
+        let service = state.service();
+        tauri::async_runtime::spawn_blocking(move || {
+            service.create_projection(
+                &request.workspace_id,
+                request.artifact_index,
+                request.filter,
+            )
+        })
+        .await
+        .map_err(|_| AppError::worker_failed())?
     }
 
     #[tauri::command]

@@ -184,6 +184,17 @@ pub struct ArtifactSummaryDto {
     pub index: u32,
     pub name: String,
     pub event_count: u32,
+    pub completeness: Vec<CompletenessRangeDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct CompletenessRangeDto {
+    pub domain: String,
+    pub start: DecimalU64Dto,
+    pub end: DecimalU64Dto,
+    pub end_inclusive: bool,
+    pub cause: String,
+    pub provenance: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]

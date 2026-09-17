@@ -48,8 +48,11 @@ fn main() {
         "{}",
         json!({ "url": format!("http://{address}"), "token": token })
     );
+    let cache_root = data_root.join("cache/indexes");
     let state = Arc::new(State {
-        service: Arc::new(Mutex::new(Arc::new(QtraceService::new()))),
+        service: Arc::new(Mutex::new(Arc::new(QtraceService::with_cache_root(
+            cache_root,
+        )))),
         fixture_root,
         data_root,
         token,
@@ -148,7 +151,9 @@ fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppErro
         *state
             .service
             .lock()
-            .map_err(|_| AppError::worker_failed())? = Arc::new(QtraceService::new());
+            .map_err(|_| AppError::worker_failed())? = Arc::new(QtraceService::with_cache_root(
+            state.data_root.join("cache/indexes"),
+        ));
         return Ok(Value::Null);
     }
     let service = state

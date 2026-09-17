@@ -12,7 +12,7 @@ function fakeApi(overrides: Partial<QtraceApi> = {}): QtraceApi {
   return {
     pickAndOpenSession: vi.fn().mockResolvedValue({
       workspace: { id: "workspace-7", generation: 0, artifact_count: 1 },
-      artifacts: [{ index: 0, name: "main.trace.bin", event_count: 42 }],
+      artifacts: [{ index: 0, name: "main.trace.bin", event_count: 42, completeness: [] }],
       warnings: ["worker artifact isolated"],
     }),
     pickAndOpenArtifact: vi.fn().mockResolvedValue(null),
@@ -88,6 +88,32 @@ describe("desktop shell", () => {
     expect(screen.getByText("newest")).toBeVisible();
     expect(api.getRegisterState).toHaveBeenCalledWith("workspace-7", 0, 2);
     expect(api.getCallTree).toHaveBeenCalledWith("workspace-7", 0, "1", 7);
+  });
+
+  it("switches artifacts, shows completeness, and traverses cursor pages", async () => {
+    const firstRows = [eventRow(1)];
+    const secondRows = [eventRow(2)];
+    const api = fakeApi({
+      pickAndOpenSession: vi.fn().mockResolvedValue({
+        workspace: { id: "workspace-7", generation: 0, artifact_count: 2 },
+        artifacts: [
+          { index: 0, name: "main.qtrb", event_count: 1, completeness: [] },
+          { index: 1, name: "capture.flight", event_count: 2, completeness: [{ domain: "captured_sequence", start: "9", end: "9", end_inclusive: true, cause: "overwritten", provenance: "damaged" }] },
+        ],
+        warnings: [],
+      }),
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-flight", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn()
+        .mockResolvedValueOnce({ rows: firstRows, next_cursor: "cursor-2", total: 2, exact_total: true })
+        .mockResolvedValueOnce({ rows: secondRows, next_cursor: null, total: 2, exact_total: true }),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(await screen.findByRole("button", { name: /capture\.flight/ }));
+    await waitFor(() => expect(api.createProjection).toHaveBeenCalledWith("workspace-7", 1, expect.any(Object)));
+    expect(await screen.findByText(/overwritten · damaged/)).toBeVisible();
+    await waitFor(() => expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "projection-flight", "cursor-2", 2_000));
+    expect(await screen.findByRole("row", { name: /2 thread 7/ })).toBeVisible();
   });
 
   it("shows a local rename above ELF identity and supports edit/delete", async () => {

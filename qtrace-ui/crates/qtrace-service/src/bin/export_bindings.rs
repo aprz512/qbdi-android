@@ -8,6 +8,7 @@ fn main() {
         AnnotationDto::decl(&config),
         AddressRangeDto::decl(&config),
         ArtifactSummaryDto::decl(&config),
+        CompletenessRangeDto::decl(&config),
         CallNodeDto::decl(&config),
         CallTreeDto::decl(&config),
         DecimalI64Dto::decl(&config),

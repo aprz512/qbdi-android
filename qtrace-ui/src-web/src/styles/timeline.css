@@ -1,5 +1,8 @@
-.virtual-timeline { position: relative; width: 100%; height: 100%; min-height: 320px; overflow: hidden; }
+.virtual-timeline { position: relative; width: 100%; height: 100%; min-height: 320px; overflow: auto; }
+.timeline-scroll-space { position: relative; }
+.timeline-window { position: absolute; inset: 0 0 auto; height: max(320px, calc(100vh - 212px)); }
 .virtual-timeline canvas { position: absolute; inset: 0; }
+.timeline-load-more { position: sticky; left: 50%; bottom: .5rem; transform: translateX(-50%); z-index: 2; }
 .interaction-layer { position: absolute; inset: 0; outline: none; }
 .interaction-layer [role="row"] { height: 24px; cursor: default; }
 .interaction-layer:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }

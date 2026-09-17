@@ -19,6 +19,7 @@ export interface AppState {
   phase: WorkspacePhase;
   generation: number;
   opened: OpenWorkspaceDto | null;
+  selectedArtifactIndex: number;
   projectionId: ProjectionId | null;
   filter: EventFilterDto;
   timelinePages: TimelinePageDto[];
@@ -34,6 +35,7 @@ export const initialState: AppState = {
   phase: "empty",
   generation: 0,
   opened: null,
+  selectedArtifactIndex: 0,
   projectionId: null,
   filter: emptyFilter(),
   timelinePages: [],

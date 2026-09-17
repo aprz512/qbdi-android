@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use qtrace_analysis::{QueryContext, TimelineProjection};
-use qtrace_store::{ElfSymbolIndex, OwnedTraceStore};
+use qtrace_store::{ElfSymbolIndex, TraceStore};
 
 use crate::ProjectionId;
 
@@ -15,12 +15,13 @@ pub(crate) struct Workspace {
 
 pub(crate) struct ArtifactWorkspace {
     pub name: String,
-    pub store: Arc<OwnedTraceStore>,
+    pub store: Arc<TraceStore>,
     pub context: Arc<QueryContext>,
 }
 
 pub(crate) struct ProjectionWorkspace {
     pub projection: Arc<TimelineProjection>,
+    pub generation: u32,
 }
 
 impl Workspace {

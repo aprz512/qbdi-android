@@ -16,11 +16,18 @@ fn fixture(name: &str) -> PathBuf {
 #[test]
 fn real_mixed_session_crosses_provider_store_analysis_and_persistent_annotations() {
     let data = tempfile::tempdir().unwrap();
-    let service = QtraceService::new();
+    let cache = tempfile::tempdir().unwrap();
+    let service = QtraceService::with_cache_root(cache.path().join("indexes"));
     let opened = service
         .open_session(AuthorizedPath::new(fixture("valid-mixed")))
         .unwrap();
     assert_eq!(opened.artifacts.len(), 3);
+    assert!(
+        opened
+            .artifacts
+            .iter()
+            .any(|artifact| !artifact.completeness.is_empty())
+    );
     let workspace = opened.workspace.id;
     let projection = service
         .create_projection(&workspace, 0, EventFilterDto::default())
@@ -50,7 +57,16 @@ fn real_mixed_session_crosses_provider_store_analysis_and_persistent_annotations
         .unwrap();
 
     drop(service);
-    let restarted = QtraceService::new();
+    assert!(
+        cache
+            .path()
+            .join("indexes")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some()
+    );
+    let restarted = QtraceService::with_cache_root(cache.path().join("indexes"));
     let reopened = restarted
         .open_session(AuthorizedPath::new(fixture("valid-mixed")))
         .unwrap();

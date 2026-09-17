@@ -1,7 +1,8 @@
 export type AppError = { code: string, stage: string, source: SourceCoordinateDto | null, retryable: boolean, detail: string, };
 export type AnnotationDto = { key: EventKeyDto, comment: string, highlight: string | null, };
 export type AddressRangeDto = { start: HexU64Dto, end_exclusive: HexU64Dto, };
-export type ArtifactSummaryDto = { index: number, name: string, event_count: number, };
+export type ArtifactSummaryDto = { index: number, name: string, event_count: number, completeness: Array<CompletenessRangeDto>, };
+export type CompletenessRangeDto = { domain: string, start: DecimalU64Dto, end: DecimalU64Dto, end_inclusive: boolean, cause: string, provenance: string, };
 export type CallNodeDto = { id: number, parent: number | null, children: Array<number>, tid: number, target: HexU64Dto | null, display: string, source_row_start: number, source_row_end_exclusive: number, provenance: string, state: string, };
 export type CallTreeDto = { identity: string, timeline_id: DecimalU64Dto, tid: number, roots: Array<number>, nodes: Array<CallNodeDto>, };
 export type DecimalI64Dto = string;

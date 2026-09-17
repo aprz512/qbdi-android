@@ -1,3 +1,4 @@
+use crate::JobCancellation;
 use qtrace_provider::{BudgetDimension, OperationAbort, WorkDelta, WorkGuard};
 use std::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -29,6 +30,7 @@ impl ServiceLimits {
 pub struct ServiceBudget {
     limits: ServiceLimits,
     cancelled: AtomicBool,
+    external_cancel: Option<JobCancellation>,
     used: [AtomicU64; 6],
 }
 impl ServiceBudget {
@@ -36,6 +38,15 @@ impl ServiceBudget {
         Self {
             limits,
             cancelled: AtomicBool::new(false),
+            external_cancel: None,
+            used: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+    pub fn with_cancellation(limits: ServiceLimits, external_cancel: JobCancellation) -> Self {
+        Self {
+            limits,
+            cancelled: AtomicBool::new(false),
+            external_cancel: Some(external_cancel),
             used: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
@@ -44,6 +55,10 @@ impl ServiceBudget {
     }
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+            || self
+                .external_cancel
+                .as_ref()
+                .is_some_and(JobCancellation::is_cancelled)
     }
 }
 impl WorkGuard for ServiceBudget {

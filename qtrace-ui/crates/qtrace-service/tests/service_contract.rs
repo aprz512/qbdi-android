@@ -35,6 +35,12 @@ fn close_invalidates_workspace_and_active_generation() {
     let service = QtraceService::new_for_tests();
     let workspace = service.insert_empty_workspace();
     service.close_workspace(&workspace).unwrap();
+    assert!(
+        service
+            .list_jobs()
+            .iter()
+            .all(|job| job.workspace_id != workspace)
+    );
     let error = service.workspace_summary(&workspace).unwrap_err();
     assert_eq!(error.code, "workspace.stale");
     assert!(
@@ -42,6 +48,34 @@ fn close_invalidates_workspace_and_active_generation() {
             .workspace_summary(&WorkspaceId::from_u64(999))
             .is_err()
     );
+}
+
+#[test]
+fn projection_retention_is_bounded_and_keeps_the_current_generation() {
+    let service = QtraceService::new();
+    let opened = service
+        .open_session(AuthorizedPath::new(fixture("valid-mixed")))
+        .unwrap();
+    let mut first = None;
+    let mut latest = None;
+    for tid in 0..20 {
+        let filter = EventFilterDto {
+            tids: vec![tid],
+            ..EventFilterDto::default()
+        };
+        let projection = service
+            .create_projection(&opened.workspace.id, 0, filter)
+            .unwrap();
+        first.get_or_insert_with(|| projection.projection_id.clone());
+        latest = Some(projection.projection_id);
+    }
+    let first_error = service
+        .query_timeline(&opened.workspace.id, &first.unwrap(), None, 1)
+        .unwrap_err();
+    assert_eq!(first_error.code, "workspace.stale");
+    service
+        .query_timeline(&opened.workspace.id, &latest.unwrap(), None, 1)
+        .unwrap();
 }
 
 #[test]

@@ -15,9 +15,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_home = app.path().app_data_dir()?;
+            let cache_home = app.path().app_cache_dir()?.join("indexes");
             std::fs::create_dir_all(&data_home)?;
+            std::fs::create_dir_all(&cache_home)?;
             app.manage(CommandAdapter::new(
-                Arc::new(qtrace_service::QtraceService::new()),
+                Arc::new(qtrace_service::QtraceService::with_cache_root(cache_home)),
                 TauriNativePicker(app.handle().clone()),
                 data_home,
             ));
