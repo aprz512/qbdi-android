@@ -875,6 +875,15 @@ fn build_and_publish_projection(
         projection.cancel();
         return Err(AppError::cancelled());
     }
+    while !projection.wait_until_complete(Duration::from_millis(25)) {
+        if cancellation.is_cancelled() {
+            projection.cancel();
+        }
+    }
+    if cancellation.is_cancelled() || projection.is_cancelled() {
+        return Err(AppError::cancelled());
+    }
+    projection.total_visible_rows()?;
     let mut all = workspaces.lock().map_err(|_| AppError::worker_failed())?;
     let item = all
         .get_mut(workspace)
@@ -885,7 +894,7 @@ fn build_and_publish_projection(
     item.projections.insert(
         projection_id,
         ProjectionWorkspace {
-            projection: projection.clone(),
+            projection,
             generation,
         },
     );
@@ -903,16 +912,6 @@ fn build_and_publish_projection(
             None => break,
         }
     }
-    drop(all);
-    while !projection.wait_until_complete(Duration::from_millis(25)) {
-        if cancellation.is_cancelled() {
-            projection.cancel();
-        }
-    }
-    if cancellation.is_cancelled() || projection.is_cancelled() {
-        return Err(AppError::cancelled());
-    }
-    projection.total_visible_rows()?;
     Ok(())
 }
 

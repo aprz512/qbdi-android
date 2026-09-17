@@ -76,3 +76,92 @@ test("switches artifacts after entering the timeline and exposes Flight complete
   await expect(page.getByRole("grid", { name: "Visible trace rows" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Completeness" })).toContainText("captured_sequence");
 });
+
+test("keeps a cross-segment viewport complete and refetches an evicted segment", async ({ page }) => {
+  test.setTimeout(60_000);
+  const pageSize = 2_000;
+  const pageCount = 6;
+  const total = pageSize * pageCount;
+  let firstPageRequests = 0;
+  let pageRequests = 0;
+  const cursors: Array<string | null> = [];
+  await page.route(/\/query_timeline$/, async (route) => {
+    pageRequests += 1;
+    const request = route.request().postDataJSON() as { cursor: string | null };
+    cursors.push(request.cursor);
+    const pageIndex = request.cursor === null ? 0 : Number(request.cursor);
+    if (pageIndex === 0) firstPageRequests += 1;
+    const first = pageIndex * pageSize;
+    const rows = Array.from({ length: pageSize }, (_, offset) => {
+      const sourceRow = first + offset;
+      return { source_row: sourceRow, key: { artifact_sha256: "a".repeat(64), timeline_id: "1", record_ordinal: String(sourceRow), source_offset: String(sourceRow * 8), sequence: String(sourceRow + 1), tid: 7 }, kind: "instruction", provenance: "captured", discontinuity: false };
+    });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: { rows, next_cursor: pageIndex + 1 < pageCount ? String(pageIndex + 1) : null, total, exact_total: true } }) });
+  });
+  await openWorkspace(page);
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  const timeline = page.getByRole("region", { name: "Timeline" });
+  await timeline.evaluate((element) => { (element as HTMLElement).style.height = "320px"; });
+  const scrollTop = await timeline.evaluate((element, rowCount) => { element.scrollTop = (rowCount - 10) * 24; element.dispatchEvent(new Event("scroll", { bubbles: true })); return element.scrollTop; }, total);
+  expect(scrollTop).toBeGreaterThan(250_000);
+  await expect.poll(() => pageRequests).toBeGreaterThanOrEqual(pageCount);
+  expect(cursors).toEqual([null, "1", "2", "3", "4", "5"]);
+  await expect(page.getByRole("row", { name: /11991 thread 7/ })).toBeVisible({ timeout: 30_000 });
+  await timeline.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll", { bubbles: true })); });
+  await expect(page.getByRole("row", { name: /^1 thread 7 / })).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => firstPageRequests).toBeGreaterThanOrEqual(2);
+});
+
+test("call-tree nodes fold and jump through the workspace", async ({ page }) => {
+  await page.route(/\/get_call_tree$/, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: { identity: "e2e-tree", timeline_id: "1", tid: 1, roots: [1], nodes: [
+    { id: 1, parent: null, children: [2], tid: 1, target: "0x1000", display: "root", source_row_start: 0, source_row_end_exclusive: 2, provenance: "captured", state: "complete" },
+    { id: 2, parent: 1, children: [], tid: 1, target: "0x1010", display: "child", source_row_start: 1, source_row_end_exclusive: 2, provenance: "derived", state: "incomplete" },
+  ] } }) }));
+  await openWorkspace(page);
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await page.getByRole("row").first().click();
+  await expect(page.getByRole("button", { name: /child · incomplete/ })).toBeVisible();
+  await page.getByRole("button", { name: "Collapse root" }).click();
+  await expect(page.getByRole("button", { name: /child · incomplete/ })).toBeHidden();
+  await page.getByRole("button", { name: "Expand root" }).click();
+  await page.getByRole("button", { name: /child · incomplete/ }).click();
+});
+
+test("reversed projection completion never queries the stale projection", async ({ page }) => {
+  let delayedProjection = "";
+  const queried = new Set<string>();
+  await page.route(/\/create_projection$/, async (route) => {
+    const request = route.request().postDataJSON() as { filter: { tids: number[] } };
+    const response = await route.fetch();
+    const envelope = await response.json() as { ok: { projection_id: string } };
+    if (request.filter.tids.length > 0) {
+      delayedProjection = envelope.ok.projection_id;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    await route.fulfill({ response });
+  });
+  await page.route(/\/query_timeline$/, async (route) => {
+    const request = route.request().postDataJSON() as { projection_id: string };
+    queried.add(request.projection_id);
+    await route.continue();
+  });
+  await openWorkspace(page);
+  await page.getByLabel("TID").fill("1");
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await page.getByLabel("TID").fill("");
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await expect(page.getByRole("grid", { name: "Visible trace rows" })).toBeVisible();
+  await page.waitForTimeout(400);
+  expect(delayedProjection).not.toBe("");
+  expect(queried.has(delayedProjection)).toBe(false);
+});
+
+test("cancelling a visible long semantic job retains the workspace", async ({ page }) => {
+  let cancelled = false;
+  await page.route(/\/list_jobs$/, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: cancelled ? [] : [{ id: "semantic-long", workspace_id: "e2e", kind: "projection", state: "running", progress: { completed: "1", total: "1000000" }, error: null }] }) }));
+  await page.route(/\/cancel_job$/, async (route) => { cancelled = true; await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: null }) }); });
+  await openWorkspace(page);
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("button", { name: "Close" })).toBeEnabled();
+  await expect(page.getByText(/Workspace /)).toBeVisible();
+});

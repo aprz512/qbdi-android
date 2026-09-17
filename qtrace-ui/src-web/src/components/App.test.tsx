@@ -135,8 +135,7 @@ describe("desktop shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load next 2,000 events" }));
     await waitFor(() => expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "projection-flight", "cursor-2", 2_000));
     await waitFor(() => expect(screen.getByRole("row", { name: /2001 thread 7/ })).toBeVisible());
-    fireEvent.click(screen.getByRole("button", { name: "Load previous 2,000 events" }));
-    await waitFor(() => expect(screen.getByRole("row", { name: /1997 thread 7/ })).toBeVisible());
+    expect(screen.getByRole("row", { name: /1997 thread 7/ })).toBeVisible();
   });
 
   it("reveals a history target by walking later cursor pages", async () => {

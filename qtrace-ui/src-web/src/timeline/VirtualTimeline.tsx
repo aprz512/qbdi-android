@@ -14,8 +14,8 @@ interface Props {
   workspaceId?: string;
   projectionId?: string;
   generation?: number;
-  onLoadMore?(): void;
-  onLoadPrevious?(): void;
+  onLoadMore?(): Promise<number | void>;
+  onLoadPrevious?(): Promise<number | void>;
   onRequestRange?(start: number, end: number, signal: AbortSignal): Promise<void>;
   onSelect?(row: EventRowDto): void;
 }
@@ -45,14 +45,14 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
     setVisible(range);
     controller.request({ workspaceId, projectionId, generation, ...range });
   }, [controller, generation, projectionId, totalRows, workspaceId]);
-  useEffect(updateViewport, [updateViewport]);
-  useEffect(() => {
-    const element = viewport.current;
-    if (element !== null && (visible.end <= pageStart || visible.start >= pageStart + rows.length)) {
-      element.scrollTop = pageStart * 24;
+  const loadAndFocus = async (load: (() => Promise<number | void>) | undefined) => {
+    const start = await load?.();
+    if (typeof start === "number" && viewport.current !== null) {
+      viewport.current.scrollTop = start * 24;
       updateViewport();
     }
-  }, [pageStart, rows.length, updateViewport, visible.end, visible.start]);
+  };
+  useEffect(updateViewport, [updateViewport]);
   useEffect(() => {
     const element = canvas.current;
     const context = element?.getContext("2d");
@@ -79,8 +79,8 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
           <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
         </div>
       </div>
-      {hasPrevious && <button className="timeline-load-previous" onClick={onLoadPrevious}>Load previous 2,000 events</button>}
-      {hasMore && <button className="timeline-load-more" onClick={onLoadMore}>Load next 2,000 events</button>}
+      {hasPrevious && <button className="timeline-load-previous" onClick={() => void loadAndFocus(onLoadPrevious)}>Load previous 2,000 events</button>}
+      {hasMore && <button className="timeline-load-more" onClick={() => void loadAndFocus(onLoadMore)}>Load next 2,000 events</button>}
     </section>
   );
 }
