@@ -96,8 +96,52 @@ pub struct SourceCoordinateDto {
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, TS)]
 pub struct EventFilterDto {
+    #[serde(default)]
     pub tids: Vec<u32>,
+    #[serde(default)]
     pub kinds: Vec<String>,
+    #[serde(default)]
+    pub modules: Vec<u32>,
+    #[serde(default)]
+    pub relative_pc: Vec<AddressRangeDto>,
+    #[serde(default)]
+    pub absolute_pc: Vec<AddressRangeDto>,
+    #[serde(default)]
+    pub sequence: Vec<SequenceRangeDto>,
+    #[serde(default)]
+    pub mnemonic: Vec<MnemonicFilterDto>,
+    #[serde(default)]
+    pub register_reads: Vec<String>,
+    #[serde(default)]
+    pub register_writes: Vec<String>,
+    #[serde(default)]
+    pub memory: Vec<MemoryFilterDto>,
+    #[serde(default)]
+    pub semantic_categories: Vec<String>,
+    #[serde(default)]
+    pub semantic_names: Vec<String>,
+    #[serde(default)]
+    pub semantic_detail_contains: Vec<String>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct AddressRangeDto {
+    pub start: HexU64Dto,
+    pub end_exclusive: HexU64Dto,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct SequenceRangeDto {
+    pub first: DecimalU64Dto,
+    pub last: DecimalU64Dto,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct MnemonicFilterDto {
+    pub mode: String,
+    pub value: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct MemoryFilterDto {
+    pub range: AddressRangeDto,
+    pub directions: Vec<String>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]

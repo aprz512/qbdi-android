@@ -4,7 +4,7 @@ import { InteractionLayer } from "./InteractionLayer";
 import { TraceCanvasRenderer, type RenderRow } from "./TraceCanvasRenderer";
 import "../styles/timeline.css";
 
-export function VirtualTimeline({ rows }: { rows: EventRowDto[] }) {
+export function VirtualTimeline({ rows, onSelect }: { rows: EventRowDto[]; onSelect?(row: EventRowDto): void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const displayRows = useMemo(() => rows.map(toRenderRow), [rows]);
@@ -29,7 +29,7 @@ export function VirtualTimeline({ rows }: { rows: EventRowDto[] }) {
   return (
     <section className="virtual-timeline" aria-label="Timeline">
       <canvas ref={canvas} aria-hidden="true" />
-      <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={setSelected} onExpand={setSelected} />
+      <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
     </section>
   );
 }

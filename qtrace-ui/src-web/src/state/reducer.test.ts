@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TimelinePageDto } from "../api/generated";
-import { initialState } from "./model";
+import { emptyFilter, initialState } from "./model";
 import { reducer } from "./reducer";
 
 const page: TimelinePageDto = { rows: [], next_cursor: null, total: 0, exact_total: true };
@@ -26,7 +26,7 @@ describe("application reducer", () => {
     expect(opened.phase).toBe("partial");
     const indexing = reducer(opened, { type: "indexingStarted", generation: 2 });
     expect(indexing.phase).toBe("indexing");
-    const filtered = reducer(indexing, { type: "filterChanged", filter: { tids: [7], kinds: [] } });
+    const filtered = reducer(indexing, { type: "filterChanged", filter: { ...emptyFilter(), tids: [7] } });
     expect(filtered.generation).toBe(3);
     const failed = reducer(filtered, {
       type: "failed",

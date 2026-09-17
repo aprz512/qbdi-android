@@ -8,11 +8,14 @@ use std::{
 };
 
 use qtrace_analysis::{
-    ByteState, CallTreeAnalyzer, CallTreeOptions, EventFilter, FrameState, MemoryAnalyzer,
-    MemoryEvidence, PageCursor, QueryContext, RegisterReplay, RegisterSnapshotState,
-    TimelineProjection, TimelineRow, query_events,
+    AddressRange, ByteState, CallTreeAnalyzer, CallTreeOptions, EventFilter, FrameState,
+    MemoryAnalyzer, MemoryEvidence, MemoryFilter, MnemonicFilter, PageCursor, QueryContext,
+    RegisterReplay, RegisterSnapshotState, SequenceRange, TimelineProjection, TimelineRow,
+    query_events,
 };
-use qtrace_provider::{ArtifactDigest, EventKey, EventKind, Provenance, RegisterSlot};
+use qtrace_provider::{
+    ArtifactDigest, EventKey, EventKind, MemoryDirection, Provenance, RegisterSlot,
+};
 use qtrace_store::{
     AnnotationOpenRequest, AnnotationStore, AuthorizedPath, BuildOptions, ElfLoadRequest,
     ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, IndexBuilder, ModuleIdentity, OpenPolicy,
@@ -593,6 +596,55 @@ fn open_limits() -> ServiceLimits {
 fn convert_filter(value: EventFilterDto) -> Result<EventFilter, AppError> {
     let mut filter = EventFilter {
         tids: value.tids,
+        modules: value.modules,
+        relative_pc: value
+            .relative_pc
+            .into_iter()
+            .map(|range| AddressRange::new(range.start.value(), range.end_exclusive.value()))
+            .collect::<Result<_, _>>()?,
+        absolute_pc: value
+            .absolute_pc
+            .into_iter()
+            .map(|range| AddressRange::new(range.start.value(), range.end_exclusive.value()))
+            .collect::<Result<_, _>>()?,
+        sequence: value
+            .sequence
+            .into_iter()
+            .map(|range| SequenceRange::new(range.first.value(), range.last.value()))
+            .collect::<Result<_, _>>()?,
+        mnemonic: value
+            .mnemonic
+            .into_iter()
+            .map(|matcher| match matcher.mode.as_str() {
+                "exact" => Ok(MnemonicFilter::Exact(matcher.value)),
+                "contains" => Ok(MnemonicFilter::Contains(matcher.value)),
+                _ => Err(AppError::new(
+                    "filter.mnemonic_mode_invalid",
+                    "projection",
+                    "mnemonic mode must be exact or contains",
+                )),
+            })
+            .collect::<Result<_, _>>()?,
+        memory: value
+            .memory
+            .into_iter()
+            .map(|memory| {
+                Ok(MemoryFilter {
+                    range: AddressRange::new(
+                        memory.range.start.value(),
+                        memory.range.end_exclusive.value(),
+                    )?,
+                    directions: memory
+                        .directions
+                        .into_iter()
+                        .map(|direction| memory_direction(&direction))
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, AppError>>()?,
+        semantic_categories: value.semantic_categories,
+        semantic_names: value.semantic_names,
+        semantic_detail_contains: value.semantic_detail_contains,
         ..EventFilter::default()
     };
     for kind in value.kinds {
@@ -606,7 +658,50 @@ fn convert_filter(value: EventFilterDto) -> Result<EventFilter, AppError> {
             })?,
         );
     }
+    filter.register.reads = value
+        .register_reads
+        .iter()
+        .map(|slot| register_slot(slot))
+        .collect::<Result<_, _>>()?;
+    filter.register.writes = value
+        .register_writes
+        .iter()
+        .map(|slot| register_slot(slot))
+        .collect::<Result<_, _>>()?;
     Ok(filter)
+}
+fn register_slot(value: &str) -> Result<RegisterSlot, AppError> {
+    match value.to_ascii_lowercase().as_str() {
+        "sp" => Ok(RegisterSlot::Sp),
+        "pc" => Ok(RegisterSlot::Pc),
+        "nzcv" => Ok(RegisterSlot::Nzcv),
+        name if name.starts_with('x') => name[1..]
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index <= 30)
+            .and_then(RegisterSlot::from_index)
+            .ok_or_else(|| {
+                AppError::new("filter.register_invalid", "projection", "invalid register")
+            }),
+        _ => Err(AppError::new(
+            "filter.register_invalid",
+            "projection",
+            "invalid register",
+        )),
+    }
+}
+fn memory_direction(value: &str) -> Result<MemoryDirection, AppError> {
+    match value {
+        "read" => Ok(MemoryDirection::Read),
+        "write" => Ok(MemoryDirection::Write),
+        "readwrite" => Ok(MemoryDirection::ReadWrite),
+        "unknown" => Ok(MemoryDirection::Unknown),
+        _ => Err(AppError::new(
+            "filter.memory_direction_invalid",
+            "projection",
+            "invalid memory direction",
+        )),
+    }
 }
 fn event_row(row: TimelineRow) -> Result<EventRowDto, AppError> {
     let (source_row, key, kind, provenance, discontinuity) = match row {

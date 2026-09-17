@@ -1,6 +1,8 @@
 import { useAppState } from "../state/AppStateProvider";
+import { JobsPane } from "./JobsPane";
+import { ResultsPane } from "./ResultsPane";
 
 export function BottomDock() {
   const { jobs } = useAppState();
-  return <footer className="bottom-dock" aria-label="Results and jobs"><strong>Results</strong><span>{jobs.length} jobs</span></footer>;
+  return <footer className="bottom-dock" aria-label="Results and jobs"><ResultsPane pages={[]} onJump={() => undefined} /><JobsPane jobs={jobs} onCancel={() => undefined} /></footer>;
 }

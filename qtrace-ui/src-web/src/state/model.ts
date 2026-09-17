@@ -9,6 +9,11 @@ import type {
 } from "../api/generated";
 
 export type WorkspacePhase = "empty" | "opening" | "indexing" | "ready" | "partial" | "failed";
+export const emptyFilter = (): EventFilterDto => ({
+  tids: [], kinds: [], modules: [], relative_pc: [], absolute_pc: [], sequence: [], mnemonic: [],
+  register_reads: [], register_writes: [], memory: [], semantic_categories: [], semantic_names: [],
+  semantic_detail_contains: [],
+});
 
 export interface AppState {
   phase: WorkspacePhase;
@@ -30,7 +35,7 @@ export const initialState: AppState = {
   generation: 0,
   opened: null,
   projectionId: null,
-  filter: { tids: [], kinds: [] },
+  filter: emptyFilter(),
   timelinePages: [],
   selectedEvent: null,
   viewport: { start: 0, end: 0 },
