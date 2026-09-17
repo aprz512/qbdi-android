@@ -17,6 +17,9 @@ impl JobCancellation {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+    pub(crate) fn token(&self) -> Arc<AtomicBool> {
+        self.0.clone()
+    }
 }
 #[derive(Clone, Default)]
 pub struct JobRegistry {

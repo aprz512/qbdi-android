@@ -487,8 +487,15 @@ thread_local! {
 
 impl TimelineProjection {
     pub fn new(context: Arc<QueryContext>, filter: EventFilter) -> Result<Self, AnalysisError> {
+        Self::new_with_cancellation(context, filter, Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn new_with_cancellation(
+        context: Arc<QueryContext>,
+        filter: EventFilter,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Self, AnalysisError> {
         let filter = filter.normalized()?;
-        let cancelled = Arc::new(AtomicBool::new(false));
         let planning_limit = projection_planning_work_limit(&context, &filter)
             .ok_or_else(|| AnalysisError::cpu_budget_exceeded("planning work budget overflow"))?;
         let guard = CandidateGuard::new(cancelled.clone(), planning_limit);

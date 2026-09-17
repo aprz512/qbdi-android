@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { TimelinePageDto } from "../api/generated";
 import type { PageRequest } from "./types";
 import { ViewportController } from "./ViewportController";
 
-const page = (total: number): TimelinePageDto => ({ rows: [], next_cursor: null, total, exact_total: true });
 const request = (generation: number, start: number, end: number): PageRequest => ({ workspaceId: "w", projectionId: "p", generation, start, end });
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
 
@@ -15,7 +13,7 @@ describe("ViewportController", () => {
   it("coalesces adjacent requests within one frame", () => {
     const scheduled: Array<() => void> = [];
     const seen: PageRequest[] = [];
-    const controller = new ViewportController(async (value) => { seen.push(value); return page(1); }, (callback) => scheduled.push(callback));
+    const controller = new ViewportController(async (value) => { seen.push(value); }, (callback) => scheduled.push(callback));
     controller.request(request(1, 0, 100));
     controller.request(request(1, 100, 200));
     scheduled[0]();
@@ -23,13 +21,23 @@ describe("ViewportController", () => {
   });
 
   it("does not publish an older generation that resolves last", async () => {
-    const resolvers: Array<(value: TimelinePageDto) => void> = [];
-    const controller = new ViewportController(() => new Promise((resolve) => resolvers.push(resolve)), (callback) => callback());
+    const resolvers: Array<() => void> = [];
+    const signals: AbortSignal[] = [];
+    const controller = new ViewportController((_value, signal) => new Promise((resolve) => { signals.push(signal); resolvers.push(resolve); }), (callback) => callback());
     controller.request(request(3, 0, 100));
     controller.request(request(4, 100, 200));
-    resolvers[1](page(4));
-    resolvers[0](page(3));
+    expect(signals[0].aborted).toBe(true);
+    resolvers[1]();
+    resolvers[0]();
     await flush();
-    expect(controller.currentPages()).toEqual([page(4)]);
+    expect(controller.completedRequests()).toEqual([request(4, 100, 200)]);
+  });
+
+  it("aborts an overlapping request when its exact range changes", () => {
+    const signals: AbortSignal[] = [];
+    const controller = new ViewportController((_value, signal) => new Promise(() => { signals.push(signal); }), (callback) => callback());
+    controller.request(request(1, 0, 100));
+    controller.request(request(1, 50, 150));
+    expect(signals[0].aborted).toBe(true);
   });
 });

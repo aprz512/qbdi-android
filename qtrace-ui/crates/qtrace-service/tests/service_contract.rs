@@ -214,3 +214,38 @@ async fn async_projection_returns_an_observable_job_before_querying() {
         .query_timeline(&opened.workspace.id, &projection.projection_id, None, 10)
         .unwrap();
 }
+
+#[tokio::test]
+async fn async_semantic_projection_honors_job_cancellation() {
+    let service = std::sync::Arc::new(QtraceService::new());
+    let opened = service
+        .open_session(AuthorizedPath::new(fixture("valid-mixed")))
+        .unwrap();
+    let projection = service
+        .clone()
+        .create_projection_task(
+            opened.workspace.id.clone(),
+            0,
+            EventFilterDto {
+                semantic_detail_contains: vec!["never-match".into()],
+                ..EventFilterDto::default()
+            },
+        )
+        .await
+        .unwrap();
+    service.cancel_job(&projection.job_id).unwrap();
+    loop {
+        let job = service
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == projection.job_id)
+            .unwrap();
+        match job.state {
+            JobState::Cancelled => break,
+            JobState::Queued | JobState::Running => tokio::task::yield_now().await,
+            JobState::Completed | JobState::Failed => {
+                panic!("cancelled projection job reached {:?}", job.state)
+            }
+        }
+    }
+}

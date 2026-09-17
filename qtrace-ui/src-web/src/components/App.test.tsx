@@ -48,6 +48,25 @@ const eventRow = (source_row: number) => ({
 });
 
 describe("desktop shell", () => {
+  it("retries cleanup when replacing a workspace whose close initially fails", async () => {
+    const closeWorkspace = vi.fn()
+      .mockRejectedValueOnce(new Error("busy"))
+      .mockResolvedValue(undefined);
+    const api = fakeApi({
+      pickAndOpenSession: vi.fn()
+        .mockResolvedValueOnce({ workspace: { id: "workspace-old", generation: 0, artifact_count: 0 }, artifacts: [], warnings: [] })
+        .mockResolvedValueOnce({ workspace: { id: "workspace-new", generation: 0, artifact_count: 0 }, artifacts: [], warnings: [] }),
+      closeWorkspace,
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-old/);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-new/);
+    await waitFor(() => expect(closeWorkspace).toHaveBeenCalledTimes(2), { timeout: 1_500 });
+    expect(closeWorkspace).toHaveBeenLastCalledWith("workspace-old");
+  });
+
   it("renders fixed semantic regions and session identity/warnings", async () => {
     render(<ApiProvider api={fakeApi()}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
     expect(screen.getByRole("banner")).toBeVisible();
@@ -91,8 +110,8 @@ describe("desktop shell", () => {
   });
 
   it("switches artifacts, shows completeness, and traverses cursor pages", async () => {
-    const firstRows = [eventRow(1)];
-    const secondRows = [eventRow(2)];
+    const firstRows = Array.from({ length: 2_000 }, (_, index) => eventRow(index + 1));
+    const secondRows = [eventRow(2_001)];
     const api = fakeApi({
       pickAndOpenSession: vi.fn().mockResolvedValue({
         workspace: { id: "workspace-7", generation: 0, artifact_count: 2 },
@@ -115,9 +134,37 @@ describe("desktop shell", () => {
     expect(await screen.findByText(/overwritten · damaged/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Load next 2,000 events" }));
     await waitFor(() => expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "projection-flight", "cursor-2", 2_000));
-    await waitFor(() => expect(screen.getByRole("row", { name: /2 thread 7/ })).toBeVisible());
+    await waitFor(() => expect(screen.getByRole("row", { name: /2001 thread 7/ })).toBeVisible());
     fireEvent.click(screen.getByRole("button", { name: "Load previous 2,000 events" }));
-    await waitFor(() => expect(screen.getByRole("row", { name: /1 thread 7/ })).toBeVisible());
+    await waitFor(() => expect(screen.getByRole("row", { name: /1997 thread 7/ })).toBeVisible());
+  });
+
+  it("reveals a history target by walking later cursor pages", async () => {
+    const first = eventRow(1);
+    const second = eventRow(2);
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-history", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn()
+        .mockResolvedValueOnce({ rows: [first], next_cursor: null, total: 1, exact_total: true })
+        .mockResolvedValueOnce({ rows: [second], next_cursor: null, total: 1, exact_total: true })
+        .mockResolvedValueOnce({ rows: [second], next_cursor: "history-next", total: 2, exact_total: true })
+        .mockResolvedValueOnce({ rows: [first], next_cursor: null, total: 2, exact_total: true }),
+      getEventDetail: vi.fn((_workspace, _artifact, row) => Promise.resolve({ artifact_index: 0, row, key: row === 1 ? first.key : second.key, kind: `detail-${row}`, provenance: "captured", raw_payload: "{}", module: null, relative_pc: null, memory_range: null })),
+      getRegisterState: vi.fn().mockResolvedValue({ key: first.key, before: [], after: [] }),
+      getCallTree: vi.fn().mockResolvedValue({ identity: "tree", timeline_id: "1", tid: 7, roots: [], nodes: [] }),
+      getAnnotation: vi.fn().mockResolvedValue(null),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-7/);
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    fireEvent.click(await screen.findByRole("row", { name: /1 thread 7/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    fireEvent.click(await screen.findByRole("row", { name: /2 thread 7/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Reveal in unfiltered timeline" }));
+    await waitFor(() => expect(api.queryTimeline).toHaveBeenCalledWith("workspace-7", "projection-history", "history-next", 2_000));
+    await waitFor(() => expect(api.getEventDetail).toHaveBeenLastCalledWith("workspace-7", 0, 1));
   });
 
   it("shows a local rename above ELF identity and supports edit/delete", async () => {

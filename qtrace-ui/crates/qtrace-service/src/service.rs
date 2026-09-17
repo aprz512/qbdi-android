@@ -866,7 +866,11 @@ fn build_and_publish_projection(
     if cancellation.is_cancelled() {
         return Err(AppError::cancelled());
     }
-    let projection = Arc::new(TimelineProjection::new(context, convert_filter(filter)?)?);
+    let projection = Arc::new(TimelineProjection::new_with_cancellation(
+        context,
+        convert_filter(filter)?,
+        cancellation.token(),
+    )?);
     if cancellation.is_cancelled() {
         projection.cancel();
         return Err(AppError::cancelled());
@@ -881,7 +885,7 @@ fn build_and_publish_projection(
     item.projections.insert(
         projection_id,
         ProjectionWorkspace {
-            projection,
+            projection: projection.clone(),
             generation,
         },
     );
@@ -899,6 +903,16 @@ fn build_and_publish_projection(
             None => break,
         }
     }
+    drop(all);
+    while !projection.wait_until_complete(Duration::from_millis(25)) {
+        if cancellation.is_cancelled() {
+            projection.cancel();
+        }
+    }
+    if cancellation.is_cancelled() || projection.is_cancelled() {
+        return Err(AppError::cancelled());
+    }
+    projection.total_visible_rows()?;
     Ok(())
 }
 

@@ -16,19 +16,24 @@ interface Props {
   generation?: number;
   onLoadMore?(): void;
   onLoadPrevious?(): void;
-  onRequestRange?(start: number, end: number): void;
+  onRequestRange?(start: number, end: number, signal: AbortSignal): Promise<void>;
   onSelect?(row: EventRowDto): void;
 }
 
 export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, hasMore = false, hasPrevious = false, workspaceId = "workspace", projectionId = "projection", generation = 0, onLoadMore, onLoadPrevious, onRequestRange, onSelect }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<HTMLElement>(null);
+  const requestRange = useRef(onRequestRange);
+  requestRange.current = onRequestRange;
+  const controllerIdentity = `${workspaceId}\0${projectionId}\0${generation}`;
   const [selected, setSelected] = useState<number | null>(null);
   const [visible, setVisible] = useState({ start: 0, end: Math.min(rows.length, 64) });
-  const controller = useMemo(() => new ViewportController(async (request) => {
-    onRequestRange?.(request.start, request.end);
-    return { rows: [], next_cursor: null, total: totalRows, exact_total: !hasMore };
-  }), [hasMore, onRequestRange, totalRows]);
+  const controller = useMemo(() => {
+    void controllerIdentity;
+    return new ViewportController(async (request, signal) => {
+      await requestRange.current?.(request.start, request.end, signal);
+    });
+  }, [controllerIdentity]);
   useEffect(() => () => controller.cancel(), [controller]);
   const localStart = Math.max(0, visible.start - pageStart);
   const localEnd = Math.max(localStart, Math.min(rows.length, visible.end - pageStart));
