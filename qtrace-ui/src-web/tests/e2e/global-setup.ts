@@ -23,5 +23,5 @@ export default async function globalSetup() {
     try { const response = await fetch("http://localhost:1421"); if (response.ok) break; } catch { /* retry startup */ }
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
-  await writeFile(RUNTIME_FILE, JSON.stringify({ serverPid: server.pid, vitePid: vite.pid, data }));
+  await writeFile(RUNTIME_FILE, JSON.stringify({ serverPid: server.pid, vitePid: vite.pid, data, url: readiness.url, token: readiness.token }));
 }

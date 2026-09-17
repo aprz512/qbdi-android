@@ -3,7 +3,9 @@
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
 };
 
 use qtrace_service::*;
@@ -13,9 +15,12 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 const MAX_REQUEST: u64 = 1024 * 1024;
+const MAX_CONCURRENCY: usize = 8;
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 
+#[derive(Clone)]
 struct State {
-    service: Arc<QtraceService>,
+    service: Arc<Mutex<Arc<QtraceService>>>,
     fixture_root: PathBuf,
     data_root: PathBuf,
     token: String,
@@ -43,14 +48,39 @@ fn main() {
         "{}",
         json!({ "url": format!("http://{address}"), "token": token })
     );
-    let state = State {
-        service: Arc::new(QtraceService::new()),
+    let state = Arc::new(State {
+        service: Arc::new(Mutex::new(Arc::new(QtraceService::new()))),
         fixture_root,
         data_root,
         token,
-    };
+    });
+    let (sender, receiver) = mpsc::sync_channel::<Request>(MAX_CONCURRENCY);
+    let receiver = Arc::new(Mutex::new(receiver));
+    for index in 0..MAX_CONCURRENCY {
+        let receiver = receiver.clone();
+        let state = state.clone();
+        thread::Builder::new()
+            .name(format!("qtrace-e2e-{index}"))
+            .spawn(move || worker(receiver, state))
+            .unwrap_or_else(|_| fail("cannot start loopback worker"));
+    }
     for request in server.incoming_requests() {
-        handle(request, &state);
+        if sender.send(request).is_err() {
+            fail("loopback workers stopped");
+        }
+    }
+}
+
+fn worker(receiver: Arc<Mutex<mpsc::Receiver<Request>>>, state: Arc<State>) {
+    loop {
+        let request = match receiver.lock() {
+            Ok(receiver) => receiver.recv(),
+            Err(_) => return,
+        };
+        match request {
+            Ok(request) => handle(request, &state),
+            Err(_) => return,
+        }
     }
 }
 
@@ -81,8 +111,32 @@ fn handle(mut request: Request, state: &State) {
         return;
     }
     let value = serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| json!({}));
-    let command = request.url().trim_start_matches('/');
-    let result = dispatch(command, value, state);
+    let command = request.url().trim_start_matches('/').to_owned();
+    let owned_state = state.clone();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if thread::Builder::new()
+        .name("qtrace-e2e-request".into())
+        .spawn(move || {
+            let _ = sender.send(dispatch(&command, value, &owned_state));
+        })
+        .is_err()
+    {
+        respond(
+            request,
+            StatusCode(500),
+            json!({ "error": AppError::worker_failed() }),
+        );
+        return;
+    }
+    let result = match receiver.recv_timeout(REQUEST_DEADLINE) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(AppError::new(
+            "e2e.deadline_exceeded",
+            "e2e",
+            "request exceeded 30-second deadline",
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(AppError::worker_failed()),
+    };
     match result {
         Ok(value) => respond(request, StatusCode(200), json!({ "ok": value })),
         Err(error) => respond(request, StatusCode(400), json!({ "error": error })),
@@ -90,15 +144,44 @@ fn handle(mut request: Request, state: &State) {
 }
 
 fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppError> {
-    let service = &state.service;
+    if command == "restart_service" {
+        *state
+            .service
+            .lock()
+            .map_err(|_| AppError::worker_failed())? = Arc::new(QtraceService::new());
+        return Ok(Value::Null);
+    }
+    let service = state
+        .service
+        .lock()
+        .map_err(|_| AppError::worker_failed())?
+        .clone();
     match command {
-        "pick_and_open_session" => to_value(service.open_session(AuthorizedPath::new(member(
-            &state.fixture_root,
-            "sessions/valid-mixed",
-        )?))?),
-        "pick_and_open_artifact" => to_value(service.open_artifact(AuthorizedPath::new(
-            member(&state.fixture_root, "qtrb/v1.2-completed.bin")?,
-        ))?),
+        "pick_and_open_session" => {
+            let fixture =
+                optional::<String>(&value, "fixture")?.unwrap_or_else(|| "valid-mixed".into());
+            let member_name = match fixture.as_str() {
+                "valid-mixed" => "sessions/valid-mixed",
+                "one-invalid-artifact" => "sessions/one-invalid-artifact",
+                _ => {
+                    return Err(AppError::new(
+                        "e2e.fixture_denied",
+                        "e2e",
+                        "fixture member is not allowed",
+                    ));
+                }
+            };
+            to_value(service.open_session(AuthorizedPath::new(member(
+                &state.fixture_root,
+                member_name,
+            )?))?)
+        }
+        "pick_and_open_artifact" => {
+            to_value(service.open_artifact(AuthorizedPath::new(member(
+                &state.fixture_root,
+                "sessions/valid-mixed/artifacts/main.trace.bin",
+            )?))?)
+        }
         "close_workspace" => {
             service.close_workspace(&field(&value, "workspace_id")?)?;
             Ok(Value::Null)
@@ -246,7 +329,9 @@ fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppErro
 fn member(root: &Path, name: &str) -> Result<PathBuf, AppError> {
     if !matches!(
         name,
-        "sessions/valid-mixed" | "sessions/one-invalid-artifact" | "qtrb/v1.2-completed.bin"
+        "sessions/valid-mixed"
+            | "sessions/one-invalid-artifact"
+            | "sessions/valid-mixed/artifacts/main.trace.bin"
     ) {
         return Err(AppError::new(
             "e2e.fixture_denied",

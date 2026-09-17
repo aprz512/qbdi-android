@@ -227,6 +227,10 @@ pub struct EventDetailDto {
     pub key: EventKeyDto,
     pub kind: String,
     pub provenance: String,
+    pub raw_payload: String,
+    pub module: Option<u32>,
+    pub relative_pc: Option<HexU64Dto>,
+    pub memory_range: Option<AddressRangeDto>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]

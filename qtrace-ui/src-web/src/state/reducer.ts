@@ -52,6 +52,7 @@ export function reducer(state: AppState, action: Action): AppState {
         generation: state.generation + 1,
         projectionId: null,
         timelinePages: [],
+        selectedEvent: null,
       };
     case "selectionChanged":
       return { ...state, selectedEvent: action.event };

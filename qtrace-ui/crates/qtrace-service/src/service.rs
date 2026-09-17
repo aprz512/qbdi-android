@@ -19,16 +19,16 @@ use qtrace_provider::{
 use qtrace_store::{
     AnnotationOpenRequest, AnnotationStore, AuthorizedPath, BuildOptions, ElfLoadRequest,
     ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, Highlight, IndexBuilder, LocalSymbolName,
-    ModuleIdentity, OpenPolicy, SessionLoader,
+    ModuleIdentity, OpenPolicy, SessionLoader, TraceStoreView,
 };
 
 use crate::workspace::{ArtifactWorkspace, ProjectionWorkspace, Workspace};
 use crate::{
-    AnnotationDto, AppError, ArtifactSummaryDto, CallNodeDto, CallTreeDto, DecimalU64Dto,
-    EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto, HexU64Dto, JobId, JobRegistry,
-    LocalSymbolNameDto, MemoryByteDto, MemoryEvidenceDto, MemoryStateDto, OpenWorkspaceDto,
-    ProjectionId, ProjectionJobDto, RegisterCellDto, RegisterStateDto, ServiceBudget,
-    ServiceLimits, SymbolDto, TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
+    AddressRangeDto, AnnotationDto, AppError, ArtifactSummaryDto, CallNodeDto, CallTreeDto,
+    DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto, HexU64Dto, JobId,
+    JobRegistry, LocalSymbolNameDto, MemoryByteDto, MemoryEvidenceDto, MemoryStateDto,
+    OpenWorkspaceDto, ProjectionId, ProjectionJobDto, RegisterCellDto, RegisterStateDto,
+    ServiceBudget, ServiceLimits, SymbolDto, TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
 };
 
 pub struct QtraceService {
@@ -244,12 +244,25 @@ impl QtraceService {
         let key = store.event_key(row_index).ok_or_else(event_missing)?;
         let kind = store.event_kind(row_index).ok_or_else(event_missing)?;
         let provenance = store.provenance(row_index).ok_or_else(event_missing)?;
+        let instruction = store.instruction(row_index);
+        let memory = store.memory(row_index);
+        let (module, relative_pc) = instruction
+            .map(|value| (value.module, Some(value.relative_pc)))
+            .or_else(|| memory.map(|value| (value.module, Some(value.relative_pc))))
+            .unwrap_or((None, None));
         Ok(EventDetailDto {
             artifact_index,
             row,
             key: event_key_dto(&key),
             kind: String::from_utf8_lossy(kind.external_tag()).into_owned(),
             provenance: provenance_name(provenance).into(),
+            raw_payload: String::from_utf8_lossy(store.payload_bytes(row_index)?).into_owned(),
+            module,
+            relative_pc: relative_pc.map(HexU64Dto::new),
+            memory_range: memory.map(|value| AddressRangeDto {
+                start: HexU64Dto::new(value.address),
+                end_exclusive: HexU64Dto::new(value.end_exclusive),
+            }),
         })
     }
 

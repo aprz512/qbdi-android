@@ -20,7 +20,7 @@ async function request<T>(command: string, value: object = {}): Promise<T> {
 }
 
 export class E2eQtraceApi implements QtraceApi {
-  pickAndOpenSession: QtraceApi["pickAndOpenSession"] = () => request("pick_and_open_session");
+  pickAndOpenSession: QtraceApi["pickAndOpenSession"] = () => request("pick_and_open_session", { fixture: new URLSearchParams(window.location.search).get("fixture") });
   pickAndOpenArtifact: QtraceApi["pickAndOpenArtifact"] = () => request("pick_and_open_artifact");
   closeWorkspace: QtraceApi["closeWorkspace"] = (workspace_id) => request("close_workspace", { workspace_id });
   getWorkspaceSummary: QtraceApi["getWorkspaceSummary"] = (workspace_id) => request("get_workspace_summary", { workspace_id });

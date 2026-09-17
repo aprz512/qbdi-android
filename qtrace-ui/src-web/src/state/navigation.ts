@@ -24,4 +24,6 @@ export class NavigationHistory {
   }
   current(): NavigationEntry | null { return this.entries[this.position] ?? null; }
   get length(): number { return this.entries.length; }
+  get canGoBack(): boolean { return this.position > 0; }
+  get canGoForward(): boolean { return this.position >= 0 && this.position < this.entries.length - 1; }
 }
