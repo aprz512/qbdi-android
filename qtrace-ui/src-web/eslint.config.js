@@ -22,4 +22,10 @@ export default tseslint.config(
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
     },
   },
+  {
+    files: ["src/timeline/TraceCanvasRenderer.ts"],
+    rules: {
+      "no-restricted-imports": ["error", { patterns: ["../api/*", "../state/*"] }],
+    },
+  },
 );

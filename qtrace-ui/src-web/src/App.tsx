@@ -4,6 +4,7 @@ import { LeftDock } from "./components/LeftDock";
 import { RightDock } from "./components/RightDock";
 import { SessionOverview } from "./components/SessionOverview";
 import { useAppState } from "./state/AppStateProvider";
+import { VirtualTimeline } from "./timeline/VirtualTimeline";
 
 export default function App() {
   const state = useAppState();
@@ -17,7 +18,7 @@ export default function App() {
         ) : state.opened === null || state.projectionId === null ? (
           <SessionOverview opened={state.opened} />
         ) : (
-          <section aria-label="Timeline"><canvas aria-label="Trace timeline" /></section>
+          <VirtualTimeline rows={state.timelinePages.flatMap((page) => page.rows)} />
         )}
       </main>
       <RightDock />
