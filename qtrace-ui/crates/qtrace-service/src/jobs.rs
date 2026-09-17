@@ -101,6 +101,11 @@ impl JobRegistry {
             }
         }
     }
+    pub fn cancel_all(&self) {
+        for entry in self.inner.jobs.lock().unwrap().values() {
+            entry.cancel.cancel();
+        }
+    }
     pub fn get(&self, id: &JobId) -> Option<JobDto> {
         self.inner
             .jobs

@@ -6,9 +6,25 @@ rust-version.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[features]
+default = []
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "tauri/wry"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 qtrace-service = { path = "../crates/qtrace-service", version = "0.1.0" }
-tauri = { version = "2", features = [] }
+qtrace-store = { path = "../crates/qtrace-store", version = "0.1.0" }
+serde = { workspace = true }
+tauri = { version = "2", optional = true, default-features = false, features = [] }
+tauri-plugin-dialog = { version = "2.7.3", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "qtrace-ui"
+path = "src/main.rs"
+required-features = ["desktop"]

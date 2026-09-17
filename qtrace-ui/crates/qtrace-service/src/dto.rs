@@ -71,6 +71,9 @@ impl HexU64Dto {
     pub fn new(value: u64) -> Self {
         Self(format!("0x{value:x}"))
     }
+    pub fn value(&self) -> u64 {
+        u64::from_str_radix(&self.0[2..], 16).expect("validated hexadecimal")
+    }
 }
 impl<'de> Deserialize<'de> for HexU64Dto {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {

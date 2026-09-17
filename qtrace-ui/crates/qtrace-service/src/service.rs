@@ -544,6 +544,9 @@ impl QtraceService {
     pub fn cancel_job(&self, id: &JobId) -> Result<(), AppError> {
         self.jobs.cancel(id)
     }
+    pub fn cancel_all(&self) {
+        self.jobs.cancel_all();
+    }
     fn artifact_store(
         &self,
         workspace: &WorkspaceId,
