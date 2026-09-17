@@ -1,6 +1,6 @@
 use std::{
     alloc::{Layout, alloc},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ffi::{OsStr, OsString},
     hash::{BuildHasher, Hash},
     mem::{align_of, size_of},
@@ -220,26 +220,6 @@ where
         return Ok(());
     }
     let (bytes, allowed_slack) = hash_table_bound::<K, V>(values.len(), additional)?;
-    let _scope = scope(guard, bytes, allowed_slack)?;
-    values
-        .try_reserve(additional)
-        .map_err(|_| AllocationFailure::Failed(label))
-}
-
-pub(crate) fn try_reserve_hash_set<K, S>(
-    values: &mut HashSet<K, S>,
-    additional: usize,
-    guard: &dyn WorkGuard,
-    label: &'static str,
-) -> Result<(), AllocationFailure>
-where
-    K: Eq + Hash,
-    S: BuildHasher,
-{
-    if additional == 0 || values.capacity().saturating_sub(values.len()) >= additional {
-        return Ok(());
-    }
-    let (bytes, allowed_slack) = hash_table_bound::<K, ()>(values.len(), additional)?;
     let _scope = scope(guard, bytes, allowed_slack)?;
     values
         .try_reserve(additional)

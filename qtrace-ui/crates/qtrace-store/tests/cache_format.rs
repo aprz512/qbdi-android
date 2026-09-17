@@ -185,20 +185,15 @@ fn mutate_section_payload(bytes: &mut Vec<u8>, name: &str, mutation: impl FnOnce
 fn known_section_payloads_are_validated_before_returning_a_view() {
     let cases = [
         ("event_kinds.v1", 0_usize, 0xff_u8),
-        ("event_keys.v1", 69_usize, 1_u8),
-        ("event_keys.v1", 0_usize, 0_u8),
-        ("event_keys.v1", 80_usize + 56, 1_u8),
-        ("event_keys.v1", 80_usize + 64, 1_u8),
+        ("event_keys.v1", 36_usize, 0xff_u8),
+        ("event_keys.v1", 37_usize, 1_u8),
+        ("event_keys.v1", 39_usize, 1_u8),
     ];
     for (name, byte, value) in cases {
         let root = private_root();
         mutate_file(root.path(), |bytes| {
             mutate_section_payload(bytes, name, |section| {
-                if name == "event_keys.v1" && byte == 0 {
-                    section[byte] ^= 1;
-                } else {
-                    section[byte] = value;
-                }
+                section[byte] = value;
             });
         });
         assert_eq!(

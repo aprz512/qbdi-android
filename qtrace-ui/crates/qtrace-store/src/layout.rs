@@ -4,7 +4,7 @@ use crate::cache::{CacheError, RebuildReason};
 
 pub(crate) const HEADER_BYTES: usize = 64;
 pub(crate) const CACHE_MAGIC: &[u8; 8] = b"QTCACHE\0";
-pub(crate) const EVENT_KEY_BYTES: usize = 80;
+pub(crate) const EVENT_KEY_BYTES: usize = 40;
 pub(crate) const EVENT_KEYS_SECTION: &str = "event_keys.v1";
 pub(crate) const EVENT_KINDS_SECTION: &str = "event_kinds.v1";
 
@@ -59,44 +59,45 @@ impl CacheHeader {
 
 pub(crate) fn encode_event_key(key: &EventKey, output: &mut [u8; EVENT_KEY_BYTES]) {
     output.fill(0);
-    output[0..32].copy_from_slice(key.artifact.as_bytes());
-    output[32..40].copy_from_slice(&key.timeline.0.to_le_bytes());
-    output[40..48].copy_from_slice(&key.record_ordinal.to_le_bytes());
-    output[48..56].copy_from_slice(&key.source_offset.to_le_bytes());
+    output[0..8].copy_from_slice(&key.timeline.0.to_le_bytes());
+    output[8..16].copy_from_slice(&key.record_ordinal.to_le_bytes());
+    output[16..24].copy_from_slice(&key.source_offset.to_le_bytes());
     if let Some(sequence) = key.sequence {
-        output[56..64].copy_from_slice(&sequence.to_le_bytes());
-        output[68] |= 1;
+        output[24..32].copy_from_slice(&sequence.to_le_bytes());
+        output[36] |= 1;
     }
     if let Some(tid) = key.tid {
-        output[64..68].copy_from_slice(&tid.to_le_bytes());
-        output[68] |= 2;
+        output[32..36].copy_from_slice(&tid.to_le_bytes());
+        output[36] |= 2;
     }
 }
 
-pub(crate) fn decode_event_key(input: &[u8; EVENT_KEY_BYTES]) -> Result<EventKey, CacheError> {
-    if input[69..].iter().any(|byte| *byte != 0) || input[68] & !3 != 0 {
+pub(crate) fn decode_event_key(
+    input: &[u8; EVENT_KEY_BYTES],
+    artifact: &[u8; 32],
+) -> Result<EventKey, CacheError> {
+    if input[37..].iter().any(|byte| *byte != 0) || input[36] & !3 != 0 {
         return Err(CacheError::access("event key has non-zero reserved bytes"));
     }
-    let artifact = ArtifactDigest::new(copy_array(&input[0..32]).map_err(CacheError::from)?);
     let timeline = TimelineId(u64::from_le_bytes(
-        copy_array(&input[32..40]).map_err(CacheError::from)?,
+        copy_array(&input[0..8]).map_err(CacheError::from)?,
     ));
-    let record_ordinal = u64::from_le_bytes(copy_array(&input[40..48]).map_err(CacheError::from)?);
-    let source_offset = u64::from_le_bytes(copy_array(&input[48..56]).map_err(CacheError::from)?);
-    let sequence_value = u64::from_le_bytes(copy_array(&input[56..64]).map_err(CacheError::from)?);
-    let tid_value = u32::from_le_bytes(copy_array(&input[64..68]).map_err(CacheError::from)?);
-    if (input[68] & 1 == 0 && sequence_value != 0) || (input[68] & 2 == 0 && tid_value != 0) {
+    let record_ordinal = u64::from_le_bytes(copy_array(&input[8..16]).map_err(CacheError::from)?);
+    let source_offset = u64::from_le_bytes(copy_array(&input[16..24]).map_err(CacheError::from)?);
+    let sequence_value = u64::from_le_bytes(copy_array(&input[24..32]).map_err(CacheError::from)?);
+    let tid_value = u32::from_le_bytes(copy_array(&input[32..36]).map_err(CacheError::from)?);
+    if (input[36] & 1 == 0 && sequence_value != 0) || (input[36] & 2 == 0 && tid_value != 0) {
         return Err(CacheError::access(
             "absent optional event-key fields must have zero wire values",
         ));
     }
     Ok(EventKey::new(
-        artifact,
+        ArtifactDigest::new(*artifact),
         timeline,
         record_ordinal,
         source_offset,
-        (input[68] & 1 != 0).then_some(sequence_value),
-        (input[68] & 2 != 0).then_some(tid_value),
+        (input[36] & 1 != 0).then_some(sequence_value),
+        (input[36] & 2 != 0).then_some(tid_value),
     ))
 }
 

@@ -11,7 +11,7 @@ use super::{
     SourceKeyRow,
     checkpoints::{RegisterAccess, RegisterObservationRow},
     intervals::{IntervalEntry, IntervalIndex},
-    postings::PostingList,
+    postings::{DeltaRun, PostingList},
 };
 
 pub(super) const CAPABILITIES: &str = "capabilities.v2";
@@ -58,6 +58,8 @@ const SEMANTIC_BYTES: u32 = 32;
 const COMPLETENESS_BYTES: u32 = 32;
 const OBSERVATION_BYTES: u32 = 24;
 const PAIR_BYTES: u32 = 16;
+const MAP_RUN_BYTES: u32 = 24;
+const LIST_RUN_BYTES: u32 = 16;
 const MODULE_PC_BYTES: u32 = 24;
 const INTERVAL_BYTES: u32 = 32;
 
@@ -79,17 +81,17 @@ pub(super) const EXACT_SECTIONS: &[(&str, u32, u32)] = &[
     (COMPLETENESS, 8, COMPLETENESS_BYTES),
     (REGISTER_OBSERVATIONS, 8, OBSERVATION_BYTES),
     (INDEX_META, 8, 16),
-    (TIMELINE_POSTINGS, 8, PAIR_BYTES),
-    (TID_POSTINGS, 8, PAIR_BYTES),
-    (KIND_POSTINGS, 8, PAIR_BYTES),
-    (MODULE_POSTINGS, 8, PAIR_BYTES),
-    (DEFINITION_POSTINGS, 8, PAIR_BYTES),
-    (REGISTER_POSTINGS, 8, PAIR_BYTES),
-    (SEMANTIC_CATEGORY_POSTINGS, 8, PAIR_BYTES),
-    (SEMANTIC_NAME_POSTINGS, 8, PAIR_BYTES),
-    (CALL_POSTINGS, 8, 8),
-    (RETURN_POSTINGS, 8, 8),
-    (CHECKPOINT_POSTINGS, 8, 8),
+    (TIMELINE_POSTINGS, 8, MAP_RUN_BYTES),
+    (TID_POSTINGS, 8, MAP_RUN_BYTES),
+    (KIND_POSTINGS, 8, MAP_RUN_BYTES),
+    (MODULE_POSTINGS, 8, MAP_RUN_BYTES),
+    (DEFINITION_POSTINGS, 8, MAP_RUN_BYTES),
+    (REGISTER_POSTINGS, 8, MAP_RUN_BYTES),
+    (SEMANTIC_CATEGORY_POSTINGS, 8, MAP_RUN_BYTES),
+    (SEMANTIC_NAME_POSTINGS, 8, MAP_RUN_BYTES),
+    (CALL_POSTINGS, 8, LIST_RUN_BYTES),
+    (RETURN_POSTINGS, 8, LIST_RUN_BYTES),
+    (CHECKPOINT_POSTINGS, 8, LIST_RUN_BYTES),
     (SEQUENCE_INDEX, 8, PAIR_BYTES),
     (MODULE_PC_INDEX, 8, MODULE_PC_BYTES),
     (MEMORY_INTERVALS, 8, INTERVAL_BYTES),
@@ -273,24 +275,24 @@ pub(super) fn encode(
             encode_map(&catalog.indexes.semantic_name, |key| u64::from(*key), guard)?,
         ),
     ] {
-        sections.push(section(name, 8, PAIR_BYTES, bytes));
+        sections.push(section(name, 8, MAP_RUN_BYTES, bytes));
     }
     sections.push(section(
         CALL_POSTINGS,
         8,
-        8,
+        LIST_RUN_BYTES,
         encode_list(&catalog.indexes.call, guard)?,
     ));
     sections.push(section(
         RETURN_POSTINGS,
         8,
-        8,
+        LIST_RUN_BYTES,
         encode_list(&catalog.indexes.return_rows, guard)?,
     ));
     sections.push(section(
         CHECKPOINT_POSTINGS,
         8,
-        8,
+        LIST_RUN_BYTES,
         encode_list(&catalog.indexes.checkpoint, guard)?,
     ));
     sections.push(section(
@@ -598,27 +600,29 @@ fn encode_map<K: Ord>(
     guard: &dyn WorkGuard,
 ) -> Result<Vec<u8>, IndexError> {
     let rows = map.values().try_fold(0usize, |n, list| {
-        n.checked_add(list.deltas().len())
+        n.checked_add(list.runs().len())
             .ok_or_else(|| IndexError::resource("posting section length overflow"))
     })?;
-    let mut out = Encoder::rows(rows, PAIR_BYTES, guard)?;
+    let mut out = Encoder::rows(rows, MAP_RUN_BYTES, guard)?;
     let mut ordinal = 0;
     for (field, list) in map.iter() {
-        for delta in list.deltas() {
+        for run in list.runs() {
             checkpoint(guard, ordinal)?;
             ordinal += 1;
             out.u64(key(field));
-            out.u64(*delta);
+            out.u64(run.delta);
+            out.u64(run.count);
         }
     }
     out.finish()
 }
 
 fn encode_list(list: &PostingList, guard: &dyn WorkGuard) -> Result<Vec<u8>, IndexError> {
-    let mut out = Encoder::rows(list.deltas().len(), 8, guard)?;
-    for (i, d) in list.deltas().iter().enumerate() {
+    let mut out = Encoder::rows(list.runs().len(), LIST_RUN_BYTES, guard)?;
+    for (i, run) in list.runs().iter().enumerate() {
         checkpoint(guard, i)?;
-        out.u64(*d);
+        out.u64(run.delta);
+        out.u64(run.count);
     }
     out.finish()
 }
@@ -1231,7 +1235,7 @@ fn decode_map<K: Ord>(
     key: impl Fn(u64) -> Result<K, IndexError>,
     guard: &dyn WorkGuard,
 ) -> Result<SortedMap<K, PostingList>, IndexError> {
-    let c = Cursor::new(bytes, PAIR_BYTES)?;
+    let c = Cursor::new(bytes, MAP_RUN_BYTES)?;
     let mut group_count = 0usize;
     for row in 0..c.rows() {
         checkpoint(guard, row)?;
@@ -1251,36 +1255,33 @@ fn decode_map<K: Ord>(
         while last < c.rows() && c.u64(last, 0)? == raw {
             last += 1;
         }
-        let mut deltas = reserved(last - first, "posting group", guard)?;
+        let mut runs = reserved(last - first, "posting group", guard)?;
         for row in first..last {
             checkpoint(guard, row)?;
             let delta = c.u64(row, 8)?;
-            if delta == 0 {
-                return Err(IndexError::corrupt("zero posting delta"));
-            }
-            deltas.push(delta);
+            let count = c.u64(row, 16)?;
+            runs.push(DeltaRun { delta, count });
         }
         guard.consume(WorkDelta {
             nodes: 1,
             ..WorkDelta::default()
         })?;
-        grouped.push((k, PostingList::from_deltas(deltas)));
+        grouped.push((k, PostingList::from_runs(runs)?));
         first = last;
     }
     SortedMap::from_sorted(grouped)
 }
 fn decode_list(bytes: &[u8], guard: &dyn WorkGuard) -> Result<PostingList, IndexError> {
-    let c = Cursor::new(bytes, 8)?;
+    let c = Cursor::new(bytes, LIST_RUN_BYTES)?;
     let mut out = reserved(c.rows(), "posting list", guard)?;
     for r in 0..c.rows() {
         checkpoint(guard, r)?;
-        let d = c.u64(r, 0)?;
-        if d == 0 {
-            return Err(IndexError::corrupt("zero posting delta"));
-        }
-        out.push(d);
+        out.push(DeltaRun {
+            delta: c.u64(r, 0)?,
+            count: c.u64(r, 8)?,
+        });
     }
-    Ok(PostingList::from_deltas(out))
+    PostingList::from_runs(out)
 }
 fn decode_pairs(bytes: &[u8], guard: &dyn WorkGuard) -> Result<Vec<(u64, usize)>, IndexError> {
     let c = Cursor::new(bytes, PAIR_BYTES)?;
@@ -1372,11 +1373,9 @@ fn decode_source_rows(
     for r in 0..c.rows() {
         checkpoint(guard, r)?;
         let row = usize_value(c.u64(r, 0)?)?;
-        let key = keys
-            .get(row)
-            .ok_or_else(|| IndexError::corrupt("source row outside keys"))?
-            .clone();
-        out.push(SourceKeyRow { key, row });
+        keys.get(row)
+            .ok_or_else(|| IndexError::corrupt("source row outside keys"))?;
+        out.push(SourceKeyRow { row });
     }
     Ok(out)
 }

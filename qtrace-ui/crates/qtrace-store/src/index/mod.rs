@@ -711,7 +711,6 @@ impl CompletenessRow {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct SourceKeyRow {
-    key: EventKey,
     row: usize,
 }
 
@@ -806,77 +805,7 @@ struct NormalizedCatalog {
     indexes: IndexCatalog,
 }
 
-struct GuardedDigest<'a> {
-    digest: Sha256,
-    guard: &'a dyn WorkGuard,
-    pending: [u8; 4096],
-    pending_bytes: usize,
-}
-
-impl GuardedDigest<'_> {
-    fn bytes(&mut self, mut bytes: &[u8]) -> Result<(), IndexError> {
-        while !bytes.is_empty() {
-            let count = bytes.len().min(4096 - self.pending_bytes);
-            self.pending[self.pending_bytes..self.pending_bytes + count]
-                .copy_from_slice(&bytes[..count]);
-            self.pending_bytes += count;
-            bytes = &bytes[count..];
-            if self.pending_bytes == 4096 {
-                self.flush()?;
-            }
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), IndexError> {
-        let count = self.pending_bytes;
-        guarded_byte_chunks(&self.pending[..count], self.guard, |chunk| {
-            self.digest.update(chunk);
-        })?;
-        self.pending_bytes = 0;
-        Ok(())
-    }
-
-    fn u8(&mut self, value: u8) -> Result<(), IndexError> {
-        self.bytes(&[value])
-    }
-
-    fn u16(&mut self, value: u16) -> Result<(), IndexError> {
-        self.bytes(&value.to_le_bytes())
-    }
-
-    fn u32(&mut self, value: u32) -> Result<(), IndexError> {
-        self.bytes(&value.to_le_bytes())
-    }
-
-    fn u64(&mut self, value: u64) -> Result<(), IndexError> {
-        self.bytes(&value.to_le_bytes())
-    }
-
-    fn usize(&mut self, value: usize) -> Result<(), IndexError> {
-        self.u64(
-            u64::try_from(value).map_err(|_| {
-                IndexError::resource("normalized digest row index does not fit u64")
-            })?,
-        )
-    }
-
-    fn option_u32(&mut self, value: Option<u32>) -> Result<(), IndexError> {
-        self.u8(u8::from(value.is_some()))?;
-        self.u32(value.unwrap_or_default())
-    }
-
-    fn option_u64(&mut self, value: Option<u64>) -> Result<(), IndexError> {
-        self.u8(u8::from(value.is_some()))?;
-        self.u64(value.unwrap_or_default())
-    }
-
-    fn finish(mut self) -> Result<NormalizedContentIdentity, IndexError> {
-        self.flush()?;
-        Ok(NormalizedContentIdentity(self.digest.finalize().into()))
-    }
-}
-
+#[cfg(test)]
 fn guarded_byte_chunks(
     bytes: &[u8],
     guard: &dyn WorkGuard,
@@ -911,148 +840,23 @@ fn derive_normalized_content_identity(
     source_format: NormalizedSourceFormat,
     guard: &dyn WorkGuard,
 ) -> Result<NormalizedContentIdentity, IndexError> {
-    let mut out = GuardedDigest {
-        digest: Sha256::new(),
-        guard,
-        pending: [0; 4096],
-        pending_bytes: 0,
-    };
-    out.bytes(b"qtrace-store/normalized-content/v1\0sha256\0canonical-logical-catalog")?;
-    out.u32(catalog.schema)?;
-    out.u8(match source_format {
+    if keys.len() != kinds.len() || catalog.events.len() != keys.len() {
+        return Err(IndexError::corrupt("normalized content identity shape"));
+    }
+    guard.consume(WorkDelta::default())?;
+    let mut digest = Sha256::new();
+    digest.update(b"qtrace-store/normalized-content/v2\0source-identity");
+    digest.update(catalog.schema.to_le_bytes());
+    digest.update([match source_format {
         NormalizedSourceFormat::Qtrb => 0,
         NormalizedSourceFormat::Flight => 1,
         NormalizedSourceFormat::Other => 2,
-    })?;
-
-    out.usize(keys.len())?;
-    for (key, kind) in keys.iter().zip(kinds) {
-        out.bytes(key.artifact.as_bytes())?;
-        out.u64(key.timeline.0)?;
-        out.u64(key.record_ordinal)?;
-        out.u64(key.source_offset)?;
-        out.option_u64(key.sequence)?;
-        out.option_u32(key.tid)?;
-        out.u8(crate::layout::encode_event_kind(*kind))?;
+    }]);
+    digest.update((keys.len() as u64).to_le_bytes());
+    if let Some(first) = keys.first() {
+        digest.update(first.artifact.as_bytes());
     }
-
-    for bit in [
-        catalog.capabilities.global_ordering,
-        catalog.capabilities.per_thread_ordering,
-        catalog.capabilities.full_register_checkpoint,
-        catalog.capabilities.register_read_write_observation,
-        catalog.capabilities.memory_metadata,
-        catalog.capabilities.memory_before_after,
-        catalog.capabilities.lifecycle,
-        catalog.capabilities.signal_and_termination,
-        catalog.capabilities.loss_and_damage_ranges,
-    ] {
-        out.u8(u8::from(bit))?;
-    }
-    out.usize(catalog.events.len())?;
-    for row in &catalog.events {
-        out.u64(row.timeline)?;
-        out.option_u32(row.tid)?;
-        out.option_u64(row.sequence)?;
-        match row.scope {
-            EventScope::Artifact => out.u8(0)?,
-            EventScope::FlightChunk {
-                chunk_index,
-                generation,
-                tid,
-            } => {
-                out.u8(1)?;
-                out.u32(chunk_index)?;
-                out.u32(generation)?;
-                out.u32(tid)?;
-            }
-        }
-        out.u8(wire::provenance(row.provenance))?;
-        out.u32(row.payload_blob)?;
-    }
-    for arena in [&catalog.payloads, &catalog.strings, &catalog.blobs] {
-        out.usize(arena.spans().len())?;
-        for span in arena.spans() {
-            out.u64(span.length)?;
-        }
-        out.usize(arena.bytes.as_slice().len())?;
-        out.bytes(arena.bytes.as_slice())?;
-    }
-    out.usize(catalog.modules.len())?;
-    for row in &catalog.modules {
-        out.usize(row.source_event_row)?;
-        out.u8(wire::provenance(row.provenance))?;
-        out.u32(row.source_id)?;
-        out.u64(row.base)?;
-        out.u32(row.name)?;
-    }
-    out.usize(catalog.definitions.len())?;
-    for row in &catalog.definitions {
-        out.usize(row.source_event_row)?;
-        out.u8(wire::provenance(row.provenance))?;
-        out.u32(row.source_id)?;
-        out.u32(row.opcode)?;
-        out.u64(row.read_mask)?;
-        out.u64(row.write_mask)?;
-        out.u64(row.pc_displacement as u64)?;
-        out.u32(row.flags)?;
-        out.u8(wire::pc_kind(row.pc_kind))?;
-        out.u8(row.condition)?;
-        out.u8(u8::from(row.slow_memory_path))?;
-        out.u32(row.mnemonic)?;
-        out.u32(row.operands)?;
-        out.u32(row.disassembly)?;
-        out.u32(row.exact_blob)?;
-    }
-    out.usize(catalog.instructions.len())?;
-    for row in &catalog.instructions {
-        out.usize(row.owner_row)?;
-        out.option_u32(row.module)?;
-        out.u64(row.relative_pc)?;
-        out.option_u32(row.definition)?;
-    }
-    out.usize(catalog.memories.len())?;
-    for row in &catalog.memories {
-        out.usize(row.owner_row)?;
-        out.option_u32(row.module)?;
-        out.u64(row.relative_pc)?;
-        out.u64(row.address)?;
-        out.u64(row.end_exclusive)?;
-        out.u32(row.size)?;
-        out.u8(wire::memory_direction(row.direction))?;
-        out.u8(u8::from(row.metadata_available))?;
-        out.u16(row.flags)?;
-        out.u64(row.value)?;
-        out.u32(row.before_blob)?;
-        out.u32(row.after_blob)?;
-    }
-    out.usize(catalog.semantics.len())?;
-    for row in &catalog.semantics {
-        out.usize(row.owner_row)?;
-        out.option_u32(row.category)?;
-        out.u32(row.name)?;
-        out.u32(row.detail_blob)?;
-    }
-    out.usize(catalog.observations.len())?;
-    for row in &catalog.observations {
-        out.usize(row.owner_row)?;
-        out.u8(row.slot)?;
-        out.u8(row.captured_width)?;
-        out.u8(wire::register_access(row.access))?;
-        out.u64(row.value)?;
-        out.u8(wire::provenance(row.provenance))?;
-    }
-    out.usize(catalog.completeness.len())?;
-    for row in &catalog.completeness {
-        out.u8(wire::range_domain(row.domain))?;
-        let (kind, start, end) = wire::range_bounds(row.bounds);
-        out.u8(kind)?;
-        out.u64(start)?;
-        out.u64(end)?;
-        out.u8(wire::provenance(row.provenance))?;
-        out.u8(wire::completeness_cause(row.cause))?;
-    }
-    out.finish()
+    Ok(NormalizedContentIdentity(digest.finalize().into()))
 }
 
 impl NormalizedCatalog {
@@ -1186,9 +990,6 @@ impl NormalizedCatalog {
                     "normalized source coordinates disagree",
                 ));
             }
-            self.payloads.get(event.payload_blob).map_err(|error| {
-                IndexError::corrupt(format!("event payload reference is invalid: {error}"))
-            })?;
         }
         let interval_block_rows = u32::try_from(self.indexes.memory.block_rows())
             .map_err(|_| IndexError::corrupt("interval block size does not fit u32"))?;
@@ -1438,7 +1239,7 @@ fn bounded_posting_union(
     for list in lists {
         consume_row_work(guard, 1)?;
         total = total
-            .checked_add(list.deltas().len())
+            .checked_add(list.row_count())
             .filter(|total| *total <= max_rows)
             .ok_or_else(|| IndexError::resource("bounded posting result exceeds row limit"))?;
     }
@@ -1452,27 +1253,30 @@ fn bounded_posting_union(
     )?;
     for list in lists {
         let mut previous = None::<u64>;
-        for chunk in list.deltas().chunks(4096) {
-            consume_row_work(guard, chunk.len())?;
-            for delta in chunk.iter().copied() {
-                if delta == 0 {
-                    return Err(IndexError::corrupt("posting delta is zero"));
-                }
-                let row = match previous {
-                    None => delta
-                        .checked_sub(1)
-                        .ok_or_else(|| IndexError::corrupt("first posting delta underflow"))?,
-                    Some(previous) => previous
-                        .checked_add(delta)
-                        .ok_or_else(|| IndexError::corrupt("posting delta overflow"))?,
-                };
-                rows.push(
-                    usize::try_from(row)
-                        .map_err(|_| IndexError::corrupt("posting row does not fit usize"))?,
-                );
-                previous = Some(row);
+        let mut visited = 0usize;
+        list.visit_deltas(|delta| {
+            if visited % 4096 == 0 {
+                consume_row_work(guard, list.row_count().saturating_sub(visited).min(4096))?;
             }
-        }
+            visited += 1;
+            if delta == 0 {
+                return Err(IndexError::corrupt("posting delta is zero"));
+            }
+            let row = match previous {
+                None => delta
+                    .checked_sub(1)
+                    .ok_or_else(|| IndexError::corrupt("first posting delta underflow"))?,
+                Some(previous) => previous
+                    .checked_add(delta)
+                    .ok_or_else(|| IndexError::corrupt("posting delta overflow"))?,
+            };
+            rows.push(
+                usize::try_from(row)
+                    .map_err(|_| IndexError::corrupt("posting row does not fit usize"))?,
+            );
+            previous = Some(row);
+            Ok(())
+        })?;
     }
     if lists.len() > 1 {
         radix_sort_unique_rows(&mut rows, guard)?;
@@ -1521,7 +1325,7 @@ where
                 .checked_add(1)
                 .ok_or_else(|| IndexError::resource("bounded posting list count overflow"))?;
             encoded_rows = encoded_rows
-                .checked_add(list.deltas().len())
+                .checked_add(list.row_count())
                 .ok_or_else(|| IndexError::resource("bounded posting row count overflow"))?;
             if encoded_rows > max_rows {
                 return Err(IndexError::resource(
@@ -1828,13 +1632,20 @@ fn rows_for_semantic_bytes(
     }
 }
 
-fn row_for_source(catalog: &NormalizedCatalog, key: &EventKey) -> Option<usize> {
-    catalog
-        .indexes
-        .source_keys
-        .binary_search_by(|entry| compare_event_keys(&entry.key, key))
-        .ok()
-        .map(|index| catalog.indexes.source_keys[index].row)
+fn row_for_source<T: HasNormalizedCatalog>(store: &T, key: &EventKey) -> Option<usize> {
+    let rows = &store.normalized_catalog().indexes.source_keys;
+    let mut left = 0;
+    let mut right = rows.len();
+    while left < right {
+        let middle = left + (right - left) / 2;
+        let row = rows[middle].row;
+        match compare_event_keys(&store.base_event_key(row).ok()?, key) {
+            std::cmp::Ordering::Less => left = middle + 1,
+            std::cmp::Ordering::Greater => right = middle,
+            std::cmp::Ordering::Equal => return Some(row),
+        }
+    }
+    None
 }
 
 fn rows_for_sequence(catalog: &NormalizedCatalog, start: u64, end: u64) -> Vec<usize> {
@@ -1920,12 +1731,7 @@ impl OwnedTraceStore {
     }
 
     pub fn row_for_key(&self, key: &EventKey) -> Option<usize> {
-        self.catalog
-            .indexes
-            .source_keys
-            .binary_search_by(|entry| compare_event_keys(&entry.key, key))
-            .ok()
-            .map(|index| self.catalog.indexes.source_keys[index].row)
+        row_for_source(self, key)
     }
 
     pub fn rows_of_kind(&self, kind: EventKind) -> Rows {
@@ -2342,7 +2148,7 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
             .overlaps(start, end)
     }
     fn row_for_source_key(&self, key: &EventKey) -> Option<usize> {
-        row_for_source(self.normalized_catalog(), key)
+        row_for_source(self, key)
     }
     fn source_key_for_row(&self, row: usize) -> Result<Option<EventKey>, IndexError> {
         TraceStoreView::event_key(self, row)
@@ -2634,7 +2440,7 @@ fn bounded_semantic_estimate(
                 .checked_add(1)
                 .ok_or_else(|| IndexError::resource("bounded posting list count overflow"))?;
             count = count
-                .checked_add(list.deltas().len())
+                .checked_add(list.row_count())
                 .ok_or_else(|| IndexError::resource("bounded posting row count overflow"))?;
             if count > max_rows {
                 return Err(IndexError::resource(
@@ -2852,7 +2658,7 @@ fn cache_identity(
         build_option_digest: options.digest(),
         cache_schema: 2,
         endian: crate::allocation::try_copy_string("little", guard, "cache endian")?,
-        layout_version: 2,
+        layout_version: 3,
         source_features: 0,
         source_format: crate::allocation::try_copy_string(
             &provider.format,

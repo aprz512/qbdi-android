@@ -68,6 +68,11 @@ impl Error for OperationAbort {}
 pub trait WorkGuard: Send + Sync {
     fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort>;
 
+    /// Maximum independent validation workers the caller may use.
+    fn parallelism(&self) -> usize {
+        1
+    }
+
     /// Authorizes one immediately-following heap-allocation operation.
     ///
     /// Implementations that observe allocator requests may override this hook to bind the

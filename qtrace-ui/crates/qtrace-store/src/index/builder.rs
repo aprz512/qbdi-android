@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::HashMap, hash::Hash};
 
 use qtrace_provider::{
     EventKind, EventPayload, EventRecord, EventScope, Provenance, ProviderCapabilities,
@@ -76,7 +76,6 @@ struct BuildState<'a> {
     semantics: Vec<SemanticRow>,
     observations: Vec<RegisterObservationRow>,
     completeness: Vec<CompletenessRow>,
-    source_keys: HashSet<qtrace_provider::EventKey>,
     module_by_source: HashMap<(EventScope, u32), (u32, u64, u32)>,
     module_by_semantic: HashMap<(u64, u32), u32>,
     definition_by_source: HashMap<(EventScope, u32), (u32, u32)>,
@@ -127,7 +126,6 @@ impl<'a> BuildState<'a> {
             semantics: Vec::new(),
             observations: Vec::new(),
             completeness: Vec::new(),
-            source_keys: HashSet::new(),
             module_by_source: HashMap::new(),
             module_by_semantic: HashMap::new(),
             definition_by_source: HashMap::new(),
@@ -156,17 +154,6 @@ impl<'a> BuildState<'a> {
         payload_blob: u32,
         guard: &dyn WorkGuard,
     ) -> Result<(), IndexError> {
-        if self.retain_source_columns {
-            crate::allocation::try_reserve_hash_set(
-                &mut self.source_keys,
-                1,
-                guard,
-                "source-key set allocation",
-            )?;
-            if !self.source_keys.insert(event.key.clone()) {
-                return Err(IndexError::duplicate_key("duplicate source EventKey"));
-            }
-        }
         let row = self.next_row;
         self.next_row = self
             .next_row
@@ -647,17 +634,10 @@ pub(super) fn validate_cached_truth(
     let mut module_cursor = 0;
     let mut definition_cursor = 0;
     let mut discontinuity_count = 0_usize;
-    for (row, kind) in kinds.iter().copied().enumerate() {
-        if row % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        let bytes = catalog.payloads.get(catalog.events[row].payload_blob)?;
-        validate_external_payload_tag(bytes, kind)?;
-        if kind == EventKind::Discontinuity {
-            discontinuity_count = discontinuity_count
-                .checked_add(1)
-                .ok_or_else(|| IndexError::resource("discontinuity count overflow"))?;
-        }
+    for kind in kinds {
+        discontinuity_count = discontinuity_count
+            .checked_add(usize::from(*kind == EventKind::Discontinuity))
+            .ok_or_else(|| IndexError::resource("discontinuity count overflow"))?;
     }
     let mut discontinuities = Vec::new();
     crate::allocation::try_reserve_vec(
@@ -666,12 +646,54 @@ pub(super) fn validate_cached_truth(
         guard,
         "discontinuity evidence allocation",
     )?;
+    let mut validated_opaque_payloads = HashMap::<u32, ()>::new();
+    let mut last_validated_opaque = None;
     for (row, kind) in kinds.iter().copied().enumerate() {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
         }
-        let bytes = catalog.payloads.get(catalog.events[row].payload_blob)?;
+        let payload_blob = catalog.events[row].payload_blob;
+        if kind == EventKind::OpaqueOptional && last_validated_opaque == Some(payload_blob) {
+            state.next_row = state
+                .next_row
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("event row count overflow"))?;
+            continue;
+        }
+        let bytes = catalog.payloads.get(payload_blob)?;
         validate_external_payload_tag(bytes, kind)?;
+        if kind == EventKind::OpaqueOptional {
+            if !validated_opaque_payloads.contains_key(&payload_blob) {
+                let decoded: EventPayload = {
+                    let resident =
+                        crate::allocation::payload_decode_upper_bound(kind, bytes.len())?;
+                    let _scope = crate::allocation::scope(guard, resident, resident)?;
+                    serde_json::from_slice(bytes).map_err(|_| {
+                        IndexError::corrupt("canonical event payload cannot be decoded")
+                    })?
+                };
+                if !matches!(decoded, EventPayload::OpaqueOptional(_))
+                    || canonical_bytes(&decoded, guard)? != bytes
+                {
+                    return Err(IndexError::corrupt(
+                        "opaque event payload bytes are not canonical",
+                    ));
+                }
+                crate::allocation::try_reserve_hash_map(
+                    &mut validated_opaque_payloads,
+                    1,
+                    guard,
+                    "opaque payload validation cache",
+                )?;
+                validated_opaque_payloads.insert(payload_blob, ());
+            }
+            last_validated_opaque = Some(payload_blob);
+            state.next_row = state
+                .next_row
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("event row count overflow"))?;
+            continue;
+        }
         let payload: EventPayload = {
             let resident = crate::allocation::payload_decode_upper_bound(kind, bytes.len())?;
             let _scope = crate::allocation::scope(guard, resident, resident)?;
@@ -772,6 +794,7 @@ pub(super) fn validate_cached_truth(
     validate_completeness_rows(source_completeness, guard).map_err(cached_rebuild_error)?;
     if source_format.eq_ignore_ascii_case("flight") {
         cancellable_sort_by(&mut discontinuities, guard, compare_completeness_rows)?;
+        discontinuities.dedup();
         let mut evidence = discontinuities.iter();
         for (ordinal, source) in source_completeness
             .iter()
@@ -943,34 +966,11 @@ pub(super) fn build_indexes(
     options: &BuildOptions,
     guard: &dyn WorkGuard,
 ) -> Result<IndexCatalog, IndexError> {
-    let mut timeline_pairs = reserved_pairs(events.len(), "timeline index", guard)?;
-    for (row, event) in events.iter().enumerate() {
-        if row % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        timeline_pairs.push((event.timeline, row));
-    }
-    let timeline = keyed_postings(timeline_pairs, guard)?;
-
-    let mut tid_pairs = reserved_pairs(events.len(), "TID index", guard)?;
-    for (row, event) in events.iter().enumerate() {
-        if row % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        if let Some(value) = event.tid {
-            tid_pairs.push((value, row));
-        }
-    }
-    let tid = keyed_postings(tid_pairs, guard)?;
-
-    let mut kind_pairs = reserved_pairs(events.len(), "kind index", guard)?;
-    for (row, kind) in kinds.iter().copied().enumerate() {
-        if row % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        kind_pairs.push((crate::layout::encode_event_kind(kind), row));
-    }
-    let kind = keyed_postings(kind_pairs, guard)?;
+    let timeline = keyed_posting_partition(events.len(), guard, |row| Some(events[row].timeline))?;
+    let tid = keyed_posting_partition(events.len(), guard, |row| events[row].tid)?;
+    let kind = keyed_posting_partition(kinds.len(), guard, |row| {
+        Some(crate::layout::encode_event_kind(kinds[row]))
+    })?;
 
     let mut sequence = reserved_pairs(events.len(), "sequence index", guard)?;
     for (row, event) in events.iter().enumerate() {
@@ -1107,15 +1107,26 @@ pub(super) fn build_indexes(
         guard,
         "source-key index allocation",
     )?;
-    for (row, key) in keys.iter().cloned().enumerate() {
+    for row in 0..keys.len() {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
         }
-        source_keys.push(SourceKeyRow { key, row });
+        source_keys.push(SourceKeyRow { row });
     }
-    cancellable_sort_by(&mut source_keys, guard, |left, right| {
-        super::compare_event_keys(&left.key, &right.key)
-    })?;
+    if !keys
+        .windows(2)
+        .all(|pair| super::compare_event_keys(&pair[0], &pair[1]).is_lt())
+    {
+        cancellable_sort_by(&mut source_keys, guard, |left, right| {
+            super::compare_event_keys(&keys[left.row], &keys[right.row])
+        })?;
+    }
+    if source_keys
+        .windows(2)
+        .any(|pair| super::compare_event_keys(&keys[pair[0].row], &keys[pair[1].row]).is_eq())
+    {
+        return Err(IndexError::duplicate_key("duplicate source EventKey"));
+    }
     Ok(IndexCatalog {
         timeline,
         tid,
@@ -1143,34 +1154,15 @@ pub(super) fn validate_index_families(
     guard: &dyn WorkGuard,
 ) -> Result<(), IndexError> {
     let indexes = &catalog.indexes;
-    let mut pairs = reserved_pairs(catalog.events.len(), "timeline validation", guard)?;
-    pairs.extend(
-        catalog
-            .events
-            .iter()
-            .enumerate()
-            .map(|(row, event)| (event.timeline, row)),
-    );
-    require_equal(keyed_postings(pairs, guard)?, &indexes.timeline, "timeline")?;
-
-    let mut pairs = reserved_pairs(catalog.events.len(), "TID validation", guard)?;
-    pairs.extend(
-        catalog
-            .events
-            .iter()
-            .enumerate()
-            .filter_map(|(row, event)| event.tid.map(|tid| (tid, row))),
-    );
-    require_equal(keyed_postings(pairs, guard)?, &indexes.tid, "TID")?;
-
-    let mut pairs = reserved_pairs(kinds.len(), "kind validation", guard)?;
-    pairs.extend(
-        kinds
-            .iter()
-            .enumerate()
-            .map(|(row, kind)| (crate::layout::encode_event_kind(*kind), row)),
-    );
-    require_equal(keyed_postings(pairs, guard)?, &indexes.kind, "kind")?;
+    validate_posting_partition(&indexes.timeline, catalog.events.len(), guard, |row| {
+        Some(catalog.events[row].timeline)
+    })?;
+    validate_posting_partition(&indexes.tid, catalog.events.len(), guard, |row| {
+        catalog.events[row].tid
+    })?;
+    validate_posting_partition(&indexes.kind, kinds.len(), guard, |row| {
+        Some(crate::layout::encode_event_kind(kinds[row]))
+    })?;
 
     let mut pairs = reserved_pairs(catalog.instructions.len(), "module validation", guard)?;
     pairs.extend(
@@ -1348,15 +1340,15 @@ pub(super) fn validate_index_families(
         guard,
         "source validation allocation",
     )?;
-    source_keys.extend(
-        keys.iter()
-            .cloned()
-            .enumerate()
-            .map(|(row, key)| SourceKeyRow { key, row }),
-    );
-    cancellable_sort_by(&mut source_keys, guard, |left, right| {
-        super::compare_event_keys(&left.key, &right.key)
-    })?;
+    source_keys.extend((0..keys.len()).map(|row| SourceKeyRow { row }));
+    if !keys
+        .windows(2)
+        .all(|pair| super::compare_event_keys(&pair[0], &pair[1]).is_lt())
+    {
+        cancellable_sort_by(&mut source_keys, guard, |left, right| {
+            super::compare_event_keys(&keys[left.row], &keys[right.row])
+        })?;
+    }
     require_equal(source_keys, &indexes.source_keys, "source key")?;
     Ok(())
 }
@@ -1388,6 +1380,80 @@ fn reserved_rows(
     let mut values = Vec::new();
     crate::allocation::try_reserve_vec(&mut values, rows, guard, label)?;
     Ok(values)
+}
+
+fn keyed_posting_partition<K: Ord + Copy + Eq + Hash>(
+    row_count: usize,
+    guard: &dyn WorkGuard,
+    key_for_row: impl Fn(usize) -> Option<K>,
+) -> Result<SortedMap<K, PostingList>, IndexError> {
+    let mut groups = HashMap::<K, Vec<usize>>::new();
+    for row in 0..row_count {
+        if row % 4096 == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        if let Some(key) = key_for_row(row) {
+            if !groups.contains_key(&key) {
+                crate::allocation::try_reserve_hash_map(&mut groups, 1, guard, "posting groups")?;
+            }
+            let rows = groups.entry(key).or_default();
+            crate::allocation::try_reserve_vec(rows, 1, guard, "posting rows")?;
+            rows.push(row);
+        }
+    }
+    let mut entries = Vec::new();
+    crate::allocation::try_reserve_vec(&mut entries, groups.len(), guard, "posting map")?;
+    for (key, rows) in groups {
+        entries.push((key, PostingList::from_rows(&rows, guard)?));
+    }
+    cancellable_sort_by(&mut entries, guard, |left, right| left.0.cmp(&right.0))?;
+    SortedMap::from_sorted(entries)
+}
+
+fn validate_posting_partition<K: Ord + Copy + Eq>(
+    postings: &SortedMap<K, PostingList>,
+    row_count: usize,
+    guard: &dyn WorkGuard,
+    expected: impl Fn(usize) -> Option<K>,
+) -> Result<(), IndexError> {
+    let expected_count = (0..row_count)
+        .filter(|row| expected(*row).is_some())
+        .count();
+    let mut actual_count = 0usize;
+    for (key, posting) in postings.iter() {
+        let mut previous: Option<u64> = None;
+        let mut ordinal = 0usize;
+        posting.visit_deltas(|delta| {
+            if ordinal % 4096 == 0 {
+                guard.consume(WorkDelta::default())?;
+            }
+            ordinal += 1;
+            if delta == 0 {
+                return Err(IndexError::corrupt("posting delta is zero"));
+            }
+            let encoded = match previous {
+                None => delta.checked_sub(1),
+                Some(value) => value.checked_add(delta),
+            }
+            .ok_or_else(|| IndexError::corrupt("posting row overflow"))?;
+            let row = usize::try_from(encoded)
+                .map_err(|_| IndexError::corrupt("posting row does not fit usize"))?;
+            if row >= row_count || expected(row) != Some(*key) {
+                return Err(IndexError::corrupt(
+                    "posting index differs from normalized facts",
+                ));
+            }
+            previous = Some(encoded);
+            actual_count = actual_count
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("posting count overflow"))?;
+            Ok(())
+        })?;
+    }
+    if actual_count != expected_count {
+        return Err(IndexError::corrupt("posting index cardinality differs"));
+    }
+    Ok(())
 }
 
 fn keyed_postings<K: Ord + Clone>(

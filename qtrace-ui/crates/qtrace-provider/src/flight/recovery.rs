@@ -74,7 +74,6 @@ enum ProofCoordinate {
 struct RecoveryStatus {
     flags: u32,
     has_damage: bool,
-    has_coverage: bool,
     has_incomplete: bool,
 }
 
@@ -557,7 +556,6 @@ pub(super) fn recover(
         RecoveryStatus {
             flags: superblock.flags,
             has_damage,
-            has_coverage,
             has_incomplete,
         },
         &mut completeness,
@@ -1363,11 +1361,7 @@ fn add_sequence_completeness(
         )?;
     }
 
-    let missing_cause = if status.flags == 0
-        && !status.has_damage
-        && !status.has_coverage
-        && !status.has_incomplete
-    {
+    let missing_cause = if status.flags == 0 && !status.has_damage && !status.has_incomplete {
         CompletenessCause::Overwritten
     } else {
         CompletenessCause::Lost
@@ -1386,13 +1380,21 @@ fn add_sequence_completeness(
             continue;
         }
         if sequence > current {
+            let cause = if matches!(
+                &event.payload,
+                EventPayload::OpaqueOptional(record) if record.record_type == 15
+            ) {
+                CompletenessCause::Lost
+            } else {
+                missing_cause
+            };
             add_missing_without_damage(
                 current,
                 sequence - 1,
                 damage_ranges,
                 &mut damage_index,
                 &mut damage_steps,
-                missing_cause,
+                cause,
                 completeness,
                 &mut missing_ranges,
                 context,

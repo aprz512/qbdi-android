@@ -4,27 +4,53 @@ use qtrace_provider::WorkGuard;
 
 use super::IndexError;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(super) struct DeltaRun {
+    pub(super) delta: u64,
+    pub(super) count: u64,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PostingList {
-    deltas: Vec<u64>,
+    runs: Vec<DeltaRun>,
+    row_count: usize,
 }
 
 impl PostingList {
-    pub(super) fn deltas(&self) -> &[u64] {
-        &self.deltas
+    pub(super) fn runs(&self) -> &[DeltaRun] {
+        &self.runs
     }
 
-    pub(super) fn from_deltas(deltas: Vec<u64>) -> Self {
-        Self { deltas }
+    pub(super) const fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    pub(super) fn from_runs(runs: Vec<DeltaRun>) -> Result<Self, IndexError> {
+        let mut row_count = 0usize;
+        for (index, run) in runs.iter().enumerate() {
+            if run.delta == 0 || run.count == 0 {
+                return Err(IndexError::corrupt("posting run contains zero"));
+            }
+            if index > 0 && runs[index - 1].delta == run.delta {
+                return Err(IndexError::corrupt("posting runs are not canonical"));
+            }
+            row_count = row_count
+                .checked_add(
+                    usize::try_from(run.count)
+                        .map_err(|_| IndexError::corrupt("posting run count does not fit usize"))?,
+                )
+                .ok_or_else(|| IndexError::corrupt("posting row count overflow"))?;
+        }
+        Ok(Self { runs, row_count })
     }
 
     pub(crate) fn from_rows(rows: &[usize], guard: &dyn WorkGuard) -> Result<Self, IndexError> {
-        let mut deltas = Vec::new();
+        let mut runs = Vec::new();
         crate::allocation::try_reserve_vec(
-            &mut deltas,
-            rows.len(),
+            &mut runs,
+            rows.len().min(1024),
             guard,
-            "posting-list allocation",
+            "posting-run allocation",
         )?;
         let mut previous: Option<u64> = None;
         for row in rows {
@@ -41,36 +67,59 @@ impl PostingList {
                     ));
                 }
             };
-            deltas.push(delta);
+            if let Some(run) = runs.last_mut() {
+                let run: &mut DeltaRun = run;
+                if run.delta == delta {
+                    run.count = run
+                        .count
+                        .checked_add(1)
+                        .ok_or_else(|| IndexError::resource("posting run overflow"))?;
+                    previous = Some(row);
+                    continue;
+                }
+            }
+            crate::allocation::try_reserve_vec(&mut runs, 1, guard, "posting-run allocation")?;
+            runs.push(DeltaRun { delta, count: 1 });
             previous = Some(row);
         }
-        Ok(Self { deltas })
+        Ok(Self {
+            runs,
+            row_count: rows.len(),
+        })
     }
 
     pub fn rows(&self) -> Result<Vec<usize>, IndexError> {
         let mut rows = Vec::new();
-        rows.try_reserve_exact(self.deltas.len())
+        rows.try_reserve_exact(self.row_count)
             .map_err(|_| IndexError::resource("posting decode allocation failed"))?;
-        let mut previous: Option<u64> = None;
-        for delta in &self.deltas {
-            if *delta == 0 {
-                return Err(IndexError::corrupt("posting delta is zero"));
-            }
-            let row = match previous {
+        self.visit_deltas(|delta| {
+            let row = match rows.last().copied() {
                 None => delta
                     .checked_sub(1)
                     .ok_or_else(|| IndexError::corrupt("first posting delta underflow"))?,
-                Some(previous) => previous
-                    .checked_add(*delta)
+                Some(previous) => (previous as u64)
+                    .checked_add(delta)
                     .ok_or_else(|| IndexError::corrupt("posting delta overflow"))?,
             };
             rows.push(
                 usize::try_from(row)
                     .map_err(|_| IndexError::corrupt("posting row does not fit usize"))?,
             );
-            previous = Some(row);
-        }
+            Ok(())
+        })?;
         Ok(rows)
+    }
+
+    pub(super) fn visit_deltas(
+        &self,
+        mut visit: impl FnMut(u64) -> Result<(), IndexError>,
+    ) -> Result<(), IndexError> {
+        for run in &self.runs {
+            for _ in 0..run.count {
+                visit(run.delta)?;
+            }
+        }
+        Ok(())
     }
 }
 

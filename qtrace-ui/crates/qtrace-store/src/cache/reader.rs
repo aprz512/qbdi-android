@@ -95,6 +95,7 @@ pub struct MappedStoreView {
     event_count: usize,
     event_keys_offset: u64,
     event_kinds_offset: u64,
+    artifact_digest: [u8; 32],
     validated_catalog: Option<ValidatedCatalog>,
 }
 
@@ -129,7 +130,7 @@ impl StoreView for MappedStoreView {
             .event_keys_offset
             .checked_add(relative)
             .ok_or_else(|| CacheError::access("event key offset overflow"))?;
-        decode_event_key(&self.checked_read(offset)?)
+        decode_event_key(&self.checked_read(offset)?, &self.artifact_digest)
     }
 
     fn event_kind(&self, row: usize) -> Result<EventKind, CacheError> {
@@ -305,10 +306,52 @@ pub(crate) fn validate_file(
     manifest
         .validate_shape()
         .map_err(ValidationFailure::Rebuild)?;
-    validate_sections(&file, &manifest, header.manifest_offset, guard)?;
+    validate_section_layout(&manifest, header.manifest_offset)?;
+    let decoded = if guard.parallelism() > 1 {
+        std::thread::scope(|scope| -> Result<_, ValidationFailure> {
+            let checksum =
+                scope.spawn(|| validate_sections(&file, &manifest, header.manifest_offset, guard));
+            let decoded = decode_sections(&file, &manifest, expected, guard);
+            checksum.join().map_err(|_| {
+                ValidationFailure::Fatal(CacheError::resource("cache checksum worker panicked"))
+            })??;
+            decoded
+        })?
+    } else {
+        validate_sections(&file, &manifest, header.manifest_offset, guard)?;
+        decode_sections(&file, &manifest, expected, guard)?
+    };
     directory.verify()?;
     stamp.verify(&file)?;
+    guard.consume(WorkDelta {
+        resident_bytes: u64::try_from(std::mem::size_of::<File>()).unwrap_or(u64::MAX),
+        nodes: 1,
+        ..WorkDelta::default()
+    })?;
+    Ok(MappedStoreView {
+        file,
+        stamp,
+        event_count: decoded.event_count,
+        event_keys_offset: decoded.event_keys_offset,
+        event_kinds_offset: decoded.event_kinds_offset,
+        artifact_digest: expected.artifact_digest,
+        validated_catalog: decoded.validated_catalog,
+    })
+}
 
+struct DecodedSections {
+    event_count: usize,
+    event_keys_offset: u64,
+    event_kinds_offset: u64,
+    validated_catalog: Option<ValidatedCatalog>,
+}
+
+fn decode_sections(
+    file: &File,
+    manifest: &CacheManifest,
+    expected: &CacheIdentity,
+    guard: &dyn WorkGuard,
+) -> Result<DecodedSections, ValidationFailure> {
     let keys = manifest
         .sections
         .iter()
@@ -334,8 +377,7 @@ pub(crate) fn validate_file(
         )));
     }
     let key_count = keys.length / u64::from(keys.element_size);
-    let kind_count = kinds.length;
-    if key_count != kind_count {
+    if key_count != kinds.length {
         return Err(ValidationFailure::Rebuild(RebuildReason::Section(
             "event count",
         )));
@@ -343,7 +385,7 @@ pub(crate) fn validate_file(
     let event_count = usize::try_from(key_count)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("event count")))?;
     let mut validated_catalog = None;
-    if expected.cache_schema == 2 && expected.layout_version == 2 {
+    if expected.cache_schema == 2 && expected.layout_version == 3 {
         let expected_name_count = 2 + crate::index::binary_section_specs().len();
         let mut expected_names = Vec::new();
         crate::allocation::try_reserve_vec(
@@ -370,8 +412,14 @@ pub(crate) fn validate_file(
                 "schema-two exact section set",
             )));
         }
-        let (event_keys, event_kinds) =
-            read_event_rows(&file, keys.offset, kinds.offset, event_count, guard)?;
+        let (event_keys, event_kinds) = read_event_rows(
+            file,
+            keys.offset,
+            kinds.offset,
+            event_count,
+            &expected.artifact_digest,
+            guard,
+        )?;
         let section_count = crate::index::binary_section_specs().len();
         guard.consume(WorkDelta {
             nodes: section_count as u64,
@@ -411,7 +459,7 @@ pub(crate) fn validate_file(
                 "binary section validation",
             )?;
             bytes.resize(length, 0);
-            read_exact_at(&file, section.offset, &mut bytes, Some(guard))?;
+            read_exact_at(file, section.offset, &mut bytes, Some(guard))?;
             binary.push((*name, bytes));
         }
         validated_catalog = Some(
@@ -425,16 +473,7 @@ pub(crate) fn validate_file(
             .map_err(normalized_validation_failure)?,
         );
     }
-    directory.verify()?;
-    stamp.verify(&file)?;
-    guard.consume(WorkDelta {
-        resident_bytes: u64::try_from(std::mem::size_of::<File>()).unwrap_or(u64::MAX),
-        nodes: 1,
-        ..WorkDelta::default()
-    })?;
-    Ok(MappedStoreView {
-        file,
-        stamp,
+    Ok(DecodedSections {
         event_count,
         event_keys_offset: keys.offset,
         event_kinds_offset: kinds.offset,
@@ -459,6 +498,7 @@ fn read_event_rows(
     keys_offset: u64,
     kinds_offset: u64,
     event_count: usize,
+    expected_artifact: &[u8; 32],
     guard: &dyn WorkGuard,
 ) -> Result<(Vec<EventKey>, Vec<EventKind>), ValidationFailure> {
     let mut keys = Vec::new();
@@ -475,35 +515,78 @@ fn read_event_rows(
         guard,
         "normalized event-kind validation",
     )?;
-    let mut encoded_key = [0_u8; EVENT_KEY_BYTES];
-    for row in 0..event_count {
-        if row % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        let byte_offset = row
+    const ROWS_PER_READ: usize = 4096;
+    let key_chunk_bytes =
+        ROWS_PER_READ
+            .checked_mul(EVENT_KEY_BYTES)
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "event-key range",
+            )))?;
+    let mut encoded_keys = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut encoded_keys,
+        key_chunk_bytes,
+        guard,
+        "event-key read buffer",
+    )?;
+    encoded_keys.resize(key_chunk_bytes, 0);
+    let mut encoded_kinds = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut encoded_kinds,
+        ROWS_PER_READ,
+        guard,
+        "event-kind read buffer",
+    )?;
+    encoded_kinds.resize(ROWS_PER_READ, 0);
+    for first in (0..event_count).step_by(ROWS_PER_READ) {
+        guard.consume(WorkDelta::default())?;
+        let count = (event_count - first).min(ROWS_PER_READ);
+        let key_bytes = count
+            .checked_mul(EVENT_KEY_BYTES)
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "event-key range",
+            )))?;
+        let key_offset = first
             .checked_mul(EVENT_KEY_BYTES)
             .and_then(|value| u64::try_from(value).ok())
             .and_then(|value| keys_offset.checked_add(value))
             .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
                 "event-key range",
             )))?;
-        read_exact_at(file, byte_offset, &mut encoded_key, Some(guard))?;
-        keys.push(
-            decode_event_key(&encoded_key)
-                .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?,
-        );
+        read_exact_at(
+            file,
+            key_offset,
+            &mut encoded_keys[..key_bytes],
+            Some(guard),
+        )?;
         let kind_offset =
             kinds_offset
-                .checked_add(row as u64)
+                .checked_add(first as u64)
                 .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
                     "event-kind range",
                 )))?;
-        let mut encoded_kind = [0_u8; 1];
-        read_exact_at(file, kind_offset, &mut encoded_kind, Some(guard))?;
-        kinds.push(
-            decode_event_kind(encoded_kind[0])
-                .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?,
-        );
+        read_exact_at(file, kind_offset, &mut encoded_kinds[..count], Some(guard))?;
+        for encoded in encoded_keys[..key_bytes].chunks_exact(EVENT_KEY_BYTES) {
+            let key = decode_event_key(
+                encoded
+                    .try_into()
+                    .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?,
+                expected_artifact,
+            )
+            .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?;
+            if key.artifact.as_bytes() != expected_artifact {
+                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                    "event artifact identity",
+                )));
+            }
+            keys.push(key);
+        }
+        for encoded in &encoded_kinds[..count] {
+            kinds.push(
+                decode_event_kind(*encoded)
+                    .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?,
+            );
+        }
     }
     Ok((keys, kinds))
 }
@@ -581,6 +664,70 @@ fn validate_sections(
     Ok(())
 }
 
+fn validate_section_layout(
+    manifest: &CacheManifest,
+    manifest_offset: u64,
+) -> Result<(), ValidationFailure> {
+    let mut previous_end = HEADER_BYTES as u64;
+    for (ordinal, section) in manifest.sections.iter().enumerate() {
+        if manifest.sections[..ordinal]
+            .iter()
+            .any(|previous| previous.name == section.name)
+        {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "duplicate name",
+            )));
+        }
+        let alignment = u64::from(section.alignment);
+        if alignment == 0 || !alignment.is_power_of_two() || alignment > 4096 {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "alignment",
+            )));
+        }
+        if section.offset % alignment != 0 {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "misaligned offset",
+            )));
+        }
+        if section.element_size == 0 || section.length % u64::from(section.element_size) != 0 {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "element size",
+            )));
+        }
+        if let Some((known_alignment, known_element_size)) = known_section_contract(&section.name) {
+            if section.alignment != known_alignment {
+                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                    if section.name == EVENT_KEYS_SECTION || section.name == EVENT_KINDS_SECTION {
+                        "known alignment"
+                    } else {
+                        "known section contract"
+                    },
+                )));
+            }
+            if section.element_size != known_element_size {
+                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                    if section.name == EVENT_KEYS_SECTION || section.name == EVENT_KINDS_SECTION {
+                        "known element size"
+                    } else {
+                        "known section contract"
+                    },
+                )));
+            }
+        }
+        let end = section
+            .offset
+            .checked_add(section.length)
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "range overflow",
+            )))?;
+        if section.offset < previous_end || end > manifest_offset {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section("range")));
+        }
+        previous_end = end;
+    }
+    Ok(())
+}
+
 fn validate_zero_padding(
     file: &File,
     start: u64,
@@ -652,13 +799,9 @@ fn validate_known_payload(
             let encoded: &[u8; EVENT_KEY_BYTES] = row
                 .try_into()
                 .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?;
-            let key = decode_event_key(encoded)
+            let key = decode_event_key(encoded, &identity.artifact_digest)
                 .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("payload")))?;
-            if key.artifact.as_bytes() != &identity.artifact_digest {
-                return Err(ValidationFailure::Rebuild(RebuildReason::Section(
-                    "payload",
-                )));
-            }
+            let _ = key;
         }
         if !rows.remainder().is_empty() {
             return Err(ValidationFailure::Rebuild(RebuildReason::Section(

@@ -30,12 +30,21 @@ impl AuthorizedPath {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpenPolicy {
     qtrb_mode: OpenMode,
+    defer_provider_probe: bool,
 }
 
 impl OpenPolicy {
     pub const fn recoverable_partial() -> Self {
         Self {
             qtrb_mode: OpenMode::RecoverablePartial,
+            defer_provider_probe: false,
+        }
+    }
+
+    pub const fn cache_aware() -> Self {
+        Self {
+            qtrb_mode: OpenMode::Sealed,
+            defer_provider_probe: true,
         }
     }
 }
@@ -44,6 +53,7 @@ impl Default for OpenPolicy {
     fn default() -> Self {
         Self {
             qtrb_mode: OpenMode::Sealed,
+            defer_provider_probe: false,
         }
     }
 }
@@ -347,7 +357,9 @@ impl SessionLoader {
                     provider.timelines(),
                     guard,
                 )?;
-                probe(provider, format, guard)?;
+                if !policy.defer_provider_probe {
+                    probe(provider, format, guard)?;
+                }
                 source.verify_unchanged(file_identity, true)?;
                 Ok(ArtifactSource {
                     local_path: relative.clone(),
@@ -406,7 +418,9 @@ impl SessionLoader {
         let provider_identity = provider.identity().clone();
         let provider_timelines =
             session_timelines(format, TimelineId(0), provider.timelines(), guard)?;
-        probe(provider, format, guard)?;
+        if !policy.defer_provider_probe {
+            probe(provider, format, guard)?;
+        }
         source.verify_unchanged(file_identity, true)?;
         let artifact = ArtifactSource {
             local_path: leaf,
