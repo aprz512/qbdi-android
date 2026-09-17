@@ -7,3 +7,14 @@ license.workspace = true
 
 [dependencies]
 qtrace-analysis = { path = "../qtrace-analysis", version = "0.1.0" }
+qtrace-provider = { path = "../qtrace-provider", version = "0.1.0" }
+qtrace-store = { path = "../qtrace-store", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+ts-rs = { version = "12", features = ["serde-compat"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
