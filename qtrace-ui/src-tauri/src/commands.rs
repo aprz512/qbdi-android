@@ -2,7 +2,7 @@
 use qtrace_service::{
     AnnotationDto, AppError, CallTreeDto, EventDetailDto, JobDto, LocalSymbolNameDto,
     MemoryEvidenceDto, MemoryStateDto, OpenWorkspaceDto, ProjectionJobDto, RegisterStateDto,
-    SymbolDto, TimelinePageDto, WorkspaceSummaryDto,
+    SymbolDto, TimelineLocationDto, TimelinePageDto, WorkspaceSummaryDto,
 };
 use qtrace_service::{DecimalU64Dto, EventFilterDto, HexU64Dto, JobId, ProjectionId, WorkspaceId};
 use serde::Deserialize;
@@ -36,6 +36,24 @@ pub struct QueryTimelineRequest {
     pub workspace_id: WorkspaceId,
     pub projection_id: ProjectionId,
     pub cursor: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocateTimelineRequest {
+    pub workspace_id: WorkspaceId,
+    pub projection_id: ProjectionId,
+    pub source_row: u32,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocateTimelineOffsetRequest {
+    pub workspace_id: WorkspaceId,
+    pub projection_id: ProjectionId,
+    pub offset: u32,
     pub limit: u32,
 }
 
@@ -193,6 +211,22 @@ mod desktop {
         state: State<'_, DesktopState>,
     ) -> Result<TimelinePageDto, AppError> {
         state.query_timeline(request)
+    }
+
+    #[tauri::command]
+    pub fn locate_timeline(
+        request: LocateTimelineRequest,
+        state: State<'_, DesktopState>,
+    ) -> Result<Option<TimelineLocationDto>, AppError> {
+        state.locate_timeline(request)
+    }
+
+    #[tauri::command]
+    pub fn locate_timeline_offset(
+        request: LocateTimelineOffsetRequest,
+        state: State<'_, DesktopState>,
+    ) -> Result<Option<TimelineLocationDto>, AppError> {
+        state.locate_timeline_offset(request)
     }
 
     #[tauri::command]

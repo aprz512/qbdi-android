@@ -9,7 +9,7 @@ import { initialState } from "../state/model";
 describe("workspace workflows", () => {
   it("constructs same-field OR filter terms and validates 64-bit inputs", () => {
     const apply = vi.fn();
-    render(<FilterBar onApply={apply} />);
+    render(<FilterBar filter={initialState.filter} onApply={apply} />);
     fireEvent.change(screen.getByLabelText("TID"), { target: { value: "7,9" } });
     fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "instruction,memory" } });
     fireEvent.change(screen.getByLabelText("Module"), { target: { value: "2,4" } });

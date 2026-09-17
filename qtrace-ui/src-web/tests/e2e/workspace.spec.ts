@@ -77,14 +77,21 @@ test("switches artifacts after entering the timeline and exposes Flight complete
   await expect(page.getByRole("region", { name: "Completeness" })).toContainText("captured_sequence");
 });
 
-test("keeps a cross-segment viewport complete and refetches an evicted segment", async ({ page }) => {
+test("jumps to a distant viewport and reuses the cached first segment", async ({ page }) => {
   test.setTimeout(60_000);
   const pageSize = 2_000;
   const pageCount = 6;
   const total = pageSize * pageCount;
   let firstPageRequests = 0;
   let pageRequests = 0;
+  let locationRequests = 0;
   const cursors: Array<string | null> = [];
+  await page.route(/\/locate_timeline_offset$/, async (route) => {
+    locationRequests += 1;
+    const request = route.request().postDataJSON() as { offset: number };
+    const pageIndex = Math.floor(request.offset / pageSize);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: { start: pageIndex * pageSize, cursor: pageIndex === 0 ? null : String(pageIndex) } }) });
+  });
   await page.route(/\/query_timeline$/, async (route) => {
     pageRequests += 1;
     const request = route.request().postDataJSON() as { cursor: string | null };
@@ -104,12 +111,13 @@ test("keeps a cross-segment viewport complete and refetches an evicted segment",
   await timeline.evaluate((element) => { (element as HTMLElement).style.height = "320px"; });
   const scrollTop = await timeline.evaluate((element, rowCount) => { element.scrollTop = (rowCount - 10) * 24; element.dispatchEvent(new Event("scroll", { bubbles: true })); return element.scrollTop; }, total);
   expect(scrollTop).toBeGreaterThan(250_000);
-  await expect.poll(() => pageRequests).toBeGreaterThanOrEqual(pageCount);
-  expect(cursors).toEqual([null, "1", "2", "3", "4", "5"]);
+  await expect.poll(() => pageRequests).toBe(2);
+  expect(locationRequests).toBe(1);
+  expect(cursors).toEqual([null, "5"]);
   await expect(page.getByRole("row", { name: /11991 thread 7/ })).toBeVisible({ timeout: 30_000 });
   await timeline.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll", { bubbles: true })); });
   await expect(page.getByRole("row", { name: /^1 thread 7 / })).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => firstPageRequests).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => firstPageRequests).toBe(1);
 });
 
 test("call-tree nodes fold and jump through the workspace", async ({ page }) => {

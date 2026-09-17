@@ -38,6 +38,7 @@ fn main() {
         WorkspaceId::decl(&config),
         WorkspaceSummaryDto::decl(&config),
         SymbolDto::decl(&config),
+        TimelineLocationDto::decl(&config),
         TimelinePageDto::decl(&config),
     ] {
         println!("export {declaration}");

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQtraceApi } from "./api/ApiContext";
-import type { AnnotationDto, AppError, CallTreeDto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto, MemoryEvidenceDto, MemoryStateDto, RegisterStateDto } from "./api/generated";
+import type { AnnotationDto, AppError, CallTreeDto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto, MemoryEvidenceDto, MemoryStateDto, RegisterStateDto, TimelinePageDto } from "./api/generated";
 import { normalizeAppError } from "./api/TauriQtraceApi";
 import { AppHeader } from "./components/AppHeader";
 import { BottomDock } from "./components/BottomDock";
@@ -42,7 +42,10 @@ export default function App() {
   const navigationWorkspace = useRef<string | null>(null);
   const pendingHistoryTarget = useRef<NavigationEntry | null>(null);
   const rows = useMemo(() => visibleSegments.flatMap((segment) => segment.page.rows), [visibleSegments]);
-  const tids = useMemo(() => [...new Set(rows.flatMap((row) => row.key.tid === null ? [] : [row.key.tid]))].sort((a, b) => a - b), [rows]);
+  const tids = useMemo(
+    () => state.opened?.artifacts.find((artifact) => artifact.index === state.selectedArtifactIndex)?.tids ?? [],
+    [state.opened, state.selectedArtifactIndex],
+  );
   const selectedTid = selectedRow?.key.tid ?? state.filter.tids[0] ?? null;
 
   useEffect(() => {
@@ -117,21 +120,23 @@ export default function App() {
         let targetIndex = 0;
         let targetStart = 0;
         let target = targetPage.rows.find((row) => sameKey(row.key, pending.eventKey));
-        const visited = new Set<string>();
-        while (target === undefined && targetPage.next_cursor !== null) {
-          const cursor = targetPage.next_cursor;
-          if (visited.has(cursor)) throw new Error("Timeline cursor cycle detected");
-          visited.add(cursor);
-          const nextStart = targetStart + targetPage.rows.length;
-          const cacheKey = `${state.opened.workspace.id}:${projection.projection_id}:${cursor}`;
-          targetPage = segmentCache.current.get(cacheKey) ?? await api.queryTimeline(state.opened.workspace.id, projection.projection_id, cursor, 2_000);
+        if (target === undefined) {
+          const location = await api.locateTimeline(state.opened.workspace.id, projection.projection_id, pending.sourceRow, 2_000);
           if (projectionGeneration.current !== generation) return;
-          segmentCache.current.set(cacheKey, targetPage);
-          targetIndex += 1;
-          targetStart = nextStart;
-          pageCursors.current[targetIndex] = cursor;
-          pageStarts.current[targetIndex] = targetStart;
-          target = targetPage.rows.find((row) => sameKey(row.key, pending.eventKey));
+          if (location !== null) {
+            const cacheKey = location.cursor === null
+              ? `${state.opened.workspace.id}:${projection.projection_id}:first`
+              : `${state.opened.workspace.id}:${projection.projection_id}:${location.cursor}`;
+            const cached = segmentCache.current.get(cacheKey);
+            targetPage = cached ?? await api.queryTimeline(state.opened.workspace.id, projection.projection_id, location.cursor, 2_000);
+            if (projectionGeneration.current !== generation) return;
+            if (cached === undefined) segmentCache.current.set(cacheKey, targetPage);
+            targetIndex = Math.floor(location.start / 2_000);
+            targetStart = location.start;
+            pageCursors.current[targetIndex] = location.cursor;
+            pageStarts.current[targetIndex] = targetStart;
+            target = targetPage.rows.find((row) => sameKey(row.key, pending.eventKey));
+          }
         }
         if (target !== undefined) {
           pageIndex.current = targetIndex;
@@ -166,11 +171,36 @@ export default function App() {
       const targetOffset = requestTarget.end === undefined ? undefined : Math.max(requestTarget.start ?? 0, requestTarget.end - 1);
       if (targetOffset !== undefined && (requestTarget.start ?? targetOffset) >= currentStart && targetOffset < currentStart + page.rows.length) return;
       if (targetOffset !== undefined) {
+        const rangeStart = requestTarget.start ?? targetOffset;
         let knownIndex = -1;
         for (let index = 0; index < pageStarts.current.length; index += 1) {
-          if (pageStarts.current[index] <= targetOffset) knownIndex = index;
+          const knownStart = pageStarts.current[index];
+          if (knownStart !== undefined && knownStart <= rangeStart && rangeStart < knownStart + 2_000) knownIndex = index;
         }
-        if (knownIndex >= 0 && knownIndex !== currentIndex) currentIndex = knownIndex;
+        if (knownIndex >= 0) {
+          currentIndex = knownIndex;
+          currentStart = pageStarts.current[currentIndex] ?? 0;
+          const cursor = pageCursors.current[currentIndex];
+          if (cursor === undefined) return;
+          const cacheKey = cursor === null ? `${workspaceId}:${projectionId}:first` : `${workspaceId}:${projectionId}:${cursor}`;
+          const cached = segmentCache.current.get(cacheKey);
+          page = cached ?? await api.queryTimeline(workspaceId, projectionId, cursor, 2_000);
+          if (signal?.aborted || projectionGeneration.current !== generation) return;
+          if (cached === undefined) segmentCache.current.set(cacheKey, page);
+        } else {
+          const location = await api.locateTimelineOffset(workspaceId, projectionId, rangeStart, 2_000);
+          if (signal?.aborted || projectionGeneration.current !== generation || location === null) return;
+          const cursor = location.cursor;
+          const cacheKey = cursor === null ? `${workspaceId}:${projectionId}:first` : `${workspaceId}:${projectionId}:${cursor}`;
+          const cached = segmentCache.current.get(cacheKey);
+          page = cached ?? await api.queryTimeline(workspaceId, projectionId, cursor, 2_000);
+          if (signal?.aborted || projectionGeneration.current !== generation) return;
+          if (cached === undefined) segmentCache.current.set(cacheKey, page);
+          currentIndex = Math.floor(location.start / 2_000);
+          currentStart = location.start;
+          pageCursors.current[currentIndex] = cursor;
+          pageStarts.current[currentIndex] = currentStart;
+        }
       } else if (requestTarget.index !== undefined) {
         currentIndex = Math.min(currentIndex, requestTarget.index);
       }
@@ -252,7 +282,7 @@ export default function App() {
     setPaneErrors([]);
     dispatch({ type: "selectionChanged", event: row.key });
     if (recordHistory) {
-      navigation.current.push({ workspaceId, projectionId: state.projectionId, artifactIndex, eventKey: row.key });
+      navigation.current.push({ workspaceId, projectionId: state.projectionId, artifactIndex, sourceRow: row.source_row, eventKey: row.key });
       setHistoryVersion((value) => value + 1);
     }
     const accept = (update: () => void) => { if (selectionRequest.current === request) update(); };
@@ -270,9 +300,43 @@ export default function App() {
     else void api.getCallTree(workspaceId, artifactIndex, row.key.timeline_id, row.key.tid).then((value) => accept(() => setCallTree(value)), fail);
   };
 
-  const jumpToRow = (sourceRow: number) => {
+  const jumpToRow = async (sourceRow: number) => {
     const row = rows.find((value) => value.source_row === sourceRow);
-    if (row !== undefined) selectRow(row);
+    if (row !== undefined) {
+      selectRow(row);
+      return;
+    }
+    if (state.opened === null || state.projectionId === null) return;
+
+    const request = ++selectionRequest.current;
+    const workspaceId = state.opened.workspace.id;
+    const projectionId = state.projectionId;
+    const generation = projectionGeneration.current;
+    try {
+      const location = await api.locateTimeline(workspaceId, projectionId, sourceRow, 2_000);
+      if (selectionRequest.current !== request || projectionGeneration.current !== generation) return;
+      if (location === null) throw new Error(`Event row ${sourceRow} is not visible in the current projection`);
+      const cacheKey = location.cursor === null
+        ? `${workspaceId}:${projectionId}:first`
+        : `${workspaceId}:${projectionId}:${location.cursor}`;
+      const cached = segmentCache.current.get(cacheKey);
+      const page: TimelinePageDto = cached ?? await api.queryTimeline(workspaceId, projectionId, location.cursor, 2_000);
+      if (selectionRequest.current !== request || projectionGeneration.current !== generation) return;
+      if (cached === undefined) segmentCache.current.set(cacheKey, page);
+      const target = page.rows.find((value) => value.source_row === sourceRow);
+      if (target === undefined) throw new Error("Located timeline page does not contain the requested event");
+      const index = Math.floor(location.start / 2_000);
+      pageCursors.current[index] = location.cursor;
+      pageStarts.current[index] = location.start;
+      pageIndex.current = index;
+      setVisibleSegments([{ start: location.start, page }]);
+      dispatch({ type: "timelinePageReceived", generation, page });
+      selectRow(target);
+    } catch (error) {
+      if (selectionRequest.current === request && projectionGeneration.current === generation) {
+        setPaneErrors((values) => [...values, normalizeAppError(error)]);
+      }
+    }
   };
 
   const visitHistory = (entry: NavigationEntry | null) => {
@@ -320,7 +384,7 @@ export default function App() {
       <AppHeader />
       <LeftDock tids={tids} selectedTid={selectedTid} callTree={callTree} onSelectTid={selectTid} onJump={jumpToRow} />
       <main className="workspace">
-        {state.opened !== null && <FilterBar onApply={(filter) => void applyFilter(filter)} />}
+        {state.opened !== null && <FilterBar filter={state.filter} onApply={(filter) => void applyFilter(filter)} />}
         {state.opened !== null && state.projectionId !== null && <nav aria-label="Artifacts" className="artifact-selector">{state.opened.artifacts.map((artifact) => <button key={artifact.index} aria-pressed={artifact.index === state.selectedArtifactIndex} onClick={() => selectArtifact(artifact.index)}>{artifact.name}</button>)}</nav>}
         {state.phase === "failed" && state.error !== null ? (
           <section role="alert"><h1>{state.error.code}</h1><p>{state.error.detail}</p></section>

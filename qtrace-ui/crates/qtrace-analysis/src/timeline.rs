@@ -461,6 +461,12 @@ pub struct EventPage {
     pub completeness: Arc<CompletenessSummary>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventLocation {
+    pub start: usize,
+    pub cursor: Option<PageCursor>,
+}
+
 #[derive(Default)]
 struct ProjectionState {
     visible: Vec<usize>,
@@ -605,6 +611,81 @@ impl TimelineProjection {
         #[cfg(test)]
         LAST_PAGE_USAGE.set(Some(guard.consumed()));
         result
+    }
+
+    fn locate(
+        &self,
+        source_row: usize,
+        limit: usize,
+    ) -> Result<Option<EventLocation>, AnalysisError> {
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+            return Err(AnalysisError::invalid_limit());
+        }
+        let Some(key) = self.context.keys.get(source_row) else {
+            return Ok(None);
+        };
+        let guard = CandidateGuard::page(self.cancelled.clone(), limit)?;
+        let state = self.state.0.lock().expect("projection state poisoned");
+        if let Some(error) = &state.error {
+            return Err(error.clone());
+        }
+        let after = locate_after_key(&self.context, &state.visible, key, &guard)?;
+        let Some(position) = after.checked_sub(1) else {
+            return Ok(None);
+        };
+        if state.visible.get(position).copied() != Some(source_row) {
+            return Ok(None);
+        }
+        self.location_for_position(&state, position, limit, &guard)
+            .map(Some)
+    }
+
+    fn locate_offset(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<EventLocation>, AnalysisError> {
+        if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+            return Err(AnalysisError::invalid_limit());
+        }
+        let guard = CandidateGuard::page(self.cancelled.clone(), limit)?;
+        let state = self.state.0.lock().expect("projection state poisoned");
+        if let Some(error) = &state.error {
+            return Err(error.clone());
+        }
+        if offset >= state.visible.len() {
+            return Ok(None);
+        }
+        self.location_for_position(&state, offset, limit, &guard)
+            .map(Some)
+    }
+
+    fn location_for_position(
+        &self,
+        state: &ProjectionState,
+        position: usize,
+        limit: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<EventLocation, AnalysisError> {
+        let start = position / limit * limit;
+        let cursor = if start == 0 {
+            None
+        } else {
+            let previous_row = *state
+                .visible
+                .get(start - 1)
+                .ok_or_else(|| AnalysisError::store_shape("located page predecessor is absent"))?;
+            let previous_key = self.context.keys.get(previous_row).ok_or_else(|| {
+                AnalysisError::store_shape("located page predecessor key is absent")
+            })?;
+            Some(encode_cursor(
+                self.context.identity,
+                self.plan.projection_identity,
+                Some(previous_key),
+                guard,
+            )?)
+        };
+        Ok(EventLocation { start, cursor })
     }
 
     fn page_guarded(
@@ -755,6 +836,22 @@ pub fn query_events(
     limit: usize,
 ) -> Result<EventPage, AnalysisError> {
     projection.page(cursor, limit)
+}
+
+pub fn locate_event(
+    projection: &TimelineProjection,
+    source_row: usize,
+    limit: usize,
+) -> Result<Option<EventLocation>, AnalysisError> {
+    projection.locate(source_row, limit)
+}
+
+pub fn locate_offset(
+    projection: &TimelineProjection,
+    offset: usize,
+    limit: usize,
+) -> Result<Option<EventLocation>, AnalysisError> {
+    projection.locate_offset(offset, limit)
 }
 
 fn build_query_context(

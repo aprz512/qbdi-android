@@ -184,6 +184,7 @@ pub struct ArtifactSummaryDto {
     pub index: u32,
     pub name: String,
     pub event_count: u32,
+    pub tids: Vec<u32>,
     pub completeness: Vec<CompletenessRangeDto>,
 }
 
@@ -229,6 +230,12 @@ pub struct TimelinePageDto {
     pub next_cursor: Option<String>,
     pub total: u32,
     pub exact_total: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct TimelineLocationDto {
+    pub start: u32,
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]

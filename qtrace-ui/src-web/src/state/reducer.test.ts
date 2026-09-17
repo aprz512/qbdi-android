@@ -28,7 +28,7 @@ describe("application reducer", () => {
       type: "workspaceOpened",
       opened: {
         workspace: { id: "w", generation: 0, artifact_count: 1 },
-        artifacts: [{ index: 0, name: "trace", event_count: 2, completeness: [] }],
+        artifacts: [{ index: 0, name: "trace", event_count: 2, tids: [7], completeness: [] }],
         warnings: ["one artifact was isolated"],
       },
     });

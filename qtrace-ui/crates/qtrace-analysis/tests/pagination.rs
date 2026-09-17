@@ -9,7 +9,7 @@ use std::{
 use qtrace_analysis::{
     AddressRange, CompletenessStatus, EventFilter, MAX_DISCONTINUITY_PAYLOAD_BYTES,
     MAX_DISCONTINUITY_TOTAL_BYTES, PageCursor, QueryContext, TimelineProjection, TimelineRow,
-    query_events,
+    locate_event, locate_offset, query_events,
 };
 use qtrace_provider::{
     ArtifactDigest, CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause,
@@ -1121,6 +1121,39 @@ fn validates_limits_reports_exact_total_and_projects_completeness_and_discontinu
     assert!(!projection.is_cancelled());
     assert_eq!(query_events(&projection, None, 2_000).unwrap(), page);
     assert_eq!(projection.total_visible_rows().unwrap(), (7, true));
+}
+
+#[test]
+fn locates_the_page_containing_a_source_row_without_walking_prior_pages() {
+    let projection = projection(
+        Arc::new(CountingStore::new(5_000, 9, false)),
+        EventFilter::default(),
+    );
+
+    let location = locate_event(&projection, 4_100, 2_000)
+        .unwrap()
+        .expect("visible source row");
+    assert_eq!(location.start, 4_000);
+    let page = query_events(&projection, location.cursor.as_ref(), 2_000).unwrap();
+    assert_eq!(page.rows.first().unwrap().source_row(), 4_000);
+    assert!(page.rows.iter().any(|row| row.source_row() == 4_100));
+    assert!(locate_event(&projection, 5_000, 2_000).unwrap().is_none());
+}
+
+#[test]
+fn locates_the_page_containing_a_projection_offset_without_walking_prior_pages() {
+    let projection = projection(
+        Arc::new(CountingStore::new(5_000, 9, false)),
+        EventFilter::default(),
+    );
+
+    let location = locate_offset(&projection, 4_100, 2_000)
+        .unwrap()
+        .expect("visible projection offset");
+    assert_eq!(location.start, 4_000);
+    let page = query_events(&projection, location.cursor.as_ref(), 2_000).unwrap();
+    assert_eq!(page.rows.first().unwrap().source_row(), 4_000);
+    assert!(locate_offset(&projection, 5_000, 2_000).unwrap().is_none());
 }
 
 #[test]

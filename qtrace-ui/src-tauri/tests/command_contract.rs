@@ -57,12 +57,32 @@ fn adapter_mirrors_the_service_contract() {
     let page = adapter
         .query_timeline(QueryTimelineRequest {
             workspace_id: workspace_id.clone(),
-            projection_id: projection.projection_id,
+            projection_id: projection.projection_id.clone(),
             cursor: None,
             limit: 10,
         })
         .unwrap();
     let row = page.rows.first().unwrap();
+    let location = adapter
+        .locate_timeline(LocateTimelineRequest {
+            workspace_id: workspace_id.clone(),
+            projection_id: projection.projection_id.clone(),
+            source_row: row.source_row,
+            limit: 10,
+        })
+        .unwrap()
+        .expect("visible row location");
+    assert_eq!(location.start, 0);
+    let offset_location = adapter
+        .locate_timeline_offset(LocateTimelineOffsetRequest {
+            workspace_id: workspace_id.clone(),
+            projection_id: projection.projection_id.clone(),
+            offset: 0,
+            limit: 10,
+        })
+        .unwrap()
+        .expect("visible offset location");
+    assert_eq!(offset_location, location);
     let event = EventRequest {
         workspace_id: workspace_id.clone(),
         artifact_index: 0,

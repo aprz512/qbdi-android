@@ -1,7 +1,7 @@
 export type AppError = { code: string, stage: string, source: SourceCoordinateDto | null, retryable: boolean, detail: string, };
 export type AnnotationDto = { key: EventKeyDto, comment: string, highlight: string | null, };
 export type AddressRangeDto = { start: HexU64Dto, end_exclusive: HexU64Dto, };
-export type ArtifactSummaryDto = { index: number, name: string, event_count: number, completeness: Array<CompletenessRangeDto>, };
+export type ArtifactSummaryDto = { index: number, name: string, event_count: number, tids: Array<number>, completeness: Array<CompletenessRangeDto>, };
 export type CompletenessRangeDto = { domain: string, start: DecimalU64Dto, end: DecimalU64Dto, end_inclusive: boolean, cause: string, provenance: string, };
 export type CallNodeDto = { id: number, parent: number | null, children: Array<number>, tid: number, target: HexU64Dto | null, display: string, source_row_start: number, source_row_end_exclusive: number, provenance: string, state: string, };
 export type CallTreeDto = { identity: string, timeline_id: DecimalU64Dto, tid: number, roots: Array<number>, nodes: Array<CallNodeDto>, };
@@ -32,4 +32,5 @@ export type SequenceRangeDto = { first: DecimalU64Dto, last: DecimalU64Dto, };
 export type WorkspaceId = string;
 export type WorkspaceSummaryDto = { id: WorkspaceId, generation: number, artifact_count: number, };
 export type SymbolDto = { module: string, name: string, relative_address: HexU64Dto, size: DecimalU64Dto, offset: DecimalU64Dto, };
+export type TimelineLocationDto = { start: number, cursor: string | null, };
 export type TimelinePageDto = { rows: Array<EventRowDto>, next_cursor: string | null, total: number, exact_total: boolean, };

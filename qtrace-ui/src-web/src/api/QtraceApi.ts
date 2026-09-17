@@ -11,6 +11,7 @@ import type {
   ProjectionJobDto,
   RegisterStateDto,
   SymbolDto,
+  TimelineLocationDto,
   TimelinePageDto,
   WorkspaceSummaryDto,
 } from "./generated";
@@ -31,6 +32,18 @@ export interface QtraceApi {
     cursor: string | null,
     limit: number,
   ): Promise<TimelinePageDto>;
+  locateTimeline(
+    workspaceId: string,
+    projectionId: string,
+    sourceRow: number,
+    limit: number,
+  ): Promise<TimelineLocationDto | null>;
+  locateTimelineOffset(
+    workspaceId: string,
+    projectionId: string,
+    offset: number,
+    limit: number,
+  ): Promise<TimelineLocationDto | null>;
   getEventDetail(workspaceId: string, artifactIndex: number, row: number): Promise<EventDetailDto>;
   getRegisterState(workspaceId: string, artifactIndex: number, row: number): Promise<RegisterStateDto>;
   getMemoryState(

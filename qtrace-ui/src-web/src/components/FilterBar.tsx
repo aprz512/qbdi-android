@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { EventFilterDto } from "../api/generated";
 import { emptyFilter } from "../state/model";
 
-export function FilterBar({ onApply }: { onApply(filter: EventFilterDto): void }) {
+export function FilterBar({ filter, onApply }: { filter: EventFilterDto; onApply(filter: EventFilterDto): void }) {
   const [tid, setTid] = useState("");
   const [kind, setKind] = useState("");
   const [moduleId, setModuleId] = useState("");
@@ -19,6 +19,24 @@ export function FilterBar({ onApply }: { onApply(filter: EventFilterDto): void }
   const [semanticName, setSemanticName] = useState("");
   const [semanticDetail, setSemanticDetail] = useState("");
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setTid(filter.tids.join(","));
+    setKind(filter.kinds.join(","));
+    setModuleId(filter.modules.join(","));
+    setSequence(formatRange(filter.sequence[0]?.first, filter.sequence[0]?.last));
+    setPc(formatRange(filter.relative_pc[0]?.start, filter.relative_pc[0]?.end_exclusive));
+    setAbsolutePc(formatRange(filter.absolute_pc[0]?.start, filter.absolute_pc[0]?.end_exclusive));
+    setMnemonic(filter.mnemonic[0]?.value ?? "");
+    setMnemonicMode(filter.mnemonic[0]?.mode ?? "contains");
+    setRegisterReads(filter.register_reads.join(","));
+    setRegisterWrites(filter.register_writes.join(","));
+    setMemory(formatRange(filter.memory[0]?.range.start, filter.memory[0]?.range.end_exclusive));
+    setMemoryDirections(filter.memory[0]?.directions.join(",") || "read,write");
+    setSemanticCategory(filter.semantic_categories.join(","));
+    setSemanticName(filter.semantic_names.join(","));
+    setSemanticDetail(filter.semantic_detail_contains.join(","));
+    setError(null);
+  }, [filter]);
   const apply = () => {
     try {
       const filter = emptyFilter();
@@ -76,6 +94,7 @@ export function FilterBar({ onApply }: { onApply(filter: EventFilterDto): void }
   );
 }
 const words = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
+const formatRange = (first: string | undefined, last: string | undefined) => first === undefined || last === undefined ? "" : `${first}:${last}`;
 const numbers = (value: string, max: number, label: string) => words(value).map((item) => { const number = Number(item); if (!Number.isInteger(number) || number < 0 || number > max) throw new Error(`Invalid ${label}`); return number; });
 const decimal = (value: string) => { if (!/^(0|[1-9]\d*)$/.test(value) || BigInt(value) > 0xffff_ffff_ffff_ffffn) throw new Error("Invalid 64-bit decimal"); return value; };
 const hex = (value: string) => { if (!/^0x(0|[1-9a-f][0-9a-f]*)$/.test(value) || BigInt(value) > 0xffff_ffff_ffff_ffffn) throw new Error("Invalid 64-bit hex"); return value; };

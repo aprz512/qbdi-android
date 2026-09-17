@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use qtrace_service::{
     AnnotationDto, AppError, CallTreeDto, EventDetailDto, JobDto, LocalSymbolNameDto,
     MemoryEvidenceDto, MemoryStateDto, OpenWorkspaceDto, ProjectionJobDto, RegisterStateDto,
-    SymbolDto, TimelinePageDto, WorkspaceSummaryDto,
+    SymbolDto, TimelineLocationDto, TimelinePageDto, WorkspaceSummaryDto,
 };
 use qtrace_store::AuthorizedPath;
 #[cfg(feature = "desktop")]
@@ -91,6 +91,30 @@ impl<P: NativePicker> CommandAdapter<P> {
             &request.workspace_id,
             &request.projection_id,
             request.cursor,
+            request.limit,
+        )
+    }
+
+    pub fn locate_timeline(
+        &self,
+        request: LocateTimelineRequest,
+    ) -> Result<Option<TimelineLocationDto>, AppError> {
+        self.service.locate_timeline(
+            &request.workspace_id,
+            &request.projection_id,
+            request.source_row,
+            request.limit,
+        )
+    }
+
+    pub fn locate_timeline_offset(
+        &self,
+        request: LocateTimelineOffsetRequest,
+    ) -> Result<Option<TimelineLocationDto>, AppError> {
+        self.service.locate_timeline_offset(
+            &request.workspace_id,
+            &request.projection_id,
+            request.offset,
             request.limit,
         )
     }

@@ -28,6 +28,7 @@ fn real_mixed_session_crosses_provider_store_analysis_and_persistent_annotations
             .iter()
             .any(|artifact| !artifact.completeness.is_empty())
     );
+    let artifact_tids = opened.artifacts[0].tids.clone();
     let workspace = opened.workspace.id;
     let projection = service
         .create_projection(&workspace, 0, EventFilterDto::default())
@@ -37,6 +38,20 @@ fn real_mixed_session_crosses_provider_store_analysis_and_persistent_annotations
         .unwrap();
     assert!(page.rows.len() <= 2_000 && !page.rows.is_empty());
     let row = &page.rows[0];
+    if let Some(tid) = row.key.tid {
+        assert!(artifact_tids.contains(&tid));
+    }
+    let location = service
+        .locate_timeline(&workspace, &projection.projection_id, row.source_row, 2_000)
+        .unwrap()
+        .expect("visible row location");
+    assert_eq!(location.start, 0);
+    assert!(location.cursor.is_none());
+    let offset_location = service
+        .locate_timeline_offset(&workspace, &projection.projection_id, 0, 2_000)
+        .unwrap()
+        .expect("visible offset location");
+    assert_eq!(offset_location, location);
     service
         .get_event_detail(&workspace, 0, row.source_row)
         .unwrap();

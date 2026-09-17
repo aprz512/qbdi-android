@@ -26,6 +26,8 @@ export class E2eQtraceApi implements QtraceApi {
   getWorkspaceSummary: QtraceApi["getWorkspaceSummary"] = (workspace_id) => request("get_workspace_summary", { workspace_id });
   createProjection: QtraceApi["createProjection"] = (workspace_id, artifact_index, filter) => request("create_projection", { workspace_id, artifact_index, filter });
   queryTimeline: QtraceApi["queryTimeline"] = (workspace_id, projection_id, cursor, limit) => request("query_timeline", { workspace_id, projection_id, cursor, limit });
+  locateTimeline: QtraceApi["locateTimeline"] = (workspace_id, projection_id, source_row, limit) => request("locate_timeline", { workspace_id, projection_id, source_row, limit });
+  locateTimelineOffset: QtraceApi["locateTimelineOffset"] = (workspace_id, projection_id, offset, limit) => request("locate_timeline_offset", { workspace_id, projection_id, offset, limit });
   getEventDetail: QtraceApi["getEventDetail"] = (workspace_id, artifact_index, row) => request("get_event_detail", { workspace_id, artifact_index, row });
   getRegisterState: QtraceApi["getRegisterState"] = (workspace_id, artifact_index, row) => request("get_register_state", { workspace_id, artifact_index, row });
   getMemoryState: QtraceApi["getMemoryState"] = (workspace_id, artifact_index, row, start, end_exclusive) => request("get_memory_state", { workspace_id, artifact_index, row, start, end_exclusive });

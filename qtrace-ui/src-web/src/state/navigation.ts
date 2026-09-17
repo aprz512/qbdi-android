@@ -1,6 +1,6 @@
 import type { EventKeyDto } from "../api/generated";
 
-export interface NavigationEntry { workspaceId: string; projectionId: string; artifactIndex: number; eventKey: EventKeyDto }
+export interface NavigationEntry { workspaceId: string; projectionId: string; artifactIndex: number; sourceRow: number; eventKey: EventKeyDto }
 
 export class NavigationHistory {
   private entries: NavigationEntry[] = [];

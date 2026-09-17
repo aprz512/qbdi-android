@@ -12,7 +12,7 @@ use qtrace_analysis::{
     AddressRange, ByteState, CallTreeAnalyzer, CallTreeOptions, EventFilter, FrameState,
     MemoryAnalyzer, MemoryEvidence, MemoryFilter, MnemonicFilter, PageCursor, QueryContext,
     RegisterReplay, RegisterSnapshotState, SequenceRange, TimelineProjection, TimelineRow,
-    query_events,
+    locate_event, locate_offset, query_events,
 };
 use qtrace_provider::{
     ArtifactDigest, CompletenessCause, EventKey, EventKind, MemoryDirection, OperationAbort,
@@ -30,8 +30,8 @@ use crate::{
     CompletenessRangeDto, DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto,
     HexU64Dto, JobId, JobRegistry, LocalSymbolNameDto, MemoryByteDto, MemoryEvidenceDto,
     MemoryStateDto, OpenWorkspaceDto, ProjectionId, ProjectionJobDto, RegisterCellDto,
-    RegisterStateDto, ServiceBudget, ServiceLimits, SymbolDto, TimelinePageDto, WorkspaceId,
-    WorkspaceSummaryDto,
+    RegisterStateDto, ServiceBudget, ServiceLimits, SymbolDto, TimelineLocationDto,
+    TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
 };
 
 pub struct QtraceService {
@@ -214,19 +214,22 @@ impl QtraceService {
         let artifact_dtos = artifacts
             .iter()
             .enumerate()
-            .map(|(index, artifact)| ArtifactSummaryDto {
-                index: u32::try_from(index).unwrap_or(u32::MAX),
-                name: artifact.name.clone(),
-                event_count: u32::try_from(artifact.store.event_count()).unwrap_or(u32::MAX),
-                completeness: artifact
-                    .store
-                    .completeness()
-                    .iter()
-                    .copied()
-                    .map(completeness_range)
-                    .collect(),
+            .map(|(index, artifact)| {
+                Ok(ArtifactSummaryDto {
+                    index: u32::try_from(index).unwrap_or(u32::MAX),
+                    name: artifact.name.clone(),
+                    event_count: u32::try_from(artifact.store.event_count()).unwrap_or(u32::MAX),
+                    tids: artifact.store.thread_ids()?,
+                    completeness: artifact
+                        .store
+                        .completeness()
+                        .iter()
+                        .copied()
+                        .map(completeness_range)
+                        .collect(),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, AppError>>()?;
         self.workspaces
             .lock()
             .map_err(|_| AppError::worker_failed())?
@@ -383,6 +386,60 @@ impl QtraceService {
             total: u32::try_from(page.total).unwrap_or(u32::MAX),
             exact_total: page.exact_total,
         })
+    }
+
+    pub fn locate_timeline(
+        &self,
+        workspace: &WorkspaceId,
+        projection: &ProjectionId,
+        source_row: u32,
+        limit: u32,
+    ) -> Result<Option<TimelineLocationDto>, AppError> {
+        let projection = {
+            let all = self
+                .workspaces
+                .lock()
+                .map_err(|_| AppError::worker_failed())?;
+            all.get(workspace)
+                .and_then(|item| item.projections.get(projection))
+                .map(|item| item.projection.clone())
+                .ok_or_else(AppError::stale_workspace)?
+        };
+        locate_event(&projection, source_row as usize, limit as usize)
+            .map(|location| {
+                location.map(|value| TimelineLocationDto {
+                    start: u32::try_from(value.start).unwrap_or(u32::MAX),
+                    cursor: value.cursor.map(|cursor| cursor.as_str().to_owned()),
+                })
+            })
+            .map_err(AppError::from)
+    }
+
+    pub fn locate_timeline_offset(
+        &self,
+        workspace: &WorkspaceId,
+        projection: &ProjectionId,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Option<TimelineLocationDto>, AppError> {
+        let projection = {
+            let all = self
+                .workspaces
+                .lock()
+                .map_err(|_| AppError::worker_failed())?;
+            all.get(workspace)
+                .and_then(|item| item.projections.get(projection))
+                .map(|item| item.projection.clone())
+                .ok_or_else(AppError::stale_workspace)?
+        };
+        locate_offset(&projection, offset as usize, limit as usize)
+            .map(|location| {
+                location.map(|value| TimelineLocationDto {
+                    start: u32::try_from(value.start).unwrap_or(u32::MAX),
+                    cursor: value.cursor.map(|cursor| cursor.as_str().to_owned()),
+                })
+            })
+            .map_err(AppError::from)
     }
 
     pub fn get_event_detail(

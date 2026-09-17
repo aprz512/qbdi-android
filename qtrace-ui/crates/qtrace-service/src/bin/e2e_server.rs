@@ -213,6 +213,18 @@ fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppErro
             optional(&value, "cursor")?,
             number(&value, "limit")?,
         )?),
+        "locate_timeline" => to_value(service.locate_timeline(
+            &field(&value, "workspace_id")?,
+            &field(&value, "projection_id")?,
+            number(&value, "source_row")?,
+            number(&value, "limit")?,
+        )?),
+        "locate_timeline_offset" => to_value(service.locate_timeline_offset(
+            &field(&value, "workspace_id")?,
+            &field(&value, "projection_id")?,
+            number(&value, "offset")?,
+            number(&value, "limit")?,
+        )?),
         "get_event_detail" => to_value(service.get_event_detail(
             &field(&value, "workspace_id")?,
             number(&value, "artifact_index")?,

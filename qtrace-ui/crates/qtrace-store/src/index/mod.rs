@@ -5,7 +5,11 @@ mod postings;
 mod validation;
 mod wire;
 
-use std::{collections::HashMap, error::Error, fmt};
+use std::{
+    collections::{BTreeSet, HashMap},
+    error::Error,
+    fmt,
+};
 
 use qtrace_provider::{
     CompletenessCause, CompletenessRange, EventKey, EventKind, EventScope, MemoryDirection,
@@ -1029,6 +1033,18 @@ pub trait TraceStoreView {
     fn definition(&self, definition: u32) -> Option<&DefinitionRow>;
     fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow>;
     fn completeness(&self) -> &[CompletenessRow];
+    fn thread_ids(&self) -> Result<Vec<u32>, IndexError> {
+        let mut tids = BTreeSet::new();
+        for row in 0..self.event_count() {
+            let key = self
+                .event_key(row)?
+                .ok_or_else(|| IndexError::corrupt("event key is absent"))?;
+            if let Some(tid) = key.tid {
+                tids.insert(tid);
+            }
+        }
+        Ok(tids.into_iter().collect())
+    }
     fn rows_for_timeline(&self, timeline: u64) -> Result<Vec<usize>, IndexError>;
     fn rows_for_tids(&self, tids: &[u32]) -> Result<Vec<usize>, IndexError>;
     fn rows_for_sequence_range(
@@ -2084,6 +2100,15 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
     }
     fn completeness(&self) -> &[CompletenessRow] {
         &self.normalized_catalog().completeness
+    }
+    fn thread_ids(&self) -> Result<Vec<u32>, IndexError> {
+        Ok(self
+            .normalized_catalog()
+            .indexes
+            .tid
+            .iter()
+            .map(|(tid, _)| *tid)
+            .collect())
     }
     fn rows_for_timeline(&self, timeline: u64) -> Result<Vec<usize>, IndexError> {
         rows_for_posting_keys(&self.normalized_catalog().indexes.timeline, &[timeline])

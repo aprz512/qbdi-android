@@ -12,7 +12,7 @@ function fakeApi(overrides: Partial<QtraceApi> = {}): QtraceApi {
   return {
     pickAndOpenSession: vi.fn().mockResolvedValue({
       workspace: { id: "workspace-7", generation: 0, artifact_count: 1 },
-      artifacts: [{ index: 0, name: "main.trace.bin", event_count: 42, completeness: [] }],
+      artifacts: [{ index: 0, name: "main.trace.bin", event_count: 42, tids: [7], completeness: [] }],
       warnings: ["worker artifact isolated"],
     }),
     pickAndOpenArtifact: vi.fn().mockResolvedValue(null),
@@ -20,6 +20,8 @@ function fakeApi(overrides: Partial<QtraceApi> = {}): QtraceApi {
     getWorkspaceSummary: unsupported,
     createProjection: unsupported,
     queryTimeline: unsupported,
+    locateTimeline: unsupported,
+    locateTimelineOffset: unsupported,
     getEventDetail: unsupported,
     getRegisterState: unsupported,
     getMemoryState: unsupported,
@@ -116,8 +118,8 @@ describe("desktop shell", () => {
       pickAndOpenSession: vi.fn().mockResolvedValue({
         workspace: { id: "workspace-7", generation: 0, artifact_count: 2 },
         artifacts: [
-          { index: 0, name: "main.qtrb", event_count: 1, completeness: [] },
-          { index: 1, name: "capture.flight", event_count: 2, completeness: [{ domain: "captured_sequence", start: "9", end: "9", end_inclusive: true, cause: "overwritten", provenance: "damaged" }] },
+          { index: 0, name: "main.qtrb", event_count: 1, tids: [7], completeness: [] },
+          { index: 1, name: "capture.flight", event_count: 2, tids: [7], completeness: [{ domain: "captured_sequence", start: "9", end: "9", end_inclusive: true, cause: "overwritten", provenance: "damaged" }] },
         ],
         warnings: [],
       }),
@@ -148,6 +150,7 @@ describe("desktop shell", () => {
         .mockResolvedValueOnce({ rows: [second], next_cursor: null, total: 1, exact_total: true })
         .mockResolvedValueOnce({ rows: [second], next_cursor: "history-next", total: 2, exact_total: true })
         .mockResolvedValueOnce({ rows: [first], next_cursor: null, total: 2, exact_total: true }),
+      locateTimeline: vi.fn().mockResolvedValue({ start: 1, cursor: "history-next" }),
       getEventDetail: vi.fn((_workspace, _artifact, row) => Promise.resolve({ artifact_index: 0, row, key: row === 1 ? first.key : second.key, kind: `detail-${row}`, provenance: "captured", raw_payload: "{}", module: null, relative_pc: null, memory_range: null })),
       getRegisterState: vi.fn().mockResolvedValue({ key: first.key, before: [], after: [] }),
       getCallTree: vi.fn().mockResolvedValue({ identity: "tree", timeline_id: "1", tid: 7, roots: [], nodes: [] }),
@@ -162,8 +165,115 @@ describe("desktop shell", () => {
     fireEvent.click(await screen.findByRole("row", { name: /2 thread 7/ }));
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
     fireEvent.click(await screen.findByRole("button", { name: "Reveal in unfiltered timeline" }));
+    await waitFor(() => expect(api.locateTimeline).toHaveBeenCalledWith("workspace-7", "projection-history", 1, 2_000));
     await waitFor(() => expect(api.queryTimeline).toHaveBeenCalledWith("workspace-7", "projection-history", "history-next", 2_000));
     await waitFor(() => expect(api.getEventDetail).toHaveBeenLastCalledWith("workspace-7", 0, 1));
+  });
+
+  it("jumps from the call tree to an event on a later timeline page", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => eventRow(index + 1));
+    const first = firstPage[0];
+    const deepCall = eventRow(101);
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-calls", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn()
+        .mockResolvedValueOnce({ rows: firstPage, next_cursor: "calls-next", total: 101, exact_total: true })
+        .mockResolvedValueOnce({ rows: [deepCall], next_cursor: null, total: 101, exact_total: true }),
+      locateTimeline: vi.fn().mockResolvedValue({ start: 100, cursor: "calls-next" }),
+      getEventDetail: vi.fn((_workspace, _artifact, row) => Promise.resolve({
+        artifact_index: 0,
+        row,
+        key: row === 1 ? first.key : deepCall.key,
+        kind: row === 1 ? "origin-detail" : "deep-call-detail",
+        provenance: "captured",
+        raw_payload: "{}",
+        module: null,
+        relative_pc: null,
+        memory_range: null,
+      })),
+      getRegisterState: vi.fn((_workspace, _artifact, row) => Promise.resolve({ key: row === 1 ? first.key : deepCall.key, before: [], after: [] })),
+      getCallTree: vi.fn().mockResolvedValue({
+        identity: "tree-deep",
+        timeline_id: "1",
+        tid: 7,
+        roots: [1],
+        nodes: [{ id: 1, parent: null, children: [], tid: 7, target: "0x1000", display: "deep call", source_row_start: 101, source_row_end_exclusive: 102, provenance: "captured", state: "complete" }],
+      }),
+      getAnnotation: vi.fn().mockResolvedValue(null),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-7/);
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    fireEvent.click(await screen.findByRole("row", { name: /^1 thread 7/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /deep call · complete/ }));
+
+    await waitFor(() => expect(screen.getByText("deep-call-detail")).toBeVisible());
+    expect(api.locateTimeline).toHaveBeenCalledWith("workspace-7", "projection-calls", 101, 2_000);
+    expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "projection-calls", "calls-next", 2_000);
+  });
+
+  it("keeps the filter editor synchronized with thread navigation", async () => {
+    const row = eventRow(1);
+    const createProjection = vi.fn().mockResolvedValue({ projection_id: "projection-thread", job_id: "job-1", generation: 1 });
+    const api = fakeApi({
+      createProjection,
+      queryTimeline: vi.fn().mockResolvedValue({ rows: [row], next_cursor: null, total: 1, exact_total: true }),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-7/);
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    fireEvent.click(await screen.findByRole("button", { name: "TID 7" }));
+
+    await waitFor(() => expect(screen.getByLabelText("TID")).toHaveValue("7"));
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    await waitFor(() => expect(createProjection).toHaveBeenLastCalledWith(
+      "workspace-7",
+      0,
+      expect.objectContaining({ tids: [7] }),
+    ));
+  });
+
+  it("lists artifact threads that are absent from the current timeline page", async () => {
+    const api = fakeApi({
+      pickAndOpenSession: vi.fn().mockResolvedValue({
+        workspace: { id: "workspace-7", generation: 0, artifact_count: 1 },
+        artifacts: [{ index: 0, name: "main.trace.bin", event_count: 2_001, tids: [7, 9], completeness: [] }],
+        warnings: [],
+      }),
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-threads", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn().mockResolvedValue({ rows: [eventRow(1)], next_cursor: "later-page", total: 2_001, exact_total: true }),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-7/);
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+
+    expect(await screen.findByRole("button", { name: "TID 9" })).toBeVisible();
+  });
+
+  it("locates a distant virtual viewport without walking intermediate pages", async () => {
+    const distant = eventRow(8_001);
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-scroll", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn()
+        .mockResolvedValueOnce({ rows: [eventRow(1)], next_cursor: "second-page", total: 10_000, exact_total: true })
+        .mockResolvedValueOnce({ rows: [distant], next_cursor: null, total: 10_000, exact_total: true }),
+      locateTimelineOffset: vi.fn().mockResolvedValue({ start: 8_000, cursor: "distant-page" }),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-7/);
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    const timeline = await screen.findByLabelText("Timeline");
+    Object.defineProperty(timeline, "clientHeight", { configurable: true, value: 320 });
+    fireEvent.scroll(timeline, { target: { scrollTop: 120_000 } });
+
+    await waitFor(() => expect(api.locateTimelineOffset).toHaveBeenCalled());
+    const offset = vi.mocked(api.locateTimelineOffset).mock.calls.at(-1)?.[2] ?? 0;
+    expect(offset).toBeGreaterThan(2_000);
+    expect(api.queryTimeline).toHaveBeenCalledWith("workspace-7", "projection-scroll", "distant-page", 2_000);
   });
 
   it("shows a local rename above ELF identity and supports edit/delete", async () => {
