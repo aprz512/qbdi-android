@@ -28,6 +28,7 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
   const controllerIdentity = `${workspaceId}\0${projectionId}\0${generation}`;
   const [selected, setSelected] = useState<number | null>(null);
   const [visible, setVisible] = useState({ start: 0, end: Math.min(rows.length, 64) });
+  const [scrollPosition, setScrollPosition] = useState({ physical: 0, logical: 0 });
   const controller = useMemo(() => {
     void controllerIdentity;
     return new ViewportController(async (request, signal) => {
@@ -41,14 +42,17 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
   const updateViewport = useCallback(() => {
     const element = viewport.current;
     if (element === null) return;
-    const range = ViewportController.rangeForViewport({ scrollOffset: element.scrollTop, canvasHeight: Math.max(320, element.clientHeight), rowHeight: 24, totalRows });
+    const geometry = { canvasHeight: Math.max(320, element.clientHeight), rowHeight: 24, totalRows };
+    const logical = ViewportController.logicalOffsetForScroll(element.scrollTop, geometry);
+    const range = ViewportController.rangeForViewport({ ...geometry, scrollOffset: logical });
+    setScrollPosition({ physical: element.scrollTop, logical });
     setVisible(range);
     controller.request({ workspaceId, projectionId, generation, ...range });
   }, [controller, generation, projectionId, totalRows, workspaceId]);
   const loadAndFocus = async (load: (() => Promise<number | void>) | undefined) => {
     const start = await load?.();
     if (typeof start === "number" && viewport.current !== null) {
-      viewport.current.scrollTop = start * 24;
+      viewport.current.scrollTop = ViewportController.scrollOffsetForRow(start, { canvasHeight: Math.max(320, viewport.current.clientHeight), rowHeight: 24, totalRows });
       updateViewport();
     }
   };
@@ -71,10 +75,12 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
       theme: { background: "#111827", foreground: "#e5e7eb", selected: "#1d4ed8", muted: "#9ca3af", damaged: "#7f1d1d", gap: "#422006" },
     });
   }, [displayRows, selected]);
+  const scrollHeight = ViewportController.scrollHeight({ canvasHeight: 320, rowHeight: 24, totalRows });
+  const windowOffset = scrollPosition.physical + (pageStart + localStart) * 24 - scrollPosition.logical;
   return (
     <section ref={viewport} className="virtual-timeline" aria-label="Timeline" onScroll={updateViewport}>
-      <div className="timeline-scroll-space" style={{ height: Math.max(320, totalRows * 24) }}>
-        <div className="timeline-window" style={{ transform: `translateY(${(pageStart + localStart) * 24}px)` }}>
+      <div className="timeline-scroll-space" style={{ height: scrollHeight }}>
+        <div className="timeline-window" style={{ transform: `translateY(${windowOffset}px)` }}>
           <canvas ref={canvas} aria-hidden="true" />
           <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
         </div>

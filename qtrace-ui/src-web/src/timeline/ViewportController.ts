@@ -2,6 +2,9 @@ import type { PageRequest, RowRange, ViewportGeometry } from "./types";
 
 type FetchPage = (request: PageRequest, signal: AbortSignal) => Promise<void>;
 type Schedule = (callback: () => void) => void;
+type ScrollGeometry = Omit<ViewportGeometry, "scrollOffset">;
+
+const MAX_SCROLL_HEIGHT = 16_000_000;
 
 export class ViewportController {
   private pending: PageRequest | null = null;
@@ -17,6 +20,26 @@ export class ViewportController {
     const first = Math.floor(Math.max(0, geometry.scrollOffset) / geometry.rowHeight);
     const overscan = Math.ceil(visible * 0.25);
     return { start: Math.max(0, first - overscan), end: Math.min(geometry.totalRows, first + visible + overscan) };
+  }
+
+  static scrollHeight(geometry: ScrollGeometry): number {
+    validateScrollGeometry(geometry);
+    return Math.max(geometry.canvasHeight, Math.min(MAX_SCROLL_HEIGHT, geometry.totalRows * geometry.rowHeight));
+  }
+
+  static logicalOffsetForScroll(scrollOffset: number, geometry: ScrollGeometry): number {
+    const logicalMaximum = Math.max(0, geometry.totalRows * geometry.rowHeight - geometry.canvasHeight);
+    const physicalMaximum = Math.max(0, this.scrollHeight(geometry) - geometry.canvasHeight);
+    if (physicalMaximum === 0) return 0;
+    return Math.min(logicalMaximum, Math.max(0, scrollOffset) / physicalMaximum * logicalMaximum);
+  }
+
+  static scrollOffsetForRow(row: number, geometry: ScrollGeometry): number {
+    const logicalMaximum = Math.max(0, geometry.totalRows * geometry.rowHeight - geometry.canvasHeight);
+    const physicalMaximum = Math.max(0, this.scrollHeight(geometry) - geometry.canvasHeight);
+    if (logicalMaximum === 0) return 0;
+    const logicalOffset = Math.min(logicalMaximum, Math.max(0, row) * geometry.rowHeight);
+    return logicalOffset / logicalMaximum * physicalMaximum;
   }
 
   request(next: PageRequest): void {
@@ -64,6 +87,9 @@ export class ViewportController {
 const sameIdentity = (a: PageRequest, b: PageRequest) => a.workspaceId === b.workspaceId && a.projectionId === b.projectionId && a.generation === b.generation;
 const touches = (a: RowRange, b: RowRange) => a.start <= b.end && b.start <= a.end;
 const exactRequest = (a: PageRequest, b: PageRequest) => sameIdentity(a, b) && a.start === b.start && a.end === b.end;
+const validateScrollGeometry = (geometry: ScrollGeometry) => {
+  if (geometry.rowHeight <= 0 || geometry.canvasHeight < 0 || geometry.totalRows < 0) throw new RangeError("invalid viewport geometry");
+};
 const defaultSchedule: Schedule = (callback) => {
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(callback);
   else queueMicrotask(callback);

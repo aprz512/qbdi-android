@@ -10,6 +10,23 @@ describe("ViewportController", () => {
     expect(ViewportController.rangeForViewport({ scrollOffset: 200, canvasHeight: 100, rowHeight: 10, totalRows: 100 })).toEqual({ start: 17, end: 33 });
   });
 
+  it("maps very large timelines into a browser-safe scroll space", () => {
+    const geometry = { canvasHeight: 320, rowHeight: 24, totalRows: 20_000_000 };
+    expect(ViewportController.scrollHeight(geometry)).toBe(16_000_000);
+    const bottom = ViewportController.scrollOffsetForRow(20_000_000, geometry);
+    expect(bottom).toBe(16_000_000 - 320);
+    const logicalBottom = ViewportController.logicalOffsetForScroll(bottom, geometry);
+    expect(logicalBottom).toBe(20_000_000 * 24 - 320);
+    expect(ViewportController.rangeForViewport({ ...geometry, scrollOffset: logicalBottom }).end).toBe(20_000_000);
+  });
+
+  it("keeps native one-to-one coordinates for ordinary timelines", () => {
+    const geometry = { canvasHeight: 320, rowHeight: 24, totalRows: 10_000 };
+    expect(ViewportController.scrollHeight(geometry)).toBe(240_000);
+    expect(ViewportController.logicalOffsetForScroll(48_000, geometry)).toBe(48_000);
+    expect(ViewportController.scrollOffsetForRow(2_000, geometry)).toBe(48_000);
+  });
+
   it("coalesces adjacent requests within one frame", () => {
     const scheduled: Array<() => void> = [];
     const seen: PageRequest[] = [];
