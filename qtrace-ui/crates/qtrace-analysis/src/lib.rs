@@ -1,5 +1,6 @@
 //! Indexed filtering and stable timeline projection over immutable trace stores.
 
+mod call_tree;
 mod filter;
 mod memory;
 mod provenance;
@@ -24,3 +25,8 @@ pub use timeline::{
 pub use qtrace_provider::{EventKind, MemoryDirection, RegisterSlot};
 
 pub const STORE_CRATE: &str = qtrace_store::PROVIDER_CRATE;
+pub use call_tree::{
+    CallNode, CallTargetEvidence, CallTreeAnalyzer, CallTreeArtifact, CallTreeIdentity,
+    CallTreeOptions, ExecutionInterval, FrameState, IncompleteReason, IntervalKind,
+    MAX_CALL_TREE_NODES, MAX_CALL_TREE_ROWS, SemanticEnrichment,
+};

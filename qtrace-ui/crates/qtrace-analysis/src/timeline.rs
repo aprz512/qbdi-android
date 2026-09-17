@@ -288,7 +288,7 @@ impl AnalysisError {
         }
     }
 
-    fn control(error: qtrace_provider::OperationAbort) -> Self {
+    pub(crate) fn control(error: qtrace_provider::OperationAbort) -> Self {
         match error {
             qtrace_provider::OperationAbort::Cancelled => Self {
                 code: "job.cancelled",
@@ -734,7 +734,7 @@ impl Drop for TimelineProjection {
 }
 
 impl AnalysisError {
-    fn store_shape(detail: impl Into<Cow<'static, str>>) -> Self {
+    pub(crate) fn store_shape(detail: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code: "analysis.store",
             detail: detail.into(),
