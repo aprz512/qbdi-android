@@ -1,5 +1,5 @@
 export type AppError = { code: string, stage: string, source: SourceCoordinateDto | null, retryable: boolean, detail: string, };
-export type AnnotationDto = { key: EventKeyDto, comment: string, };
+export type AnnotationDto = { key: EventKeyDto, comment: string, highlight: string | null, };
 export type AddressRangeDto = { start: HexU64Dto, end_exclusive: HexU64Dto, };
 export type ArtifactSummaryDto = { index: number, name: string, event_count: number, };
 export type CallNodeDto = { id: number, parent: number | null, children: Array<number>, tid: number, target: HexU64Dto | null, display: string, source_row_start: number, source_row_end_exclusive: number, provenance: string, state: string, };
@@ -15,6 +15,7 @@ export type JobDto = { id: JobId, workspace_id: WorkspaceId, kind: string, state
 export type JobId = string;
 export type JobProgressDto = { completed: DecimalU64Dto, total: DecimalU64Dto | null, };
 export type JobState = "queued" | "running" | "completed" | "cancelled" | "failed";
+export type LocalSymbolNameDto = { module_digest: string, relative_pc: HexU64Dto, name: string, };
 export type MemoryByteDto = { address: HexU64Dto, value: number | null, provenance: string, };
 export type MemoryFilterDto = { range: AddressRangeDto, directions: Array<string>, };
 export type MemoryEvidenceDto = { key: EventKeyDto, tid: number | null, direction: string, provenance: string, address: HexU64Dto, size: number, };

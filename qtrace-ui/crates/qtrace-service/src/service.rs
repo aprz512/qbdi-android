@@ -18,17 +18,17 @@ use qtrace_provider::{
 };
 use qtrace_store::{
     AnnotationOpenRequest, AnnotationStore, AuthorizedPath, BuildOptions, ElfLoadRequest,
-    ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, IndexBuilder, ModuleIdentity, OpenPolicy,
-    SessionLoader,
+    ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, Highlight, IndexBuilder, LocalSymbolName,
+    ModuleIdentity, OpenPolicy, SessionLoader,
 };
 
 use crate::workspace::{ArtifactWorkspace, ProjectionWorkspace, Workspace};
 use crate::{
     AnnotationDto, AppError, ArtifactSummaryDto, CallNodeDto, CallTreeDto, DecimalU64Dto,
     EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto, HexU64Dto, JobId, JobRegistry,
-    MemoryByteDto, MemoryEvidenceDto, MemoryStateDto, OpenWorkspaceDto, ProjectionId,
-    ProjectionJobDto, RegisterCellDto, RegisterStateDto, ServiceBudget, ServiceLimits, SymbolDto,
-    TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
+    LocalSymbolNameDto, MemoryByteDto, MemoryEvidenceDto, MemoryStateDto, OpenWorkspaceDto,
+    ProjectionId, ProjectionJobDto, RegisterCellDto, RegisterStateDto, ServiceBudget,
+    ServiceLimits, SymbolDto, TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
 };
 
 pub struct QtraceService {
@@ -440,12 +440,18 @@ impl QtraceService {
     ) -> Result<Option<AnnotationDto>, AppError> {
         let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
         let store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
-        Ok(store
-            .event_annotation(&key)?
-            .map(|annotation| AnnotationDto {
-                key: event_key_dto(annotation.event()),
-                comment: annotation.comment().to_owned(),
-            }))
+        let comment = store.event_annotation(&key)?;
+        let highlight = store.highlight(&key)?;
+        if comment.is_none() && highlight.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(AnnotationDto {
+            key: event_key_dto(&key),
+            comment: comment
+                .as_ref()
+                .map_or_else(String::new, |annotation| annotation.comment().to_owned()),
+            highlight: highlight.map(|value| value.value().to_owned()),
+        }))
     }
 
     pub fn upsert_annotation(
@@ -476,6 +482,94 @@ impl QtraceService {
         let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
         let mut tx = store.begin_transaction()?;
         tx.delete_event_annotation(&key)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn upsert_highlight(
+        &self,
+        workspace: &WorkspaceId,
+        data_home: AuthorizedPath,
+        artifact_index: u32,
+        row: u32,
+        value: String,
+    ) -> Result<(), AppError> {
+        let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
+        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let highlight = Highlight::new(key, value)?;
+        let mut tx = store.begin_transaction()?;
+        tx.put_highlight(&highlight)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_highlight(
+        &self,
+        workspace: &WorkspaceId,
+        data_home: AuthorizedPath,
+        artifact_index: u32,
+        row: u32,
+    ) -> Result<(), AppError> {
+        let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
+        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut tx = store.begin_transaction()?;
+        tx.delete_highlight(&key)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_local_symbol_name(
+        &self,
+        workspace: &WorkspaceId,
+        data_home: AuthorizedPath,
+        artifact_index: u32,
+        module_digest: String,
+        relative_pc: u64,
+    ) -> Result<Option<LocalSymbolNameDto>, AppError> {
+        let digest = parse_module_digest(&module_digest)?;
+        let identity = self.annotation_identity(workspace, artifact_index)?;
+        let store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        Ok(store
+            .local_symbol_name(digest, relative_pc)?
+            .map(|value| LocalSymbolNameDto {
+                module_digest,
+                relative_pc: HexU64Dto::new(relative_pc),
+                name: value.name().to_owned(),
+            }))
+    }
+
+    pub fn upsert_local_symbol_name(
+        &self,
+        workspace: &WorkspaceId,
+        data_home: AuthorizedPath,
+        artifact_index: u32,
+        module_digest: String,
+        relative_pc: u64,
+        name: String,
+    ) -> Result<(), AppError> {
+        let digest = parse_module_digest(&module_digest)?;
+        let identity = self.annotation_identity(workspace, artifact_index)?;
+        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let value = LocalSymbolName::new(digest, relative_pc, name)?;
+        let mut tx = store.begin_transaction()?;
+        tx.put_local_symbol_name(&value)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_local_symbol_name(
+        &self,
+        workspace: &WorkspaceId,
+        data_home: AuthorizedPath,
+        artifact_index: u32,
+        module_digest: String,
+        relative_pc: u64,
+    ) -> Result<(), AppError> {
+        let digest = parse_module_digest(&module_digest)?;
+        let identity = self.annotation_identity(workspace, artifact_index)?;
+        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut tx = store.begin_transaction()?;
+        tx.delete_local_symbol_name(digest, relative_pc)?;
         tx.commit()?;
         Ok(())
     }
@@ -577,9 +671,29 @@ impl QtraceService {
             .unwrap_or(key.artifact);
         Ok((key, identity))
     }
+    fn annotation_identity(
+        &self,
+        workspace: &WorkspaceId,
+        artifact_index: u32,
+    ) -> Result<ArtifactDigest, AppError> {
+        self.artifact_store(workspace, artifact_index)?
+            .event_key(0)
+            .map(|key| key.artifact)
+            .ok_or_else(event_missing)
+    }
     fn next_id(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed) + 1
     }
+}
+
+fn parse_module_digest(value: &str) -> Result<ArtifactDigest, AppError> {
+    ArtifactDigest::from_hex(value).ok_or_else(|| {
+        AppError::new(
+            "symbol.module_identity_invalid",
+            "annotation",
+            "invalid module digest",
+        )
+    })
 }
 
 fn open_limits() -> ServiceLimits {

@@ -1,8 +1,8 @@
 #[cfg(feature = "desktop")]
 use qtrace_service::{
-    AnnotationDto, AppError, CallTreeDto, EventDetailDto, JobDto, MemoryEvidenceDto,
-    MemoryStateDto, OpenWorkspaceDto, ProjectionJobDto, RegisterStateDto, SymbolDto,
-    TimelinePageDto, WorkspaceSummaryDto,
+    AnnotationDto, AppError, CallTreeDto, EventDetailDto, JobDto, LocalSymbolNameDto,
+    MemoryEvidenceDto, MemoryStateDto, OpenWorkspaceDto, ProjectionJobDto, RegisterStateDto,
+    SymbolDto, TimelinePageDto, WorkspaceSummaryDto,
 };
 use qtrace_service::{DecimalU64Dto, EventFilterDto, HexU64Dto, JobId, ProjectionId, WorkspaceId};
 use serde::Deserialize;
@@ -90,6 +90,34 @@ pub struct UpsertAnnotationRequest {
     pub artifact_index: u32,
     pub row: u32,
     pub comment: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsertHighlightRequest {
+    pub workspace_id: WorkspaceId,
+    pub artifact_index: u32,
+    pub row: u32,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalSymbolRequest {
+    pub workspace_id: WorkspaceId,
+    pub artifact_index: u32,
+    pub module_digest: String,
+    pub relative_pc: HexU64Dto,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsertLocalSymbolRequest {
+    pub workspace_id: WorkspaceId,
+    pub artifact_index: u32,
+    pub module_digest: String,
+    pub relative_pc: HexU64Dto,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -228,6 +256,46 @@ mod desktop {
         state: State<'_, DesktopState>,
     ) -> Result<Option<AnnotationDto>, AppError> {
         state.get_annotation(request)
+    }
+
+    #[tauri::command]
+    pub fn upsert_highlight(
+        request: UpsertHighlightRequest,
+        state: State<'_, DesktopState>,
+    ) -> Result<(), AppError> {
+        state.upsert_highlight(request)
+    }
+
+    #[tauri::command]
+    pub fn delete_highlight(
+        request: EventRequest,
+        state: State<'_, DesktopState>,
+    ) -> Result<(), AppError> {
+        state.delete_highlight(request)
+    }
+
+    #[tauri::command]
+    pub fn get_local_symbol_name(
+        request: LocalSymbolRequest,
+        state: State<'_, DesktopState>,
+    ) -> Result<Option<LocalSymbolNameDto>, AppError> {
+        state.get_local_symbol_name(request)
+    }
+
+    #[tauri::command]
+    pub fn upsert_local_symbol_name(
+        request: UpsertLocalSymbolRequest,
+        state: State<'_, DesktopState>,
+    ) -> Result<(), AppError> {
+        state.upsert_local_symbol_name(request)
+    }
+
+    #[tauri::command]
+    pub fn delete_local_symbol_name(
+        request: LocalSymbolRequest,
+        state: State<'_, DesktopState>,
+    ) -> Result<(), AppError> {
+        state.delete_local_symbol_name(request)
     }
 
     #[tauri::command]

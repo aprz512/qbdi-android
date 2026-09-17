@@ -183,6 +183,53 @@ fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppErro
             )?;
             Ok(Value::Null)
         }
+        "upsert_highlight" => {
+            service.upsert_highlight(
+                &field(&value, "workspace_id")?,
+                AuthorizedPath::new(state.data_root.clone()),
+                number(&value, "artifact_index")?,
+                number(&value, "row")?,
+                field(&value, "value")?,
+            )?;
+            Ok(Value::Null)
+        }
+        "delete_highlight" => {
+            service.delete_highlight(
+                &field(&value, "workspace_id")?,
+                AuthorizedPath::new(state.data_root.clone()),
+                number(&value, "artifact_index")?,
+                number(&value, "row")?,
+            )?;
+            Ok(Value::Null)
+        }
+        "get_local_symbol_name" => to_value(service.get_local_symbol_name(
+            &field(&value, "workspace_id")?,
+            AuthorizedPath::new(state.data_root.clone()),
+            number(&value, "artifact_index")?,
+            field(&value, "module_digest")?,
+            field::<HexU64Dto>(&value, "relative_pc")?.value(),
+        )?),
+        "upsert_local_symbol_name" => {
+            service.upsert_local_symbol_name(
+                &field(&value, "workspace_id")?,
+                AuthorizedPath::new(state.data_root.clone()),
+                number(&value, "artifact_index")?,
+                field(&value, "module_digest")?,
+                field::<HexU64Dto>(&value, "relative_pc")?.value(),
+                field(&value, "name")?,
+            )?;
+            Ok(Value::Null)
+        }
+        "delete_local_symbol_name" => {
+            service.delete_local_symbol_name(
+                &field(&value, "workspace_id")?,
+                AuthorizedPath::new(state.data_root.clone()),
+                number(&value, "artifact_index")?,
+                field(&value, "module_digest")?,
+                field::<HexU64Dto>(&value, "relative_pc")?.value(),
+            )?;
+            Ok(Value::Null)
+        }
         "list_jobs" => to_value(service.list_jobs()),
         "cancel_job" => {
             service.cancel_job(&field(&value, "job_id")?)?;

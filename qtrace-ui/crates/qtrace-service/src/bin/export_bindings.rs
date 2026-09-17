@@ -21,6 +21,7 @@ fn main() {
         JobId::decl(&config),
         JobProgressDto::decl(&config),
         JobState::decl(&config),
+        LocalSymbolNameDto::decl(&config),
         MemoryByteDto::decl(&config),
         MemoryFilterDto::decl(&config),
         MemoryEvidenceDto::decl(&config),

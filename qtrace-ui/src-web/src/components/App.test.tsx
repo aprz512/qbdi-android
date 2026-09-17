@@ -28,6 +28,11 @@ function fakeApi(): QtraceApi {
     getAnnotation: unsupported,
     upsertAnnotation: unsupported,
     deleteAnnotation: unsupported,
+    upsertHighlight: unsupported,
+    deleteHighlight: unsupported,
+    getLocalSymbolName: unsupported,
+    upsertLocalSymbolName: unsupported,
+    deleteLocalSymbolName: unsupported,
     listJobs: vi.fn().mockResolvedValue([]),
     cancelJob: unsupported,
   };

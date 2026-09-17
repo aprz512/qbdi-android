@@ -309,6 +309,14 @@ pub struct SymbolDto {
 pub struct AnnotationDto {
     pub key: EventKeyDto,
     pub comment: String,
+    pub highlight: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct LocalSymbolNameDto {
+    pub module_digest: String,
+    pub relative_pc: HexU64Dto,
+    pub name: String,
 }
 impl fmt::Display for WorkspaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

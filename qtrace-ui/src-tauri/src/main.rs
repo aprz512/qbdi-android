@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use qtrace_ui::{
     CommandAdapter, TauriNativePicker, cancel_job, close_workspace, create_projection,
-    delete_annotation, get_annotation, get_call_tree, get_event_detail, get_memory_history,
-    get_memory_state, get_register_state, get_workspace_summary, list_jobs, list_symbols,
-    pick_and_attach_elf, pick_and_open_artifact, pick_and_open_session, query_timeline,
-    upsert_annotation,
+    delete_annotation, delete_highlight, delete_local_symbol_name, get_annotation, get_call_tree,
+    get_event_detail, get_local_symbol_name, get_memory_history, get_memory_state,
+    get_register_state, get_workspace_summary, list_jobs, list_symbols, pick_and_attach_elf,
+    pick_and_open_artifact, pick_and_open_session, query_timeline, upsert_annotation,
+    upsert_highlight, upsert_local_symbol_name,
 };
 use tauri::Manager;
 
@@ -39,6 +40,11 @@ fn main() {
             upsert_annotation,
             delete_annotation,
             get_annotation,
+            upsert_highlight,
+            delete_highlight,
+            get_local_symbol_name,
+            upsert_local_symbol_name,
+            delete_local_symbol_name,
             list_jobs,
             cancel_job,
         ])

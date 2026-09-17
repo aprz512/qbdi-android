@@ -36,6 +36,11 @@ export class E2eQtraceApi implements QtraceApi {
   getAnnotation: QtraceApi["getAnnotation"] = (workspace_id, artifact_index, row) => request("get_annotation", { workspace_id, artifact_index, row });
   upsertAnnotation: QtraceApi["upsertAnnotation"] = (workspace_id, artifact_index, row, comment) => request("upsert_annotation", { workspace_id, artifact_index, row, comment });
   deleteAnnotation: QtraceApi["deleteAnnotation"] = (workspace_id, artifact_index, row) => request("delete_annotation", { workspace_id, artifact_index, row });
+  upsertHighlight: QtraceApi["upsertHighlight"] = (workspace_id, artifact_index, row, value) => request("upsert_highlight", { workspace_id, artifact_index, row, value });
+  deleteHighlight: QtraceApi["deleteHighlight"] = (workspace_id, artifact_index, row) => request("delete_highlight", { workspace_id, artifact_index, row });
+  getLocalSymbolName: QtraceApi["getLocalSymbolName"] = (workspace_id, artifact_index, module_digest, relative_pc) => request("get_local_symbol_name", { workspace_id, artifact_index, module_digest, relative_pc });
+  upsertLocalSymbolName: QtraceApi["upsertLocalSymbolName"] = (workspace_id, artifact_index, module_digest, relative_pc, name) => request("upsert_local_symbol_name", { workspace_id, artifact_index, module_digest, relative_pc, name });
+  deleteLocalSymbolName: QtraceApi["deleteLocalSymbolName"] = (workspace_id, artifact_index, module_digest, relative_pc) => request("delete_local_symbol_name", { workspace_id, artifact_index, module_digest, relative_pc });
   listJobs: QtraceApi["listJobs"] = () => request("list_jobs");
   cancelJob: QtraceApi["cancelJob"] = (job_id) => request("cancel_job", { job_id });
 }

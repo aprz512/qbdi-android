@@ -92,6 +92,51 @@ fn real_workspace_exposes_bounded_analysis_without_store_handles() {
         .unwrap()
         .unwrap();
     assert_eq!(annotation.comment, "reviewed");
+    assert_eq!(annotation.highlight, None);
+    service
+        .upsert_highlight(
+            &workspace,
+            AuthorizedPath::new(data.path().to_owned()),
+            0,
+            row.source_row,
+            "#ffcc00".into(),
+        )
+        .unwrap();
+    let highlighted = service
+        .get_annotation(
+            &workspace,
+            AuthorizedPath::new(data.path().to_owned()),
+            0,
+            row.source_row,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(highlighted.comment, "reviewed");
+    assert_eq!(highlighted.highlight.as_deref(), Some("#ffcc00"));
+
+    let module_digest = "11".repeat(32);
+    service
+        .upsert_local_symbol_name(
+            &workspace,
+            AuthorizedPath::new(data.path().to_owned()),
+            0,
+            module_digest.clone(),
+            0x120,
+            "local_entry".into(),
+        )
+        .unwrap();
+    let local = service
+        .get_local_symbol_name(
+            &workspace,
+            AuthorizedPath::new(data.path().to_owned()),
+            0,
+            module_digest,
+            0x120,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(local.name, "local_entry");
+    assert_eq!(local.relative_pc.value(), 0x120);
     service
         .delete_annotation(
             &workspace,

@@ -4,6 +4,7 @@ import type {
   EventDetailDto,
   EventFilterDto,
   JobDto,
+  LocalSymbolNameDto,
   MemoryEvidenceDto,
   MemoryStateDto,
   OpenWorkspaceDto,
@@ -67,6 +68,11 @@ export interface QtraceApi {
     comment: string,
   ): Promise<void>;
   deleteAnnotation(workspaceId: string, artifactIndex: number, row: number): Promise<void>;
+  upsertHighlight(workspaceId: string, artifactIndex: number, row: number, value: string): Promise<void>;
+  deleteHighlight(workspaceId: string, artifactIndex: number, row: number): Promise<void>;
+  getLocalSymbolName(workspaceId: string, artifactIndex: number, moduleDigest: string, relativePc: string): Promise<LocalSymbolNameDto | null>;
+  upsertLocalSymbolName(workspaceId: string, artifactIndex: number, moduleDigest: string, relativePc: string, name: string): Promise<void>;
+  deleteLocalSymbolName(workspaceId: string, artifactIndex: number, moduleDigest: string, relativePc: string): Promise<void>;
   listJobs(): Promise<JobDto[]>;
   cancelJob(jobId: string): Promise<void>;
 }

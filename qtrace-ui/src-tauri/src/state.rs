@@ -1,9 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use qtrace_service::{
-    AnnotationDto, AppError, CallTreeDto, EventDetailDto, JobDto, MemoryEvidenceDto,
-    MemoryStateDto, OpenWorkspaceDto, ProjectionJobDto, RegisterStateDto, SymbolDto,
-    TimelinePageDto, WorkspaceSummaryDto,
+    AnnotationDto, AppError, CallTreeDto, EventDetailDto, JobDto, LocalSymbolNameDto,
+    MemoryEvidenceDto, MemoryStateDto, OpenWorkspaceDto, ProjectionJobDto, RegisterStateDto,
+    SymbolDto, TimelinePageDto, WorkspaceSummaryDto,
 };
 use qtrace_store::AuthorizedPath;
 #[cfg(feature = "desktop")]
@@ -172,6 +172,62 @@ impl<P: NativePicker> CommandAdapter<P> {
             AuthorizedPath::new(self.data_home.clone()),
             request.artifact_index,
             request.row,
+        )
+    }
+
+    pub fn upsert_highlight(&self, request: UpsertHighlightRequest) -> Result<(), AppError> {
+        self.service.upsert_highlight(
+            &request.workspace_id,
+            AuthorizedPath::new(self.data_home.clone()),
+            request.artifact_index,
+            request.row,
+            request.value,
+        )
+    }
+
+    pub fn delete_highlight(&self, request: EventRequest) -> Result<(), AppError> {
+        self.service.delete_highlight(
+            &request.workspace_id,
+            AuthorizedPath::new(self.data_home.clone()),
+            request.artifact_index,
+            request.row,
+        )
+    }
+
+    pub fn get_local_symbol_name(
+        &self,
+        request: LocalSymbolRequest,
+    ) -> Result<Option<LocalSymbolNameDto>, AppError> {
+        self.service.get_local_symbol_name(
+            &request.workspace_id,
+            AuthorizedPath::new(self.data_home.clone()),
+            request.artifact_index,
+            request.module_digest,
+            request.relative_pc.value(),
+        )
+    }
+
+    pub fn upsert_local_symbol_name(
+        &self,
+        request: UpsertLocalSymbolRequest,
+    ) -> Result<(), AppError> {
+        self.service.upsert_local_symbol_name(
+            &request.workspace_id,
+            AuthorizedPath::new(self.data_home.clone()),
+            request.artifact_index,
+            request.module_digest,
+            request.relative_pc.value(),
+            request.name,
+        )
+    }
+
+    pub fn delete_local_symbol_name(&self, request: LocalSymbolRequest) -> Result<(), AppError> {
+        self.service.delete_local_symbol_name(
+            &request.workspace_id,
+            AuthorizedPath::new(self.data_home.clone()),
+            request.artifact_index,
+            request.module_digest,
+            request.relative_pc.value(),
         )
     }
 
