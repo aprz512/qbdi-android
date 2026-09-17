@@ -67,8 +67,26 @@ impl QtraceService {
         self.open_selected(selected, true)
     }
 
+    pub async fn open_session_task(
+        self: Arc<Self>,
+        selected: AuthorizedPath,
+    ) -> Result<OpenWorkspaceDto, AppError> {
+        tokio::task::spawn_blocking(move || self.open_session(selected))
+            .await
+            .map_err(|_| AppError::worker_failed())?
+    }
+
     pub fn open_artifact(&self, selected: AuthorizedPath) -> Result<OpenWorkspaceDto, AppError> {
         self.open_selected(selected, false)
+    }
+
+    pub async fn open_artifact_task(
+        self: Arc<Self>,
+        selected: AuthorizedPath,
+    ) -> Result<OpenWorkspaceDto, AppError> {
+        tokio::task::spawn_blocking(move || self.open_artifact(selected))
+            .await
+            .map_err(|_| AppError::worker_failed())?
     }
 
     fn open_selected(
@@ -79,14 +97,14 @@ impl QtraceService {
         let workspace_id = WorkspaceId::from_u64(self.next_id());
         let (job_id, cancellation) = self.jobs.begin(workspace_id.clone(), "open");
         let result = (|| {
-            let discovery_bytes = selected
+            let selected_file_bytes = selected
                 .as_path()
                 .metadata()
                 .ok()
                 .filter(|metadata| metadata.is_file())
-                .map_or(16 * 1024 * 1024, |metadata| metadata.len());
+                .map(|metadata| metadata.len());
             let discovery = ServiceBudget::with_cancellation(
-                open_limits(discovery_bytes),
+                discovery_limits(selected_file_bytes),
                 cancellation.clone(),
             );
             let session = if session_report {
@@ -94,11 +112,18 @@ impl QtraceService {
             } else {
                 SessionLoader::open_artifact(selected, OpenPolicy::cache_aware(), &discovery)?
             };
+            let (input_bytes, stream_probes) = session_input_budget(&session)?;
             let budget = ServiceBudget::with_cancellation(
-                open_limits(session_input_bytes(&session)?),
+                open_limits(input_bytes, stream_probes),
                 cancellation.clone(),
             );
-            self.publish_session(workspace_id.clone(), &job_id, session, &budget)
+            self.publish_session(
+                workspace_id.clone(),
+                &job_id,
+                session,
+                &budget,
+                &cancellation,
+            )
         })();
         self.jobs.finish(
             &job_id,
@@ -106,6 +131,7 @@ impl QtraceService {
             cancellation.is_cancelled(),
         );
         self.jobs.prune_workspace(&workspace_id, 64);
+        self.jobs.prune_terminal(256);
         result
     }
 
@@ -114,7 +140,8 @@ impl QtraceService {
         id: WorkspaceId,
         job_id: &JobId,
         session: qtrace_store::SessionSource,
-        budget: &ServiceBudget,
+        source_budget: &ServiceBudget,
+        cancellation: &crate::JobCancellation,
     ) -> Result<OpenWorkspaceDto, AppError> {
         let mut artifacts = Vec::new();
         let mut warnings = session
@@ -132,15 +159,19 @@ impl QtraceService {
         let artifact_total = u64::try_from(session.artifacts().len()).unwrap_or(u64::MAX);
         self.jobs.set_progress(job_id, 0, Some(artifact_total))?;
         for (artifact_position, source) in session.artifacts().iter().enumerate() {
-            match TraceStore::open_or_build(
+            let cache_budget =
+                ServiceBudget::with_cancellation(cache_limits(), cancellation.clone());
+            match TraceStore::open_or_build_with_guards(
                 &self.cache_root,
                 source,
                 &BuildOptions::default(),
-                budget,
+                source_budget,
+                &cache_budget,
             ) {
                 Ok(store) => {
                     let store = Arc::new(store);
-                    let context = Arc::new(QueryContext::new_with_guard(store.clone(), budget)?);
+                    let context =
+                        Arc::new(QueryContext::new_with_guard(store.clone(), &cache_budget)?);
                     artifacts.push(ArtifactWorkspace {
                         name: source.local_path().to_owned(),
                         store,
@@ -298,6 +329,19 @@ impl QtraceService {
             job_id,
             generation,
         })
+    }
+
+    pub async fn create_projection_task(
+        self: Arc<Self>,
+        workspace: WorkspaceId,
+        artifact_index: u32,
+        filter: EventFilterDto,
+    ) -> Result<ProjectionJobDto, AppError> {
+        tokio::task::spawn_blocking(move || {
+            self.create_projection(&workspace, artifact_index, filter)
+        })
+        .await
+        .map_err(|_| AppError::worker_failed())?
     }
 
     pub fn query_timeline(
@@ -811,12 +855,11 @@ fn parse_module_digest(value: &str) -> Result<ArtifactDigest, AppError> {
     })
 }
 
-fn open_limits(input_bytes: u64) -> ServiceLimits {
+fn open_limits(input_bytes: u64, stream_probe_count: u64) -> ServiceLimits {
     ServiceLimits {
         deadline: Instant::now() + Duration::from_secs(30 * 60),
-        // Cache validation/serialization is charged as input work too. Keep the raw selected
-        // size as the basis while allowing a bounded normalized-cache representation.
-        input_bytes: input_bytes.saturating_mul(3).max(64 * 1024 * 1024),
+        // QTRB's streaming reader charges one work unit for the final EOF probe.
+        input_bytes: input_bytes.saturating_add(stream_probe_count),
         decompressed_bytes: 4 * 1024 * 1024 * 1024,
         events: 20_000_000,
         nodes: u64::MAX,
@@ -825,8 +868,28 @@ fn open_limits(input_bytes: u64) -> ServiceLimits {
     }
 }
 
-fn session_input_bytes(session: &qtrace_store::SessionSource) -> Result<u64, AppError> {
-    session
+fn discovery_limits(selected_file_bytes: Option<u64>) -> ServiceLimits {
+    let input_bytes = selected_file_bytes.map_or(4 * 1024 * 1024 * 1024, |size| {
+        // Single-artifact discovery hashes the file, then probes its provider stream.
+        size.saturating_mul(2).saturating_add(4 * 1024)
+    });
+    open_limits(input_bytes, 0)
+}
+
+fn cache_limits() -> ServiceLimits {
+    ServiceLimits {
+        deadline: Instant::now() + Duration::from_secs(30 * 60),
+        input_bytes: 4 * 1024 * 1024 * 1024,
+        decompressed_bytes: 4 * 1024 * 1024 * 1024,
+        events: 20_000_000,
+        nodes: u64::MAX,
+        rows: u64::MAX,
+        resident_bytes: 2 * 1024 * 1024 * 1024,
+    }
+}
+
+fn session_input_budget(session: &qtrace_store::SessionSource) -> Result<(u64, u64), AppError> {
+    let input_bytes = session
         .artifacts()
         .iter()
         .try_fold(0_u64, |total, artifact| {
@@ -839,7 +902,16 @@ fn session_input_bytes(session: &qtrace_store::SessionSource) -> Result<u64, App
                         "selected artifact sizes overflow the input budget",
                     )
                 })
-        })
+        })?;
+    let stream_probes = session
+        .artifacts()
+        .iter()
+        .filter(|artifact| matches!(artifact.format(), qtrace_store::ArtifactFormat::QtrbLz4))
+        .count();
+    Ok((
+        input_bytes,
+        u64::try_from(stream_probes).unwrap_or(u64::MAX),
+    ))
 }
 
 fn default_cache_root() -> PathBuf {

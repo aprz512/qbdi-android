@@ -3,6 +3,7 @@
 .timeline-window { position: absolute; inset: 0 0 auto; height: max(320px, calc(100vh - 212px)); }
 .virtual-timeline canvas { position: absolute; inset: 0; }
 .timeline-load-more { position: sticky; left: 50%; bottom: .5rem; transform: translateX(-50%); z-index: 2; }
+.timeline-load-previous { position: sticky; left: .5rem; bottom: .5rem; z-index: 2; }
 .interaction-layer { position: absolute; inset: 0; outline: none; }
 .interaction-layer [role="row"] { height: 24px; cursor: default; }
 .interaction-layer:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }

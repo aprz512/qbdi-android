@@ -109,3 +109,17 @@ async fn worker_panic_is_contained_and_progress_is_bounded() {
     assert_eq!(error.code, "internal.worker_failed");
     assert!(!error.detail.contains("private"));
 }
+
+#[test]
+fn terminal_job_pruning_uses_numeric_age() {
+    let jobs = JobRegistry::default();
+    let workspace = WorkspaceId::from_u64(4);
+    for _ in 0..110 {
+        jobs.record_completed(workspace.clone(), "test");
+    }
+    jobs.prune_terminal(8);
+    let retained = jobs.list();
+    assert_eq!(retained.len(), 8);
+    assert!(retained.iter().any(|job| job.id.as_str() == "103"));
+    assert!(retained.iter().any(|job| job.id.as_str() == "110"));
+}

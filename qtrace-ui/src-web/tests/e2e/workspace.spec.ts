@@ -65,3 +65,14 @@ test("thread selection creates a bounded thread projection", async ({ page }) =>
   await expect(page.getByRole("grid", { name: "Visible trace rows" })).toBeVisible();
   expect(await page.getByRole("row").count()).toBeLessThanOrEqual(2_000);
 });
+
+test("switches artifacts after entering the timeline and exposes Flight completeness", async ({ page }) => {
+  await openWorkspace(page);
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  const artifacts = page.getByRole("navigation", { name: "Artifacts" });
+  await expect(artifacts).toBeVisible();
+  await artifacts.getByRole("button", { name: /capture\.flight\.bin/ }).click();
+  await expect(artifacts.getByRole("button", { name: /capture\.flight\.bin/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("grid", { name: "Visible trace rows" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Completeness" })).toContainText("captured_sequence");
+});

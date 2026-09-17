@@ -2538,26 +2538,36 @@ impl TraceStore {
         options: &BuildOptions,
         guard: &dyn WorkGuard,
     ) -> Result<Self, IndexError> {
+        Self::open_or_build_with_guards(cache_root, source, options, guard, guard)
+    }
+
+    pub fn open_or_build_with_guards(
+        cache_root: &std::path::Path,
+        source: &ArtifactSource,
+        options: &BuildOptions,
+        source_guard: &dyn WorkGuard,
+        cache_guard: &dyn WorkGuard,
+    ) -> Result<Self, IndexError> {
         options.validate()?;
-        let identity = cache_identity(source, options, guard)?;
-        guard.consume(WorkDelta::default())?;
-        match CacheReader::open(cache_root, &identity, guard)? {
+        let identity = cache_identity(source, options, cache_guard)?;
+        cache_guard.consume(WorkDelta::default())?;
+        match CacheReader::open(cache_root, &identity, cache_guard)? {
             CacheOpen::Ready(view) => {
-                return Ok(Self::Mapped(MappedTraceStore::open(view, guard)?));
+                return Ok(Self::Mapped(MappedTraceStore::open(view, cache_guard)?));
             }
             CacheOpen::Missing | CacheOpen::Rebuild(_) => {}
         }
-        guard.consume(WorkDelta::default())?;
-        let owned = IndexBuilder::build(source, options, guard)?;
-        guard.consume(WorkDelta::default())?;
+        source_guard.consume(WorkDelta::default())?;
+        let owned = IndexBuilder::build(source, options, source_guard)?;
+        cache_guard.consume(WorkDelta::default())?;
         let (outcome, receipt) = CacheWriter::new(
-            identity.try_clone_guarded(guard)?,
-            owned.into_cache_view_with_catalog(guard)?,
+            identity.try_clone_guarded(cache_guard)?,
+            owned.into_cache_view_with_catalog(cache_guard)?,
         )?
-        .publish_with_receipt(cache_root, guard)?;
+        .publish_with_receipt(cache_root, cache_guard)?;
         let reopened = (|| {
-            guard.consume(WorkDelta::default())?;
-            let view = match CacheReader::open(cache_root, &identity, guard)? {
+            cache_guard.consume(WorkDelta::default())?;
+            let view = match CacheReader::open(cache_root, &identity, cache_guard)? {
                 CacheOpen::Ready(view) => view,
                 CacheOpen::Missing => {
                     return Err(IndexError::corrupt("published cache is missing"));
@@ -2568,7 +2578,7 @@ impl TraceStore {
                     )));
                 }
             };
-            Ok(Self::Mapped(MappedTraceStore::open(view, guard)?))
+            Ok(Self::Mapped(MappedTraceStore::open(view, cache_guard)?))
         })();
         match reopened {
             Ok(store) => Ok(store),

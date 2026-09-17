@@ -35,8 +35,11 @@ export default function App() {
   const projectionGeneration = useRef(0);
   const paginationRequest = useRef(false);
   const requestedCursors = useRef(new Set<string>());
+  const pageCursors = useRef<Array<string | null>>([null]);
+  const pageIndex = useRef(0);
   const segmentCache = useRef(new SegmentCache<Awaited<ReturnType<typeof api.queryTimeline>>>());
   const navigation = useRef(new NavigationHistory());
+  const pendingHistoryTarget = useRef<NavigationEntry | null>(null);
   const rows = useMemo(() => state.timelinePages.flatMap((page) => page.rows), [state.timelinePages]);
   const tids = useMemo(() => [...new Set(rows.flatMap((row) => row.key.tid === null ? [] : [row.key.tid]))].sort((a, b) => a - b), [rows]);
   const selectedTid = selectedRow?.key.tid ?? state.filter.tids[0] ?? null;
@@ -76,8 +79,19 @@ export default function App() {
       const projection = await api.createProjection(state.opened.workspace.id, artifactIndex, filter);
       dispatch({ type: "projectionReady", generation, projectionId: projection.projection_id });
       const page = await api.queryTimeline(state.opened.workspace.id, projection.projection_id, null, 2_000);
+      pageCursors.current = [null];
+      pageIndex.current = 0;
       segmentCache.current.set(`${state.opened.workspace.id}:${projection.projection_id}:first`, page);
       dispatch({ type: "timelinePageReceived", generation, page });
+      const pending = pendingHistoryTarget.current;
+      if (pending !== null && pending.artifactIndex === artifactIndex) {
+        const target = page.rows.find((row) => sameKey(row.key, pending.eventKey));
+        if (target !== undefined) {
+          pendingHistoryTarget.current = null;
+          setHiddenHistoryTarget(null);
+          selectRow(target, false, artifactIndex);
+        }
+      }
     } catch (error) {
       dispatch({ type: "failed", generation, error: normalizeAppError(error) });
     }
@@ -101,16 +115,40 @@ export default function App() {
       const cached = segmentCache.current.get(cacheKey);
       const page = cached ?? await api.queryTimeline(state.opened.workspace.id, state.projectionId, cursor, 2_000);
       if (cached === undefined) segmentCache.current.set(cacheKey, page);
+      const nextIndex = pageIndex.current + 1;
+      pageCursors.current[nextIndex] = cursor;
+      pageCursors.current.length = nextIndex + 1;
+      pageIndex.current = nextIndex;
       dispatch({ type: "timelinePageReceived", generation, page });
     } catch (error) {
       requestedCursors.current.delete(cacheKey);
       if (projectionGeneration.current === generation) setPaneErrors((values) => [...values, normalizeAppError(error)]);
     } finally {
+      requestedCursors.current.delete(cacheKey);
       paginationRequest.current = false;
     }
   };
 
-  const selectRow = (row: EventRowDto, recordHistory = true) => {
+  const loadPreviousPage = async () => {
+    if (paginationRequest.current || pageIndex.current === 0 || state.opened === null || state.projectionId === null) return;
+    const previousIndex = pageIndex.current - 1;
+    const cursor = pageCursors.current[previousIndex] ?? null;
+    const cacheKey = cursor === null ? `${state.opened.workspace.id}:${state.projectionId}:first` : `${state.opened.workspace.id}:${state.projectionId}:${cursor}`;
+    paginationRequest.current = true;
+    try {
+      const cached = segmentCache.current.get(cacheKey);
+      const page = cached ?? await api.queryTimeline(state.opened.workspace.id, state.projectionId, cursor, 2_000);
+      if (cached === undefined) segmentCache.current.set(cacheKey, page);
+      pageIndex.current = previousIndex;
+      dispatch({ type: "timelinePageReceived", generation: state.generation, page });
+    } catch (error) {
+      setPaneErrors((values) => [...values, normalizeAppError(error)]);
+    } finally {
+      paginationRequest.current = false;
+    }
+  };
+
+  const selectRow = (row: EventRowDto, recordHistory = true, artifactIndex = state.selectedArtifactIndex) => {
     if (state.opened === null || state.projectionId === null) return;
     const request = ++selectionRequest.current;
     const workspaceId = state.opened.workspace.id;
@@ -120,12 +158,11 @@ export default function App() {
     setPaneErrors([]);
     dispatch({ type: "selectionChanged", event: row.key });
     if (recordHistory) {
-      navigation.current.push({ workspaceId, projectionId: state.projectionId, eventKey: row.key });
+      navigation.current.push({ workspaceId, projectionId: state.projectionId, artifactIndex, eventKey: row.key });
       setHistoryVersion((value) => value + 1);
     }
     const accept = (update: () => void) => { if (selectionRequest.current === request) update(); };
     const fail = (error: unknown) => accept(() => setPaneErrors((values) => [...values, normalizeAppError(error)]));
-    const artifactIndex = state.selectedArtifactIndex;
     void api.getEventDetail(workspaceId, artifactIndex, row.source_row).then((value) => {
       accept(() => setDetail(value));
       if (value.memory_range !== null && selectionRequest.current === request) {
@@ -147,8 +184,11 @@ export default function App() {
   const visitHistory = (entry: NavigationEntry | null) => {
     setHistoryVersion((value) => value + 1);
     if (entry === null) return;
-    const row = rows.find((value) => sameKey(value.key, entry.eventKey));
-    if (row === undefined) setHiddenHistoryTarget(entry);
+    const row = entry.artifactIndex === state.selectedArtifactIndex ? rows.find((value) => sameKey(value.key, entry.eventKey)) : undefined;
+    if (row === undefined) {
+      pendingHistoryTarget.current = entry;
+      setHiddenHistoryTarget(entry);
+    }
     else selectRow(row, false);
   };
 
@@ -167,7 +207,15 @@ export default function App() {
   };
 
   const selectTid = (tid: number) => void applyFilter({ ...state.filter, tids: [tid] });
-  const reveal = () => { setHiddenHistoryTarget(null); void applyFilter(emptyFilter()); };
+  const reveal = () => {
+    const target = hiddenHistoryTarget;
+    if (target === null) return;
+    pendingHistoryTarget.current = target;
+    if (target.artifactIndex !== state.selectedArtifactIndex) {
+      dispatch({ type: "artifactSelected", artifactIndex: target.artifactIndex });
+    }
+    void applyFilter(emptyFilter(), target.artifactIndex);
+  };
   const cancelJob = async (id: string) => {
     try { await api.cancelJob(id); dispatch({ type: "jobsReceived", jobs: await api.listJobs() }); }
     catch (error) { setPaneErrors((values) => [...values, normalizeAppError(error)]); }
@@ -179,15 +227,16 @@ export default function App() {
       <LeftDock tids={tids} selectedTid={selectedTid} callTree={callTree} onSelectTid={selectTid} onJump={jumpToRow} />
       <main className="workspace">
         {state.opened !== null && <FilterBar onApply={(filter) => void applyFilter(filter)} />}
+        {state.opened !== null && state.projectionId !== null && <nav aria-label="Artifacts" className="artifact-selector">{state.opened.artifacts.map((artifact) => <button key={artifact.index} aria-pressed={artifact.index === state.selectedArtifactIndex} onClick={() => selectArtifact(artifact.index)}>{artifact.name}</button>)}</nav>}
         {state.phase === "failed" && state.error !== null ? (
           <section role="alert"><h1>{state.error.code}</h1><p>{state.error.detail}</p></section>
         ) : state.opened === null || state.projectionId === null ? (
           <SessionOverview opened={state.opened} selectedArtifactIndex={state.selectedArtifactIndex} onSelectArtifact={selectArtifact} />
         ) : (
-          <VirtualTimeline rows={rows} totalRows={state.timelinePages.at(-1)?.total ?? rows.length} hasMore={state.timelinePages.at(-1)?.next_cursor !== null} workspaceId={state.opened.workspace.id} projectionId={state.projectionId} generation={state.generation} onLoadMore={() => void loadNextPage()} onSelect={selectRow} />
+          <VirtualTimeline rows={rows} totalRows={rows.length} hasMore={state.timelinePages.at(-1)?.next_cursor !== null} hasPrevious={pageIndex.current > 0} workspaceId={state.opened.workspace.id} projectionId={state.projectionId} generation={state.generation} onLoadMore={() => void loadNextPage()} onLoadPrevious={() => void loadPreviousPage()} onSelect={selectRow} />
         )}
       </main>
-      <RightDock row={selectedRow} detail={detail} registers={registers} memory={memory} history={memoryHistory} annotation={annotation} errors={paneErrors} workspaceId={state.opened?.workspace.id ?? null} completeness={state.opened?.artifacts.find((artifact) => artifact.index === state.selectedArtifactIndex)?.completeness ?? []} onSaveComment={(value) => writeAnnotation("comment", value)} onDeleteComment={() => writeAnnotation("comment")} onSaveHighlight={(value) => writeAnnotation("highlight", value)} onDeleteHighlight={() => writeAnnotation("highlight")} />
+      <RightDock row={selectedRow} detail={detail} registers={registers} memory={memory} history={memoryHistory} annotation={annotation} errors={paneErrors} workspaceId={state.opened?.workspace.id ?? null} artifactIndex={state.selectedArtifactIndex} completeness={state.opened?.artifacts.find((artifact) => artifact.index === state.selectedArtifactIndex)?.completeness ?? []} onSaveComment={(value) => writeAnnotation("comment", value)} onDeleteComment={() => writeAnnotation("comment")} onSaveHighlight={(value) => writeAnnotation("highlight", value)} onDeleteHighlight={() => writeAnnotation("highlight")} />
       <BottomDock pages={state.timelinePages} jobs={state.jobs} canGoBack={navigation.current.canGoBack} canGoForward={navigation.current.canGoForward} hiddenHistoryTarget={hiddenHistoryTarget !== null} onJump={jumpToRow} onCancel={(id) => void cancelJob(id)} onBack={() => visitHistory(navigation.current.back())} onForward={() => visitHistory(navigation.current.forward())} onReveal={reveal} />
     </div>
   );

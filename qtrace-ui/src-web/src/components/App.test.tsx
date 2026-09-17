@@ -111,9 +111,12 @@ describe("desktop shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open session" }));
     fireEvent.click(await screen.findByRole("button", { name: /capture\.flight/ }));
     await waitFor(() => expect(api.createProjection).toHaveBeenCalledWith("workspace-7", 1, expect.any(Object)));
+    expect(screen.getByRole("navigation", { name: "Artifacts" })).toBeVisible();
     expect(await screen.findByText(/overwritten · damaged/)).toBeVisible();
     await waitFor(() => expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "projection-flight", "cursor-2", 2_000));
     expect(await screen.findByRole("row", { name: /2 thread 7/ })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Load previous 2,000 events" }));
+    expect(await screen.findByRole("row", { name: /1 thread 7/ })).toBeVisible();
   });
 
   it("shows a local rename above ELF identity and supports edit/delete", async () => {
@@ -124,7 +127,7 @@ describe("desktop shell", () => {
       upsertLocalSymbolName: vi.fn().mockResolvedValue(undefined),
       deleteLocalSymbolName: vi.fn().mockResolvedValue(undefined),
     });
-    render(<ApiProvider api={api}><SymbolPane workspaceId="workspace-7" /></ApiProvider>);
+    render(<ApiProvider api={api}><SymbolPane workspaceId="workspace-7" artifactIndex={2} /></ApiProvider>);
     fireEvent.change(screen.getByLabelText("Module name"), { target: { value: "libdemo.so" } });
     fireEvent.change(screen.getByLabelText("Module digest"), { target: { value: digest } });
     fireEvent.change(screen.getByLabelText("Relative PC"), { target: { value: "0x124" } });
@@ -133,10 +136,10 @@ describe("desktop shell", () => {
     expect(screen.getByText(/ELF elf_name/)).toBeVisible();
     fireEvent.change(screen.getByLabelText("Local symbol name"), { target: { value: "edited_name" } });
     fireEvent.click(screen.getByRole("button", { name: "Save rename" }));
-    await waitFor(() => expect(api.upsertLocalSymbolName).toHaveBeenCalledWith("workspace-7", 0, digest, "0x124", "edited_name"));
+    await waitFor(() => expect(api.upsertLocalSymbolName).toHaveBeenCalledWith("workspace-7", 2, digest, "0x124", "edited_name"));
     expect(screen.getByText("edited_name")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Delete rename" }));
-    await waitFor(() => expect(api.deleteLocalSymbolName).toHaveBeenCalledWith("workspace-7", 0, digest, "0x124"));
+    await waitFor(() => expect(api.deleteLocalSymbolName).toHaveBeenCalledWith("workspace-7", 2, digest, "0x124"));
     expect(screen.getByText("elf_name", { selector: "strong" })).toBeVisible();
   });
 });

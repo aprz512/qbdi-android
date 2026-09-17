@@ -51,7 +51,7 @@ export function reducer(state: AppState, action: Action): AppState {
     case "projectionReady":
       return { ...state, phase: "ready", generation: action.generation, projectionId: action.projectionId };
     case "timelinePageReceived":
-      return { ...state, timelinePages: [...state.timelinePages, action.page].slice(-8) };
+      return { ...state, timelinePages: [action.page] };
     case "filterChanged":
       return {
         ...state,

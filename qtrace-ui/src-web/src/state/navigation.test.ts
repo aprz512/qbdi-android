@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { NavigationHistory, type NavigationEntry } from "./navigation";
 
 const entry = (ordinal: number): NavigationEntry => ({
-  workspaceId: "w", projectionId: "p", eventKey: {
+  workspaceId: "w", projectionId: "p", artifactIndex: 0, eventKey: {
     artifact_sha256: "a".repeat(64), timeline_id: "1", record_ordinal: String(ordinal), source_offset: String(ordinal), sequence: String(ordinal), tid: 1,
   },
 });

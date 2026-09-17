@@ -142,7 +142,25 @@ impl JobRegistry {
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        terminal.sort();
+        terminal.sort_by_key(|id| id.as_str().parse::<u64>().unwrap_or(u64::MAX));
+        let remove = terminal.len().saturating_sub(keep);
+        for id in terminal.into_iter().take(remove) {
+            jobs.remove(&id);
+        }
+    }
+    pub fn prune_terminal(&self, keep: usize) {
+        let mut jobs = self.inner.jobs.lock().unwrap();
+        let mut terminal = jobs
+            .iter()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.dto.state,
+                    JobState::Completed | JobState::Cancelled | JobState::Failed
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        terminal.sort_by_key(|id| id.as_str().parse::<u64>().unwrap_or(u64::MAX));
         let remove = terminal.len().saturating_sub(keep);
         for id in terminal.into_iter().take(remove) {
             jobs.remove(&id);

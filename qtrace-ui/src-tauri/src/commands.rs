@@ -139,12 +139,10 @@ mod desktop {
             return Ok(None);
         };
         let service = state.service();
-        tauri::async_runtime::spawn_blocking(move || {
-            service.open_session(qtrace_store::AuthorizedPath::new(path))
-        })
-        .await
-        .map_err(|_| AppError::worker_failed())?
-        .map(Some)
+        service
+            .open_session_task(qtrace_store::AuthorizedPath::new(path))
+            .await
+            .map(Some)
     }
 
     #[tauri::command]
@@ -156,12 +154,10 @@ mod desktop {
             return Ok(None);
         };
         let service = state.service();
-        tauri::async_runtime::spawn_blocking(move || {
-            service.open_artifact(qtrace_store::AuthorizedPath::new(path))
-        })
-        .await
-        .map_err(|_| AppError::worker_failed())?
-        .map(Some)
+        service
+            .open_artifact_task(qtrace_store::AuthorizedPath::new(path))
+            .await
+            .map(Some)
     }
 
     #[tauri::command]
@@ -186,15 +182,9 @@ mod desktop {
         state: State<'_, DesktopState>,
     ) -> Result<ProjectionJobDto, AppError> {
         let service = state.service();
-        tauri::async_runtime::spawn_blocking(move || {
-            service.create_projection(
-                &request.workspace_id,
-                request.artifact_index,
-                request.filter,
-            )
-        })
-        .await
-        .map_err(|_| AppError::worker_failed())?
+        service
+            .create_projection_task(request.workspace_id, request.artifact_index, request.filter)
+            .await
     }
 
     #[tauri::command]

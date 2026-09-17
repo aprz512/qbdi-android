@@ -12,6 +12,15 @@ describe("application reducer", () => {
     expect(next.timelinePages).toBe(state.timelinePages);
   });
 
+  it("retains only the current bounded timeline page", () => {
+    const first = { ...page, total: 4, next_cursor: "next" };
+    const second = { ...page, total: 4 };
+    const ready = { ...initialState, phase: "ready" as const, generation: 1 };
+    const withFirst = reducer(ready, { type: "timelinePageReceived", generation: 1, page: first });
+    const withSecond = reducer(withFirst, { type: "timelinePageReceived", generation: 1, page: second });
+    expect(withSecond.timelinePages).toEqual([second]);
+  });
+
   it("covers cancel, open, partial, indexing, failure, filter and close transitions", () => {
     const opening = reducer(initialState, { type: "openStarted" });
     expect(reducer(opening, { type: "pickerCancelled" }).phase).toBe("empty");

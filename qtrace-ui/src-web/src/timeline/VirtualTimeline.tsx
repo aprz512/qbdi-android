@@ -9,14 +9,16 @@ interface Props {
   rows: EventRowDto[];
   totalRows?: number;
   hasMore?: boolean;
+  hasPrevious?: boolean;
   workspaceId?: string;
   projectionId?: string;
   generation?: number;
   onLoadMore?(): void;
+  onLoadPrevious?(): void;
   onSelect?(row: EventRowDto): void;
 }
 
-export function VirtualTimeline({ rows, totalRows = rows.length, hasMore = false, workspaceId = "workspace", projectionId = "projection", generation = 0, onLoadMore, onSelect }: Props) {
+export function VirtualTimeline({ rows, totalRows = rows.length, hasMore = false, hasPrevious = false, workspaceId = "workspace", projectionId = "projection", generation = 0, onLoadMore, onLoadPrevious, onSelect }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<HTMLElement>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -61,6 +63,7 @@ export function VirtualTimeline({ rows, totalRows = rows.length, hasMore = false
           <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
         </div>
       </div>
+      {hasPrevious && <button className="timeline-load-previous" onClick={onLoadPrevious}>Load previous 2,000 events</button>}
       {hasMore && <button className="timeline-load-more" onClick={onLoadMore}>Load next 2,000 events</button>}
     </section>
   );
