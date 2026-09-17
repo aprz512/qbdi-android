@@ -7,6 +7,7 @@ import "../styles/timeline.css";
 
 interface Props {
   rows: EventRowDto[];
+  pageStart?: number;
   totalRows?: number;
   hasMore?: boolean;
   hasPrevious?: boolean;
@@ -15,28 +16,38 @@ interface Props {
   generation?: number;
   onLoadMore?(): void;
   onLoadPrevious?(): void;
+  onRequestRange?(start: number, end: number): void;
   onSelect?(row: EventRowDto): void;
 }
 
-export function VirtualTimeline({ rows, totalRows = rows.length, hasMore = false, hasPrevious = false, workspaceId = "workspace", projectionId = "projection", generation = 0, onLoadMore, onLoadPrevious, onSelect }: Props) {
+export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, hasMore = false, hasPrevious = false, workspaceId = "workspace", projectionId = "projection", generation = 0, onLoadMore, onLoadPrevious, onRequestRange, onSelect }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewport = useRef<HTMLElement>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [visible, setVisible] = useState({ start: 0, end: Math.min(rows.length, 64) });
   const controller = useMemo(() => new ViewportController(async (request) => {
-    if (hasMore && request.end >= rows.length - 32) onLoadMore?.();
+    onRequestRange?.(request.start, request.end);
     return { rows: [], next_cursor: null, total: totalRows, exact_total: !hasMore };
-  }), [hasMore, onLoadMore, rows.length, totalRows]);
+  }), [hasMore, onRequestRange, totalRows]);
   useEffect(() => () => controller.cancel(), [controller]);
-  const displayRows = useMemo(() => rows.slice(visible.start, visible.end).map(toRenderRow), [rows, visible]);
+  const localStart = Math.max(0, visible.start - pageStart);
+  const localEnd = Math.max(localStart, Math.min(rows.length, visible.end - pageStart));
+  const displayRows = useMemo(() => rows.slice(localStart, localEnd).map(toRenderRow), [localEnd, localStart, rows]);
   const updateViewport = useCallback(() => {
     const element = viewport.current;
     if (element === null) return;
-    const range = ViewportController.rangeForViewport({ scrollOffset: element.scrollTop, canvasHeight: Math.max(320, element.clientHeight), rowHeight: 24, totalRows: rows.length });
+    const range = ViewportController.rangeForViewport({ scrollOffset: element.scrollTop, canvasHeight: Math.max(320, element.clientHeight), rowHeight: 24, totalRows });
     setVisible(range);
     controller.request({ workspaceId, projectionId, generation, ...range });
-  }, [controller, generation, projectionId, rows.length, workspaceId]);
+  }, [controller, generation, projectionId, totalRows, workspaceId]);
   useEffect(updateViewport, [updateViewport]);
+  useEffect(() => {
+    const element = viewport.current;
+    if (element !== null && (visible.end <= pageStart || visible.start >= pageStart + rows.length)) {
+      element.scrollTop = pageStart * 24;
+      updateViewport();
+    }
+  }, [pageStart, rows.length, updateViewport, visible.end, visible.start]);
   useEffect(() => {
     const element = canvas.current;
     const context = element?.getContext("2d");
@@ -57,8 +68,8 @@ export function VirtualTimeline({ rows, totalRows = rows.length, hasMore = false
   }, [displayRows, selected]);
   return (
     <section ref={viewport} className="virtual-timeline" aria-label="Timeline" onScroll={updateViewport}>
-      <div className="timeline-scroll-space" style={{ height: Math.max(320, rows.length * 24) }}>
-        <div className="timeline-window" style={{ transform: `translateY(${visible.start * 24}px)` }}>
+      <div className="timeline-scroll-space" style={{ height: Math.max(320, totalRows * 24) }}>
+        <div className="timeline-window" style={{ transform: `translateY(${(pageStart + localStart) * 24}px)` }}>
           <canvas ref={canvas} aria-hidden="true" />
           <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
         </div>

@@ -35,7 +35,7 @@ function fakeApi(overrides: Partial<QtraceApi> = {}): QtraceApi {
     getLocalSymbolName: unsupported,
     upsertLocalSymbolName: unsupported,
     deleteLocalSymbolName: unsupported,
-    listJobs: vi.fn().mockResolvedValue([]),
+    listJobs: vi.fn().mockResolvedValue([{ id: "job-1", workspace_id: "workspace-7", kind: "projection", state: "completed", progress: { completed: "1", total: "1" }, error: null }]),
     cancelJob: unsupported,
     ...overrides,
   };
@@ -104,8 +104,8 @@ describe("desktop shell", () => {
       }),
       createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-flight", job_id: "job-1", generation: 1 }),
       queryTimeline: vi.fn()
-        .mockResolvedValueOnce({ rows: firstRows, next_cursor: "cursor-2", total: 2, exact_total: true })
-        .mockResolvedValueOnce({ rows: secondRows, next_cursor: null, total: 2, exact_total: true }),
+        .mockResolvedValueOnce({ rows: firstRows, next_cursor: "cursor-2", total: 2_001, exact_total: true })
+        .mockResolvedValueOnce({ rows: secondRows, next_cursor: null, total: 2_001, exact_total: true }),
     });
     render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
     fireEvent.click(screen.getByRole("button", { name: "Open session" }));
@@ -113,10 +113,11 @@ describe("desktop shell", () => {
     await waitFor(() => expect(api.createProjection).toHaveBeenCalledWith("workspace-7", 1, expect.any(Object)));
     expect(screen.getByRole("navigation", { name: "Artifacts" })).toBeVisible();
     expect(await screen.findByText(/overwritten · damaged/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Load next 2,000 events" }));
     await waitFor(() => expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "projection-flight", "cursor-2", 2_000));
-    expect(await screen.findByRole("row", { name: /2 thread 7/ })).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("row", { name: /2 thread 7/ })).toBeVisible());
     fireEvent.click(screen.getByRole("button", { name: "Load previous 2,000 events" }));
-    expect(await screen.findByRole("row", { name: /1 thread 7/ })).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("row", { name: /1 thread 7/ })).toBeVisible());
   });
 
   it("shows a local rename above ELF identity and supports edit/delete", async () => {

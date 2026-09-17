@@ -1,4 +1,4 @@
-use qtrace_service::{EventFilterDto, QtraceService, WorkspaceId};
+use qtrace_service::{EventFilterDto, JobState, QtraceService, WorkspaceId};
 use qtrace_store::AuthorizedPath;
 
 fn fixture(name: &str) -> std::path::PathBuf {
@@ -178,5 +178,39 @@ fn real_workspace_exposes_bounded_analysis_without_store_handles() {
             0,
             row.source_row,
         )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn async_projection_returns_an_observable_job_before_querying() {
+    let service = std::sync::Arc::new(QtraceService::new());
+    let opened = service
+        .open_session(AuthorizedPath::new(fixture("valid-mixed")))
+        .unwrap();
+    let projection = service
+        .clone()
+        .create_projection_task(opened.workspace.id.clone(), 0, EventFilterDto::default())
+        .await
+        .unwrap();
+    assert!(
+        service
+            .list_jobs()
+            .iter()
+            .any(|job| job.id == projection.job_id)
+    );
+    loop {
+        let job = service
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == projection.job_id)
+            .unwrap();
+        match job.state {
+            JobState::Completed => break,
+            JobState::Queued | JobState::Running => tokio::task::yield_now().await,
+            JobState::Cancelled | JobState::Failed => panic!("projection job did not complete"),
+        }
+    }
+    service
+        .query_timeline(&opened.workspace.id, &projection.projection_id, None, 10)
         .unwrap();
 }

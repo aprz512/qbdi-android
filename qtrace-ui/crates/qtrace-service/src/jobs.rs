@@ -18,7 +18,7 @@ impl JobCancellation {
         self.0.load(Ordering::Acquire)
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct JobRegistry {
     inner: Arc<Inner>,
 }

@@ -19,16 +19,22 @@ export function AppHeader() {
         if (opened !== null) await api.closeWorkspace(opened.workspace.id);
         return;
       }
-      if (opened !== null && previousWorkspace !== null && previousWorkspace !== opened.workspace.id) {
-        await api.closeWorkspace(previousWorkspace);
+      if (opened === null) {
+        dispatch({ type: "pickerCancelled" });
+        return;
       }
-      dispatch(opened === null ? { type: "pickerCancelled" } : { type: "workspaceOpened", opened });
+      dispatch({ type: "workspaceOpened", opened });
+      if (previousWorkspace !== null && previousWorkspace !== opened.workspace.id) {
+        try { await api.closeWorkspace(previousWorkspace); }
+        catch { /* The newly adopted workspace remains usable; stale cleanup can be retried. */ }
+      }
     } catch (error) {
       dispatch({ type: "failed", error: normalizeAppError(error) });
     }
   };
 
   const close = async () => {
+    openRequest.current += 1;
     if (state.opened !== null) await api.closeWorkspace(state.opened.workspace.id);
     dispatch({ type: "closed" });
   };

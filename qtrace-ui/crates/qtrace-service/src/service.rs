@@ -15,8 +15,8 @@ use qtrace_analysis::{
     query_events,
 };
 use qtrace_provider::{
-    ArtifactDigest, CompletenessCause, EventKey, EventKind, MemoryDirection, Provenance,
-    RangeBounds, RangeDomain, RegisterSlot,
+    ArtifactDigest, CompletenessCause, EventKey, EventKind, MemoryDirection, OperationAbort,
+    Provenance, RangeBounds, RangeDomain, RegisterSlot, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
     AnnotationOpenRequest, AnnotationStore, AuthorizedPath, BuildOptions, ElfLoadRequest,
@@ -37,7 +37,7 @@ use crate::{
 pub struct QtraceService {
     next: AtomicU64,
     cache_root: PathBuf,
-    workspaces: Mutex<HashMap<WorkspaceId, Workspace>>,
+    workspaces: Arc<Mutex<HashMap<WorkspaceId, Workspace>>>,
     jobs: JobRegistry,
 }
 
@@ -52,7 +52,7 @@ impl QtraceService {
         Self {
             next: AtomicU64::new(0),
             cache_root,
-            workspaces: Mutex::new(HashMap::new()),
+            workspaces: Arc::new(Mutex::new(HashMap::new())),
             jobs: JobRegistry::default(),
         }
     }
@@ -112,9 +112,8 @@ impl QtraceService {
             } else {
                 SessionLoader::open_artifact(selected, OpenPolicy::cache_aware(), &discovery)?
             };
-            let (input_bytes, stream_probes) = session_input_budget(&session)?;
             let budget = ServiceBudget::with_cancellation(
-                open_limits(input_bytes, stream_probes),
+                open_limits(session_input_bytes(&session)?),
                 cancellation.clone(),
             );
             self.publish_session(
@@ -158,14 +157,20 @@ impl QtraceService {
         }));
         let artifact_total = u64::try_from(session.artifacts().len()).unwrap_or(u64::MAX);
         self.jobs.set_progress(job_id, 0, Some(artifact_total))?;
+        let cache_budget = ServiceBudget::with_cancellation(cache_limits(), cancellation.clone());
         for (artifact_position, source) in session.artifacts().iter().enumerate() {
-            let cache_budget =
-                ServiceBudget::with_cancellation(cache_limits(), cancellation.clone());
+            let probe_adjusted = InputProbeAdjustedGuard::new(source_budget);
+            let artifact_guard: &dyn WorkGuard =
+                if matches!(source.format(), qtrace_store::ArtifactFormat::QtrbLz4) {
+                    &probe_adjusted
+                } else {
+                    source_budget
+                };
             match TraceStore::open_or_build_with_guards(
                 &self.cache_root,
                 source,
                 &BuildOptions::default(),
-                source_budget,
+                artifact_guard,
                 &cache_budget,
             ) {
                 Ok(store) => {
@@ -248,82 +253,26 @@ impl QtraceService {
         artifact_index: u32,
         filter: EventFilterDto,
     ) -> Result<ProjectionJobDto, AppError> {
-        let (context, generation) = {
-            let mut all = self
-                .workspaces
-                .lock()
-                .map_err(|_| AppError::worker_failed())?;
-            let item = all
-                .get_mut(workspace)
-                .ok_or_else(AppError::stale_workspace)?;
-            item.generation = item.generation.checked_add(1).ok_or_else(|| {
-                AppError::new(
-                    "workspace.generation_overflow",
-                    "workspace",
-                    "generation overflow",
-                )
-            })?;
-            let artifact = item.artifacts.get(artifact_index as usize).ok_or_else(|| {
-                AppError::new(
-                    "workspace.artifact_missing",
-                    "projection",
-                    "artifact index is invalid",
-                )
-            })?;
-            (artifact.context.clone(), item.generation)
-        };
+        let (context, generation, projection_id) =
+            self.prepare_projection(workspace, artifact_index)?;
         let (job_id, cancellation) = self.jobs.begin(workspace.clone(), "projection");
         self.jobs.set_progress(&job_id, 0, Some(1))?;
-        let result = (|| {
-            if cancellation.is_cancelled() {
-                return Err(AppError::cancelled());
-            }
-            let projection = Arc::new(TimelineProjection::new(context, convert_filter(filter)?)?);
-            if cancellation.is_cancelled() {
-                projection.cancel();
-                return Err(AppError::cancelled());
-            }
-            let projection_id = ProjectionId::from_u64(self.next_id());
-            let mut all = self
-                .workspaces
-                .lock()
-                .map_err(|_| AppError::worker_failed())?;
-            let item = all
-                .get_mut(workspace)
-                .ok_or_else(AppError::stale_workspace)?;
-            if item.generation == generation {
-                item.current = Some(projection_id.clone());
-            }
-            item.projections.insert(
-                projection_id.clone(),
-                ProjectionWorkspace {
-                    projection,
-                    generation,
-                },
-            );
-            while item.projections.len() > 16 {
-                let oldest = item
-                    .projections
-                    .iter()
-                    .filter(|(id, _)| Some(*id) != item.current.as_ref())
-                    .min_by_key(|(_, value)| value.generation)
-                    .map(|(id, _)| id.clone());
-                match oldest {
-                    Some(id) => {
-                        item.projections.remove(&id);
-                    }
-                    None => break,
-                }
-            }
-            Ok(projection_id)
-        })();
+        let result = build_and_publish_projection(
+            &self.workspaces,
+            workspace,
+            context,
+            generation,
+            projection_id.clone(),
+            filter,
+            &cancellation,
+        );
         self.jobs.finish(
             &job_id,
             result.as_ref().map(|_| ()).map_err(Clone::clone),
             cancellation.is_cancelled(),
         );
         self.jobs.prune_workspace(workspace, 64);
-        let projection_id = result?;
+        result?;
         Ok(ProjectionJobDto {
             projection_id,
             job_id,
@@ -337,11 +286,71 @@ impl QtraceService {
         artifact_index: u32,
         filter: EventFilterDto,
     ) -> Result<ProjectionJobDto, AppError> {
-        tokio::task::spawn_blocking(move || {
-            self.create_projection(&workspace, artifact_index, filter)
-        })
-        .await
-        .map_err(|_| AppError::worker_failed())?
+        let (context, generation, projection_id) =
+            self.prepare_projection(&workspace, artifact_index)?;
+        let (job_id, cancellation) = self.jobs.begin(workspace.clone(), "projection");
+        self.jobs.set_progress(&job_id, 0, Some(1))?;
+        let dto = ProjectionJobDto {
+            projection_id: projection_id.clone(),
+            job_id: job_id.clone(),
+            generation,
+        };
+        let workspaces = self.workspaces.clone();
+        let jobs = self.jobs.clone();
+        tokio::spawn(async move {
+            let cancelled = cancellation.clone();
+            let work_workspace = workspace.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                build_and_publish_projection(
+                    &workspaces,
+                    &work_workspace,
+                    context,
+                    generation,
+                    projection_id,
+                    filter,
+                    &cancellation,
+                )
+            })
+            .await
+            .map_err(|_| AppError::worker_failed())
+            .and_then(|result| result);
+            jobs.finish(&job_id, result, cancelled.is_cancelled());
+            jobs.prune_workspace(&workspace, 64);
+        });
+        Ok(dto)
+    }
+
+    fn prepare_projection(
+        &self,
+        workspace: &WorkspaceId,
+        artifact_index: u32,
+    ) -> Result<(Arc<QueryContext>, u32, ProjectionId), AppError> {
+        let mut all = self
+            .workspaces
+            .lock()
+            .map_err(|_| AppError::worker_failed())?;
+        let item = all
+            .get_mut(workspace)
+            .ok_or_else(AppError::stale_workspace)?;
+        item.generation = item.generation.checked_add(1).ok_or_else(|| {
+            AppError::new(
+                "workspace.generation_overflow",
+                "workspace",
+                "generation overflow",
+            )
+        })?;
+        let artifact = item.artifacts.get(artifact_index as usize).ok_or_else(|| {
+            AppError::new(
+                "workspace.artifact_missing",
+                "projection",
+                "artifact index is invalid",
+            )
+        })?;
+        Ok((
+            artifact.context.clone(),
+            item.generation,
+            ProjectionId::from_u64(self.next_id()),
+        ))
     }
 
     pub fn query_timeline(
@@ -845,6 +854,54 @@ impl QtraceService {
     }
 }
 
+fn build_and_publish_projection(
+    workspaces: &Mutex<HashMap<WorkspaceId, Workspace>>,
+    workspace: &WorkspaceId,
+    context: Arc<QueryContext>,
+    generation: u32,
+    projection_id: ProjectionId,
+    filter: EventFilterDto,
+    cancellation: &crate::JobCancellation,
+) -> Result<(), AppError> {
+    if cancellation.is_cancelled() {
+        return Err(AppError::cancelled());
+    }
+    let projection = Arc::new(TimelineProjection::new(context, convert_filter(filter)?)?);
+    if cancellation.is_cancelled() {
+        projection.cancel();
+        return Err(AppError::cancelled());
+    }
+    let mut all = workspaces.lock().map_err(|_| AppError::worker_failed())?;
+    let item = all
+        .get_mut(workspace)
+        .ok_or_else(AppError::stale_workspace)?;
+    if item.generation == generation {
+        item.current = Some(projection_id.clone());
+    }
+    item.projections.insert(
+        projection_id,
+        ProjectionWorkspace {
+            projection,
+            generation,
+        },
+    );
+    while item.projections.len() > 16 {
+        let oldest = item
+            .projections
+            .iter()
+            .filter(|(id, _)| Some(*id) != item.current.as_ref())
+            .min_by_key(|(_, value)| value.generation)
+            .map(|(id, _)| id.clone());
+        match oldest {
+            Some(id) => {
+                item.projections.remove(&id);
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
 fn parse_module_digest(value: &str) -> Result<ArtifactDigest, AppError> {
     ArtifactDigest::from_hex(value).ok_or_else(|| {
         AppError::new(
@@ -855,11 +912,10 @@ fn parse_module_digest(value: &str) -> Result<ArtifactDigest, AppError> {
     })
 }
 
-fn open_limits(input_bytes: u64, stream_probe_count: u64) -> ServiceLimits {
+fn open_limits(input_bytes: u64) -> ServiceLimits {
     ServiceLimits {
         deadline: Instant::now() + Duration::from_secs(30 * 60),
-        // QTRB's streaming reader charges one work unit for the final EOF probe.
-        input_bytes: input_bytes.saturating_add(stream_probe_count),
+        input_bytes,
         decompressed_bytes: 4 * 1024 * 1024 * 1024,
         events: 20_000_000,
         nodes: u64::MAX,
@@ -873,7 +929,7 @@ fn discovery_limits(selected_file_bytes: Option<u64>) -> ServiceLimits {
         // Single-artifact discovery hashes the file, then probes its provider stream.
         size.saturating_mul(2).saturating_add(4 * 1024)
     });
-    open_limits(input_bytes, 0)
+    open_limits(input_bytes)
 }
 
 fn cache_limits() -> ServiceLimits {
@@ -888,8 +944,8 @@ fn cache_limits() -> ServiceLimits {
     }
 }
 
-fn session_input_budget(session: &qtrace_store::SessionSource) -> Result<(u64, u64), AppError> {
-    let input_bytes = session
+fn session_input_bytes(session: &qtrace_store::SessionSource) -> Result<u64, AppError> {
+    session
         .artifacts()
         .iter()
         .try_fold(0_u64, |total, artifact| {
@@ -902,16 +958,37 @@ fn session_input_budget(session: &qtrace_store::SessionSource) -> Result<(u64, u
                         "selected artifact sizes overflow the input budget",
                     )
                 })
-        })?;
-    let stream_probes = session
-        .artifacts()
-        .iter()
-        .filter(|artifact| matches!(artifact.format(), qtrace_store::ArtifactFormat::QtrbLz4))
-        .count();
-    Ok((
-        input_bytes,
-        u64::try_from(stream_probes).unwrap_or(u64::MAX),
-    ))
+        })
+}
+
+/// Normalizes QTRB's one pre-authorized probe unit so cumulative input work is
+/// exactly the verified compressed size, including the final EOF check.
+struct InputProbeAdjustedGuard<'a> {
+    inner: &'a dyn WorkGuard,
+    pending_probe: AtomicU64,
+}
+
+impl<'a> InputProbeAdjustedGuard<'a> {
+    fn new(inner: &'a dyn WorkGuard) -> Self {
+        Self {
+            inner,
+            pending_probe: AtomicU64::new(1),
+        }
+    }
+}
+
+impl WorkGuard for InputProbeAdjustedGuard<'_> {
+    fn consume(&self, mut delta: WorkDelta) -> Result<(), OperationAbort> {
+        if delta.input_bytes != 0
+            && self
+                .pending_probe
+                .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            delta.input_bytes -= 1;
+        }
+        self.inner.consume(delta)
+    }
 }
 
 fn default_cache_root() -> PathBuf {

@@ -21,6 +21,7 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 struct State {
     service: Arc<Mutex<Arc<QtraceService>>>,
+    runtime: Arc<tokio::runtime::Runtime>,
     fixture_root: PathBuf,
     data_root: PathBuf,
     token: String,
@@ -49,10 +50,17 @@ fn main() {
         json!({ "url": format!("http://{address}"), "token": token })
     );
     let cache_root = data_root.join("cache/indexes");
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|_| fail("cannot create E2E runtime")),
+    );
     let state = Arc::new(State {
         service: Arc::new(Mutex::new(Arc::new(QtraceService::with_cache_root(
             cache_root,
         )))),
+        runtime,
         fixture_root,
         data_root,
         token,
@@ -194,11 +202,11 @@ fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppErro
         "get_workspace_summary" => {
             to_value(service.workspace_summary(&field(&value, "workspace_id")?)?)
         }
-        "create_projection" => to_value(service.create_projection(
-            &field(&value, "workspace_id")?,
+        "create_projection" => to_value(state.runtime.block_on(service.create_projection_task(
+            field(&value, "workspace_id")?,
             number(&value, "artifact_index")?,
             field(&value, "filter")?,
-        )?),
+        ))?),
         "query_timeline" => to_value(service.query_timeline(
             &field(&value, "workspace_id")?,
             &field(&value, "projection_id")?,
