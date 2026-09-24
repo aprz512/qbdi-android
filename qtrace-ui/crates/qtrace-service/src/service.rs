@@ -24,7 +24,7 @@ use qtrace_store::{
     ModuleIdentity, OpenPolicy, SessionLoader, TraceStore, TraceStoreView,
 };
 
-use crate::workspace::{ArtifactWorkspace, ProjectionWorkspace, Workspace};
+use crate::workspace::{ArtifactWorkspace, ProjectionWorkspace, RegisterReplaySlot, Workspace};
 use crate::{
     AddressRangeDto, AnnotationDto, AppError, ArtifactSummaryDto, CallNodeDto, CallTreeDto,
     CompletenessRangeDto, DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto,
@@ -181,6 +181,7 @@ impl QtraceService {
                         name: source.local_path().to_owned(),
                         store,
                         context,
+                        register_replay: Arc::new(Mutex::new(None)),
                     });
                 }
                 Err(error) => warnings.push(format!("{}: {error}", source.local_path())),
@@ -481,10 +482,20 @@ impl QtraceService {
         artifact_index: u32,
         row: u32,
     ) -> Result<RegisterStateDto, AppError> {
-        let store = self.artifact_store(workspace, artifact_index)?;
+        let (store, replay_slot) = self.artifact_store_and_replay(workspace, artifact_index)?;
         let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
+        let replay = {
+            let mut slot = replay_slot.lock().map_err(|_| AppError::worker_failed())?;
+            if let Some(replay) = slot.as_ref() {
+                replay.clone()
+            } else {
+                let build_budget = ServiceBudget::new(register_replay_build_limits());
+                let replay = Arc::new(RegisterReplay::new_with_guard(store, &build_budget)?);
+                *slot = Some(replay.clone());
+                replay
+            }
+        };
         let budget = ServiceBudget::new(ServiceLimits::interactive());
-        let replay = RegisterReplay::new_with_guard(store, &budget)?;
         let state = replay.state_at_with_guard(&key, &budget)?;
         Ok(RegisterStateDto {
             key: event_key_dto(&state.key),
@@ -882,6 +893,19 @@ impl QtraceService {
             .map(|artifact| artifact.store.clone())
             .ok_or_else(AppError::stale_workspace)
     }
+    fn artifact_store_and_replay(
+        &self,
+        workspace: &WorkspaceId,
+        artifact_index: u32,
+    ) -> Result<(Arc<TraceStore>, RegisterReplaySlot), AppError> {
+        self.workspaces
+            .lock()
+            .map_err(|_| AppError::worker_failed())?
+            .get(workspace)
+            .and_then(|item| item.artifacts.get(artifact_index as usize))
+            .map(|artifact| (artifact.store.clone(), artifact.register_replay.clone()))
+            .ok_or_else(AppError::stale_workspace)
+    }
     fn annotation_target(
         &self,
         workspace: &WorkspaceId,
@@ -1011,6 +1035,18 @@ fn cache_limits() -> ServiceLimits {
         nodes: u64::MAX,
         rows: u64::MAX,
         resident_bytes: 2 * 1024 * 1024 * 1024,
+    }
+}
+
+fn register_replay_build_limits() -> ServiceLimits {
+    ServiceLimits {
+        deadline: Instant::now() + Duration::from_secs(30),
+        input_bytes: u64::MAX,
+        decompressed_bytes: u64::MAX,
+        events: 20_000_000,
+        nodes: 40_000_000,
+        rows: 20_000_000,
+        resident_bytes: 512 * 1024 * 1024,
     }
 }
 
@@ -1344,5 +1380,63 @@ fn provenance_name(value: Provenance) -> &'static str {
         Provenance::Heuristic => "heuristic",
         Provenance::Unknown => "unknown",
         Provenance::Damaged => "damaged",
+    }
+}
+
+#[cfg(test)]
+mod register_replay_cache_tests {
+    use std::{path::Path, sync::Arc};
+
+    use qtrace_store::AuthorizedPath;
+
+    use super::QtraceService;
+
+    fn fixture() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("fixtures/sessions/valid-mixed")
+    }
+
+    #[test]
+    fn register_replay_is_shared_by_queries_and_released_with_workspace() {
+        let cache = tempfile::tempdir().unwrap();
+        let service = QtraceService::with_cache_root(cache.path().join("indexes"));
+        let workspace = service
+            .open_session(AuthorizedPath::new(fixture()))
+            .unwrap()
+            .workspace
+            .id;
+        let replay_slot = {
+            let workspaces = service.workspaces.lock().unwrap();
+            workspaces.get(&workspace).unwrap().artifacts[0]
+                .register_replay
+                .clone()
+        };
+        assert!(replay_slot.lock().unwrap().is_none());
+
+        let first_state = service.get_register_state(&workspace, 0, 0).unwrap();
+        let first = replay_slot.lock().unwrap().as_ref().unwrap().clone();
+        std::thread::scope(|threads| {
+            for _ in 0..8 {
+                threads.spawn(|| {
+                    assert_eq!(
+                        service.get_register_state(&workspace, 0, 0).unwrap(),
+                        first_state
+                    );
+                });
+            }
+        });
+        let second = replay_slot.lock().unwrap().as_ref().unwrap().clone();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        drop(second);
+        drop(replay_slot);
+        service.close_workspace(&workspace).unwrap();
+        assert!(weak.upgrade().is_none());
     }
 }
