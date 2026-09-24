@@ -28,8 +28,10 @@ describe("application reducer", () => {
       type: "workspaceOpened",
       opened: {
         workspace: { id: "w", generation: 0, artifact_count: 1 },
-        artifacts: [{ index: 0, name: "trace", event_count: 2, tids: [7], completeness: [] }],
+        artifacts: [{ index: 0, name: "trace", status: "indexed", event_count: 2, tids: [7], completeness: [] }],
         warnings: ["one artifact was isolated"],
+        context: null,
+        missing_capabilities: ["package", "device", "target", "effective_config"],
       },
     });
     expect(opened.phase).toBe("partial");

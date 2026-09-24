@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     SourceIdentity,
-    manifest::{MAX_REPORT_BYTES, Manifest, ManifestArtifact},
+    manifest::{MAX_REPORT_BYTES, Manifest, ManifestArtifact, ReportContext},
     secure_path::{SecureFile, split_selected_file, split_selected_report},
 };
 
@@ -224,6 +224,7 @@ impl ArtifactSource {
 #[derive(Debug)]
 pub struct SessionSource {
     session_id: Option<String>,
+    context: Option<ReportContext>,
     artifacts: Vec<ArtifactSource>,
     metadata: Vec<ArtifactMetadata>,
     failures: Vec<ArtifactFailure>,
@@ -234,6 +235,10 @@ pub struct SessionSource {
 impl SessionSource {
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    pub fn context(&self) -> Option<&ReportContext> {
+        self.context.as_ref()
     }
 
     pub fn artifacts(&self) -> &[ArtifactSource] {
@@ -276,6 +281,7 @@ impl SessionLoader {
         let manifest = Manifest::parse(&report_bytes)?;
         let mut session = SessionSource {
             session_id: Some(manifest.session_id),
+            context: Some(manifest.context),
             artifacts: fallible_vec(manifest.artifacts.len())?,
             metadata: fallible_vec(manifest.artifacts.len())?,
             failures: fallible_vec(manifest.artifacts.len())?,
@@ -447,6 +453,7 @@ impl SessionLoader {
             .collect();
         Ok(SessionSource {
             session_id: None,
+            context: None,
             artifacts: vec![artifact],
             metadata: Vec::new(),
             failures: Vec::new(),

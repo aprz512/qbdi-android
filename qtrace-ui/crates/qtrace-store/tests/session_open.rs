@@ -341,6 +341,39 @@ fn effective_config_capability_depends_only_on_effective_config() {
 }
 
 #[test]
+fn report_context_extracts_only_bounded_display_fields() {
+    let temp = TempDir::new().unwrap();
+    let value = with_field(
+        &report(Vec::new()),
+        "device",
+        json!({"access_mode": "run-as", "serial": "ignored"}),
+    );
+    let value = with_field(
+        &value,
+        "target",
+        json!({"module": "libtarget.so", "unrelated": {"large": "ignored"}}),
+    );
+    let scenes = (0..12)
+        .map(|index| json!({"name": format!("scene-{index}")}))
+        .collect::<Vec<_>>();
+    let value = with_field(
+        &value,
+        "effective_config",
+        json!({"trace": {"profile": "full"}, "scenes": scenes}),
+    );
+    write_json(temp.path().join("report.json"), &value);
+    let session = open_path(temp.path()).unwrap();
+    let context = session.context().unwrap();
+    assert_eq!(context.package.as_deref(), Some("com.example.fixture"));
+    assert_eq!(context.device_serial.as_deref(), Some("fixture-device"));
+    assert_eq!(context.device_access_mode.as_deref(), Some("run-as"));
+    assert_eq!(context.target_module.as_deref(), Some("libtarget.so"));
+    assert_eq!(context.profile.as_deref(), Some("full"));
+    assert_eq!(context.scenes.len(), 8);
+    assert_eq!(context.scenes[0], "scene-0");
+}
+
+#[test]
 fn single_qtrb_is_degraded_with_explicit_missing_context_capabilities() {
     let path = fixture_root("valid-mixed").join("artifacts/main.trace.bin");
     let session =
@@ -348,6 +381,7 @@ fn single_qtrb_is_degraded_with_explicit_missing_context_capabilities() {
             .expect("single QTRB");
 
     assert_eq!(session.artifacts().len(), 1);
+    assert!(session.context().is_none());
     for capability in [
         SessionCapability::Package,
         SessionCapability::Device,

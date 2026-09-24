@@ -22,6 +22,22 @@ fn real_mixed_session_crosses_provider_store_analysis_and_persistent_annotations
         .open_session(AuthorizedPath::new(fixture("valid-mixed")))
         .unwrap();
     assert_eq!(opened.artifacts.len(), 3);
+    let context = opened.context.as_ref().unwrap();
+    assert_eq!(context.package.as_deref(), Some("com.example.fixture"));
+    assert_eq!(context.device_serial.as_deref(), Some("fixture-device"));
+    assert_eq!(context.device_access_mode.as_deref(), Some("run-as"));
+    assert_eq!(context.target_module.as_deref(), Some("libtarget.so"));
+    assert!(
+        opened
+            .missing_capabilities
+            .contains(&"effective_config".to_owned())
+    );
+    assert!(
+        opened
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.status == "indexed")
+    );
     assert!(
         opened
             .artifacts
@@ -112,4 +128,21 @@ fn invalid_artifact_is_isolated_while_healthy_timelines_remain_queryable() {
         .query_timeline(&opened.workspace.id, &projection.projection_id, None, 32)
         .unwrap();
     assert!(!page.rows.is_empty());
+}
+
+#[test]
+fn single_artifact_exposes_missing_session_context() {
+    let service = QtraceService::new();
+    let opened = service
+        .open_artifact(AuthorizedPath::new(
+            fixture("valid-mixed").join("artifacts/main.trace.bin"),
+        ))
+        .unwrap();
+    assert!(opened.context.is_none());
+    assert_eq!(
+        opened.missing_capabilities,
+        ["package", "device", "target", "effective_config"]
+    );
+    assert_eq!(opened.artifacts.len(), 1);
+    assert_eq!(opened.artifacts[0].status, "indexed");
 }

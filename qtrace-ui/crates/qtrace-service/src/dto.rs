@@ -183,9 +183,24 @@ pub struct ProjectionJobDto {
 pub struct ArtifactSummaryDto {
     pub index: u32,
     pub name: String,
+    pub status: String,
     pub event_count: u32,
     pub tids: Vec<u32>,
     pub completeness: Vec<CompletenessRangeDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct SessionContextDto {
+    pub session_id: String,
+    pub mode: Option<String>,
+    pub status: Option<String>,
+    pub stage: Option<String>,
+    pub package: Option<String>,
+    pub device_serial: Option<String>,
+    pub device_access_mode: Option<String>,
+    pub target_module: Option<String>,
+    pub profile: Option<String>,
+    pub scenes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
@@ -203,6 +218,8 @@ pub struct OpenWorkspaceDto {
     pub workspace: WorkspaceSummaryDto,
     pub artifacts: Vec<ArtifactSummaryDto>,
     pub warnings: Vec<String>,
+    pub context: Option<SessionContextDto>,
+    pub missing_capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]

@@ -33,6 +33,7 @@ fn main() {
         ProjectionJobDto::decl(&config),
         RegisterCellDto::decl(&config),
         RegisterStateDto::decl(&config),
+        SessionContextDto::decl(&config),
         SourceCoordinateDto::decl(&config),
         SequenceRangeDto::decl(&config),
         WorkspaceId::decl(&config),
