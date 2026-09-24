@@ -1,6 +1,10 @@
 import importlib.util
+import json
+import os
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parents[2]
@@ -51,6 +55,7 @@ def report(**overrides):
         ],
         "viewport_seconds": [0.05] * 200,
         "structured_search_seconds": [0.2] * 200,
+        "workload_correctness_digest": digest,
     }
     for key, item in overrides.items():
         if key == "cold_index_seconds":
@@ -120,6 +125,93 @@ class PerformanceVerdictTests(unittest.TestCase):
         self.assertEqual(12 * 1024, self.gate.parse_rss_bytes("VmHWM:\t12 kB\n"))
         with self.assertRaises(ValueError):
             self.gate.parse_rss_bytes("VmHWM: unlimited\n")
+
+    def test_diagnostic_comparison_reports_same_host_before_after_without_a_gate_verdict(self):
+        before = report(mode="diagnostic")
+        after = report(mode="diagnostic")
+        for run in after["cold_index"]:
+            run["seconds"] = 27.0
+        before["analyzer"]["commit"] = "1" * 40
+        after["analyzer"]["commit"] = "2" * 40
+        comparison = self.gate.compare_diagnostics(before, after)
+        self.assertEqual(30.0, comparison["metrics"]["cold_index_median_seconds"]["before"])
+        self.assertEqual(27.0, comparison["metrics"]["cold_index_median_seconds"]["after"])
+        self.assertAlmostEqual(-10.0, comparison["metrics"]["cold_index_median_seconds"]["change_percent"])
+        self.assertEqual("2" * 40, comparison["current_analyzer"]["commit"])
+
+    def test_diagnostic_comparison_rejects_cross_host_and_reference_reports(self):
+        before = report(mode="diagnostic")
+        after = report(mode="diagnostic")
+        after["host"]["cpu_model"] = "different CPU"
+        with self.assertRaisesRegex(ValueError, "host mismatch"):
+            self.gate.compare_diagnostics(before, after)
+        after["host"] = before["host"].copy()
+        after["mode"] = "reference"
+        with self.assertRaisesRegex(ValueError, "only diagnostic"):
+            self.gate.compare_diagnostics(before, after)
+
+    def test_diagnostic_comparison_rejects_mismatched_corpus(self):
+        before = report(mode="diagnostic")
+        after = report(mode="diagnostic")
+        after["corpora"]["qtrb"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "corpora mismatch"):
+            self.gate.compare_diagnostics(before, after)
+
+    def test_diagnostic_comparison_rejects_wrong_workload_oracle(self):
+        before = report(mode="diagnostic")
+        after = report(mode="diagnostic", workload_correctness_digest="wrong")
+        with self.assertRaisesRegex(ValueError, "workload correctness mismatch"):
+            self.gate.compare_diagnostics(before, after)
+
+    def test_reference_host_remains_required_but_diagnostic_labels_local_host(self):
+        with patch.dict(os.environ, {"QTRACE_UI_REFERENCE_HOST": ""}):
+            with self.assertRaisesRegex(RuntimeError, "QTRACE_UI_REFERENCE_HOST"):
+                self.gate._host_identity({})
+            host = self.gate._host_identity({}, diagnostic=True)
+        self.assertTrue(host["identity"].startswith("diagnostic:"))
+
+    def test_diagnostic_refuses_to_overwrite_tracked_reference_files(self):
+        tracked = ROOT / "qtrace-ui" / "README.md"
+        with self.assertRaisesRegex(ValueError, "tracked reference file"):
+            self.gate.run_gate(Path("/nonexistent"), tracked, None, None, diagnostic=True)
+
+    def test_diagnostic_run_writes_local_comparison_without_reference_summary(self):
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({
+                "generator_schema": 1,
+                "corpora": report()["corpora"],
+                "correctness_digest": digest,
+                "expected_flight_completeness": report()["expected_flight_completeness"],
+            }))
+            before = root / "before.json"
+            after = root / "after.json"
+
+            def driver(command, _env):
+                if command[1] == "workload":
+                    return {"viewport_seconds": [0.01] * 200,
+                            "structured_search_seconds": [0.02] * 200,
+                            "correctness_digest": digest}, 0.1, 1024
+                return {"correctness_digest": digest}, 1.0, 1024
+
+            with patch.object(self.gate, "_host_identity", return_value={"identity": "diagnostic:test"}), \
+                 patch.object(self.gate, "_git", return_value="c" * 40), \
+                 patch.object(self.gate, "_sha256", return_value="d" * 64), \
+                 patch.object(self.gate, "_run_driver", side_effect=driver), \
+                 patch.object(self.gate.subprocess, "run"), \
+                 patch.object(self.gate.subprocess, "check_output", return_value="version"):
+                self.assertEqual(0, self.gate.run_gate(manifest, before, None, None, diagnostic=True))
+                self.assertEqual(0, self.gate.run_gate(
+                    manifest, after, None, None,
+                    diagnostic=True, diagnostic_baseline=before,
+                ))
+            document = json.loads(after.read_text())
+            self.assertEqual("diagnostic", document["mode"])
+            self.assertNotIn("verdict", document)
+            self.assertIn("comparison", document)
+            self.assertEqual(0.0, document["comparison"]["metrics"]["cold_index_median_seconds"]["change_percent"])
 
 
 if __name__ == "__main__":
