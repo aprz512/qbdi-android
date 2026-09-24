@@ -65,6 +65,9 @@ export interface QtraceApi {
     artifactIndex: number,
     timelineId: string,
     tid: number,
+    parent?: number | null,
+    offset?: number,
+    expectedIdentity?: string | null,
   ): Promise<CallTreeDto>;
   pickAndAttachElf(
     workspaceId: string,

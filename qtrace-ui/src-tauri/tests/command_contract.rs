@@ -106,6 +106,9 @@ fn adapter_mirrors_the_service_contract() {
                 artifact_index: 0,
                 timeline_id: row.key.timeline_id.clone(),
                 tid,
+                parent: None,
+                offset: 0,
+                expected_identity: None,
             })
             .unwrap();
     }

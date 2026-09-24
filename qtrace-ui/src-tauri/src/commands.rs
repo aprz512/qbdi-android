@@ -82,6 +82,12 @@ pub struct CallTreeRequest {
     pub artifact_index: u32,
     pub timeline_id: DecimalU64Dto,
     pub tid: u32,
+    #[serde(default)]
+    pub parent: Option<u32>,
+    #[serde(default)]
+    pub offset: u32,
+    #[serde(default)]
+    pub expected_identity: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -267,11 +273,26 @@ mod desktop {
     }
 
     #[tauri::command]
-    pub fn get_call_tree(
+    pub async fn get_call_tree(
         request: CallTreeRequest,
         state: State<'_, DesktopState>,
     ) -> Result<CallTreeDto, AppError> {
-        state.get_call_tree(request)
+        let service = state.service();
+        tokio::task::spawn_blocking(move || {
+            service.get_call_tree(
+                &request.workspace_id,
+                request.artifact_index,
+                request.timeline_id.value(),
+                request.tid,
+                qtrace_service::CallTreePageQuery {
+                    parent: request.parent,
+                    offset: request.offset,
+                    expected_identity: request.expected_identity,
+                },
+            )
+        })
+        .await
+        .map_err(|_| AppError::worker_failed())?
     }
 
     #[tauri::command]

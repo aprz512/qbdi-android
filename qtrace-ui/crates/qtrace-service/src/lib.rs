@@ -14,6 +14,6 @@ pub use budget::{ServiceBudget, ServiceLimits};
 pub use dto::*;
 pub use error::AppError;
 pub use jobs::{JobCancellation, JobRegistry};
-pub use service::QtraceService;
+pub use service::{CallTreePageQuery, QtraceService};
 
 pub const ANALYSIS_CRATE: &str = qtrace_analysis::STORE_CRATE;

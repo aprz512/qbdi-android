@@ -382,7 +382,11 @@ export default function App() {
   return (
     <div className="app-shell">
       <AppHeader />
-      <LeftDock tids={tids} selectedTid={selectedTid} callTree={callTree} onSelectTid={selectTid} onJump={jumpToRow} />
+      <LeftDock workspaceId={state.opened?.workspace.id ?? null} tids={tids} selectedTid={selectedTid} callTree={callTree} onSelectTid={selectTid} onJump={jumpToRow}
+        onLoadCallTreePage={(parent, offset, identity) => {
+          if (state.opened === null || callTree === null) return Promise.reject(new Error("Call tree closed"));
+          return api.getCallTree(state.opened.workspace.id, callTree.artifact_index, callTree.timeline_id, callTree.tid, parent, offset, identity);
+        }} />
       <main className="workspace">
         {state.opened !== null && <FilterBar filter={state.filter} onApply={(filter) => void applyFilter(filter)} />}
         {state.opened !== null && state.projectionId !== null && <nav aria-label="Artifacts" className="artifact-selector">{state.opened.artifacts.map((artifact) => <button key={artifact.index} aria-pressed={artifact.index === state.selectedArtifactIndex} onClick={() => selectArtifact(artifact.index)}>{artifact.name}</button>)}</nav>}

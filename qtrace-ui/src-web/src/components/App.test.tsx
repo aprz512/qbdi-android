@@ -92,7 +92,7 @@ describe("desktop shell", () => {
       getRegisterState: vi.fn((_workspace, _artifact, row) => Promise.resolve({ key: rows[row - 1].key, before: [], after: [] })),
       getMemoryState: vi.fn((_workspace, _artifact, row) => Promise.resolve({ key: rows[row - 1].key, start: "0x0", end_exclusive: "0x1", observed: [], before: [], after: [], last_written: [] })),
       getMemoryHistory: vi.fn().mockResolvedValue([]),
-      getCallTree: vi.fn().mockResolvedValue({ identity: "tree", timeline_id: "1", tid: 7, roots: [], nodes: [] }),
+      getCallTree: vi.fn().mockResolvedValue({ identity: "tree", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 0, total: 0, nodes: [] }),
       getAnnotation: vi.fn().mockResolvedValue(null),
     });
     render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
@@ -153,7 +153,7 @@ describe("desktop shell", () => {
       locateTimeline: vi.fn().mockResolvedValue({ start: 1, cursor: "history-next" }),
       getEventDetail: vi.fn((_workspace, _artifact, row) => Promise.resolve({ artifact_index: 0, row, key: row === 1 ? first.key : second.key, kind: `detail-${row}`, provenance: "captured", raw_payload: "{}", module: null, relative_pc: null, memory_range: null })),
       getRegisterState: vi.fn().mockResolvedValue({ key: first.key, before: [], after: [] }),
-      getCallTree: vi.fn().mockResolvedValue({ identity: "tree", timeline_id: "1", tid: 7, roots: [], nodes: [] }),
+      getCallTree: vi.fn().mockResolvedValue({ identity: "tree", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 0, total: 0, nodes: [] }),
       getAnnotation: vi.fn().mockResolvedValue(null),
     });
     render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
@@ -194,10 +194,11 @@ describe("desktop shell", () => {
       getRegisterState: vi.fn((_workspace, _artifact, row) => Promise.resolve({ key: row === 1 ? first.key : deepCall.key, before: [], after: [] })),
       getCallTree: vi.fn().mockResolvedValue({
         identity: "tree-deep",
+        artifact_index: 0,
         timeline_id: "1",
         tid: 7,
-        roots: [1],
-        nodes: [{ id: 1, parent: null, children: [], tid: 7, target: "0x1000", display: "deep call", source_row_start: 101, source_row_end_exclusive: 102, provenance: "captured", state: "complete" }],
+        parent: null, offset: 0, total: 1,
+        nodes: [{ id: 1, parent: null, child_count: 0, tid: 7, target: "0x1000", display: "deep call", source_row_start: 101, source_row_end_exclusive: 102, provenance: "captured", state: "complete" }],
       }),
       getAnnotation: vi.fn().mockResolvedValue(null),
     });

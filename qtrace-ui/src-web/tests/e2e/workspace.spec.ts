@@ -121,17 +121,31 @@ test("jumps to a distant viewport and reuses the cached first segment", async ({
 });
 
 test("call-tree nodes fold and jump through the workspace", async ({ page }) => {
-  await page.route(/\/get_call_tree$/, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: { identity: "e2e-tree", timeline_id: "1", tid: 1, roots: [1], nodes: [
-    { id: 1, parent: null, children: [2], tid: 1, target: "0x1000", display: "root", source_row_start: 0, source_row_end_exclusive: 2, provenance: "captured", state: "complete" },
-    { id: 2, parent: 1, children: [], tid: 1, target: "0x1010", display: "child", source_row_start: 1, source_row_end_exclusive: 2, provenance: "derived", state: "incomplete" },
-  ] } }) }));
+  let childRequests = 0;
+  await page.route(/\/get_call_tree$/, (route) => {
+    const request = route.request().postDataJSON() as { parent: number | null; expected_identity: string | null };
+    const child = request.parent === 1;
+    if (child) {
+      expect(request.expected_identity).toBe("e2e-tree");
+      childRequests += 1;
+    }
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: {
+      identity: "e2e-tree", artifact_index: 0, timeline_id: "1", tid: 1, parent: child ? 1 : null, offset: 0, total: 1,
+      nodes: child
+        ? [{ id: 2, parent: 1, child_count: 0, tid: 1, target: "0x1010", display: "child", source_row_start: 1, source_row_end_exclusive: 2, provenance: "derived", state: "incomplete" }]
+        : [{ id: 1, parent: null, child_count: 1, tid: 1, target: "0x1000", display: "root", source_row_start: 0, source_row_end_exclusive: 2, provenance: "captured", state: "complete" }],
+    } }) });
+  });
   await openWorkspace(page);
   await page.getByRole("button", { name: "Apply filters" }).click();
   await page.getByRole("row").first().click();
+  await page.getByRole("button", { name: "Expand root" }).click();
   await expect(page.getByRole("button", { name: /child · incomplete/ })).toBeVisible();
+  await expect.poll(() => childRequests).toBe(1);
   await page.getByRole("button", { name: "Collapse root" }).click();
   await expect(page.getByRole("button", { name: /child · incomplete/ })).toBeHidden();
   await page.getByRole("button", { name: "Expand root" }).click();
+  await expect.poll(() => childRequests).toBe(1);
   await page.getByRole("button", { name: /child · incomplete/ }).click();
 });
 

@@ -299,7 +299,7 @@ pub struct MemoryEvidenceDto {
 pub struct CallNodeDto {
     pub id: u32,
     pub parent: Option<u32>,
-    pub children: Vec<u32>,
+    pub child_count: u32,
     pub tid: u32,
     pub target: Option<HexU64Dto>,
     pub display: String,
@@ -312,9 +312,12 @@ pub struct CallNodeDto {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
 pub struct CallTreeDto {
     pub identity: String,
+    pub artifact_index: u32,
     pub timeline_id: DecimalU64Dto,
     pub tid: u32,
-    pub roots: Vec<u32>,
+    pub parent: Option<u32>,
+    pub offset: u32,
+    pub total: u32,
     pub nodes: Vec<CallNodeDto>,
 }
 

@@ -1,4 +1,4 @@
-use qtrace_service::{EventFilterDto, JobState, QtraceService, WorkspaceId};
+use qtrace_service::{CallTreePageQuery, EventFilterDto, JobState, QtraceService, WorkspaceId};
 use qtrace_store::AuthorizedPath;
 
 fn fixture(name: &str) -> std::path::PathBuf {
@@ -179,6 +179,116 @@ fn real_workspace_exposes_bounded_analysis_without_store_handles() {
             row.source_row,
         )
         .unwrap();
+}
+
+#[test]
+fn call_tree_pages_preserve_identity_and_reject_stale_or_invalid_parents() {
+    let service = QtraceService::new();
+    let opened = service
+        .open_session(AuthorizedPath::new(fixture("valid-mixed")))
+        .unwrap();
+    let workspace = opened.workspace.id;
+    let projection = service
+        .create_projection(&workspace, 0, EventFilterDto::default())
+        .unwrap();
+    let row = service
+        .query_timeline(&workspace, &projection.projection_id, None, 1)
+        .unwrap()
+        .rows
+        .remove(0);
+    let tid = row.key.tid.unwrap();
+    let timeline = row.key.timeline_id.value();
+    let roots = service
+        .get_call_tree(&workspace, 0, timeline, tid, CallTreePageQuery::default())
+        .unwrap();
+    assert_eq!(roots.parent, None);
+    assert_eq!(roots.offset, 0);
+    assert!(roots.nodes.len() <= 100);
+    assert!(roots.nodes.len() <= roots.total as usize);
+    let same = service
+        .get_call_tree(
+            &workspace,
+            0,
+            timeline,
+            tid,
+            CallTreePageQuery {
+                expected_identity: Some(roots.identity.clone()),
+                ..CallTreePageQuery::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(same, roots);
+    let stale = service
+        .get_call_tree(
+            &workspace,
+            0,
+            timeline,
+            tid,
+            CallTreePageQuery {
+                expected_identity: Some("wrong".into()),
+                ..CallTreePageQuery::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(stale.code, "call_tree.stale");
+    let invalid = service
+        .get_call_tree(
+            &workspace,
+            0,
+            timeline,
+            tid,
+            CallTreePageQuery {
+                parent: Some(u32::MAX),
+                expected_identity: Some(roots.identity.clone()),
+                ..CallTreePageQuery::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(invalid.code, "call_tree.parent_invalid");
+    let missing_identity = service
+        .get_call_tree(
+            &workspace,
+            0,
+            timeline,
+            tid,
+            CallTreePageQuery {
+                offset: 1,
+                ..CallTreePageQuery::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(missing_identity.code, "call_tree.identity_required");
+    let other = service
+        .get_call_tree(
+            &workspace,
+            0,
+            timeline,
+            tid + 1,
+            CallTreePageQuery::default(),
+        )
+        .unwrap();
+    assert_ne!(other.identity, roots.identity);
+    let previous = service
+        .get_call_tree(
+            &workspace,
+            0,
+            timeline,
+            tid,
+            CallTreePageQuery {
+                expected_identity: Some(roots.identity.clone()),
+                ..CallTreePageQuery::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(previous.code, "call_tree.stale");
+    service.close_workspace(&workspace).unwrap();
+    assert_eq!(
+        service
+            .get_call_tree(&workspace, 0, timeline, tid, CallTreePageQuery::default())
+            .unwrap_err()
+            .code,
+        "workspace.stale"
+    );
 }
 
 #[tokio::test]
