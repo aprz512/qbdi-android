@@ -101,7 +101,7 @@ test("jumps to a distant viewport and reuses the cached first segment", async ({
     const first = pageIndex * pageSize;
     const rows = Array.from({ length: pageSize }, (_, offset) => {
       const sourceRow = first + offset;
-      return { source_row: sourceRow, key: { artifact_sha256: "a".repeat(64), timeline_id: "1", record_ordinal: String(sourceRow), source_offset: String(sourceRow * 8), sequence: String(sourceRow + 1), tid: 7 }, kind: "instruction", provenance: "captured", discontinuity: false };
+      return { source_row: sourceRow, key: { artifact_sha256: "a".repeat(64), timeline_id: "1", record_ordinal: String(sourceRow), source_offset: String(sourceRow * 8), sequence: String(sourceRow + 1), tid: 7 }, kind: "instruction", provenance: "captured", discontinuity: false, location: `lib.so+0x${sourceRow.toString(16)}`, symbol: null, summary: "mov x0, x1" };
     });
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: { rows, next_cursor: pageIndex + 1 < pageCount ? String(pageIndex + 1) : null, total, exact_total: true } }) });
   });

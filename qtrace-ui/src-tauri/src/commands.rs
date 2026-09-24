@@ -212,11 +212,21 @@ mod desktop {
     }
 
     #[tauri::command]
-    pub fn query_timeline(
+    pub async fn query_timeline(
         request: QueryTimelineRequest,
         state: State<'_, DesktopState>,
     ) -> Result<TimelinePageDto, AppError> {
-        state.query_timeline(request)
+        let service = state.service();
+        tokio::task::spawn_blocking(move || {
+            service.query_timeline(
+                &request.workspace_id,
+                &request.projection_id,
+                request.cursor,
+                request.limit,
+            )
+        })
+        .await
+        .map_err(|_| AppError::worker_failed())?
     }
 
     #[tauri::command]

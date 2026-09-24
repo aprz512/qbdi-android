@@ -94,6 +94,26 @@ fn real_workspace_exposes_bounded_analysis_without_store_handles() {
         .unwrap();
     assert!(!page.rows.is_empty());
     assert!(page.rows.len() <= 10);
+    let instruction = page
+        .rows
+        .iter()
+        .find(|row| row.kind == "instruction")
+        .unwrap();
+    assert_eq!(instruction.location, "lib.so+0x2345");
+    assert_eq!(instruction.summary, "B.EQ x0, #0x4");
+    let memory = page.rows.iter().find(|row| row.kind == "memory").unwrap();
+    assert_eq!(memory.summary, "read/write [0x2000] 4 B");
+    let semantic = page
+        .rows
+        .iter()
+        .find(|row| row.kind == "semantic_call")
+        .unwrap();
+    assert_eq!(semantic.summary, "jni/Find: line \"quoted\"");
+    assert!(
+        page.rows.iter().all(|row| row.symbol.is_none()
+            && row.location.len() <= 96
+            && row.summary.len() <= 160)
+    );
 
     let row = &page.rows[0];
     let detail = service
