@@ -9,8 +9,12 @@ use std::{
     time::Instant,
 };
 
-use qtrace_analysis::{EventFilter, QueryContext, TimelineProjection, query_events};
+use qtrace_analysis::{
+    CallTreeAnalyzer, CallTreeOptions, EventFilter, QueryContext, RegisterReplay,
+    TimelineProjection, query_events,
+};
 use qtrace_provider::{EventKind, OperationAbort, WorkDelta, WorkGuard};
+use qtrace_service::{CallTreePageQuery, EventFilterDto, QtraceService};
 use qtrace_store::{
     AuthorizedPath, BuildOptions, CompletenessRow, OpenPolicy, SessionLoader, TraceStore,
     TraceStoreView,
@@ -64,6 +68,44 @@ struct Opened {
     qtrb: Arc<TraceStore>,
     flight: Arc<TraceStore>,
     digest: String,
+}
+
+#[derive(Deserialize)]
+struct RichManifest {
+    corpora: RichCorpora,
+    semantic_oracle: RichOracle,
+}
+
+#[derive(Deserialize)]
+struct RichCorpora {
+    raw: Corpus,
+    compressed: Corpus,
+}
+
+#[derive(Deserialize)]
+struct RichOracle {
+    events: usize,
+    instructions: usize,
+    memory_events: usize,
+    semantic_events: usize,
+    call_frames: usize,
+}
+
+#[derive(Serialize)]
+struct RichOutput {
+    raw_cold_seconds: f64,
+    raw_warm_seconds: f64,
+    compressed_cold_seconds: f64,
+    query_seconds: Vec<f64>,
+    replay_build_seconds: f64,
+    replay_query_seconds: Vec<f64>,
+    call_tree_seconds: f64,
+    event_counts: [usize; 4],
+    call_frames: usize,
+    ipc_query_seconds: f64,
+    ipc_page_bytes: usize,
+    ipc_call_tree_seconds: f64,
+    ipc_call_tree_bytes: usize,
 }
 
 struct AllowAll;
@@ -261,6 +303,115 @@ fn workload_mode(manifest_path: &Path, cache: &Path) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+fn rich_mode(manifest_path: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
+    let manifest: RichManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    let raw_path = source_path(manifest_path, &manifest.corpora.raw)?;
+    let compressed_path = source_path(manifest_path, &manifest.corpora.compressed)?;
+    let started = Instant::now();
+    let raw = Arc::new(open_store(raw_path.clone(), cache)?);
+    let raw_cold_seconds = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    let warm = open_store(raw_path.clone(), cache)?;
+    let raw_warm_seconds = started.elapsed().as_secs_f64();
+    if !warm.is_mapped() {
+        return Err("rich warm open did not map the cache".into());
+    }
+    let started = Instant::now();
+    let compressed = open_store(compressed_path, cache)?;
+    let compressed_cold_seconds = started.elapsed().as_secs_f64();
+    verify_store_digest(&raw, &manifest.corpora.raw)?;
+    verify_store_digest(&compressed, &manifest.corpora.compressed)?;
+    let mut counts = [0usize; 4];
+    for row in 0..raw.event_count() {
+        match raw.event_kind(row)? {
+            Some(EventKind::Instruction) => counts[0] += 1,
+            Some(EventKind::Memory) => counts[1] += 1,
+            Some(EventKind::SemanticCall) => counts[2] += 1,
+            _ => counts[3] += 1,
+        }
+    }
+    if raw.event_count() != manifest.semantic_oracle.events
+        || compressed.event_count() != raw.event_count()
+        || counts[0] != manifest.semantic_oracle.instructions
+        || counts[1] != manifest.semantic_oracle.memory_events
+        || counts[2] != manifest.semantic_oracle.semantic_events
+    {
+        return Err(format!("rich semantic oracle mismatch: {counts:?}").into());
+    }
+    let context = Arc::new(QueryContext::new(raw.clone())?);
+    let projection = TimelineProjection::new(context, EventFilter::default())?;
+    let query_seconds = timed_pages(&projection)?;
+    let started = Instant::now();
+    let replay = RegisterReplay::new(raw.clone())?;
+    let replay_build_seconds = started.elapsed().as_secs_f64();
+    let mut replay_query_seconds = Vec::with_capacity(50);
+    for row in (10..raw.event_count())
+        .step_by(raw.event_count() / 50)
+        .take(50)
+    {
+        let key = raw.event_key(row)?.ok_or("missing rich event key")?;
+        let started = Instant::now();
+        replay.state_at(&key)?;
+        replay_query_seconds.push(started.elapsed().as_secs_f64());
+    }
+    let first_instruction = raw.event_key(5)?.ok_or("missing first instruction")?;
+    let started = Instant::now();
+    let tree = CallTreeAnalyzer::new(raw).build(
+        first_instruction.timeline.0,
+        first_instruction.tid.ok_or("missing rich thread id")?,
+        &CallTreeOptions::default(),
+    )?;
+    let call_tree_seconds = started.elapsed().as_secs_f64();
+    if tree.nodes.len() != manifest.semantic_oracle.call_frames {
+        return Err(format!("rich call tree has {} frames", tree.nodes.len()).into());
+    }
+    let service = QtraceService::with_cache_root(cache.join("service"));
+    let opened = service
+        .open_artifact(AuthorizedPath::new(raw_path))
+        .map_err(|error| format!("{}: {}", error.code, error.detail))?;
+    let workspace = opened.workspace.id;
+    let projection = service
+        .create_projection(&workspace, 0, EventFilterDto::default())
+        .map_err(|error| format!("{}: {}", error.code, error.detail))?;
+    let started = Instant::now();
+    let page = service
+        .query_timeline(&workspace, &projection.projection_id, None, 2_000)
+        .map_err(|error| format!("{}: {}", error.code, error.detail))?;
+    let ipc_query_seconds = started.elapsed().as_secs_f64();
+    let ipc_page_bytes = serde_json::to_vec(&page)?.len();
+    let started = Instant::now();
+    let tree_page = service
+        .get_call_tree(
+            &workspace,
+            0,
+            first_instruction.timeline.0,
+            first_instruction.tid.ok_or("missing rich thread id")?,
+            CallTreePageQuery::default(),
+        )
+        .map_err(|error| format!("{}: {}", error.code, error.detail))?;
+    let ipc_call_tree_seconds = started.elapsed().as_secs_f64();
+    let ipc_call_tree_bytes = serde_json::to_vec(&tree_page)?.len();
+    println!(
+        "{}",
+        serde_json::to_string(&RichOutput {
+            raw_cold_seconds,
+            raw_warm_seconds,
+            compressed_cold_seconds,
+            query_seconds,
+            replay_build_seconds,
+            replay_query_seconds,
+            call_tree_seconds,
+            event_counts: counts,
+            call_frames: tree.nodes.len(),
+            ipc_query_seconds,
+            ipc_page_bytes,
+            ipc_call_tree_seconds,
+            ipc_call_tree_bytes,
+        })?
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let mode = arguments.first().ok_or("missing mode")?.as_str();
@@ -274,6 +425,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let cache = argument(&arguments, "--workspace")?;
             let manifest = argument(&arguments, "--queries")?;
             workload_mode(&manifest, &cache)
+        }
+        "rich" => {
+            let manifest = argument(&arguments, "--input")?;
+            let cache = argument(&arguments, "--cache")?;
+            rich_mode(&manifest, &cache)
         }
         _ => Err(format!("unknown mode: {mode}").into()),
     }
