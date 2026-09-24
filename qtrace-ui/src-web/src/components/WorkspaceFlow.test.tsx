@@ -68,18 +68,48 @@ describe("workspace workflows", () => {
     expect(screen.getByLabelText("Comment")).toHaveValue("reviewed");
   });
 
-  it("jumps to call entries and folds nested frames", () => {
+  it("loads child frames on expansion and jumps to entries", async () => {
     const jump = vi.fn();
-    render(<CallTreePane tree={{ identity: "tree-1", timeline_id: "1", tid: 7, roots: [1], nodes: [
-      { id: 1, parent: null, children: [2], tid: 7, target: "0x1000", display: "root", source_row_start: 10, source_row_end_exclusive: 20, provenance: "captured", state: "complete" },
-      { id: 2, parent: 1, children: [], tid: 7, target: "0x1100", display: "child", source_row_start: 12, source_row_end_exclusive: 18, provenance: "derived", state: "incomplete" },
-    ] }} onJump={jump} />);
-    expect(screen.getByText(/child · incomplete/)).toBeVisible();
+    const child = { id: 2, parent: 1, child_count: 0, tid: 7, target: "0x1100", display: "child", source_row_start: 12, source_row_end_exclusive: 18, provenance: "derived", state: "incomplete" };
+    const loadPage = vi.fn().mockResolvedValue({ identity: "tree-1", artifact_index: 0, timeline_id: "1", tid: 7, parent: 1, offset: 0, total: 1, nodes: [child] });
+    render(<CallTreePane tree={{ identity: "tree-1", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 0, total: 1, nodes: [
+      { id: 1, parent: null, child_count: 1, tid: 7, target: "0x1000", display: "root", source_row_start: 10, source_row_end_exclusive: 20, provenance: "captured", state: "complete" },
+    ] }} onJump={jump} loadPage={loadPage} />);
+    expect(screen.queryByText(/child · incomplete/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand root" }));
+    expect(await screen.findByText(/child · incomplete/)).toBeVisible();
+    expect(loadPage).toHaveBeenCalledWith(1, 0, "tree-1");
     fireEvent.click(screen.getByRole("button", { name: "Collapse root" }));
     expect(screen.queryByText(/child · incomplete/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Expand root" }));
     fireEvent.click(screen.getByRole("button", { name: /child · incomplete/ }));
     expect(jump).toHaveBeenCalledWith(12);
+  });
+
+  it("keeps the call frame DOM bounded while loading a wide root page", async () => {
+    const nodes = Array.from({ length: 100 }, (_, id) => ({ id, parent: null, child_count: 0, tid: 7, target: null, display: `call ${id}`, source_row_start: id, source_row_end_exclusive: id + 1, provenance: "captured", state: "complete" }));
+    const nextNodes = nodes.map((node) => ({ ...node, id: node.id + 100 }));
+    const loadPage = vi.fn().mockResolvedValue({ identity: "wide", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 100, total: 10_000, nodes: nextNodes });
+    render(<CallTreePane tree={{ identity: "wide", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 0, total: 10_000, nodes }} onJump={() => undefined} loadPage={loadPage} />);
+    expect(screen.getAllByRole("treeitem").length).toBeLessThan(20);
+    fireEvent.scroll(screen.getByRole("tree"), { target: { scrollTop: 3000 } });
+    fireEvent.click(screen.getByRole("button", { name: "Load more calls" }));
+    await waitFor(() => expect(loadPage).toHaveBeenCalledWith(null, 100, "wide"));
+    expect(screen.getAllByRole("treeitem").length).toBeLessThan(20);
+  });
+
+  it("drops a child page from a previous tree identity", async () => {
+    const root = { id: 1, parent: null, child_count: 1, tid: 7, target: null, display: "old root", source_row_start: 1, source_row_end_exclusive: 3, provenance: "captured", state: "complete" };
+    const child = { ...root, id: 2, parent: 1, child_count: 0, display: "stale child" };
+    let resolvePage: (value: unknown) => void = () => undefined;
+    const loadPage = vi.fn().mockImplementation(() => new Promise((resolve) => { resolvePage = resolve; }));
+    const oldTree = { identity: "old", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 0, total: 1, nodes: [root] };
+    const { rerender } = render(<CallTreePane tree={oldTree} onJump={() => undefined} loadPage={loadPage} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand old root" }));
+    rerender(<CallTreePane tree={{ ...oldTree, identity: "new", nodes: [{ ...root, display: "new root" }] }} onJump={() => undefined} loadPage={loadPage} />);
+    resolvePage({ ...oldTree, parent: 1, nodes: [child] });
+    await waitFor(() => expect(screen.getByText(/new root · complete/)).toBeVisible());
+    expect(screen.queryByText(/stale child/)).not.toBeInTheDocument();
   });
 
   it("bounds result rendering and state has no full-trace collection", () => {

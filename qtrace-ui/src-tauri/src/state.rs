@@ -158,6 +158,11 @@ impl<P: NativePicker> CommandAdapter<P> {
             request.artifact_index,
             request.timeline_id.value(),
             request.tid,
+            qtrace_service::CallTreePageQuery {
+                parent: request.parent,
+                offset: request.offset,
+                expected_identity: request.expected_identity,
+            },
         )
     }
 

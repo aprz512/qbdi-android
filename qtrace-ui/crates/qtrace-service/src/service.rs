@@ -24,7 +24,9 @@ use qtrace_store::{
     ModuleIdentity, OpenPolicy, SessionLoader, TraceStore, TraceStoreView,
 };
 
-use crate::workspace::{ArtifactWorkspace, ProjectionWorkspace, RegisterReplaySlot, Workspace};
+use crate::workspace::{
+    ArtifactWorkspace, CachedCallTree, ProjectionWorkspace, RegisterReplaySlot, Workspace,
+};
 use crate::{
     AddressRangeDto, AnnotationDto, AppError, ArtifactSummaryDto, CallNodeDto, CallTreeDto,
     CompletenessRangeDto, DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto,
@@ -39,6 +41,13 @@ pub struct QtraceService {
     cache_root: PathBuf,
     workspaces: Arc<Mutex<HashMap<WorkspaceId, Workspace>>>,
     jobs: JobRegistry,
+}
+
+#[derive(Default)]
+pub struct CallTreePageQuery {
+    pub parent: Option<u32>,
+    pub offset: u32,
+    pub expected_identity: Option<String>,
 }
 
 impl Default for QtraceService {
@@ -242,6 +251,7 @@ impl QtraceService {
                     artifacts,
                     projections: HashMap::new(),
                     symbols: HashMap::new(),
+                    call_tree: Arc::new(Mutex::new(None)),
                 },
             );
         Ok(OpenWorkspaceDto {
@@ -555,39 +565,112 @@ impl QtraceService {
         artifact_index: u32,
         timeline_id: u64,
         tid: u32,
+        page: CallTreePageQuery,
     ) -> Result<CallTreeDto, AppError> {
-        let store = self.artifact_store(workspace, artifact_index)?;
-        let budget = ServiceBudget::new(ServiceLimits::interactive());
-        let tree = CallTreeAnalyzer::new(store).build_with_guard(
-            timeline_id,
-            tid,
-            &CallTreeOptions::default(),
-            &budget,
-        )?;
+        const PAGE_SIZE: usize = 100;
+        let CallTreePageQuery {
+            parent,
+            offset,
+            expected_identity,
+        } = page;
+        let expected_identity = expected_identity.as_deref();
+        if (parent.is_some() || offset > 0) && expected_identity.is_none() {
+            return Err(AppError::new(
+                "call_tree.identity_required",
+                "analysis",
+                "call tree page requires an identity",
+            ));
+        }
+        let (store, slot) = {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|_| AppError::worker_failed())?;
+            let item = workspaces
+                .get(workspace)
+                .ok_or_else(AppError::stale_workspace)?;
+            let artifact = item
+                .artifacts
+                .get(artifact_index as usize)
+                .ok_or_else(AppError::stale_workspace)?;
+            (artifact.store.clone(), item.call_tree.clone())
+        };
+        let tree = {
+            let mut cached = slot.lock().map_err(|_| AppError::worker_failed())?;
+            if expected_identity.is_some()
+                && !cached.as_ref().is_some_and(|item| {
+                    item.artifact_index == artifact_index
+                        && item.timeline_id == timeline_id
+                        && item.tid == tid
+                        && expected_identity
+                            == Some(hex_bytes(item.tree.identity.as_bytes()).as_str())
+                })
+            {
+                return Err(AppError::new(
+                    "call_tree.stale",
+                    "analysis",
+                    "call tree changed",
+                ));
+            }
+            if !cached.as_ref().is_some_and(|item| {
+                item.artifact_index == artifact_index
+                    && item.timeline_id == timeline_id
+                    && item.tid == tid
+            }) {
+                *cached = None;
+                let budget = ServiceBudget::new(call_tree_build_limits());
+                let tree = Arc::new(CallTreeAnalyzer::new(store).build_with_guard(
+                    timeline_id,
+                    tid,
+                    &CallTreeOptions::default(),
+                    &budget,
+                )?);
+                *cached = Some(CachedCallTree {
+                    artifact_index,
+                    timeline_id,
+                    tid,
+                    tree,
+                });
+            }
+            cached.as_ref().unwrap().tree.clone()
+        };
+        let siblings = if let Some(parent) = parent {
+            let node = tree
+                .nodes
+                .get(parent as usize)
+                .filter(|node| node.id == parent as usize)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "call_tree.parent_invalid",
+                        "analysis",
+                        "invalid call parent",
+                    )
+                })?;
+            &node.children
+        } else {
+            &tree.roots
+        };
+        let start = (offset as usize).min(siblings.len());
+        let end = start.saturating_add(PAGE_SIZE).min(siblings.len());
         Ok(CallTreeDto {
             identity: hex_bytes(tree.identity.as_bytes()),
+            artifact_index,
             timeline_id: DecimalU64Dto::new(tree.timeline.0),
             tid: tree.tid,
-            roots: tree
-                .roots
-                .into_iter()
-                .map(as_u32)
-                .collect::<Result<_, _>>()?,
-            nodes: tree
-                .nodes
-                .into_iter()
+            parent,
+            offset,
+            total: as_u32(siblings.len())?,
+            nodes: siblings[start..end]
+                .iter()
+                .map(|id| &tree.nodes[*id])
                 .map(|node| {
                     Ok(CallNodeDto {
                         id: as_u32(node.id)?,
                         parent: node.parent.map(as_u32).transpose()?,
-                        children: node
-                            .children
-                            .into_iter()
-                            .map(as_u32)
-                            .collect::<Result<_, _>>()?,
+                        child_count: as_u32(node.children.len())?,
                         tid: node.tid,
                         target: node.target.map(HexU64Dto::new),
-                        display: node.display,
+                        display: node.display.clone(),
                         source_row_start: as_u32(node.source_row_start)?,
                         source_row_end_exclusive: as_u32(node.source_row_end_exclusive)?,
                         provenance: provenance_name(node.provenance).into(),
@@ -1046,6 +1129,18 @@ fn register_replay_build_limits() -> ServiceLimits {
         events: 20_000_000,
         nodes: 40_000_000,
         rows: 20_000_000,
+        resident_bytes: 512 * 1024 * 1024,
+    }
+}
+
+fn call_tree_build_limits() -> ServiceLimits {
+    ServiceLimits {
+        deadline: Instant::now() + Duration::from_secs(30),
+        input_bytes: u64::MAX,
+        decompressed_bytes: u64::MAX,
+        events: 10_000_000,
+        nodes: 2_000_000,
+        rows: 10_000_000,
         resident_bytes: 512 * 1024 * 1024,
     }
 }

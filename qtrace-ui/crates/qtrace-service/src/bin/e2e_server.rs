@@ -254,6 +254,11 @@ fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppErro
             number(&value, "artifact_index")?,
             field::<DecimalU64Dto>(&value, "timeline_id")?.value(),
             number(&value, "tid")?,
+            qtrace_service::CallTreePageQuery {
+                parent: optional(&value, "parent")?,
+                offset: optional::<u32>(&value, "offset")?.unwrap_or(0),
+                expected_identity: optional(&value, "expected_identity")?,
+            },
         )?),
         "list_symbols" => {
             let pcs = field::<Vec<HexU64Dto>>(&value, "relative_pcs")?
