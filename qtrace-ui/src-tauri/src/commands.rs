@@ -238,11 +238,16 @@ mod desktop {
     }
 
     #[tauri::command]
-    pub fn get_register_state(
+    pub async fn get_register_state(
         request: EventRequest,
         state: State<'_, DesktopState>,
     ) -> Result<RegisterStateDto, AppError> {
-        state.get_register_state(request)
+        let service = state.service();
+        tokio::task::spawn_blocking(move || {
+            service.get_register_state(&request.workspace_id, request.artifact_index, request.row)
+        })
+        .await
+        .map_err(|_| AppError::worker_failed())?
     }
 
     #[tauri::command]
