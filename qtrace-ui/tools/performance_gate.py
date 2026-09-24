@@ -168,7 +168,7 @@ def _git(root: Path, *args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
 
 
-def _host_identity(expected: dict[str, object]) -> dict[str, object]:
+def _host_identity(expected: dict[str, object], *, diagnostic: bool = False) -> dict[str, object]:
     cpu_model = "unknown"
     cpuinfo = Path("/proc/cpuinfo")
     if cpuinfo.exists():
@@ -181,7 +181,10 @@ def _host_identity(expected: dict[str, object]) -> dict[str, object]:
         ["stat", "-f", "-c", "%T", "."], capture_output=True, text=True, check=True,
     ).stdout.strip()
     observed = {
-        "identity": os.environ.get("QTRACE_UI_REFERENCE_HOST", ""),
+        "identity": (
+            f"diagnostic:{platform.node()}" if diagnostic
+            else os.environ.get("QTRACE_UI_REFERENCE_HOST", "")
+        ),
         "cpu_model": cpu_model,
         "cpu_count": os.cpu_count() or 0,
         "ram_bytes": int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")),
@@ -190,11 +193,57 @@ def _host_identity(expected: dict[str, object]) -> dict[str, object]:
         "filesystem_block_bytes": stat.f_frsize,
     }
     required = expected.get("reference_host")
-    if required is not None and observed != required:
+    if not diagnostic and required is not None and observed != required:
         raise RuntimeError("reference host identity drift")
-    if not observed["identity"]:
+    if not diagnostic and not observed["identity"]:
         raise RuntimeError("QTRACE_UI_REFERENCE_HOST is required")
     return observed
+
+
+def diagnostic_metrics(report: dict[str, object]) -> dict[str, float]:
+    """The same aggregate measurements for both sides of a local comparison."""
+    cold = report["cold_index"]
+    warm = report["warm_open"]
+    viewport = report["viewport_seconds"]
+    search = report["structured_search_seconds"]
+    if not isinstance(cold, list) or len(cold) != RUN_COUNT or not isinstance(warm, list) or len(warm) != RUN_COUNT:
+        raise ValueError("diagnostic comparison requires five cold and warm runs")
+    if not isinstance(viewport, list) or len(viewport) < QUERY_COUNT or not isinstance(search, list) or len(search) < QUERY_COUNT:
+        raise ValueError("diagnostic comparison requires 200 query samples")
+    expected = report.get("expected_correctness_digest")
+    if any(not isinstance(run, dict) or run.get("correctness_digest") != expected for run in cold + warm):
+        raise ValueError("diagnostic comparison has a correctness mismatch")
+    if report.get("workload_correctness_digest") != expected:
+        raise ValueError("diagnostic workload correctness mismatch")
+    return {
+        "cold_index_median_seconds": median(float(run["seconds"]) for run in cold),
+        "cold_index_peak_rss_median_bytes": median(float(run["peak_rss_bytes"]) for run in cold),
+        "warm_open_median_seconds": median(float(run["seconds"]) for run in warm),
+        "viewport_p95_seconds": nearest_rank_p95(viewport),
+        "structured_search_p95_seconds": nearest_rank_p95(search),
+    }
+
+
+def compare_diagnostics(baseline: dict[str, object], current: dict[str, object]) -> dict[str, object]:
+    if baseline.get("mode") != "diagnostic" or current.get("mode") != "diagnostic":
+        raise ValueError("only diagnostic reports can be compared")
+    for field in ("schema", "host", "generator", "corpora", "expected_correctness_digest", "expected_flight_completeness"):
+        if baseline.get(field) != current.get(field):
+            raise ValueError(f"diagnostic comparison {field} mismatch")
+    before = diagnostic_metrics(baseline)
+    after = diagnostic_metrics(current)
+    return {
+        "baseline_analyzer": baseline["analyzer"],
+        "current_analyzer": current["analyzer"],
+        "metrics": {
+            key: {
+                "before": value,
+                "after": after[key],
+                "change_percent": (after[key] / value - 1.0) * 100.0 if value else None,
+            }
+            for key, value in before.items()
+        },
+    }
 
 
 def _run_driver(command: list[str], env: dict[str, str]) -> tuple[dict[str, object], float, int]:
@@ -255,17 +304,35 @@ def run_gate(
     evidence_path: Path,
     summary_path: Path | None,
     reference_summary: Path | None,
+    *,
+    diagnostic: bool = False,
+    diagnostic_baseline: Path | None = None,
 ) -> int:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     root = Path(__file__).resolve().parents[2]
+    if diagnostic:
+        output = evidence_path.resolve()
+        if diagnostic_baseline is not None and output == diagnostic_baseline.resolve():
+            raise ValueError("diagnostic output must not overwrite its baseline")
+        if output.is_relative_to(root):
+            tracked = subprocess.run(
+                ["git", "ls-files", "--error-unmatch", str(output)],
+                cwd=root, capture_output=True, check=False,
+            )
+            if tracked.returncode == 0:
+                raise ValueError("diagnostic output must not overwrite a tracked reference file")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     ui = root / "qtrace-ui"
     driver = ui / "target/release/examples/perf_driver"
     subprocess.run(["cargo", "build", "--release", "-p", "qtrace-service", "--example", "perf_driver"], cwd=ui, check=True)
-    host = _host_identity({"reference_host": _reference_host(reference_summary)})
+    host = _host_identity(
+        {"reference_host": _reference_host(reference_summary) if not diagnostic else None},
+        diagnostic=diagnostic,
+    )
     generator_path = ui / "tools/generate_performance_fixtures.py"
     analyzer_commit = _git(root, "rev-parse", "HEAD")
     base = {
         "schema": 1,
+        "mode": "diagnostic" if diagnostic else "reference",
         "generator": {"schema": manifest["generator_schema"], "sha256": _sha256(generator_path)},
         "analyzer": {"commit": analyzer_commit, "sha256": _sha256(driver)},
         "host": host,
@@ -307,13 +374,24 @@ def run_gate(
         )
         base["viewport_seconds"] = workload["viewport_seconds"]
         base["structured_search_seconds"] = workload["structured_search_seconds"]
+        if diagnostic:
+            base["workload_correctness_digest"] = workload["correctness_digest"]
     result = verdict(base)
-    base["verdict"] = {"passed": result.passed, "failures": result.failures, "metrics": result.metrics}
+    if diagnostic:
+        base["diagnostic_metrics"] = diagnostic_metrics(base)
+        base["reference_thresholds_for_context_only"] = {
+            "passed": result.passed, "failures": result.failures,
+        }
+        if diagnostic_baseline is not None:
+            previous = json.loads(diagnostic_baseline.read_text(encoding="utf-8"))
+            base["comparison"] = compare_diagnostics(previous, base)
+    else:
+        base["verdict"] = {"passed": result.passed, "failures": result.failures, "metrics": result.metrics}
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(base, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if summary_path is not None:
+    if summary_path is not None and not diagnostic:
         summary_path.write_text(_render_markdown(base, result), encoding="utf-8")
-    return 0 if result.passed else 1
+    return 0 if diagnostic or result.passed else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -322,12 +400,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--write-summary", type=Path)
     parser.add_argument("--reference-summary", type=Path)
+    parser.add_argument("--diagnostic", action="store_true", help="label results as local diagnostic; do not update a reference summary")
+    parser.add_argument("--diagnostic-baseline", type=Path, help="prior diagnostic JSON from the same host")
     args = parser.parse_args(argv)
+    if args.diagnostic:
+        if args.write_summary is not None or args.reference_summary is not None:
+            parser.error("diagnostic mode cannot read or write a reference summary")
+    elif args.diagnostic_baseline is not None:
+        parser.error("--diagnostic-baseline requires --diagnostic")
     return run_gate(
         args.manifest.resolve(),
         args.evidence.resolve(),
         args.write_summary,
         args.reference_summary,
+        diagnostic=args.diagnostic,
+        diagnostic_baseline=args.diagnostic_baseline,
     )
 
 

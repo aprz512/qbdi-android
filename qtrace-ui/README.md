@@ -60,3 +60,17 @@ python3 qtrace-ui/tools/performance_gate.py \
 ```
 
 The gate requires five cold indexes, five warm opens, at least 200 viewport and 200 indexed structured-query samples, exact corpus/tool identities, and the checked-in reference-host identity.
+
+For a local before/after comparison on the same machine, save a diagnostic JSON before changing the analyzer, then pass it as the baseline after the change:
+
+```bash
+python3 qtrace-ui/tools/performance_gate.py \
+  --manifest qtrace-ui-performance-evidence/corpus/manifest.json \
+  --evidence qtrace-ui-performance-evidence/before.json --diagnostic
+python3 qtrace-ui/tools/performance_gate.py \
+  --manifest qtrace-ui-performance-evidence/corpus/manifest.json \
+  --evidence qtrace-ui-performance-evidence/after.json --diagnostic \
+  --diagnostic-baseline qtrace-ui-performance-evidence/before.json
+```
+
+The diagnostic report labels all values as local, checks matching host and corpus identities, and reports percent changes (negative is faster or lower memory). It cannot read or write the checked-in reference summary or overwrite tracked reference files. It does not decide reference-gate acceptance.
