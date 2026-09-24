@@ -25,7 +25,7 @@ struct RawReport {
     timeline: Vec<Value>,
     device: BTreeMap<String, Value>,
     #[serde(rename = "tracer")]
-    _tracer: BTreeMap<String, Value>,
+    tracer: BTreeMap<String, Value>,
     target: BTreeMap<String, Value>,
     effective_config: BTreeMap<String, Value>,
     native: BTreeMap<String, Value>,
@@ -38,12 +38,26 @@ struct RawReport {
 #[derive(Clone, Debug)]
 pub(crate) struct Manifest {
     pub(crate) session_id: String,
+    pub(crate) context: ReportContext,
     pub(crate) package_present: bool,
     pub(crate) device_present: bool,
     pub(crate) target_present: bool,
     pub(crate) config_present: bool,
     pub(crate) artifacts: Vec<ManifestArtifact>,
     pub(crate) unavailable: Vec<ManifestWarning>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportContext {
+    pub mode: Option<String>,
+    pub status: Option<String>,
+    pub stage: Option<String>,
+    pub package: Option<String>,
+    pub device_serial: Option<String>,
+    pub device_access_mode: Option<String>,
+    pub target_module: Option<String>,
+    pub profile: Option<String>,
+    pub scenes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -146,8 +160,56 @@ impl Manifest {
             unavailable.push(parse_warning(&record)?);
         }
 
+        let trace = raw.effective_config.get("trace").and_then(Value::as_object);
+        let target_module = display_member(&raw.target, "module", 128)
+            .or_else(|| display_member(&raw.effective_config, "targetModule", 128))
+            .or_else(|| display_member(&raw.effective_config, "module", 128));
+        let profile = trace
+            .and_then(|value| value.get("profile"))
+            .and_then(Value::as_str)
+            .and_then(|value| display_text(value, 64))
+            .or_else(|| display_member(&raw.effective_config, "profile", 64))
+            .or_else(|| display_member(&raw.tracer, "profile", 64));
+        let mut scenes = raw
+            .effective_config
+            .get("scenes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .take(8)
+            .filter_map(|item| {
+                item.get("name")
+                    .and_then(Value::as_str)
+                    .and_then(|value| display_text(value, 96))
+            })
+            .collect::<Vec<_>>();
+        if scenes.is_empty() {
+            let entry = raw
+                .effective_config
+                .get("flight")
+                .and_then(Value::as_object)
+                .and_then(|value| value.get("entryScene"))
+                .and_then(Value::as_str)
+                .and_then(|value| display_text(value, 96))
+                .or_else(|| display_member(&raw.effective_config, "flight_entry_scene", 96));
+            if let Some(entry) = entry {
+                scenes.push(entry);
+            }
+        }
+        let context = ReportContext {
+            mode: display_text(&raw.mode, 64),
+            status: display_text(&raw.status, 64),
+            stage: display_text(&raw.stage, 64),
+            package: display_text(&raw.package, 128),
+            device_serial: display_text(&raw.serial, 128),
+            device_access_mode: display_member(&raw.device, "access_mode", 64),
+            target_module,
+            profile,
+            scenes,
+        };
         Ok(Self {
             session_id: raw.session_id,
+            context,
             package_present: !raw.package.is_empty(),
             device_present: !raw.serial.is_empty() && !raw.device.is_empty(),
             target_present: !raw.target.is_empty(),
@@ -155,6 +217,29 @@ impl Manifest {
             artifacts,
             unavailable,
         })
+    }
+}
+
+fn display_member(map: &BTreeMap<String, Value>, key: &str, limit: usize) -> Option<String> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .and_then(|value| display_text(value, limit))
+}
+
+fn display_text(input: &str, limit: usize) -> Option<String> {
+    let mut output = String::with_capacity(input.len().min(limit));
+    for ch in input.chars() {
+        let ch = if ch.is_control() { ' ' } else { ch };
+        if output.len() + ch.len_utf8() > limit {
+            break;
+        }
+        output.push(ch);
+    }
+    let output = output.trim();
+    if output.is_empty() {
+        None
+    } else {
+        Some(output.to_owned())
     }
 }
 

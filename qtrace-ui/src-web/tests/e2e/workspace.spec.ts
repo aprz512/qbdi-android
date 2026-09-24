@@ -4,6 +4,11 @@ import { openWorkspace } from "./support";
 test("opens a real mixed session and queries a bounded timeline", async ({ page }) => {
   await openWorkspace(page);
   await expect(page.getByText(/3 artifacts/)).toBeVisible();
+  await expect(page.getByText("Package")).toBeVisible();
+  await expect(page.getByText("com.example.fixture")).toBeVisible();
+  await expect(page.getByText("fixture-device · run-as")).toBeVisible();
+  await expect(page.getByText("libtarget.so")).toBeVisible();
+  await expect(page.getByText("Unavailable context: effective_config")).toBeVisible();
   await page.getByRole("button", { name: "Apply filters" }).click();
   await expect(page.getByRole("grid", { name: "Visible trace rows" })).toBeVisible();
   expect(await page.getByRole("row").count()).toBeLessThanOrEqual(2_000);
@@ -30,6 +35,7 @@ test("opens a degraded single artifact and analyzes it", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Open artifact" }).click();
   await expect(page.getByText(/1 artifacts/)).toBeVisible();
+  await expect(page.getByText("Single artifact. Session context is unavailable.")).toBeVisible();
   await page.getByRole("button", { name: "Apply filters" }).click();
   await expect(page.getByRole("grid", { name: "Visible trace rows" })).toBeVisible();
 });

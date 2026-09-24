@@ -12,8 +12,10 @@ function fakeApi(overrides: Partial<QtraceApi> = {}): QtraceApi {
   return {
     pickAndOpenSession: vi.fn().mockResolvedValue({
       workspace: { id: "workspace-7", generation: 0, artifact_count: 1 },
-      artifacts: [{ index: 0, name: "main.trace.bin", event_count: 42, tids: [7], completeness: [] }],
+      artifacts: [{ index: 0, name: "main.trace.bin", status: "indexed", event_count: 42, tids: [7], completeness: [] }],
       warnings: ["worker artifact isolated"],
+      context: { session_id: "session-7", mode: "run", status: "sealed", stage: "sealed", package: "com.example.fixture", device_serial: "fixture-device", device_access_mode: "run-as", target_module: "libtarget.so", profile: "full", scenes: ["entry"] },
+      missing_capabilities: [],
     }),
     pickAndOpenArtifact: vi.fn().mockResolvedValue(null),
     closeWorkspace: vi.fn().mockResolvedValue(undefined),
@@ -57,8 +59,8 @@ describe("desktop shell", () => {
       .mockResolvedValue(undefined);
     const api = fakeApi({
       pickAndOpenSession: vi.fn()
-        .mockResolvedValueOnce({ workspace: { id: "workspace-old", generation: 0, artifact_count: 0 }, artifacts: [], warnings: [] })
-        .mockResolvedValueOnce({ workspace: { id: "workspace-new", generation: 0, artifact_count: 0 }, artifacts: [], warnings: [] }),
+        .mockResolvedValueOnce({ workspace: { id: "workspace-old", generation: 0, artifact_count: 0 }, artifacts: [], warnings: [], context: null, missing_capabilities: ["package", "device", "target", "effective_config"] })
+        .mockResolvedValueOnce({ workspace: { id: "workspace-new", generation: 0, artifact_count: 0 }, artifacts: [], warnings: [], context: null, missing_capabilities: ["package", "device", "target", "effective_config"] }),
       closeWorkspace,
     });
     render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
@@ -81,6 +83,11 @@ describe("desktop shell", () => {
     await waitFor(() => expect(screen.getByText(/Workspace workspace-7/)).toBeVisible());
     expect(screen.getByText(/main\.trace\.bin/)).toBeVisible();
     expect(screen.getByText("worker artifact isolated")).toBeVisible();
+    expect(screen.getByText("com.example.fixture")).toBeVisible();
+    expect(screen.getByText("fixture-device · run-as")).toBeVisible();
+    expect(screen.getByText("libtarget.so")).toBeVisible();
+    expect(screen.getByText("full")).toBeVisible();
+    expect(screen.getByText("entry")).toBeVisible();
   });
 
   it("synchronizes panes and rejects a late response from the previous selection", async () => {
@@ -119,10 +126,12 @@ describe("desktop shell", () => {
       pickAndOpenSession: vi.fn().mockResolvedValue({
         workspace: { id: "workspace-7", generation: 0, artifact_count: 2 },
         artifacts: [
-          { index: 0, name: "main.qtrb", event_count: 1, tids: [7], completeness: [] },
-          { index: 1, name: "capture.flight", event_count: 2, tids: [7], completeness: [{ domain: "captured_sequence", start: "9", end: "9", end_inclusive: true, cause: "overwritten", provenance: "damaged" }] },
+          { index: 0, name: "main.qtrb", status: "indexed", event_count: 1, tids: [7], completeness: [] },
+          { index: 1, name: "capture.flight", status: "indexed", event_count: 2, tids: [7], completeness: [{ domain: "captured_sequence", start: "9", end: "9", end_inclusive: true, cause: "overwritten", provenance: "damaged" }] },
         ],
         warnings: [],
+        context: null,
+        missing_capabilities: ["package", "device", "target", "effective_config"],
       }),
       createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-flight", job_id: "job-1", generation: 1 }),
       queryTimeline: vi.fn()
@@ -241,8 +250,10 @@ describe("desktop shell", () => {
     const api = fakeApi({
       pickAndOpenSession: vi.fn().mockResolvedValue({
         workspace: { id: "workspace-7", generation: 0, artifact_count: 1 },
-        artifacts: [{ index: 0, name: "main.trace.bin", event_count: 2_001, tids: [7, 9], completeness: [] }],
+        artifacts: [{ index: 0, name: "main.trace.bin", status: "indexed", event_count: 2_001, tids: [7, 9], completeness: [] }],
         warnings: [],
+        context: null,
+        missing_capabilities: ["package", "device", "target", "effective_config"],
       }),
       createProjection: vi.fn().mockResolvedValue({ projection_id: "projection-threads", job_id: "job-1", generation: 1 }),
       queryTimeline: vi.fn().mockResolvedValue({ rows: [eventRow(1)], next_cursor: "later-page", total: 2_001, exact_total: true }),

@@ -21,7 +21,7 @@ use qtrace_provider::{
 use qtrace_store::{
     AnnotationOpenRequest, AnnotationStore, AuthorizedPath, BuildOptions, ElfLoadRequest,
     ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, Highlight, LocalSymbolName,
-    ModuleIdentity, OpenPolicy, SessionLoader, TraceStore, TraceStoreView,
+    ModuleIdentity, OpenPolicy, SessionCapability, SessionLoader, TraceStore, TraceStoreView,
 };
 
 use crate::workspace::{
@@ -32,8 +32,8 @@ use crate::{
     CompletenessRangeDto, DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto,
     HexU64Dto, JobId, JobRegistry, LocalSymbolNameDto, MemoryByteDto, MemoryEvidenceDto,
     MemoryStateDto, OpenWorkspaceDto, ProjectionId, ProjectionJobDto, RegisterCellDto,
-    RegisterStateDto, ServiceBudget, ServiceLimits, SymbolDto, TimelineLocationDto,
-    TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
+    RegisterStateDto, ServiceBudget, ServiceLimits, SessionContextDto, SymbolDto,
+    TimelineLocationDto, TimelinePageDto, WorkspaceId, WorkspaceSummaryDto,
 };
 
 pub struct QtraceService {
@@ -156,6 +156,29 @@ impl QtraceService {
         source_budget: &ServiceBudget,
         cancellation: &crate::JobCancellation,
     ) -> Result<OpenWorkspaceDto, AppError> {
+        let context = session.context().map(|source| SessionContextDto {
+            session_id: session.session_id().unwrap_or_default().to_owned(),
+            mode: source.mode.clone(),
+            status: source.status.clone(),
+            stage: source.stage.clone(),
+            package: source.package.clone(),
+            device_serial: source.device_serial.clone(),
+            device_access_mode: source.device_access_mode.clone(),
+            target_module: source.target_module.clone(),
+            profile: source.profile.clone(),
+            scenes: source.scenes.clone(),
+        });
+        let missing_capabilities = [
+            (SessionCapability::Package, "package"),
+            (SessionCapability::Device, "device"),
+            (SessionCapability::Target, "target"),
+            (SessionCapability::EffectiveConfig, "effective_config"),
+        ]
+        .into_iter()
+        .filter_map(|(capability, name)| {
+            (!session.capabilities().has(capability)).then_some(name.to_owned())
+        })
+        .collect::<Vec<_>>();
         let mut artifacts = Vec::new();
         let mut warnings = session
             .warnings()
@@ -233,6 +256,7 @@ impl QtraceService {
                 Ok(ArtifactSummaryDto {
                     index: u32::try_from(index).unwrap_or(u32::MAX),
                     name: artifact.name.clone(),
+                    status: "indexed".into(),
                     event_count: u32::try_from(artifact.store.event_count()).unwrap_or(u32::MAX),
                     tids: artifact.store.thread_ids()?,
                     completeness: artifact
@@ -263,6 +287,8 @@ impl QtraceService {
             workspace: summary,
             artifacts: artifact_dtos,
             warnings,
+            context,
+            missing_capabilities,
         })
     }
 

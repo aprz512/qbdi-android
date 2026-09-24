@@ -31,6 +31,7 @@ pub use index::{
     Rows, SemanticDictionaryFamily, SemanticDictionaryWork, SemanticRow, TraceStore,
     TraceStoreView, intersect_rows,
 };
+pub use manifest::ReportContext;
 pub use session::{
     ArtifactFailure, ArtifactFormat, ArtifactMetadata, ArtifactSource, AuthorizedPath, OpenPolicy,
     SessionCapabilities, SessionCapability, SessionLoader, SessionSource, SessionWarning,

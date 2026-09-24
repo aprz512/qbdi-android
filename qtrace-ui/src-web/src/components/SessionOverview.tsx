@@ -8,11 +8,23 @@ export function SessionOverview({ opened, selectedArtifactIndex = 0, onSelectArt
     <section aria-label="Session overview" className="session-overview">
       <h1>Workspace {opened.workspace.id}</h1>
       <p>{opened.workspace.artifact_count} artifacts · generation {opened.workspace.generation}</p>
+      {opened.context === null ? <p>Single artifact. Session context is unavailable.</p> : (
+        <dl className="session-context" aria-label="Session context">
+          <dt>Session</dt><dd>{opened.context.session_id}</dd>
+          <dt>State</dt><dd>{[opened.context.mode, opened.context.status, opened.context.stage].filter(Boolean).join(" · ") || "unavailable"}</dd>
+          <dt>Package</dt><dd>{opened.context.package ?? "unavailable"}</dd>
+          <dt>Device</dt><dd>{[opened.context.device_serial, opened.context.device_access_mode].filter(Boolean).join(" · ") || "unavailable"}</dd>
+          <dt>Target</dt><dd>{opened.context.target_module ?? "unavailable"}</dd>
+          <dt>Profile</dt><dd>{opened.context.profile ?? "unavailable"}</dd>
+          <dt>Scenes</dt><dd>{opened.context.scenes.join(", ") || "unavailable"}</dd>
+        </dl>
+      )}
+      {opened.missing_capabilities.length > 0 && <p>Unavailable context: {opened.missing_capabilities.join(", ")}</p>}
       <ul aria-label="Artifacts">
         {opened.artifacts.map((artifact) => (
           <li key={artifact.index}>
             <button aria-pressed={artifact.index === selectedArtifactIndex} onClick={() => onSelectArtifact?.(artifact.index)}>
-              {artifact.name} — {artifact.event_count} events
+              {artifact.name} — {artifact.event_count} events · {artifact.status}
             </button>
           </li>
         ))}
