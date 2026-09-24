@@ -222,6 +222,9 @@ pub struct EventRowDto {
     pub kind: String,
     pub provenance: String,
     pub discontinuity: bool,
+    pub location: String,
+    pub symbol: Option<String>,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]

@@ -36,6 +36,7 @@ pub(crate) struct ArtifactWorkspace {
 
 pub(crate) struct ProjectionWorkspace {
     pub projection: Arc<TimelineProjection>,
+    pub store: Arc<TraceStore>,
     pub generation: u32,
 }
 

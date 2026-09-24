@@ -47,6 +47,7 @@ const eventRow = (source_row: number) => ({
   source_row,
   key: { artifact_sha256: "a".repeat(64), timeline_id: "1", record_ordinal: String(source_row), source_offset: String(source_row * 8), sequence: String(source_row), tid: 7 },
   kind: "instruction", provenance: "captured", discontinuity: false,
+  location: `lib.so+0x${(source_row * 4).toString(16)}`, symbol: null, summary: "mov x0, x1",
 });
 
 describe("desktop shell", () => {

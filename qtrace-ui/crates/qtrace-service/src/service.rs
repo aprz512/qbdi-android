@@ -50,6 +50,11 @@ pub struct CallTreePageQuery {
     pub expected_identity: Option<String>,
 }
 
+struct ProjectionInput {
+    context: Arc<QueryContext>,
+    store: Arc<TraceStore>,
+}
+
 impl Default for QtraceService {
     fn default() -> Self {
         Self::with_cache_root(default_cache_root())
@@ -267,14 +272,14 @@ impl QtraceService {
         artifact_index: u32,
         filter: EventFilterDto,
     ) -> Result<ProjectionJobDto, AppError> {
-        let (context, generation, projection_id) =
+        let (input, generation, projection_id) =
             self.prepare_projection(workspace, artifact_index)?;
         let (job_id, cancellation) = self.jobs.begin(workspace.clone(), "projection");
         self.jobs.set_progress(&job_id, 0, Some(1))?;
         let result = build_and_publish_projection(
             &self.workspaces,
             workspace,
-            context,
+            input,
             generation,
             projection_id.clone(),
             filter,
@@ -300,7 +305,7 @@ impl QtraceService {
         artifact_index: u32,
         filter: EventFilterDto,
     ) -> Result<ProjectionJobDto, AppError> {
-        let (context, generation, projection_id) =
+        let (input, generation, projection_id) =
             self.prepare_projection(&workspace, artifact_index)?;
         let (job_id, cancellation) = self.jobs.begin(workspace.clone(), "projection");
         self.jobs.set_progress(&job_id, 0, Some(1))?;
@@ -318,7 +323,7 @@ impl QtraceService {
                 build_and_publish_projection(
                     &workspaces,
                     &work_workspace,
-                    context,
+                    input,
                     generation,
                     projection_id,
                     filter,
@@ -338,7 +343,7 @@ impl QtraceService {
         &self,
         workspace: &WorkspaceId,
         artifact_index: u32,
-    ) -> Result<(Arc<QueryContext>, u32, ProjectionId), AppError> {
+    ) -> Result<(ProjectionInput, u32, ProjectionId), AppError> {
         let mut all = self
             .workspaces
             .lock()
@@ -361,7 +366,10 @@ impl QtraceService {
             )
         })?;
         Ok((
-            artifact.context.clone(),
+            ProjectionInput {
+                context: artifact.context.clone(),
+                store: artifact.store.clone(),
+            },
             item.generation,
             ProjectionId::from_u64(self.next_id()),
         ))
@@ -374,22 +382,28 @@ impl QtraceService {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<TimelinePageDto, AppError> {
-        let projection = {
+        let (projection, store, symbols) = {
             let all = self
                 .workspaces
                 .lock()
                 .map_err(|_| AppError::worker_failed())?;
-            all.get(workspace)
-                .and_then(|item| item.projections.get(projection))
-                .map(|item| item.projection.clone())
-                .ok_or_else(AppError::stale_workspace)?
+            let item = all.get(workspace).ok_or_else(AppError::stale_workspace)?;
+            let projection = item
+                .projections
+                .get(projection)
+                .ok_or_else(AppError::stale_workspace)?;
+            (
+                projection.projection.clone(),
+                projection.store.clone(),
+                item.symbols.clone(),
+            )
         };
         let cursor = cursor.map(PageCursor::from_encoded);
         let page = query_events(&projection, cursor.as_ref(), limit as usize)?;
         let rows = page
             .rows
             .into_iter()
-            .map(event_row)
+            .map(|row| event_row(row, store.as_ref(), &symbols))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(TimelinePageDto {
             rows,
@@ -1021,7 +1035,7 @@ impl QtraceService {
 fn build_and_publish_projection(
     workspaces: &Mutex<HashMap<WorkspaceId, Workspace>>,
     workspace: &WorkspaceId,
-    context: Arc<QueryContext>,
+    input: ProjectionInput,
     generation: u32,
     projection_id: ProjectionId,
     filter: EventFilterDto,
@@ -1031,7 +1045,7 @@ fn build_and_publish_projection(
         return Err(AppError::cancelled());
     }
     let projection = Arc::new(TimelineProjection::new_with_cancellation(
-        context,
+        input.context,
         convert_filter(filter)?,
         cancellation.token(),
     )?);
@@ -1059,6 +1073,7 @@ fn build_and_publish_projection(
         projection_id,
         ProjectionWorkspace {
             projection,
+            store: input.store,
             generation,
         },
     );
@@ -1372,7 +1387,11 @@ fn memory_direction(value: &str) -> Result<MemoryDirection, AppError> {
         )),
     }
 }
-fn event_row(row: TimelineRow) -> Result<EventRowDto, AppError> {
+fn event_row(
+    row: TimelineRow,
+    store: &TraceStore,
+    symbols: &HashMap<String, Arc<ElfSymbolIndex>>,
+) -> Result<EventRowDto, AppError> {
     let (source_row, key, kind, provenance, discontinuity) = match row {
         TimelineRow::Event(row) => (row.source_row, row.key, row.kind, row.provenance, false),
         TimelineRow::Discontinuity(row) => (
@@ -1383,15 +1402,110 @@ fn event_row(row: TimelineRow) -> Result<EventRowDto, AppError> {
             true,
         ),
     };
+    let instruction = store.instruction(source_row);
+    let memory = store.memory(source_row);
+    let module_pc = instruction
+        .map(|value| (value.module, value.relative_pc))
+        .or_else(|| memory.map(|value| (value.module, value.relative_pc)));
+    let module_name = module_pc
+        .and_then(|(module, _)| module)
+        .and_then(|module| store.module(module))
+        .map(|module| store.string_bytes(module.name))
+        .transpose()?
+        .map(|bytes| bounded_display(bytes, 64));
+    let location = if let Some((module, pc)) = module_pc {
+        let label = module_name
+            .clone()
+            .unwrap_or_else(|| module.map_or_else(|| "pc".to_owned(), |id| format!("module#{id}")));
+        format!("{label}+0x{pc:x}")
+    } else {
+        format!("offset 0x{:x}", key.source_offset)
+    };
+    let symbol = module_pc
+        .and_then(|(_, pc)| {
+            module_name
+                .as_ref()
+                .and_then(|name| symbols.get(name))
+                .and_then(|index| index.resolve(pc))
+        })
+        .map(|resolved| {
+            let name = bounded_display(resolved.name().as_bytes(), 96);
+            if resolved.offset() == 0 {
+                name
+            } else {
+                format!("{name}+0x{:x}", resolved.offset())
+            }
+        });
+    let kind_name = String::from_utf8_lossy(kind.external_tag()).into_owned();
+    let summary = if discontinuity {
+        kind_name.clone()
+    } else if let Some(instruction) = instruction {
+        if let Some(definition) = instruction.definition.and_then(|id| store.definition(id)) {
+            let mnemonic = bounded_display(store.string_bytes(definition.mnemonic)?, 48);
+            let operands = bounded_display(store.string_bytes(definition.operands)?, 96);
+            let disassembly = bounded_display(store.string_bytes(definition.disassembly)?, 160);
+            if !mnemonic.is_empty() && !operands.is_empty() {
+                format!("{mnemonic} {operands}")
+            } else if !disassembly.is_empty() {
+                disassembly
+            } else {
+                mnemonic
+            }
+        } else {
+            kind_name.clone()
+        }
+    } else if let Some(memory) = memory {
+        let direction = match memory.direction {
+            MemoryDirection::Read => "read",
+            MemoryDirection::Write => "write",
+            MemoryDirection::ReadWrite => "read/write",
+            MemoryDirection::Unknown => "memory",
+        };
+        format!("{direction} [0x{:x}] {} B", memory.address, memory.size)
+    } else if let Some(semantic) = store.semantic(source_row) {
+        let name = bounded_display(store.string_bytes(semantic.name)?, 64);
+        let category = semantic
+            .category
+            .map(|id| store.string_bytes(id))
+            .transpose()?
+            .map(|bytes| bounded_display(bytes, 32));
+        let detail = bounded_display(store.blob_bytes(semantic.detail_blob)?, 80);
+        let label = category
+            .filter(|value| !value.is_empty())
+            .map_or(name.clone(), |value| format!("{value}/{name}"));
+        if detail.is_empty() {
+            label
+        } else {
+            format!("{label}: {detail}")
+        }
+    } else {
+        kind_name.clone()
+    };
     Ok(EventRowDto {
         source_row: u32::try_from(source_row).map_err(|_| {
             AppError::new("timeline.row_overflow", "query", "source row exceeds u32")
         })?,
         key: event_key_dto(&key),
-        kind: String::from_utf8_lossy(kind.external_tag()).into_owned(),
+        kind: kind_name,
         provenance: provenance_name(provenance).into(),
         discontinuity,
+        location: bounded_display(location.as_bytes(), 96),
+        symbol,
+        summary: bounded_display(summary.as_bytes(), 160),
     })
+}
+
+fn bounded_display(bytes: &[u8], max_bytes: usize) -> String {
+    let sample = &bytes[..bytes.len().min(max_bytes)];
+    let mut output = String::with_capacity(sample.len());
+    for ch in String::from_utf8_lossy(sample).chars() {
+        let ch = if ch.is_control() { ' ' } else { ch };
+        if output.len() + ch.len_utf8() > max_bytes {
+            break;
+        }
+        output.push(ch);
+    }
+    output.trim().to_owned()
 }
 fn event_key_dto(key: &EventKey) -> EventKeyDto {
     EventKeyDto {
