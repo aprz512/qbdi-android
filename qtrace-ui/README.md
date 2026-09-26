@@ -53,11 +53,11 @@ Generate the large corpus outside Git, verify it, then run the fixed-host gate:
 ```bash
 python3 qtrace-ui/tools/generate_performance_fixtures.py --output qtrace-ui-performance-evidence/corpus
 python3 qtrace-ui/tools/generate_performance_fixtures.py --check qtrace-ui-performance-evidence/corpus/manifest.json
-QTRACE_UI_REFERENCE_HOST=qtrace-ui-reference-v1 \
+QTRACE_UI_REFERENCE_HOST=qtrace-ui-reference-v2 \
 python3 qtrace-ui/tools/performance_gate.py \
   --manifest qtrace-ui-performance-evidence/corpus/manifest.json \
   --evidence qtrace-ui-performance-evidence/run.json \
-  --reference-summary docs/benchmarks/qtrace-ui-performance.md
+  --reference-summary docs/benchmarks/qtrace-ui-performance-current.md
 ```
 
 The gate requires five cold indexes, five warm opens, at least 200 viewport and 200 indexed structured-query samples, exact corpus/tool identities, and the checked-in reference-host identity.
@@ -75,3 +75,38 @@ python3 qtrace-ui/tools/performance_gate.py \
 ```
 
 The diagnostic report labels all values as local, checks matching host and corpus identities, and reports percent changes (negative is faster or lower memory). It cannot read or write the checked-in reference summary or overwrite tracked reference files. It does not decide reference-gate acceptance.
+
+## Rich workload evidence
+
+Keep the original 10M/512 MiB scale gate. Generate typed QTRB at 100k, 1M
+(default), or 10M records plus six metadata/terminal records with `--groups`
+20000, 200000, or 2000000. Generation and concatenated LZ4 frame compression
+use bounded buffers. The 100k and 1M streams have fixed semantic SHA-256 oracles.
+The companion Flight has four threads, checkpoints/deltas, overwritten and
+coverage-gap evidence; it is checked against the existing completeness oracle.
+
+```bash
+python3 qtrace-ui/tools/generate_rich_performance_fixture.py --output /tmp/qtrace-rich
+python3 qtrace-ui/tools/rich_performance_gate.py \
+  --manifest /tmp/qtrace-rich/rich-manifest.json \
+  --evidence /tmp/qtrace-rich/local-run.json --diagnostic
+```
+
+Each report preserves five fresh-process runs, raw cold/warm and compressed cold
+opens, 200 timeline and 200 memory-query samples per run, 50 register queries,
+raw/warm/compressed replay equivalence, call trees, IPC bytes, RSS, cache sizes,
+host/analyzer/generator/corpus identities, and Flight thread/gap truth. Rich
+latencies are measurements, not new reference latency thresholds. The reference
+workflow runs the same workload with `--reference-summary` and preserves browser
+attachments alongside the existing strict scale-gate report.
+
+The 1M typed corpus currently exceeds the service's cumulative 2 GiB allocation
+budget on both cold and cached open. Direct store/analysis measurements use that
+corpus; IPC and real browser measurements use the separately identified 100k
+corpus. They never lift the service budget. Browser samples cover 50 filter
+applications and require fewer than 100 DOM rows. The browser harness uses debug
+Rust and a Vite E2E shell, so its latency is not a packaged desktop guarantee.
+
+Local optimization evidence: [2026-09-26 report](../docs/benchmarks/qtrace-ui-optimization-2026-09-26.md).
+
+The active reference is [the current-environment baseline](../docs/benchmarks/qtrace-ui-performance-current.md), accepted on 2026-09-26 as `qtrace-ui-reference-v2`. The previous baseline remains preserved as historical evidence. Host identity checks and performance thresholds remain unchanged.

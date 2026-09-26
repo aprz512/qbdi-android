@@ -153,7 +153,7 @@ pub(super) fn max_length(name: &str, event_count: usize) -> Result<u64, IndexErr
 }
 
 pub(super) fn encode(
-    catalog: NormalizedCatalog,
+    mut catalog: NormalizedCatalog,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<OwnedSection>, IndexError> {
     let mut sections = Vec::new();
@@ -169,16 +169,21 @@ pub(super) fn encode(
         16,
         encode_capabilities(&catalog.capabilities, guard)?,
     ));
-    sections.push(if catalog.events.len() >= 1_000_000 {
-        encode_events_spooled(&catalog.events, guard)?
+    let event_count = catalog.events.len();
+    let events = std::mem::take(&mut catalog.events);
+    sections.push(if events.len() >= 1_000_000 {
+        encode_events_spooled(&events, guard)?
     } else {
         section(
             EVENT_META,
             8,
             EVENT_META_BYTES,
-            encode_events(&catalog.events, guard)?,
+            encode_events(&events, guard)?,
         )
     });
+    // The encoded section owns these rows now. Release the source allocation before
+    // encoding the remaining sections, which can be large on a cold index build.
+    drop(events);
     super::probe_index_memory("after_event_encoding");
     encode_arena(
         &mut sections,
@@ -245,7 +250,7 @@ pub(super) fn encode(
     ));
     let mut meta = Encoder::rows(1, 16, guard)?;
     meta.u64(catalog.indexes.memory.block_rows() as u64);
-    meta.u64(catalog.events.len() as u64);
+    meta.u64(event_count as u64);
     sections.push(section(INDEX_META, 8, 16, meta.finish()?));
     for (name, bytes) in [
         (
@@ -1056,7 +1061,7 @@ pub(super) fn decode_events(
         return Err(IndexError::corrupt("event meta row count"));
     }
     let mut out = reserved(keys.len(), "event meta", guard)?;
-    for (row, key) in keys.iter().enumerate() {
+    for row in 0..keys.len() {
         checkpoint(guard, row)?;
         c.zero(row, 2, 2)?;
         c.zero(row, 20, 4)?;
@@ -1075,9 +1080,6 @@ pub(super) fn decode_events(
             _ => return Err(IndexError::corrupt("invalid event scope")),
         };
         out.push(EventColumn {
-            timeline: key.timeline.0,
-            tid: key.tid,
-            sequence: key.sequence,
             scope,
             provenance: decode_provenance(c.u8(row, 0)?)?,
             payload_blob: c.u32(row, 16)?,

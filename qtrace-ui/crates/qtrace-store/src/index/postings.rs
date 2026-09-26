@@ -45,47 +45,54 @@ impl PostingList {
     }
 
     pub(crate) fn from_rows(rows: &[usize], guard: &dyn WorkGuard) -> Result<Self, IndexError> {
-        let mut runs = Vec::new();
-        crate::allocation::try_reserve_vec(
-            &mut runs,
-            rows.len().min(1024),
-            guard,
-            "posting-run allocation",
-        )?;
-        let mut previous: Option<u64> = None;
-        for row in rows {
-            let row = u64::try_from(*row)
-                .map_err(|_| IndexError::invalid("posting row does not fit u64"))?;
-            let delta = match previous {
-                None => row
-                    .checked_add(1)
-                    .ok_or_else(|| IndexError::invalid("first posting delta overflow"))?,
-                Some(previous) if row > previous => row - previous,
-                Some(_) => {
-                    return Err(IndexError::invalid(
-                        "posting rows must be strictly increasing",
-                    ));
-                }
-            };
-            if let Some(run) = runs.last_mut() {
-                let run: &mut DeltaRun = run;
-                if run.delta == delta {
-                    run.count = run
-                        .count
-                        .checked_add(1)
-                        .ok_or_else(|| IndexError::resource("posting run overflow"))?;
-                    previous = Some(row);
-                    continue;
-                }
+        let mut posting = Self::default();
+        let mut previous = None;
+        for (index, &row) in rows.iter().enumerate() {
+            if index % 4096 == 0 {
+                guard.consume(qtrace_provider::WorkDelta::default())?;
             }
-            crate::allocation::try_reserve_vec(&mut runs, 1, guard, "posting-run allocation")?;
-            runs.push(DeltaRun { delta, count: 1 });
-            previous = Some(row);
+            posting.push_row(row, &mut previous, guard)?;
         }
-        Ok(Self {
-            runs,
-            row_count: rows.len(),
-        })
+        Ok(posting)
+    }
+
+    // Partition builders already visit rows in order. Encode runs directly instead of
+    // retaining a second, uncompressed row vector for every partition.
+    pub(super) fn push_row(
+        &mut self,
+        row: usize,
+        previous: &mut Option<u64>,
+        guard: &dyn WorkGuard,
+    ) -> Result<(), IndexError> {
+        let row =
+            u64::try_from(row).map_err(|_| IndexError::invalid("posting row does not fit u64"))?;
+        let delta = match *previous {
+            None => row
+                .checked_add(1)
+                .ok_or_else(|| IndexError::invalid("first posting delta overflow"))?,
+            Some(last) if row > last => row - last,
+            Some(_) => {
+                return Err(IndexError::invalid(
+                    "posting rows must be strictly increasing",
+                ));
+            }
+        };
+        let count = self
+            .row_count
+            .checked_add(1)
+            .ok_or_else(|| IndexError::resource("posting row count overflow"))?;
+        if let Some(run) = self.runs.last_mut().filter(|run| run.delta == delta) {
+            run.count = run
+                .count
+                .checked_add(1)
+                .ok_or_else(|| IndexError::resource("posting run overflow"))?;
+        } else {
+            crate::allocation::try_reserve_vec(&mut self.runs, 1, guard, "posting-run allocation")?;
+            self.runs.push(DeltaRun { delta, count: 1 });
+        }
+        self.row_count = count;
+        *previous = Some(row);
+        Ok(())
     }
 
     pub fn rows(&self) -> Result<Vec<usize>, IndexError> {

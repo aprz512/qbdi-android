@@ -438,8 +438,41 @@ fn public_index_view_matches_naive_rows_and_is_owned_mapped_equivalent() {
         assert_eq!(owned_view.memory(row), mapped_view.memory(row));
         assert_eq!(owned_view.semantic(row), mapped_view.semantic(row));
         assert_eq!(
+            owned_view.instruction(row),
+            owned
+                .instruction_rows()
+                .iter()
+                .find(|entry| entry.owner_row == row)
+                .copied()
+        );
+        assert_eq!(
+            owned_view.memory(row),
+            owned
+                .memory_rows()
+                .iter()
+                .find(|entry| entry.owner_row == row)
+                .copied()
+        );
+        assert_eq!(
+            owned_view.semantic(row),
+            owned
+                .semantic_rows()
+                .iter()
+                .find(|entry| entry.owner_row == row)
+                .copied()
+        );
+        assert_eq!(
             owned_view.register_observations(row),
             mapped_view.register_observations(row)
+        );
+        assert_eq!(
+            owned_view.register_observations(row),
+            owned
+                .register_observation_rows()
+                .iter()
+                .filter(|entry| entry.owner_row == row)
+                .copied()
+                .collect::<Vec<_>>()
         );
         if let Some(key) = owned_view.event_key(row).unwrap() {
             assert_eq!(owned_view.row_for_source_key(&key), Some(row));

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a deterministic, untracked QTRB corpus with typed events.
 
-The original 10M mostly-optional corpus remains the scale gate. This smaller
+The original 10M mostly-optional corpus remains the scale gate. The scalable rich
 corpus exercises the work that optional records cannot: register replay,
 memory/semantic queries, compressed input, and a large call tree.
 """
@@ -28,13 +28,14 @@ from scripts.tests.test_trace_binary import (  # noqa: E402
     stream_header,
 )
 from generate_performance_fixtures import (  # noqa: E402
-    _atomic_target, _publish, _safe_output,
+    _atomic_target, _publish, _safe_output, generate_flight, EXPECTED_FLIGHT_COMPLETENESS,
 )
 
 
 EVENT_GROUPS = 20_000
 CALL_FRAMES = 5_000
 RAW_SEMANTIC_SHA256 = "f00f7a25b0cc773903d42235bfbf629c2bea883fa88cfefd3d37ab72e8eadd7e"
+MILLION_SEMANTIC_SHA256 = "5718b952fd2d3667f017bec186449c501ef351d1a42cc108fe7fbff5091132ba"
 
 
 def _atomic_write(target: Path, payload: bytes) -> None:
@@ -63,7 +64,7 @@ def _definition(metadata_id: int, flags: int) -> bytes:
     return bytes(encoded)
 
 
-def _raw_corpus() -> bytes:
+def _records(groups: int):
     prefix = (
         stream_header(minor=2, features=1)
         + begin()
@@ -72,13 +73,13 @@ def _raw_corpus() -> bytes:
         + _definition(100, 1 << 2)
         + _definition(101, 1 << 3)
     )
-    chunks = [prefix]
+    yield prefix
     sequence = 0
-    for index in range(EVENT_GROUPS):
+    for index in range(groups):
         sequence += 1
-        chunks.append(_instruction(sequence, 99, 0x2000 + index * 4))
-        chunks.append(memory())
-        chunks.append(call("jni", "Lookup", "rich-corpus"))
+        yield (_instruction(sequence, 99, 0x2000 + index * 4))
+        yield (memory())
+        yield (call("jni", "Lookup", "rich-corpus"))
         sequence += 1
         if index < CALL_FRAMES:
             kind = 100
@@ -86,16 +87,16 @@ def _raw_corpus() -> bytes:
             kind = 101
         else:
             kind = 99
-        chunks.append(_instruction(sequence, kind, 0x22000 + index * 4))
+        yield (_instruction(sequence, kind, 0x22000 + index * 4))
         sequence += 1
-        chunks.append(_instruction(sequence, 99, 0x42000 + index * 4))
-    initial_footer = footer(instructions=sequence)
+        yield (_instruction(sequence, 99, 0x42000 + index * 4))
+
+
+def _raw_corpus() -> bytes:
+    chunks = list(_records(EVENT_GROUPS))
+    initial_footer = footer(instructions=EVENT_GROUPS * 3)
     encoded_bytes = sum(map(len, chunks)) + len(initial_footer)
-    chunks.append(footer(
-        instructions=sequence,
-        encoded_bytes=encoded_bytes,
-        compressed_bytes=encoded_bytes,
-    ))
+    chunks.append(footer(instructions=EVENT_GROUPS * 3, encoded_bytes=encoded_bytes, compressed_bytes=encoded_bytes))
     return b"".join(chunks)
 
 
@@ -123,36 +124,76 @@ def _compress_lz4_frame(payload: bytes) -> bytes:
     return destination.raw[:size]
 
 
-def generate(output: Path) -> Path:
+def generate(output: Path, groups: int = 200_000) -> Path:
+    if groups not in (20_000, 200_000, 2_000_000):
+        raise ValueError("groups must be 20000, 200000 or 2000000")
     output = _safe_output(output)
-    raw = _raw_corpus()
-    if hashlib.sha256(raw).hexdigest() != RAW_SEMANTIC_SHA256:
-        raise RuntimeError("rich corpus semantic fingerprint drift")
-    compressed = _compress_lz4_frame(raw)
-    raw_name = "qtrb-rich-100k.trace.bin"
+    ipc_corpus = None
+    if groups > EVENT_GROUPS:
+        small_manifest = json.loads(generate(output, EVENT_GROUPS).read_text())
+        ipc_corpus = small_manifest["corpora"]["raw"]
+    raw_name = f"qtrb-rich-{groups * 5}.trace.bin"
     compressed_name = raw_name + ".lz4"
-    _atomic_write(output / raw_name, raw)
-    _atomic_write(output / compressed_name, compressed)
+    descriptor, temporary, target = _atomic_target(output, raw_name)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False, buffering=1024 * 1024) as sink:
+            for encoded in _records(groups):
+                sink.write(encoded)
+                digest.update(encoded)
+                total += len(encoded)
+            total += len(footer())
+            terminal = footer(instructions=groups * 3, encoded_bytes=total, compressed_bytes=total)
+            sink.write(terminal)
+            digest.update(terminal)
+            sink.flush()
+        expected_digest = {EVENT_GROUPS: RAW_SEMANTIC_SHA256, 200_000: MILLION_SEMANTIC_SHA256}.get(groups)
+        if expected_digest is not None and digest.hexdigest() != expected_digest:
+            raise RuntimeError("rich corpus semantic fingerprint drift")
+        _publish(descriptor, temporary, target)
+        descriptor = -1
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+    descriptor, temporary, compressed_target = _atomic_target(output, compressed_name)
+    compressed_digest = hashlib.sha256()
+    compressed_bytes = 0
+    try:
+        with target.open("rb") as source, os.fdopen(descriptor, "wb", closefd=False) as sink:
+            # Independent frames keep generator memory bounded even for 10M typed events.
+            for payload in iter(lambda: source.read(4 * 1024 * 1024), b""):
+                encoded = _compress_lz4_frame(payload)
+                sink.write(encoded)
+                compressed_digest.update(encoded)
+                compressed_bytes += len(encoded)
+            sink.flush()
+        _publish(descriptor, temporary, compressed_target)
+        descriptor = -1
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+    flight = generate_flight(output)
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "semantic_sha256": RAW_SEMANTIC_SHA256,
+        "semantic_sha256": digest.hexdigest(),
+        "expected_flight_completeness": EXPECTED_FLIGHT_COMPLETENESS,
         "semantic_oracle": {
-            "events": EVENT_GROUPS * 5 + 6,
-            "instructions": EVENT_GROUPS * 3,
-            "memory_events": EVENT_GROUPS,
-            "semantic_events": EVENT_GROUPS,
+            "events": groups * 5 + 6,
+            "instructions": groups * 3,
+            "memory_events": groups,
+            "semantic_events": groups,
             "call_frames": CALL_FRAMES,
-            "thread_and_gap_source": "flight-512m.flight.bin",
+            "flight_threads": [101, 202, 303, 404],
         },
         "corpora": {
-            "raw": {"path": raw_name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "events": EVENT_GROUPS * 5 + 6},
-            "compressed": {
-                "path": compressed_name,
-                "bytes": len(compressed),
-                "sha256": hashlib.sha256(compressed).hexdigest(),
-                "events": EVENT_GROUPS * 5 + 6,
-            },
+            "raw": {"path": raw_name, "bytes": total, "sha256": digest.hexdigest(), "events": groups * 5 + 6},
+            "compressed": {"path": compressed_name, "bytes": compressed_bytes, "sha256": compressed_digest.hexdigest(), "events": groups * 5 + 6},
+            "flight": flight,
+            "ipc": ipc_corpus or {"path": raw_name, "bytes": total, "sha256": digest.hexdigest(), "events": groups * 5 + 6},
         },
     }
     target = output / "rich-manifest.json"
@@ -163,9 +204,10 @@ def generate(output: Path) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--groups", type=int, choices=(20_000, 200_000, 2_000_000), default=200_000)
     args = parser.parse_args()
     try:
-        print(generate(args.output))
+        print(generate(args.output, args.groups))
     except (OSError, RuntimeError, ValueError) as error:
         print(f"rich fixture generator: {error}", file=sys.stderr)
         return 1

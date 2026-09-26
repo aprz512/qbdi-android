@@ -594,10 +594,9 @@ impl<'a> ByteArena<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+// Source coordinates live only in OwnedStoreView/EventKey. The cache metadata
+// section has never encoded them; duplicating them here costs 32 bytes per row.
 struct EventColumn {
-    timeline: u64,
-    tid: Option<u32>,
-    sequence: Option<u64>,
     scope: EventScope,
     provenance: Provenance,
     payload_blob: u32,
@@ -1050,19 +1049,6 @@ impl NormalizedCatalog {
             return Err(IndexError::corrupt(
                 "normalized event-column row counts differ",
             ));
-        }
-        for (row, event) in self.events.iter().enumerate() {
-            if row % 4096 == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            if event.timeline != keys[row].timeline.0
-                || event.tid != keys[row].tid
-                || event.sequence != keys[row].sequence
-            {
-                return Err(IndexError::corrupt(
-                    "normalized source coordinates disagree",
-                ));
-            }
         }
         let interval_block_rows = u32::try_from(self.indexes.memory.block_rows())
             .map_err(|_| IndexError::corrupt("interval block size does not fit u32"))?;
@@ -1872,8 +1858,9 @@ impl OwnedTraceStore {
     pub fn memory(&self, event_row: usize) -> Option<&MemoryRow> {
         self.catalog
             .memories
-            .iter()
-            .find(|memory| memory.owner_row == event_row)
+            .binary_search_by_key(&event_row, |memory| memory.owner_row)
+            .ok()
+            .map(|index| &self.catalog.memories[index])
     }
 
     fn into_cache_view_with_catalog(
@@ -2080,25 +2067,22 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
         &self.normalized_catalog().capabilities
     }
     fn instruction(&self, event_row: usize) -> Option<InstructionRow> {
-        self.normalized_catalog()
-            .instructions
-            .iter()
-            .find(|row| row.owner_row == event_row)
-            .copied()
+        let rows = &self.normalized_catalog().instructions;
+        rows.binary_search_by_key(&event_row, |row| row.owner_row)
+            .ok()
+            .map(|index| rows[index])
     }
     fn memory(&self, event_row: usize) -> Option<MemoryRow> {
-        self.normalized_catalog()
-            .memories
-            .iter()
-            .find(|row| row.owner_row == event_row)
-            .copied()
+        let rows = &self.normalized_catalog().memories;
+        rows.binary_search_by_key(&event_row, |row| row.owner_row)
+            .ok()
+            .map(|index| rows[index])
     }
     fn semantic(&self, event_row: usize) -> Option<SemanticRow> {
-        self.normalized_catalog()
-            .semantics
-            .iter()
-            .find(|row| row.owner_row == event_row)
-            .copied()
+        let rows = &self.normalized_catalog().semantics;
+        rows.binary_search_by_key(&event_row, |row| row.owner_row)
+            .ok()
+            .map(|index| rows[index])
     }
     fn payload_bytes(&self, event_row: usize) -> Result<&[u8], IndexError> {
         let event = self
@@ -2127,10 +2111,10 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
         if event_row >= self.base_event_count() {
             return Err(IndexError::invalid("event row is out of range"));
         }
-        self.normalized_catalog()
-            .memories
-            .iter()
-            .find(|row| row.owner_row == event_row)
+        let rows = &self.normalized_catalog().memories;
+        rows.binary_search_by_key(&event_row, |row| row.owner_row)
+            .ok()
+            .map(|index| &rows[index])
             .map(|row| {
                 self.normalized_catalog()
                     .blobs
@@ -2143,10 +2127,10 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
         if event_row >= self.base_event_count() {
             return Err(IndexError::invalid("event row is out of range"));
         }
-        self.normalized_catalog()
-            .memories
-            .iter()
-            .find(|row| row.owner_row == event_row)
+        let rows = &self.normalized_catalog().memories;
+        rows.binary_search_by_key(&event_row, |row| row.owner_row)
+            .ok()
+            .map(|index| &rows[index])
             .map(|row| {
                 self.normalized_catalog()
                     .blobs
@@ -2164,12 +2148,10 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
             .get(definition as usize)
     }
     fn register_observations(&self, event_row: usize) -> Vec<RegisterObservationRow> {
-        self.normalized_catalog()
-            .observations
-            .iter()
-            .filter(|row| row.owner_row == event_row)
-            .copied()
-            .collect()
+        let rows = &self.normalized_catalog().observations;
+        let first = rows.partition_point(|row| row.owner_row < event_row);
+        let last = first + rows[first..].partition_point(|row| row.owner_row == event_row);
+        rows[first..last].to_vec()
     }
     fn completeness(&self) -> &[CompletenessRow] {
         &self.normalized_catalog().completeness

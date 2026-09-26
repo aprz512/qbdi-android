@@ -172,9 +172,6 @@ impl<'a> BuildState<'a> {
             self.keys.push(event.key.clone());
             self.kinds.push(event.kind());
             self.events.push(EventColumn {
-                timeline: event.key.timeline.0,
-                tid: event.key.tid,
-                sequence: event.key.sequence,
                 scope: event.scope(),
                 provenance: event.provenance,
                 payload_blob,
@@ -724,9 +721,6 @@ pub(super) fn validate_cached_truth(
             ));
         }
         let expected_event = EventColumn {
-            timeline: keys[row].timeline.0,
-            tid: keys[row].tid,
-            sequence: keys[row].sequence,
             scope: event.scope(),
             provenance: event.provenance,
             payload_blob: catalog.events[row].payload_blob,
@@ -968,18 +962,18 @@ pub(super) fn build_indexes(
     options: &BuildOptions,
     guard: &dyn WorkGuard,
 ) -> Result<IndexCatalog, IndexError> {
-    let timeline = keyed_posting_partition(events.len(), guard, |row| Some(events[row].timeline))?;
-    let tid = keyed_posting_partition(events.len(), guard, |row| events[row].tid)?;
+    let timeline = keyed_posting_partition(events.len(), guard, |row| Some(keys[row].timeline.0))?;
+    let tid = keyed_posting_partition(events.len(), guard, |row| keys[row].tid)?;
     let kind = keyed_posting_partition(kinds.len(), guard, |row| {
         Some(crate::layout::encode_event_kind(kinds[row]))
     })?;
 
     let mut sequence = reserved_pairs(events.len(), "sequence index", guard)?;
-    for (row, event) in events.iter().enumerate() {
+    for (row, key) in keys.iter().enumerate() {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
         }
-        if let Some(value) = event.sequence {
+        if let Some(value) = key.sequence {
             sequence.push((value, row));
         }
     }
@@ -1157,10 +1151,10 @@ pub(super) fn validate_index_families(
 ) -> Result<(), IndexError> {
     let indexes = &catalog.indexes;
     validate_posting_partition(&indexes.timeline, catalog.events.len(), guard, |row| {
-        Some(catalog.events[row].timeline)
+        Some(keys[row].timeline.0)
     })?;
     validate_posting_partition(&indexes.tid, catalog.events.len(), guard, |row| {
-        catalog.events[row].tid
+        keys[row].tid
     })?;
     validate_posting_partition(&indexes.kind, kinds.len(), guard, |row| {
         Some(crate::layout::encode_event_kind(kinds[row]))
@@ -1389,7 +1383,7 @@ fn keyed_posting_partition<K: Ord + Copy + Eq + Hash>(
     guard: &dyn WorkGuard,
     key_for_row: impl Fn(usize) -> Option<K>,
 ) -> Result<SortedMap<K, PostingList>, IndexError> {
-    let mut groups = HashMap::<K, Vec<usize>>::new();
+    let mut groups = HashMap::<K, (PostingList, Option<u64>)>::new();
     for row in 0..row_count {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
@@ -1398,15 +1392,14 @@ fn keyed_posting_partition<K: Ord + Copy + Eq + Hash>(
             if !groups.contains_key(&key) {
                 crate::allocation::try_reserve_hash_map(&mut groups, 1, guard, "posting groups")?;
             }
-            let rows = groups.entry(key).or_default();
-            crate::allocation::try_reserve_vec(rows, 1, guard, "posting rows")?;
-            rows.push(row);
+            let (posting, previous) = groups.entry(key).or_default();
+            posting.push_row(row, previous, guard)?;
         }
     }
     let mut entries = Vec::new();
     crate::allocation::try_reserve_vec(&mut entries, groups.len(), guard, "posting map")?;
-    for (key, rows) in groups {
-        entries.push((key, PostingList::from_rows(&rows, guard)?));
+    for (key, (posting, _)) in groups {
+        entries.push((key, posting));
     }
     cancellable_sort_by(&mut entries, guard, |left, right| left.0.cmp(&right.0))?;
     SortedMap::from_sorted(entries)

@@ -74,12 +74,15 @@ struct Opened {
 struct RichManifest {
     corpora: RichCorpora,
     semantic_oracle: RichOracle,
+    expected_flight_completeness: Vec<CompletenessRow>,
 }
 
 #[derive(Deserialize)]
 struct RichCorpora {
     raw: Corpus,
     compressed: Corpus,
+    flight: Corpus,
+    ipc: Corpus,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +92,7 @@ struct RichOracle {
     memory_events: usize,
     semantic_events: usize,
     call_frames: usize,
+    flight_threads: Vec<u32>,
 }
 
 #[derive(Serialize)]
@@ -104,8 +108,14 @@ struct RichOutput {
     call_frames: usize,
     ipc_query_seconds: f64,
     ipc_page_bytes: usize,
+    ipc_events: usize,
     ipc_call_tree_seconds: f64,
     ipc_call_tree_bytes: usize,
+    memory_query_seconds: Vec<f64>,
+    flight_events: usize,
+    flight_threads: Vec<u32>,
+    flight_completeness: Vec<CompletenessRow>,
+    correctness_digest: String,
 }
 
 struct AllowAll;
@@ -339,11 +349,24 @@ fn rich_mode(manifest_path: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
         return Err(format!("rich semantic oracle mismatch: {counts:?}").into());
     }
     let context = Arc::new(QueryContext::new(raw.clone())?);
-    let projection = TimelineProjection::new(context, EventFilter::default())?;
+    let projection = TimelineProjection::new(context.clone(), EventFilter::default())?;
     let query_seconds = timed_pages(&projection)?;
+    let memory_projection = TimelineProjection::new(
+        context,
+        EventFilter {
+            kinds: vec![EventKind::Memory],
+            ..EventFilter::default()
+        },
+    )?;
+    let memory_query_seconds = timed_pages(&memory_projection)?;
     let started = Instant::now();
     let replay = RegisterReplay::new(raw.clone())?;
     let replay_build_seconds = started.elapsed().as_secs_f64();
+    let warm_replay = RegisterReplay::new(Arc::new(warm))?;
+    let compressed_replay = RegisterReplay::new(Arc::new(compressed))?;
+    let mut correctness = Sha256::new();
+    correctness.update(b"qtrace-ui/rich-correctness/v2\0");
+    correctness.update(manifest.corpora.raw.sha256.as_bytes());
     let mut replay_query_seconds = Vec::with_capacity(50);
     for row in (10..raw.event_count())
         .step_by(raw.event_count() / 50)
@@ -351,8 +374,36 @@ fn rich_mode(manifest_path: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
     {
         let key = raw.event_key(row)?.ok_or("missing rich event key")?;
         let started = Instant::now();
-        replay.state_at(&key)?;
+        let state = replay.state_at(&key)?;
         replay_query_seconds.push(started.elapsed().as_secs_f64());
+        if state != warm_replay.state_at(&key)? {
+            return Err("rich raw/warm register replay mismatch".into());
+        }
+        let compressed_key = qtrace_provider::EventKey {
+            artifact: qtrace_provider::ArtifactDigest::from_hex(
+                &manifest.corpora.compressed.sha256,
+            )
+            .ok_or("invalid compressed artifact hash")?,
+            ..key.clone()
+        };
+        let compressed_state = compressed_replay.state_at(&compressed_key)?;
+        for index in 0..qtrace_provider::RegisterSlot::COUNT {
+            let slot =
+                qtrace_provider::RegisterSlot::from_index(index).ok_or("invalid register slot")?;
+            for (expected, observed) in [
+                (state.before.cell(slot), compressed_state.before.cell(slot)),
+                (state.after.cell(slot), compressed_state.after.cell(slot)),
+            ] {
+                let mut observed = observed.clone();
+                if let Some(evidence) = observed.evidence.as_mut() {
+                    evidence.artifact = key.artifact;
+                }
+                if *expected != observed {
+                    return Err("rich raw/compressed register replay mismatch".into());
+                }
+            }
+        }
+        correctness.update(format!("{state:?}").as_bytes());
     }
     let first_instruction = raw.event_key(5)?.ok_or("missing first instruction")?;
     let started = Instant::now();
@@ -365,10 +416,17 @@ fn rich_mode(manifest_path: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
     if tree.nodes.len() != manifest.semantic_oracle.call_frames {
         return Err(format!("rich call tree has {} frames", tree.nodes.len()).into());
     }
-    let service = QtraceService::with_cache_root(cache.join("service"));
+    let service = QtraceService::with_cache_root(cache.to_path_buf());
     let opened = service
-        .open_artifact(AuthorizedPath::new(raw_path))
+        .open_artifact(AuthorizedPath::new(source_path(
+            manifest_path,
+            &manifest.corpora.ipc,
+        )?))
         .map_err(|error| format!("{}: {}", error.code, error.detail))?;
+    let ipc_events = opened.artifacts[0].event_count as usize;
+    if ipc_events != manifest.corpora.ipc.events as usize {
+        return Err("rich IPC event oracle mismatch".into());
+    }
     let workspace = opened.workspace.id;
     let projection = service
         .create_projection(&workspace, 0, EventFilterDto::default())
@@ -391,6 +449,24 @@ fn rich_mode(manifest_path: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
         .map_err(|error| format!("{}: {}", error.code, error.detail))?;
     let ipc_call_tree_seconds = started.elapsed().as_secs_f64();
     let ipc_call_tree_bytes = serde_json::to_vec(&tree_page)?.len();
+    let flight = open_store(source_path(manifest_path, &manifest.corpora.flight)?, cache)?;
+    verify_store_digest(&flight, &manifest.corpora.flight)?;
+    let mut flight_threads = std::collections::BTreeSet::new();
+    for row in 0..flight.event_count() {
+        if let Some(tid) = flight.event_key(row)?.and_then(|key| key.tid) {
+            flight_threads.insert(tid);
+        }
+    }
+    let flight_threads = flight_threads.into_iter().collect::<Vec<_>>();
+    if flight.event_count() != manifest.corpora.flight.events as usize
+        || flight_threads != manifest.semantic_oracle.flight_threads
+        || flight.completeness() != manifest.expected_flight_completeness
+    {
+        return Err("rich Flight thread/gap oracle mismatch".into());
+    }
+    correctness.update(serde_json::to_vec(&counts)?);
+    correctness.update(serde_json::to_vec(flight.completeness())?);
+    correctness.update((tree.nodes.len() as u64).to_le_bytes());
     println!(
         "{}",
         serde_json::to_string(&RichOutput {
@@ -405,8 +481,14 @@ fn rich_mode(manifest_path: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
             call_frames: tree.nodes.len(),
             ipc_query_seconds,
             ipc_page_bytes,
+            ipc_events,
             ipc_call_tree_seconds,
             ipc_call_tree_bytes,
+            memory_query_seconds,
+            flight_events: flight.event_count(),
+            flight_threads,
+            flight_completeness: flight.completeness().to_vec(),
+            correctness_digest: hex(&correctness.finalize()),
         })?
     );
     Ok(())

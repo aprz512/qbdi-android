@@ -567,6 +567,7 @@ integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。运行�
 
 ## 深入文档
 
+- [项目优化清单与状态](docs/superpowers/specs/2026-09-24-project-optimization-design.md)
 - [QTRB v1、文本格式 4、指标与崩溃恢复](docs/trace-format.md)
 - [IDA/objdump 场景偏移定位](docs/ida-offsets.md)
 - [完整性检查与 CodeRules](docs/integrity-bypass.md)

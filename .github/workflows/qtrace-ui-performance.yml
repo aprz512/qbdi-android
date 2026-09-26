@@ -10,7 +10,7 @@ jobs:
     runs-on: [self-hosted, linux, qtrace-ui-reference]
     timeout-minutes: 90
     env:
-      QTRACE_UI_REFERENCE_HOST: qtrace-ui-reference-v1
+      QTRACE_UI_REFERENCE_HOST: qtrace-ui-reference-v2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,9 +26,39 @@ jobs:
           python3 qtrace-ui/tools/performance_gate.py \
             --manifest "$RUNNER_TEMP/qtrace-ui-performance/corpus/manifest.json" \
             --evidence "$RUNNER_TEMP/qtrace-ui-performance/run.json" \
-            --reference-summary docs/benchmarks/qtrace-ui-performance.md
+            --reference-summary docs/benchmarks/qtrace-ui-performance-current.md
+      - name: Generate rich typed corpus and thread/gap companion
+        run: python3 qtrace-ui/tools/generate_rich_performance_fixture.py --output "$RUNNER_TEMP/qtrace-ui-performance/rich"
+      - name: Record five rich workloads on the reference host
+        run: |
+          python3 qtrace-ui/tools/rich_performance_gate.py \
+            --manifest "$RUNNER_TEMP/qtrace-ui-performance/rich/rich-manifest.json" \
+            --evidence "$RUNNER_TEMP/qtrace-ui-performance/rich-run.json" \
+            --reference-summary docs/benchmarks/qtrace-ui-performance-current.md
+      - name: Install browser dependencies
+        working-directory: qtrace-ui/src-web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Record real rich service-to-UI latency
+        working-directory: qtrace-ui/src-web
+        run: |
+          mkdir -p "$RUNNER_TEMP/qtrace-ui-performance/ui-fixtures/sessions/valid-mixed/artifacts"
+          cp "$RUNNER_TEMP/qtrace-ui-performance/rich/qtrb-rich-100000.trace.bin" "$RUNNER_TEMP/qtrace-ui-performance/ui-fixtures/sessions/valid-mixed/artifacts/main.trace.bin"
+          PLAYWRIGHT_JSON_OUTPUT_NAME="$RUNNER_TEMP/qtrace-ui-performance/ui-run.json" QTRACE_E2E_FIXTURE_ROOT="$RUNNER_TEMP/qtrace-ui-performance/ui-fixtures" npx playwright test tests/e2e/performance.spec.ts -g 'real rich' --reporter=list,json
+      - name: Preserve browser measurements
+        if: always()
+        run: |
+          if [ -d qtrace-ui/src-web/test-results ]; then
+            cp -r qtrace-ui/src-web/test-results "$RUNNER_TEMP/qtrace-ui-performance/ui-results"
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: qtrace-ui-performance-evidence
-          path: ${{ runner.temp }}/qtrace-ui-performance/run.json
+          path: |
+            ${{ runner.temp }}/qtrace-ui-performance/run.json
+            ${{ runner.temp }}/qtrace-ui-performance/rich-run.json
+            ${{ runner.temp }}/qtrace-ui-performance/rich/rich-manifest.json
+            ${{ runner.temp }}/qtrace-ui-performance/ui-run.json
+            ${{ runner.temp }}/qtrace-ui-performance/ui-results/
