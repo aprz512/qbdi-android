@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { ApiProvider } from "../api/ApiContext";
@@ -148,6 +148,11 @@ describe("desktop shell", () => {
     await waitFor(() => expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "projection-flight", "cursor-2", 2_000));
     await waitFor(() => expect(screen.getByRole("row", { name: /2001 thread 7/ })).toBeVisible());
     expect(screen.getByRole("row", { name: /1997 thread 7/ })).toBeVisible();
+    const results = within(screen.getByRole("region", { name: "Search results" }));
+    expect(results.getByText("2001 results · exact total")).toBeVisible();
+    expect(results.getByText("Page 1 of 2 · Results 1–2000")).toBeVisible();
+    expect(results.getByText("instruction · 1")).toBeVisible();
+    expect(results.queryByText("instruction · 2001")).not.toBeInTheDocument();
   });
 
   it("reveals a history target by walking later cursor pages", async () => {

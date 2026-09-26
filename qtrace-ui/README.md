@@ -39,6 +39,7 @@ Source artifacts are immutable. Persistent indexes live under `${XDG_CACHE_HOME:
 
 - Prefer a session report; single-file open intentionally lacks package/device/config context.
 - Filter by thread, kind, module, PC, sequence, mnemonic, register, memory, or semantic fields. The projection is paged; the DOM never owns the full trace.
+- Results have independent page navigation and show whether the total is exact or still indexing. Previous/Next hit cross page boundaries; selecting a hit jumps to its event in the timeline.
 - The canvas has a parallel ARIA grid. Arrow keys move focus, Enter selects, and Escape clears transient navigation.
 - Inspect register and memory provenance before relying on a value. Incomplete call frames remain explicit.
 - Rebuild caches after analyzer/schema upgrades; back up annotations before deleting the data root.

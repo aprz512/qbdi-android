@@ -5,6 +5,8 @@ import { FilterBar } from "./FilterBar";
 import { ResultsPane } from "./ResultsPane";
 import { CallTreePane } from "./CallTreePane";
 import { initialState } from "../state/model";
+import { ApiProvider } from "../api/ApiContext";
+import { E2eQtraceApi } from "../api/E2eQtraceApi";
 
 describe("workspace workflows", () => {
   it("constructs same-field OR filter terms and validates 64-bit inputs", () => {
@@ -114,7 +116,7 @@ describe("workspace workflows", () => {
 
   it("bounds result rendering and state has no full-trace collection", () => {
     const rows = Array.from({ length: 2_001 }, (_, source_row) => ({ source_row, key: { artifact_sha256: "a".repeat(64), timeline_id: "1", record_ordinal: String(source_row), source_offset: String(source_row), sequence: String(source_row), tid: 1 }, kind: "instruction", provenance: "captured", discontinuity: false, location: `lib.so+0x${source_row.toString(16)}`, symbol: null, summary: "mov x0, x1" }));
-    render(<ResultsPane pages={[{ rows, next_cursor: null, total: 2_001, exact_total: false }]} onJump={() => undefined} />);
+    render(<ApiProvider api={new E2eQtraceApi()}><ResultsPane workspaceId="w" projectionId="p" initialPage={{ rows: rows.slice(0, 2_000), next_cursor: "next", total: 2_001, exact_total: false }} onJump={() => undefined} /></ApiProvider>);
     expect(screen.getAllByRole("listitem")).toHaveLength(2_000);
     expect(screen.getByText(/indexing/)).toBeVisible();
     expect(Object.keys(initialState).some((key) => /allEvents|eventsById/i.test(key))).toBe(false);

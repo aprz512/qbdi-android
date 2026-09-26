@@ -124,6 +124,17 @@ test("jumps to a distant viewport and reuses the cached first segment", async ({
   await timeline.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll", { bubbles: true })); });
   await expect(page.getByRole("row", { name: /^1 thread 7 / })).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => firstPageRequests).toBe(1);
+  const results = page.getByRole("region", { name: "Search results" });
+  await expect(results).toContainText("Page 1 of 6 · Results 1–2000");
+  await expect(results).toContainText("12000 results · exact total");
+  await results.getByRole("button", { name: "Next results page" }).click();
+  await expect(results).toContainText("Page 2 of 6 · Results 2001–4000");
+  await results.getByRole("button", { name: "Next results page" }).click();
+  await expect(results).toContainText("Page 3 of 6 · Results 4001–6000");
+  await results.getByRole("button", { name: "Previous results page" }).click();
+  await expect(results).toContainText("Page 2 of 6 · Results 2001–4000");
+  await expect(results.getByRole("listitem")).toHaveCount(2_000);
+  await expect(page.getByRole("row", { name: /^1 thread 7 / })).toBeVisible();
 });
 
 test("call-tree nodes fold and jump through the workspace", async ({ page }) => {
