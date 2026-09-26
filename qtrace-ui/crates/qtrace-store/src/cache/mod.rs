@@ -12,6 +12,7 @@ use std::{
         fs::{FileTypeExt, MetadataExt},
     },
     path::{Component, Path},
+    sync::{Arc, Mutex},
 };
 
 use qtrace_provider::{EventKey, EventKind, OperationAbort, WorkDelta, WorkGuard};
@@ -290,7 +291,22 @@ pub(crate) struct OwnedSection {
     pub(crate) name: &'static str,
     pub(crate) alignment: u32,
     pub(crate) element_size: u32,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) data: OwnedSectionData,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OwnedSectionData {
+    Bytes(Vec<u8>),
+    Spool { file: Arc<Mutex<File>>, len: u64 },
+}
+
+impl OwnedSectionData {
+    pub(crate) fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Spool { len, .. } => *len,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -321,7 +337,7 @@ impl OwnedStoreView {
             || section.alignment == 0
             || !section.alignment.is_power_of_two()
             || section.element_size == 0
-            || section.bytes.len() as u64 % u64::from(section.element_size) != 0
+            || section.data.len() % u64::from(section.element_size) != 0
             || self
                 .extra_sections
                 .iter()

@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -20,8 +20,8 @@ use crate::layout::{
 };
 
 use super::{
-    CacheDirectory, CacheError, CacheIdentity, CacheManifest, ObjectIdentity, OwnedStoreView,
-    SectionDescriptor, map_errno, map_io_error,
+    CacheDirectory, CacheError, CacheIdentity, CacheManifest, ObjectIdentity, OwnedSectionData,
+    OwnedStoreView, SectionDescriptor, map_errno, map_io_error,
     reader::{ValidationFailure, open_final, probe_identity, validate_file},
 };
 
@@ -390,16 +390,43 @@ impl CacheWriter {
                 write_part(file, &zeros[..padding], guard)?;
             }
             let mut digest = Sha256::new();
-            for chunk in section.bytes.chunks(SECTION_CHUNK_BYTES) {
+            let mut write_chunk = |chunk: &[u8]| -> Result<(), CacheError> {
                 guard.consume(WorkDelta {
                     rows: (chunk.len() / section.element_size as usize) as u64,
                     ..WorkDelta::default()
                 })?;
                 digest.update(chunk);
-                write_part(file, chunk, guard)?;
+                write_part(file, chunk, guard)
+            };
+            match &section.data {
+                OwnedSectionData::Bytes(bytes) => {
+                    for chunk in bytes.chunks(SECTION_CHUNK_BYTES) {
+                        write_chunk(chunk)?;
+                    }
+                }
+                OwnedSectionData::Spool { file: source, len } => {
+                    let mut source = source
+                        .lock()
+                        .map_err(|_| CacheError::io("temporary section lock poisoned"))?;
+                    source
+                        .seek(SeekFrom::Start(0))
+                        .map_err(|error| map_io_error("cannot rewind temporary section", error))?;
+                    let mut buffer = [0_u8; SECTION_CHUNK_BYTES];
+                    let mut remaining = *len;
+                    while remaining > 0 {
+                        let size = usize::try_from(remaining.min(SECTION_CHUNK_BYTES as u64))
+                            .map_err(|_| {
+                                CacheError::invalid("temporary section length overflow")
+                            })?;
+                        source.read_exact(&mut buffer[..size]).map_err(|error| {
+                            map_io_error("cannot read temporary section", error)
+                        })?;
+                        write_chunk(&buffer[..size])?;
+                        remaining -= size as u64;
+                    }
+                }
             }
-            let length = u64::try_from(section.bytes.len())
-                .map_err(|_| CacheError::invalid("extra-section length does not fit u64"))?;
+            let length = section.data.len();
             next_offset = offset
                 .checked_add(length)
                 .ok_or_else(|| CacheError::invalid("extra-section range overflow"))?;
@@ -1022,7 +1049,7 @@ mod tests {
         os::unix::fs::{MetadataExt, PermissionsExt},
         path::PathBuf,
         process::Command,
-        sync::mpsc,
+        sync::{Arc, Mutex, mpsc},
         thread,
         time::{Duration, Instant},
     };
@@ -1038,8 +1065,8 @@ mod tests {
         POST_DIRECTORY_FSYNC_HOOK, PostDirectoryFsyncHook, PublicationLock,
     };
     use crate::cache::{
-        CacheDirectory, CacheIdentity, CacheOpen, CacheReader, CacheWriter, OwnedStoreView,
-        PublicationState, PublishOutcome,
+        CacheDirectory, CacheIdentity, CacheOpen, CacheReader, CacheWriter, OwnedSection,
+        OwnedSectionData, OwnedStoreView, PublicationState, PublishOutcome,
     };
 
     struct AllowAll;
@@ -1092,6 +1119,41 @@ mod tests {
             vec![EventKind::Instruction],
         )
         .expect("store")
+    }
+
+    #[test]
+    fn truncated_spooled_section_cleans_up_without_publishing() {
+        let parent = private_root();
+        let root = parent.path().join("xdg-cache");
+        let identity = identity(0x6f);
+        let file = tempfile::tempfile().expect("anonymous spool");
+        let store = store(0x6f)
+            .with_section(
+                OwnedSection {
+                    name: "test-spool",
+                    alignment: 1,
+                    element_size: 1,
+                    data: OwnedSectionData::Spool {
+                        file: Arc::new(Mutex::new(file)),
+                        len: 1,
+                    },
+                },
+                &AllowAll,
+            )
+            .expect("section");
+        let error = CacheWriter::new(identity.clone(), store)
+            .expect("writer")
+            .publish(&root, &AllowAll)
+            .expect_err("truncated spool");
+        assert_eq!(error.code(), "cache.io");
+        let directory = root.join("qtrace-ui").join(identity.cache_key());
+        assert!(!directory.join("index.qtc").exists());
+        assert!(
+            fs::read_dir(&directory)
+                .expect("cache directory")
+                .filter_map(Result::ok)
+                .all(|entry| entry.file_name() == ".publish.lock")
+        );
     }
 
     fn private_root() -> TempDir {

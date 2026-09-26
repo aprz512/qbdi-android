@@ -5,6 +5,31 @@ mod postings;
 mod validation;
 mod wire;
 
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_index_memory(stage: &str) {
+    if std::env::var_os("QTRACE_UI_INDEX_PROBE").is_none() {
+        return;
+    }
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        let fields = ["VmRSS:", "VmHWM:", "VmData:"];
+        let values = fields.map(|field| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(field))
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        });
+        eprintln!(
+            "qtrace_index_memory stage={stage} rss={} hwm={} data={}",
+            values[0], values[1], values[2]
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn probe_index_memory(_stage: &str) {}
+
 use std::{
     collections::{BTreeSet, HashMap},
     error::Error,
@@ -32,6 +57,14 @@ pub(crate) fn binary_section_contract(name: &str) -> Option<(u32, u32)> {
     wire::contract(name)
 }
 
+pub(crate) const fn event_meta_section_name() -> &'static str {
+    wire::EVENT_META
+}
+
+pub(crate) const fn event_meta_row_bytes() -> u32 {
+    wire::EVENT_META_BYTES
+}
+
 pub(crate) fn binary_section_specs() -> &'static [(&'static str, u32, u32)] {
     wire::EXACT_SECTIONS
 }
@@ -42,12 +75,13 @@ pub(crate) fn binary_section_max_length(name: &str, event_count: usize) -> Resul
 
 pub(crate) fn validate_binary_sections(
     sections: Vec<(&'static str, Vec<u8>)>,
+    events: PredecodedEvents,
     keys: &[EventKey],
     kinds: &[EventKind],
     source_format: &str,
     guard: &dyn WorkGuard,
 ) -> Result<ValidatedCatalog, IndexError> {
-    let catalog = wire::decode(sections, keys, kinds, source_format, true, guard)?;
+    let catalog = wire::decode(sections, events, keys, kinds, source_format, true, guard)?;
     let source_format = NormalizedSourceFormat::parse(source_format)?;
     let content_identity =
         derive_normalized_content_identity(&catalog, keys, kinds, source_format, guard)?;
@@ -56,6 +90,41 @@ pub(crate) fn validate_binary_sections(
         content_identity,
         source_format,
     })
+}
+
+pub(crate) struct PredecodedEvents(Vec<EventColumn>);
+
+pub(crate) fn stream_event_meta(
+    keys: &[EventKey],
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), CacheError>,
+    guard: &dyn WorkGuard,
+) -> Result<PredecodedEvents, IndexError> {
+    const CHUNK_ROWS: usize = 4096;
+    let mut events = Vec::new();
+    crate::allocation::try_reserve_vec(&mut events, keys.len(), guard, "event metadata decode")?;
+    let mut bytes = Vec::new();
+    crate::allocation::try_reserve_vec(
+        &mut bytes,
+        CHUNK_ROWS * wire::EVENT_META_BYTES as usize,
+        guard,
+        "event metadata read buffer",
+    )?;
+    bytes.resize(CHUNK_ROWS * wire::EVENT_META_BYTES as usize, 0);
+    for start in (0..keys.len()).step_by(CHUNK_ROWS) {
+        let end = (start + CHUNK_ROWS).min(keys.len());
+        let size = (end - start) * wire::EVENT_META_BYTES as usize;
+        let offset = u64::try_from(start)
+            .ok()
+            .and_then(|row| row.checked_mul(u64::from(wire::EVENT_META_BYTES)))
+            .ok_or_else(|| IndexError::corrupt("event metadata offset overflow"))?;
+        read(offset, &mut bytes[..size])?;
+        events.extend(wire::decode_events(
+            &bytes[..size],
+            &keys[start..end],
+            guard,
+        )?);
+    }
+    Ok(PredecodedEvents(events))
 }
 
 #[derive(Debug)]
@@ -1813,10 +1882,14 @@ impl OwnedTraceStore {
     ) -> Result<OwnedStoreView, IndexError> {
         let mut view = self.base;
         let catalog = *self.catalog;
-        for section in wire::encode(catalog, guard)? {
+        probe_index_memory("before_encoding");
+        let sections = wire::encode(catalog, guard)?;
+        probe_index_memory("after_encoding");
+        for section in sections {
             guard.consume(WorkDelta::default())?;
             view = view.with_section(section, guard)?;
         }
+        probe_index_memory("after_cache_view");
         Ok(view)
     }
 }
@@ -2584,12 +2657,14 @@ impl TraceStore {
         }
         source_guard.consume(WorkDelta::default())?;
         let owned = IndexBuilder::build(source, options, source_guard)?;
+        probe_index_memory("after_index_build");
         cache_guard.consume(WorkDelta::default())?;
         let (outcome, receipt) = CacheWriter::new(
             identity.try_clone_guarded(cache_guard)?,
             owned.into_cache_view_with_catalog(cache_guard)?,
         )?
         .publish_with_receipt(cache_root, cache_guard)?;
+        probe_index_memory("after_publish");
         let reopened = (|| {
             cache_guard.consume(WorkDelta::default())?;
             let view = match CacheReader::open(cache_root, &identity, cache_guard)? {

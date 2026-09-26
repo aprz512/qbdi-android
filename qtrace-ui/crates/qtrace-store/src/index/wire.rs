@@ -1,14 +1,19 @@
+use std::{
+    io::{BufWriter, Write},
+    sync::{Arc, Mutex},
+};
+
 use qtrace_provider::{
     CompletenessCause, EventKey, EventKind, EventScope, MemoryDirection, PcRelativeKind,
     Provenance, ProviderCapabilities, RangeBounds, RangeDomain, RegisterSlot, WorkDelta, WorkGuard,
 };
 
-use crate::cache::OwnedSection;
+use crate::cache::{OwnedSection, OwnedSectionData, map_io_error};
 
 use super::{
     BuildOptions, ByteArena, ByteSpan, CompletenessRow, DefinitionRow, EventColumn, IndexCatalog,
-    IndexError, InstructionRow, MemoryRow, ModuleRow, NormalizedCatalog, SemanticRow, SortedMap,
-    SourceKeyRow,
+    IndexError, InstructionRow, MemoryRow, ModuleRow, NormalizedCatalog, PredecodedEvents,
+    SemanticRow, SortedMap, SourceKeyRow,
     checkpoints::{RegisterAccess, RegisterObservationRow},
     intervals::{IntervalEntry, IntervalIndex},
     postings::{DeltaRun, PostingList},
@@ -164,12 +169,17 @@ pub(super) fn encode(
         16,
         encode_capabilities(&catalog.capabilities, guard)?,
     ));
-    sections.push(section(
-        EVENT_META,
-        8,
-        EVENT_META_BYTES,
-        encode_events(&catalog.events, guard)?,
-    ));
+    sections.push(if catalog.events.len() >= 1_000_000 {
+        encode_events_spooled(&catalog.events, guard)?
+    } else {
+        section(
+            EVENT_META,
+            8,
+            EVENT_META_BYTES,
+            encode_events(&catalog.events, guard)?,
+        )
+    });
+    super::probe_index_memory("after_event_encoding");
     encode_arena(
         &mut sections,
         PAYLOAD_SPANS,
@@ -326,6 +336,7 @@ pub(super) fn encode(
         8,
         encode_source_rows(&catalog.indexes.source_keys, guard)?,
     ));
+    super::probe_index_memory("after_all_sections");
     Ok(sections)
 }
 
@@ -334,8 +345,44 @@ fn section(name: &'static str, alignment: u32, element_size: u32, bytes: Vec<u8>
         name,
         alignment,
         element_size,
-        bytes,
+        data: OwnedSectionData::Bytes(bytes),
     }
+}
+
+fn encode_events_spooled(
+    rows: &[EventColumn],
+    guard: &dyn WorkGuard,
+) -> Result<OwnedSection, IndexError> {
+    let file = tempfile::tempfile().map_err(|error| {
+        IndexError::from(map_io_error("cannot create temporary event section", error))
+    })?;
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
+    for chunk in rows.chunks(4096) {
+        let encoded = encode_events(chunk, guard)?;
+        writer
+            .write_all(&encoded)
+            .map_err(|error| IndexError::from(map_io_error("cannot spool event section", error)))?;
+    }
+    let file = writer.into_inner().map_err(|error| {
+        IndexError::from(map_io_error(
+            "cannot finish event section",
+            error.into_error(),
+        ))
+    })?;
+    let len = rows
+        .len()
+        .checked_mul(EVENT_META_BYTES as usize)
+        .and_then(|len| u64::try_from(len).ok())
+        .ok_or_else(|| IndexError::resource("temporary event section length overflow"))?;
+    Ok(OwnedSection {
+        name: EVENT_META,
+        alignment: 8,
+        element_size: EVENT_META_BYTES,
+        data: OwnedSectionData::Spool {
+            file: Arc::new(Mutex::new(file)),
+            len,
+        },
+    })
 }
 
 struct Encoder {
@@ -768,6 +815,7 @@ pub(super) fn completeness_cause(v: CompletenessCause) -> u8 {
 
 pub(super) fn decode(
     mut sections: Vec<(&'static str, Vec<u8>)>,
+    events: PredecodedEvents,
     keys: &[EventKey],
     kinds: &[EventKind],
     source_format: &str,
@@ -775,7 +823,8 @@ pub(super) fn decode(
     guard: &dyn WorkGuard,
 ) -> Result<NormalizedCatalog, IndexError> {
     let capabilities = decode_capabilities(&take(&mut sections, CAPABILITIES)?)?;
-    let events = decode_events(&take(&mut sections, EVENT_META)?, keys, guard)?;
+    let events = events.0;
+    super::probe_index_memory("decode_after_events");
     let payload_bytes = take(&mut sections, PAYLOAD_ARENA)?;
     let payload_spans = take(&mut sections, PAYLOAD_SPANS)?;
     let payloads = decode_arena(
@@ -878,8 +927,10 @@ pub(super) fn decode(
         completeness,
         indexes,
     };
+    super::probe_index_memory("decode_before_validation");
     if deep_validate {
         catalog.validate(keys, kinds, guard)?;
+        super::probe_index_memory("decode_after_shape_validation");
         super::builder::validate_cached_truth(
             &catalog,
             &source_completeness,
@@ -888,6 +939,7 @@ pub(super) fn decode(
             source_format,
             guard,
         )?;
+        super::probe_index_memory("decode_after_truth_validation");
     }
     Ok(catalog)
 }
@@ -994,7 +1046,7 @@ fn decode_capabilities(bytes: &[u8]) -> Result<ProviderCapabilities, IndexError>
     })
 }
 
-fn decode_events(
+pub(super) fn decode_events(
     bytes: &[u8],
     keys: &[EventKey],
     guard: &dyn WorkGuard,

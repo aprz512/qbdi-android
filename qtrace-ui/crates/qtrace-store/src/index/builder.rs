@@ -55,6 +55,7 @@ impl IndexBuilder {
         let summary = cursor.finish()?;
         guard.consume(WorkDelta::default())?;
         state.append_completeness(summary.completeness, guard)?;
+        super::probe_index_memory("after_source_scan");
         capabilities.full_register_checkpoint &= state.saw_complete_checkpoint;
         state.finish(capabilities, options, source_format, guard)
     }
@@ -582,6 +583,7 @@ impl<'a> BuildState<'a> {
             options,
             guard,
         )?;
+        super::probe_index_memory("after_postings");
         let (payload_bytes, payload_spans, payload_max) = self.payloads.into_owned_parts()?;
         let (string_bytes, string_spans, string_max) = self.strings.into_owned_parts()?;
         let (blob_bytes, blob_spans, blob_max) = self.blobs.into_owned_parts()?;
@@ -1849,7 +1851,7 @@ mod tests {
             .iter()
             .find(|section| section.name == "event_meta.v2")
             .expect("event metadata");
-        assert_eq!(event_meta.bytes.len(), count as usize * 24);
+        assert_eq!(event_meta.data.len(), count * 24);
         assert!(
             sections
                 .iter()

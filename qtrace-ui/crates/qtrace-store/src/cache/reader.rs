@@ -420,6 +420,38 @@ fn decode_sections(
             &expected.artifact_digest,
             guard,
         )?;
+        crate::index::probe_index_memory("reader_after_event_rows");
+        let event_meta = manifest
+            .sections
+            .iter()
+            .find(|section| section.name == crate::index::event_meta_section_name())
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "missing event metadata",
+            )))?;
+        let expected_meta_length = u64::try_from(event_count)
+            .ok()
+            .and_then(|count| count.checked_mul(u64::from(crate::index::event_meta_row_bytes())))
+            .ok_or(ValidationFailure::Rebuild(RebuildReason::Section(
+                "event metadata length overflow",
+            )))?;
+        if event_meta.length != expected_meta_length {
+            return Err(ValidationFailure::Rebuild(RebuildReason::Section(
+                "event metadata length",
+            )));
+        }
+        let events = crate::index::stream_event_meta(
+            &event_keys,
+            |relative, bytes| {
+                let offset = event_meta
+                    .offset
+                    .checked_add(relative)
+                    .ok_or_else(|| CacheError::invalid("event metadata offset overflow"))?;
+                read_exact_at(file, offset, bytes, Some(guard))
+            },
+            guard,
+        )
+        .map_err(normalized_validation_failure)?;
+        crate::index::probe_index_memory("reader_after_streamed_events");
         let section_count = crate::index::binary_section_specs().len();
         guard.consume(WorkDelta {
             nodes: section_count as u64,
@@ -433,6 +465,9 @@ fn decode_sections(
             "schema-two binary section list",
         )?;
         for (name, _, _) in crate::index::binary_section_specs() {
+            if *name == crate::index::event_meta_section_name() {
+                continue;
+            }
             guard.consume(WorkDelta::default())?;
             let section = manifest
                 .sections
@@ -462,9 +497,11 @@ fn decode_sections(
             read_exact_at(file, section.offset, &mut bytes, Some(guard))?;
             binary.push((*name, bytes));
         }
+        crate::index::probe_index_memory("reader_after_binary_sections");
         validated_catalog = Some(
             crate::index::validate_binary_sections(
                 binary,
+                events,
                 &event_keys,
                 &event_kinds,
                 &expected.source_format,
@@ -472,6 +509,7 @@ fn decode_sections(
             )
             .map_err(normalized_validation_failure)?,
         );
+        crate::index::probe_index_memory("reader_after_catalog_validation");
     }
     Ok(DecodedSections {
         event_count,
