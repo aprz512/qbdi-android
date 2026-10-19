@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <link.h>
 #include <limits>
 #include <string>
 #include <utility>
@@ -14,6 +15,64 @@ static void check(bool condition, const char *expression, int line) {
 }
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
+static std::vector<dl_phdr_info> loaded_modules;
+
+extern "C" int __wrap_dl_iterate_phdr(
+        int (*callback)(dl_phdr_info *, size_t, void *), void *data) {
+    for (auto &info : loaded_modules) {
+        int result = callback(&info, sizeof(info), data);
+        if (result != 0) return result;
+    }
+    return 0;
+}
+
+static void loaded_module_with_16kb_segments_uses_linker_load_bias() {
+    // DIGIMON UP's libmain.so repeats file page zero at base + 0x4000.
+    // Executable mapping start minus file offset is therefore NOT its base.
+    const ElfW(Phdr) headers[] = {
+        {.p_type = PT_LOAD, .p_flags = PF_R, .p_offset = 0, .p_vaddr = 0,
+         .p_filesz = 0xa20, .p_memsz = 0xa20, .p_align = 0x4000},
+        {.p_type = PT_LOAD, .p_flags = PF_R | PF_X, .p_offset = 0xa20,
+         .p_vaddr = 0x4a20, .p_filesz = 0x500, .p_memsz = 0x500, .p_align = 0x4000},
+        {.p_type = PT_LOAD, .p_flags = PF_R | PF_W, .p_offset = 0x1150,
+         .p_vaddr = 0xd150, .p_filesz = 0x30, .p_memsz = 0x40, .p_align = 0x4000},
+    };
+    dl_phdr_info info{};
+    info.dlpi_addr = 0x70000000;
+    info.dlpi_name = "/data/app/libmain.so";
+    info.dlpi_phdr = headers;
+    info.dlpi_phnum = std::size(headers);
+    loaded_modules = {info};
+
+    ModuleRange constructor, polled, observed;
+    CHECK(module_range_from_phdr(info, &constructor));
+    CHECK(find_loaded_module("libmain.so", 0, 0, &polled));
+    CHECK(polled.start == 0x70000000);
+    CHECK(polled.start == constructor.start);
+    CHECK(polled.end == constructor.end);
+    CHECK(polled.readable_executable_range_count == 1);
+    CHECK(polled.readable_executable_ranges[0].start == 0x70004a20);
+    CHECK(polled.readable_executable_ranges[0].end == 0x70004f20);
+    CHECK(find_loaded_module(info.dlpi_name, info.dlpi_addr, 0x10000, &observed));
+    CHECK(observed.start == polled.start && observed.end == polled.end);
+    CHECK(!find_loaded_module(info.dlpi_name, info.dlpi_addr + 0x4000,
+                              0x10000, &observed));
+    CHECK(!find_loaded_module(info.dlpi_name, info.dlpi_addr, 0x4000, &observed));
+    CHECK(!find_loaded_module(info.dlpi_name, UINTPTR_MAX - 1, 4, &observed));
+
+    info.dlpi_addr = 0x71000000;
+    info.dlpi_name = "/other/libmain.so";
+    loaded_modules.push_back(info);
+    CHECK(!find_loaded_module("libmain.so", 0, 0, &observed));
+    CHECK(find_loaded_module("/data/app/libmain.so", 0, 0, &observed));
+    CHECK(observed.start == polled.start);
+    CHECK(find_loaded_module("libmain.so", 0x71000000, 0x10000, &observed));
+    CHECK(observed.start == 0x71000000);
+    CHECK(!find_loaded_module("", 0, 0, &observed));
+    CHECK(!find_loaded_module("libmain.so", 0, 0, nullptr));
+    loaded_modules.clear();
+}
+
 static ModuleRange mapping(uintptr_t start, uintptr_t end,
                            std::string permissions, std::string path) {
     ModuleRange range;
@@ -22,6 +81,28 @@ static ModuleRange mapping(uintptr_t start, uintptr_t end,
     range.permissions = std::move(permissions);
     range.path = std::move(path);
     return range;
+}
+
+static void unpacked_regions_require_a_contiguous_readable_executable_mapping() {
+    const auto anonymous = mapping(0x70000000, 0x70184000, "rwxp", "");
+    ModuleRange region;
+    CHECK(module_range_from_region({anonymous}, "unpacked.so", 0x70000000, 0x184000, &region));
+    CHECK(region.start == anonymous.start && region.end == anonymous.end);
+    CHECK(region.path == "unpacked.so");
+    CHECK(region.readable_executable_range_count == 1);
+    CHECK(region.readable_executable_ranges[0].end == anonymous.end);
+    CHECK(module_range_from_region({anonymous}, "unpacked.so", 0x70001000, 0x1000, &region));
+    CHECK(region.start == 0x70001000 && region.end == 0x70002000);
+    CHECK(!module_range_from_region({anonymous}, "unpacked.so", 0x70000000, 0x185000, &region));
+    CHECK(!module_range_from_region({anonymous}, "unpacked.so", UINTPTR_MAX - 1, 4, &region));
+    CHECK(!module_range_from_region({anonymous}, "unpacked.so", 0, 4, &region));
+    CHECK(!module_range_from_region({anonymous}, "unpacked.so", 0x70000000, 0, &region));
+    CHECK(!module_range_from_region({anonymous}, "", 0x70000000, 0x1000, &region));
+    CHECK(!module_range_from_region({anonymous}, "unpacked.so", 0x70000000, 0x1000, nullptr));
+    CHECK(!module_range_from_region({mapping(0x70000000, 0x70184000, "rw-p", "")},
+                                    "unpacked.so", 0x70000000, 0x1000, &region));
+    CHECK(!module_range_from_region({mapping(0x70000000, 0x70184000, "--xp", "")},
+                                    "unpacked.so", 0x70000000, 0x1000, &region));
 }
 
 static void in_module_executable_address_has_no_warning() {
@@ -103,6 +184,8 @@ static void overflow_is_a_hard_address_diagnostic() {
 }
 
 int main() {
+    loaded_module_with_16kb_segments_uses_linker_load_bias();
+    unpacked_regions_require_a_contiguous_readable_executable_mapping();
     in_module_executable_address_has_no_warning();
     in_module_non_executable_address_warns();
     executable_anonymous_address_outside_module_warns_in_code_order();

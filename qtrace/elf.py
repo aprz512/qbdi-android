@@ -252,7 +252,10 @@ class ElfInspector:
                 "target.inspect",
                 "executable PT_LOAD records do not share one ELF load bias",
             )
-        load_bias = next(iter(biases))
+        # Segment padding can make the executable p_vaddr - p_offset differ
+        # from the ELF origin (Android 16KB layout). Anchor to all PT_LOADs,
+        # rather than silently turning virtual scene addresses into file offsets.
+        load_bias = min(vaddr - offset for offset, vaddr, *_rest in loads)
         executable: list[tuple[int, int]] = []
         for _offset, vaddr, _file_size, mem_size, _flags, _align in executable_loads:
             start = vaddr - load_bias

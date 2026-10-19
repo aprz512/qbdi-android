@@ -75,7 +75,7 @@ class _BoundDeviceClient:
     def size(self, name: str, *, timeout: float) -> int:
         _name(name)
         raw = self.device.target_shell("wc", "-c", f"{self.directory}/{name}",
-                                       timeout=timeout, maximum_bytes=128)
+                                       timeout=timeout, maximum_bytes=8192)
         try:
             value = int(raw.decode("ascii").split()[0])
         except (UnicodeDecodeError, ValueError, IndexError) as error:

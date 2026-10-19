@@ -540,7 +540,9 @@ class BoundTargetDevice(AdbDevice):
         if self.target_strategy == "run-as":
             arguments = ("exec-out", *_run_as_argv(self.package, self.android_user, "cat", path))
         else:
-            command = _compose_su_command(("cat", path))
+            # exec-out passes argv directly. Unlike `adb shell`, it has no
+            # intermediate shell to remove the outer quotes around su -c.
+            command = " ".join(_shell_tokens(("cat", path)))
             arguments = ("exec-out", "su", str(self.package_uid), "-c", command)
         stream = getattr(self.runner, "stream", None)
         if not callable(stream):

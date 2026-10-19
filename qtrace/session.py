@@ -64,6 +64,7 @@ class RunRequest:
     adb_timeout: float
     pull_timeout: float
     installed_action: InstalledAction | None = None
+    detach_before_resume: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class MonitorRequest:
     adb_timeout: float
     pull_timeout: float
     installed_action: InstalledAction | None = None
+    detach_before_resume: bool = False
 
 
 @dataclass(frozen=True)
@@ -276,7 +278,8 @@ def _validate_request(request: object, timed: bool, session_id: str) -> RunReque
     if not isinstance(request, expected):
         raise QtraceError("session.request_invalid", "session.request", "request type does not match command")
     if type(request.output) is not _PATH_TYPE or (request.device is not None and (type(request.device) is not str or _SERIAL.fullmatch(request.device) is None)) or \
-            (request.installed_action is not None and not callable(request.installed_action)):
+            (request.installed_action is not None and not callable(request.installed_action)) or \
+            type(request.detach_before_resume) is not bool:
         raise QtraceError("session.request_invalid", "session.request", "config and output are invalid")
     _request_config(request.config)
     _safe_output(request.output)
@@ -444,7 +447,7 @@ class SessionOrchestrator:
             mark(SessionStage.INSTALLING_HOOKS)
             result: InjectionResult = self._injector_factory(device).install(InjectionRequest(
                 request.config.app.package, session_id, deployment.tracer_so, deployment.companion,
-                native, request.setup_timeout,
+                native, request.setup_timeout, detach_before_resume=request.detach_before_resume,
             ))
             pid = result.pid
             resumed = True

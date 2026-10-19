@@ -18,6 +18,9 @@ from typing import Any
 from qtrace.device import AdbDevice, BoundTargetDevice
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.models import ResolvedScene
+from qtrace.status import (NativeStatusValidationError, StrictJsonLoadError,
+                           load_strict_json, validate_status_shape)
+from scripts.bounded_process import BoundedProcessError
 
 
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
@@ -47,6 +50,7 @@ class InjectionRequest:
     companion: str
     native_request: Mapping[str, object]
     setup_timeout: float
+    detach_before_resume: bool = False
 
 
 @dataclass(frozen=True)
@@ -235,6 +239,8 @@ class _ValidatedRequest:
 def _validate_request(request: InjectionRequest, device: BoundTargetDevice) -> _ValidatedRequest:
     if not isinstance(request, InjectionRequest):
         _fail("inject.request_invalid", "inject.validate", "request must be an InjectionRequest")
+    if type(request.detach_before_resume) is not bool:
+        _fail("inject.request_invalid", "inject.validate", "detach_before_resume must be a boolean")
     if not isinstance(request.package, str) or _PACKAGE.fullmatch(request.package) is None:
         _fail("inject.request_invalid", "inject.validate", "package name is invalid")
     if device.package != request.package:
@@ -550,6 +556,44 @@ class _Mailbox:
         _fail("inject.protocol_invalid", "inject.protocol", "agent payload type is not allowed")
 
 
+def _wait_for_detached_installation(validated: _ValidatedRequest, mailbox: _Mailbox,
+                                    deadline: float) -> None:
+    """Require native installation evidence after relinquishing Frida ownership."""
+    request = validated.request
+    path = f"{validated.request_device.trace_directory}/session-{request.session_id}.status.json"
+    expected = [{"name": scene.name, "startOffset": scene.start_offset,
+                 "endOffset": scene.end_offset} for scene in validated.expected_scenes]
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _fail("inject.timeout", "inject.wait", "native installation receipt did not arrive before setup deadline")
+        try:
+            raw = validated.request_device.target_shell(
+                "cat", path, timeout=remaining, maximum_bytes=1024 * 1024)
+        except QtraceError as error:
+            failure = error.__cause__
+            if not (error.code == "process.failed" and isinstance(failure, BoundedProcessError)
+                    and path.encode() in failure.stderr
+                    and b"no such file or directory" in failure.stderr.lower()):
+                raise
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            continue
+        try:
+            status = validate_status_shape(load_strict_json(raw, 1024 * 1024))
+        except (NativeStatusValidationError, StrictJsonLoadError) as error:
+            _fail("inject.protocol_invalid", "inject.protocol", f"native installation receipt is invalid: {error}")
+        if (status["sessionId"] != request.session_id or status["packageName"] != request.package
+                or status["generation"] != mailbox.generation or status["pid"] != mailbox.pid
+                or status["normalizedScenes"] != expected):
+            _fail("inject.protocol_invalid", "inject.protocol", "native installation receipt identity does not match")
+        if status["errors"] or status["state"] == "stop_incomplete":
+            _fail("inject.hook_install_failed", "inject.status", "native installation receipt reports a failure")
+        # This receipt is first published only after every scene is installed.
+        # A short scene may already have advanced to running or sealed.
+        mailbox.installed = True
+        return
+
+
 def _external(code: str, stage: str, operation):
     try:
         return operation()
@@ -630,6 +674,7 @@ def _run_injection_worker(
     mailbox: _Mailbox | None = None
     script_loaded = False
     resumed = False
+    early_detached = False
 
     def budget() -> float:
         remaining = deadline - time.monotonic()
@@ -700,6 +745,13 @@ def _run_injection_worker(
             lambda: script.post({"type": "qtrace-startup", "payload": envelope}),
         )
         mailbox.wait_for("initialized", deadline)
+        if request.detach_before_resume:
+            _external("frida.unload_failed", "inject.cleanup", script.unload)
+            script_loaded = False
+            script = None
+            _external("frida.detach_failed", "inject.cleanup", session.detach)
+            session = None
+            early_detached = True
         mailbox.mark_resume_started()
         _external(
             "frida.resume_failed",
@@ -709,7 +761,10 @@ def _run_injection_worker(
         mailbox.mark_resumed()
         resumed = True
         _send_worker_event(channel, "resumed", pid)
-        mailbox.wait_for("installed", deadline)
+        if request.detach_before_resume:
+            _wait_for_detached_installation(validated, mailbox, deadline)
+        else:
+            mailbox.wait_for("installed", deadline)
         assert mailbox.generation is not None and mailbox.normalized_scenes is not None
         result = InjectionResult(
             pid=pid,
@@ -722,7 +777,7 @@ def _run_injection_worker(
         primary = error
     finally:
         cleanup_error: BaseException | None = None
-        detach_succeeded = False
+        detach_succeeded = early_detached
         if pid is not None and not resumed:
             cleaned = False
             detail = "original process script was not loaded"

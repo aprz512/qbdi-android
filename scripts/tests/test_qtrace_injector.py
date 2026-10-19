@@ -16,6 +16,7 @@ from unittest.mock import patch
 from qtrace.errors import ErrorCode, QtraceError
 from qtrace.injector import FridaInjector, FridaProvider, InjectionRequest
 from qtrace.models import ResolvedScene
+from scripts.bounded_process import BoundedProcessError
 
 
 SESSION_ID = "7d5807cf-cf09-4f21-92de-1ad92802610a"
@@ -140,6 +141,19 @@ def error_message(code, *, stage="load", detail="agent rejected startup"):
     }
 
 
+def native_installation_receipt(state="installed"):
+    return {
+        "schemaVersion": 1, "sessionId": SESSION_ID, "generation": 7,
+        "packageName": PACKAGE, "pid": 4242, "state": state,
+        "reason": "duration_elapsed" if state == "sealed" else "",
+        "transitionMonotonicNs": 100, "deadlineMonotonicNs": 200,
+        "normalizedScenes": [{"name": "entry", "startOffset": 0x100, "endOffset": 0x140},
+                             {"name": "worker", "startOffset": 0x200, "endOffset": 0x280}],
+        "activeScenes": [], "artifacts": [], "stopAcknowledged": state == "sealed",
+        "warnings": [], "errors": [],
+    }
+
+
 class SharedLog:
     """One-writer-at-a-time observation log that survives the worker fork."""
 
@@ -177,6 +191,7 @@ class SharedLog:
 
 class Scenario:
     def __init__(self):
+        self.native_receipts = [json.dumps(native_installation_receipt()).encode()]
         self.post_messages = [initialized_message()]
         self.resume_messages = [installed_message()]
         self.resume_messages_synchronous = False
@@ -346,6 +361,7 @@ class FakeProvider:
 class FakeAdbDevice:
     serial = "SERIAL"
     package = PACKAGE
+    trace_directory = f"/data/user/0/{PACKAGE}/files/qbdi-traces"
 
     def __init__(self, scenario, events):
         self.scenario = scenario
@@ -363,6 +379,13 @@ class FakeAdbDevice:
 
     def target_shell(self, *args, timeout, maximum_bytes):
         self.events.append(("target", tuple(args)))
+        if args == ("cat", f"{self.trace_directory}/session-{SESSION_ID}.status.json"):
+            receipt = self.scenario.native_receipts[0]
+            if len(self.scenario.native_receipts) > 1:
+                self.scenario.native_receipts.pop(0)
+            if isinstance(receipt, BaseException):
+                raise receipt
+            return receipt
         self.kill_calls.append(tuple(args))
         self.kill_timeouts.append(timeout)
         if self.scenario.kill_error:
@@ -397,6 +420,71 @@ class InjectorHarness:
 
 
 class FridaInjectorTests(unittest.TestCase):
+    def test_detach_before_resume_waits_for_native_proof_including_short_finished_scenes(self):
+        for state in ("installed", "running", "sealed"):
+            with self.subTest(state=state):
+                harness = InjectorHarness()
+                harness.scenario.resume_messages = []
+                harness.scenario.native_receipts = [json.dumps(native_installation_receipt(state)).encode()]
+                result = harness.install(harness.request(detach_before_resume=True))
+                events = harness.events.snapshot()
+                self.assertLess(events.index("unload"), events.index("detach"))
+                self.assertLess(events.index("detach"), events.index(("resume", 4242)))
+                self.assertTrue(result.cleanup_detached)
+                self.assertEqual(7, result.generation)
+                self.assertEqual(1, events.count("detach"))
+
+    def test_early_detach_rejects_receipt_identity_mismatch_and_native_failure(self):
+        changes = ({"pid": 9999}, {"generation": 9}, {"sessionId": "another-session"},
+                   {"packageName": "com.example.other"}, {"normalizedScenes": []},
+                   {"errors": [{"code": "HOOK_INSTALL_FAILED", "path": "scenes", "message": "failed"}]})
+        for change in changes:
+            with self.subTest(change=change):
+                harness = InjectorHarness()
+                harness.scenario.resume_messages = []
+                receipt = native_installation_receipt()
+                receipt.update(change)
+                harness.scenario.native_receipts = [json.dumps(receipt).encode()]
+                with self.assertRaises(QtraceError) as caught:
+                    harness.install(harness.request(detach_before_resume=True))
+                self.assertIn(caught.exception.code, {"inject.protocol_invalid", "inject.hook_install_failed"})
+
+    def test_early_detach_waits_only_for_missing_receipts_and_obeys_deadline(self):
+        for eventually_present in (True, False):
+            with self.subTest(eventually_present=eventually_present):
+                harness = InjectorHarness()
+                harness.scenario.resume_messages = []
+                path = f"{harness.adb.trace_directory}/session-{SESSION_ID}.status.json"
+                missing = QtraceError("process.failed", "process", "missing receipt")
+                missing.__cause__ = BoundedProcessError("cat", returncode=1,
+                    stderr=f"cat: {path}: No such file or directory".encode())
+                harness.scenario.native_receipts.insert(0, missing)
+                if eventually_present:
+                    self.assertTrue(harness.install(harness.request(detach_before_resume=True)).cleanup_detached)
+                else:
+                    harness.scenario.native_receipts = [missing]
+                    with self.assertRaises(QtraceError) as caught:
+                        harness.install(harness.request(detach_before_resume=True, setup_timeout=0.4))
+                    self.assertEqual("inject.timeout", caught.exception.code)
+
+    def test_early_detach_rejects_malformed_receipts_and_preserves_adb_errors(self):
+        for receipt in (b'{}', b'{"schemaVersion":1,"schemaVersion":1}',
+                        QtraceError("device.command_failed", "device", "permission denied")):
+            with self.subTest(receipt=receipt):
+                harness = InjectorHarness()
+                harness.scenario.resume_messages = []
+                harness.scenario.native_receipts = [receipt]
+                with self.assertRaises(QtraceError) as caught:
+                    harness.install(harness.request(detach_before_resume=True))
+                self.assertEqual("device.command_failed" if isinstance(receipt, QtraceError)
+                                 else "inject.protocol_invalid", caught.exception.code)
+
+    def test_detach_option_requires_boolean_before_any_device_action(self):
+        harness = InjectorHarness()
+        with self.assertRaises(QtraceError):
+            harness.install(harness.request(detach_before_resume="yes"))
+        self.assertEqual([], harness.events.snapshot())
+
     def test_installs_in_exact_order_posts_one_static_envelope_and_detaches(self):
         harness = InjectorHarness()
 

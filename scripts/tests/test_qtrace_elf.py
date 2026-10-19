@@ -73,6 +73,15 @@ Program Headers:
   LOAD           0x003000 0x000000000000b000 0x000000000000b000 0x000100 0x000180 RW  0x1000
 """
 
+ANDROID16K_READELF = ARM64_READELF[:ARM64_READELF.index("Program Headers:")] + """\
+Program Headers:
+  Type Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align
+  LOAD 0x000000 0x000000 0x000000 0x000a20 0x000a20 R 0x4000
+  LOAD 0x000a20 0x004a20 0x004a20 0x000500 0x000500 R E 0x4000
+  LOAD 0x000f20 0x008f20 0x008f20 0x000230 0x0010e0 RW 0x4000
+  LOAD 0x001150 0x00d150 0x00d150 0x000030 0x000040 RW 0x4000
+"""
+
 
 @dataclass(frozen=True)
 class RunnerCall:
@@ -273,6 +282,11 @@ class ElfInspectorTests(unittest.TestCase):
         )
         self.assertGreater(runner.calls[0].timeout, 0)
         self.assertGreater(runner.calls[0].maximum_bytes, 0)
+
+    def test_android16kb_executable_virtual_offsets_are_not_file_offsets(self):
+        inspector, _ = self.inspector(readelf=ANDROID16K_READELF, nm="JNI_OnLoad T 4a80 8c\n")
+        self.assertEqual(((0x4a20, 0x4f20),), inspector.inspect(self.binary).executable_ranges)
+        self.assertEqual((0x4a80, 0x4b0c), inspector.symbol_range(self.binary, "JNI_OnLoad"))
 
     def test_nonzero_elf_load_bias_is_removed_from_ranges_and_symbols(self):
         inspector, _runner = self.inspector(

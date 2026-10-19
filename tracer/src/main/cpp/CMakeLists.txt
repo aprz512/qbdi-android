@@ -7,6 +7,10 @@ set(ANDROID_16KB_PAGE_LINK_OPTIONS "-Wl,-z,max-page-size=16384")
 set(QBDI_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qbdi)
 set(SHADOWHOOK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/android-inline-hook/shadowhook/src/main/cpp)
 set(LZ4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lz4/lib)
+set(QTRACE_USER_RULES_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/rules/user_code_rules.cpp"
+        CACHE FILEPATH "Source defining register_user_code_rules for this tracer build")
+option(QTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK
+        "Allow 20-byte entry patches when no nearby branch island is available (startup experiments)" OFF)
 
 add_library(lz4_static STATIC
         ${LZ4_ROOT}/lz4.c
@@ -37,6 +41,9 @@ file(GLOB SHADOWHOOK_SRC
 
 add_library(shadowhook_static STATIC ${SHADOWHOOK_SRC})
 target_compile_features(shadowhook_static PRIVATE c_std_11)
+if(QTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK)
+    target_compile_definitions(shadowhook_static PRIVATE SH_CONFIG_TRY_HOOK_WITHOUT_ISLAND)
+endif()
 target_compile_options(shadowhook_static PRIVATE -Os -ffunction-sections -fdata-sections)
 target_include_directories(shadowhook_static PUBLIC ${SHADOWHOOK_ROOT}/include)
 target_include_directories(shadowhook_static PRIVATE
@@ -108,7 +115,7 @@ add_library(qbdi_tracer SHARED
         handlers/call_handlers.cpp
         rules/code_rule.cpp
         rules/code_rule_context.cpp
-        rules/user_code_rules.cpp
+        ${QTRACE_USER_RULES_SOURCE}
         jni/jni_call_resolver.cpp
         jni/jni_function_registry.cpp
         jni/jni_state.cpp

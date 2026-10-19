@@ -31,6 +31,7 @@ add_trace_test(tracer_configuration_test
 add_trace_test(module_maps_test
     module_maps_test.cpp
     ../../main/cpp/core/module_maps.cpp)
+target_link_options(module_maps_test PRIVATE -Wl,--wrap=dl_iterate_phdr)
 
 add_trace_test(safe_memory_string_test
     safe_memory_string_test.cpp
@@ -219,6 +220,13 @@ add_trace_test(qbdi_instruction_decoder_test
 add_trace_test(code_rule_test
     code_rule_test.cpp
     ../../main/cpp/rules/code_rule.cpp)
+
+add_trace_test(appguard_rules_test
+    appguard_rules_test.cpp
+    ../../../../scripts/appguard_dgup/rules.cpp
+    ../../main/cpp/rules/code_rule.cpp
+    ../../main/cpp/rules/code_rule_context.cpp
+    ../../main/cpp/core/safe_memory.cpp)
 
 add_trace_test(shadowhook_retention_contract_test
     shadowhook_retention_contract_test.cpp)

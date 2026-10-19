@@ -83,6 +83,10 @@ python3 -m qtrace run --config target.json --duration 30s --device SERIAL --outp
 python3 -m qtrace monitor --config target.json --device SERIAL --output results
 ```
 
+如果目标在 Frida 驻留的启动阶段出现兼容性问题，可给 `run` 或 `monitor` 加
+`--detach-before-resume`。该选项在发布原生配置后、恢复应用前卸载脚本并脱离会话，
+随后通过 ADB 校验绑定 session、PID、generation 和场景的原生安装凭据；不会将配置回执当作安装成功。
+
 配置中的 offset 是模块相对、半开区间 `[startOffset,endOffset)`；不接受 base
 address。offset 与 symbol 两种严格形式如下（它们不能混用，也不能附加 `base`）：
 
@@ -535,9 +539,12 @@ Flight Recorder 的多线程崩溃压力结果见 [Flight Recorder 验收报告]
 
 ## 完整性检查与 CodeRules
 
-integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。运行时绕过逻辑应放在 `tracer/src/main/cpp/rules/user_code_rules.cpp`，由 CodeRules 按目标模块偏移匹配；JavaScript 配置只负责场景位置。
+integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。运行时绕过逻辑默认放在 `tracer/src/main/cpp/rules/user_code_rules.cpp`，也可用 CMake 参数 `QTRACE_USER_RULES_SOURCE` 指定目标专用源文件。CodeRules 按目标模块偏移匹配；JavaScript 配置只负责场景位置。
 
 具体机制见 [完整性检查与 CodeRules](docs/integrity-bypass.md)。
+
+真实应用的检测链、QBDI 跟踪结果、工具修复和并发覆盖限制，见
+[数码宝贝 UP / AppGuard 实测](docs/research/2026-10-19-appguard-dgup.md)。
 
 ## 常见问题
 

@@ -165,8 +165,71 @@ bool normalize_module_ranges(const std::vector<ModuleRange> &maps,
 
 bool find_loaded_module(const std::string &requested_path, uintptr_t observed_base,
                         uintptr_t observed_size, ModuleRange *out) {
+    if (requested_path.empty() || out == nullptr) return false;
+    if (observed_size != 0 &&
+        (observed_base == 0 || observed_size >
+                std::numeric_limits<uintptr_t>::max() - observed_base)) {
+        return false;
+    }
+    struct Lookup {
+        const std::string &path;
+        uintptr_t base;
+        uintptr_t size;
+        bool matched = false;
+        bool found = false;
+        bool invalid = false;
+        ModuleRange module;
+    } lookup{requested_path, observed_base, observed_size, false, false, false, {}};
+    // The linker knows the ELF load bias. start - file_offset from an RX map
+    // is incorrect when PT_LOAD p_vaddr differs from p_offset (e.g. 16KB ELFs).
+    // Use the same source of identity as the constructor callback. Callers must
+    // not hold the hook registry lock while acquiring the linker's lock here.
+    ::dl_iterate_phdr([](dl_phdr_info *info, size_t, void *data) -> int {
+        auto &lookup = *static_cast<Lookup *>(data);
+        if (info == nullptr || info->dlpi_name == nullptr ||
+            !mapped_path_matches(lookup.path, info->dlpi_name)) return 0;
+        lookup.matched = true;
+        if (lookup.size != 0 && info->dlpi_addr != lookup.base) return 0;
+        ModuleRange module;
+        if (!module_range_from_phdr(*info, &module) || !module.executable() ||
+            (lookup.size != 0 && module.end > lookup.base + lookup.size) ||
+            lookup.found) {
+            lookup.invalid = true;
+            return 1;
+        }
+        lookup.module = std::move(module);
+        lookup.found = true;
+        return 0;
+    }, &lookup);
+    if (lookup.matched) {
+        if (!lookup.found || lookup.invalid) return false;
+        *out = std::move(lookup.module);
+        return true;
+    }
+    // Keep the maps fallback for mappings absent from the linker namespace.
     return normalize_module_ranges(read_process_maps(), requested_path, observed_base,
                                    observed_size, out);
+}
+
+bool module_range_from_region(const std::vector<ModuleRange> &maps,
+                              const std::string &logical_name, uintptr_t base,
+                              uintptr_t size, ModuleRange *out) {
+    if (out == nullptr || logical_name.empty() || base == 0 || size == 0 ||
+        size > std::numeric_limits<uintptr_t>::max() - base) return false;
+    for (const ModuleRange &mapping : maps) {
+        if (mapping.start > base || mapping.end < base + size ||
+            !mapping.executable() || mapping.permissions.find('r') == std::string::npos) continue;
+        ModuleRange module;
+        module.start = base;
+        module.end = base + size;
+        module.path = logical_name;
+        module.permissions = mapping.permissions;
+        module.readable_executable_ranges[0] = {base, base + size};
+        module.readable_executable_range_count = 1;
+        *out = std::move(module);
+        return true;
+    }
+    return false;
 }
 
 bool module_offset_address(const ModuleRange &module, uintptr_t offset,

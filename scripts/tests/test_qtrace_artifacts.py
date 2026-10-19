@@ -97,6 +97,26 @@ class ArtifactTests(unittest.TestCase):
             device.calls,
         )
 
+    def test_remote_size_allows_wc_to_echo_a_long_game_artifact_path(self):
+        from qtrace.artifacts import _client_for
+
+        class BoundDevice:
+            package = "com.bandainamcoent.dgup_ww"
+            trace_directory = f"/data/user/0/{package}/files/qbdi-traces"
+
+            def target_shell(self, *args, timeout, maximum_bytes):
+                self.path = args[2]
+                raw = ("123 " + self.path + "\n").encode()
+                if len(raw) > maximum_bytes:
+                    raise QtraceError("process.failed", "process", "output exceeds bound")
+                return raw
+
+        device = BoundDevice()
+        client = _client_for(device, device.package, None)
+        name = "1792415087351_23655_23655_unity-initialization_0x4a80_0.trace.bin.metrics"
+        self.assertEqual(123, client.size(name, timeout=1.5))
+        self.assertGreater(len(device.path), 128)
+
     def test_default_client_rejects_package_mismatch_despite_legacy_client_capabilities(self):
         from qtrace.artifacts import _client_for
 

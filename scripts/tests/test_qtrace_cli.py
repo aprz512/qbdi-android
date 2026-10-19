@@ -184,11 +184,13 @@ class QtraceCliTests(unittest.TestCase):
                     "run", "--config", "target.json", "--duration", "30s",
                     "--device", "serial", "--output", "results", "--setup-timeout", "91",
                     "--stop-timeout", "11", "--adb-timeout", "31", "--pull-timeout", "61",
+                    "--detach-before-resume",
                 ])
 
         self.assertEqual(0, exit_code)
         request = orchestrator.run.call_args.args[0]
         self.assertEqual(30_000, request.duration_ms)
+        self.assertTrue(request.detach_before_resume)
         self.assertEqual((91.0, 11.0, 31.0, 61.0),
                          (request.setup_timeout, request.stop_timeout,
                           request.adb_timeout, request.pull_timeout))

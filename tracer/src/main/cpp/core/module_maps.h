@@ -56,6 +56,12 @@ bool normalize_module_ranges(const std::vector<ModuleRange> &maps,
 bool find_loaded_module(const std::string &requested_path, uintptr_t observed_base,
                         uintptr_t observed_size, ModuleRange *out);
 
+// Explicit logical module for unpacked code. The entire region must belong to
+// one currently readable/executable mapping; this does not infer ELF identity.
+bool module_range_from_region(const std::vector<ModuleRange> &maps,
+                              const std::string &logical_name, uintptr_t base,
+                              uintptr_t size, ModuleRange *out);
+
 bool module_offset_address(const ModuleRange &module, uintptr_t offset,
                            bool allow_end, uintptr_t *address);
 

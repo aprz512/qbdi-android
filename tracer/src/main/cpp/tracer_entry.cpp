@@ -2081,6 +2081,27 @@ qbdi_tracer_install_module(const char *module_path, uintptr_t module_base, uintp
     install_hooks_for_module(module, generation, false);
 }
 
+// An explicit alternative for unpacked anonymous code, absent from the ELF
+// loader. Zero means installation was attempted; get_status_json remains the
+// authoritative success/failure receipt. The caller owns sample identification.
+extern "C" __attribute__((visibility("default"))) int
+qbdi_tracer_install_region(const char *logical_module, uintptr_t base, uintptr_t size) {
+    try {
+        if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) return -1;
+        if (logical_module == nullptr || logical_module[0] == '\0') return -2;
+        uint64_t generation = 0;
+        TraceConfig config;
+        if (!g_tracer_configuration.current(&generation, &config) ||
+            basename_of(logical_module) != config.target_so) return -2;
+        ModuleRange module;
+        if (!module_range_from_region(read_process_maps(), logical_module, base, size, &module)) return -3;
+        install_hooks_for_module(module, generation, false);
+        return 0;
+    } catch (...) {
+        return -4;
+    }
+}
+
 __attribute__((constructor)) static void qbdi_tracer_init() {
     int install_error = trace_process_lifecycle_error();
     if (install_trace_process_lifecycle()) {

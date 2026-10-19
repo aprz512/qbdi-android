@@ -83,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--duration", type=_duration, required=True, metavar="DURATION",
                      help="duration from 100ms through 24h (for example 30s)")
     _add_setup_timeout(run)
+    run.add_argument("--detach-before-resume", action="store_true",
+                     help="detach Frida before app startup and verify installation through native status")
     run.add_argument("--stop-timeout", type=_positive_timeout, default=_DEFAULT_STOP_TIMEOUT,
                      metavar="SECONDS", help="native stop deadline in seconds (default: 10)")
     _add_adb_timeout(run)
@@ -91,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     monitor = commands.add_parser("monitor", help="trace until the app process exits")
     _add_common(monitor, config=True)
     _add_setup_timeout(monitor)
+    monitor.add_argument("--detach-before-resume", action="store_true",
+                         help="detach Frida before app startup and verify installation through native status")
     _add_adb_timeout(monitor)
     _add_pull_timeout(monitor)
 
@@ -345,7 +349,8 @@ def _emit_result(report: Path, artifacts: Sequence[Path], exit_code: int, as_jso
 def _run(arguments: argparse.Namespace, repo_root: Path) -> int:
     request = RunRequest(load_config(arguments.config), arguments.device, arguments.output,
                          arguments.duration, arguments.setup_timeout, arguments.stop_timeout,
-                         arguments.adb_timeout, arguments.pull_timeout)
+                         arguments.adb_timeout, arguments.pull_timeout,
+                         detach_before_resume=arguments.detach_before_resume)
     _progress("starting timed session")
     result = _make_orchestrator(repo_root).run(request)
     _emit_result(result.report, result.outputs, result.exit_code, arguments.json)
@@ -354,7 +359,8 @@ def _run(arguments: argparse.Namespace, repo_root: Path) -> int:
 
 def _monitor(arguments: argparse.Namespace, repo_root: Path) -> int:
     request = MonitorRequest(load_config(arguments.config), arguments.device, arguments.output,
-                             arguments.setup_timeout, arguments.adb_timeout, arguments.pull_timeout)
+                             arguments.setup_timeout, arguments.adb_timeout, arguments.pull_timeout,
+                             detach_before_resume=arguments.detach_before_resume)
     _progress("starting monitor session")
     result = _make_orchestrator(repo_root).monitor(request)
     _emit_result(result.report, result.outputs, result.exit_code, arguments.json)

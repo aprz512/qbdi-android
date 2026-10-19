@@ -1,6 +1,7 @@
 import math
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError, dataclass
@@ -265,7 +266,7 @@ class AdbDeviceTests(unittest.TestCase):
     def test_su_uid_target_stream_uses_the_bounded_command_tuple(self):
         path = "/data/user/0/com.example.app/files/qbdi-traces/run.trace.bin"
         command = (
-            "adb", "-s", "SERIAL", "exec-out", "su", "10905", "-c", f"'cat {path}'",
+            "adb", "-s", "SERIAL", "exec-out", "su", "10905", "-c", f"cat {path}",
         )
         runner = FakeRunner({command: (b"trace",)})
         device = AdbDevice("SERIAL", runner).bind_target(TargetBinding(
@@ -279,6 +280,24 @@ class AdbDeviceTests(unittest.TestCase):
 
         self.assertEqual(b"trace", output.getvalue())
         self.assertEqual([Call(command, 512, 1.5)], runner.calls)
+
+    def test_exec_out_su_command_preserves_binary_bytes_through_its_single_shell(self):
+        class ExecOutRunner:
+            def stream(self, command, output, *, maximum_bytes, timeout):
+                # exec-out and su pass the -c operand directly to this shell.
+                result = subprocess.run(["/bin/sh", "-c", command[-1]],
+                                        capture_output=True, check=True, timeout=timeout)
+                if len(result.stdout) > maximum_bytes: raise AssertionError("unbounded stream")
+                output.write(result.stdout)
+
+        with tempfile.TemporaryDirectory(prefix="qtrace-exec-out-") as directory:
+            path = Path(directory) / "trace.bin"
+            binary = b"QTRB\x00\xff\r\n\x80"
+            path.write_bytes(binary)
+            device = AdbDevice("SERIAL", ExecOutRunner()).bind_target(target_binding(target_strategy="su-uid"))
+            output = io.BytesIO()
+            device.stream_target_file(str(path), output, maximum_bytes=512, timeout=1.5)
+            self.assertEqual(binary, output.getvalue())
 
     def test_accepts_literal_tildes_in_normalized_absolute_pixel_apk_path(self):
         command = (
