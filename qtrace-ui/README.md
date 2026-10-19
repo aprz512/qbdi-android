@@ -40,6 +40,7 @@ Source artifacts are immutable. Persistent indexes live under `${XDG_CACHE_HOME:
 - Prefer a session report; single-file open intentionally lacks package/device/config context.
 - Filter by thread, kind, module, PC, sequence, mnemonic, register, memory, or semantic fields. The projection is paged; the DOM never owns the full trace.
 - Results have independent page navigation and show whether the total is exact or still indexing. Previous/Next hit cross page boundaries; selecting a hit jumps to its event in the timeline.
+- Call trees keep one sibling page per parent. Use Load more calls and Previous calls to move between pages. Older branches can be unloaded and fetched again when expanded.
 - The canvas has a parallel ARIA grid. Arrow keys move focus, Enter selects, and Escape clears transient navigation.
 - Inspect register and memory provenance before relying on a value. Incomplete call frames remain explicit.
 - Rebuild caches after analyzer/schema upgrades; back up annotations before deleting the data root.
@@ -75,6 +76,32 @@ The cache format is unchanged, so existing caches use the same validation path.
 
 Local phase measurements, cancellation checks, and retained-capture browser
 acceptance are recorded in the [2026-10-19 long-operation evidence](../docs/benchmarks/qtrace-long-operations-2026-10-19.json).
+
+## Call tree page memory
+
+The call tree cache retains at most 8,192 nodes and 4 MiB of accounted weight.
+Weight includes string lengths and allowances for objects; it is not a browser
+heap limit. Each sibling page contains at most 100 nodes. Paging replaces that
+parent's window and releases unreachable descendants. Least recently used
+branches are evicted under pressure and remain available through expansion or
+Load calls. An ancestor path that alone exceeds the budget is rejected without
+replacing the current view. DOM virtualization also remains enabled.
+
+Run the frontend diagnostic from the repository root after installing frontend
+dependencies and Playwright Chromium:
+
+```bash
+node qtrace-ui/tools/call_tree_memory.mjs /tmp/qtrace-call-tree-memory.json
+```
+
+The diagnostic opens five isolated Chromium pages. Each browses 100 branches
+with 100 children, using the actual CallTreePane and synthetic page responses.
+It records forced-GC heap growth, frame and expansion samples, DOM counts,
+source hashes, and runtime identity. Expansion timings include two animation
+frames and should not be interpreted as JavaScript execution time. This does
+not measure the Rust service, Tauri WebKit, or device capture performance.
+The [page-cache acceptance](../docs/benchmarks/qtrace-ui-call-tree-pages.md)
+records the local comparison and retained-capture browser regression.
 
 ## Captured session verification
 
