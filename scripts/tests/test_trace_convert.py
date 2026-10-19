@@ -122,8 +122,10 @@ class DocumentationContractTests(unittest.TestCase):
     def test_user_docs_describe_binary_workflow_and_compatibility(self):
         root = Path(__file__).parents[2]
         readme = root.joinpath("README.md").read_text(encoding="utf-8")
+        usage = root.joinpath("docs", "usage.md").read_text(encoding="utf-8")
         protocol = root.joinpath("docs", "trace-format.md").read_text(encoding="utf-8")
-        pull_section = readme.split("## Pull Traces", 1)[1]
+        self.assertIn("(docs/usage.md)", readme)
+        pull_section = usage.split("## Pull Traces", 1)[1]
         self.assertIn(
             "python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \\\n"
             "  --device 192.168.51.42:5555 --output pulled-traces",
@@ -139,15 +141,16 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("QTRB 1.2 type 10 + metrics v3", pull_section)
         self.assertIn(
             "QTRB `.trace.bin.lz4` 始终需要主机 `lz4`，包括 `--compressed-only`。",
-            readme,
+            usage,
         )
         self.assertIn(
             "遗留 `.trace.txt.lz4` 与 Flight Recorder `.flight.bin` 使用 `--compressed-only` "
             "可原样拉取，无需解压。",
-            readme,
+            usage,
         )
         self.assertIn("truncated + valid crash marker", pull_section)
         self.assertNotIn("文本格式 3", readme)
+        self.assertNotIn("文本格式 3", usage)
         self.assertIn("app-private", pull_section)
         compatibility = protocol.split("## Artifact set", 1)[1].split("## QTRB v1 stream", 1)[0]
         self.assertIn("format-2 `.trace.txt.lz4`", compatibility)

@@ -76,8 +76,13 @@ class ShadowHookCompanionContractTests(unittest.TestCase):
 
     def test_deployment_docs_stage_companion_with_standalone_tracer(self):
         readme = (ROOT / "README.md").read_text()
+        development = (ROOT / "docs/development.md").read_text()
+        manual = (ROOT / "docs/manual-tracing.md").read_text()
 
-        self.assertIn("out/arm64-v8a/libshadowhook_nothing.so", readme)
+        self.assertIn("(docs/development.md)", readme)
+        self.assertIn("(docs/manual-tracing.md)", readme)
+        self.assertIn("out/arm64-v8a/libshadowhook_nothing.so", development)
+        self.assertIn("adb push out/arm64-v8a/libshadowhook_nothing.so", manual)
 
 
 if __name__ == "__main__":
