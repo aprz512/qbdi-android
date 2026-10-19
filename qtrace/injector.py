@@ -43,6 +43,13 @@ _AGENT_SOURCE = Path(__file__).with_name("agent.js")
 
 
 @dataclass(frozen=True)
+class StartupAdapter:
+    library: str
+    entrypoint: str
+    mode: int
+
+
+@dataclass(frozen=True)
 class InjectionRequest:
     package: str
     session_id: str
@@ -51,6 +58,7 @@ class InjectionRequest:
     native_request: Mapping[str, object]
     setup_timeout: float
     detach_before_resume: bool = False
+    startup_adapter: StartupAdapter | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +257,16 @@ def _validate_request(request: InjectionRequest, device: BoundTargetDevice) -> _
         _fail("inject.request_invalid", "inject.validate", "session ID must be a lowercase UUIDv4")
     _safe_remote_path(request.tracer_so, "tracer path")
     _safe_remote_path(request.companion, "companion path")
+    adapter = request.startup_adapter
+    if adapter is not None:
+        if (type(adapter) is not StartupAdapter or
+                not isinstance(adapter.entrypoint, str) or
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", adapter.entrypoint) is None or
+                type(adapter.mode) is not int or not 0 <= adapter.mode <= 0x7fffffff):
+            _fail("inject.request_invalid", "inject.validate", "startup adapter is invalid")
+        _safe_remote_path(adapter.library, "adapter library")
+        if PurePosixPath(adapter.library).parent != PurePosixPath(request.tracer_so).parent:
+            _fail("inject.request_invalid", "inject.validate", "adapter must share the staged tracer directory")
     if (
         isinstance(request.setup_timeout, bool)
         or not isinstance(request.setup_timeout, (int, float))
@@ -729,6 +747,8 @@ def _run_injection_worker(
             "nativeRequest": validated.native_request,
             "setupTimeoutMs": remaining_ms,
         }
+        if request.startup_adapter is not None:
+            envelope["startupAdapter"] = dataclasses.asdict(request.startup_adapter)
         envelope_size = len(json.dumps(
             envelope,
             ensure_ascii=False,

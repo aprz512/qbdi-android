@@ -28,6 +28,9 @@ add_trace_test(tracer_configuration_test
     ../../main/cpp/core/trace_config.cpp
     ../../main/cpp/core/tracer_configuration.cpp)
 
+target_compile_definitions(tracer_configuration_test PRIVATE
+    QTRACE_USER_RULES_SAMPLE_SHA256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
 add_trace_test(module_maps_test
     module_maps_test.cpp
     ../../main/cpp/core/module_maps.cpp)
@@ -216,6 +219,13 @@ add_trace_test(qbdi_instruction_decoder_test
     ../../main/cpp/core/arm64_memory_operand.cpp
     ../../main/cpp/core/safe_memory.cpp
     ../../main/cpp/core/instruction_cache.cpp)
+
+add_trace_test(default_user_rules_test
+    default_user_rules_test.cpp
+    ../../main/cpp/rules/code_rule.cpp
+    ../../main/cpp/rules/code_rule_context.cpp
+    ../../main/cpp/rules/user_code_rules.cpp
+    ../../main/cpp/core/safe_memory.cpp)
 
 add_trace_test(code_rule_test
     code_rule_test.cpp

@@ -44,6 +44,11 @@ struct SessionOptions {
     bool timed() const noexcept { return duration_ms != 0; }
 };
 
+struct CodeRulesOptions {
+    bool enabled = false;
+    std::string sample_sha256;
+};
+
 struct TraceConfig {
     std::string package_name = "com.aprz.qbdiandroid";
     std::string target_so = "libdemo_target.so";
@@ -51,6 +56,7 @@ struct TraceConfig {
     // JNI 函数名列表，命中时打印调用栈（回溯）
     std::vector<std::string> jni_backtrace_funcs;
     TraceOptions trace;
+    CodeRulesOptions code_rules;
     FlightOptions flight;
     SessionOptions session;
 #ifndef NDEBUG

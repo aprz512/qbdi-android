@@ -34,6 +34,24 @@ class DurationTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_accepts_explicit_sample_sha256_and_rules_opt_in(self):
+        payload = self.valid_payload()
+        payload["target"]["sha256"] = "a" * 64
+        payload["tracer"] = {"codeRules": True}
+        config = load_config(self.write_json("sample.json", payload))
+        self.assertEqual(config.target.sha256, "a" * 64)
+        self.assertTrue(config.tracer.code_rules)
+
+    def test_rules_require_explicit_identity_and_sha256_is_strict(self):
+        payload = self.valid_payload()
+        payload["tracer"] = {"codeRules": True}
+        with self.assertRaisesRegex(ConfigError, "RULES_IDENTITY_REQUIRED"):
+            load_config(self.write_json("missing-sha.json", payload))
+        for digest in [None, "A" * 64, "a" * 63, "g" * 64, 123, "a" * 64 + "\n"]:
+            payload["target"]["sha256"] = digest
+            with self.subTest(digest=digest), self.assertRaisesRegex(ConfigError, "TARGET_SHA256_INVALID"):
+                load_config(self.write_json("bad-sha.json", payload))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

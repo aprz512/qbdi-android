@@ -30,6 +30,7 @@ def main():
         "-DANDROID_ABI=arm64-v8a", "-DANDROID_PLATFORM=android-28", "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
         "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + str(output),
         "-DQTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK=ON",
+        "-DQTRACE_USER_RULES_SAMPLE_SHA256=4aeafdbe1ea691c8c6f7ea675cb817688a1f4875a258b97e1f342aaebd9094d0",
         "-DQTRACE_USER_RULES_SOURCE=" + str(ROOT / "scripts/appguard_dgup/rules.cpp")], check=True)
     subprocess.run([str(cmake), "--build", str(build), "--target", "qbdi_tracer", "shadowhook_nothing", "-j", "4"], check=True)
     clang = ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"

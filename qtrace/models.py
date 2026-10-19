@@ -28,6 +28,7 @@ class AppConfig:
 class TargetConfig:
     module: str
     binary: Path | None
+    sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class TracerConfig:
     flight_entry_scene: str | None
     library: Path | None
     companion: Path | None
+    code_rules: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class ElfIdentity:
     machine: str
     build_id: str
     executable_ranges: tuple[tuple[int, int], ...]
+    sha256: str | None = None
 
 
 @dataclass(frozen=True)

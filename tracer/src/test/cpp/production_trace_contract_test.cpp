@@ -169,7 +169,7 @@ void flight_register_sync_follows_simulated_call_setup() {
             read_file(root / "core" / "qbdi_thread_session.cpp");
     const size_t call = source.find("QBDI::simulateCallA(gpr, kReturnAddress");
     const size_t sync = source.find("flight_sink.sync_registers(*gpr)", call);
-    const size_t run = source.find("vm.run(execution_entry, kReturnAddress)", sync);
+    const size_t run = source.find("vm.run(start, kReturnAddress)", sync);
     CHECK(call != std::string::npos);
     CHECK(sync != std::string::npos);
     CHECK(run != std::string::npos);
@@ -281,7 +281,7 @@ void signal_virtualization_is_scoped_to_each_vm_run_epoch() {
     const size_t call_activate = source.find(
             "signal_execution.activate(gpr)", call);
     const size_t call_run = source.find(
-            "vm.run(execution_entry, kReturnAddress)", call_activate);
+            "vm.run(start, kReturnAddress)", call_activate);
     const size_t call_clear = source.find(
             "signal_execution.clear()", call_run);
     CHECK(call != std::string::npos);

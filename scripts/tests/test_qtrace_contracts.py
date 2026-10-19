@@ -795,12 +795,12 @@ class SchemaContractsTests(unittest.TestCase):
         self.assertEqual({"package", "apk"}, set(definitions["app"]["properties"]))
         self.assertEqual(["package"], definitions["app"]["required"])
         self.assertFalse(definitions["app"]["additionalProperties"])
-        self.assertEqual({"module", "binary"}, set(definitions["target"]["properties"]))
+        self.assertEqual({"module", "binary", "sha256"}, set(definitions["target"]["properties"]))
         self.assertEqual(["module"], definitions["target"]["required"])
         self.assertFalse(definitions["target"]["additionalProperties"])
         tracer = definitions["tracer"]
         self.assertEqual(
-            {"profile", "compression", "flightEnabled", "flightEntryScene", "library", "companion"},
+            {"profile", "compression", "flightEnabled", "flightEntryScene", "library", "companion", "codeRules"},
             set(tracer["properties"]),
         )
         self.assertFalse(tracer["additionalProperties"])

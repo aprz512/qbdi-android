@@ -760,10 +760,13 @@ void status_metadata_producers_publish_artifacts_warnings_and_errors() {
     CHECK(runtime->arm());
     wait_for_count(poll.waits, 1);
     CHECK(runtime->record_artifact("flight.trace.bin.lz4"));
+    for (unsigned index = 0; index < 31; ++index) {
+        CHECK(runtime->record_artifact("concurrent-" + std::to_string(index) + ".trace.bin"));
+    }
     CHECK(runtime->record_status_warning("FLIGHT_DEGRADED", "$.flight", "ring wrapped"));
     CHECK(runtime->record_status_error("SEAL_FAILED", "$.seal", "seal deferred"));
     CHECK(!runtime->record_artifact("flight.trace.bin.lz4"));
-    for (unsigned int index = 0; index != 128; ++index) {
+    for (unsigned int index = 0; index != 256; ++index) {
         const std::string artifact = "artifact" + std::to_string(index) + ".bin";
         if (!runtime->record_artifact(artifact)) break;
     }
@@ -802,7 +805,7 @@ void status_metadata_producers_deduplicate_and_classify_each_rejection() {
     CHECK(!runtime->record_artifact("one.trace"));
     CHECK(!runtime->record_artifact("../invalid.trace"));
     size_t accepted_artifacts = 1;
-    for (size_t index = 0; index != 64; ++index) {
+    for (size_t index = 0; index != 256; ++index) {
         const std::string artifact = "artifact-" + std::to_string(index) + ".trace";
         if (!runtime->record_artifact(artifact)) break;
         ++accepted_artifacts;
@@ -918,7 +921,7 @@ void repeated_metadata_rejections_do_not_republish_unchanged_status() {
     publish_transition();
     CHECK(!runtime->record_artifact("../invalid.trace"));
     poll_without_transition();
-    for (size_t index = 1; index != 64; ++index) {
+    for (size_t index = 1; index != 257; ++index) {
         if (!runtime->record_artifact("artifact-" + std::to_string(index) + ".trace")) break;
     }
     publish_transition();

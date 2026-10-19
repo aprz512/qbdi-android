@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-19",
+  "baseline_commit": "143142749a61c35b5409e3814484cef0e140c4f4",
+  "working_tree_code_sha256": "8efe2f1eeed042909dd48b0a66ae97e36d21d49cdcab497491a5c437a27c19bb",
+  "native_build": {
+    "ndk": "26.1.10909125",
+    "abi": "arm64-v8a",
+    "android_platform": 28,
+    "long_jump_fallback": true,
+    "sha256": {
+      "libqbdi_tracer.so": "3bd625bfcad08a2fb621602db064d4561d64bcc56091200edcfe3f508125168a",
+      "libshadowhook_nothing.so": "091bab56a2ab7867708a5a5233eb6e7466f7d8d1099bafb56a4ef1e35025a027"
+    }
+  },
+  "validation": {
+    "cpp_host": {
+      "command": "ctest --test-dir build/native-tests --output-on-failure --timeout 60 -j 6",
+      "passed": 47
+    },
+    "python_full": {
+      "command": "python3 -m unittest discover -s scripts/tests",
+      "run": 875,
+      "skipped": 9,
+      "result": "passed"
+    },
+    "python_after_final_config_review": {
+      "run": 228,
+      "result": "passed"
+    },
+    "image_marker_with_pillow": {
+      "run": 3,
+      "result": "passed"
+    },
+    "diff_check": "passed"
+  },
+  "elf_without_build_id": {
+    "elf_class": "ELF64",
+    "machine": "AArch64",
+    "build_id": "",
+    "executable_ranges": [
+      [
+        0,
+        1700592
+      ]
+    ],
+    "sha256": "e5e27eb73dd1d8a78da9ec7e2d09231bc93de045e98e1a9370f0b4f29eb84f86"
+  },
+  "appguard": {
+    "serial": "2d32ed71",
+    "pid": 10482,
+    "starttime_ticks": 62751889,
+    "session_id": "61e61749-8e6f-4041-9b98-90b7d52eeda7",
+    "sample": {
+      "libcompatible.so": "e5e27eb73dd1d8a78da9ec7e2d09231bc93de045e98e1a9370f0b4f29eb84f86",
+      "libengine.so": "4aeafdbe1ea691c8c6f7ea675cb817688a1f4875a258b97e1f342aaebd9094d0",
+      "libmain.so": "1aa3ef824c78cc5ba84f27ac38313790f33ab40125673174a6eff438558a5a89"
+    },
+    "acceptance": {
+      "passed": true,
+      "identity_stable": true,
+      "title_seconds": 159.95043177400657,
+      "required_seconds": 120,
+      "maximum_sample_gap_seconds": 15
+    },
+    "traces": 25,
+    "instructions": 323,
+    "rule_hits": {
+      "appguard-report": 13,
+      "appguard-policy": 10,
+      "appguard-termination": 12
+    },
+    "observed_seconds": 181.90840906600351,
+    "cleanup_detached": true,
+    "guard_mode": 15,
+    "native_guard_worker_hits": 0,
+    "native_errors": [],
+    "screenshot_sha256": {
+      "title_start": "bf14b90d499afc3ca1b84e6a8e507f4852a5123d88e3935e60fc4c7fd5fd2858",
+      "title_end": "ccb8ca2a24075867fb63bf7c8f9b28c4a7da4d3b0345634de1ec34e49008787b"
+    },
+    "frida_mappings_absent_in_samples": true
+  },
+  "native_regressions": {
+    "overlap": {
+      "traces": 2,
+      "distinct_tids": 2,
+      "result": "passed"
+    },
+    "vm_reentry": {
+      "calls": 10,
+      "instruction_counts": [
+        7
+      ],
+      "result": "passed"
+    }
+  },
+  "buffer_experiment": {
+    "native_instructions_per_short_call": 113,
+    "recorded_instructions_per_short_call": 112,
+    "calls_per_process": 10,
+    "processes_per_buffer": 3,
+    "exclude_first_call_from_latency": true,
+    "first_run": [
+      {
+        "buffer_mb": 8,
+        "median_call_us": 4042.813,
+        "median_peak_rss_kib": 42892
+      },
+      {
+        "buffer_mb": 16,
+        "median_call_us": 4249.531,
+        "median_peak_rss_kib": 42960
+      },
+      {
+        "buffer_mb": 64,
+        "median_call_us": 3632.396,
+        "median_peak_rss_kib": 42620
+      }
+    ],
+    "repeat_run": [
+      {
+        "buffer_mb": 8,
+        "median_call_us": 3561.927,
+        "median_peak_rss_kib": 43036
+      },
+      {
+        "buffer_mb": 16,
+        "median_call_us": 4092.136,
+        "median_peak_rss_kib": 43064
+      },
+      {
+        "buffer_mb": 64,
+        "median_call_us": 4091.25,
+        "median_peak_rss_kib": 43056
+      }
+    ],
+    "decision": "Keep existing general auto buffer defaults: no material RSS reduction; latency ordering reverses between runs."
+  },
+  "artifact_directory": "artifacts/appguard-reliability-2026-10-19/",
+  "limits": [
+    "Relocated entry instructions execute in a control-only trampoline and are omitted from target instruction records.",
+    "Entry rule notification has no decoded instruction or corresponding POSTINST.",
+    "Crash marker slots are limited to 1024 per process; status artifact names to 256 per session.",
+    "4 KB and 16 KB ELF layouts tested; device kernel page size is 4 KB.",
+    "Title marker applies to the verified interface and aspect ratio."
+  ]
+}

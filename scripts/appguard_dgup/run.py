@@ -3,6 +3,8 @@ from pathlib import Path
 import argparse
 import dataclasses
 import json
+import hashlib
+import math
 import re
 import shlex
 import subprocess
@@ -98,9 +100,10 @@ def validate_and_collect(bound, output, report):
     from qtrace.session import parse_status
     from qtrace.status import load_strict_json
     from scripts.trace_convert import convert_binary_file
+    from scripts.trace_metrics import parse_metrics
 
     session_id = report["session_id"]
-    generation = report["agent_result"]["configuration"]["generation"]
+    generation = report["injection"]["generation"]
     native = report["native_request"]
     scenes = tuple(ResolvedScene(scene["name"], int(scene["location"]["offset"], 16),
                                  int(scene["location"]["endOffset"], 16)) for scene in native["scenes"])
@@ -132,12 +135,55 @@ def validate_and_collect(bound, output, report):
         source = output / "traces" / name
         text = source.with_suffix(".txt")
         stats = convert_binary_file(source, text, lz4=None, crash_marked=False)
+        metrics = parse_metrics(source.with_name(name + ".metrics").read_bytes(), name)
+        if metrics["instructions"] != stats.instructions or metrics["compressed_bytes"] != source.stat().st_size:
+            raise RuntimeError("trace and metrics disagree: " + name)
         lines = text.read_text().splitlines()
         summaries.append({"file": name, "instructions": stats.instructions,
                           "rules": [line for line in lines if line.startswith("RULE ")],
+                          "elapsed_ms": int(metrics["elapsed_ms"]),
+                          "effective_buffer_bytes": int(metrics["effective_buffer_bytes"]),
                           "terminal": lines[-1]})
     report["trace_summary"] = summaries
     (output / "trace-summary.json").write_text(json.dumps(summaries, ensure_ascii=False, indent=2) + "\n")
+
+
+def process_identity(pid):
+    from qtrace.session import _parse_process_identity
+    result = adb("shell", shlex.join(["su", "-c", f"cat /proc/{pid}/stat"]))
+    if result.returncode:
+        return None
+    identity = _parse_process_identity(result.stdout, pid)
+    return identity.starttime_ticks if identity.state not in {"Z", "X", "x"} else None
+
+
+def capture_title(output, report, sample, reference):
+    from qtrace.acceptance import image_marker
+    pid = report["pid"]
+    before = process_identity(pid)
+    focus = adb("shell", "dumpsys", "window")
+    focused = [line.strip() for line in focus.stdout.decode(errors="replace").splitlines()
+               if "mCurrentFocus=" in line]
+    screen = adb("exec-out", "screencap", "-p")
+    after = process_identity(pid)
+    sample["elapsed"] = time.monotonic() - report["monitor_monotonic"]
+    sample["starttime_ticks"] = after
+    sample["focused"] = focus.returncode == 0 and any(PACKAGE + "/" in line for line in focused)
+    sample["original_pid_alive"] = before == after == report["starttime_ticks"]
+    if screen.returncode or not screen.stdout.startswith(b"\x89PNG"):
+        sample["title_marker"] = {"matched": False, "reason": "screenshot failed"}
+        return
+    sample["title_marker"] = image_marker(screen.stdout, reference)
+    if sample["title_marker"]["matched"] and sample["focused"] and sample["original_pid_alive"]:
+        previous = report["samples"][-2] if len(report["samples"]) > 1 else {}
+        label = "title-end" if (previous.get("title_marker", {}).get("matched") and previous.get("focused")) else "title-start"
+        receipt = {"pid": pid, "starttime_ticks": after, "elapsed": sample["elapsed"],
+                   "epoch": time.time(), "focus": focused,
+                   "screenshot_sha256": hashlib.sha256(screen.stdout).hexdigest(),
+                   "marker": sample["title_marker"]}
+        (output / (label + ".png")).write_bytes(screen.stdout)
+        (output / (label + ".json")).write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        report[label.replace("-", "_")] = receipt
 
 
 def main():
@@ -147,23 +193,29 @@ def main():
     parser.add_argument("--helper", type=Path, default=REPO / "out/appguard-dgup/libappguard_dgup.so")
     parser.add_argument("--tracer", type=Path, default=REPO / "out/appguard-dgup/libqbdi_tracer.so")
     parser.add_argument("--companion", type=Path, default=REPO / "out/appguard-dgup/libshadowhook_nothing.so")
-    parser.add_argument("--mode", choices=["baseline", "load", "main", "engine", "engine-qbdi-workers"], default="engine")
+    parser.add_argument("--mode", choices=["baseline", "main", "engine", "engine-qbdi-workers", "engine-native-workers"], default="engine")
     parser.add_argument("--label", default="dgup")
-    parser.add_argument("--seconds", type=float, default=165)
+    parser.add_argument("--seconds", type=float, default=180)
+    parser.add_argument("--title-seconds", type=float, default=120)
+    parser.add_argument("--buffer-mb", type=int, choices=[8, 16, 32, 64, 128])
 
     parser.add_argument("--handle-startup-prompts", action="store_true")
     parser.add_argument("--guard-mode", type=int, choices=[5, 6, 8, 13, 14, 15])
     args = parser.parse_args()
-    engine_mode = args.mode in {"engine", "engine-qbdi-workers"}
-    expected_guard = 15 if args.mode == "engine-qbdi-workers" else 14
+    engine_mode = args.mode in {"engine", "engine-qbdi-workers", "engine-native-workers"}
+    expected_guard = 14 if args.mode == "engine-native-workers" else 15
     if args.guard_mode is None: args.guard_mode = expected_guard if engine_mode else 13
     if (engine_mode and args.guard_mode != expected_guard) or (not engine_mode and args.guard_mode in {14, 15}):
-        parser.error("engine uses guard 14; engine-qbdi-workers uses guard 15; other modes use 5, 6, 8 or 13")
+        parser.error("engine uses guard 15; engine-native-workers uses guard 14; other modes use 5, 6, 8 or 13")
     global SERIAL, ADB
     SERIAL = args.serial
     ADB = ["adb", "-s", SERIAL]
     args.detach = "before-resume"
-    if args.seconds <= 0: parser.error("seconds must be positive")
+    if not all(math.isfinite(value) and value > 0 for value in (args.seconds, args.title_seconds)):
+        parser.error("seconds and title-seconds must be finite and positive")
+    from qtrace.acceptance import continuous_title_acceptance
+    import PIL.Image  # Check screenshot verification dependency before device mutation.
+    reference = json.loads((ROOT / "title-marker.json").read_text())
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     import shutil, hashlib
@@ -172,7 +224,6 @@ def main():
     if args.mode != "baseline": shutil.copy2(args.helper, output / "libguard_probe.so")
     report = {"helper_sha256": hashlib.sha256(args.helper.read_bytes()).hexdigest() if args.mode != "baseline" else None, "mode": args.mode, "label": args.label, "seconds": args.seconds, "detach": args.detach,
               "package": PACKAGE, "serial": SERIAL, "samples": []}
-    session = None
     log = None
     log_file = (output / "logcat.txt").open("wb")
     try:
@@ -195,11 +246,17 @@ def main():
         if deployment is not None:
             temporary = "/data/local/tmp/qguard-" + session_id + ".so"
             helper = deployment.remote_dir + "/libguard_probe.so"
-            pushed = adb("push", str(args.helper), temporary)
-            if pushed.returncode: raise RuntimeError("helper push failed")
-            for command in [["cp", temporary, helper], ["chown", f"{bound.binding.package_uid}:{bound.binding.package_uid}", helper], ["chmod", "700", helper], ["rm", temporary]]:
-                copied = adb("shell", shlex.join(["su", "-c", shlex.join(command)]))
-                if copied.returncode: raise RuntimeError("helper stage failed")
+            try:
+                bound.push(args.helper, temporary, timeout=15)
+                bound.root_shell("cp", temporary, helper, timeout=15, maximum_bytes=8192)
+                bound.root_shell("chown", f"{bound.binding.package_uid}:{bound.binding.package_uid}", helper,
+                                    timeout=15, maximum_bytes=8192)
+                bound.root_shell("chmod", "700", helper, timeout=15, maximum_bytes=8192)
+                digest = bound.target_shell("sha256sum", helper, timeout=15, maximum_bytes=8192).decode().split()[0]
+                if digest != report["helper_sha256"]:
+                    raise RuntimeError("deployed adapter SHA-256 mismatch")
+            finally:
+                bound.shell("rm", "-f", temporary, timeout=15, maximum_bytes=8192)
             report["guard_helper"] = helper
             report["guard_mode"] = args.guard_mode
         log = subprocess.Popen(ADB + ["logcat", "-T", "1", "-v", "threadtime"], stdout=log_file, stderr=subprocess.STDOUT)
@@ -212,52 +269,54 @@ def main():
                 raise RuntimeError("no baseline main process")
             pid = candidates[0]["pid"]
         else:
-            import frida
-            device = frida.get_device(SERIAL, timeout=5)
-            pid = device.spawn([PACKAGE])
-            report["pid"] = pid
-            session = device.attach(pid)
-            session.on("detached", lambda *details: report.setdefault("detach_events", []).append(str(details)))
-            agent_source = (ROOT / "agent.js").read_text()
-            (output / "agent.js").write_text(agent_source)
-            script = session.create_script(agent_source)
-            script.on("message", lambda message, data: report.setdefault("messages", []).append(message))
-            script.load()
-            request = {"mode": args.mode}
-            if deployment is not None:
-                request.update(tracerSo=deployment.tracer_so, companion=deployment.companion, helper=helper, guardMode=args.guard_mode)
+            from qtrace.injector import FridaInjector, FridaProvider, InjectionRequest, StartupAdapter
             if args.mode == "main" or engine_mode:
                 module, start, end = (("appguard-runtime.so", "0x146c88", "0x146f80") if engine_mode
                                       else ("libmain.so", "0x4a80", "0x4b0c"))
                 native = {
                     "schemaVersion": 1, "packageName": PACKAGE, "targetModule": module,
-                    "trace": {"profile": "fast", "compression": False, "autoBuffer": True, "bufferMb": 0, "lz4Level": 0, "hexdumpLimit": 32},
+                    "trace": {"profile": "fast", "compression": False, "autoBuffer": args.buffer_mb is None, "bufferMb": args.buffer_mb or 0, "lz4Level": 0, "hexdumpLimit": 32},
                     "flight": {"enabled": False, "entryScene": "", "capacityMb": 64, "chunkKb": 256, "maxThreads": 32, "protectedChunks": 4},
                     "session": {"id": session_id} if engine_mode else {"id": session_id, "durationMs": 5000},
                     "scenes": [{"name": "appguard-report" if engine_mode else "unity-initialization",
                                 "location": {"offset": start, "endOffset": end}}],
                 }
-                if args.mode == "engine-qbdi-workers":
+                if engine_mode and args.guard_mode == 15:
                     native["scenes"].append({"name": "appguard-termination", "location": {
                         "offset": "0xc6114", "endOffset": "0xc61c4"}})
-                request["nativeRequest"] = native
+                if engine_mode:
+                    native["codeRules"] = {"enabled": True, "sampleSha256": report["sample"]["libengine.so"]}
                 report["native_request"] = native
-            started = time.monotonic()
-            report["agent_result"] = script.exports_sync.run(request)
-            session.detach()
-            session = None
-            report["detach_before_resume_ms"] = (time.monotonic() - started) * 1000
-            device.resume(pid)
+            result = FridaInjector(bound, FridaProvider()).install(InjectionRequest(
+                package=PACKAGE, session_id=session_id,
+                tracer_so=deployment.tracer_so, companion=deployment.companion,
+                native_request=native, setup_timeout=30, detach_before_resume=True,
+                startup_adapter=StartupAdapter(helper, "qguard_probe_start", args.guard_mode),
+            ))
+            report["injection"] = dataclasses.asdict(result)
+            if not result.cleanup_detached:
+                raise RuntimeError("injector did not confirm Frida cleanup")
+            pid = result.pid
         report["pid"] = pid
+        report["starttime_ticks"] = process_identity(pid)
+        if report["starttime_ticks"] is None:
+            raise RuntimeError("original process identity unavailable after installation")
         (output / "startup.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         print(json.dumps({"label": args.label, "pid": pid, "mode": args.mode, "stage": "resumed"}), flush=True)
         started = time.monotonic()
+        report["monitor_monotonic"] = started
         next_sample = 0.0
         while True:
             elapsed = time.monotonic() - started
             rows = processes()
-            alive = any(row["pid"] == pid for row in rows)
-            report["samples"].append({"elapsed": round(elapsed, 3), "original_pid_alive": alive, "processes": rows})
+            ticks = process_identity(pid)
+            alive = any(row["pid"] == pid for row in rows) and ticks == report["starttime_ticks"]
+            sample = {"elapsed": elapsed, "pid": pid, "starttime_ticks": ticks,
+                      "original_pid_alive": alive, "processes": rows}
+            report["samples"].append(sample)
+            if alive:
+                capture_title(output, report, sample, reference)
+                alive = sample["original_pid_alive"]
             if alive and len(report["samples"]) in [1, 3]:
                 report.setdefault("mapping_checks", []).append({"elapsed": elapsed, "rows": capture_maps(output, pid, f"sample-{len(report['samples'])}")})
             if alive and args.handle_startup_prompts and len(report["samples"]) in [2, 3, 5, 7, 13, 25]:
@@ -268,6 +327,8 @@ def main():
             time.sleep(max(0, min(next_sample, args.seconds) - (time.monotonic() - started)))
         report["original_pid_survived"] = report["samples"][-1]["original_pid_alive"]
         report["observed_seconds"] = report["samples"][-1]["elapsed"]
+        report["acceptance"] = continuous_title_acceptance(
+            report["samples"], pid, report["starttime_ticks"], args.title_seconds)
         focus = adb("shell", "dumpsys", "window").stdout.decode(errors="replace")
         report["focus"] = [line.strip() for line in focus.splitlines() if "mCurrentFocus=" in line]
         if report["original_pid_survived"]:
@@ -282,11 +343,6 @@ def main():
         report["error"] = {"type": type(error).__name__, "detail": str(error)}
         print(json.dumps(report["error"], ensure_ascii=False), flush=True)
     finally:
-        if session is not None:
-            try:
-                session.detach()
-            except Exception:
-                pass
         if log is not None:
             log.terminate()
             try:
@@ -295,8 +351,20 @@ def main():
                 log.kill()
                 log.wait(timeout=3)
         log_file.close()
+        rules = [line for summary in report.get("trace_summary", []) for line in summary["rules"]]
+        summary = {key: report.get(key) for key in ("mode", "package", "serial", "pid", "starttime_ticks", "session_id", "sample", "acceptance", "error")}
+        summary["traces"] = len(report.get("trace_summary", []))
+        summary["instructions"] = sum(item["instructions"] for item in report.get("trace_summary", []))
+        summary["rule_hits"] = {name: sum(name in line for line in rules) for name in
+                                ("appguard-report", "appguard-policy", "appguard-termination")}
+        summary["injection"] = report.get("injection")
+        summary["screenshots"] = {key: report.get(key) for key in ("title_start", "title_end")}
+        summary["passed"] = (report.get("acceptance", {}).get("passed") is True and not report.get("error")
+                             and (not engine_mode or (summary["rule_hits"]["appguard-policy"] > 0 and
+                                  (args.guard_mode != 15 or summary["rule_hits"]["appguard-termination"] > 0))))
+        (output / "acceptance-summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
         (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-    return 1 if report.get("error") or not report.get("original_pid_survived") else 0
+    return 0 if summary["passed"] else 1
 
 
 if __name__ == "__main__":

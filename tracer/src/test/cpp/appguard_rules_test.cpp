@@ -1,4 +1,5 @@
 #include "rules/code_rule.h"
+#include "core/qbdi_gateway_entry.h"
 #include "events/trace_sink.h"
 
 #include <cstdio>
@@ -44,11 +45,13 @@ int main() {
         gpr.sp = 0x8000;
         gpr.lr = 0x9000;
         gpr.pc = instruction.address;
-        const auto action = engine.on_pre_instruction(context);
+        const uintptr_t trampoline = 0x12340000;
+        const auto action = evaluate_qbdi_gateway_entry(engine, nullptr, &gpr, &fpr,
+                                                       instruction.address, trampoline, &trace, &sink);
         const bool blocked = code == 34 || code == 38;
         CHECK(action == (blocked ? QBDI::BREAK_TO_VM : QBDI::CONTINUE));
         CHECK(gpr.x0 == (blocked ? 1 : 123));
-        CHECK(gpr.pc == (blocked ? gpr.lr : instruction.address));
+        CHECK(gpr.pc == (blocked ? gpr.lr : trampoline));
         CHECK(gpr.sp == 0x8000);
         CHECK(sink.rules.front().second.find("3139393a2f70726f647563742f62696e2f7375") != std::string::npos);
         sink.rules.clear();

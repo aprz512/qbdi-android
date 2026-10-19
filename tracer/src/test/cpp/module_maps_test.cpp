@@ -183,7 +183,40 @@ static void overflow_is_a_hard_address_diagnostic() {
     CHECK(diagnostics.warnings.empty());
 }
 
+static void nonzero_elf_origins_and_reload_preserve_scene_offsets() {
+    for (uintptr_t padding : {0x1000, 0x4000}) {
+        std::array<ElfW(Phdr), 3> headers{};
+        headers[0].p_type = PT_LOAD;
+        headers[0].p_flags = PF_R;
+        headers[0].p_vaddr = 0x10000;
+        headers[0].p_memsz = 0x100;
+        headers[1].p_type = headers[2].p_type = PT_LOAD;
+        headers[1].p_flags = headers[2].p_flags = PF_R | PF_X;
+        headers[1].p_offset = 0x100;
+        headers[1].p_vaddr = 0x10100 + padding;
+        headers[1].p_memsz = 0x100;
+        headers[2].p_offset = 0x200;
+        headers[2].p_vaddr = 0x10200 + 2 * padding;
+        headers[2].p_memsz = 0x100;
+        dl_phdr_info info{};
+        info.dlpi_name = "/data/app/reloaded.so";
+        info.dlpi_phdr = headers.data();
+        info.dlpi_phnum = headers.size();
+        for (uintptr_t base : {0x70000000, 0x71000000}) {
+            info.dlpi_addr = base;
+            ModuleRange module;
+            CHECK(module_range_from_phdr(info, &module));
+            CHECK(module.start == base + 0x10000);
+            CHECK(module.readable_executable_range_count == 2);
+            uintptr_t address = 0;
+            CHECK(module_offset_address(module, padding + 0x100, false, &address));
+            CHECK(address == module.readable_executable_ranges[0].start);
+        }
+    }
+}
+
 int main() {
+    nonzero_elf_origins_and_reload_preserve_scene_offsets();
     loaded_module_with_16kb_segments_uses_linker_load_bias();
     unpacked_regions_require_a_contiguous_readable_executable_mapping();
     in_module_executable_address_has_no_warning();

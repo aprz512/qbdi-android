@@ -69,9 +69,9 @@ function requestHex(value, location) {
 }
 
 function validateEnvelope(value) {
-  if (!ownKeys(value, [
-    "package", "sessionId", "tracerSo", "companion", "nativeRequest", "setupTimeoutMs",
-  ])) {
+  const keys = ["package", "sessionId", "tracerSo", "companion", "nativeRequest", "setupTimeoutMs"];
+  if (value && Object.prototype.hasOwnProperty.call(value, "startupAdapter")) keys.push("startupAdapter");
+  if (!ownKeys(value, keys)) {
     fail("request", "STARTUP_REQUEST_INVALID", "startup envelope has invalid shape");
   }
   for (const field of ["package", "sessionId", "tracerSo", "companion"]) {
@@ -81,6 +81,15 @@ function validateEnvelope(value) {
   }
   if (!Number.isSafeInteger(value.setupTimeoutMs) || value.setupTimeoutMs <= 0) {
     fail("request", "STARTUP_REQUEST_INVALID", "setupTimeoutMs must be a positive integer");
+  }
+  if (value.startupAdapter !== undefined) {
+    const adapter = value.startupAdapter;
+    if (!ownKeys(adapter, ["library", "entrypoint", "mode"]) ||
+        typeof adapter.library !== "string" || !adapter.library.startsWith("/") ||
+        typeof adapter.entrypoint !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(adapter.entrypoint) ||
+        !Number.isSafeInteger(adapter.mode) || adapter.mode < 0 || adapter.mode > 0x7fffffff) {
+      fail("request", "STARTUP_REQUEST_INVALID", "startup adapter is invalid");
+    }
   }
   const nativeRequest = value.nativeRequest;
   if (nativeRequest === null || typeof nativeRequest !== "object" || Array.isArray(nativeRequest)) {
@@ -382,6 +391,18 @@ function start(rawEnvelope) {
     ),
     envelope.nativeRequest,
   );
+  if (envelope.startupAdapter !== undefined) {
+    const adapter = envelope.startupAdapter;
+    const adapterPath = canonicalFile(realpathCall, adapter.library, "adapter", "ADAPTER_LOAD_FAILED", "adapter");
+    if (parentDirectory(adapterPath) !== parentDirectory(tracerPath)) {
+      fail("adapter", "ADAPTER_LOAD_FAILED", "adapter and tracer must share a canonical directory");
+    }
+    const library = Module.load(adapterPath);
+    const begin = new NativeFunction(exportFrom(library, adapter.entrypoint), "int", ["pointer", "int"]);
+    if (begin(Memory.allocUtf8String(tracerPath), adapter.mode) !== 0) {
+      fail("adapter", "ADAPTER_START_FAILED", "native startup adapter rejected initialization");
+    }
+  }
   send({
     type: "initialized",
     sessionId: envelope.sessionId,

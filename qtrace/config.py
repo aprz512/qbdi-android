@@ -248,9 +248,13 @@ def _load_target(value: Any, base: Path) -> TargetConfig:
         target,
         "target",
         required=frozenset(("module",)),
-        optional=frozenset(("binary",)),
+        optional=frozenset(("binary", "sha256")),
     )
+    digest = target.get("sha256")
+    if "sha256" in target and (type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+        _fail("TARGET_SHA256_INVALID", "target.sha256 must contain 64 lowercase hex digits")
     return TargetConfig(
+        sha256=digest,
         module=_string(target["module"], "target.module"),
         binary=_optional_path(target, "binary", "target", base),
     )
@@ -269,6 +273,7 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
             "flightEntryScene",
             "library",
             "companion",
+            "codeRules",
         )),
     )
     profile = tracer.get("profile", "fast")
@@ -303,6 +308,7 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
         flight_entry_scene = None
 
     return TracerConfig(
+        code_rules=_boolean(tracer, "codeRules", False),
         profile=profile,
         compression=compression,
         flight_enabled=flight_enabled,
@@ -346,10 +352,14 @@ def load_config(path: Path) -> UserConfig:
     except (OSError, RuntimeError, ValueError):
         _fail("CONFIG_JSON_INVALID", "config directory cannot be resolved")
     tracer_value = root.get("tracer", {})
+    target = _load_target(root["target"], base)
+    tracer = _load_tracer(tracer_value, base, frozenset(scene_names))
+    if tracer.code_rules and target.sha256 is None:
+        _fail("RULES_IDENTITY_REQUIRED", "tracer.codeRules requires target.sha256")
     return UserConfig(
         schema_version=1,
         app=_load_app(root["app"], base),
-        target=_load_target(root["target"], base),
-        tracer=_load_tracer(tracer_value, base, frozenset(scene_names)),
+        target=target,
+        tracer=tracer,
         scenes=scenes,
     )

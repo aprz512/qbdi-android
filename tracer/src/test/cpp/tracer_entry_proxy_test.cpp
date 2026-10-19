@@ -1130,7 +1130,7 @@ void stopped_generation_proxy_bypasses_qbdi_before_allocation() {
 
     uint64_t args[8]{3};
     size_t proxy_generation = trace_proxy_test_generation(0);
-    CHECK(trace_proxy_dispatch(proxy_generation, args, 0) == 0x203);
+    CHECK(trace_proxy_dispatch(proxy_generation, args, 0) == 0x103);
     const std::shared_ptr<TraceGenerationRuntime> runtime =
             g_seen_invocation.runtime;
     CHECK(runtime != nullptr);
@@ -1142,7 +1142,7 @@ void stopped_generation_proxy_bypasses_qbdi_before_allocation() {
     proxy_generation = trace_proxy_test_generation(0);
     CHECK(trace_proxy_dispatch(proxy_generation, args, 0) == 0x103);
     CHECK(g_runner_calls == runner_calls_before);
-    CHECK(g_old_calls == 1);
+    CHECK(g_old_calls == 2);
     CHECK(runtime->snapshot().active_calls == 0);
 }
 
@@ -1347,7 +1347,7 @@ void old_generation_deadline_cannot_stop_a_newer_generation() {
     CHECK(new_runtime->snapshot().phase == TraceGenerationPhase::Running);
 }
 
-void unhook_failure_uses_the_saved_original_exactly_once() {
+void normal_dispatch_does_not_depend_on_unhook_success() {
     reset_fakes();
     const TraceConfig config = config_named("unhook-failure");
     const SceneConfig scene = scene_named("unhook-failure",
@@ -1360,11 +1360,11 @@ void unhook_failure_uses_the_saved_original_exactly_once() {
     CHECK(trace_proxy_dispatch(0, args, 0x1234) == 0x109);
     CHECK(g_old_calls == 1);
     CHECK(g_bridge_calls == 1);
-    CHECK(g_runner_calls == 0);
-    CHECK(g_unhook_calls == 1);
+    CHECK(g_runner_calls == 1);
+    CHECK(g_unhook_calls == 0);
 }
 
-void rehook_failure_leaves_a_coherent_direct_execution_state() {
+void normal_dispatch_does_not_reinstall_the_hook() {
     reset_fakes();
     const TraceConfig config = config_named("rehook-failure");
     const SceneConfig scene = scene_named("rehook-failure",
@@ -1381,7 +1381,7 @@ void rehook_failure_leaves_a_coherent_direct_execution_state() {
     CHECK(g_new_calls == 0);
 }
 
-void every_physical_rehook_gets_a_new_proxy_identity() {
+void normal_calls_preserve_the_proxy_identity_and_runtime() {
     reset_fakes();
     const TraceConfig config = config_named("physical-rehook-generation");
     const SceneConfig scene = scene_named("physical-rehook-generation",
@@ -1395,13 +1395,12 @@ void every_physical_rehook_gets_a_new_proxy_identity() {
     uint64_t args[8]{19};
     CHECK(trace_proxy_dispatch(first_generation, args, 0) == 0x113);
     const size_t second_generation = trace_proxy_test_generation(scene.index);
-    CHECK(second_generation != first_generation);
-    CHECK(g_hook_calls == 2);
-    CHECK(trace_proxy_test_hook_runtime(first_generation) == nullptr);
+    CHECK(second_generation == first_generation);
+    CHECK(g_hook_calls == 1);
+    CHECK(trace_proxy_test_hook_runtime(first_generation) == runtime);
     CHECK(trace_proxy_test_hook_runtime(second_generation) == runtime);
 
-    // A delayed call already carrying the first identity remains valid and cannot
-    // resolve the second generation.
+    // Repeated calls keep the same physical hook and generation runtime.
     CHECK(trace_proxy_dispatch(first_generation, args, 0) == 0x113);
     CHECK(g_seen_config.package_name == "physical-rehook-generation");
 }
@@ -1722,7 +1721,7 @@ void stale_rollback_never_inverts_registry_and_transition_locks() {
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
-void physical_rehook_keeps_its_original_capture_coordinator() {
+void persistent_hook_keeps_its_original_capture_coordinator() {
     reset_fakes();
     const TraceConfig config = config_named("coordinator-generation");
     const SceneConfig scene = scene_named(
@@ -1742,12 +1741,12 @@ void physical_rehook_keeps_its_original_capture_coordinator() {
     CHECK(trace_proxy_dispatch(first_generation, args, 0) == 0x129);
     const size_t second_generation = trace_proxy_test_generation(scene.index);
 
-    CHECK(second_generation != first_generation);
-    CHECK(trace_proxy_test_hook_coordinator(first_generation) == nullptr);
+    CHECK(second_generation == first_generation);
+    CHECK(trace_proxy_test_hook_coordinator(first_generation) == original.get());
     CHECK(trace_proxy_test_hook_coordinator(second_generation) == original.get());
 }
 
-void concurrent_unhook_failures_keep_the_original_bypass_alive() {
+void concurrent_calls_do_not_attempt_unhook() {
     reset_fakes();
     const TraceConfig config = config_named("concurrent-unhook-failure");
     const SceneConfig scene = scene_named("concurrent-unhook-failure",
@@ -1775,7 +1774,7 @@ void concurrent_unhook_failures_keep_the_original_bypass_alive() {
     }
     {
         std::lock_guard<std::mutex> lock(g_fake_mutex);
-        CHECK(g_unhook_calls == 1);
+        CHECK(g_unhook_calls == 0);
     }
     {
         std::lock_guard<std::mutex> lock(g_gate_mutex);
@@ -1849,7 +1848,7 @@ void failed_same_generation_install_is_retried() {
     CHECK(trace_proxy_test_generation(scene.index) != failed_generation);
 }
 
-void duplicate_during_an_active_call_schedules_only_the_required_rehook() {
+void duplicate_during_an_active_call_keeps_the_persistent_hook() {
     reset_fakes();
     const TraceConfig config = config_named("active-duplicate");
     const SceneConfig scene = scene_named("active-duplicate",
@@ -1879,9 +1878,9 @@ void duplicate_during_an_active_call_schedules_only_the_required_rehook() {
     active.join();
 
     CHECK(result == 0x117);
-    CHECK(g_hook_calls == 2);
-    CHECK(g_unhook_calls == 1);
-    CHECK(trace_proxy_test_generation(scene.index) != first_generation);
+    CHECK(g_hook_calls == 1);
+    CHECK(g_unhook_calls == 0);
+    CHECK(trace_proxy_test_generation(scene.index) == first_generation);
 }
 
 void batch_reconfiguration_stays_installing_until_pending_rehook_succeeds() {
@@ -2471,7 +2470,6 @@ void failed_replacement_batch_removes_unattempted_prior_generation_hooks() {
     CHECK(snapshot.at("scenes").at(1).at("state") == "hook_failed");
     CHECK(!trace_proxy_test_generation_installed(old_third_generation));
     CHECK(g_unhook_calls == 4);
-    const size_t hook_calls_before_release = g_hook_calls;
     {
         std::lock_guard<std::mutex> lock(g_gate_mutex);
         g_release_runner = true;
@@ -2479,7 +2477,7 @@ void failed_replacement_batch_removes_unattempted_prior_generation_hooks() {
     g_gate_condition.notify_all();
     active.join();
     CHECK(active_result == 0x11f);
-    CHECK(g_hook_calls == hook_calls_before_release);
+    CHECK(g_hook_calls == 5);
 }
 
 void removed_prior_scene_residual_is_appended_to_rollback_status() {
@@ -3119,6 +3117,50 @@ void flight_hook_install_failure_latches_a_specific_gap() {
           CoverageGapReason::HookSetup);
 }
 
+void concurrent_normal_entries_both_reach_qbdi() {
+    reset_fakes();
+    const TraceConfig config = config_named("persistent-normal");
+    const SceneConfig scene = scene_named(
+            "persistent-normal", reinterpret_cast<uintptr_t>(new_target));
+    trace_proxy_test_reset(config);
+    g_original_override = reinterpret_cast<uintptr_t>(old_target);
+    CHECK(trace_proxy_test_update(config, scene, module_named("module")));
+    const size_t generation = trace_proxy_test_generation(scene.index);
+    g_use_runner_gate = true;
+    uint64_t first_args[8]{51}, second_args[8]{52};
+    uint64_t first_result = 0, second_result = 0;
+    std::thread first([&] {
+        first_result = trace_proxy_dispatch(generation, first_args, 0);
+    });
+    {
+        std::unique_lock<std::mutex> lock(g_gate_mutex);
+        CHECK(g_gate_condition.wait_for(lock, std::chrono::seconds(5), [] {
+            return g_runner_entered;
+        }));
+    }
+    // Model a fresh physical entry while the first invocation is still in QBDI.
+    // An unhooked entry reaches the native target without visiting the proxy.
+    const bool still_installed = trace_proxy_test_generation_installed(generation);
+    std::thread second([&] {
+        second_result = still_installed
+                ? trace_proxy_dispatch(generation, second_args, 0)
+                : new_target(52, 0, 0, 0, 0, 0, 0, 0);
+    });
+    {
+        std::lock_guard<std::mutex> lock(g_gate_mutex);
+        g_release_runner = true;
+    }
+    g_gate_condition.notify_all();
+    first.join();
+    second.join();
+    CHECK(still_installed);
+    CHECK(g_runner_calls == 2);
+    CHECK(g_unhook_calls == 0 && g_hook_calls == 1);
+    CHECK(first_result == 0x133 && second_result == 0x134);
+    CHECK(g_seen_invocation.execution_address == reinterpret_cast<uintptr_t>(old_target));
+    CHECK(g_old_calls == 2 && g_new_calls == 0);
+}
+
 void concurrent_flight_gateway_keeps_the_hook_persistent() {
     reset_fakes();
     const SceneConfig scene = scene_named(
@@ -3594,6 +3636,14 @@ int main(int argc, char **argv) {
     }
     if (argc == 2) {
         const std::string_view selected(argv[1]);
+        if (selected == "replacement-cleanup") {
+            failed_replacement_batch_removes_unattempted_prior_generation_hooks();
+            return 0;
+        }
+        if (selected == "persistent-normal") {
+            concurrent_normal_entries_both_reach_qbdi();
+            return 0;
+        }
         if (selected == "flight-hook-failure") {
             flight_hook_install_failure_latches_a_specific_gap();
             return 0;
@@ -3679,19 +3729,19 @@ int main(int argc, char **argv) {
     active_proxy_acknowledges_the_exact_generation_admission();
     stopped_dormant_hook_never_attempts_a_failing_unhook();
     old_generation_deadline_cannot_stop_a_newer_generation();
-    unhook_failure_uses_the_saved_original_exactly_once();
-    rehook_failure_leaves_a_coherent_direct_execution_state();
-    every_physical_rehook_gets_a_new_proxy_identity();
+    normal_dispatch_does_not_depend_on_unhook_success();
+    normal_dispatch_does_not_reinstall_the_hook();
+    normal_calls_preserve_the_proxy_identity_and_runtime();
     hook_install_never_waits_for_the_linker_while_holding_the_registry();
     module_fini_before_hook_commit_rolls_back_the_unpublished_gateway();
     stale_rollback_failure_stays_authoritative_until_cleanup_succeeds();
     stale_rollback_never_inverts_registry_and_transition_locks();
-    physical_rehook_keeps_its_original_capture_coordinator();
-    concurrent_unhook_failures_keep_the_original_bypass_alive();
+    persistent_hook_keeps_its_original_capture_coordinator();
+    concurrent_calls_do_not_attempt_unhook();
     same_address_updates_replace_all_metadata_and_hook_generation();
     duplicate_install_for_one_configuration_generation_is_idempotent();
     failed_same_generation_install_is_retried();
-    duplicate_during_an_active_call_schedules_only_the_required_rehook();
+    duplicate_during_an_active_call_keeps_the_persistent_hook();
     batch_reconfiguration_stays_installing_until_pending_rehook_succeeds();
     superseded_pending_runtime_is_destroyed_outside_generation_locks();
     observer_module_is_normalized_to_load_bias_and_exact_readable_exec_map();
@@ -3720,6 +3770,7 @@ int main(int argc, char **argv) {
     proxy_runtime_allocation_failure_executes_the_target_once();
     proxy_runtime_snapshot_performs_no_throwing_allocation();
     flight_hook_install_failure_latches_a_specific_gap();
+    concurrent_normal_entries_both_reach_qbdi();
     concurrent_flight_gateway_keeps_the_hook_persistent();
     flight_proxy_defers_pthread_exit_until_after_proxy_cleanup();
     flight_proxy_continues_partial_execution_without_entry_restart();

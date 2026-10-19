@@ -49,6 +49,7 @@ private:
     std::array<struct sigaction, kSignalCount> previous_{};
     std::array<bool, kSignalCount> installed_{};
     size_t handler_slot_ = static_cast<size_t>(-1);
+    size_t marker_slot_ = static_cast<size_t>(-1);
     bool opened_ = false;
     bool finish_called_ = false;
     bool finish_result_ = false;

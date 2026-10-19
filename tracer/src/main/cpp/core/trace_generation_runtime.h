@@ -237,7 +237,7 @@ private:
     uint64_t next_admission_serial_ = 1;
     // Bound producer-owned data so it cannot independently exhaust the
     // publisher's fixed JSON serialization budget.
-    static constexpr size_t kMaxStatusArtifacts = 16;
+    static constexpr size_t kMaxStatusArtifacts = 256;
     static constexpr size_t kMaxStatusIssues = 8;
     static constexpr size_t kMaxStatusTextBytes = 128;
     mutable std::mutex status_metadata_mutex_;

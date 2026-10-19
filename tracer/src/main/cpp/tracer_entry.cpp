@@ -280,8 +280,10 @@ static void module_constructor_pre(struct dl_phdr_info *info, size_t,
 static void module_destructor_post(struct dl_phdr_info *info, size_t,
                                    void *) noexcept {
     if (info == nullptr) return;
-    retire_module_generation(static_cast<uintptr_t>(info->dlpi_addr),
-                             info->dlpi_name);
+    ModuleRange module;
+    if (module_range_from_phdr(*info, &module)) {
+        retire_module_generation(module.start, info->dlpi_name);
+    }
 }
 
 static bool prepare_module_callbacks() noexcept {
@@ -450,55 +452,37 @@ extern "C" uint64_t trace_proxy_dispatch(size_t generation, const uint64_t args[
                         "persistent hook has no retained original");
                 safe_to_dispatch = false;
             }
-        } else if (!persistent_flight) {
+        } else {
+            execution_target = reinterpret_cast<uintptr_t>(
+                    runtime->hook->hook.retained_original);
+            runtime->invocation.execution_address = execution_target;
+            runtime->invocation.execution_bytes = runtime->hook->hook.retained_original_bytes;
             if (runtime->hook->hook.residual_hook) {
+                // Failed installation may leave an entry with no original. Never
+                // enter QBDI or branch back into that residual patch.
                 if (!unhook_function(&runtime->hook->hook)) {
                     safe_to_dispatch = false;
                 } else {
                     runtime->hook->installed = false;
+                    execution_target = runtime->invocation.target_address;
+                    runtime->invocation.execution_address = execution_target;
                     use_original_bypass = true;
                 }
-            } else if (runtime->hook->unhook_failed_window) {
-                execution_target = reinterpret_cast<uintptr_t>(
-                        runtime->hook->hook.retained_original);
-                runtime->invocation.execution_address = execution_target;
-                use_original_bypass = true;
+            } else if (!runtime->hook->installed || execution_target == 0 ||
+                       runtime->invocation.execution_bytes == 0) {
+                safe_to_dispatch = false;
             } else {
-                const uint32_t tid = static_cast<uint32_t>(
-                        ::syscall(SYS_gettid));
+                const uint32_t tid = static_cast<uint32_t>(::syscall(SYS_gettid));
                 const TraceAdmissionResult admitted =
                         runtime->invocation.runtime == nullptr
-                                ? TraceAdmissionResult{
-                                          TraceAdmissionStatus::NotRunning, {}}
+                                ? TraceAdmissionResult{TraceAdmissionStatus::NotRunning, {}}
                                 : runtime->invocation.runtime->try_begin_call(
                                           runtime->hook->config_generation,
                                           runtime->hook->scene.index, tid);
-                if (admitted.status != TraceAdmissionStatus::Admitted) {
-                    execution_target = reinterpret_cast<uintptr_t>(
-                            runtime->hook->hook.retained_original);
-                    runtime->invocation.execution_address = execution_target;
-                    use_original_bypass = true;
-                    safe_to_dispatch = execution_target != 0;
-                } else {
+                if (admitted.status == TraceAdmissionStatus::Admitted) {
                     runtime->invocation.admission = admitted.admission;
-                    if (runtime->hook->installed &&
-                        !unhook_function(&runtime->hook->hook)) {
-                        if (runtime->hook->hook.retained_original == nullptr) {
-                            QTRACE_E("residual hook has no safe original bypass generation=%zu",
-                                     generation);
-                            safe_to_dispatch = false;
-                        } else {
-                            execution_target = reinterpret_cast<uintptr_t>(
-                                    runtime->hook->hook.retained_original);
-                            runtime->invocation.execution_address = execution_target;
-                            use_original_bypass = true;
-                            runtime->hook->unhook_failed_window = true;
-                            QTRACE_E("trace proxy using original bypass after unhook failure generation=%zu",
-                                     generation);
-                        }
-                    } else if (runtime->hook->installed) {
-                        runtime->hook->installed = false;
-                    }
+                } else {
+                    use_original_bypass = true;
                 }
             }
         }
@@ -1534,8 +1518,9 @@ static bool retire_superseded_hooks(
             }
             continue;
         }
-        if (hook->active_proxy_calls != 0 ||
-            !unhook_function(&hook->hook)) {
+        // The retained trampoline and invocation metadata outlive this patch.
+        // Retiring an entry is safe even while an admitted call is executing it.
+        if (!unhook_function(&hook->hook)) {
             hook->hook.residual_hook = true;
             hook->rollback_residual = true;
             // A reachable residual proxy has a retained native gateway. Retire

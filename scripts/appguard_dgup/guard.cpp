@@ -74,9 +74,8 @@ void write_jump(unsigned char *entry, uintptr_t destination) {
 
 bool install(uintptr_t base) {
     if (selected_mode == 14 || selected_mode == 15) {
-        // Ordinary QBDI scenes temporarily unhook their entry. Two termination
-        // workers can start concurrently; mode 14 keeps a persistent native
-        // guard for that entry. Mode 15 reproduces the QBDI-only coverage gap.
+        // Mode 15 delegates both entries to persistent QBDI gateways. Mode 14
+        // retains the native-worker control used by the earlier comparison.
         if (selected_mode == 14) {
             write_jump(reinterpret_cast<unsigned char *>(base + kTerminationOffset),
                        reinterpret_cast<uintptr_t>(termination_worker));

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import math
+import os
 import re
 import shutil
 import stat
@@ -119,6 +121,8 @@ class ElfInspector:
             if "NT_GNU_BUILD_ID" in line and line.strip().startswith("GNU")
         ]
         build_rows = [line for line in text.splitlines() if "Build ID:" in line]
+        if not note_rows and not build_rows:
+            return ""
         if not note_rows or not build_rows:
             _fail("target.build_id_missing", "target.inspect", "GNU build ID is missing")
         if len(note_rows) != 1 or len(build_rows) != 1:
@@ -242,16 +246,6 @@ class ElfInspector:
                 "target.inspect",
                 "ELF has no executable PT_LOAD range",
             )
-        biases = {
-            vaddr - offset
-            for offset, vaddr, _file, _mem, _flags, _align in executable_loads
-        }
-        if len(biases) != 1:
-            _fail(
-                "target.load_bias_ambiguous",
-                "target.inspect",
-                "executable PT_LOAD records do not share one ELF load bias",
-            )
         # Segment padding can make the executable p_vaddr - p_offset differ
         # from the ELF origin (Android 16KB layout). Anchor to all PT_LOADs,
         # rather than silently turning virtual scene addresses into file offsets.
@@ -277,7 +271,7 @@ class ElfInspector:
                 )
         return load_bias, tuple(executable)
 
-    def _inspect_details(self, binary: Path) -> tuple[ElfIdentity, int]:
+    def _inspect_details(self, binary: Path, expected_sha256: str | None = None) -> tuple[ElfIdentity, int]:
         text = self._capture(
             (str(self._readelf), "-h", "-n", "-lW", str(binary)),
             "llvm-readelf",
@@ -289,6 +283,15 @@ class ElfInspector:
         if machine != "AArch64":
             _fail("target.machine_unsupported", "target.inspect", "target must be AArch64")
         build_id = self._build_id(text)
+        digest = None
+        if expected_sha256 is not None:
+            if not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+                _fail("target.sha256_invalid", "target.inspect", "expected SHA-256 must be 64 lowercase hex digits")
+            digest = self._sha256(binary)
+            if digest != expected_sha256:
+                _fail("target.sha256_mismatch", "target.inspect", "target bytes differ from explicit sample SHA-256")
+        elif not build_id:
+            _fail("target.build_id_missing", "target.inspect", "GNU build ID is missing; configure target.sha256 explicitly")
         load_bias, executable_ranges = self._program_headers(text)
         return (
             ElfIdentity(
@@ -296,15 +299,43 @@ class ElfInspector:
                 machine=machine,
                 build_id=build_id,
                 executable_ranges=executable_ranges,
+                sha256=digest,
             ),
             load_bias,
         )
 
-    def inspect(self, binary: Path) -> ElfIdentity:
-        return self._inspect_details(Path(binary))[0]
+    @staticmethod
+    def _sha256(binary: Path) -> str:
+        try:
+            if binary.is_symlink() or not binary.is_file():
+                _fail("target.binary_invalid", "target.inspect", "SHA-256 input must be a regular file")
+            with binary.open("rb") as source:
+                before = os.fstat(source.fileno())
+                if not 0 < before.st_size <= _MAX_ELF_BYTES:
+                    _fail("target.binary_invalid", "target.inspect", "SHA-256 input size is outside bounds")
+                digest = hashlib.sha256()
+                total = 0
+                while chunk := source.read(min(1024 * 1024, _MAX_ELF_BYTES + 1 - total)):
+                    total += len(chunk)
+                    digest.update(chunk)
+                    if total > _MAX_ELF_BYTES:
+                        _fail("target.binary_invalid", "target.inspect", "SHA-256 input exceeds bounds")
+                after = os.fstat(source.fileno())
+                path_after = binary.lstat()
+                if not stat.S_ISREG(path_after.st_mode) or (path_after.st_dev, path_after.st_ino) != (after.st_dev, after.st_ino):
+                    _fail("target.binary_changed", "target.inspect", "target path changed during SHA-256 verification")
+                if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or total != before.st_size:
+                    _fail("target.binary_changed", "target.inspect", "target changed during SHA-256 verification")
+                return digest.hexdigest()
+        except OSError as error:
+            _fail("target.binary_invalid", "target.inspect", f"cannot hash target: {error}")
 
-    def symbol_range(self, binary: Path, symbol: str) -> tuple[int, int]:
-        identity, load_bias = self._inspect_details(Path(binary))
+    def inspect(self, binary: Path, *, expected_sha256: str | None = None) -> ElfIdentity:
+        return self._inspect_details(Path(binary), expected_sha256)[0]
+
+    def symbol_range(self, binary: Path, symbol: str, *, expected_sha256: str | None = None) -> tuple[int, int]:
+        identity, load_bias = self._inspect_details(Path(binary), expected_sha256)
         text = self._capture(
             (
                 str(self._nm),
@@ -570,6 +601,9 @@ class TargetResolver:
             host.elf_class == device.elf_class
             and host.machine == device.machine
             and host.build_id == device.build_id
+            and host.sha256 == device.sha256
+            and host.executable_ranges == device.executable_ranges
+            and bool(host.build_id or host.sha256)
         )
 
     @staticmethod
@@ -580,7 +614,8 @@ class TargetResolver:
         device_identity: ElfIdentity,
     ) -> ResolvedScene:
         if isinstance(scene, SymbolScene):
-            start, end = inspector.symbol_range(host_binary, scene.symbol)
+            options = {"expected_sha256": device_identity.sha256} if device_identity.sha256 else {}
+            start, end = inspector.symbol_range(host_binary, scene.symbol, **options)
         elif isinstance(scene, OffsetScene):
             start, end = scene.start_offset, scene.end_offset
             if start <= 0 or start >= end or end > _MAX_U64:
@@ -617,12 +652,13 @@ class TargetResolver:
         else:
             host_binary = device_host
 
-        host_identity = self._inspector.inspect(host_binary)
+        options = {"expected_sha256": config.target.sha256} if config.target.sha256 else {}
+        host_identity = self._inspector.inspect(host_binary, **options)
         if host_binary == device_host:
             device_identity = host_identity
         else:
             try:
-                device_identity = self._inspector.inspect(device_host)
+                device_identity = self._inspector.inspect(device_host, **options)
             except QtraceError as error:
                 if error.code in {
                     "target.elf_class_unsupported",

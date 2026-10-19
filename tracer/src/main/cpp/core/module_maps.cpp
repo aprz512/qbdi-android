@@ -56,11 +56,14 @@ bool module_range_from_phdr(const dl_phdr_info &info,
     module.start = base;
     uintptr_t maximum_load_end = 0;
     bool have_load = false;
+    uintptr_t image_origin = maximum;
     bool have_executable = false;
     for (ElfW(Half) index = 0; index < info.dlpi_phnum; ++index) {
         const ElfW(Phdr) &header = info.dlpi_phdr[index];
         if (header.p_type != PT_LOAD || header.p_memsz == 0) continue;
-        if (header.p_vaddr > maximum - header.p_memsz) return false;
+        if (header.p_vaddr < header.p_offset ||
+            header.p_vaddr > maximum - header.p_memsz) return false;
+        image_origin = std::min(image_origin, static_cast<uintptr_t>(header.p_vaddr - header.p_offset));
         const uintptr_t relative_end = header.p_vaddr + header.p_memsz;
         maximum_load_end = std::max(maximum_load_end, relative_end);
         have_load = true;
@@ -77,7 +80,8 @@ bool module_range_from_phdr(const dl_phdr_info &info,
                 {base + header.p_vaddr, base + relative_end};
         have_executable = true;
     }
-    if (!have_load) return false;
+    if (!have_load || image_origin > maximum - base) return false;
+    module.start = base + image_origin;
     const uintptr_t remainder = maximum_load_end % page_size;
     if (remainder != 0) {
         const uintptr_t padding = page_size - remainder;
@@ -189,9 +193,10 @@ bool find_loaded_module(const std::string &requested_path, uintptr_t observed_ba
         if (info == nullptr || info->dlpi_name == nullptr ||
             !mapped_path_matches(lookup.path, info->dlpi_name)) return 0;
         lookup.matched = true;
-        if (lookup.size != 0 && info->dlpi_addr != lookup.base) return 0;
         ModuleRange module;
-        if (!module_range_from_phdr(*info, &module) || !module.executable() ||
+        if (!module_range_from_phdr(*info, &module)) { lookup.invalid = true; return 0; }
+        if (lookup.size != 0 && module.start != lookup.base) return 0;
+        if (!module.executable() ||
             (lookup.size != 0 && module.end > lookup.base + lookup.size) ||
             lookup.found) {
             lookup.invalid = true;

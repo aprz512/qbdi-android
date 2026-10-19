@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from qtrace.errors import ErrorCode, QtraceError
-from qtrace.injector import FridaInjector, FridaProvider, InjectionRequest
+from qtrace.injector import FridaInjector, FridaProvider, InjectionRequest, StartupAdapter
 from qtrace.models import ResolvedScene
 from scripts.bounded_process import BoundedProcessError
 
@@ -420,6 +420,21 @@ class InjectorHarness:
 
 
 class FridaInjectorTests(unittest.TestCase):
+    def test_startup_adapter_uses_the_official_envelope_and_cleanup(self):
+        harness = InjectorHarness()
+        adapter = StartupAdapter(str(Path(TRACER_SO).with_name("adapter.so")), "start_adapter", 15)
+        result = harness.install(harness.request(startup_adapter=adapter))
+        envelope = harness.provider.device.script.posts[0]["payload"]
+        self.assertEqual(envelope["startupAdapter"], {"library": adapter.library, "entrypoint": "start_adapter", "mode": 15})
+        self.assertTrue(result.cleanup_detached)
+        for invalid in [StartupAdapter("/different/adapter.so", "start", 1),
+                        StartupAdapter(adapter.library, "bad-name", 1),
+                        StartupAdapter(adapter.library, "start", True)]:
+            harness = InjectorHarness()
+            with self.subTest(invalid=invalid), self.assertRaises(QtraceError):
+                harness.install(harness.request(startup_adapter=invalid))
+            self.assertEqual(harness.events.snapshot(), [])
+
     def test_detach_before_resume_waits_for_native_proof_including_short_finished_scenes(self):
         for state in ("installed", "running", "sealed"):
             with self.subTest(state=state):

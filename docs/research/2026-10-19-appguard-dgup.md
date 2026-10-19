@@ -1,5 +1,8 @@
 # 数码宝贝 UP：AppGuard 校验、退出链与 QBDI 兼容性
 
+> 后续改进已落地：当前 `engine` 默认由持久 QBDI hook 同时处理上报桥和退出线程；默认通用 CodeRules 为空。启动复用正式 `FridaInjector`，验收联合检查 PID、启动时间、标题标志与持续时长。当前结果及限制见 [可靠性改进验收](../benchmarks/qtrace-tracing-reliability-2026-10-19.md)。下文保留此前组合方案的分析过程；其中“默认”“最终”指此前实验，旧临时卸钩失败记录不代表当前实现。
+
+
 本记录针对手机上实际安装的「数码宝贝 UP / DIGIMON UP」，不是宝可梦游戏。目标包名为 `com.bandainamcoent.dgup_ww`，版本为 `1.5.0`，versionCode 为 `55`。验收要求是进入标题或登录界面，并在同一个进程内连续运行至少 120 秒。
 
 已通过该验收。QBDI 能跟踪 AppGuard 的实际上报桥，并用 CodeRules 阻断本机命中的 Root、USB 调试事件；独立的原生延迟退出线程由固定版本的原生跳板处理。最终复测 PID `32099` 存活 180 秒，标题界面两次截图间隔 162.14 秒；13 份轨迹严格解码通过，记录 7 次 Root、3 次 USB 上报阻断和 12 次原生退出线程阻断。普通 QBDI 跟踪存在临时卸钩窗口，纯 QBDI 拦截并发退出线程的实验未通过，不能把组合方案描述成所有阻断均由 QBDI 完成。
@@ -227,9 +230,9 @@ python3 scripts/appguard_dgup/run.py \
   --output artifacts/appguard-$(date +%s)
 ```
 
-需要主机的 `frida` Python 绑定及版本匹配的设备端 server。`build.py` 自动寻找主机或 SDK 内的 CMake；也可传 `--cmake`。编译产物单独放在 `out/appguard-dgup/`，不覆盖通用 CodeRules。
+需要主机的 `frida`、`Pillow` Python 包及版本匹配的设备端 server。`build.py` 自动寻找主机或 SDK 内的 CMake；也可传 `--cmake`。编译产物单独放在 `out/appguard-dgup/`，不覆盖通用 CodeRules。
 
-`run.py` 在停止游戏前校验已安装的三个 native 样本哈希，使用 qtrace 的设备绑定和部署逻辑。启动后在同一原始 PID 上按 5 秒间隔采样；退出码为 0 还要求原生状态有效、无错误、轨迹和 sidecar 完整拉取、严格转换成功。它输出 `report.json`、`startup.json`、截图、maps、logcat、`traces/` 和 `trace-summary.json`。截图是否确为标题界面还需独立观察，脚本不通过进程存活自动推断 UI。
+`run.py` 在停止游戏前校验已安装的三个 native 样本哈希，使用 qtrace 的设备绑定和部署逻辑。启动后在同一原始 PID 上按 5 秒间隔采样；退出码为 0 还要求原生状态有效、无错误、轨迹和 sidecar 完整拉取、严格转换成功。它输出 `report.json`、`startup.json`、截图、maps、logcat、`traces/` 和 `trace-summary.json`。当前脚本还会匹配版本限定的标题标志，核对 `/proc/PID/stat` 启动时间，并要求连续标题时长至少 120 秒；生成 `acceptance-summary.json`。旧版验收曾依赖人工观察截图。
 
 `--handle-startup-prompts` 仅处理通知权限拒绝和 Google Play Games 的取消按钮，不创建玩家资料或登录账号。游戏资源已经在本机完成下载；另一设备首次运行可能需更长时间。
 

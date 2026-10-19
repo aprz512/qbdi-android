@@ -228,6 +228,11 @@ def _request_config(config: object) -> UserConfig:
 
     if type(config.app.package) is not str or _PACKAGE.fullmatch(config.app.package) is None or type(config.target.module) is not str or not text(config.target.module) or _MODULE.fullmatch(config.target.module) is None or config.target.module in {".", ".."}:
         raise QtraceError("session.request_invalid", "session.request", "config package or module is invalid")
+    if (config.target.sha256 is not None and
+            (type(config.target.sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", config.target.sha256) is None)):
+        raise QtraceError("session.request_invalid", "session.request", "target SHA-256 is invalid")
+    if type(config.tracer.code_rules) is not bool or (config.tracer.code_rules and config.target.sha256 is None):
+        raise QtraceError("session.request_invalid", "session.request", "enabled rules require explicit target SHA-256")
     tracer = config.tracer
     if type(tracer.profile) is not str or tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
             type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None) or \
@@ -307,7 +312,7 @@ def build_native_request(config: UserConfig, resolved: ResolvedTarget, session_i
         if type(duration_ms) is not int or not 100 <= duration_ms <= 86_400_000:
             raise QtraceError("session.duration_invalid", "session.request", "duration must be 100 ms through 24 hours")
         session["durationMs"] = duration_ms
-    return {
+    native = {
         "schemaVersion": 1,
         "packageName": config.app.package,
         "targetModule": resolved.module,
@@ -322,6 +327,9 @@ def build_native_request(config: UserConfig, resolved: ResolvedTarget, session_i
                    for scene in resolved.scenes],
         "session": session,
     }
+    if config.tracer.code_rules:
+        native["codeRules"] = {"enabled": True, "sampleSha256": config.target.sha256}
+    return native
 
 
 def _collection_proves_crash(records: tuple[Mapping[str, object], ...]) -> bool:

@@ -1,4 +1,6 @@
 import math
+import hashlib
+from dataclasses import replace
 import stat
 import tempfile
 import unittest
@@ -349,6 +351,26 @@ class ElfInspectorTests(unittest.TestCase):
                 inspector, _runner = self.inspector(nm=nm)
                 self.assert_error(code, lambda: inspector.symbol_range(self.binary, "work"))
 
+    def test_no_build_id_requires_explicit_matching_sha256(self):
+        output = ARM64_READELF[:ARM64_READELF.index("Displaying notes")] + ARM64_READELF[ARM64_READELF.index("Program Headers:"):]
+        inspector, _ = self.inspector(readelf=output)
+        self.assert_error("target.build_id_missing", lambda: inspector.inspect(self.binary))
+        digest = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        identity = inspector.inspect(self.binary, expected_sha256=digest)
+        self.assertEqual(identity.build_id, "")
+        self.assertEqual(identity.sha256, digest)
+        self.assertEqual(inspector.symbol_range(self.binary, "do_work", expected_sha256=digest), (0x120, 0x160))
+        self.assert_error("target.sha256_mismatch", lambda: inspector.inspect(self.binary, expected_sha256="0" * 64))
+
+    def test_multiple_executable_segments_allow_distinct_padding(self):
+        for alignment in ("0x1000", "0x4000"):
+            output = ARM64_READELF.replace("0x1000", alignment).replace(
+                "0x0000000000000400 0x0000000000000400 0x000100 0x000180 RW",
+                "0x0000000000004400 0x0000000000004400 0x000100 0x000180 R E")
+            inspector, _ = self.inspector(readelf=output)
+            self.assertEqual(inspector.inspect(self.binary).executable_ranges,
+                             ((0x100, 0x400), (0x4400, 0x4580)))
+
     def test_symbol_range_may_touch_both_executable_boundaries(self):
         inspector, _runner = self.inspector(nm="work T 100 300\n")
         self.assertEqual((0x100, 0x400), inspector.symbol_range(self.binary, "work"))
@@ -396,17 +418,12 @@ class ElfInspectorTests(unittest.TestCase):
             "  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x000100 0x000100 R   0x1000\n"
             "  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x000100 0x000100 R   0x1000",
         )
-        ambiguous_executable_bias = ARM64_READELF.replace(
-            "0x0000000000000400 0x0000000000000400 0x000100 0x000180 RW",
-            "0x0000000000001400 0x0000000000001400 0x000100 0x000180 R E",
-        )
         cases = (
             (b"\xff\xfe", "target.tool_output_invalid"),
             (repeated_class, "target.header_ambiguous"),
             (repeated_note, "target.build_id_ambiguous"),
             (malformed_load, "target.program_header_malformed"),
             (repeated_load, "target.program_header_ambiguous"),
-            (ambiguous_executable_bias, "target.load_bias_ambiguous"),
         )
         for output, code in cases:
             with self.subTest(code=code):
@@ -445,6 +462,17 @@ class TargetResolverTests(unittest.TestCase):
             callback()
         self.assertEqual(code, caught.exception.code)
         self.assertTrue(caught.exception.stage.startswith("target."))
+
+    def test_sha256_checks_both_host_and_installed_bytes_without_build_id(self):
+        output = ARM64_READELF[:ARM64_READELF.index("Displaying notes")] + ARM64_READELF[ARM64_READELF.index("Program Headers:"):]
+        config = config_with_scene(OffsetScene("work", 0x120, 0x160), binary=self.host_binary)
+        digest = hashlib.sha256(b"host").hexdigest()
+        config = replace(config, target=replace(config.target, sha256=digest))
+        resolver, _, _ = self.resolver(FakeRunner(readelf=output))
+        self.assert_error("target.sha256_mismatch", lambda: resolver.resolve(config))
+        device = FakeDevice({"/data/app/base.apk": {"lib/arm64-v8a/libtarget.so": b"host"}})
+        resolver, _, _ = self.resolver(FakeRunner(readelf=output), device)
+        self.assertEqual(resolver.resolve(config).identity.sha256, digest)
 
     def test_unique_text_symbol_resolves_to_half_open_module_offsets(self):
         runner = FakeRunner(readelf=ARM64_READELF, nm="do_work T 120 40\n")

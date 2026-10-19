@@ -1,3 +1,5 @@
+#include "core/qbdi_gateway_entry.h"
+#include "rules/user_rules_gate.h"
 #include "core/qbdi_thread_session.h"
 
 #include "core/capture_coordinator.h"
@@ -222,7 +224,10 @@ struct QbdiThreadSession::Impl {
             module->start >= module->end) {
             return;
         }
-        register_user_code_rules(code_rules);
+        if (config->code_rules.enabled &&
+            user_rules_identity_matches(config->code_rules.sample_sha256)) {
+            register_user_code_rules(code_rules);
+        }
         collector = new (std::nothrow) InstructionCollector(
                 &instruction_cache, sink, &code_rules, context, gate,
                 trace_options, *module, signal_broker,
@@ -361,16 +366,12 @@ struct QbdiThreadSession::Impl {
 
     static uint32_t add_pre(void *opaque) noexcept {
         auto *self = static_cast<Impl *>(opaque);
-        if (self->flight) return self->add_target_code_callbacks(QBDI::PREINST);
-        return self->vm.addCodeCB(QBDI::PREINST,
-                                  on_target_pre, self);
+        return self->add_target_code_callbacks(QBDI::PREINST);
     }
 
     static uint32_t add_post(void *opaque) noexcept {
         auto *self = static_cast<Impl *>(opaque);
-        if (self->flight) return self->add_target_code_callbacks(QBDI::POSTINST);
-        return self->vm.addCodeCB(QBDI::POSTINST,
-                                  on_target_post, self);
+        return self->add_target_code_callbacks(QBDI::POSTINST);
     }
 
     static QBDI::VMAction on_target_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
@@ -383,19 +384,34 @@ struct QbdiThreadSession::Impl {
         const QbdiTargetPreDecision decision = decide_qbdi_target_pre(
                 self->stop_control, self->control_only,
                 &self->stop_observation);
-        if (decision.action == QbdiTargetPreAction::ContinueWithoutCollection) {
-            return QBDI::CONTINUE;
+        if (decision.action == QbdiTargetPreAction::Stop) return QBDI::STOP;
+        if (!self->flight && gpr != nullptr &&
+            gpr->pc == self->gateway_logical_entry &&
+            self->gateway_execution_entry != self->gateway_logical_entry) {
+            // A loop or tail call can revisit the patched head from inside the
+            // VM. Route it through the same retained original instead of
+            // executing/recording the installed hook's branch instructions.
+            if (decision.action == QbdiTargetPreAction::ContinueWithoutCollection) {
+                gpr->pc = self->gateway_execution_entry;
+                return QBDI::BREAK_TO_VM;
+            }
+            self->collector->finish_last(*gpr);
+            const auto action = evaluate_qbdi_gateway_entry(
+                    self->code_rules, vm, gpr, fpr, self->gateway_logical_entry,
+                    self->gateway_execution_entry, self->context, self->sink);
+            return action == QBDI::CONTINUE ? QBDI::BREAK_TO_VM : action;
         }
-        if (decision.action == QbdiTargetPreAction::Stop) {
-            return QBDI::STOP;
-        }
+        if (decision.action == QbdiTargetPreAction::ContinueWithoutCollection) return QBDI::CONTINUE;
         return InstructionCollector::pre_callback(vm, gpr, fpr, self->collector);
     }
 
     static QBDI::VMAction on_memory(QBDI::VM *vm, QBDI::GPRState *gpr,
                                     QBDI::FPRState *fpr, void *opaque) {
         auto *self = static_cast<Impl *>(opaque);
-        if (self->control_only) return QBDI::CONTINUE;
+        const QBDI::InstAnalysis *instruction = vm == nullptr ? nullptr
+                : vm->getInstAnalysis(QBDI::ANALYSIS_INSTRUCTION);
+        if (self->control_only || instruction == nullptr ||
+            !self->is_target_address(instruction->address)) return QBDI::CONTINUE;
         return InstructionCollector::memory_callback(
                 vm, gpr, fpr, self->collector);
     }
@@ -513,6 +529,8 @@ struct QbdiThreadSession::Impl {
         gpr->x8 = indirect_result;
         gpr->sp = initial_sp;
         gpr->pc = execution_entry;
+        gateway_logical_entry = logical_entry;
+        gateway_execution_entry = execution_entry;
         last_target_pc = is_target_address(logical_entry) ? logical_entry : 0;
         if (flight && context != nullptr && is_target_address(logical_entry)) {
             context->target_address = logical_entry;
@@ -590,7 +608,26 @@ struct QbdiThreadSession::Impl {
         stop_observation = {};
         control_only = false;
         if (!signal_execution.activate(gpr)) return {};
-        const bool executed = vm.run(execution_entry, kReturnAddress);
+        uintptr_t start = execution_entry;
+        if (!flight && logical_entry != execution_entry) {
+            // Entry policy runs before relocated prologue instructions. The
+            // trampoline is control-only; report this omission explicitly.
+            if (!sink->call("qtrace", "hook-gateway",
+                            "logical entry policy before retained trampoline; relocated prologue omitted")) {
+                signal_execution.clear();
+                return {};
+            }
+            const QBDI::VMAction action = evaluate_qbdi_gateway_entry(
+                    code_rules, &vm, gpr, vm.getFPRState(), logical_entry,
+                    execution_entry, context, sink);
+            if (action == QBDI::STOP) {
+                signal_execution.clear();
+                return {};
+            }
+            start = gpr->pc;
+            if (start != execution_entry) target_execution_observed = true;
+        }
+        const bool executed = start == kReturnAddress || vm.run(start, kReturnAddress);
         signal_execution.clear();
         const bool returned = executed && gpr->pc == kReturnAddress;
         const bool target_executed = executed || target_execution_observed;
@@ -706,6 +743,8 @@ struct QbdiThreadSession::Impl {
     uint8_t *fakestack = nullptr;
     QBDI::rword initial_sp = 0;
     uintptr_t last_target_pc = 0;
+    uintptr_t gateway_logical_entry = 0;
+    uintptr_t gateway_execution_entry = 0;
     uintptr_t thread_start_routine = 0;
     uint32_t thread_creator_tid = 0;
     uint32_t thread_module_generation = 0;

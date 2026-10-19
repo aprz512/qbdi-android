@@ -9,6 +9,13 @@ set(SHADOWHOOK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/android-inline-hook/
 set(LZ4_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lz4/lib)
 set(QTRACE_USER_RULES_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/rules/user_code_rules.cpp"
         CACHE FILEPATH "Source defining register_user_code_rules for this tracer build")
+set(QTRACE_USER_RULES_SAMPLE_SHA256 "" CACHE STRING "SHA-256 of the sample allowed to enable custom rules")
+if(NOT QTRACE_USER_RULES_SOURCE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/rules/user_code_rules.cpp")
+    string(LENGTH "${QTRACE_USER_RULES_SAMPLE_SHA256}" RULES_SHA_LENGTH)
+    if(NOT RULES_SHA_LENGTH EQUAL 64 OR NOT QTRACE_USER_RULES_SAMPLE_SHA256 MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "Custom rules require QTRACE_USER_RULES_SAMPLE_SHA256 (64 lowercase hex digits)")
+    endif()
+endif()
 option(QTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK
         "Allow 20-byte entry patches when no nearby branch island is available (startup experiments)" OFF)
 
@@ -152,6 +159,12 @@ target_include_directories(qbdi_tracer PRIVATE
         ${QBDI_ROOT}/include
         ${SHADOWHOOK_ROOT}/third_party/xdl
         ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(qbdi_tracer PRIVATE
+    QTRACE_USER_RULES_SAMPLE_SHA256="${QTRACE_USER_RULES_SAMPLE_SHA256}")
+if(QTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK)
+    target_compile_definitions(qbdi_tracer PRIVATE SH_CONFIG_TRY_HOOK_WITHOUT_ISLAND)
+endif()
+
 target_link_libraries(qbdi_tracer PRIVATE
         qbdi_static
         shadowhook_static

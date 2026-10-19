@@ -539,7 +539,7 @@ Flight Recorder 的多线程崩溃压力结果见 [Flight Recorder 验收报告]
 
 ## 完整性检查与 CodeRules
 
-integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。运行时绕过逻辑默认放在 `tracer/src/main/cpp/rules/user_code_rules.cpp`，也可用 CMake 参数 `QTRACE_USER_RULES_SOURCE` 指定目标专用源文件。CodeRules 按目标模块偏移匹配；JavaScript 配置只负责场景位置。
+integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。通用 CodeRules 默认为空。自定义策略须通过 `QTRACE_USER_RULES_SOURCE` 选择源文件、通过 `QTRACE_USER_RULES_SAMPLE_SHA256` 绑定样本，并显式设置 `tracer.codeRules: true` 和 `target.sha256`。CodeRules 按目标模块偏移匹配；JavaScript 配置负责场景位置。
 
 具体机制见 [完整性检查与 CodeRules](docs/integrity-bypass.md)。
 
@@ -585,3 +585,12 @@ integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。运行�
 ## License
 
 见 [LICENSE](LICENSE)。第三方组件仍遵循各自许可证。
+
+
+### 跟踪可靠性与样本身份
+
+缺少 GNU build ID 的 ELF 可通过 `target.sha256` 显式验证；本地与设备副本都必须匹配。
+
+普通模式保持入口 hook，QBDI 执行保留的原始指令跳板。跳板重定位的入口指令不计入目标指令轨迹，轨迹通过 `hook-gateway` 事件声明此边界。入口规则在跳板执行前按逻辑偏移评估，此入口通知没有解码指令信息。
+
+[可靠性改进验收](docs/benchmarks/qtrace-tracing-reliability-2026-10-19.md) 包含并发回归、模块偏移定义、自动标题验收、短函数缓冲测量与复现命令。

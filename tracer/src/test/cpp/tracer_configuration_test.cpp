@@ -550,6 +550,18 @@ int main() {
                                   "\"scenes\": [], \"debug\": {}"),
                      "UNKNOWN_FIELD", "$.debug");
 #endif
+    {
+        auto request = nlohmann::json::parse(document_with_scenes("[]"));
+        CHECK(!prepare_tracer_configuration(request.dump()).config.code_rules.enabled);
+        request["codeRules"] = {{"enabled", true}, {"sampleSha256", std::string(64, 'a')}};
+        const auto enabled = prepare_tracer_configuration(request.dump());
+        CHECK(enabled.accepted() && enabled.config.code_rules.enabled);
+        request["codeRules"]["sampleSha256"] = std::string(64, 'b');
+        expect_rejection(request.dump(), "RULES_IDENTITY_MISMATCH", "$.codeRules");
+        request["codeRules"]["sampleSha256"] = std::string(64, 'a');
+        request["codeRules"]["enabled"] = false;
+        expect_rejection(request.dump(), "RULES_IDENTITY_MISMATCH", "$.codeRules");
+    }
     generation_registry_is_transactional_and_retains_two_generations();
     configure_and_status_serialize_normalized_session();
     terminal_generations_ignore_late_install_callbacks();

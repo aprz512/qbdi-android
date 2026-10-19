@@ -142,8 +142,9 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         const uintptr_t execution_address = invocation.execution_address != 0
                                                     ? invocation.execution_address
                                                     : invocation.target_address;
-        const TraceRunResult call = qbdi->call(
-                execution_address, invocation.args.data(),
+        const TraceRunResult call = qbdi->call_gateway(
+                invocation.target_address, execution_address, execution_address,
+                invocation.execution_bytes, invocation.args.data(),
                 invocation.indirect_result);
         if (trace_process_child_detached()) {
             state->writer.detach_after_fork_child();

@@ -52,6 +52,10 @@
     "tracer": {"$ref": "#/$defs/tracer"},
     "scenes": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/scene"}}
   },
+  "allOf": [{
+    "if": {"properties": {"tracer": {"properties": {"codeRules": {"const": true}}, "required": ["codeRules"]}}, "required": ["tracer"]},
+    "then": {"properties": {"target": {"required": ["sha256"]}}}
+  }],
   "$defs": {
     "text": {"type": "string", "minLength": 1},
     "sceneName": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -62,13 +66,14 @@
     },
     "target": {
       "type": "object", "additionalProperties": false, "required": ["module"],
-      "properties": {"module": {"$ref": "#/$defs/text"}, "binary": {"$ref": "#/$defs/text"}}
+      "properties": {"module": {"$ref": "#/$defs/text"}, "binary": {"$ref": "#/$defs/text"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$(?![\\s\\S])"}}
     },
     "tracer": {
       "type": "object", "additionalProperties": false,
       "properties": {
         "profile": {"type": "string", "enum": ["fast", "balanced", "full"]},
         "compression": {"type": "boolean"},
+        "codeRules": {"type": "boolean"},
         "flightEnabled": {"type": "boolean"},
         "flightEntryScene": {"$ref": "#/$defs/text"},
         "library": {"$ref": "#/$defs/text"},

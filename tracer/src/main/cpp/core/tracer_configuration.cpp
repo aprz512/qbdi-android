@@ -1,3 +1,4 @@
+#include "rules/user_rules_gate.h"
 #include "core/tracer_configuration.h"
 
 #include "third_party/nlohmann/json.hpp"
@@ -564,10 +565,10 @@ PreparedConfiguration prepare_tracer_configuration(std::string_view request) {
         ConfigurationIssue issue;
 #ifndef NDEBUG
         if (!exact_keys(root, {"schemaVersion", "packageName", "targetModule", "trace", "flight",
-                               "scenes", "session", "debug"}, &issue, "$")) {
+                               "scenes", "session", "codeRules", "debug"}, &issue, "$")) {
 #else
         if (!exact_keys(root, {"schemaVersion", "packageName", "targetModule", "trace", "flight",
-                               "scenes", "session"}, &issue, "$")) {
+                               "scenes", "session", "codeRules"}, &issue, "$")) {
 #endif
             PreparedConfiguration prepared;
             prepared.error = std::move(issue);
@@ -597,6 +598,22 @@ PreparedConfiguration prepare_tracer_configuration(std::string_view request) {
             PreparedConfiguration prepared;
             prepared.error = std::move(issue);
             return prepared;
+        }
+        if (root.contains("codeRules")) {
+            const json &rules = root.at("codeRules");
+            if (!exact_keys(rules, {"enabled", "sampleSha256"}, &issue, "$.codeRules") ||
+                !boolean_member(rules, "enabled", &config.code_rules.enabled, &issue, "$.codeRules") ||
+                !string_member(rules, "sampleSha256", &config.code_rules.sample_sha256,
+                               &issue, "$.codeRules", true, 64)) {
+                PreparedConfiguration prepared;
+                prepared.error = std::move(issue);
+                return prepared;
+            }
+            if (!config.code_rules.enabled ||
+                !user_rules_identity_matches(config.code_rules.sample_sha256)) {
+                return reject("RULES_IDENTITY_MISMATCH", "$.codeRules",
+                              "enabled rules must match this build's sample SHA-256");
+            }
         }
         const json *trace = required_member(root, "trace", &issue, "$");
         if (trace == nullptr || !parse_trace(*trace, &config.trace, &issue)) {

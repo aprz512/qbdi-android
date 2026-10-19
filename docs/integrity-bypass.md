@@ -7,4 +7,4 @@ The integrity scene contains two checks:
 
 The JavaScript config now only provides scene offsets. It does not pre-enable bypass handlers.
 
-Runtime behavior changes should be implemented as native CodeRules under `tracer/src/main/cpp/rules/user_code_rules.cpp`. CodeRules can match by module offset, then adjust registers, arguments, return values, PC, flags, or memory through `CodeRuleContext`.
+The default `tracer/src/main/cpp/rules/user_code_rules.cpp` is empty. Select sample-specific native CodeRules with `QTRACE_USER_RULES_SOURCE`, bind the build with `QTRACE_USER_RULES_SAMPLE_SHA256`, and explicitly enable `tracer.codeRules` with a matching `target.sha256`. CodeRules can match by module offset, then adjust registers, arguments, return values, PC, flags, or memory through `CodeRuleContext`.

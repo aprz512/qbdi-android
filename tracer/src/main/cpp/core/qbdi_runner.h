@@ -21,6 +21,7 @@ struct TraceInvocation {
     // May select a retained hook-generation trampoline while target_address keeps
     // the logical scene address used by trace metadata and instrumentation ranges.
     uintptr_t execution_address = 0;
+    size_t execution_bytes = 0;
     std::array<uint64_t, 8> args{};
     uint64_t indirect_result = 0;
     // Filled by the proxy admission gate. Keeping the generation alive here

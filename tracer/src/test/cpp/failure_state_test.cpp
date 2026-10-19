@@ -346,7 +346,7 @@ void signal_writes_one_valid_fixed_size_marker_and_reraises() {
     CHECK(::rmdir(directory) == 0);
 }
 
-void concurrent_session_is_rejected_and_multiple_signals_write_once() {
+void same_thread_nested_session_is_rejected_and_multiple_signals_write_once() {
     char path[] = "/tmp/qtrace-crash-multiple-XXXXXX";
     char *directory = mkdtemp(path);
     CHECK(directory != nullptr);
@@ -1116,6 +1116,58 @@ void crash_marker_path_overflow_latches_without_opening_or_allocating() {
 
 } // namespace
 
+void different_threads_share_crash_handlers_with_separate_markers(bool finish_first) {
+    char path[] = "/tmp/qtrace-crash-concurrent-XXXXXX";
+    char *directory = mkdtemp(path);
+    CHECK(directory != nullptr);
+    const std::string first_path = std::string(directory) + "/first";
+    const std::string second_path = std::string(directory) + "/second";
+    struct sigaction forwarding{}, previous{};
+    forwarding.sa_handler = forwarding_handler;
+    sigemptyset(&forwarding.sa_mask);
+    CHECK(sigaction(SIGABRT, &forwarding, &previous) == 0);
+    CrashMarkerSession first;
+    CHECK(first.open(first_path));
+    std::atomic<bool> second_opened{false}, release_second{false};
+    std::atomic<bool> signal_written{false}, finish_second{false};
+    int second_tid = 0;
+    std::thread second([&] {
+        second_tid = static_cast<int>(syscall(SYS_gettid));
+        CrashMarkerSession marker;
+        CHECK(marker.open(second_path));
+        second_opened = true;
+        while (!release_second.load()) std::this_thread::yield();
+        CHECK(raise(SIGABRT) == 0);
+        signal_written = true;
+        while (!finish_second.load()) std::this_thread::yield();
+        CHECK(marker.finish());
+    });
+    while (!second_opened.load()) std::this_thread::yield();
+    if (finish_first) CHECK(first.finish());
+    release_second = true;
+    while (!signal_written.load()) std::this_thread::yield();
+    if (!finish_first) {
+        struct stat status{};
+        CHECK(::stat((first_path + ".crash").c_str(), &status) == 0 && status.st_size == 0);
+        CHECK(first.finish());
+    }
+    CHECK(::access((first_path + ".crash").c_str(), F_OK) != 0);
+    finish_second = true;
+    second.join();
+    const int fd = ::open((second_path + ".crash").c_str(), O_RDONLY | O_CLOEXEC);
+    CHECK(fd >= 0);
+    CrashMarker marker{};
+    CHECK(::read(fd, &marker, sizeof(marker)) == sizeof(marker));
+    CHECK(valid_crash_marker(marker) && marker.tid == second_tid);
+    CHECK(::close(fd) == 0);
+    struct sigaction restored{};
+    CHECK(sigaction(SIGABRT, nullptr, &restored) == 0);
+    CHECK(restored.sa_handler == forwarding_handler);
+    CHECK(sigaction(SIGABRT, &previous, nullptr) == 0);
+    CHECK(::unlink((second_path + ".crash").c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
 int main() {
     setup_failures_latch_their_code_and_finish_is_idempotent();
     runtime_failures_preserve_the_first_code_and_finish_is_idempotent();
@@ -1130,7 +1182,9 @@ int main() {
     stale_forwarding_preserves_mask_and_one_shot_reset_behavior();
     real_fault_preserves_siginfo_code_address_and_context();
     successful_run_removes_its_empty_crash_marker_and_restores_handlers();
-    concurrent_session_is_rejected_and_multiple_signals_write_once();
+    different_threads_share_crash_handlers_with_separate_markers(false);
+    different_threads_share_crash_handlers_with_separate_markers(true);
+    same_thread_nested_session_is_rejected_and_multiple_signals_write_once();
     delayed_handler_from_a_finished_run_cannot_touch_the_next_run();
     delayed_custom_handler_uses_old_semantics_without_consuming_the_new_marker();
     delayed_custom_handler_preserves_stale_nodefer_mask();
