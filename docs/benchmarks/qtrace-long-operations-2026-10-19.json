@@ -1,0 +1,5916 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-10-19T03:48:43.892323+00:00",
+  "status": "passed",
+  "scope": [
+    "PERF-03 local warm-open phase measurements and bounded validation scheduling",
+    "UI-07 audited loading stages and visible cancellation",
+    "UI-09 workspace-scoped analysis cancellation"
+  ],
+  "revision": {
+    "head": "f4cf92b8227fed470f11039e727338ca360f61ae",
+    "branch": "perf/flight-recovery-budget",
+    "dirty": true,
+    "tested_source_sha256": {
+      "qtrace-ui/Cargo.lock": "b504c781c0ac41bee7ceb7edf296e15974b2146b963662a52627bf0bfd0ada08",
+      "qtrace-ui/crates/qtrace-analysis/src/memory.rs": "1531734edfcf77ce9a49c05c9ea575d68163a26f8311ca629c51fa185260132b",
+      "qtrace-ui/crates/qtrace-analysis/src/registers.rs": "6eb54d27bb94eb372c3312478329387fdd0aeba391ac0154deb5b7718ff852f8",
+      "qtrace-ui/crates/qtrace-analysis/src/timeline.rs": "72048401dd925e4423e9e9d60321b148235027a18ea8a6b0ea421a040e52e557",
+      "qtrace-ui/crates/qtrace-analysis/tests/memory_state.rs": "2da24dc0d4e78cbfb4549d3c324596798e4e92205c05e6b91a8744be5114d0c8",
+      "qtrace-ui/crates/qtrace-analysis/tests/pagination.rs": "16276901acba88d0366c9373a2381a39a3df6bcd7834733563133da963953c60",
+      "qtrace-ui/crates/qtrace-analysis/tests/register_state.rs": "12b350e01ad1081ce9128076f7f5a2ad46bd5cfb892725635d32a3866699ab9a",
+      "qtrace-ui/crates/qtrace-provider/src/control.rs": "6b2f5a97ffe3a28a8e972d65d96f46bf06aefba67239e25b3721f861c78b1169",
+      "qtrace-ui/crates/qtrace-provider/src/flight/events.rs": "15c4a88ac9940f623683bb3715bc56eec213dcbc440d2d9114b840f2173b7c0b",
+      "qtrace-ui/crates/qtrace-provider/src/flight/mod.rs": "5db7c6c8ace25fe71339a252c8a2e83f218d172a9173a09264ee708707acff7d",
+      "qtrace-ui/crates/qtrace-provider/src/flight/recovery.rs": "2f3a6479317d8a04390ce5e53bd5f3faec3369b74e2fbde7fcce5d1b646692d1",
+      "qtrace-ui/crates/qtrace-provider/src/flight/sort.rs": "9e7b08ccaff06ecad068c8ad5f3b39a752f382202ef99ad6c99d953c477f2785",
+      "qtrace-ui/crates/qtrace-provider/src/lib.rs": "8018a8cd6e4feaee37e48b8956a8347830630717f286a159f659f8fa0308d873",
+      "qtrace-ui/crates/qtrace-provider/src/model.rs": "fb015d572dc88307d5dfc18584586c862e480f67600091149a16073dd3c902be",
+      "qtrace-ui/crates/qtrace-provider/src/qtrb/input.rs": "6e8abf66d4777d0adca4d3545fdc546aaeade4406a932fa2a0ce107087f5d490",
+      "qtrace-ui/crates/qtrace-provider/src/source.rs": "8fa4ff97b2bcbeb053ce982c72887579d629ff28cf2d7360d867c444a7c4a434",
+      "qtrace-ui/crates/qtrace-provider/tests/flight_recovery.rs": "1544ce85a2f6d996df2165a3808b4a5a0a2b6b705848b42d54d05cb0a87a8328",
+      "qtrace-ui/crates/qtrace-provider/tests/qtrb_input.rs": "b6b68fe08f9b85275a3b0a109c75154dc06af4bd04fa9461b870bd4c48506bc8",
+      "qtrace-ui/crates/qtrace-service/Cargo.toml": "66c6f0cc6859a4c056fd53ee198e298bc193ab79d960835465b039e2acd84d3e",
+      "qtrace-ui/crates/qtrace-service/examples/verify_capture.rs": "c323ffed4c1966009f27f13d2bd53730e965283a6e52f27c75c2ac4aaa54afcb",
+      "qtrace-ui/crates/qtrace-service/src/bin/export_bindings.rs": "3dab38e6afd4a1c493487e2fb889bba1bfa0b570dffb07fe16d5f774a4120742",
+      "qtrace-ui/crates/qtrace-service/src/budget.rs": "0d9fcfbe1c9ef07a77aecc928f499a7aa5cdba196fec7fc62031ee2573b9e864",
+      "qtrace-ui/crates/qtrace-service/src/dto.rs": "acc4d50122929119e196dc34a0b945b1970f265fb2afbf7651e56f7aee28048b",
+      "qtrace-ui/crates/qtrace-service/src/jobs.rs": "a9dd29b3cafd7ec2fcd6f6b45cd799ba98bcece9b6ebff847d50b3210bbb85b5",
+      "qtrace-ui/crates/qtrace-service/src/lib.rs": "26b8313b7c68f40983ac871733196d8ba30b65ad36530f77f7dbdc4c1162fded",
+      "qtrace-ui/crates/qtrace-service/src/progress.rs": "875253e7a212798b0a862b80c973145b5446f89abfb121f4241267c30ccb125e",
+      "qtrace-ui/crates/qtrace-service/src/service.rs": "e9cb96bef7cc26db7c0e8a01d369dc33aa3f46182a27686dad00be227862a1c1",
+      "qtrace-ui/crates/qtrace-service/src/workspace.rs": "beaae517163dd20077d5ba32657deeec9d2569a3843634b804792b3b0d5af913",
+      "qtrace-ui/crates/qtrace-service/tests/end_to_end.rs": "62102d9ead1763b0a2b4a7fb76fd25d73a64ee61e496a0042ca9d52f6f140c4d",
+      "qtrace-ui/crates/qtrace-store/src/cache/reader.rs": "cde6367dfcafc6a3b92cc8f544d12ac98331f784e95937ceb6d2b42a578c6b0a",
+      "qtrace-ui/crates/qtrace-store/src/index/builder.rs": "93045eee99d5c225d8c9777eb7418be5552d44483f625f5afc5b936c6aa7cb5b",
+      "qtrace-ui/crates/qtrace-store/src/index/intervals.rs": "8b40f62dbf8177943f7975976cd1d649c30d7baded10d98cd2e740e3a0e9860b",
+      "qtrace-ui/crates/qtrace-store/src/index/mod.rs": "a57b958e794db3ba7aa542521d208fe94e701e9b683e1534d9f94fe68b34823f",
+      "qtrace-ui/crates/qtrace-store/src/index/wire.rs": "d5ceb0fa900d1c0b7152aecf0200a4ab2bf170ea4159583e0aae7ef2c7d5733b",
+      "qtrace-ui/crates/qtrace-store/src/lib.rs": "569d5101a1e6c24f74db4d8b5a671ff9d282a8a45ccd6302d75bcd10edd02773",
+      "qtrace-ui/crates/qtrace-store/src/profile.rs": "5dd68cb7ba2f76b96fb1bd9131cc429b1b4c2ec66d3cd6014c4673f663c61834",
+      "qtrace-ui/crates/qtrace-store/src/session.rs": "931c53ffa8eff16bb5c6bd14c95300c8335c1fc972e55d61565a50e8b8fb4346",
+      "qtrace-ui/crates/qtrace-store/tests/index_equivalence.rs": "47d994e6444e040ad292cbfc873b57cc7da930119e351eeec76305d080510050",
+      "qtrace-ui/crates/qtrace-store/tests/open_progress.rs": "f24629305a73ac18170ab1513fe532314b460f6e99abf09db183da7d4f02b921",
+      "qtrace-ui/src-web/src/App.tsx": "87fe8f2cebd7e18e133ec3826e953eb59e378cbbcc4d9c2a92610f8108bf774d",
+      "qtrace-ui/src-web/src/api/generated.ts": "3671a700730db24512249761361f68fd2c488ef39b5efc5905a9a70da30fad3e",
+      "qtrace-ui/src-web/src/components/App.test.tsx": "fb37cf82782236284945d421c037dbc3d400c7bbd9a0f224ed1c548b3d1a0b8a",
+      "qtrace-ui/src-web/src/components/BottomDock.tsx": "2197227b003939fd982faa5eef7ede0be555ac3f272816245d1f0e690ea556fc",
+      "qtrace-ui/src-web/src/components/JobsPane.test.tsx": "13643ad4935b6d298ac339d53cf23c0562ad1f77405456eb6195b976f1d0dc29",
+      "qtrace-ui/src-web/src/components/JobsPane.tsx": "1726e673d45bf91ee65a9a44da235d8deb5efe23757d42a847a2afef8854edd3",
+      "qtrace-ui/src-web/src/styles/global.css": "bbcd55ec8055cedde105b6e8aee0ae7abea05149dd86c635c1c8f6f0df936773"
+    }
+  },
+  "host": {
+    "system": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "logical_cpus": 16,
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "node": "v22.23.2"
+  },
+  "evidence_root": "artifacts/long-operations-2026-10-19-qqno4ilc",
+  "performance": {
+    "status": "passed_local_comparison",
+    "corpus": {
+      "cache_options": {
+        "interval_block_rows": 64,
+        "schema": 2
+      },
+      "corpora": {
+        "flight": {
+          "bytes": 536870912,
+          "events": 68,
+          "format": "Flight",
+          "path": "flight-512m.flight.bin",
+          "physical_records": 60,
+          "sha256": "a81933708736e2fc4003b024cd59bb763fb9cef44d2920a57c86dd852784e4de",
+          "version": "2"
+        },
+        "qtrb": {
+          "bytes": 80078397,
+          "events": 10000000,
+          "format": "QTRB",
+          "instructions": 814,
+          "memory_events": 814,
+          "opaque_optional_events": 9997554,
+          "path": "qtrb-10m.trace.bin",
+          "semantic_events": 814,
+          "sha256": "54bedf8fbf469ef51388e042d9cb24b273d7ef4efd5c027d9aa2b28841022d0d",
+          "version": "1.2"
+        }
+      },
+      "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+      "expected_flight_completeness": [
+        {
+          "bounds": {
+            "inclusive_sequence": {
+              "first": 1,
+              "last": 8
+            }
+          },
+          "cause": "retained",
+          "domain": "captured_sequence",
+          "provenance": "captured"
+        },
+        {
+          "bounds": {
+            "inclusive_sequence": {
+              "first": 10,
+              "last": 61
+            }
+          },
+          "cause": "retained",
+          "domain": "captured_sequence",
+          "provenance": "captured"
+        },
+        {
+          "bounds": {
+            "inclusive_sequence": {
+              "first": 9,
+              "last": 9
+            }
+          },
+          "cause": "overwritten",
+          "domain": "captured_sequence",
+          "provenance": "unknown"
+        },
+        {
+          "bounds": {
+            "inclusive_sequence": {
+              "first": 60,
+              "last": 60
+            }
+          },
+          "cause": "coverage_gap",
+          "domain": "captured_sequence",
+          "provenance": "captured"
+        }
+      ],
+      "generator_schema": 1,
+      "generator_sha256": "dae978e230b024e45eeb84333e2284775c9887af0e478467bc0a743c5ba4386e",
+      "query_set": {
+        "schema": 1,
+        "structured_samples": 200,
+        "viewport_samples": 200
+      },
+      "reference_host": null
+    },
+    "baseline": "Same working tree with phase hooks, before cache scheduling refactor. Retains preceding Flight/replay fixes. This is not a comparison against clean HEAD.",
+    "procedure": "Five paired fresh-cache builds and five paired existing-cache opens; alternate before/after order. Elapsed monotonic clock and per-child wait4 RSS. Warm profiling enabled in both binaries; cold profiling disabled. Same cache identity, source corpus, machine, and correctness oracle.",
+    "binary_scope": "Measured before and after binaries are preserved by SHA-256. Final service progress/cancellation refinements do not execute in the direct-store perf_driver open path; cache scheduling and format are unchanged since measurement. Final workload/capture/browser checks exercise the final implementation.",
+    "warm": {
+      "before": {
+        "median_seconds": 1.1669838009984232,
+        "median_peak_rss_bytes": 1215102976
+      },
+      "after": {
+        "median_seconds": 0.8081042140038335,
+        "median_peak_rss_bytes": 1215057920
+      },
+      "elapsed_change_percent": -30.752747954817128,
+      "rss_change_percent": -0.003707998489832498
+    },
+    "cold": {
+      "before": {
+        "median_seconds": 8.076998043994536,
+        "median_peak_rss_bytes": 1215160320
+      },
+      "after": {
+        "median_seconds": 7.553993320994778,
+        "median_peak_rss_bytes": 1215541248
+      },
+      "elapsed_change_percent": -6.475236469676082,
+      "rss_change_percent": 0.031347962382444194
+    },
+    "raw_warm": {
+      "scope": "paired warm open, identical existing cache/corpus/machine; profiling enabled in both binaries",
+      "binaries": {
+        "before": "13ebdef4d77097412d545cfdc823fa4bfee0422a8d042fe7ea06f17902df7155",
+        "after": "5f72e4c0f8394d9d3923f6195465762e8d742ed3b2a81822517df614d4c22132"
+      },
+      "samples": [
+        {
+          "iteration": 0,
+          "variant": "before",
+          "seconds": 1.2965016460002516,
+          "peak_rss_bytes": 1215115264,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.02495756
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.42e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.176150291
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.24e-07
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.000107803
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 4.0764e-05
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.5266e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.000120203
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000198008
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000227667
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000406459
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000552461
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.272214744
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.546982358
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.322832816
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.065251287
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.263153069
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.313030486
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 1.263804847
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 1.264003485
+            }
+          ]
+        },
+        {
+          "iteration": 0,
+          "variant": "after",
+          "seconds": 0.802027507997991,
+          "peak_rss_bytes": 1215053824,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.023761638
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.99e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.170837733
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 4.28e-07
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 5.9492e-05
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.000147664
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.000586743
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.4804e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 7.6908e-05
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000197148
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000225058
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000245601
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000951298
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.278777631
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.400833272
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.401440902
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.051899724
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.262305945
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.252025019
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.301545335
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.369033071
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.770672679
+            }
+          ]
+        },
+        {
+          "iteration": 1,
+          "variant": "after",
+          "seconds": 0.7936891739955172,
+          "peak_rss_bytes": 1215148032,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.023880041
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 5.07e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.16414487
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 5.41e-07
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 4.8597e-05
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.000121198
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.000393336
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.8581e-05
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000213382
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000236974
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000264335
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.000102943
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.00089222
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.270662524
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.411074904
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.411406294
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.044027008
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.258657171
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.256583112
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.291371208
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.351286026
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.762893038
+            }
+          ]
+        },
+        {
+          "iteration": 1,
+          "variant": "before",
+          "seconds": 1.0900920610001776,
+          "peak_rss_bytes": 1215074304,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.02457654
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.02e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.162329965
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.01e-07
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 9.6066e-05
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 3.7731e-05
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.4034e-05
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000247785
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.000104445
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000275178
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000478068
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000657689
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.263730815
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.450649582
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.253449339
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.045521617
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.256429147
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.293557709
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 1.058893224
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 1.059111235
+            }
+          ]
+        },
+        {
+          "iteration": 2,
+          "variant": "before",
+          "seconds": 1.1669838009984232,
+          "peak_rss_bytes": 1215102976,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.02382539
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.44e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.166982035
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 2.8e-07
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 9.363e-05
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 4.7319e-05
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.4627e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.000104068
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000204818
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000238137
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000409478
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000580524
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.265294365
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.466480666
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.285550882
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.06339845
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.257105786
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.306361212
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 1.136950307
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 1.137155004
+            }
+          ]
+        },
+        {
+          "iteration": 2,
+          "variant": "after",
+          "seconds": 0.8081042140038335,
+          "peak_rss_bytes": 1215057920,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.024237218
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 4.4e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.163191544
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 5.63e-07
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 4.9435e-05
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.000106173
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.000356828
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.6459e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 7.2528e-05
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000202404
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000231667
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000257926
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.00074374
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.274836218
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.403199878
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.403529734
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.048014481
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.257373226
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.258473784
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.308986186
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.372423594
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.776152878
+            }
+          ]
+        },
+        {
+          "iteration": 3,
+          "variant": "after",
+          "seconds": 0.8672136530003627,
+          "peak_rss_bytes": 1215197184,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.024515178
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 5e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.167898335
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 6.66e-07
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 4.5716e-05
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 9.9549e-05
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.000370748
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.8655e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 6.8727e-05
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000194736
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000223353
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000253164
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000778847
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.273886933
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.449542804
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.44982743
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.063052407
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.258632346
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.255723088
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.307591958
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.385851807
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.835894753
+            }
+          ]
+        },
+        {
+          "iteration": 3,
+          "variant": "before",
+          "seconds": 1.0992714319945662,
+          "peak_rss_bytes": 1215107072,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.024228978
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.79e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.162559012
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 3.25e-07
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 9.8433e-05
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 3.8776e-05
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.5262e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.000121621
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000258684
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000286627
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000453517
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000596317
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.260654582
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.446377078
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.26291637
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.045853625
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.259780674
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.29613782
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 1.068230455
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 1.068445833
+            }
+          ]
+        },
+        {
+          "iteration": 4,
+          "variant": "before",
+          "seconds": 1.195373511996877,
+          "peak_rss_bytes": 1215102976,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.025725484
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 2.92e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.167141218
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 2.54e-07
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 9.7741e-05
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 4.3932e-05
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.4678e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 7.4676e-05
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000207746
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000234607
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000406009
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000570972
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.282632013
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.478762245
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.287695633
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.064679926
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.262627083
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.313538304
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 1.162914899
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 1.16313906
+            }
+          ]
+        },
+        {
+          "iteration": 4,
+          "variant": "after",
+          "seconds": 0.9139095510035986,
+          "peak_rss_bytes": 1215033344,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          },
+          "phases": [
+            {
+              "phase": "source.hash",
+              "seconds": 0.025678352
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 4.69e-07
+            },
+            {
+              "phase": "source.hash",
+              "seconds": 0.17949518
+            },
+            {
+              "phase": "cache.identity",
+              "seconds": 4.5e-07
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 5.3051e-05
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.000113574
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.000343803
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 1.6032e-05
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.000124333
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.000292423
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.000323071
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.000350295
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.000828261
+            },
+            {
+              "phase": "cache.read_event_meta",
+              "seconds": 0.314685806
+            },
+            {
+              "phase": "cache.read_event_rows",
+              "seconds": 0.469739386
+            },
+            {
+              "phase": "cache.prepare_rows",
+              "seconds": 0.470022202
+            },
+            {
+              "phase": "cache.read_binary_sections",
+              "seconds": 0.057700246
+            },
+            {
+              "phase": "cache.section_checksums",
+              "seconds": 0.277922846
+            },
+            {
+              "phase": "cache.validate_catalog",
+              "seconds": 0.280156106
+            },
+            {
+              "phase": "cache.decode_catalog",
+              "seconds": 0.334656428
+            },
+            {
+              "phase": "cache.decode_sections",
+              "seconds": 0.410114623
+            },
+            {
+              "phase": "cache.open",
+              "seconds": 0.880346991
+            }
+          ]
+        }
+      ]
+    },
+    "raw_cold": {
+      "scope": "five paired fresh-cache builds, same canonical 10M QTRB/512MiB Flight corpus; profiling disabled",
+      "binaries": {
+        "before": "13ebdef4d77097412d545cfdc823fa4bfee0422a8d042fe7ea06f17902df7155",
+        "after": "5f72e4c0f8394d9d3923f6195465762e8d742ed3b2a81822517df614d4c22132"
+      },
+      "samples": [
+        {
+          "iteration": 0,
+          "variant": "before",
+          "seconds": 7.8823815190044115,
+          "peak_rss_bytes": 1215234048,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 0,
+          "variant": "after",
+          "seconds": 7.471155455998087,
+          "peak_rss_bytes": 1215668224,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 1,
+          "variant": "after",
+          "seconds": 7.372593721993326,
+          "peak_rss_bytes": 1215397888,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 1,
+          "variant": "before",
+          "seconds": 8.076998043994536,
+          "peak_rss_bytes": 1215082496,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 2,
+          "variant": "before",
+          "seconds": 8.332842970005004,
+          "peak_rss_bytes": 1215143936,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 2,
+          "variant": "after",
+          "seconds": 7.90613534500153,
+          "peak_rss_bytes": 1215549440,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 3,
+          "variant": "after",
+          "seconds": 7.553993320994778,
+          "peak_rss_bytes": 1215541248,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 3,
+          "variant": "before",
+          "seconds": 7.970861991001584,
+          "peak_rss_bytes": 1215160320,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 4,
+          "variant": "before",
+          "seconds": 8.760659525003575,
+          "peak_rss_bytes": 1215176704,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        },
+        {
+          "iteration": 4,
+          "variant": "after",
+          "seconds": 9.928614611002558,
+          "peak_rss_bytes": 1215483904,
+          "cache_bytes": 730331981,
+          "result": {
+            "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69",
+            "qtrb_events": 10000000,
+            "flight_events": 68,
+            "mapped": true,
+            "flight_completeness": [
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 1,
+                    "last": 8
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 10,
+                    "last": 61
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 9,
+                    "last": 9
+                  }
+                },
+                "provenance": "unknown",
+                "cause": "overwritten"
+              },
+              {
+                "domain": "captured_sequence",
+                "bounds": {
+                  "inclusive_sequence": {
+                    "first": 60,
+                    "last": 60
+                  }
+                },
+                "provenance": "captured",
+                "cause": "coverage_gap"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "cache_bytes_identical": true,
+    "query_p95_seconds": {
+      "before": {
+        "viewport_seconds": 2.494e-05,
+        "structured_search_seconds": 1.4384e-05
+      },
+      "after": {
+        "viewport_seconds": 2.2202e-05,
+        "structured_search_seconds": 1.4192e-05
+      }
+    },
+    "query_scope": "200 direct-analysis viewport and 200 indexed structured queries per binary; no UI frame-latency claim.",
+    "raw_queries": {
+      "before": {
+        "elapsed_seconds": 20.913770203995227,
+        "viewport_seconds": [
+          0.00015301,
+          2.4152e-05,
+          1.8754e-05,
+          1.9456e-05,
+          1.852e-05,
+          2.0156e-05,
+          1.9231e-05,
+          1.8667e-05,
+          1.9561e-05,
+          1.8988e-05,
+          1.9322e-05,
+          4.2546e-05,
+          1.934e-05,
+          1.8222e-05,
+          1.828e-05,
+          1.8803e-05,
+          1.9027e-05,
+          1.8331e-05,
+          1.9012e-05,
+          1.9259e-05,
+          2.0297e-05,
+          1.8336e-05,
+          1.873e-05,
+          1.7754e-05,
+          1.7825e-05,
+          1.7946e-05,
+          1.777e-05,
+          1.7854e-05,
+          1.7599e-05,
+          1.8279e-05,
+          1.8609e-05,
+          1.8298e-05,
+          1.8952e-05,
+          1.7787e-05,
+          1.7463e-05,
+          1.851e-05,
+          1.753e-05,
+          1.8494e-05,
+          1.806e-05,
+          1.7521e-05,
+          1.9106e-05,
+          1.7732e-05,
+          1.7808e-05,
+          1.8024e-05,
+          0.000251655,
+          3.0191e-05,
+          2.4972e-05,
+          2.5192e-05,
+          2.4911e-05,
+          2.5159e-05,
+          2.4615e-05,
+          2.462e-05,
+          2.494e-05,
+          2.2579e-05,
+          1.8552e-05,
+          1.8314e-05,
+          1.8409e-05,
+          1.8779e-05,
+          1.8733e-05,
+          1.8384e-05,
+          1.7753e-05,
+          1.7569e-05,
+          1.7958e-05,
+          1.7999e-05,
+          1.8259e-05,
+          1.7604e-05,
+          1.7796e-05,
+          1.7562e-05,
+          1.7551e-05,
+          1.8171e-05,
+          1.7556e-05,
+          1.7969e-05,
+          1.7449e-05,
+          1.7643e-05,
+          1.8011e-05,
+          1.7612e-05,
+          1.7889e-05,
+          1.799e-05,
+          1.7563e-05,
+          1.8951e-05,
+          1.7839e-05,
+          1.7789e-05,
+          1.8109e-05,
+          1.7469e-05,
+          1.778e-05,
+          1.7419e-05,
+          1.8089e-05,
+          1.8136e-05,
+          1.722e-05,
+          1.7623e-05,
+          1.754e-05,
+          1.8142e-05,
+          1.735e-05,
+          1.8344e-05,
+          1.7495e-05,
+          1.777e-05,
+          1.7544e-05,
+          1.8593e-05,
+          1.9553e-05,
+          1.9338e-05,
+          1.8708e-05,
+          1.8859e-05,
+          1.9793e-05,
+          1.948e-05,
+          4.0011e-05,
+          1.8881e-05,
+          1.7806e-05,
+          1.7655e-05,
+          3.431e-05,
+          1.8617e-05,
+          1.7827e-05,
+          1.7312e-05,
+          1.7419e-05,
+          1.8761e-05,
+          1.7585e-05,
+          1.7886e-05,
+          1.8033e-05,
+          1.7469e-05,
+          1.8444e-05,
+          1.763e-05,
+          1.8116e-05,
+          3.0733e-05,
+          1.8033e-05,
+          1.8634e-05,
+          1.774e-05,
+          1.7553e-05,
+          1.7688e-05,
+          1.8732e-05,
+          1.7363e-05,
+          1.7356e-05,
+          1.7509e-05,
+          1.7372e-05,
+          1.8021e-05,
+          1.7347e-05,
+          1.7827e-05,
+          1.7618e-05,
+          1.7223e-05,
+          1.9018e-05,
+          1.8117e-05,
+          1.754e-05,
+          1.8092e-05,
+          1.74e-05,
+          1.7257e-05,
+          1.7378e-05,
+          1.7163e-05,
+          1.7828e-05,
+          1.7379e-05,
+          1.8316e-05,
+          1.7451e-05,
+          1.831e-05,
+          1.7397e-05,
+          1.719e-05,
+          1.8118e-05,
+          1.7309e-05,
+          1.7933e-05,
+          1.7284e-05,
+          1.768e-05,
+          2.0493e-05,
+          1.7302e-05,
+          1.7598e-05,
+          1.7473e-05,
+          1.7593e-05,
+          1.7455e-05,
+          1.7923e-05,
+          1.7687e-05,
+          1.7563e-05,
+          1.7333e-05,
+          1.8082e-05,
+          1.764e-05,
+          1.7289e-05,
+          1.8094e-05,
+          1.8098e-05,
+          1.7653e-05,
+          1.7988e-05,
+          1.7865e-05,
+          1.7435e-05,
+          1.9329e-05,
+          1.7225e-05,
+          1.7971e-05,
+          1.786e-05,
+          1.765e-05,
+          1.7769e-05,
+          1.7471e-05,
+          1.7529e-05,
+          1.7496e-05,
+          1.7537e-05,
+          1.8136e-05,
+          1.8148e-05,
+          1.8362e-05,
+          1.7343e-05,
+          1.7449e-05,
+          1.7695e-05,
+          1.7469e-05,
+          1.7574e-05,
+          1.7554e-05,
+          1.7424e-05,
+          1.8911e-05,
+          1.7645e-05,
+          1.7686e-05,
+          1.7613e-05
+        ],
+        "structured_search_seconds": [
+          0.000214685,
+          3.451e-05,
+          1.5756e-05,
+          1.4761e-05,
+          1.4257e-05,
+          1.4351e-05,
+          1.4134e-05,
+          1.4384e-05,
+          1.41e-05,
+          1.3976e-05,
+          1.4056e-05,
+          1.4067e-05,
+          1.3979e-05,
+          1.4005e-05,
+          1.3971e-05,
+          1.4012e-05,
+          1.3998e-05,
+          1.4027e-05,
+          1.3969e-05,
+          1.3971e-05,
+          1.3922e-05,
+          1.3977e-05,
+          1.4032e-05,
+          1.3922e-05,
+          1.3955e-05,
+          1.3973e-05,
+          1.3923e-05,
+          1.4009e-05,
+          1.3986e-05,
+          1.3989e-05,
+          1.4005e-05,
+          1.4016e-05,
+          1.3986e-05,
+          1.3915e-05,
+          1.393e-05,
+          1.4e-05,
+          1.3966e-05,
+          1.3917e-05,
+          1.4017e-05,
+          1.3952e-05,
+          1.3974e-05,
+          1.3954e-05,
+          1.398e-05,
+          1.3935e-05,
+          1.381e-05,
+          1.4012e-05,
+          1.3982e-05,
+          1.3998e-05,
+          1.3944e-05,
+          1.3993e-05,
+          1.3911e-05,
+          1.3956e-05,
+          1.3927e-05,
+          1.394e-05,
+          2.2513e-05,
+          1.3969e-05,
+          1.3915e-05,
+          1.3975e-05,
+          1.3968e-05,
+          1.4008e-05,
+          1.4063e-05,
+          1.4e-05,
+          1.395e-05,
+          1.3835e-05,
+          1.4005e-05,
+          1.3877e-05,
+          1.4055e-05,
+          1.4266e-05,
+          1.4011e-05,
+          1.3853e-05,
+          1.395e-05,
+          1.3918e-05,
+          1.3951e-05,
+          1.3895e-05,
+          1.3944e-05,
+          1.4014e-05,
+          1.3954e-05,
+          1.3952e-05,
+          1.3946e-05,
+          1.398e-05,
+          1.4016e-05,
+          1.3947e-05,
+          1.4003e-05,
+          1.3923e-05,
+          1.3973e-05,
+          1.3942e-05,
+          1.3955e-05,
+          1.402e-05,
+          1.3983e-05,
+          1.3927e-05,
+          1.4002e-05,
+          1.3954e-05,
+          1.3908e-05,
+          1.3893e-05,
+          1.404e-05,
+          1.3976e-05,
+          1.3948e-05,
+          1.9293e-05,
+          1.4238e-05,
+          1.4347e-05,
+          1.3695e-05,
+          1.3792e-05,
+          1.3776e-05,
+          2.2785e-05,
+          1.3991e-05,
+          1.3665e-05,
+          1.4381e-05,
+          1.3657e-05,
+          1.3665e-05,
+          1.3608e-05,
+          1.3762e-05,
+          1.3923e-05,
+          1.3734e-05,
+          1.4071e-05,
+          1.3787e-05,
+          2.4966e-05,
+          1.4708e-05,
+          1.4006e-05,
+          1.3777e-05,
+          1.3692e-05,
+          1.3704e-05,
+          1.3816e-05,
+          1.3652e-05,
+          1.3809e-05,
+          1.3702e-05,
+          1.3761e-05,
+          1.3806e-05,
+          1.3736e-05,
+          1.375e-05,
+          1.3807e-05,
+          1.3746e-05,
+          1.3742e-05,
+          1.3738e-05,
+          1.3753e-05,
+          1.3752e-05,
+          1.3729e-05,
+          1.3765e-05,
+          1.3685e-05,
+          1.3701e-05,
+          1.3654e-05,
+          1.3076e-05,
+          1.3143e-05,
+          1.3035e-05,
+          1.322e-05,
+          1.3434e-05,
+          2.4547e-05,
+          1.3268e-05,
+          1.3294e-05,
+          1.313e-05,
+          1.3157e-05,
+          1.324e-05,
+          1.3087e-05,
+          1.308e-05,
+          1.3157e-05,
+          1.3198e-05,
+          1.3077e-05,
+          1.316e-05,
+          1.3122e-05,
+          1.3231e-05,
+          1.3172e-05,
+          1.3061e-05,
+          1.3211e-05,
+          1.3122e-05,
+          1.3142e-05,
+          1.3156e-05,
+          1.3126e-05,
+          1.3188e-05,
+          1.3181e-05,
+          1.3178e-05,
+          1.3124e-05,
+          1.3206e-05,
+          1.3188e-05,
+          1.3388e-05,
+          1.3689e-05,
+          1.3658e-05,
+          1.3669e-05,
+          1.3585e-05,
+          1.3698e-05,
+          1.3642e-05,
+          1.3813e-05,
+          1.3686e-05,
+          1.3654e-05,
+          1.3729e-05,
+          1.3594e-05,
+          1.3724e-05,
+          1.3738e-05,
+          1.3608e-05,
+          1.3666e-05,
+          1.3709e-05,
+          1.3779e-05,
+          1.3642e-05,
+          1.3662e-05,
+          1.3679e-05,
+          1.3678e-05,
+          1.374e-05,
+          1.3703e-05,
+          1.362e-05,
+          1.366e-05,
+          1.3654e-05,
+          1.3713e-05
+        ],
+        "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69"
+      },
+      "after": {
+        "elapsed_seconds": 20.420658205999644,
+        "viewport_seconds": [
+          0.00010424,
+          2.2202e-05,
+          1.806e-05,
+          1.7672e-05,
+          1.7551e-05,
+          1.729e-05,
+          1.7779e-05,
+          1.9501e-05,
+          1.732e-05,
+          1.7579e-05,
+          1.8315e-05,
+          1.7213e-05,
+          1.6678e-05,
+          1.7812e-05,
+          1.7113e-05,
+          1.7928e-05,
+          1.718e-05,
+          5.5648e-05,
+          1.895e-05,
+          2.9676e-05,
+          2.0573e-05,
+          1.8182e-05,
+          1.8561e-05,
+          1.7813e-05,
+          1.7457e-05,
+          1.7829e-05,
+          1.7746e-05,
+          1.8012e-05,
+          1.7927e-05,
+          1.7996e-05,
+          1.8781e-05,
+          1.833e-05,
+          1.8614e-05,
+          1.7865e-05,
+          1.7624e-05,
+          1.8782e-05,
+          1.8017e-05,
+          1.8324e-05,
+          1.7775e-05,
+          1.7751e-05,
+          1.8909e-05,
+          1.8165e-05,
+          1.8508e-05,
+          4.7034e-05,
+          2.231e-05,
+          1.8814e-05,
+          1.9382e-05,
+          1.952e-05,
+          1.9234e-05,
+          1.9148e-05,
+          1.8775e-05,
+          1.8904e-05,
+          1.9283e-05,
+          1.8753e-05,
+          1.8751e-05,
+          1.8903e-05,
+          1.864e-05,
+          4.4911e-05,
+          2.0236e-05,
+          1.9015e-05,
+          1.8752e-05,
+          1.896e-05,
+          1.9076e-05,
+          1.892e-05,
+          1.8687e-05,
+          1.7503e-05,
+          1.7822e-05,
+          1.7269e-05,
+          1.7571e-05,
+          1.7554e-05,
+          1.7522e-05,
+          1.718e-05,
+          1.7173e-05,
+          1.7457e-05,
+          1.8355e-05,
+          1.7962e-05,
+          1.7669e-05,
+          5.9643e-05,
+          1.7926e-05,
+          3.8664e-05,
+          1.7987e-05,
+          1.7748e-05,
+          1.7408e-05,
+          1.7167e-05,
+          1.755e-05,
+          1.7561e-05,
+          1.8017e-05,
+          1.7792e-05,
+          1.8019e-05,
+          1.7759e-05,
+          1.762e-05,
+          1.7963e-05,
+          1.7885e-05,
+          1.7923e-05,
+          1.8168e-05,
+          1.7456e-05,
+          1.7822e-05,
+          1.7733e-05,
+          1.8129e-05,
+          1.7644e-05,
+          1.7315e-05,
+          1.7277e-05,
+          1.7375e-05,
+          1.7793e-05,
+          1.7509e-05,
+          1.7687e-05,
+          1.8024e-05,
+          3.6213e-05,
+          1.9272e-05,
+          1.7681e-05,
+          1.7883e-05,
+          1.7734e-05,
+          1.7246e-05,
+          1.7892e-05,
+          1.769e-05,
+          1.7796e-05,
+          1.748e-05,
+          1.7478e-05,
+          1.8225e-05,
+          1.7729e-05,
+          1.7638e-05,
+          1.7469e-05,
+          1.7551e-05,
+          1.775e-05,
+          1.7274e-05,
+          1.7644e-05,
+          1.754e-05,
+          1.8059e-05,
+          1.7326e-05,
+          1.7263e-05,
+          1.736e-05,
+          1.7517e-05,
+          1.7709e-05,
+          1.7177e-05,
+          1.7315e-05,
+          1.7326e-05,
+          1.6839e-05,
+          1.8148e-05,
+          1.7522e-05,
+          1.7206e-05,
+          1.7341e-05,
+          1.7062e-05,
+          1.7317e-05,
+          1.7611e-05,
+          1.7303e-05,
+          1.8084e-05,
+          1.7375e-05,
+          1.8404e-05,
+          1.7411e-05,
+          1.7318e-05,
+          1.7797e-05,
+          1.7654e-05,
+          1.841e-05,
+          1.7584e-05,
+          1.7902e-05,
+          1.7913e-05,
+          1.7697e-05,
+          1.9486e-05,
+          1.7447e-05,
+          1.7285e-05,
+          1.7971e-05,
+          3.2708e-05,
+          1.7733e-05,
+          1.7689e-05,
+          1.7407e-05,
+          1.7375e-05,
+          1.6927e-05,
+          1.78e-05,
+          1.7349e-05,
+          1.6856e-05,
+          1.7282e-05,
+          1.7322e-05,
+          1.728e-05,
+          1.7463e-05,
+          1.7556e-05,
+          1.7121e-05,
+          1.7996e-05,
+          1.6591e-05,
+          1.742e-05,
+          1.7187e-05,
+          1.6937e-05,
+          1.7204e-05,
+          1.7485e-05,
+          1.702e-05,
+          1.7248e-05,
+          1.6987e-05,
+          1.7721e-05,
+          1.7344e-05,
+          1.7752e-05,
+          1.7343e-05,
+          1.6871e-05,
+          1.7402e-05,
+          1.7454e-05,
+          1.7783e-05,
+          1.7025e-05,
+          1.6672e-05,
+          1.8115e-05,
+          1.712e-05,
+          1.6603e-05,
+          1.6694e-05
+        ],
+        "structured_search_seconds": [
+          0.00010833,
+          3.4653e-05,
+          1.5969e-05,
+          1.4186e-05,
+          1.3138e-05,
+          1.2956e-05,
+          1.2807e-05,
+          1.269e-05,
+          1.2995e-05,
+          1.2913e-05,
+          1.265e-05,
+          1.2612e-05,
+          1.2692e-05,
+          1.2731e-05,
+          1.294e-05,
+          1.2906e-05,
+          1.2936e-05,
+          1.2923e-05,
+          1.3013e-05,
+          1.3065e-05,
+          1.2929e-05,
+          1.2933e-05,
+          1.2683e-05,
+          1.2695e-05,
+          1.2723e-05,
+          1.2685e-05,
+          1.2656e-05,
+          1.2653e-05,
+          1.2664e-05,
+          1.2732e-05,
+          1.2719e-05,
+          1.2622e-05,
+          1.2739e-05,
+          1.2684e-05,
+          1.2742e-05,
+          1.271e-05,
+          1.2731e-05,
+          1.2829e-05,
+          1.274e-05,
+          1.278e-05,
+          1.2988e-05,
+          1.2792e-05,
+          1.2787e-05,
+          1.2765e-05,
+          1.2792e-05,
+          1.2803e-05,
+          1.2827e-05,
+          1.2943e-05,
+          1.2904e-05,
+          1.2936e-05,
+          1.2973e-05,
+          1.2972e-05,
+          1.2836e-05,
+          1.2944e-05,
+          1.2833e-05,
+          1.2922e-05,
+          1.2796e-05,
+          1.2838e-05,
+          2.3068e-05,
+          1.3922e-05,
+          1.3243e-05,
+          1.3092e-05,
+          1.316e-05,
+          1.2927e-05,
+          1.308e-05,
+          1.2932e-05,
+          1.2983e-05,
+          1.2907e-05,
+          1.2853e-05,
+          1.2894e-05,
+          1.2968e-05,
+          1.2928e-05,
+          1.2897e-05,
+          1.2864e-05,
+          1.2903e-05,
+          1.2868e-05,
+          1.2886e-05,
+          1.2991e-05,
+          1.2984e-05,
+          1.2947e-05,
+          1.2915e-05,
+          1.2897e-05,
+          1.9699e-05,
+          1.336e-05,
+          1.2936e-05,
+          1.2897e-05,
+          1.2701e-05,
+          1.2744e-05,
+          1.2681e-05,
+          1.2687e-05,
+          1.2786e-05,
+          1.2696e-05,
+          1.7678e-05,
+          1.5351e-05,
+          1.4192e-05,
+          1.3305e-05,
+          1.314e-05,
+          1.3041e-05,
+          2.966e-05,
+          1.4239e-05,
+          1.3743e-05,
+          1.3539e-05,
+          1.3573e-05,
+          1.3553e-05,
+          1.3537e-05,
+          1.3436e-05,
+          1.3397e-05,
+          1.3497e-05,
+          1.3404e-05,
+          1.3646e-05,
+          1.3439e-05,
+          1.3493e-05,
+          1.3411e-05,
+          1.3412e-05,
+          1.3504e-05,
+          1.3634e-05,
+          1.3544e-05,
+          1.3496e-05,
+          1.3362e-05,
+          1.3424e-05,
+          1.344e-05,
+          1.3589e-05,
+          1.3459e-05,
+          1.3642e-05,
+          1.3518e-05,
+          1.3552e-05,
+          1.3573e-05,
+          1.3611e-05,
+          1.3461e-05,
+          3.3302e-05,
+          1.3863e-05,
+          1.3538e-05,
+          1.369e-05,
+          1.3452e-05,
+          1.356e-05,
+          1.3495e-05,
+          1.3596e-05,
+          1.3412e-05,
+          1.3474e-05,
+          1.344e-05,
+          1.3447e-05,
+          1.3465e-05,
+          1.3433e-05,
+          1.3464e-05,
+          1.3405e-05,
+          1.3527e-05,
+          1.3617e-05,
+          1.3539e-05,
+          1.3544e-05,
+          1.3551e-05,
+          1.3561e-05,
+          1.3489e-05,
+          1.366e-05,
+          1.3542e-05,
+          1.3583e-05,
+          1.359e-05,
+          1.3519e-05,
+          1.3583e-05,
+          1.3465e-05,
+          1.359e-05,
+          1.3595e-05,
+          1.3605e-05,
+          1.356e-05,
+          1.3557e-05,
+          1.28e-05,
+          1.2687e-05,
+          1.277e-05,
+          1.2801e-05,
+          1.285e-05,
+          1.2853e-05,
+          1.283e-05,
+          1.2723e-05,
+          1.2816e-05,
+          1.2908e-05,
+          1.2845e-05,
+          1.2761e-05,
+          1.2855e-05,
+          1.2817e-05,
+          1.2846e-05,
+          1.2664e-05,
+          1.2862e-05,
+          1.2698e-05,
+          1.2746e-05,
+          1.277e-05,
+          1.2792e-05,
+          1.2802e-05,
+          1.2763e-05,
+          1.275e-05,
+          1.2733e-05,
+          1.2718e-05,
+          1.276e-05,
+          1.2869e-05,
+          1.282e-05,
+          1.271e-05,
+          1.276e-05,
+          1.2679e-05,
+          1.2732e-05,
+          1.2775e-05,
+          1.2691e-05,
+          1.2879e-05
+        ],
+        "correctness_digest": "780f3fd8132848ee2afadeb4595d1601ed6286595dc038afbb0b44ce3ffb8c69"
+      }
+    },
+    "threshold_context_only": {
+      "cold_seconds": 30,
+      "warm_seconds": 2,
+      "cold_peak_rss_bytes": 2147483648,
+      "reference_baseline_replaced": false
+    },
+    "profiling": "QTRACE_UI_OPEN_PROFILE=1 emits nested/overlapping spans. The reader uses held descriptors and bounded pread, without an mmap phase. Every checksum, catalog truth validation, identity check, and corruption rebuild remains enforced.",
+    "rejected_candidate": {
+      "change": "inline event-key decoder",
+      "disposition": "reverted: no measured benefit",
+      "raw": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/warm-inline-rejected.json",
+        "sha256": "8d0eba2b0eae04f74155720986b7123e86b5f81214d5fbdb28bae7b1da6aab02",
+        "bytes": 34621
+      }
+    }
+  },
+  "loading": {
+    "status": "passed",
+    "phases": [
+      "build_index",
+      "open_cache",
+      "prepare_analysis",
+      "publish_cache",
+      "publish_workspace",
+      "reopen_cache",
+      "verify_source"
+    ],
+    "backend_snapshots": 113,
+    "browser_updates": 24,
+    "cancelled_without_workspace_or_cache": true,
+    "retry_and_cache_reopen": true,
+    "successful_open_events": [
+      1185909,
+      1185909
+    ],
+    "counter_semantics": "Per-stage accounted input bytes, events and row work. Repeated passes count separately. Artifact total is independent. No unique-coverage percentage or ETA inferred.",
+    "allocation_boundary": "Progress notifications may allocate only outside a WorkGuard allocation scope; authorization records counters using atomics and defers notifications. Covered by focused regression.",
+    "page_errors": [],
+    "unexpected_api_responses": [],
+    "samples": [
+      {
+        "observed_ms": 1792381487385,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381487485,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "78566637",
+            "processed_events": "86016",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381487635,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "93681373",
+            "processed_events": "200704",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381487736,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "109051923",
+            "processed_events": "319292",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381487835,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "124449507",
+            "processed_events": "438272",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381487935,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "140366819",
+            "processed_events": "561152",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381488036,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "156013165",
+            "processed_events": "679936",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381488137,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "171970363",
+            "processed_events": "802597",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489041,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "185755627",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489241,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "186673131",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489340,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "286287851",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489440,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "362833899",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489541,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "493905899",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489641,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "717256452",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489741,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "957380425",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489792,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489891,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "16729002",
+            "processed_events": "126976",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381489992,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "31457296",
+            "processed_events": "239790",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381490093,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "47185944",
+            "processed_events": "359768",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381490192,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "62614104",
+            "processed_events": "479232",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381490293,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "77998602",
+            "processed_events": "598016",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381490394,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "94175648",
+            "processed_events": "720896",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381490494,
+        "error": null,
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "109581922",
+            "processed_events": "847872",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381490845,
+        "error": {
+          "code": "job.cancelled",
+          "detail": "operation cancelled",
+          "retryable": false,
+          "source": null,
+          "stage": "control"
+        },
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "920013",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "cancelled",
+        "workspace_id": "1"
+      },
+      {
+        "observed_ms": 1792381491646,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381491746,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "78566637",
+            "processed_events": "86016",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381491848,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "93150963",
+            "processed_events": "196608",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381491948,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "109051923",
+            "processed_events": "319292",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381492047,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "124979813",
+            "processed_events": "442368",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381492148,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "140897197",
+            "processed_events": "565248",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381492248,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "156237947",
+            "processed_events": "682650",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381492348,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "171970363",
+            "processed_events": "802597",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381493203,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "185755627",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381493404,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "186673131",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381493504,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "519104428",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381493605,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "834703855",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381493705,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381493807,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "16729002",
+            "processed_events": "126976",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381493908,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "33434856",
+            "processed_events": "253952",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381494058,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "47185944",
+            "processed_events": "359768",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381494157,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "62614104",
+            "processed_events": "479232",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381494258,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "78528994",
+            "processed_events": "602112",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381494358,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "94175648",
+            "processed_events": "720896",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381494458,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "107182698",
+            "processed_events": "823296",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381494559,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118258704",
+            "processed_events": "917504",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381495362,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381495463,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1212416",
+            "processed_rows": "2371",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381495562,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1324733",
+            "processed_rows": "114688",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381495662,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1439421",
+            "processed_rows": "229376",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381495762,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1550013",
+            "processed_rows": "339968",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381495863,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1671168",
+            "processed_rows": "461123",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381495962,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1783485",
+            "processed_rows": "573440",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381496063,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "1892352",
+            "processed_rows": "682307",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381496163,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "2004669",
+            "processed_rows": "794624",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381496264,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "2088960",
+            "processed_rows": "878915",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381496364,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "118614128",
+            "processed_events": "2228224",
+            "processed_rows": "1018179",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381497168,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "publish_cache"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381497267,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "74158352",
+            "processed_events": "0",
+            "processed_rows": "11818806",
+            "stage": "publish_cache"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381497468,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "reopen_cache"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381497568,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "323015036",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "reopen_cache"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499276,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499375,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "86016",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499475,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "163840",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499575,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "245760",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499676,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "323584",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499775,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "409600",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499876,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "491520",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381499976,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "569344",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500075,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "651264",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500176,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "733184",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500276,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "806912",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500426,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "884736",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500527,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "966656",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500627,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "1052672",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500728,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "1138688",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500828,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "2733457",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500929,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "20971658",
+            "processed_events": "0",
+            "processed_rows": "13105313",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381500980,
+        "error": null,
+        "id": "2",
+        "kind": "open",
+        "progress": {
+          "completed": "1",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "publish_workspace"
+          },
+          "total": "1"
+        },
+        "state": "completed",
+        "workspace_id": "2"
+      },
+      {
+        "observed_ms": 1792381503353,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381503453,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "78566637",
+            "processed_events": "86016",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381503554,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "93150963",
+            "processed_events": "196608",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381503654,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "104291739",
+            "processed_events": "282624",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381503753,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "118085045",
+            "processed_events": "389120",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381503854,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "131880045",
+            "processed_events": "495616",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381503955,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "145670493",
+            "processed_events": "602112",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381504055,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "158338651",
+            "processed_events": "698652",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381504157,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "168215263",
+            "processed_events": "774144",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381504255,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "179242827",
+            "processed_events": "868352",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381505359,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "185755627",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381505609,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "186673131",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381505710,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "485517291",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381505811,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "772827144",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381505910,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "1039169353",
+            "processed_events": "1210045",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381505959,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "open_cache"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381506061,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "280008972",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "open_cache"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381507967,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508068,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "81920",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508168,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "163840",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508269,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "245760",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508369,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "323584",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508469,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "401408",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508569,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "487424",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508668,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "565248",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508770,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "647168",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508869,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "716800",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381508970,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "794624",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381509072,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "868352",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381509172,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "946176",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381509272,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "1024000",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381509372,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "1105920",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381509522,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "1190005",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381509622,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "5358731",
+            "stage": "prepare_analysis"
+          },
+          "total": "1"
+        },
+        "state": "running",
+        "workspace_id": "3"
+      },
+      {
+        "observed_ms": 1792381509724,
+        "error": null,
+        "id": "3",
+        "kind": "open",
+        "progress": {
+          "completed": "1",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "0",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "publish_workspace"
+          },
+          "total": "1"
+        },
+        "state": "completed",
+        "workspace_id": "3"
+      }
+    ],
+    "raw": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-progress.json",
+      "sha256": "3d11c2482232e50167f716000e50451b8a9fe1ca53c22e2dee4023f2b543885d",
+      "bytes": 12168760
+    },
+    "harness": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-progress.mjs",
+      "sha256": "51a5e5e8da5d5c8212ed4120148920cc2ec7ac3e6e347ca2de55284ce6eeea2e",
+      "bytes": 6885
+    }
+  },
+  "analysis_cancellation": {
+    "status": "passed",
+    "corpus_events": 1185909,
+    "measurements": [
+      {
+        "analysis": "registers",
+        "cancel_seconds": 0.009160657,
+        "partial_cache_published": false,
+        "store_released": true
+      },
+      {
+        "analysis": "call_tree",
+        "cancel_seconds": 0.01694006,
+        "partial_cache_published": false,
+        "store_released": true
+      }
+    ],
+    "procedure": "Observe the shared slot locked by a query, let the build run for 20 ms, close the workspace, join the query, require job.cancelled, empty slots, and released store Weak reference.",
+    "scope": "Single-run release diagnostics, not a cancellation latency gate. Deterministic blocked-slot regressions and existing concurrent cache-sharing/release tests also pass."
+  },
+  "retained_capture_regression": [
+    {
+      "name": "offset-v2",
+      "status": "passed",
+      "reopen_equivalent": true,
+      "artifacts": [
+        {
+          "name": "artifacts/1792378340896_4369_4502_fixture-entry_0x71250_0.trace.bin.lz4",
+          "events": 987,
+          "tids": [
+            4502
+          ],
+          "sha256": "6cb602c21419fe076be95e79e7cf630bff70e88af980688ef75be4e44f547213",
+          "file_bytes": 14851,
+          "provider_bytes": 51180,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 678,
+            "instruction_definition": 46,
+            "memory": 260,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "timeline_sha256": "76390f26518809689af55f62f8a176635e6b2a0c333d34b6ee70f97cbbb147ad",
+          "analysis_sha256": "a640858b03930221008a6d9ac36ce50a3e7a07bab394fad637ceca3c3b490e58",
+          "completeness_rows": 1,
+          "termination": {
+            "kind": "stopped",
+            "reason": "duration_elapsed",
+            "return_value": null,
+            "elapsed_ms": 1708,
+            "metrics": {
+              "instructions": 678,
+              "encoded_bytes": 51180,
+              "compressed_bytes": 14851,
+              "cache_hits": 632,
+              "cache_misses": 46,
+              "cache_collisions": 0,
+              "buffer_swaps": 2,
+              "producer_waits": 1,
+              "producer_wait_ns": 604896,
+              "effective_buffer_bytes": 67108864
+            }
+          }
+        }
+      ],
+      "raw": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-offset-v2.json",
+        "sha256": "a512660790bb5db106c551255386ae2b78ad863890693fbf3df477db8b9b2dda",
+        "bytes": 3472
+      }
+    },
+    {
+      "name": "symbol",
+      "status": "passed",
+      "reopen_equivalent": true,
+      "artifacts": [
+        {
+          "name": "artifacts/1792378365684_5010_5139_fixture-entry_0x71250_0.trace.bin.lz4",
+          "events": 987,
+          "tids": [
+            5139
+          ],
+          "sha256": "cc1b25fd9cfab74b57e0d1e9fbae210c1b5a0db3cbf02ccbde8954aa50382dbf",
+          "file_bytes": 14909,
+          "provider_bytes": 51180,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 678,
+            "instruction_definition": 46,
+            "memory": 260,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "timeline_sha256": "53915cf6f18a2bd4d5572acd5344f291112f4092a42995c10c017ded3eb6e04f",
+          "analysis_sha256": "94539da387dbec81ac5ed01360d76925849ef20d43606d71e2414fffd8c79928",
+          "completeness_rows": 1,
+          "termination": {
+            "kind": "stopped",
+            "reason": "duration_elapsed",
+            "return_value": null,
+            "elapsed_ms": 1708,
+            "metrics": {
+              "instructions": 678,
+              "encoded_bytes": 51180,
+              "compressed_bytes": 14909,
+              "cache_hits": 632,
+              "cache_misses": 46,
+              "cache_collisions": 0,
+              "buffer_swaps": 2,
+              "producer_waits": 1,
+              "producer_wait_ns": 765573,
+              "effective_buffer_bytes": 67108864
+            }
+          }
+        }
+      ],
+      "raw": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-symbol.json",
+        "sha256": "b450984b88ebed3479c34756a6713f6c71869b8cbc185b5c441d69421f234195",
+        "bytes": 3472
+      }
+    },
+    {
+      "name": "monitor-exit",
+      "status": "passed",
+      "reopen_equivalent": true,
+      "artifacts": [
+        {
+          "name": "artifacts/1792378390293_5658_5793_fixture-entry_0x71250_0.trace.bin.lz4",
+          "events": 1714,
+          "tids": [
+            5793
+          ],
+          "sha256": "29a7b6b39467b902d59700172606b50f6a2c52672f23b8f1544c511b73c9339e",
+          "file_bytes": 24533,
+          "provider_bytes": 87035,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 1199,
+            "instruction_definition": 50,
+            "memory": 462,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "timeline_sha256": "12cff621cea00ac74217cdf68448c0a9e5e3d3d54ed88050e30fccbc1f4b0f95",
+          "analysis_sha256": "7599daa48c78c51a53493a592e9a1a495e67460cb2a53d8f947e9327069325bf",
+          "completeness_rows": 1,
+          "termination": {
+            "kind": "completed",
+            "reason": null,
+            "return_value": 1804524732435045419,
+            "elapsed_ms": 3024,
+            "metrics": {
+              "instructions": 1199,
+              "encoded_bytes": 87035,
+              "compressed_bytes": 24533,
+              "cache_hits": 1149,
+              "cache_misses": 50,
+              "cache_collisions": 0,
+              "buffer_swaps": 2,
+              "producer_waits": 1,
+              "producer_wait_ns": 6166302,
+              "effective_buffer_bytes": 67108864
+            }
+          }
+        }
+      ],
+      "raw": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-monitor-exit.json",
+        "sha256": "0304ada50796b3a03276bf187faaa868781d03a857d1a030f3daf6dc4444c403",
+        "bytes": 3495
+      }
+    },
+    {
+      "name": "flight-crash",
+      "status": "passed",
+      "reopen_equivalent": true,
+      "artifacts": [
+        {
+          "name": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+          "events": 1185909,
+          "tids": [
+            6284,
+            6285,
+            6286,
+            6287,
+            6288,
+            6289,
+            6290,
+            6291,
+            6292,
+            6293,
+            6294,
+            6295,
+            6297,
+            6298,
+            6299,
+            6300,
+            6302,
+            6305,
+            6306,
+            6311,
+            6312,
+            6313,
+            6314,
+            6320,
+            6321,
+            6324,
+            6325,
+            6328,
+            6331,
+            6336,
+            6367
+          ],
+          "sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+          "file_bytes": 67108864,
+          "provider_bytes": 67108864,
+          "event_counts": {
+            "begin": 255,
+            "discontinuity": 265896,
+            "instruction": 357543,
+            "instruction_definition": 11450,
+            "memory": 159331,
+            "register_checkpoint": 255,
+            "register_delta": 357485,
+            "semantic_call": 31467,
+            "signal_handler_boundary": 1,
+            "string_definition": 2206,
+            "syscall": 1,
+            "thread_lifecycle": 19
+          },
+          "timeline_sha256": "97ef8e245124cf0ea04667000dfddc16cf776a394c570a3b3110235bb32c63f2",
+          "analysis_sha256": "eba00923010d3b7bea5d82fd4fda32bf4ca92a6ec608ebb01f19cb0b2b92d8bb",
+          "completeness_rows": 24162,
+          "termination": null
+        }
+      ],
+      "raw": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-flight-crash.json",
+        "sha256": "537a4c850ca248d9687c46db42e161283f928a4ab01b3dac478ed6ace518ad90",
+        "bytes": 18501681
+      }
+    }
+  ],
+  "limits": {
+    "validation_workers_per_artifact": 2,
+    "cache_resident_bytes": 2147483648,
+    "register_replay_resident_bytes": 536870912,
+    "call_tree_resident_bytes": 536870912,
+    "interactive_nodes": 100000,
+    "interactive_rows": 2000,
+    "cache_schema": 2,
+    "layout_version": 3
+  },
+  "checks": [
+    {
+      "command": "cargo test --workspace",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/rust-tests.log",
+        "sha256": "895460847e5049e576769cf4723caf93214540b874bbbedc9ddea09275ffcab5",
+        "bytes": 49075
+      }
+    },
+    {
+      "command": "cargo test -p qtrace-service",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/service-final.log",
+        "sha256": "4aca3f64026b8c416ff226a9d502dcd3f2e849708032b191e8d7b13fd25b0f0e",
+        "bytes": 4434
+      }
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/clippy.log",
+        "sha256": "830267e4a9c1dbd98929dba485bf8cebfa84b6a62eb32941ff4927a69250fae7",
+        "bytes": 269
+      }
+    },
+    {
+      "command": "python3 tools/check_generated.py",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/generated.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "command": "npm run lint",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/web-lint.log",
+        "sha256": "c9173d6b04289ea54953ecabd12565393c97679b2266d6cefa8e35131e2fee54",
+        "bytes": 57
+      }
+    },
+    {
+      "command": "npm test",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/web-tests.log",
+        "sha256": "183fecc9d3d81ed9cfaf51cab8db89c0ad646ed375845aacb6d79e0560fbf0f5",
+        "bytes": 1448
+      }
+    },
+    {
+      "command": "npm run build",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/web-build.log",
+        "sha256": "7af63e9dc94c9dc268c201c2f7bf5e5d8604cbbf480aa4f02c954621c32595de",
+        "bytes": 381
+      }
+    },
+    {
+      "command": "npm run e2e",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/e2e.log",
+        "sha256": "b6d0f7f027e219e31fe186665111f38e872e6bbd50df7ec3a9053b4e42e3c4ab",
+        "bytes": 2160
+      }
+    },
+    {
+      "command": "npm run e2e:production",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/production-e2e.log",
+        "sha256": "0e8407e921e22cf1f163f57917c29a9077ff31b02fc3f18b715fd3eb9dc5a38a",
+        "bytes": 823
+      }
+    },
+    {
+      "command": "QTRACE_CANCEL_REPORT=<retained Flight report> cargo test --release -p qtrace-service --lib close_cancels_active_analysis_on_large_capture -- --ignored --nocapture --test-threads=1",
+      "status": "passed",
+      "log": {
+        "path": "artifacts/long-operations-2026-10-19-qqno4ilc/active-cancellation-final.log",
+        "sha256": "72d51d2e9286aa44dc7af8cafa9f950479945f505c287abbdb221a78323bf6c2",
+        "bytes": 682
+      }
+    },
+    {
+      "command": "cargo fmt --all --check",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "frontend_test_counts": {
+    "unit_passed": 45,
+    "e2e_passed": 15,
+    "e2e_opt_in_performance_skipped": 1,
+    "production_passed": 1
+  },
+  "regression_proof": {
+    "blocked_register_and_call_tree_before_fix": "Both tests returned successful results after workspace closure; both now return job.cancelled and release stores.",
+    "single_artifact_cancel_before_fix": "workspace.no_valid_artifact instead of job.cancelled",
+    "single_artifact_cancel_red_log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/open-cancel-red.log",
+      "sha256": "1341aeb06f77ffb0c007b3777699672e01fcd99a16fed4673551d61d90b0ff05",
+      "bytes": 1180
+    }
+  },
+  "verification_notes": [
+    "Full workspace tests pass; after the final progress-only allocation notification change, the affected service suite and clippy/fmt/generated checks pass again. The final browser harness reruns against the rebuilt service.",
+    "Initial concurrently compiled frontend run hit the existing 5 s test deadline. Unchanged focused test passed in 2.79 s; unchanged full frontend suite passed, with no deadline changes.",
+    "Retained capture timings are functional diagnostics and overlap other verification work; they are not before/after performance samples.",
+    "No new Android capture, tracer throughput, rich-workload performance gate, native file-dialog, high-zoom layout, or call-tree cumulative-memory claim. Existing reference baselines remain intact."
+  ],
+  "raw_files": {
+    "workload-paired.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/workload-paired.json",
+      "sha256": "91007ea7ef48c3f831127c047107f731f501b136552c4e593374ffe03e79bc00",
+      "bytes": 14747
+    },
+    "store-before.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/store-before.log",
+      "sha256": "05d372a6123a4150ae9ebbf05e1586b95077c6efeba2bca9374390d1db358d29",
+      "bytes": 20511
+    },
+    "layout-before.rs": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/layout-before.rs",
+      "sha256": "ac4e7f8feec9e7e2807108ae2e13a72e5c8efd0fcad969dd19686b37d8c6efcd",
+      "bytes": 6123
+    },
+    "rust-tests.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/rust-tests.log",
+      "sha256": "895460847e5049e576769cf4723caf93214540b874bbbedc9ddea09275ffcab5",
+      "bytes": 49075
+    },
+    "open-cancel-red.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/open-cancel-red.log",
+      "sha256": "1341aeb06f77ffb0c007b3777699672e01fcd99a16fed4673551d61d90b0ff05",
+      "bytes": 1180
+    },
+    "browser-progress.mjs": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-progress.mjs",
+      "sha256": "51a5e5e8da5d5c8212ed4120148920cc2ec7ac3e6e347ca2de55284ce6eeea2e",
+      "bytes": 6885
+    },
+    "perf_driver-after-measured": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/perf_driver-after-measured",
+      "sha256": "5f72e4c0f8394d9d3923f6195465762e8d742ed3b2a81822517df614d4c22132",
+      "bytes": 4082808
+    },
+    "release-build.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/release-build.log",
+      "sha256": "9888c4df4e2ed5ccd56070eea241cea3005c02eb2c9bcae8d11989eb684d0d08",
+      "bytes": 169
+    },
+    "final-monitor-exit.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-monitor-exit.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "browser-progress.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-progress.json",
+      "sha256": "3d11c2482232e50167f716000e50451b8a9fe1ca53c22e2dee4023f2b543885d",
+      "bytes": 12168760
+    },
+    "cold-paired.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/cold-paired.json",
+      "sha256": "c2a878010a8bce0bda3af05a612866e662448835732fde007429abda253fe998",
+      "bytes": 15990
+    },
+    "final-offset-v2.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-offset-v2.json",
+      "sha256": "a512660790bb5db106c551255386ae2b78ad863890693fbf3df477db8b9b2dda",
+      "bytes": 3472
+    },
+    "final-symbol.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-symbol.json",
+      "sha256": "b450984b88ebed3479c34756a6713f6c71869b8cbc185b5c441d69421f234195",
+      "bytes": 3472
+    },
+    "web-lint.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/web-lint.log",
+      "sha256": "c9173d6b04289ea54953ecabd12565393c97679b2266d6cefa8e35131e2fee54",
+      "bytes": 57
+    },
+    "publish-evidence.py": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/publish-evidence.py",
+      "sha256": "bf9acb66ae15aff4f67baef546af69e85eb1f2037573e4558e342aee0cb2e811",
+      "bytes": 12353
+    },
+    "progress-tests.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/progress-tests.log",
+      "sha256": "5c7ff530165b897caa0715cb77e04bafe6eaa4775c13a57607f893ccb959f61d",
+      "bytes": 958
+    },
+    "generated.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/generated.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "profile-cold.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/profile-cold.json",
+      "sha256": "0c0786167556c45788802f046f4a56b5e0051f7d79a5006d78eb82c9e82ce897",
+      "bytes": 688
+    },
+    "perf_driver-before": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/perf_driver-before",
+      "sha256": "13ebdef4d77097412d545cfdc823fa4bfee0422a8d042fe7ea06f17902df7155",
+      "bytes": 4061472
+    },
+    "active-cancellation-final.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/active-cancellation-final.log",
+      "sha256": "72d51d2e9286aa44dc7af8cafa9f950479945f505c287abbdb221a78323bf6c2",
+      "bytes": 682
+    },
+    "final-offset-v2.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-offset-v2.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "browser-progress-before-allocation-check.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-progress-before-allocation-check.json",
+      "sha256": "fb761657998fc8168e5d069b9de34c10c5ee9afa52ca474dbc957cb6b79a8ff9",
+      "bytes": 12166927
+    },
+    "warm-before.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/warm-before.json",
+      "sha256": "512bd6d0080b6ad7ab9cb279fcb218b43ee5e216452b587331aa9c8ce8a0a917",
+      "bytes": 15553
+    },
+    "browser-progress.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-progress.log",
+      "sha256": "13a8dd058c39fd682b835592f5ee7da25fe22a03506c81bec32d6f56b036dc16",
+      "bytes": 112
+    },
+    "final-flight-crash.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-flight-crash.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "clippy.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/clippy.log",
+      "sha256": "830267e4a9c1dbd98929dba485bf8cebfa84b6a62eb32941ff4927a69250fae7",
+      "bytes": 269
+    },
+    "final-flight-crash.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-flight-crash.json",
+      "sha256": "537a4c850ca248d9687c46db42e161283f928a4ab01b3dac478ed6ace518ad90",
+      "bytes": 18501681
+    },
+    "e2e.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/e2e.log",
+      "sha256": "b6d0f7f027e219e31fe186665111f38e872e6bbd50df7ec3a9053b4e42e3c4ab",
+      "bytes": 2160
+    },
+    "warm-inline-rejected.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/warm-inline-rejected.json",
+      "sha256": "8d0eba2b0eae04f74155720986b7123e86b5f81214d5fbdb28bae7b1da6aab02",
+      "bytes": 34621
+    },
+    "web-build.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/web-build.log",
+      "sha256": "7af63e9dc94c9dc268c201c2f7bf5e5d8604cbbf480aa4f02c954621c32595de",
+      "bytes": 381
+    },
+    "production-e2e.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/production-e2e.log",
+      "sha256": "0e8407e921e22cf1f163f57917c29a9077ff31b02fc3f18b715fd3eb9dc5a38a",
+      "bytes": 823
+    },
+    "browser-progress-before-allocation-check.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-progress-before-allocation-check.log",
+      "sha256": "fa3bc8d3f2ebb779b43484770e938a0ea266ae15f9ac61fec893c9f0bfc4c333",
+      "bytes": 112
+    },
+    "web-timeout-focused.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/web-timeout-focused.log",
+      "sha256": "bb9521c0993f07d7e5df77a416a2fadba6d1a956a1889ff1520f609fc0123b2c",
+      "bytes": 529
+    },
+    "warm-paired.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/warm-paired.json",
+      "sha256": "8b3d075199494a8f4524ef0f928b944dc59a291997fe6037f93d9878ca304225",
+      "bytes": 35957
+    },
+    "final-monitor-exit.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-monitor-exit.json",
+      "sha256": "0304ada50796b3a03276bf187faaa868781d03a857d1a030f3daf6dc4444c403",
+      "bytes": 3495
+    },
+    "final-symbol.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-symbol.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "web-tests.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/web-tests.log",
+      "sha256": "183fecc9d3d81ed9cfaf51cab8db89c0ad646ed375845aacb6d79e0560fbf0f5",
+      "bytes": 1448
+    },
+    "active-cancellation.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/active-cancellation.log",
+      "sha256": "bf6c24450894af382015fd1c639e983ef57e3def8bd3369171fd7abbf67f7790",
+      "bytes": 904
+    },
+    "service-final.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/service-final.log",
+      "sha256": "4aca3f64026b8c416ff226a9d502dcd3f2e849708032b191e8d7b13fd25b0f0e",
+      "bytes": 4434
+    },
+    "final-capture-checks.json": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/final-capture-checks.json",
+      "sha256": "953f90bee74b9cb340b4a28669251fe63785e6442d5428fd8c01d6e421f6622c",
+      "bytes": 656
+    },
+    "store-after.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/store-after.log",
+      "sha256": "33d066a8907a8c4aa45a966919d90f42acf7cb1d41af5acede6a30211b635a79",
+      "bytes": 20512
+    },
+    "profile-cold.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/profile-cold.log",
+      "sha256": "39e46e7720c229e0d35932b003ae938dea125c5f05c30e81bf2490cc37c7ba36",
+      "bytes": 1564
+    },
+    "browser-EqBA1c/cancelled.png": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-EqBA1c/cancelled.png",
+      "sha256": "e12e9b8587b113918c06a95066d1750b103275af8744548b901392bfa9ffeed8",
+      "bytes": 72143
+    },
+    "browser-EqBA1c/building.png": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-EqBA1c/building.png",
+      "sha256": "3ba655fd80b7ccfea2a3aad530b41ef4246c8b2cf7db659023afb19cdc91a87d",
+      "bytes": 74618
+    },
+    "browser-EqBA1c/vite.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-EqBA1c/vite.log",
+      "sha256": "2696206b2fadbb697b65bedfb5098dc6824c01c0d38a4ef2716c7f4a0fbf4dbd",
+      "bytes": 116
+    },
+    "browser-EqBA1c/reopened.png": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-EqBA1c/reopened.png",
+      "sha256": "6e69f29bcb8456b87038b6c4f486652fd0e23fdbd06c3a9e74249fa44dd705ab",
+      "bytes": 181989
+    },
+    "browser-EqBA1c/vite-errors.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-EqBA1c/vite-errors.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "browser-EqBA1c/server.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-EqBA1c/server.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "browser-pM94gz/cancelled.png": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-pM94gz/cancelled.png",
+      "sha256": "e12e9b8587b113918c06a95066d1750b103275af8744548b901392bfa9ffeed8",
+      "bytes": 72143
+    },
+    "browser-pM94gz/building.png": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-pM94gz/building.png",
+      "sha256": "80574e0e2e4589cf6a108bfd0fd020231e0e114eca404f70805a7710e6bd65f8",
+      "bytes": 74326
+    },
+    "browser-pM94gz/vite.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-pM94gz/vite.log",
+      "sha256": "8cc3b1efe621bd9cc6daafd6018482c90f7a7c081ca0feab4d5a33df4e456e4e",
+      "bytes": 116
+    },
+    "browser-pM94gz/reopened.png": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-pM94gz/reopened.png",
+      "sha256": "6e69f29bcb8456b87038b6c4f486652fd0e23fdbd06c3a9e74249fa44dd705ab",
+      "bytes": 181989
+    },
+    "browser-pM94gz/vite-errors.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-pM94gz/vite-errors.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "browser-pM94gz/server.log": {
+      "path": "artifacts/long-operations-2026-10-19-qqno4ilc/browser-pM94gz/server.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  }
+}

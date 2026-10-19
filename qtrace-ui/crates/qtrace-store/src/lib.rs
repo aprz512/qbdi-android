@@ -8,6 +8,7 @@ mod identity;
 mod index;
 mod layout;
 mod manifest;
+mod profile;
 mod secure_path;
 mod session;
 mod symbols;

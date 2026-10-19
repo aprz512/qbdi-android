@@ -2,12 +2,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     CompletenessCause, CompletenessRange, Discontinuity, DiscontinuityCause, EventKey,
-    EventPayload, EventRecord, MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance,
+    EventPayload, EventRecord, EventScope, MAX_UNGUARDED_RECORDS, OpaqueOptionalRecord, Provenance,
     ProviderCounters, ProviderError, RangeBounds, ReadAtSource, SourceCoordinate, TimelineId,
     WorkDelta, WorkGuard, completeness_canonical_key, merge_canonical_completeness,
 };
 
-use super::allocation;
 use super::wire::{
     ChunkHeader, EMERGENCY_COMMITTED, EmergencyCell, FLIGHT_CHUNK_HEADER_BYTES,
     FLIGHT_DIRECTORY_ENTRY_BYTES, FLIGHT_EMERGENCY_RECORD_BYTES, FLIGHT_EMERGENCY_SLOT_BYTES,
@@ -16,6 +15,7 @@ use super::wire::{
     parse_directory, parse_emergency_cell, parse_record_header, parse_superblock, record_checksum,
     record_error, valid_record_flags,
 };
+use super::{allocation, sort::guarded_radix_sort};
 
 pub(super) const MERGED_TIMELINE_ID: TimelineId = TimelineId(0);
 const FNV_OFFSET_BASIS: u32 = 2_166_136_261;
@@ -29,6 +29,14 @@ pub(super) struct RecoveredFlight {
     pub(super) final_registers: HashMap<u32, crate::RegisterSnapshot>,
     pub(super) termination: Option<crate::Termination>,
     pub(super) recovery_summary: super::FlightRecoverySummary,
+}
+
+// Physical recovery retains only the payload variant that can occur on wire.
+// Materialize the larger typed event only while decoding each recovered record.
+pub(super) struct PhysicalRecord {
+    pub(super) key: EventKey,
+    pub(super) scope: EventScope,
+    pub(super) raw: OpaqueOptionalRecord,
 }
 
 #[derive(Clone, Copy)]
@@ -84,7 +92,6 @@ struct LifecycleBalance {
 }
 
 struct RecordScan {
-    events: Vec<EventRecord>,
     first_sequence: Option<u64>,
     last_sequence: Option<u64>,
     lifecycle_balance: i64,
@@ -229,6 +236,9 @@ pub(super) fn recover(
     let mut has_damage = false;
     let mut has_incomplete = superblock.flags != 0 || has_directory_uncertainty;
     let mut active_chunks = Vec::new();
+    // A chunk is published only after its complete scan validates. Retain the
+    // temporary table's capacity across chunks, including rejected scans.
+    let mut chunk_events = Vec::new();
     for index in 0..superblock.chunk_count {
         context.guard.consume(WorkDelta::default())?;
         let offset = indexed_offset(
@@ -313,9 +323,12 @@ pub(super) fn recover(
                 artifact,
                 index,
                 &header,
-                data_offset,
-                committed,
+                data_offset
+                    ..data_offset
+                        .checked_add(committed)
+                        .ok_or_else(|| allocation_error("chunk scan extent overflow"))?,
                 false,
+                &mut chunk_events,
             ) {
                 Ok(scan) => scan,
                 Err(error)
@@ -348,7 +361,7 @@ pub(super) fn recover(
             };
             let count_matches = usize::try_from(header.record_count)
                 .ok()
-                .is_some_and(|count| count == scan.events.len());
+                .is_some_and(|count| count == chunk_events.len());
             let endpoints_match = match (scan.first_sequence, scan.last_sequence) {
                 (Some(first), Some(last)) => {
                     first == header.first_sequence && last == header.last_sequence
@@ -356,7 +369,7 @@ pub(super) fn recover(
                 (None, None) => header.first_sequence == 0 && header.last_sequence == 0,
                 _ => false,
             };
-            if scan.events.is_empty() || !count_matches || !endpoints_match {
+            if chunk_events.is_empty() || !count_matches || !endpoints_match {
                 mark_chunk_damage(
                     &mut completeness,
                     &mut damage_ranges,
@@ -377,7 +390,7 @@ pub(super) fn recover(
                 scan.lifecycle_first_begin,
                 &context,
             )?;
-            append_events(&mut events, scan.events, &context)?;
+            append_events(&mut events, &mut chunk_events, &context)?;
         } else {
             guarded_push(&mut active_chunks, index, &context)?;
             push_source_range(
@@ -393,9 +406,12 @@ pub(super) fn recover(
                 artifact,
                 index,
                 &header,
-                data_offset,
-                capacity,
+                data_offset
+                    ..data_offset
+                        .checked_add(capacity)
+                        .ok_or_else(|| allocation_error("chunk scan extent overflow"))?,
                 true,
+                &mut chunk_events,
             )?;
             merge_lifecycle(
                 &mut lifecycle,
@@ -404,10 +420,11 @@ pub(super) fn recover(
                 scan.lifecycle_first_begin,
                 &context,
             )?;
-            append_events(&mut events, scan.events, &context)?;
+            append_events(&mut events, &mut chunk_events, &context)?;
         }
     }
 
+    drop(chunk_events);
     let mut stale_directory_entries = Vec::new();
     for (index, entry) in directories.iter().enumerate() {
         guard_checkpoint(context.guard, index)?;
@@ -453,7 +470,7 @@ pub(super) fn recover(
         &mut known_tids,
         &regular_sequences,
     )?;
-    events = guarded_radix_sort(events, 8, event_sequence_byte, &context)?;
+    events = guarded_radix_sort(events, 8, event_sequence_byte, context.guard)?;
     events = resolve_sequence_collisions(
         events,
         superblock.emergencies.offset,
@@ -461,16 +478,13 @@ pub(super) fn recover(
         &mut completeness,
         &context,
     )?;
-    tids = guarded_radix_sort(tids, 4, u32_byte, &context)?;
+    tids = guarded_radix_sort(tids, 4, u32_byte, context.guard)?;
     has_damage |= emergency_status.has_damage;
     has_incomplete |= emergency_status.has_incomplete;
     let mut has_coverage = emergency_status.has_coverage;
     for (index, event) in events.iter().enumerate() {
         guard_checkpoint(context.guard, index)?;
-        if matches!(
-            &event.payload,
-            EventPayload::OpaqueOptional(record) if record.record_type == 15
-        ) {
+        if event.raw.record_type == 15 {
             let sequence = event
                 .key
                 .sequence
@@ -547,8 +561,8 @@ pub(super) fn recover(
         }
     }
 
-    damage_ranges = guarded_radix_sort(damage_ranges, 16, sequence_range_byte, &context)?;
-    hints = guarded_radix_sort(hints, 8, sequence_fact_byte, &context)?;
+    damage_ranges = guarded_radix_sort(damage_ranges, 16, sequence_range_byte, context.guard)?;
+    hints = guarded_radix_sort(hints, 8, sequence_fact_byte, context.guard)?;
     add_sequence_completeness(
         &events,
         &hints,
@@ -563,7 +577,7 @@ pub(super) fn recover(
         &context,
     )?;
     let decoded = super::events::decode(events, &superblock, &chunks, artifact, context.guard)?;
-    events = decoded.events;
+    let mut events = decoded.events;
     let decoded_damage_count = decoded.damaged_sequences.len();
     let completeness_target = completeness
         .len()
@@ -615,7 +629,8 @@ pub(super) fn recover(
         guard_checkpoint(context.guard, index)?;
         damaged_source_offsets.push(offset);
     }
-    damaged_source_offsets = guarded_radix_sort(damaged_source_offsets, 8, u64_byte, &context)?;
+    damaged_source_offsets =
+        guarded_radix_sort(damaged_source_offsets, 8, u64_byte, context.guard)?;
     let mut previous_chunk = None;
     for (index, offset) in damaged_source_offsets.into_iter().enumerate() {
         guard_checkpoint(context.guard, index)?;
@@ -660,10 +675,11 @@ pub(super) fn recover(
         .counters
         .damaged_records
         .saturating_add(decoded.damaged_sequences.len() as u64);
-    active_chunks = guarded_radix_sort(active_chunks, 4, u32_byte, &context)?;
-    stale_directory_entries = guarded_radix_sort(stale_directory_entries, 4, u32_byte, &context)?;
+    active_chunks = guarded_radix_sort(active_chunks, 4, u32_byte, context.guard)?;
+    stale_directory_entries =
+        guarded_radix_sort(stale_directory_entries, 4, u32_byte, context.guard)?;
     rotating_directory_entries =
-        guarded_radix_sort(rotating_directory_entries, 4, u32_byte, &context)?;
+        guarded_radix_sort(rotating_directory_entries, 4, u32_byte, context.guard)?;
     let complete = superblock.flags == 0
         && !has_damage
         && !has_coverage
@@ -718,6 +734,16 @@ fn add_discontinuity_events(
         ..WorkDelta::default()
     };
     context.guard.consume(evidence_delta)?;
+    let event_capacity = events
+        .len()
+        .checked_add(evidence_capacity)
+        .ok_or_else(|| allocation_error("discontinuity event count overflow"))?;
+    allocation::try_reserve_vec_exact(
+        events,
+        event_capacity,
+        context.guard,
+        "Flight discontinuity event allocation failed",
+    )?;
     let mut proof_ranges = fallible_vec(sequence_proofs.len(), context)?;
     for (index, proof) in sequence_proofs.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
@@ -827,11 +853,16 @@ fn scan_records(
     artifact: crate::ArtifactDigest,
     chunk_index: u32,
     header: &ChunkHeader,
-    data_offset: u64,
-    limit: u64,
+    extent: std::ops::Range<u64>,
     active: bool,
+    events: &mut Vec<PhysicalRecord>,
 ) -> Result<RecordScan, ProviderError> {
-    let mut events = Vec::new();
+    events.clear();
+    let data_offset = extent.start;
+    let limit = extent
+        .end
+        .checked_sub(extent.start)
+        .ok_or_else(|| allocation_error("chunk scan extent underflow"))?;
     let mut lifecycle_balance = 0_i64;
     let mut lifecycle_first_begin = None;
     let mut relative = 0_u64;
@@ -943,21 +974,20 @@ fn scan_records(
             Some(record.sequence),
             Some(header.tid),
         );
-        let event = EventRecord::new_scoped(
+        let event = PhysicalRecord {
             key,
-            Provenance::Captured,
-            crate::EventScope::FlightChunk {
+            scope: EventScope::FlightChunk {
                 chunk_index,
                 generation: header.generation,
                 tid: header.tid,
             },
-            EventPayload::OpaqueOptional(OpaqueOptionalRecord {
+            raw: OpaqueOptionalRecord {
                 record_type: record.kind,
                 flags: record.flags,
                 bytes: payload,
-            }),
-        );
-        guarded_push(&mut events, event, context)?;
+            },
+        };
+        guarded_push(events, event, context)?;
         context.next_ordinal = context
             .next_ordinal
             .checked_add(1)
@@ -987,7 +1017,6 @@ fn scan_records(
         ));
     }
     Ok(RecordScan {
-        events,
         first_sequence,
         last_sequence,
         lifecycle_balance,
@@ -1000,7 +1029,7 @@ fn scan_emergencies(
     context: &mut RecoveryContext<'_>,
     superblock: &Superblock,
     artifact: crate::ArtifactDigest,
-    events: &mut Vec<EventRecord>,
+    events: &mut Vec<PhysicalRecord>,
     completeness: &mut Vec<CompletenessRange>,
     tids: &mut Vec<u32>,
     known_tids: &mut HashMap<u32, ()>,
@@ -1082,8 +1111,8 @@ fn scan_emergencies(
             payload.extend_from_slice(logical);
             let kind = u16::try_from(candidate.cell.kind)
                 .map_err(|_| allocation_error("emergency type conversion failed"))?;
-            let event = EventRecord::new(
-                EventKey::new(
+            let event = PhysicalRecord {
+                key: EventKey::new(
                     artifact,
                     MERGED_TIMELINE_ID,
                     context.next_ordinal,
@@ -1091,13 +1120,13 @@ fn scan_emergencies(
                     Some(candidate.cell.sequence),
                     Some(candidate.cell.tid),
                 ),
-                Provenance::Captured,
-                EventPayload::OpaqueOptional(OpaqueOptionalRecord {
+                scope: EventScope::Artifact,
+                raw: OpaqueOptionalRecord {
                     record_type: kind,
                     flags: 0,
                     bytes: payload,
-                }),
-            );
+                },
+            };
             context.next_ordinal = context
                 .next_ordinal
                 .checked_add(1)
@@ -1110,7 +1139,7 @@ fn scan_emergencies(
 }
 
 fn index_regular_sequences(
-    events: &[EventRecord],
+    events: &[PhysicalRecord],
     context: &RecoveryContext<'_>,
 ) -> Result<HashMap<u64, ()>, ProviderError> {
     let mut sequences = fallible_hash_map(events.len(), context)?;
@@ -1291,7 +1320,7 @@ fn emergency_legacy_checksum(cell: &EmergencyCell) -> u32 {
 }
 
 fn add_sequence_completeness(
-    events: &[EventRecord],
+    events: &[PhysicalRecord],
     hints: &[SequenceFact],
     damage_ranges: &[SequenceRange],
     status: RecoveryStatus,
@@ -1380,10 +1409,7 @@ fn add_sequence_completeness(
             continue;
         }
         if sequence > current {
-            let cause = if matches!(
-                &event.payload,
-                EventPayload::OpaqueOptional(record) if record.record_type == 15
-            ) {
+            let cause = if event.raw.record_type == 15 {
                 CompletenessCause::Lost
             } else {
                 missing_cause
@@ -1667,23 +1693,41 @@ fn merge_lifecycle(
 }
 
 fn append_events(
-    target: &mut Vec<EventRecord>,
-    source: Vec<EventRecord>,
+    target: &mut Vec<PhysicalRecord>,
+    source: &mut Vec<PhysicalRecord>,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
-    for event in source {
+    for event in source.drain(..) {
         guarded_push(target, event, context)?;
     }
     Ok(())
 }
 
 fn resolve_sequence_collisions(
-    events: Vec<EventRecord>,
+    events: Vec<PhysicalRecord>,
     emergency_start: u64,
     emergency_end: u64,
     completeness: &mut Vec<CompletenessRange>,
     context: &RecoveryContext<'_>,
-) -> Result<Vec<EventRecord>, ProviderError> {
+) -> Result<Vec<PhysicalRecord>, ProviderError> {
+    let mut previous = None;
+    let mut has_collision = false;
+    for (index, event) in events.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        let sequence = event
+            .key
+            .sequence
+            .ok_or_else(|| allocation_error("Flight event has no sequence"))?;
+        if previous == Some(sequence) {
+            has_collision = true;
+            break;
+        }
+        previous = Some(sequence);
+    }
+    if !has_collision {
+        return Ok(events);
+    }
+
     let mut output = fallible_vec(events.len(), context)?;
     let mut sequence = None;
     let mut regular = None;
@@ -1726,9 +1770,9 @@ fn resolve_sequence_collisions(
 }
 
 fn flush_sequence_group(
-    output: &mut Vec<EventRecord>,
-    regular: Option<EventRecord>,
-    emergency: Option<EventRecord>,
+    output: &mut Vec<PhysicalRecord>,
+    regular: Option<PhysicalRecord>,
+    emergency: Option<PhysicalRecord>,
     completeness: &mut Vec<CompletenessRange>,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
@@ -1756,7 +1800,7 @@ fn normalize_completeness(
     ranges: &mut Vec<CompletenessRange>,
     context: &RecoveryContext<'_>,
 ) -> Result<(), ProviderError> {
-    let sorted = guarded_radix_sort(std::mem::take(ranges), 19, completeness_byte, context)?;
+    let sorted = guarded_radix_sort(std::mem::take(ranges), 19, completeness_byte, context.guard)?;
     *ranges = sorted;
     let mut output = fallible_vec(ranges.len(), context)?;
     for (index, range) in ranges.drain(..).enumerate() {
@@ -1775,7 +1819,7 @@ fn normalize_completeness(
     Ok(())
 }
 
-fn event_sequence_byte(event: &EventRecord, pass: usize) -> Result<u8, ProviderError> {
+fn event_sequence_byte(event: &PhysicalRecord, pass: usize) -> Result<u8, ProviderError> {
     let sequence = event
         .key
         .sequence
@@ -1897,89 +1941,6 @@ where
         context.guard,
         "Flight recovery hash allocation failed",
     )
-}
-
-fn guarded_radix_sort<T, F>(
-    values: Vec<T>,
-    passes: usize,
-    key_byte: F,
-    context: &RecoveryContext<'_>,
-) -> Result<Vec<T>, ProviderError>
-where
-    F: Fn(&T, usize) -> Result<u8, ProviderError>,
-{
-    if values.len() < 2 {
-        return Ok(values);
-    }
-    let length = values.len();
-    let mut input = fallible_vec(length, context)?;
-    for (index, value) in values.into_iter().enumerate() {
-        guard_checkpoint(context.guard, index)?;
-        input.push(Some(value));
-    }
-    let mut scratch = fallible_none_vec(length, context)?;
-
-    for pass in 0..passes {
-        let mut counts = [0_usize; 256];
-        for (index, item) in input.iter().enumerate() {
-            guard_checkpoint(context.guard, index)?;
-            let value = item
-                .as_ref()
-                .ok_or_else(|| allocation_error("radix input slot is empty"))?;
-            let bucket = usize::from(key_byte(value, pass)?);
-            let count = counts
-                .get_mut(bucket)
-                .ok_or_else(|| allocation_error("radix count bucket is invalid"))?;
-            *count = count
-                .checked_add(1)
-                .ok_or_else(|| allocation_error("radix bucket count overflow"))?;
-        }
-
-        let mut positions = [0_usize; 256];
-        let mut cursor = 0_usize;
-        for (bucket, count) in counts.iter().copied().enumerate() {
-            let position = positions
-                .get_mut(bucket)
-                .ok_or_else(|| allocation_error("radix position bucket is invalid"))?;
-            *position = cursor;
-            cursor = cursor
-                .checked_add(count)
-                .ok_or_else(|| allocation_error("radix position overflow"))?;
-        }
-        if cursor != length {
-            return Err(allocation_error("radix item count mismatch"));
-        }
-
-        for (index, item) in input.iter_mut().enumerate() {
-            guard_checkpoint(context.guard, index)?;
-            let value = item
-                .take()
-                .ok_or_else(|| allocation_error("radix input slot is empty"))?;
-            let bucket = usize::from(key_byte(&value, pass)?);
-            let position = positions
-                .get_mut(bucket)
-                .ok_or_else(|| allocation_error("radix position bucket is invalid"))?;
-            let destination = *position;
-            *position = position
-                .checked_add(1)
-                .ok_or_else(|| allocation_error("radix destination overflow"))?;
-            let slot = scratch
-                .get_mut(destination)
-                .ok_or_else(|| allocation_error("radix destination is invalid"))?;
-            if slot.is_some() {
-                return Err(allocation_error("radix destination is occupied"));
-            }
-            *slot = Some(value);
-        }
-        std::mem::swap(&mut input, &mut scratch);
-    }
-
-    let mut output = fallible_vec(length, context)?;
-    for (index, item) in input.into_iter().enumerate() {
-        guard_checkpoint(context.guard, index)?;
-        output.push(item.ok_or_else(|| allocation_error("radix output slot is empty"))?);
-    }
-    Ok(output)
 }
 
 fn guard_checkpoint(guard: &dyn WorkGuard, index: usize) -> Result<(), ProviderError> {

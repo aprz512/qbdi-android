@@ -16,7 +16,7 @@ use crate::{
 use super::{
     allocation,
     fragments::{self, Fragment},
-    recovery::ChunkIdentity,
+    recovery::{ChunkIdentity, PhysicalRecord},
     wire::Superblock,
 };
 
@@ -49,7 +49,7 @@ struct ChunkState {
 }
 
 pub(super) fn decode(
-    physical: Vec<EventRecord>,
+    physical: Vec<PhysicalRecord>,
     superblock: &Superblock,
     chunks: &[Option<ChunkIdentity>],
     artifact: crate::ArtifactDigest,
@@ -77,7 +77,8 @@ pub(super) fn decode(
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
-        if let EventPayload::OpaqueOptional(raw) = &event.payload {
+        {
+            let raw = &event.raw;
             if let Some(chunk) = chunk_index(superblock, event.key.source_offset) {
                 let index = chunk as usize;
                 if matches!((raw.record_type, raw.flags), (4, 1)) {
@@ -153,7 +154,13 @@ pub(super) fn decode(
         "Flight damage-offset allocation failed",
     )?;
 
-    for (position, event) in physical.into_iter().enumerate() {
+    for (position, physical) in physical.into_iter().enumerate() {
+        let event = EventRecord::new_scoped(
+            physical.key,
+            Provenance::Captured,
+            physical.scope,
+            EventPayload::OpaqueOptional(physical.raw),
+        );
         if position as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
@@ -290,7 +297,9 @@ pub(super) fn decode(
                         match final_state.entry(tid) {
                             std::collections::hash_map::Entry::Occupied(mut item) => {
                                 if sequence >= item.get().0 {
-                                    *item.get_mut() = (sequence, clone_snapshot(snapshot, guard)?);
+                                    let (last_sequence, values) = item.get_mut();
+                                    *last_sequence = sequence;
+                                    values.copy_from(snapshot);
                                 }
                             }
                             std::collections::hash_map::Entry::Vacant(item) => {
@@ -1394,119 +1403,40 @@ fn payload_error(coordinate: SourceCoordinate, detail: &str) -> ProviderError {
 }
 
 fn guarded_sort_events(
-    mut values: Vec<EventRecord>,
+    values: Vec<EventRecord>,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<EventRecord>, ProviderError> {
-    for byte in 0..8 {
-        let mut counts = [0_usize; 256];
-        for (index, event) in values.iter().enumerate() {
-            if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            let key = event.key.sequence.unwrap_or(0);
-            counts[((key >> (byte * 8)) & 0xff) as usize] += 1;
-        }
-        let mut positions = [0_usize; 256];
-        for index in 1..256 {
-            positions[index] = positions[index - 1] + counts[index - 1];
-        }
-        let mut slots = Vec::new();
-        allocation::try_reserve_vec_exact(
-            &mut slots,
-            values.len(),
-            guard,
-            "Flight event sort allocation failed",
-        )?;
-        for index in 0..values.len() {
-            if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            slots.push(None);
-        }
-        for (index, event) in values.drain(..).enumerate() {
-            if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            let bucket = ((event.key.sequence.unwrap_or(0) >> (byte * 8)) & 0xff) as usize;
-            let position = positions[bucket];
-            positions[bucket] += 1;
-            slots[position] = Some(event);
-        }
-        for (index, event) in slots.into_iter().enumerate() {
-            if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            let Some(event) = event else {
-                return Err(payload_error(
-                    SourceCoordinate {
-                        offset: 0,
-                        record_ordinal: None,
-                    },
-                    "Flight event sort invariant failed",
-                ));
-            };
-            values.push(event);
-        }
-    }
-    Ok(values)
+    super::sort::guarded_radix_sort(
+        values,
+        8,
+        |event, pass| Ok(event.key.sequence.unwrap_or(0).to_le_bytes()[pass]),
+        guard,
+    )
 }
 
 pub(super) fn guarded_sort_u64(
-    mut values: Vec<u64>,
+    values: Vec<u64>,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<u64>, ProviderError> {
-    for byte in 0..8 {
-        let mut counts = [0_usize; 256];
-        for (index, value) in values.iter().enumerate() {
-            if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            counts[((value >> (byte * 8)) & 0xff) as usize] += 1;
-        }
-        let mut positions = [0_usize; 256];
-        for index in 1..256 {
-            positions[index] = positions[index - 1] + counts[index - 1];
-        }
-        let mut output = Vec::new();
-        allocation::try_reserve_vec_exact(
-            &mut output,
-            values.len(),
-            guard,
-            "Flight u64 sort allocation failed",
-        )?;
-        for index in 0..values.len() {
-            if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            output.push(0);
-        }
-        for (index, value) in values.drain(..).enumerate() {
-            if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
-                guard.consume(WorkDelta::default())?;
-            }
-            let bucket = ((value >> (byte * 8)) & 0xff) as usize;
-            let position = positions[bucket];
-            positions[bucket] += 1;
-            output[position] = value;
-        }
-        values = output;
-    }
-    let mut unique = Vec::new();
-    allocation::try_reserve_vec_exact(
-        &mut unique,
-        values.len(),
+    let mut values = super::sort::guarded_radix_sort(
+        values,
+        8,
+        |value, pass| Ok(value.to_le_bytes()[pass]),
         guard,
-        "Flight u64 deduplication allocation failed",
     )?;
-    for (index, value) in values.into_iter().enumerate() {
+    let mut retained = 0;
+    for index in 0..values.len() {
         if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
             guard.consume(WorkDelta::default())?;
         }
-        if unique.last() != Some(&value) {
-            unique.push(value);
+        let value = values[index];
+        if retained == 0 || values[retained - 1] != value {
+            values[retained] = value;
+            retained += 1;
         }
     }
-    Ok(unique)
+    values.truncate(retained);
+    Ok(values)
 }
 
 struct Cursor<'a> {

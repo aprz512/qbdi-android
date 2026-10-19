@@ -23,8 +23,13 @@ e2e-fixture = ["dep:tiny_http"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+lz4_flex = { version = "0.11", features = ["frame"] }
 
 [[bin]]
 name = "e2e_server"
 path = "src/bin/e2e_server.rs"
 required-features = ["e2e-fixture"]
+
+[[example]]
+name = "verify_capture"
+test = true

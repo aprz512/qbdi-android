@@ -664,6 +664,8 @@ fn production_normalized_qtrb_store_uses_real_overlap_posting() {
     let store = Arc::new(IndexBuilder::build(source, &BuildOptions::default(), &AllowAll).unwrap());
     let row = store.memory_rows()[0];
     let key = store.event_key(row.owner_row).unwrap();
+    let context = Arc::new(qtrace_analysis::QueryContext::new(store.clone()).unwrap());
+    let reused = MemoryAnalyzer::from_context_with_guard(context, &AllowAll).unwrap();
     let analyzer = MemoryAnalyzer::new(store).unwrap();
     let history = analyzer
         .history(&key, row.address + 1..row.end_exclusive)
@@ -672,6 +674,20 @@ fn production_normalized_qtrb_store_uses_real_overlap_posting() {
         history
             .iter()
             .any(|item| item.address == row.address && item.size == row.size)
+    );
+    assert_eq!(
+        history,
+        reused
+            .history(&key, row.address + 1..row.end_exclusive)
+            .unwrap()
+    );
+    assert_eq!(
+        analyzer
+            .state_at(&key, row.address..row.end_exclusive)
+            .unwrap(),
+        reused
+            .state_at(&key, row.address..row.end_exclusive)
+            .unwrap()
     );
 }
 

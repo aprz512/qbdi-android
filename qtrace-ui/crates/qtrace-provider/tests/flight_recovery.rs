@@ -32,6 +32,26 @@ impl WorkGuard for AllowAll {
     }
 }
 
+struct ResidentLimitGuard {
+    used: Mutex<u64>,
+    limit: u64,
+}
+
+impl WorkGuard for ResidentLimitGuard {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        let mut used = self.used.lock().unwrap();
+        *used = used.saturating_add(delta.resident_bytes);
+        if *used > self.limit {
+            return Err(OperationAbort::budget_exceeded(
+                BudgetDimension::ResidentBytes,
+                self.limit,
+                *used,
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct RejectAll;
 
 impl WorkGuard for RejectAll {
@@ -1486,6 +1506,43 @@ fn sealed_checksum_count_range_commit_checksum_and_padding_are_transactional() {
 }
 
 #[test]
+fn reused_chunk_buffer_discards_rejected_records_before_the_next_chunk() {
+    let generation = 2;
+    let mut rejected = chunk(
+        0,
+        7,
+        generation,
+        &[record(2, 9, b"rejected", 0, generation, true)],
+        2,
+        b"",
+    );
+    put_u32(&mut rejected, 44, 2);
+    let valid = chunk(
+        1,
+        8,
+        generation,
+        &[record(2, 10, b"retained", 0, generation, true)],
+        2,
+        b"",
+    );
+    let parsed = collect_bytes(artifact(
+        &[
+            directory(7, 9, 9, 0, generation, 1),
+            directory(8, 10, 10, 1, generation, 1),
+        ],
+        &[rejected, valid],
+        &[],
+        0,
+    ))
+    .unwrap();
+
+    assert_eq!(sequences(&parsed.events), vec![10]);
+    assert!(parsed.summary.completeness.iter().any(|item| {
+        item.provenance() == Provenance::Damaged && item.cause() == CompletenessCause::Incomplete
+    }));
+}
+
+#[test]
 fn active_committed_checksum_or_type_damage_fails_instead_of_truncating_prefix() {
     let generation = 1;
     let mut bad_checksum = record(2, 1, b"", 0, generation, true);
@@ -1921,6 +1978,22 @@ fn high_cardinality_projection_and_merge_work_stays_checkpoint_bounded() {
 }
 
 #[test]
+fn recovery_keeps_large_event_tables_within_a_cumulative_allocation_budget() {
+    let bytes = many_thread_artifact(128, 64);
+    let expected = collect_bytes(bytes.clone()).unwrap();
+    let guard = ResidentLimitGuard {
+        used: Mutex::new(0),
+        limit: 32 * 1024 * 1024,
+    };
+    let actual = collect_source(Arc::new(ByteSource::new(bytes)), &guard).unwrap();
+
+    assert_eq!(actual.events, expected.events);
+    assert_eq!(actual.summary, expected.summary);
+    assert_eq!(actual.projections, expected.projections);
+    assert_eq!(actual.final_registers, expected.final_registers);
+}
+
+#[test]
 fn public_open_can_cancel_chunk_state_initialization_after_4096_items() {
     let thread_count = 4_097_u32;
     let bytes = many_thread_artifact(thread_count, 1);
@@ -1979,7 +2052,7 @@ fn global_merge_can_cancel_before_the_final_source_identity_recheck() {
         None,
         Some(final_slot_offset),
     ));
-    let guard = ScratchCancelGuard::new(phase, 100_000);
+    let guard = ScratchCancelGuard::new(phase, 8_192 * size_of::<usize>() as u64);
 
     let error = FlightProvider::open(source.clone(), identity(0), &guard)
         .expect_err("merge ignored cancellation");
@@ -1993,7 +2066,7 @@ fn global_merge_can_cancel_before_the_final_source_identity_recheck() {
 }
 
 #[test]
-fn radix_scratch_initialization_is_cancellable_after_input_staging() {
+fn radix_order_initialization_is_cancellable_after_scratch_allocation() {
     let bytes = many_thread_artifact(128, 64);
     let emergency_offset = get_u64(&bytes, 56);
     let emergency_count = u32::from_le_bytes(bytes[68..72].try_into().expect("emergency count"));
@@ -2007,7 +2080,7 @@ fn radix_scratch_initialization_is_cancellable_after_input_staging() {
         None,
         Some(final_slot_offset),
     ));
-    let guard = DelayedScratchCancelGuard::new(phase, 1_000_000, 2);
+    let guard = DelayedScratchCancelGuard::new(phase, 8_192 * size_of::<usize>() as u64, 2);
 
     let error = FlightProvider::open(source.clone(), identity(0), &guard)
         .expect_err("radix scratch initialization ignored cancellation");

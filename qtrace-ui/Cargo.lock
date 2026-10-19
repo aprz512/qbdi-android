@@ -2409,6 +2409,7 @@ dependencies = [
 name = "qtrace-service"
 version = "0.1.0"
 dependencies = [
+ "lz4_flex",
  "qtrace-analysis",
  "qtrace-provider",
  "qtrace-store",

@@ -47,7 +47,9 @@ pub const MAX_CONTEXT_EVENTS: usize = 10_000_000;
 pub const MAX_CONTEXT_TYPED_ROWS: usize = 20_000_000;
 pub const MAX_CONTEXT_DICTIONARY_ENTRIES: usize = 20_000_000;
 pub const MAX_DISCONTINUITY_PAYLOAD_BYTES: usize = 1024 * 1024;
+/// Minimum allowance; larger contexts scale with their bounded canonical rows.
 pub const MAX_DISCONTINUITY_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CANONICAL_DISCONTINUITY_BYTES: usize = 256;
 
 fn stable_key_work_bound(rows: usize) -> Option<u64> {
     let rows = u64::try_from(rows).ok()?;
@@ -347,8 +349,11 @@ pub struct QueryContext {
     memory_pc: Vec<MemoryPcEntry>,
     max_sequence_rows: Vec<usize>,
     completeness: Arc<CompletenessSummary>,
-    discontinuities: Arc<Vec<Option<(qtrace_provider::DiscontinuityCause, CompletenessRow)>>>,
+    discontinuities: Arc<DiscontinuityEntries>,
+    discontinuity_rows: Vec<usize>,
 }
+
+type DiscontinuityEntries = Vec<Option<(qtrace_provider::DiscontinuityCause, CompletenessRow)>>;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct MemoryPcEntry {
@@ -390,6 +395,36 @@ impl QueryContext {
 
     pub fn identity(&self) -> StoreIdentity {
         self.identity
+    }
+
+    pub(crate) fn store(&self) -> Arc<dyn NormalizedBulkView + Send + Sync> {
+        self.store.clone()
+    }
+
+    pub(crate) fn discontinuity_evidence(&self, row: usize) -> Option<CompletenessRow> {
+        self.discontinuities
+            .get(row)
+            .copied()
+            .flatten()
+            .map(|(_, evidence)| evidence)
+    }
+
+    pub(crate) fn discontinuities_through(
+        &self,
+        target: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<&[usize], AnalysisError> {
+        let (mut low, mut high) = (0, self.discontinuity_rows.len());
+        while low < high {
+            consume_analysis_work(guard, 1)?;
+            let middle = low + (high - low) / 2;
+            if self.discontinuity_rows[middle] <= target {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Ok(&self.discontinuity_rows[..low])
     }
 }
 
@@ -1007,7 +1042,9 @@ fn build_query_context(
         store.normalized_source_format(),
         observed_first.zip(observed_last),
     ));
-    let discontinuities = Arc::new(map_discontinuities(store.as_ref(), event_count, guard)?);
+    let (discontinuities, discontinuity_rows) =
+        map_discontinuities(store.as_ref(), event_count, guard)?;
+    let discontinuities = Arc::new(discontinuities);
     Ok(QueryContext {
         modules: try_clone_slice(store.module_rows(), guard, "module map allocation failed")?,
         definitions: try_clone_slice(
@@ -1029,6 +1066,7 @@ fn build_query_context(
         max_sequence_rows,
         completeness,
         discontinuities,
+        discontinuity_rows,
     })
 }
 
@@ -2811,7 +2849,7 @@ fn map_discontinuities(
     store: &dyn NormalizedBulkView,
     event_count: usize,
     guard: &dyn WorkGuard,
-) -> Result<Vec<Option<(qtrace_provider::DiscontinuityCause, CompletenessRow)>>, AnalysisError> {
+) -> Result<(DiscontinuityEntries, Vec<usize>), AnalysisError> {
     let rows = store
         .bounded_rows(
             NormalizedPostingQuery::Kinds(&[EventKind::Discontinuity]),
@@ -2829,9 +2867,21 @@ fn map_discontinuities(
     result.resize(event_count, None);
     let mut payload_bytes = 0_usize;
     let row_count = rows.len();
-    for (index, row) in rows.into_iter().enumerate() {
+    // Closed enum tokens and two u64 endpoints fit within this per-row bound.
+    // Keep the legacy allowance for small contexts and reject padded payload
+    // amplification. The caller still authorizes every byte and allocation.
+    let payload_limit = row_count
+        .checked_mul(MAX_CANONICAL_DISCONTINUITY_BYTES)
+        .map(|bytes| bytes.max(MAX_DISCONTINUITY_TOTAL_BYTES))
+        .ok_or_else(|| AnalysisError::resource_exhausted("discontinuity byte bound overflow"))?;
+    for (index, row) in rows.iter().copied().enumerate() {
         if index % 4096 == 0 {
             consume_analysis_work(guard, (row_count - index).min(4096))?;
+        }
+        if index != 0 && rows[index - 1] >= row {
+            return Err(AnalysisError::store_shape(
+                "discontinuity rows are not ascending and unique",
+            ));
         }
         let payload = store.payload_bytes(row).map_err(AnalysisError::store)?;
         if payload.len() > MAX_DISCONTINUITY_PAYLOAD_BYTES {
@@ -2841,10 +2891,10 @@ fn map_discontinuities(
         }
         payload_bytes = payload_bytes
             .checked_add(payload.len())
-            .filter(|bytes| *bytes <= MAX_DISCONTINUITY_TOTAL_BYTES)
+            .filter(|bytes| *bytes <= payload_limit)
             .ok_or_else(|| {
                 AnalysisError::resource_exhausted(
-                    "discontinuity payloads exceed 16 MiB context limit",
+                    "discontinuity payloads exceed row-derived context byte limit",
                 )
             })?;
         for chunk in payload.chunks(4096) {
@@ -2867,7 +2917,7 @@ fn map_discontinuities(
             .ok_or_else(|| AnalysisError::store_shape("discontinuity row is out of bounds"))?;
         *slot = Some((discontinuity.cause, evidence));
     }
-    Ok(result)
+    Ok((result, rows))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4544,6 +4594,7 @@ mod tests {
                 None,
             )),
             discontinuities: Arc::new(vec![None; size]),
+            discontinuity_rows: Vec::new(),
             keys,
         });
         TimelineProjection {
@@ -4996,6 +5047,7 @@ mod tests {
                             },
                         ))
                         .unwrap();
+                    assert!(payload.len() <= MAX_CANONICAL_DISCONTINUITY_BYTES);
                     activate_allocation_oracle();
                     let decoded = decode_discontinuity_payload(&payload).unwrap();
                     let allocation = finish_allocation_oracle();

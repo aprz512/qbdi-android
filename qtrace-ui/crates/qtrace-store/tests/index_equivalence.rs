@@ -26,6 +26,10 @@ impl WorkGuard for AllowAll {
     fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
         Ok(())
     }
+
+    fn parallelism(&self) -> usize {
+        2
+    }
 }
 
 struct ResidentLimit {

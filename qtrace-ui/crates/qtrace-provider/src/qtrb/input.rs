@@ -13,7 +13,7 @@ enum InputEncoding {
     Lz4,
 }
 
-/// A one-shot raw or standard-LZ4 QTRB input.
+/// A one-shot raw or LZ4-frame QTRB input, including skippable padding frames.
 pub struct QtrbInput {
     reader: Box<dyn Read + Send>,
     encoding: InputEncoding,
@@ -171,6 +171,14 @@ impl ConcatenatedFrameReader {
         let mut output = Vec::new();
         let mut frames = 0_u64;
         while let Some((magic, frame_start)) = reader.read_optional_magic(guard)? {
+            if u32::from_le_bytes(magic) & 0xffff_fff0 == 0x184d_2a50 {
+                guard.consume(WorkDelta {
+                    nodes: 1,
+                    ..WorkDelta::default()
+                })?;
+                skip_frame(reader, guard)?;
+                continue;
+            }
             if magic != STANDARD_FRAME_MAGIC {
                 return Err(compression_error(
                     frame_start,
@@ -194,6 +202,24 @@ impl ConcatenatedFrameReader {
         }
         Ok(output)
     }
+}
+
+fn skip_frame(reader: &mut CountingReader, guard: &dyn WorkGuard) -> Result<(), ProviderError> {
+    let mut size = [0_u8; 4];
+    reader.read_lz4_exact(&mut size, guard, "truncated LZ4 skippable frame length")?;
+    let mut remaining = u32::from_le_bytes(size) as u64;
+    // Do not allocate from the untrusted payload length or bypass input accounting.
+    let mut scratch = [0_u8; 8 * 1024];
+    while remaining != 0 {
+        let count = remaining.min(scratch.len() as u64) as usize;
+        reader.read_lz4_exact(
+            &mut scratch[..count],
+            guard,
+            "truncated LZ4 skippable frame payload",
+        )?;
+        remaining -= count as u64;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

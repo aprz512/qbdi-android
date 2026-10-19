@@ -376,7 +376,7 @@ export default function App() {
   };
   const cancelJob = async (id: string) => {
     try { await api.cancelJob(id); dispatch({ type: "jobsReceived", jobs: await api.listJobs() }); }
-    catch (error) { setPaneErrors((values) => [...values, normalizeAppError(error)]); }
+    catch (error) { setPaneErrors((values) => [...values, normalizeAppError(error)]); throw error; }
   };
 
   return (
@@ -399,7 +399,7 @@ export default function App() {
         )}
       </main>
       <RightDock row={selectedRow} detail={detail} registers={registers} memory={memory} history={memoryHistory} annotation={annotation} errors={paneErrors} workspaceId={state.opened?.workspace.id ?? null} artifactIndex={state.selectedArtifactIndex} completeness={state.opened?.artifacts.find((artifact) => artifact.index === state.selectedArtifactIndex)?.completeness ?? []} onSaveComment={(value) => writeAnnotation("comment", value)} onDeleteComment={() => writeAnnotation("comment")} onSaveHighlight={(value) => writeAnnotation("highlight", value)} onDeleteHighlight={() => writeAnnotation("highlight")} />
-      <BottomDock initialResultsPage={state.timelinePages[0] ?? null} workspaceId={state.opened?.workspace.id ?? null} projectionId={state.projectionId} generation={state.generation} jobs={state.jobs} canGoBack={navigation.current.canGoBack} canGoForward={navigation.current.canGoForward} hiddenHistoryTarget={hiddenHistoryTarget !== null} onJump={jumpToRow} onCancel={(id) => void cancelJob(id)} onBack={() => visitHistory(navigation.current.back())} onForward={() => visitHistory(navigation.current.forward())} onReveal={reveal} />
+      <BottomDock initialResultsPage={state.timelinePages[0] ?? null} workspaceId={state.opened?.workspace.id ?? null} projectionId={state.projectionId} generation={state.generation} jobs={state.jobs} canGoBack={navigation.current.canGoBack} canGoForward={navigation.current.canGoForward} hiddenHistoryTarget={hiddenHistoryTarget !== null} onJump={jumpToRow} onCancel={cancelJob} onBack={() => visitHistory(navigation.current.back())} onForward={() => visitHistory(navigation.current.forward())} onReveal={reveal} />
     </div>
   );
 }

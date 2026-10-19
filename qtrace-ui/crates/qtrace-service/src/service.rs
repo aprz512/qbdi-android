@@ -24,6 +24,8 @@ use qtrace_store::{
     ModuleIdentity, OpenPolicy, SessionCapability, SessionLoader, TraceStore, TraceStoreView,
 };
 
+use crate::budget::MemoryWorkGuard;
+use crate::progress::{OpenProgress, ProgressGuard};
 use crate::workspace::{
     ArtifactWorkspace, CachedCallTree, ProjectionWorkspace, RegisterReplaySlot, Workspace,
 };
@@ -53,6 +55,13 @@ pub struct CallTreePageQuery {
 struct ProjectionInput {
     context: Arc<QueryContext>,
     store: Arc<TraceStore>,
+}
+
+struct ArtifactAnalysis {
+    store: Arc<TraceStore>,
+    context: Arc<QueryContext>,
+    replay_slot: RegisterReplaySlot,
+    cancellation: crate::JobCancellation,
 }
 
 impl Default for QtraceService {
@@ -110,17 +119,28 @@ impl QtraceService {
     ) -> Result<OpenWorkspaceDto, AppError> {
         let workspace_id = WorkspaceId::from_u64(self.next_id());
         let (job_id, cancellation) = self.jobs.begin(workspace_id.clone(), "open");
+        let progress = OpenProgress::new(self.jobs.clone(), job_id.clone());
         let result = (|| {
-            let selected_file_bytes = selected
-                .as_path()
-                .metadata()
-                .ok()
-                .filter(|metadata| metadata.is_file())
-                .map(|metadata| metadata.len());
+            // A report describes additional files; its own length cannot bound
+            // artifact discovery. Only single-artifact opens use that shortcut.
+            let selected_file_bytes = if session_report {
+                None
+            } else {
+                selected
+                    .as_path()
+                    .metadata()
+                    .ok()
+                    .filter(|metadata| metadata.is_file())
+                    .map(|metadata| metadata.len())
+            };
             let discovery = ServiceBudget::with_cancellation(
                 discovery_limits(selected_file_bytes),
                 cancellation.clone(),
             );
+            let discovery = ProgressGuard {
+                inner: &discovery,
+                progress: &progress,
+            };
             let session = if session_report {
                 SessionLoader::open_report(selected, OpenPolicy::cache_aware(), &discovery)?
             } else {
@@ -136,8 +156,10 @@ impl QtraceService {
                 session,
                 &budget,
                 &cancellation,
+                &progress,
             )
         })();
+        progress.flush();
         self.jobs.finish(
             &job_id,
             result.as_ref().map(|_| ()).map_err(Clone::clone),
@@ -153,8 +175,9 @@ impl QtraceService {
         id: WorkspaceId,
         job_id: &JobId,
         session: qtrace_store::SessionSource,
-        source_budget: &ServiceBudget,
+        source_budget: &dyn WorkGuard,
         cancellation: &crate::JobCancellation,
+        progress: &OpenProgress,
     ) -> Result<OpenWorkspaceDto, AppError> {
         let context = session.context().map(|source| SessionContextDto {
             session_id: session.session_id().unwrap_or_default().to_owned(),
@@ -194,14 +217,25 @@ impl QtraceService {
         }));
         let artifact_total = u64::try_from(session.artifacts().len()).unwrap_or(u64::MAX);
         self.jobs.set_progress(job_id, 0, Some(artifact_total))?;
-        let cache_budget = ServiceBudget::with_cancellation(cache_limits(), cancellation.clone());
+        let cache_budget = ServiceBudget::with_cancellation(cache_limits(), cancellation.clone())
+            .with_cache_validation_workers();
+        let source_budget = ProgressGuard {
+            inner: source_budget,
+            progress,
+        };
+        let cache_budget = ProgressGuard {
+            inner: &cache_budget,
+            progress,
+        };
         for (artifact_position, source) in session.artifacts().iter().enumerate() {
-            let probe_adjusted = InputProbeAdjustedGuard::new(source_budget);
+            source_budget.consume(WorkDelta::default())?;
+            progress.artifact(Some(source.local_path()));
+            let probe_adjusted = InputProbeAdjustedGuard::new(&source_budget);
             let artifact_guard: &dyn WorkGuard =
                 if matches!(source.format(), qtrace_store::ArtifactFormat::QtrbLz4) {
                     &probe_adjusted
                 } else {
-                    source_budget
+                    &source_budget
                 };
             match TraceStore::open_or_build_with_guards(
                 &self.cache_root,
@@ -212,6 +246,7 @@ impl QtraceService {
             ) {
                 Ok(store) => {
                     let store = Arc::new(store);
+                    cache_budget.begin_phase(qtrace_provider::WorkPhase::PrepareAnalysis);
                     let context =
                         Arc::new(QueryContext::new_with_guard(store.clone(), &cache_budget)?);
                     artifacts.push(ArtifactWorkspace {
@@ -220,6 +255,11 @@ impl QtraceService {
                         context,
                         register_replay: Arc::new(Mutex::new(None)),
                     });
+                }
+                Err(error)
+                    if error.code() == "job.cancelled" || error.code().starts_with("control.") =>
+                {
+                    return Err(error.into());
                 }
                 Err(error) => warnings.push(format!("{}: {error}", source.local_path())),
             }
@@ -269,12 +309,16 @@ impl QtraceService {
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
+        progress.artifact(None);
+        cache_budget.begin_phase(qtrace_provider::WorkPhase::PublishWorkspace);
+        source_budget.consume(WorkDelta::default())?;
         self.workspaces
             .lock()
             .map_err(|_| AppError::worker_failed())?
             .insert(
                 id.clone(),
                 Workspace {
+                    cancellation: crate::JobCancellation::default(),
                     generation: 0,
                     current: None,
                     artifacts,
@@ -532,20 +576,31 @@ impl QtraceService {
         artifact_index: u32,
         row: u32,
     ) -> Result<RegisterStateDto, AppError> {
-        let (store, replay_slot) = self.artifact_store_and_replay(workspace, artifact_index)?;
+        let ArtifactAnalysis {
+            store,
+            context,
+            replay_slot,
+            cancellation,
+        } = self.artifact_analysis(workspace, artifact_index)?;
+        let build_budget =
+            ServiceBudget::with_cancellation(register_replay_build_limits(), cancellation.clone());
         let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
         let replay = {
             let mut slot = replay_slot.lock().map_err(|_| AppError::worker_failed())?;
+            build_budget.consume(WorkDelta::default())?;
             if let Some(replay) = slot.as_ref() {
                 replay.clone()
             } else {
-                let build_budget = ServiceBudget::new(register_replay_build_limits());
-                let replay = Arc::new(RegisterReplay::new_with_guard(store, &build_budget)?);
+                let replay = Arc::new(RegisterReplay::from_context_with_guard(
+                    &context,
+                    &build_budget,
+                )?);
+                build_budget.consume(WorkDelta::default())?;
                 *slot = Some(replay.clone());
                 replay
             }
         };
-        let budget = ServiceBudget::new(ServiceLimits::interactive());
+        let budget = ServiceBudget::with_cancellation(ServiceLimits::interactive(), cancellation);
         let state = replay.state_at_with_guard(&key, &budget)?;
         Ok(RegisterStateDto {
             key: event_key_dto(&state.key),
@@ -562,14 +617,24 @@ impl QtraceService {
         start: u64,
         end_exclusive: u64,
     ) -> Result<MemoryStateDto, AppError> {
-        let store = self.artifact_store(workspace, artifact_index)?;
+        let ArtifactAnalysis {
+            store,
+            context,
+            cancellation,
+            ..
+        } = self.artifact_analysis(workspace, artifact_index)?;
         let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
-        let budget = ServiceBudget::new(ServiceLimits::interactive());
-        let state = MemoryAnalyzer::new_with_guard(store, &budget)?.state_at_with_guard(
+        let budget = ServiceBudget::with_cancellation(ServiceLimits::interactive(), cancellation);
+        let work = MemoryWorkGuard(&budget);
+        let state = MemoryAnalyzer::from_context_with_guard(context, &work)?.state_at_with_guard(
             &key,
             start..end_exclusive,
-            &budget,
+            &work,
         )?;
+        budget.consume(WorkDelta {
+            rows: state.observed.len() as u64,
+            ..WorkDelta::default()
+        })?;
         Ok(MemoryStateDto {
             key: event_key_dto(&state.key),
             start: HexU64Dto::new(state.range.start),
@@ -589,14 +654,25 @@ impl QtraceService {
         start: u64,
         end_exclusive: u64,
     ) -> Result<Vec<MemoryEvidenceDto>, AppError> {
-        let store = self.artifact_store(workspace, artifact_index)?;
+        let ArtifactAnalysis {
+            store,
+            context,
+            cancellation,
+            ..
+        } = self.artifact_analysis(workspace, artifact_index)?;
         let key = store.event_key(row as usize)?.ok_or_else(event_missing)?;
-        let budget = ServiceBudget::new(ServiceLimits::interactive());
-        MemoryAnalyzer::new_with_guard(store, &budget)?
-            .history_with_guard(&key, start..end_exclusive, &budget)?
-            .into_iter()
-            .map(memory_evidence)
-            .collect()
+        let budget = ServiceBudget::with_cancellation(ServiceLimits::interactive(), cancellation);
+        let work = MemoryWorkGuard(&budget);
+        let history = MemoryAnalyzer::from_context_with_guard(context, &work)?.history_with_guard(
+            &key,
+            start..end_exclusive,
+            &work,
+        )?;
+        budget.consume(WorkDelta {
+            rows: history.len() as u64,
+            ..WorkDelta::default()
+        })?;
+        history.into_iter().map(memory_evidence).collect()
     }
 
     pub fn get_call_tree(
@@ -621,7 +697,7 @@ impl QtraceService {
                 "call tree page requires an identity",
             ));
         }
-        let (store, slot) = {
+        let (store, slot, cancellation) = {
             let workspaces = self
                 .workspaces
                 .lock()
@@ -633,10 +709,16 @@ impl QtraceService {
                 .artifacts
                 .get(artifact_index as usize)
                 .ok_or_else(AppError::stale_workspace)?;
-            (artifact.store.clone(), item.call_tree.clone())
+            (
+                artifact.store.clone(),
+                item.call_tree.clone(),
+                item.cancellation.clone(),
+            )
         };
+        let budget = ServiceBudget::with_cancellation(call_tree_build_limits(), cancellation);
         let tree = {
             let mut cached = slot.lock().map_err(|_| AppError::worker_failed())?;
+            budget.consume(WorkDelta::default())?;
             if expected_identity.is_some()
                 && !cached.as_ref().is_some_and(|item| {
                     item.artifact_index == artifact_index
@@ -658,13 +740,13 @@ impl QtraceService {
                     && item.tid == tid
             }) {
                 *cached = None;
-                let budget = ServiceBudget::new(call_tree_build_limits());
                 let tree = Arc::new(CallTreeAnalyzer::new(store).build_with_guard(
                     timeline_id,
                     tid,
                     &CallTreeOptions::default(),
                     &budget,
                 )?);
+                budget.consume(WorkDelta::default())?;
                 *cached = Some(CachedCallTree {
                     artifact_index,
                     timeline_id,
@@ -974,7 +1056,7 @@ impl QtraceService {
             .lock()
             .map_err(|_| AppError::worker_failed())?
             .remove(workspace)
-            .map(|_| ())
+            .map(|item| item.cancellation.cancel())
             .ok_or_else(AppError::stale_workspace);
         self.jobs.remove_workspace(workspace);
         result
@@ -1002,6 +1084,11 @@ impl QtraceService {
     }
     pub fn cancel_all(&self) {
         self.jobs.cancel_all();
+        if let Ok(workspaces) = self.workspaces.lock() {
+            for item in workspaces.values() {
+                item.cancellation.cancel();
+            }
+        }
     }
     fn artifact_store(
         &self,
@@ -1016,18 +1103,28 @@ impl QtraceService {
             .map(|artifact| artifact.store.clone())
             .ok_or_else(AppError::stale_workspace)
     }
-    fn artifact_store_and_replay(
+    fn artifact_analysis(
         &self,
         workspace: &WorkspaceId,
         artifact_index: u32,
-    ) -> Result<(Arc<TraceStore>, RegisterReplaySlot), AppError> {
-        self.workspaces
+    ) -> Result<ArtifactAnalysis, AppError> {
+        let workspaces = self
+            .workspaces
             .lock()
-            .map_err(|_| AppError::worker_failed())?
+            .map_err(|_| AppError::worker_failed())?;
+        let item = workspaces
             .get(workspace)
-            .and_then(|item| item.artifacts.get(artifact_index as usize))
-            .map(|artifact| (artifact.store.clone(), artifact.register_replay.clone()))
-            .ok_or_else(AppError::stale_workspace)
+            .ok_or_else(AppError::stale_workspace)?;
+        let artifact = item
+            .artifacts
+            .get(artifact_index as usize)
+            .ok_or_else(AppError::stale_workspace)?;
+        Ok(ArtifactAnalysis {
+            store: artifact.store.clone(),
+            context: artifact.context.clone(),
+            replay_slot: artifact.register_replay.clone(),
+            cancellation: item.cancellation.clone(),
+        })
     }
     fn annotation_target(
         &self,
@@ -1144,8 +1241,9 @@ fn open_limits(input_bytes: u64) -> ServiceLimits {
 
 fn discovery_limits(selected_file_bytes: Option<u64>) -> ServiceLimits {
     let input_bytes = selected_file_bytes.map_or(4 * 1024 * 1024 * 1024, |size| {
-        // Single-artifact discovery hashes the file, then probes its provider stream.
-        size.saturating_mul(2).saturating_add(4 * 1024)
+        // Discovery hashes once. Flight can then read every sealed payload twice:
+        // once for the chunk checksum, once for record validation and recovery.
+        size.saturating_mul(3).saturating_add(4 * 1024)
     });
     open_limits(input_bytes)
 }
@@ -1191,8 +1289,17 @@ fn session_input_bytes(session: &qtrace_store::SessionSource) -> Result<u64, App
         .artifacts()
         .iter()
         .try_fold(0_u64, |total, artifact| {
+            // Include each bounded provider pass, not just physical file size.
+            let additional_bytes = match artifact.format() {
+                qtrace_store::ArtifactFormat::QtrbLz4 => {
+                    artifact.identity().provider().source_bytes
+                }
+                qtrace_store::ArtifactFormat::Flight => artifact.identity().file().size,
+                qtrace_store::ArtifactFormat::Qtrb => 0,
+            };
             total
                 .checked_add(artifact.identity().file().size)
+                .and_then(|bytes| bytes.checked_add(additional_bytes))
                 .ok_or_else(|| {
                     AppError::new(
                         "workspace.input_size_overflow",
@@ -1203,8 +1310,8 @@ fn session_input_bytes(session: &qtrace_store::SessionSource) -> Result<u64, App
         })
 }
 
-/// Normalizes QTRB's one pre-authorized probe unit so cumulative input work is
-/// exactly the verified compressed size, including the final EOF check.
+/// Removes LZ4's pre-authorized EOF probe from transport accounting. The source
+/// budget separately includes compressed transport bytes and logical QTRB reads.
 struct InputProbeAdjustedGuard<'a> {
     inner: &'a dyn WorkGuard,
     pending_probe: AtomicU64,
@@ -1220,6 +1327,10 @@ impl<'a> InputProbeAdjustedGuard<'a> {
 }
 
 impl WorkGuard for InputProbeAdjustedGuard<'_> {
+    fn begin_phase(&self, phase: qtrace_provider::WorkPhase) {
+        self.inner.begin_phase(phase);
+    }
+
     fn consume(&self, mut delta: WorkDelta) -> Result<(), OperationAbort> {
         if delta.input_bytes != 0
             && self
@@ -1622,7 +1733,7 @@ fn provenance_name(value: Provenance) -> &'static str {
 mod register_replay_cache_tests {
     use std::{path::Path, sync::Arc};
 
-    use qtrace_store::AuthorizedPath;
+    use qtrace_store::{AuthorizedPath, TraceStoreView};
 
     use super::QtraceService;
 
@@ -1633,6 +1744,206 @@ mod register_replay_cache_tests {
             .parent()
             .unwrap()
             .join("fixtures/sessions/valid-mixed")
+    }
+
+    fn wait_for_query<T>(slot: &Arc<T>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while Arc::strong_count(slot) < 3 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "query did not acquire slot"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn cancelling_the_only_artifact_during_indexing_remains_a_cancelled_job() {
+        use qtrace_provider::{OperationAbort, WorkDelta, WorkGuard, WorkPhase};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct CancelOnIndex(AtomicBool);
+        impl WorkGuard for CancelOnIndex {
+            fn begin_phase(&self, phase: WorkPhase) {
+                if phase == WorkPhase::BuildIndex {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+            fn consume(&self, _: WorkDelta) -> Result<(), OperationAbort> {
+                if self.0.load(Ordering::Relaxed) {
+                    Err(OperationAbort::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let budget = CancelOnIndex(AtomicBool::new(false));
+        let session = qtrace_store::SessionLoader::open_artifact(
+            AuthorizedPath::new(fixture().join("artifacts/main.trace.bin")),
+            qtrace_store::OpenPolicy::cache_aware(),
+            &budget,
+        )
+        .unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let service = QtraceService::with_cache_root(cache.path().join("indexes"));
+        let workspace = crate::WorkspaceId::from_u64(1);
+        let (job, cancellation) = service.jobs.begin(workspace.clone(), "open");
+        let progress = crate::progress::OpenProgress::new(service.jobs.clone(), job.clone());
+        let result = service.publish_session(
+            workspace.clone(),
+            &job,
+            session,
+            &budget,
+            &cancellation,
+            &progress,
+        );
+        assert_eq!(result.as_ref().unwrap_err().code, "job.cancelled");
+        service.jobs.finish(&job, result.map(|_| ()), false);
+        assert_eq!(
+            service.jobs.get(&job).unwrap().state,
+            crate::JobState::Cancelled
+        );
+        assert_eq!(
+            service.workspace_summary(&workspace).unwrap_err().code,
+            "workspace.stale"
+        );
+    }
+
+    #[test]
+    fn close_cancels_register_build_waiting_for_shared_slot() {
+        let cache = tempfile::tempdir().unwrap();
+        let service = QtraceService::with_cache_root(cache.path().join("indexes"));
+        let workspace = service
+            .open_session(AuthorizedPath::new(fixture()))
+            .unwrap()
+            .workspace
+            .id;
+        let (slot, store) = {
+            let all = service.workspaces.lock().unwrap();
+            let artifact = &all.get(&workspace).unwrap().artifacts[0];
+            (
+                artifact.register_replay.clone(),
+                Arc::downgrade(&artifact.store),
+            )
+        };
+        let locked = slot.lock().unwrap();
+        std::thread::scope(|threads| {
+            let query = threads.spawn(|| service.get_register_state(&workspace, 0, 0));
+            wait_for_query(&slot);
+            service.close_workspace(&workspace).unwrap();
+            drop(locked);
+            assert_eq!(query.join().unwrap().unwrap_err().code, "job.cancelled");
+        });
+        assert!(slot.lock().unwrap().is_none());
+        assert!(store.upgrade().is_none());
+    }
+
+    #[test]
+    fn close_cancels_call_tree_build_waiting_for_shared_slot() {
+        let cache = tempfile::tempdir().unwrap();
+        let service = QtraceService::with_cache_root(cache.path().join("indexes"));
+        let workspace = service
+            .open_session(AuthorizedPath::new(fixture()))
+            .unwrap()
+            .workspace
+            .id;
+        let (slot, store, timeline, tid) = {
+            let all = service.workspaces.lock().unwrap();
+            let item = all.get(&workspace).unwrap();
+            let artifact = &item.artifacts[0];
+            (
+                item.call_tree.clone(),
+                Arc::downgrade(&artifact.store),
+                artifact.store.event_key(0).unwrap().unwrap().timeline.0,
+                artifact.store.thread_ids().unwrap()[0],
+            )
+        };
+        let locked = slot.lock().unwrap();
+        std::thread::scope(|threads| {
+            let query = threads
+                .spawn(|| service.get_call_tree(&workspace, 0, timeline, tid, Default::default()));
+            wait_for_query(&slot);
+            service.close_workspace(&workspace).unwrap();
+            drop(locked);
+            assert_eq!(query.join().unwrap().unwrap_err().code, "job.cancelled");
+        });
+        assert!(slot.lock().unwrap().is_none());
+        assert!(store.upgrade().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires a large captured session in QTRACE_CANCEL_REPORT"]
+    fn close_cancels_active_analysis_on_large_capture() {
+        use std::time::{Duration, Instant};
+
+        let report = std::env::var_os("QTRACE_CANCEL_REPORT").expect("QTRACE_CANCEL_REPORT");
+        let cache = tempfile::tempdir().unwrap();
+        let service = QtraceService::with_cache_root(cache.path().join("indexes"));
+        for kind in ["registers", "call_tree"] {
+            let workspace = service
+                .open_session(AuthorizedPath::new(report.clone().into()))
+                .unwrap()
+                .workspace
+                .id;
+            let (replay, tree, weak, row, timeline, tid) = {
+                let all = service.workspaces.lock().unwrap();
+                let item = all.get(&workspace).unwrap();
+                let artifact = &item.artifacts[0];
+                let row = u32::try_from(artifact.store.event_count() - 1).unwrap();
+                (
+                    artifact.register_replay.clone(),
+                    item.call_tree.clone(),
+                    Arc::downgrade(&artifact.store),
+                    row,
+                    artifact.store.event_key(0).unwrap().unwrap().timeline.0,
+                    artifact.store.thread_ids().unwrap()[0],
+                )
+            };
+            std::thread::scope(|threads| {
+                let query = threads.spawn(|| {
+                    if kind == "registers" {
+                        service.get_register_state(&workspace, 0, row).map(|_| ())
+                    } else {
+                        service
+                            .get_call_tree(&workspace, 0, timeline, tid, Default::default())
+                            .map(|_| ())
+                    }
+                });
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let running = if kind == "registers" {
+                        Arc::strong_count(&replay) >= 3 && replay.try_lock().is_err()
+                    } else {
+                        Arc::strong_count(&tree) >= 3 && tree.try_lock().is_err()
+                    };
+                    if running {
+                        break;
+                    }
+                    assert!(
+                        !query.is_finished(),
+                        "capture too small to observe active build"
+                    );
+                    assert!(Instant::now() < deadline, "build did not start");
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                assert!(
+                    !query.is_finished(),
+                    "capture too small to exercise active cancellation"
+                );
+                let started = Instant::now();
+                service.close_workspace(&workspace).unwrap();
+                assert_eq!(query.join().unwrap().unwrap_err().code, "job.cancelled");
+                let seconds = started.elapsed().as_secs_f64();
+                assert!(replay.lock().unwrap().is_none());
+                assert!(tree.lock().unwrap().is_none());
+                assert!(weak.upgrade().is_none());
+                println!(
+                    "{}",
+                    serde_json::json!({"analysis":kind, "cancel_seconds":seconds, "store_released":true, "partial_cache_published":false})
+                );
+            });
+        }
     }
 
     #[test]

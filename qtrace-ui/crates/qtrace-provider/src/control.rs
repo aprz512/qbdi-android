@@ -15,6 +15,18 @@ pub struct WorkDelta {
     pub resident_bytes: u64,
 }
 
+/// Observable operation boundaries. Reporting progress never authorizes work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkPhase {
+    VerifySource,
+    OpenCache,
+    BuildIndex,
+    PublishCache,
+    ReopenCache,
+    PrepareAnalysis,
+    PublishWorkspace,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetDimension {
@@ -67,6 +79,8 @@ impl Error for OperationAbort {}
 
 pub trait WorkGuard: Send + Sync {
     fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort>;
+
+    fn begin_phase(&self, _phase: WorkPhase) {}
 
     /// Maximum independent validation workers the caller may use.
     fn parallelism(&self) -> usize {

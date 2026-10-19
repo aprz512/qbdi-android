@@ -7,6 +7,7 @@ mod budget;
 mod dto;
 mod error;
 mod jobs;
+mod progress;
 mod service;
 mod workspace;
 

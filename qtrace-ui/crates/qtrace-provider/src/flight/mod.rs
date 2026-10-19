@@ -1,6 +1,7 @@
 mod events;
 mod fragments;
 mod recovery;
+mod sort;
 mod wire;
 
 mod allocation {
@@ -349,6 +350,10 @@ impl TraceProvider for FlightProvider {
 
     fn timelines(&self) -> &[TimelineDescriptor] {
         &self.timelines
+    }
+
+    fn event_count_hint(&self) -> Option<usize> {
+        Some(self.events.len())
     }
 
     fn cursor_resident_bytes(&self) -> Result<u64, ProviderError> {

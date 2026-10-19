@@ -46,6 +46,88 @@ Source artifacts are immutable. Persistent indexes live under `${XDG_CACHE_HOME:
 
 V1 excludes live capture, device control, trace editing, source-level debugging, collaborative sync, Windows/macOS packaging, and automatic symbol downloads.
 
+## Long operations
+
+Open jobs report source verification, cache validation, indexing, cache publication,
+cache reopening, analysis preparation, and workspace publication. The outer count
+tracks artifacts. Stage counters report accounted input bytes, events, and rows;
+repeated validation passes count separately, and counters reset at each stage.
+They do not estimate a percentage or remaining time. Updates are bounded and
+coalesced; analysis preparation also reports row work when no input bytes change.
+The Cancel button shows `Cancelling…` until the job reaches a terminal state and
+allows another attempt if cancellation submission fails.
+
+Cache validation uses at most two workers per artifact, sharing the existing
+allocation, input, and cancellation budgets. Event keys and metadata decode
+independently; the second worker then checks all section checksums alongside
+catalog validation. Source identity, file stamps, corruption rebuilding, and
+transactional publication remain enforced. Closing a workspace or cancelling
+the service also cancels active register replay and call tree construction;
+cancelled builds never populate their shared analysis caches.
+
+Set `QTRACE_UI_OPEN_PROFILE=1` when running the performance driver to emit
+`qtrace_open_phase` JSON lines on stderr. Timings cover source hashing, cache
+identity, event-key and metadata reads, binary section reads, checksums, and
+catalog validation. Some spans include others and some overlap; do not sum them
+as elapsed time. The reader uses held file descriptors and bounded reads. Timing
+lines contain phase names and seconds, without source paths or captured payloads.
+The cache format is unchanged, so existing caches use the same validation path.
+
+Local phase measurements, cancellation checks, and retained-capture browser
+acceptance are recorded in the [2026-10-19 long-operation evidence](../docs/benchmarks/qtrace-long-operations-2026-10-19.json).
+
+## Captured session verification
+
+After a device capture has published its session report, verify the original files
+through the same provider, index, analysis, and application-service layers used by
+the desktop app. Run from the repository root with an absolute report path and a
+new cache directory:
+
+```bash
+cargo run --manifest-path qtrace-ui/Cargo.toml -p qtrace-service --example verify_capture -- \
+  --report /absolute/path/session/report.json \
+  --cache /absolute/path/new-cache > /absolute/path/capture-evidence.json
+```
+
+The checker compares every indexed key, payload, kind, and provenance with an
+independent provider pass. It visits the complete paged timeline, checks the
+instruction filter, samples register replay, call trees, and memory, then repeats
+the checks after closing and reopening the persisted cache. JSON evidence includes
+artifact hashes, physical and decoded sizes, event counts, completeness, context,
+and timeline/analysis digests. Existing nonempty caches are rejected so the first
+open builds an index. Timings are single-run diagnostics, not performance gates.
+
+Rejected artifacts and failed analysis queries fail verification. Partial captures
+retain their recorded gaps and termination uncertainty; a passing check does not
+assert that capture is complete. Checks use the production service limits.
+Source input allowances account for checksum and record-reading passes. Index
+memory, analysis work, and the 2,000-row response limit remain enforced; internal
+memory posting scans consume work rather than response rows.
+The checker uses no device connection and does not exercise browser rendering.
+Its fixture tests run with `cargo test -p qtrace-service`; Android capture remains
+an explicit manual prerequisite.
+
+The preserved Flight and monitor-exit sessions pass offline cold/cache-reopen
+verification in the [2026-10-19 budget validation](../docs/benchmarks/qtrace-capture-budget-2026-10-19.json).
+This does not replace a new device capture or browser acceptance run.
+
+The [2026-10-19 browser acceptance](../docs/benchmarks/qtrace-browser-acceptance-2026-10-19.json)
+also checks those two preserved reports through Chromium and the real Rust service:
+result pages, distant timeline navigation, filters, registers, call trees, memory,
+annotations, and restart persistence. The production bundle isolation test passes.
+These browser results retain the historical capture identities.
+
+The [fresh Xiaomi acceptance](../docs/benchmarks/qtrace-xiaomi-capture-2026-10-19.json)
+subsequently passes timed offset/symbol, monitor-exit, and Flight crash recovery on
+M2011K2C after Shell root is granted. All four new reports pass offline verification
+and Chromium checks through the real Rust service, including memory history and
+restart persistence. The new 64 MiB Flight contains 1,185,909 recovered events.
+Strictly ordered memory overlap candidates now skip redundant sorting; unordered
+candidates retain sorting and deduplication, and the existing work/response limits
+remain enforced. Capture setup follows the manual device gate's trace-directory
+isolation procedure and preserves the previous directory as a backup. This proves
+the current functional path; it is not a new device performance benchmark.
+
 ## Performance reproduction
 
 Generate the large corpus outside Git, verify it, then run the fixed-host gate:

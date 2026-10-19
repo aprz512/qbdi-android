@@ -32,6 +32,7 @@ pub struct ServiceBudget {
     cancelled: AtomicBool,
     external_cancel: Option<JobCancellation>,
     used: [AtomicU64; 6],
+    validation_workers: usize,
 }
 impl ServiceBudget {
     pub fn new(limits: ServiceLimits) -> Self {
@@ -40,6 +41,7 @@ impl ServiceBudget {
             cancelled: AtomicBool::new(false),
             external_cancel: None,
             used: std::array::from_fn(|_| AtomicU64::new(0)),
+            validation_workers: 1,
         }
     }
     pub fn with_cancellation(limits: ServiceLimits, external_cancel: JobCancellation) -> Self {
@@ -48,10 +50,15 @@ impl ServiceBudget {
             cancelled: AtomicBool::new(false),
             external_cancel: Some(external_cancel),
             used: std::array::from_fn(|_| AtomicU64::new(0)),
+            validation_workers: 1,
         }
     }
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release)
+    }
+    pub(crate) fn with_cache_validation_workers(mut self) -> Self {
+        self.validation_workers = 2;
+        self
     }
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
@@ -62,6 +69,10 @@ impl ServiceBudget {
     }
 }
 impl WorkGuard for ServiceBudget {
+    fn parallelism(&self) -> usize {
+        self.validation_workers
+    }
+
     fn consume(&self, d: WorkDelta) -> Result<(), OperationAbort> {
         if self.is_cancelled() || Instant::now() > self.limits.deadline {
             return Err(OperationAbort::Cancelled);
@@ -99,5 +110,40 @@ impl WorkGuard for ServiceBudget {
             }
         }
         Ok(())
+    }
+}
+
+/// Memory posting scans and sorts are internal work, not returned evidence rows.
+/// Keep that work bounded by Nodes while reserving Rows for the response.
+pub(crate) struct MemoryWorkGuard<'a>(pub(crate) &'a dyn WorkGuard);
+
+impl MemoryWorkGuard<'_> {
+    fn work(mut delta: WorkDelta) -> WorkDelta {
+        delta.nodes = delta.nodes.saturating_add(delta.rows);
+        delta.rows = 0;
+        delta
+    }
+}
+
+impl WorkGuard for MemoryWorkGuard<'_> {
+    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+        self.0.consume(Self::work(delta))
+    }
+
+    fn parallelism(&self) -> usize {
+        self.0.parallelism()
+    }
+
+    fn begin_allocation_scope(
+        &self,
+        delta: WorkDelta,
+        allowed_slack: u64,
+    ) -> Result<(), OperationAbort> {
+        self.0
+            .begin_allocation_scope(Self::work(delta), allowed_slack)
+    }
+
+    fn end_allocation_scope(&self) {
+        self.0.end_allocation_scope();
     }
 }

@@ -275,15 +275,21 @@ impl IntervalIndex {
             guard,
             "bounded memory result allocation",
         )?;
+        let mut ordered = true;
         for chunk in self.entries[located.first..located.upper].chunks(4096) {
             super::consume_row_work(guard, chunk.len())?;
             for entry in chunk {
                 if entry.end_exclusive > start {
+                    ordered = ordered && rows.last().is_none_or(|previous| *previous < entry.row);
                     rows.push(entry.row);
                 }
             }
         }
-        super::radix_sort_unique_rows(&mut rows, guard)?;
+        // Same-address observations often already follow source row order.
+        // Strict ordering also proves uniqueness, avoiding the sort and dedup passes.
+        if !ordered {
+            super::radix_sort_unique_rows(&mut rows, guard)?;
+        }
         Ok(rows)
     }
 }

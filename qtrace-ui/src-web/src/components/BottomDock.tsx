@@ -12,7 +12,7 @@ interface BottomDockProps {
   canGoForward: boolean;
   hiddenHistoryTarget: boolean;
   onJump(row: number): void;
-  onCancel(id: string): void;
+  onCancel(id: string): void | Promise<void>;
   onBack(): void;
   onForward(): void;
   onReveal(): void;

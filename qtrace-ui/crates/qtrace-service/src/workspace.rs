@@ -6,7 +6,7 @@ use std::{
 use qtrace_analysis::{CallTreeArtifact, QueryContext, RegisterReplay, TimelineProjection};
 use qtrace_store::{ElfSymbolIndex, TraceStore};
 
-use crate::ProjectionId;
+use crate::{JobCancellation, ProjectionId};
 
 pub(crate) type RegisterReplaySlot = Arc<Mutex<Option<Arc<RegisterReplay>>>>;
 pub(crate) type CallTreeSlot = Arc<Mutex<Option<CachedCallTree>>>;
@@ -19,6 +19,7 @@ pub(crate) struct CachedCallTree {
 }
 
 pub(crate) struct Workspace {
+    pub cancellation: JobCancellation,
     pub generation: u32,
     pub current: Option<ProjectionId>,
     pub artifacts: Vec<ArtifactWorkspace>,
@@ -43,6 +44,7 @@ pub(crate) struct ProjectionWorkspace {
 impl Workspace {
     pub fn empty() -> Self {
         Self {
+            cancellation: JobCancellation::default(),
             generation: 0,
             current: None,
             artifacts: Vec::new(),

@@ -20,6 +20,11 @@ pub trait TraceProvider: Send + Sync {
     fn identity(&self) -> &SourceIdentity;
     fn capabilities(&self) -> &ProviderCapabilities;
     fn timelines(&self) -> &[TimelineDescriptor];
+    /// A verified in-memory event count that consumers may use to reserve tables.
+    /// Streaming providers can leave the count unknown.
+    fn event_count_hint(&self) -> Option<usize> {
+        None
+    }
     fn cursor_resident_bytes(&self) -> Result<u64, ProviderError> {
         Ok(0)
     }

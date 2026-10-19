@@ -22,7 +22,9 @@ body {
 .left-dock, .right-dock, .workspace { padding: 1rem; overflow: auto; }
 .left-dock { border-right: 1px solid GrayText; }
 .right-dock { border-left: 1px solid GrayText; }
-.bottom-dock { grid-column: 1 / -1; display: flex; gap: 1rem; padding: 1rem; border-top: 1px solid GrayText; }
+.bottom-dock { grid-column: 1 / -1; display: flex; gap: 1rem; padding: 1rem; border-top: 1px solid GrayText; overflow: auto; min-height: 0; }
+.bottom-dock > section { min-width: 0; flex: 1; }
+.job-progress { overflow-wrap: anywhere; }
 .session-overview { max-width: 70rem; margin: 0 auto; }
 .session-context { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .35rem .8rem; }
 .session-context dt { font-weight: 600; }

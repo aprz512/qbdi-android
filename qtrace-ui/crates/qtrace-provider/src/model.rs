@@ -429,6 +429,10 @@ impl RegisterSnapshot {
         &self.values
     }
 
+    pub(crate) fn copy_from(&mut self, source: &Self) {
+        self.values.copy_from_slice(&source.values);
+    }
+
     pub fn value(&self, slot: RegisterSlot) -> Option<u64> {
         self.values.get(slot.index()).copied()
     }

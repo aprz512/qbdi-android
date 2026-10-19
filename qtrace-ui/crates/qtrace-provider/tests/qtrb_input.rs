@@ -198,6 +198,98 @@ fn concatenated_linked_frames_reset_history_between_frames() {
     assert!(error.starts_with("source.qtrb.compression"), "{error}");
 }
 
+fn skippable_frame(id: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = (0x184d_2a50_u32 + u32::from(id)).to_le_bytes().to_vec();
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+#[test]
+fn skippable_frames_preserve_standard_frame_output_and_accounting() {
+    let first = test_frame(&[raw_block(b"first")], FrameOptions::default());
+    let last = test_frame(&[compressed_block(b"last")], FrameOptions::default());
+    let baseline = Totals::default();
+    decode(
+        Cursor::new([first.clone(), last.clone()].concat()),
+        &baseline,
+    )
+    .unwrap();
+    let baseline = *baseline.0.lock().unwrap();
+    for id in 0..16 {
+        // The native writer appends a zero-filled skippable frame to fix final size.
+        let stream = [
+            skippable_frame(id, &[]),
+            first.clone(),
+            skippable_frame(id, &vec![0x99; 128 * 1024]),
+            last.clone(),
+            skippable_frame(id, &[0; 41]),
+        ]
+        .concat();
+        for maximum in [7, usize::MAX] {
+            let guard = Totals::default();
+            assert_eq!(
+                decode(
+                    ShortReads {
+                        inner: Cursor::new(stream.clone()),
+                        maximum
+                    },
+                    &guard
+                )
+                .unwrap(),
+                b"firstlast"
+            );
+            let totals = *guard.0.lock().unwrap();
+            assert_eq!(totals.input_bytes, stream.len() as u64 + 1);
+            assert_eq!(totals.decompressed_bytes, baseline.decompressed_bytes);
+            assert_eq!(totals.resident_bytes, baseline.resident_bytes);
+        }
+    }
+}
+
+#[test]
+fn incomplete_skippable_frames_and_padding_only_streams_fail() {
+    let standard = test_frame(&[raw_block(b"payload")], FrameOptions::default());
+    let padding = skippable_frame(0, &[0; 41]);
+    for length in 1..padding.len() {
+        let stream = [standard.clone(), padding[..length].to_vec()].concat();
+        let error = decode(Cursor::new(stream), &AllowAll).unwrap_err();
+        assert!(error.starts_with("source.qtrb.compression"), "{error}");
+    }
+    let error = decode(Cursor::new(padding), &AllowAll).unwrap_err();
+    assert!(error.contains("zero frames"), "{error}");
+}
+
+#[test]
+fn skippable_payload_respects_input_budget_before_io() {
+    let bytes_read = Arc::new(AtomicUsize::new(0));
+    let error = decode(
+        CountedReader {
+            inner: Cursor::new(skippable_frame(0, &[0; 128])),
+            bytes_read: bytes_read.clone(),
+        },
+        &LimitInput {
+            remaining: Mutex::new(8),
+        },
+    )
+    .unwrap_err();
+    assert!(error.starts_with("control.budget_exceeded"), "{error}");
+    assert_eq!(bytes_read.load(Ordering::SeqCst), 8);
+}
+
+#[test]
+fn many_empty_skippable_frames_remain_cancellable() {
+    let stream = skippable_frame(0, &[]).repeat(100);
+    let error = decode(
+        Cursor::new(stream),
+        &CancelAfterNodes {
+            remaining: Mutex::new(8),
+        },
+    )
+    .unwrap_err();
+    assert!(error.starts_with("control.cancelled"), "{error}");
+}
+
 #[test]
 fn dictionary_id_accepts_self_contained_blocks_and_rejects_required_unknown_dictionary() {
     let self_contained = test_frame(

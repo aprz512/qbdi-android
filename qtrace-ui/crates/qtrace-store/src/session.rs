@@ -274,6 +274,7 @@ impl SessionLoader {
         policy: OpenPolicy,
         guard: &dyn WorkGuard,
     ) -> Result<SessionSource, ProviderError> {
+        guard.begin_phase(qtrace_provider::WorkPhase::VerifySource);
         let selected_path = selected.0;
         let (root, report_name, display_root) = split_selected_report(&selected_path)?;
         let report_file = root.open_report_file(report_name)?;
@@ -398,6 +399,7 @@ impl SessionLoader {
         policy: OpenPolicy,
         guard: &dyn WorkGuard,
     ) -> Result<SessionSource, ProviderError> {
+        guard.begin_phase(qtrace_provider::WorkPhase::VerifySource);
         let path = selected.0;
         let (root, leaf) = split_selected_file(&path)?;
         let _suffix_format = match classify(&leaf) {
@@ -555,6 +557,7 @@ fn hash_file(
     before: crate::FileIdentity,
     guard: &dyn WorkGuard,
 ) -> Result<ArtifactDigest, ProviderError> {
+    let _timing = crate::profile::phase("source.hash");
     const CHUNK_BYTES: usize = 64 * 1024;
     let mut hasher = Sha256::new();
     let mut offset = 0_u64;
@@ -797,6 +800,10 @@ impl TraceProvider for TimelineRemapProvider {
             .ok_or_else(|| resource_error("timeline-remap cursor allocation bound overflow"))
     }
 
+    fn event_count_hint(&self) -> Option<usize> {
+        self.inner.event_count_hint()
+    }
+
     fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError> {
         let Self {
             inner, timeline_id, ..
@@ -856,6 +863,10 @@ impl TraceProvider for IdentityCheckedProvider {
             .cursor_resident_bytes()?
             .checked_add(size_of::<IdentityCheckedCursor>() as u64)
             .ok_or_else(|| resource_error("identity cursor allocation bound overflow"))
+    }
+
+    fn event_count_hint(&self) -> Option<usize> {
+        self.inner.event_count_hint()
     }
 
     fn into_cursor(self: Box<Self>) -> Result<Box<dyn EventCursor>, ProviderError> {

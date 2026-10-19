@@ -1,0 +1,2016 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-10-19T03:08:43.544802+00:00",
+  "status": "passed",
+  "scope": "Four new Xiaomi demo captures, complete offline fact/page verification, and actual Chromium interactions with the real Rust service. Includes the ordered memory posting regression fix discovered by the fresh Flight capture.",
+  "revision": {
+    "started_at": "2026-10-19T03:04:27.914417+00:00",
+    "head": "f4cf92b8227fed470f11039e727338ca360f61ae",
+    "tested_source_sha256": {
+      "qtrace-ui/Cargo.lock": "b504c781c0ac41bee7ceb7edf296e15974b2146b963662a52627bf0bfd0ada08",
+      "qtrace-ui/crates/qtrace-analysis/src/memory.rs": "1531734edfcf77ce9a49c05c9ea575d68163a26f8311ca629c51fa185260132b",
+      "qtrace-ui/crates/qtrace-analysis/src/registers.rs": "6eb54d27bb94eb372c3312478329387fdd0aeba391ac0154deb5b7718ff852f8",
+      "qtrace-ui/crates/qtrace-analysis/src/timeline.rs": "72048401dd925e4423e9e9d60321b148235027a18ea8a6b0ea421a040e52e557",
+      "qtrace-ui/crates/qtrace-analysis/tests/memory_state.rs": "2da24dc0d4e78cbfb4549d3c324596798e4e92205c05e6b91a8744be5114d0c8",
+      "qtrace-ui/crates/qtrace-analysis/tests/pagination.rs": "16276901acba88d0366c9373a2381a39a3df6bcd7834733563133da963953c60",
+      "qtrace-ui/crates/qtrace-analysis/tests/register_state.rs": "12b350e01ad1081ce9128076f7f5a2ad46bd5cfb892725635d32a3866699ab9a",
+      "qtrace-ui/crates/qtrace-provider/src/flight/events.rs": "15c4a88ac9940f623683bb3715bc56eec213dcbc440d2d9114b840f2173b7c0b",
+      "qtrace-ui/crates/qtrace-provider/src/flight/mod.rs": "5db7c6c8ace25fe71339a252c8a2e83f218d172a9173a09264ee708707acff7d",
+      "qtrace-ui/crates/qtrace-provider/src/flight/recovery.rs": "2f3a6479317d8a04390ce5e53bd5f3faec3369b74e2fbde7fcce5d1b646692d1",
+      "qtrace-ui/crates/qtrace-provider/src/flight/sort.rs": "9e7b08ccaff06ecad068c8ad5f3b39a752f382202ef99ad6c99d953c477f2785",
+      "qtrace-ui/crates/qtrace-provider/src/model.rs": "fb015d572dc88307d5dfc18584586c862e480f67600091149a16073dd3c902be",
+      "qtrace-ui/crates/qtrace-provider/src/qtrb/input.rs": "6e8abf66d4777d0adca4d3545fdc546aaeade4406a932fa2a0ce107087f5d490",
+      "qtrace-ui/crates/qtrace-provider/src/source.rs": "8fa4ff97b2bcbeb053ce982c72887579d629ff28cf2d7360d867c444a7c4a434",
+      "qtrace-ui/crates/qtrace-provider/tests/flight_recovery.rs": "1544ce85a2f6d996df2165a3808b4a5a0a2b6b705848b42d54d05cb0a87a8328",
+      "qtrace-ui/crates/qtrace-provider/tests/qtrb_input.rs": "b6b68fe08f9b85275a3b0a109c75154dc06af4bd04fa9461b870bd4c48506bc8",
+      "qtrace-ui/crates/qtrace-service/Cargo.toml": "66c6f0cc6859a4c056fd53ee198e298bc193ab79d960835465b039e2acd84d3e",
+      "qtrace-ui/crates/qtrace-service/examples/verify_capture.rs": "c323ffed4c1966009f27f13d2bd53730e965283a6e52f27c75c2ac4aaa54afcb",
+      "qtrace-ui/crates/qtrace-service/src/bin/e2e_server.rs": "686418ca0dee036bf17900bbeae18b6d0a798065fb2f57782287af4cec6c1721",
+      "qtrace-ui/crates/qtrace-service/src/budget.rs": "7c782d966b6a6260695c19c95f96f2244c13b6729026e82ea96b402525fa55ae",
+      "qtrace-ui/crates/qtrace-service/src/service.rs": "bf2df239ff4ebea003fa5f4077b410c01abfcb4cb52729397104f0080a32615c",
+      "qtrace-ui/crates/qtrace-service/tests/end_to_end.rs": "62102d9ead1763b0a2b4a7fb76fd25d73a64ee61e496a0042ca9d52f6f140c4d",
+      "qtrace-ui/crates/qtrace-store/src/index/builder.rs": "93045eee99d5c225d8c9777eb7418be5552d44483f625f5afc5b936c6aa7cb5b",
+      "qtrace-ui/crates/qtrace-store/src/session.rs": "6d9b2025c7e6ccb1bef8b9cc21006a4ab6888516cfe981be4a599bd470d2300f",
+      "qtrace-ui/src-web/package-lock.json": "06c6db897d06230f21ca4f22153eb6ade681f11a35e08690acd2984f87daf144",
+      "qtrace-ui/src-web/package.json": "519fa9e15f9399b73783bc986bd64cc3b1f58c21cf47b3328ce7cba401a9e338",
+      "qtrace-ui/src-web/playwright.config.ts": "398334530d162c37b9b2b153bba868a97ace4c3872ea3301a1b2df896c8a5d9e",
+      "qtrace-ui/src-web/playwright.production.config.ts": "9817452e13da1c436cefec1f3b279388720c33e29315e43e8fc2b91ec87ccac2",
+      "qtrace-ui/src-web/src/App.tsx": "62f6f7373763a637904ce22c7c8aba8559390cd878524704c7e6cae6ad392775",
+      "qtrace-ui/src-web/src/api/ApiContext.tsx": "b5d0d236844b3d17eb48fecd8c65ff9cdfd041e8ebb72ee6f4a828d6f9cd7186",
+      "qtrace-ui/src-web/src/api/E2eQtraceApi.ts": "1bafa26e7acc28e6414abc51a4fdc8ddfe0c49ff226b633103fd4e42a0744015",
+      "qtrace-ui/src-web/src/api/QtraceApi.ts": "0c190936c6b96317ab4f928d94ef6cb35c7b5bb2da465ab8adbcb24b63191e38",
+      "qtrace-ui/src-web/src/api/TauriQtraceApi.ts": "3be2e9ab82e38af1eb0c8970f139b49515b282e4a840c6705a349b96742fd3ca",
+      "qtrace-ui/src-web/src/api/createApi.ts": "3144af93a0496bc3bef2ce7b9e0b5b4392e7f98d1b20cffcbe9f2e81abeaf2a1",
+      "qtrace-ui/src-web/src/api/generated.ts": "191680d18e0d8cbd1dfe1e83fadc50c920beb949053a91c2041049709c0108f1",
+      "qtrace-ui/src-web/src/components/AnnotationEditor.tsx": "9b7570dbd2ef3f8204001b9b028ac9bb9d7d188483485c540a724fa873cac47b",
+      "qtrace-ui/src-web/src/components/App.test.tsx": "04e30abd520829a33ca0df05487ee884afea52a0135baebfe6f1f5884dafdc3f",
+      "qtrace-ui/src-web/src/components/AppHeader.tsx": "0d0e295771dbefc4fac794f229dbf3d6c78da5b264f0b22a05e67518932f4b74",
+      "qtrace-ui/src-web/src/components/BottomDock.tsx": "7d12bf40c51f8371d736b06866e34df71a53ff490501a7190f2b1bebd25858bf",
+      "qtrace-ui/src-web/src/components/CallTreePane.tsx": "f6cdba9b4157a6548cfbf924ff508b54bd20a5812b26f61e6a8f24415fc7b443",
+      "qtrace-ui/src-web/src/components/CompletenessPane.tsx": "91abb23c954d998e7046f9d8e02000864880162cd8cb0f3cf0fc1fa7b1183cbc",
+      "qtrace-ui/src-web/src/components/EventDetailPane.tsx": "755818332388c69da965967f9bed622bad2d0fba10fe193e320c7a32f44c05ec",
+      "qtrace-ui/src-web/src/components/FilterBar.tsx": "06591ae925e43d25b44f3df067e49529c38cf25f8344de925c1052663ed110fa",
+      "qtrace-ui/src-web/src/components/JobsPane.tsx": "766581f747ec11456844f8c16f455e8781b33201bedca8aa25b60de27332df5c",
+      "qtrace-ui/src-web/src/components/LeftDock.tsx": "540c09ea8f964391c27b257681245799a8a67e5b61fa835278f6b95c1705979c",
+      "qtrace-ui/src-web/src/components/MemoryPane.tsx": "977577133cba57493b68dc28d71c2396337e83e3c8c4fcbc223353aa28f4b040",
+      "qtrace-ui/src-web/src/components/RegisterPane.tsx": "37a569f2569b8dd37b99bfac80daf35a1b7cb8d628bd9ef11ae9e3f9de278750",
+      "qtrace-ui/src-web/src/components/ResultsPane.test.tsx": "143064e6c2f230f1d5528c56d1bd52c5124160d474381ca2364e6e3667c4a842",
+      "qtrace-ui/src-web/src/components/ResultsPane.tsx": "ced0e94fce3328aea9aa252dbda337253f235315205b7b249e9d48c32a23a7c4",
+      "qtrace-ui/src-web/src/components/RightDock.tsx": "29c249b086bfe7bcf9bd0b7c8804f8b916a0089b4a90e39981161a9faed1334b",
+      "qtrace-ui/src-web/src/components/SessionOverview.test.tsx": "e6810493b4cf68ddcfb716f80beb3c1a9532dd890bd29ec3966f9c3a6bf310fc",
+      "qtrace-ui/src-web/src/components/SessionOverview.tsx": "32af71b49d5a444280aad46dc3bdd51fff7f28f3c3f0c41d799796dbff1ea474",
+      "qtrace-ui/src-web/src/components/SymbolPane.tsx": "8e88382d14bf74303c41ec4b3546afb6143fc2e425c55f0ccf805c442e386a5c",
+      "qtrace-ui/src-web/src/components/ThreadPane.tsx": "1d891c413196acc81bfe15f6211d1f4b2f97a136e610313377dc5b458797c8a2",
+      "qtrace-ui/src-web/src/components/WorkspaceFlow.test.tsx": "da55e3dfcb22848fbb5a0572232c9ad86cd7ffcb7c6ba3551eec75ebf579288e",
+      "qtrace-ui/src-web/src/main.tsx": "04ef350cd72130c6b23d2e26a8eee1cf534b0bcbf20065996d0e5f4bc3a73562",
+      "qtrace-ui/src-web/src/state/AppStateProvider.tsx": "27d74ea1b5d84dfa5c6d91b1663c8a11e35a2a19ff586110d238201197b9ad6c",
+      "qtrace-ui/src-web/src/state/model.ts": "a82f7a28952fd27865fd9664fb6aa42297b561f723f85f759aadea437339b226",
+      "qtrace-ui/src-web/src/state/navigation.test.ts": "cfabb2813461de06d35fc2f60a4c7bef3c7bcd84ddaa776cec9a2debf0a12b2f",
+      "qtrace-ui/src-web/src/state/navigation.ts": "ead6761c02f33f011a97b4b5703a0999b10482fd37f778e3aad51217b9d92515",
+      "qtrace-ui/src-web/src/state/reducer.test.ts": "f28de3395c61fd1c19e8162f4f4a04e20d65da434d521eee41f37846fe0fb19d",
+      "qtrace-ui/src-web/src/state/reducer.ts": "045eddb51226ad282b50cd14c97c0c4f0a4f0e7996fa767468b70c5cb6d8b607",
+      "qtrace-ui/src-web/src/styles/global.css": "9d41b40785a05798fa728eb02636742b4bc569dcdbba7c3a94109be39f3b6021",
+      "qtrace-ui/src-web/src/styles/timeline.css": "a69041060035e33fd3f35effde7252288a0f86424730b2e336fd0db0652c83d5",
+      "qtrace-ui/src-web/src/test/setup.ts": "e3687d1f6ec8fefac96190288e3d55c10e6dcef3bcf3d9c8c0a8593c9748b405",
+      "qtrace-ui/src-web/src/timeline/InteractionLayer.test.tsx": "20d86a860e9027675df0ec8351ff061c3e3fda6153f4c966fc451681acb3a45d",
+      "qtrace-ui/src-web/src/timeline/InteractionLayer.tsx": "ab6c54d3eb0dfeadd326df0dac75bf59357f2c923ac4bc12ac23b2a60e284e88",
+      "qtrace-ui/src-web/src/timeline/SegmentCache.test.ts": "69c10c11296d2b8d82268a15a98d95ea273803a8fb5d1b2615ae4445f74a6b5c",
+      "qtrace-ui/src-web/src/timeline/SegmentCache.ts": "e790439192d8ca1475ff9dc7b491a7302fac72daa505397f7f53a97587aa72f7",
+      "qtrace-ui/src-web/src/timeline/TimelineProjection.test.ts": "89503d5cf7754ed102cef55f473a314d05d98e19428b4db62511b7394a60db5b",
+      "qtrace-ui/src-web/src/timeline/TimelineProjection.ts": "877ca400aa95b5d17ab3b5b6efc544459574083a0263d2e624aeb0abc8b86432",
+      "qtrace-ui/src-web/src/timeline/TraceCanvasRenderer.test.ts": "adebfab7ad4e04c94b3b71a1ef8e8daa54a739a654d5fabedf11154dc43ef2ee",
+      "qtrace-ui/src-web/src/timeline/TraceCanvasRenderer.ts": "6c80d44e482e0120726691dd30df0fd0244745cb1c89e5b44ebf96ced6d6fd68",
+      "qtrace-ui/src-web/src/timeline/ViewportController.test.ts": "36638af2beeccae2348bf5cc87694c327cb1e1c6cc054c0259696c40b843c6cb",
+      "qtrace-ui/src-web/src/timeline/ViewportController.ts": "d78d236b9c86e74f3aea24d1295d6ef6c8270be2f58c7f43ad19cfbe235cb4b8",
+      "qtrace-ui/src-web/src/timeline/VirtualTimeline.test.tsx": "6bb5f886781f64e39a757db2bfc52b03ef8ae61d569ce21679a1d6ca0f9d6299",
+      "qtrace-ui/src-web/src/timeline/VirtualTimeline.tsx": "697358657c91dade56bc12afb4f9c90f82e52f8b818e89f951730979b88b2221",
+      "qtrace-ui/src-web/src/timeline/types.ts": "6143d3ea6d81354e942811a15dc589977ea37d1e81a629843fc899ab4a398c0e",
+      "qtrace-ui/src-web/src/vite-env.d.ts": "65996936fbb042915f7b74a200fcdde7e410f32a669b1ab9597cfaa4b0faddb5",
+      "qtrace-ui/crates/qtrace-store/src/index/intervals.rs": "8b40f62dbf8177943f7975976cd1d649c30d7baded10d98cd2e740e3a0e9860b",
+      "qtrace/cli.py": "12edd1ffa9e8ff40bb7d4c7389ae392627bb3100c0fb7f041203228b786d9fe0",
+      "qtrace/demo.py": "19cf3a1eb19b8b227a4b3451f55a0edf0eb7e28cea848bbd1f46b1ef076d8eba",
+      "qtrace/session.py": "63256a2592800f685501f3d3aebea4cc4bbbdae76efed0466750cb2995e03f73",
+      "qtrace/status.py": "7f657b55f621c56376cc2423f6a99eb1b39fc1d5a57269d9541ae0395e4357d1",
+      "scripts/qtrace_device_acceptance.py": "8afa4c230a5a9e57814605994112442c863acca506f46cd50ad9574b9d95c45e"
+    },
+    "tested_binary_sha256": {
+      "qtrace-ui/target/release/examples/verify_capture": "e9b615b3c336d2acde2c309f0e5f5ff857d156dec0f1ca6099dec966e1ff0bba",
+      "qtrace-ui/target/release/e2e_server": "b30def52cb75eb39fe4f5b0051c34b58d461dafae986b949cf47da4be206ea64",
+      "app/build/outputs/apk/debug/app-debug.apk": "c1c01cd0f10ccb443d37a2c312a638b2a3a04439d2c4214d6181bf0d7700212b",
+      "out/arm64-v8a/libqbdi_tracer.so": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+      "out/arm64-v8a/libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+    },
+    "branch": "perf/flight-recovery-budget",
+    "state": "Existing uncommitted capture-budget work plus a strict-order fast path in index/intervals.rs and one service regression test. Native, app, Python CLI, and frontend product sources are unchanged in this follow-up.",
+    "final_build": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/release-final-format-build.log",
+      "bytes": 381,
+      "sha256": "e55e5d0f246fcf52c26d04a49dfed0e1a1979f1d0be7d4197f8736590d89d228"
+    },
+    "build_command": [
+      "cargo",
+      "build",
+      "--manifest-path",
+      "qtrace-ui/Cargo.toml",
+      "--release",
+      "-p",
+      "qtrace-service",
+      "--features",
+      "e2e-fixture",
+      "--example",
+      "verify_capture",
+      "--bin",
+      "e2e_server"
+    ],
+    "runtime_note": "A final rustfmt line wrap changed binary hashes. All six offline checks and all four browser scenarios were repeated with these final binaries in the separate final/ evidence directory."
+  },
+  "device": {
+    "serial": "2d32ed71",
+    "model": "M2011K2C",
+    "android_release": "16",
+    "sdk": 36,
+    "abi": "arm64-v8a",
+    "selinux": "Enforcing",
+    "root": "Shell root allowed by the user; su -c id returned uid=0.",
+    "frida_host_version": "17.24.2",
+    "frida_server_version": "17.24.2",
+    "confirmation": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/device-confirmation.json",
+      "bytes": 1492,
+      "sha256": "3ff51f88f621a1b4754eb6530688853647c8cd0353041d0022fff01839046f1c"
+    },
+    "final_confirmation": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/device-final-confirmation.json",
+      "bytes": 1388,
+      "sha256": "5b30e6e4ca9ce8a1c1f190916cc605b95e7c9a20f822120a06d05dc4a84ce2d2",
+      "recorded_at": "2026-10-19T03:07:09.579270+00:00",
+      "checks": [
+        {
+          "command": [
+            "adb",
+            "-s",
+            "2d32ed71",
+            "shell",
+            "pm",
+            "path",
+            "com.aprz.qbdiandroid"
+          ],
+          "exit_code": 0,
+          "stdout": "package:/data/app/~~lfMSqbe-RAeOyfLNyVYSsA==/com.aprz.qbdiandroid-lWkvoXWY1zMxjp75YgYstw==/base.apk\n",
+          "stderr": ""
+        },
+        {
+          "command": [
+            "adb",
+            "-s",
+            "2d32ed71",
+            "shell",
+            "sha256sum -- '/data/app/~~lfMSqbe-RAeOyfLNyVYSsA==/com.aprz.qbdiandroid-lWkvoXWY1zMxjp75YgYstw==/base.apk'"
+          ],
+          "exit_code": 0,
+          "stdout": "c1c01cd0f10ccb443d37a2c312a638b2a3a04439d2c4214d6181bf0d7700212b  /data/app/~~lfMSqbe-RAeOyfLNyVYSsA==/com.aprz.qbdiandroid-lWkvoXWY1zMxjp75YgYstw==/base.apk\n",
+          "stderr": ""
+        },
+        {
+          "command": [
+            "adb",
+            "-s",
+            "2d32ed71",
+            "shell",
+            "run-as",
+            "com.aprz.qbdiandroid",
+            "stat",
+            "-c",
+            "%F",
+            "files/qbdi-traces.pre-acceptance-e20e2ce31415467fb2029bfc2868e341"
+          ],
+          "exit_code": 0,
+          "stdout": "directory\n",
+          "stderr": ""
+        }
+      ],
+      "installed_apk_sha256": "c1c01cd0f10ccb443d37a2c312a638b2a3a04439d2c4214d6181bf0d7700212b",
+      "trace_backup_preserved": "files/qbdi-traces.pre-acceptance-e20e2ce31415467fb2029bfc2868e341"
+    },
+    "frida_start": {
+      "recorded_at": "2026-10-19T02:47:13.705433+00:00",
+      "started_by_this_task": true,
+      "owned_pid": 1114,
+      "executable": "/data/local/tmp/qtrace-frida-server-17.24.2",
+      "commands": [
+        {
+          "command": [
+            "adb",
+            "-s",
+            "2d32ed71",
+            "shell",
+            "su",
+            "-c",
+            "id"
+          ],
+          "exit_code": 0,
+          "stdout": "uid=0(root) gid=0(root) groups=0(root) context=u:r:magisk:s0\n",
+          "stderr": ""
+        },
+        {
+          "command": [
+            "adb",
+            "-s",
+            "2d32ed71",
+            "shell",
+            "ps",
+            "-A",
+            "-o",
+            "PID,USER,NAME"
+          ],
+          "exit_code": 0,
+          "stdout": " 1114 root         qtrace-frida-server-17.24.2",
+          "stderr": ""
+        }
+      ],
+      "startup_note": "Initial daemonize ADB shell invocation reached its 30-second timeout, but the root daemon remained running; the matching Frida SDK subsequently enumerated the target device processes successfully.",
+      "connection_evidence": "frida-connection.json"
+    },
+    "frida_connection": {
+      "host_version": "17.24.2",
+      "device_id": "2d32ed71",
+      "process_count": 194,
+      "frida_processes": []
+    },
+    "frida_cleanup": {
+      "recorded_at": "2026-10-19T02:55:30.860812+00:00",
+      "owned_pid": 1114,
+      "command": [
+        "adb",
+        "-s",
+        "2d32ed71",
+        "shell",
+        "su -c 'if [ \"$(readlink /proc/1114/exe)\" = \"/data/local/tmp/qtrace-frida-server-17.24.2\" ]; then kill -TERM 1114; else exit 3; fi'"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "earlier_attempt": "An initial unquoted adb shell argument list failed shell parsing before executing the conditional or kill; retry quotes the complete su script.",
+      "verification": {
+        "command": [
+          "adb",
+          "-s",
+          "2d32ed71",
+          "shell",
+          "ps",
+          "-A",
+          "-o",
+          "PID,USER,NAME"
+        ],
+        "exit_code": 0,
+        "matching_process_rows": []
+      },
+      "passed": true
+    }
+  },
+  "capture_setup": {
+    "method": "Force-stop only the fixed demo package; reuse _isolate_demo_trace_directory to atomically preserve the prior real directory and create a writable trace root before native status publication.",
+    "isolation": {
+      "existed": true,
+      "backup_path": "files/qbdi-traces.pre-acceptance-e20e2ce31415467fb2029bfc2868e341"
+    },
+    "previous_directory_retained": true,
+    "environment": {
+      "ANDROID_NDK_HOME": "/home/lyldalek/Android/sdk/ndk/26.1.10909125",
+      "extra_PATH": [
+        "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin",
+        "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/tools/usr/bin"
+      ]
+    },
+    "baseline": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/baseline.json",
+      "bytes": 88,
+      "sha256": "cb086574ce99011d79f67cbb764f562013e0e4ab73666f71354c846b977fe178",
+      "value": {
+        "iterations": 30,
+        "seed": 5855319310239641971,
+        "result": "0x190af5aef1329c2b"
+      }
+    },
+    "command": [
+      "artifacts/xiaomi-validation/venv/bin/python",
+      "artifacts/xiaomi-capture-2026-10-19/capture-new.py"
+    ]
+  },
+  "acceptance": [
+    {
+      "name": "offset-v2",
+      "command": {
+        "name": "offset-v2",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+          "--report",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset-v2/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/report.json",
+          "--cache",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/final/final-offset-v2-offline-cache"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.06414547299937112
+      },
+      "raw_evidence": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/final/final-offset-v2-offline.json",
+        "bytes": 3472,
+        "sha256": "ad60263504a91e458b5ad7c855a4a11c7ae9f290dd9e82576087ef585498197e"
+      },
+      "cold_open_seconds": 0.009988696,
+      "warm_open_seconds": 0.003360112,
+      "reopen_equivalent": true,
+      "artifact": {
+        "name": "artifacts/1792378340896_4369_4502_fixture-entry_0x71250_0.trace.bin.lz4",
+        "status": "indexed",
+        "event_count": 987,
+        "tids": [
+          4502
+        ],
+        "file_bytes": 14851,
+        "provider_bytes": 51180,
+        "file_sha256": "6cb602c21419fe076be95e79e7cf630bff70e88af980688ef75be4e44f547213",
+        "event_counts": {
+          "begin": 1,
+          "instruction": 678,
+          "instruction_definition": 46,
+          "memory": 260,
+          "module_definition": 1,
+          "termination": 1
+        },
+        "timeline_sha256": "76390f26518809689af55f62f8a176635e6b2a0c333d34b6ee70f97cbbb147ad",
+        "analysis_sha256": "a640858b03930221008a6d9ac36ce50a3e7a07bab394fad637ceca3c3b490e58",
+        "completeness_rows": 1,
+        "completeness_canonical_json_sha256": "b3dd45638adabd00eefb40205de0933ceb76ad5f6b4d2a8583525fb73a76b900",
+        "provider_summary_canonical_json_sha256": "c84c8c8cf86b4588d069ab13b005431548cb92bd3905d00a556a41e01ade10cc",
+        "provider_counters": {
+          "records_seen": 987,
+          "events_emitted": 987,
+          "opaque_records": 0,
+          "damaged_records": 0,
+          "input_bytes": 51180,
+          "decompressed_bytes": 51180
+        },
+        "provider_termination": {
+          "kind": "stopped",
+          "reason": "duration_elapsed",
+          "return_value": null,
+          "elapsed_ms": 1708,
+          "metrics": {
+            "instructions": 678,
+            "encoded_bytes": 51180,
+            "compressed_bytes": 14851,
+            "cache_hits": 632,
+            "cache_misses": 46,
+            "cache_collisions": 0,
+            "buffer_swaps": 2,
+            "producer_waits": 1,
+            "producer_wait_ns": 604896,
+            "effective_buffer_bytes": 67108864
+          }
+        }
+      },
+      "capture": {
+        "name": "offset-v2",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin/python",
+          "-m",
+          "qtrace",
+          "demo",
+          "--device",
+          "2d32ed71",
+          "--scenario",
+          "timed",
+          "--scene-form",
+          "offset",
+          "--setup-timeout",
+          "180",
+          "--pull-timeout",
+          "120",
+          "--output",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset-v2",
+          "--json",
+          "--duration",
+          "2s"
+        ],
+        "started_at": "2026-10-19T02:52:00.538968+00:00",
+        "expected_exit_code": 0,
+        "passed": true,
+        "environment": {
+          "ANDROID_NDK_HOME": "/home/lyldalek/Android/sdk/ndk/26.1.10909125",
+          "extra_PATH": [
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin",
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/tools/usr/bin"
+          ]
+        },
+        "exit_code": 0,
+        "report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset-v2/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/report.json",
+        "checks": [
+          "sealed duration_elapsed stop acknowledged",
+          "native entry receipt and injector detach",
+          "process alive after stop",
+          "traced oracle equals fresh baseline",
+          "binary and metrics-v3 complete duration stop",
+          "normalized offset/symbol scene"
+        ],
+        "status": "sealed",
+        "session_id": "1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d",
+        "pid": 4369,
+        "elapsed_seconds": 23.977074588001415
+      },
+      "report": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/offset-v2/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/report.json",
+        "bytes": 10570,
+        "sha256": "703728f0dfefd803b277d8737a285e09a8796f18212a584267d76a4430d6b30e"
+      },
+      "report_context": {
+        "session_id": "1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d",
+        "mode": "run",
+        "status": "sealed",
+        "stage": "completed",
+        "package": "com.aprz.qbdiandroid",
+        "device_serial": "2d32ed71",
+        "device_access_mode": null,
+        "target_module": null,
+        "profile": null,
+        "scenes": []
+      },
+      "device_identity": {
+        "abi": "arm64-v8a",
+        "access_mode": "root",
+        "android_user": 0,
+        "api_level": 36,
+        "free_bytes": 227727273984,
+        "frida_host_version": "17.24.2",
+        "frida_server_version": "17.24.2",
+        "package_data_dir": "/data/user/0/com.aprz.qbdiandroid",
+        "serial": "2d32ed71"
+      },
+      "capture_started_at": "2026-10-19T02:52:07.437994Z",
+      "capture_finished_at": "2026-10-19T02:52:23.931364Z",
+      "deployed_tracer_sha256": {
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/libqbdi_tracer.so": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+      },
+      "timed_fixture_evidence": {
+        "receipt": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/offset-v2-receipt.json",
+          "bytes": 134,
+          "sha256": "4b3186768b1522112f900854f07815bfab1217c11d2194cbe85b2e939ada3cef"
+        },
+        "entry-status": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/offset-v2-entry-status.json",
+          "bytes": 411,
+          "sha256": "11b4d860f902b67f98ce810185445068ee9b6ef0196131e4b7a94718345b62cc"
+        },
+        "oracle": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/offset-v2-oracle.json",
+          "bytes": 88,
+          "sha256": "cb086574ce99011d79f67cbb764f562013e0e4ab73666f71354c846b977fe178"
+        }
+      },
+      "normalized_scenes": [
+        {
+          "endOffset": 463692,
+          "name": "fixture-entry",
+          "startOffset": 463440
+        }
+      ]
+    },
+    {
+      "name": "symbol",
+      "command": {
+        "name": "symbol",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+          "--report",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/symbol/feb418a4-b5c4-4827-817c-1f04a4c77ef8/report.json",
+          "--cache",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/final/final-symbol-offline-cache"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.06424954899557633
+      },
+      "raw_evidence": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/final/final-symbol-offline.json",
+        "bytes": 3472,
+        "sha256": "ad7c2dfc99c10ee5b0874c28a48174559a5c99b6eb90ccd8d9a84bce9ce87da7"
+      },
+      "cold_open_seconds": 0.010651623,
+      "warm_open_seconds": 0.003991449,
+      "reopen_equivalent": true,
+      "artifact": {
+        "name": "artifacts/1792378365684_5010_5139_fixture-entry_0x71250_0.trace.bin.lz4",
+        "status": "indexed",
+        "event_count": 987,
+        "tids": [
+          5139
+        ],
+        "file_bytes": 14909,
+        "provider_bytes": 51180,
+        "file_sha256": "cc1b25fd9cfab74b57e0d1e9fbae210c1b5a0db3cbf02ccbde8954aa50382dbf",
+        "event_counts": {
+          "begin": 1,
+          "instruction": 678,
+          "instruction_definition": 46,
+          "memory": 260,
+          "module_definition": 1,
+          "termination": 1
+        },
+        "timeline_sha256": "53915cf6f18a2bd4d5572acd5344f291112f4092a42995c10c017ded3eb6e04f",
+        "analysis_sha256": "94539da387dbec81ac5ed01360d76925849ef20d43606d71e2414fffd8c79928",
+        "completeness_rows": 1,
+        "completeness_canonical_json_sha256": "b3dd45638adabd00eefb40205de0933ceb76ad5f6b4d2a8583525fb73a76b900",
+        "provider_summary_canonical_json_sha256": "f2449d7feca81fb7e863d1b5f8c93271592b92dc190385a357983358d7d072f1",
+        "provider_counters": {
+          "records_seen": 987,
+          "events_emitted": 987,
+          "opaque_records": 0,
+          "damaged_records": 0,
+          "input_bytes": 51180,
+          "decompressed_bytes": 51180
+        },
+        "provider_termination": {
+          "kind": "stopped",
+          "reason": "duration_elapsed",
+          "return_value": null,
+          "elapsed_ms": 1708,
+          "metrics": {
+            "instructions": 678,
+            "encoded_bytes": 51180,
+            "compressed_bytes": 14909,
+            "cache_hits": 632,
+            "cache_misses": 46,
+            "cache_collisions": 0,
+            "buffer_swaps": 2,
+            "producer_waits": 1,
+            "producer_wait_ns": 765573,
+            "effective_buffer_bytes": 67108864
+          }
+        }
+      },
+      "capture": {
+        "name": "symbol",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin/python",
+          "-m",
+          "qtrace",
+          "demo",
+          "--device",
+          "2d32ed71",
+          "--scenario",
+          "timed",
+          "--scene-form",
+          "symbol",
+          "--setup-timeout",
+          "180",
+          "--pull-timeout",
+          "120",
+          "--output",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/symbol",
+          "--json",
+          "--duration",
+          "2s"
+        ],
+        "started_at": "2026-10-19T02:52:24.516454+00:00",
+        "expected_exit_code": 0,
+        "passed": true,
+        "environment": {
+          "ANDROID_NDK_HOME": "/home/lyldalek/Android/sdk/ndk/26.1.10909125",
+          "extra_PATH": [
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin",
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/tools/usr/bin"
+          ]
+        },
+        "exit_code": 0,
+        "report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/symbol/feb418a4-b5c4-4827-817c-1f04a4c77ef8/report.json",
+        "checks": [
+          "sealed duration_elapsed stop acknowledged",
+          "native entry receipt and injector detach",
+          "process alive after stop",
+          "traced oracle equals fresh baseline",
+          "binary and metrics-v3 complete duration stop",
+          "normalized offset/symbol scene"
+        ],
+        "status": "sealed",
+        "session_id": "feb418a4-b5c4-4827-817c-1f04a4c77ef8",
+        "pid": 5010,
+        "elapsed_seconds": 24.208136868997826
+      },
+      "report": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/symbol/feb418a4-b5c4-4827-817c-1f04a4c77ef8/report.json",
+        "bytes": 10557,
+        "sha256": "9fe8274288026ec0106b25a5ba5c4920c6567e7fb81208b185d23e4a50885a51"
+      },
+      "report_context": {
+        "session_id": "feb418a4-b5c4-4827-817c-1f04a4c77ef8",
+        "mode": "run",
+        "status": "sealed",
+        "stage": "completed",
+        "package": "com.aprz.qbdiandroid",
+        "device_serial": "2d32ed71",
+        "device_access_mode": null,
+        "target_module": null,
+        "profile": null,
+        "scenes": []
+      },
+      "device_identity": {
+        "abi": "arm64-v8a",
+        "access_mode": "root",
+        "android_user": 0,
+        "api_level": 36,
+        "free_bytes": 227714314240,
+        "frida_host_version": "17.24.2",
+        "frida_server_version": "17.24.2",
+        "package_data_dir": "/data/user/0/com.aprz.qbdiandroid",
+        "serial": "2d32ed71"
+      },
+      "capture_started_at": "2026-10-19T02:52:32.417520Z",
+      "capture_finished_at": "2026-10-19T02:52:48.944757Z",
+      "deployed_tracer_sha256": {
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/feb418a4-b5c4-4827-817c-1f04a4c77ef8/libqbdi_tracer.so": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/feb418a4-b5c4-4827-817c-1f04a4c77ef8/libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+      },
+      "timed_fixture_evidence": {
+        "receipt": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/symbol-receipt.json",
+          "bytes": 134,
+          "sha256": "4e567a2b8d0a04730ca255e9b65e37f3d2c8000ecc73dfd321a827426c669d0f"
+        },
+        "entry-status": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/symbol-entry-status.json",
+          "bytes": 411,
+          "sha256": "1016a7e8ee2d61baa94e519dc8fa6924174e89a9634b107e70cde0663629d657"
+        },
+        "oracle": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/symbol-oracle.json",
+          "bytes": 88,
+          "sha256": "cb086574ce99011d79f67cbb764f562013e0e4ab73666f71354c846b977fe178"
+        }
+      },
+      "normalized_scenes": [
+        {
+          "endOffset": 463692,
+          "name": "fixture-entry",
+          "startOffset": 463440
+        }
+      ]
+    },
+    {
+      "name": "monitor-exit",
+      "command": {
+        "name": "monitor-exit",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+          "--report",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/monitor-exit/c5a42187-c0ca-4384-8fb1-e448210af16c/report.json",
+          "--cache",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/final/final-monitor-exit-offline-cache"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.06403648799459916
+      },
+      "raw_evidence": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/final/final-monitor-exit-offline.json",
+        "bytes": 3495,
+        "sha256": "6b37b432f6d3f466af0302d2a452fc57100dd0053fd652986a0987f995f9c5cf"
+      },
+      "cold_open_seconds": 0.014013623,
+      "warm_open_seconds": 0.006335386,
+      "reopen_equivalent": true,
+      "artifact": {
+        "name": "artifacts/1792378390293_5658_5793_fixture-entry_0x71250_0.trace.bin.lz4",
+        "status": "indexed",
+        "event_count": 1714,
+        "tids": [
+          5793
+        ],
+        "file_bytes": 24533,
+        "provider_bytes": 87035,
+        "file_sha256": "29a7b6b39467b902d59700172606b50f6a2c52672f23b8f1544c511b73c9339e",
+        "event_counts": {
+          "begin": 1,
+          "instruction": 1199,
+          "instruction_definition": 50,
+          "memory": 462,
+          "module_definition": 1,
+          "termination": 1
+        },
+        "timeline_sha256": "12cff621cea00ac74217cdf68448c0a9e5e3d3d54ed88050e30fccbc1f4b0f95",
+        "analysis_sha256": "7599daa48c78c51a53493a592e9a1a495e67460cb2a53d8f947e9327069325bf",
+        "completeness_rows": 1,
+        "completeness_canonical_json_sha256": "e7bf7478554c9df04230876372cd23fc052bc7a9465e894195cc4211a090bb97",
+        "provider_summary_canonical_json_sha256": "2dc4c38262edfed7f498dc6e562695de4f9bc49beb295a9408f5511bcb20e7cc",
+        "provider_counters": {
+          "records_seen": 1714,
+          "events_emitted": 1714,
+          "opaque_records": 0,
+          "damaged_records": 0,
+          "input_bytes": 87035,
+          "decompressed_bytes": 87035
+        },
+        "provider_termination": {
+          "kind": "completed",
+          "reason": null,
+          "return_value": 1804524732435045419,
+          "elapsed_ms": 3024,
+          "metrics": {
+            "instructions": 1199,
+            "encoded_bytes": 87035,
+            "compressed_bytes": 24533,
+            "cache_hits": 1149,
+            "cache_misses": 50,
+            "cache_collisions": 0,
+            "buffer_swaps": 2,
+            "producer_waits": 1,
+            "producer_wait_ns": 6166302,
+            "effective_buffer_bytes": 67108864
+          }
+        }
+      },
+      "capture": {
+        "name": "monitor-exit",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin/python",
+          "-m",
+          "qtrace",
+          "demo",
+          "--device",
+          "2d32ed71",
+          "--scenario",
+          "monitor-exit",
+          "--scene-form",
+          "offset",
+          "--setup-timeout",
+          "180",
+          "--pull-timeout",
+          "120",
+          "--output",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/monitor-exit",
+          "--json"
+        ],
+        "started_at": "2026-10-19T02:52:49.546468+00:00",
+        "expected_exit_code": 0,
+        "passed": true,
+        "environment": {
+          "ANDROID_NDK_HOME": "/home/lyldalek/Android/sdk/ndk/26.1.10909125",
+          "extra_PATH": [
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin",
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/tools/usr/bin"
+          ]
+        },
+        "exit_code": 0,
+        "report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/monitor-exit/c5a42187-c0ca-4384-8fb1-e448210af16c/report.json",
+        "checks": [
+          "classified process_exited",
+          "expected CLI exit code"
+        ],
+        "status": "process_exited",
+        "session_id": "c5a42187-c0ca-4384-8fb1-e448210af16c",
+        "pid": 5658,
+        "elapsed_seconds": 23.23548837999988
+      },
+      "report": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/monitor-exit/c5a42187-c0ca-4384-8fb1-e448210af16c/report.json",
+        "bytes": 10399,
+        "sha256": "6e2be641fee1f70b25ea3b587dd4332e33b95c84c39dd01101775c6c1eb73699"
+      },
+      "report_context": {
+        "session_id": "c5a42187-c0ca-4384-8fb1-e448210af16c",
+        "mode": "monitor",
+        "status": "process_exited",
+        "stage": "completed",
+        "package": "com.aprz.qbdiandroid",
+        "device_serial": "2d32ed71",
+        "device_access_mode": null,
+        "target_module": null,
+        "profile": null,
+        "scenes": []
+      },
+      "device_identity": {
+        "abi": "arm64-v8a",
+        "access_mode": "root",
+        "android_user": 0,
+        "api_level": 36,
+        "free_bytes": 227701194752,
+        "frida_host_version": "17.24.2",
+        "frida_server_version": "17.24.2",
+        "package_data_dir": "/data/user/0/com.aprz.qbdiandroid",
+        "serial": "2d32ed71"
+      },
+      "capture_started_at": "2026-10-19T02:52:56.384865Z",
+      "capture_finished_at": "2026-10-19T02:53:13.592613Z",
+      "deployed_tracer_sha256": {
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/c5a42187-c0ca-4384-8fb1-e448210af16c/libqbdi_tracer.so": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/c5a42187-c0ca-4384-8fb1-e448210af16c/libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+      }
+    },
+    {
+      "name": "flight-crash",
+      "command": {
+        "name": "flight-crash",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+          "--report",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+          "--cache",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/final/final-flight-crash-offline-cache"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 44.0364389009992
+      },
+      "raw_evidence": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/final/final-flight-crash-offline.json",
+        "bytes": 18501674,
+        "sha256": "921ed028ca0f7ab869b27e8ce8ffb51e1a5c3264b59fd63433a03702d3fcb737"
+      },
+      "cold_open_seconds": 9.766940877,
+      "warm_open_seconds": 5.42900583,
+      "reopen_equivalent": true,
+      "artifact": {
+        "name": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+        "status": "indexed",
+        "event_count": 1185909,
+        "tids": [
+          6284,
+          6285,
+          6286,
+          6287,
+          6288,
+          6289,
+          6290,
+          6291,
+          6292,
+          6293,
+          6294,
+          6295,
+          6297,
+          6298,
+          6299,
+          6300,
+          6302,
+          6305,
+          6306,
+          6311,
+          6312,
+          6313,
+          6314,
+          6320,
+          6321,
+          6324,
+          6325,
+          6328,
+          6331,
+          6336,
+          6367
+        ],
+        "file_bytes": 67108864,
+        "provider_bytes": 67108864,
+        "file_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+        "event_counts": {
+          "begin": 255,
+          "discontinuity": 265896,
+          "instruction": 357543,
+          "instruction_definition": 11450,
+          "memory": 159331,
+          "register_checkpoint": 255,
+          "register_delta": 357485,
+          "semantic_call": 31467,
+          "signal_handler_boundary": 1,
+          "string_definition": 2206,
+          "syscall": 1,
+          "thread_lifecycle": 19
+        },
+        "timeline_sha256": "97ef8e245124cf0ea04667000dfddc16cf776a394c570a3b3110235bb32c63f2",
+        "analysis_sha256": "eba00923010d3b7bea5d82fd4fda32bf4ca92a6ec608ebb01f19cb0b2b92d8bb",
+        "completeness_rows": 24162,
+        "completeness_canonical_json_sha256": "0700648b456f88683617a3707a463835e2881da1815cc1580ca1e34b113457a8",
+        "provider_summary_canonical_json_sha256": "50e1ccc14b6fb7224715f57ff9bc1f0c72fffea9490d56a9f43ad486ff6eb956",
+        "provider_counters": {
+          "records_seen": 920013,
+          "events_emitted": 1185909,
+          "opaque_records": 0,
+          "damaged_records": 0,
+          "input_bytes": 118614128,
+          "decompressed_bytes": 0
+        },
+        "provider_termination": null
+      },
+      "capture": {
+        "name": "flight-crash",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin/python",
+          "-m",
+          "qtrace",
+          "demo",
+          "--device",
+          "2d32ed71",
+          "--scenario",
+          "flight-crash",
+          "--scene-form",
+          "offset",
+          "--setup-timeout",
+          "180",
+          "--pull-timeout",
+          "120",
+          "--output",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash",
+          "--json"
+        ],
+        "started_at": "2026-10-19T02:53:13.660315+00:00",
+        "expected_exit_code": 2,
+        "passed": true,
+        "environment": {
+          "ANDROID_NDK_HOME": "/home/lyldalek/Android/sdk/ndk/26.1.10909125",
+          "extra_PATH": [
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin",
+            "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/tools/usr/bin"
+          ]
+        },
+        "exit_code": 2,
+        "report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+        "checks": [
+          "classified crash_recovered",
+          "expected CLI exit code"
+        ],
+        "status": "crash_recovered",
+        "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+        "pid": 6207,
+        "elapsed_seconds": 71.58362661100546
+      },
+      "report": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+        "bytes": 32631,
+        "sha256": "8bfc8e51d5894e338a83fae4fbbeb727cb904b5466b9abdbd849b223457e864f"
+      },
+      "report_context": {
+        "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+        "mode": "monitor",
+        "status": "crash_recovered",
+        "stage": "completed",
+        "package": "com.aprz.qbdiandroid",
+        "device_serial": "2d32ed71",
+        "device_access_mode": null,
+        "target_module": null,
+        "profile": null,
+        "scenes": []
+      },
+      "device_identity": {
+        "abi": "arm64-v8a",
+        "access_mode": "root",
+        "android_user": 0,
+        "api_level": 36,
+        "free_bytes": 227688321024,
+        "frida_host_version": "17.24.2",
+        "frida_server_version": "17.24.2",
+        "package_data_dir": "/data/user/0/com.aprz.qbdiandroid",
+        "serial": "2d32ed71"
+      },
+      "capture_started_at": "2026-10-19T02:53:20.649040Z",
+      "capture_finished_at": "2026-10-19T02:54:26.885924Z",
+      "deployed_tracer_sha256": {
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/d9fc09a8-7358-4d8c-a6c1-a426eea60380/libqbdi_tracer.so": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "/data/user/0/com.aprz.qbdiandroid/cache/qtrace/d9fc09a8-7358-4d8c-a6c1-a426eea60380/libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+      }
+    },
+    {
+      "name": "historical-flight",
+      "command": {
+        "name": "historical-flight",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+          "--report",
+          "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/report.json",
+          "--cache",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/final/final-historical-flight-offline-cache"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 41.24176589999843
+      },
+      "raw_evidence": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/final/final-historical-flight-offline.json",
+        "bytes": 16950206,
+        "sha256": "aa7635a4f3cf76aae8fa1111c097895480b80f037336231235b9ed19e4497735"
+      },
+      "cold_open_seconds": 8.855363889,
+      "warm_open_seconds": 4.9107029650000005,
+      "reopen_equivalent": true,
+      "artifact": {
+        "name": "artifacts/137490380472177_26411_libdemo_target.so.flight.bin",
+        "status": "indexed",
+        "event_count": 1133180,
+        "tids": [
+          26429,
+          26430,
+          26431,
+          26432,
+          26433,
+          26434,
+          26435,
+          26436,
+          26437,
+          26438,
+          26439,
+          26440,
+          26441,
+          26442,
+          26443,
+          26444,
+          26445,
+          26446,
+          26447,
+          26448,
+          26449,
+          26450,
+          26451,
+          26452,
+          26453,
+          26454,
+          26455,
+          26456,
+          26457,
+          26458,
+          26459,
+          26460,
+          26461,
+          26462,
+          26465,
+          26466,
+          26467,
+          26473,
+          26474,
+          26476,
+          26481,
+          26510,
+          26600
+        ],
+        "file_bytes": 67108864,
+        "provider_bytes": 67108864,
+        "file_sha256": "2603ca95f497bbf2c629abca1ba8877634f069ec100e765af22af04dbdd81ca0",
+        "event_counts": {
+          "begin": 255,
+          "discontinuity": 258055,
+          "instruction": 340141,
+          "instruction_definition": 10749,
+          "memory": 151559,
+          "register_checkpoint": 255,
+          "register_delta": 340090,
+          "semantic_call": 29948,
+          "signal_handler_boundary": 1,
+          "string_definition": 2092,
+          "syscall": 1,
+          "thread_lifecycle": 34
+        },
+        "timeline_sha256": "803937f7d127a7b7b4c91765ea029ddc3356322a8e208857d904c72f36670be4",
+        "analysis_sha256": "fb1cb67511ddaa1677b321cb199ab61b0764c7973c4f21e15020f6396a65d7c4",
+        "completeness_rows": 22134,
+        "completeness_canonical_json_sha256": "5d6a5de74d143b363330545c631608cf98f561d57d56f05b4c9e721bb840267b",
+        "provider_summary_canonical_json_sha256": "7a184b15f010b80a7ffd36fcd7dabf8bb8cd4e88ff07dc275430236d02b4ab5a",
+        "provider_counters": {
+          "records_seen": 875125,
+          "events_emitted": 1133180,
+          "opaque_records": 0,
+          "damaged_records": 0,
+          "input_bytes": 112683480,
+          "decompressed_bytes": 0
+        },
+        "provider_termination": null
+      },
+      "equivalent_to_prior_budget_acceptance": true
+    },
+    {
+      "name": "historical-monitor-exit",
+      "command": {
+        "name": "historical-monitor-exit",
+        "command": [
+          "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+          "--report",
+          "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/exit/22bfb9bd-e99b-4dd8-a8a2-f2a6be8ef341/report.json",
+          "--cache",
+          "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/final/final-historical-monitor-exit-offline-cache"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.06417821400100365
+      },
+      "raw_evidence": {
+        "path": "artifacts/xiaomi-capture-2026-10-19/final/final-historical-monitor-exit-offline.json",
+        "bytes": 3512,
+        "sha256": "242e9d8fb3df26010f823b064afcfb5bd099512b2edf1e6f0e0f3acaaf0ef655"
+      },
+      "cold_open_seconds": 0.01411025,
+      "warm_open_seconds": 0.006020264,
+      "reopen_equivalent": true,
+      "artifact": {
+        "name": "artifacts/1787949179017_26040_26105_fixture-entry_0x71250_0.trace.bin.lz4",
+        "status": "indexed",
+        "event_count": 1714,
+        "tids": [
+          26105
+        ],
+        "file_bytes": 24527,
+        "provider_bytes": 87035,
+        "file_sha256": "9d6cf360b7c5bd2f00eb666a33ee9eb975474edbe10c345d8f409d5daacb3f4e",
+        "event_counts": {
+          "begin": 1,
+          "instruction": 1199,
+          "instruction_definition": 50,
+          "memory": 462,
+          "module_definition": 1,
+          "termination": 1
+        },
+        "timeline_sha256": "8ccdb9b6ae0936482b5f984f618c57f9f3d2f94d619e2b366fb809bd6543cc37",
+        "analysis_sha256": "0133e2077c8122b08ebbfcfb73b321d1d5c7cdcda6e7deefd7296b69d8dd35f4",
+        "completeness_rows": 1,
+        "completeness_canonical_json_sha256": "e7bf7478554c9df04230876372cd23fc052bc7a9465e894195cc4211a090bb97",
+        "provider_summary_canonical_json_sha256": "1a0e275e8062746cce542ea3cadc66f18fa73890e99c675e5c95da3aa0e3df7e",
+        "provider_counters": {
+          "records_seen": 1714,
+          "events_emitted": 1714,
+          "opaque_records": 0,
+          "damaged_records": 0,
+          "input_bytes": 87035,
+          "decompressed_bytes": 87035
+        },
+        "provider_termination": {
+          "kind": "completed",
+          "reason": null,
+          "return_value": 1804524732435045419,
+          "elapsed_ms": 3033,
+          "metrics": {
+            "instructions": 1199,
+            "encoded_bytes": 87035,
+            "compressed_bytes": 24527,
+            "cache_hits": 1149,
+            "cache_misses": 50,
+            "cache_collisions": 0,
+            "buffer_swaps": 2,
+            "producer_waits": 1,
+            "producer_wait_ns": 3347087,
+            "effective_buffer_bytes": 67108864
+          }
+        }
+      },
+      "equivalent_to_prior_budget_acceptance": true
+    }
+  ],
+  "offline_method": {
+    "command": [
+      "python3",
+      "artifacts/xiaomi-capture-2026-10-19/final/verify-final-offline.py"
+    ],
+    "result": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/final/final-offline-commands.json",
+      "bytes": 3170,
+      "sha256": "cfdfce06865cbcb03212f40c884391e411bab1cbbdb4386dd5e58eda1a4760d3"
+    },
+    "log": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/final/offline.log",
+      "bytes": 851,
+      "sha256": "bed4daf4ca06fc16e1c97a3abd70dc724d2c091764d9b81ca2dd98496a379c1b"
+    },
+    "checks": [
+      "Every provider/index key, payload, kind, and provenance agrees",
+      "Every timeline row visited exactly once through bounded pages with exact totals",
+      "Instruction counts and first/last register samples",
+      "Call-tree and memory-state samples",
+      "Independent service restart and equivalent persisted cache reopen"
+    ],
+    "timings": "Single-run functional diagnostics; concurrent validation work and cache effects are uncontrolled. These are not performance-gate results."
+  },
+  "browser": {
+    "command": [
+      "node",
+      "artifacts/xiaomi-capture-2026-10-19/final/verify-browser.cjs"
+    ],
+    "chromium": "153.0.8010.12",
+    "headless": true,
+    "viewport": {
+      "width": 1600,
+      "height": 1100
+    },
+    "method": "Actual Chromium UI and Rust production service behind the existing authenticated E2E loopback transport; no response mocks or product-code changes.",
+    "raw_result": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/final/browser-captures-result.json",
+      "bytes": 14806,
+      "sha256": "8707d60c5173b171bc9c74464081138234f3b0d6d1215fbc7cc629940d224aa2"
+    },
+    "scenario_manifest": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/final/capture-scenarios.json",
+      "bytes": 4498,
+      "sha256": "2c716ddb8f23d6bdb57ec69c3164a60642299121fb5055e10bb3ef42a45f9c16"
+    },
+    "fixture_copies": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/browser-copy-identities.json",
+      "bytes": 24381,
+      "sha256": "9a96e2e483246b2bade9411c4b32172a1bc1a976bd38fc518dece7748f1644bb"
+    },
+    "copy_method": "All 59 files from the four newly published session directories were copied byte-identically beneath private E2E fixture roots. The existing file-selection adapter chooses valid-mixed; report identities and artifact validation remain those of the real Xiaomi sessions. No response mocks.",
+    "scenarios": [
+      {
+        "name": "offset-v2",
+        "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset-v2/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/report.json",
+        "expected": {
+          "event_count": 987,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 678,
+            "instruction_definition": 46,
+            "memory": 260,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "sha256": "6cb602c21419fe076be95e79e7cf630bff70e88af980688ef75be4e44f547213",
+          "context": {
+            "session_id": "1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d",
+            "mode": "run",
+            "status": "sealed",
+            "stage": "completed",
+            "package": "com.aprz.qbdiandroid",
+            "device_serial": "2d32ed71",
+            "device_access_mode": null,
+            "target_module": null,
+            "profile": null,
+            "scenes": []
+          }
+        },
+        "directory": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is",
+        "checks": [
+          "report context and real artifact count",
+          "bounded real timeline and exact total",
+          "instruction filter, real detail, 34-cell register replay and call tree",
+          "real thread filter",
+          "real memory state and history without response-row budget errors",
+          "empty results",
+          "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+        ],
+        "api_counts": {
+          "list_jobs": 13,
+          "pick_and_open_session": 2,
+          "create_projection": 7,
+          "query_timeline": 7,
+          "get_event_detail": 4,
+          "get_register_state": 4,
+          "get_annotation": 4,
+          "get_call_tree": 4,
+          "upsert_annotation": 1,
+          "upsert_highlight": 1,
+          "get_memory_history": 1,
+          "get_memory_state": 1,
+          "close_workspace": 1
+        },
+        "api_errors": [],
+        "page_errors": [],
+        "passed": true,
+        "opened": {
+          "name": "artifacts/1792378340896_4369_4502_fixture-entry_0x71250_0.trace.bin.lz4",
+          "events": 987,
+          "tids": [
+            4502
+          ],
+          "completeness_rows": 1,
+          "context": {
+            "device_access_mode": null,
+            "device_serial": "2d32ed71",
+            "mode": "run",
+            "package": "com.aprz.qbdiandroid",
+            "profile": null,
+            "scenes": [],
+            "session_id": "1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d",
+            "stage": "completed",
+            "status": "sealed",
+            "target_module": null
+          }
+        },
+        "first_page_sha256": "d0e45fbeaf4e067cd793f08791a49e7cf9024b4d2b9a2745c4e370ce01fb3c69",
+        "instruction": {
+          "source_row": 3,
+          "key": {
+            "artifact_sha256": "6cb602c21419fe076be95e79e7cf630bff70e88af980688ef75be4e44f547213",
+            "record_ordinal": "3",
+            "sequence": "1",
+            "source_offset": "252",
+            "tid": 4502,
+            "timeline_id": "0"
+          },
+          "register_sha256": "8fa0091ff95ad258a7b8a09b7ed916057066098066c338eb6534ec74102f074a",
+          "call_tree_nodes": 1
+        },
+        "memory": {
+          "source_row": 6,
+          "state_sha256": "daf031aa944a0a5048f8135069795000d57b31007ca28099b5f0b41458ff1f14",
+          "history_rows": 1
+        },
+        "files": {
+          "result.json": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is/result.json",
+            "bytes": 3000,
+            "sha256": "dfb0d509b5652a029870582ace7116ef813984824e349551763f3370192db2c2"
+          },
+          "memory.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is/memory.png",
+            "bytes": 160293,
+            "sha256": "c28602b9908cd446c2ce47823761b907777f24f2383f9d62888f973056228136"
+          },
+          "instruction.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is/instruction.png",
+            "bytes": 159216,
+            "sha256": "6d299cd5f6561c19ebb6e94e0b9a647c99866be7806709b3aea395d1a30ed3e5"
+          },
+          "reopened.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is/reopened.png",
+            "bytes": 145991,
+            "sha256": "6e5672069477d1f7a98dcee3aeba0e5c24e88171cc58fd285edfcedeafe24db1"
+          },
+          "trace.zip": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is/trace.zip",
+            "bytes": 3036475,
+            "sha256": "0def7d66e23c16dcc937eb6a58531dc90b5ebadd6393247841a311b0e0595d8c"
+          },
+          "server.stderr": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is/server.stderr",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "vite.log": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/offset-v2-browser-13d4Is/vite.log",
+            "bytes": 115,
+            "sha256": "1fe7e8d74880b806b615b3dcf46124ab9e75c7cbb2fc80797f24b6e2fef64090"
+          }
+        }
+      },
+      {
+        "name": "symbol",
+        "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/symbol/feb418a4-b5c4-4827-817c-1f04a4c77ef8/report.json",
+        "expected": {
+          "event_count": 987,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 678,
+            "instruction_definition": 46,
+            "memory": 260,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "sha256": "cc1b25fd9cfab74b57e0d1e9fbae210c1b5a0db3cbf02ccbde8954aa50382dbf",
+          "context": {
+            "session_id": "feb418a4-b5c4-4827-817c-1f04a4c77ef8",
+            "mode": "run",
+            "status": "sealed",
+            "stage": "completed",
+            "package": "com.aprz.qbdiandroid",
+            "device_serial": "2d32ed71",
+            "device_access_mode": null,
+            "target_module": null,
+            "profile": null,
+            "scenes": []
+          }
+        },
+        "directory": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2",
+        "checks": [
+          "report context and real artifact count",
+          "bounded real timeline and exact total",
+          "instruction filter, real detail, 34-cell register replay and call tree",
+          "real thread filter",
+          "real memory state and history without response-row budget errors",
+          "empty results",
+          "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+        ],
+        "api_counts": {
+          "list_jobs": 12,
+          "pick_and_open_session": 2,
+          "create_projection": 7,
+          "query_timeline": 7,
+          "get_event_detail": 4,
+          "get_register_state": 4,
+          "get_annotation": 4,
+          "get_call_tree": 4,
+          "upsert_annotation": 1,
+          "upsert_highlight": 1,
+          "get_memory_history": 1,
+          "get_memory_state": 1,
+          "close_workspace": 1
+        },
+        "api_errors": [],
+        "page_errors": [],
+        "passed": true,
+        "opened": {
+          "name": "artifacts/1792378365684_5010_5139_fixture-entry_0x71250_0.trace.bin.lz4",
+          "events": 987,
+          "tids": [
+            5139
+          ],
+          "completeness_rows": 1,
+          "context": {
+            "device_access_mode": null,
+            "device_serial": "2d32ed71",
+            "mode": "run",
+            "package": "com.aprz.qbdiandroid",
+            "profile": null,
+            "scenes": [],
+            "session_id": "feb418a4-b5c4-4827-817c-1f04a4c77ef8",
+            "stage": "completed",
+            "status": "sealed",
+            "target_module": null
+          }
+        },
+        "first_page_sha256": "416dfd7b247055eab3580bed55a3ae75d21c832443a8ee127b1895d778e6d9c8",
+        "instruction": {
+          "source_row": 3,
+          "key": {
+            "artifact_sha256": "cc1b25fd9cfab74b57e0d1e9fbae210c1b5a0db3cbf02ccbde8954aa50382dbf",
+            "record_ordinal": "3",
+            "sequence": "1",
+            "source_offset": "252",
+            "tid": 5139,
+            "timeline_id": "0"
+          },
+          "register_sha256": "8fbc70ed6851259dff02866b584bff8f20ba30ceadd565342884d47f408cfef1",
+          "call_tree_nodes": 1
+        },
+        "memory": {
+          "source_row": 6,
+          "state_sha256": "86cf6a83ebc1d35b0a354c50ecd0b5a152b3396e3e8994c66096f3f613bf4f43",
+          "history_rows": 1
+        },
+        "files": {
+          "result.json": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2/result.json",
+            "bytes": 2991,
+            "sha256": "6ee7e2c7d79a7b1136a01f6c93d613218e272b2adb52c8f1d06c21ac79045b34"
+          },
+          "memory.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2/memory.png",
+            "bytes": 162880,
+            "sha256": "4d65a508c51d1c2d0938129378c2db124dc21e2e387df75ed8c485977fabfa68"
+          },
+          "instruction.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2/instruction.png",
+            "bytes": 159029,
+            "sha256": "3f3668af95f4484fd884bba7ca16f605d023771e0c3b492ea24c4f280aa928ad"
+          },
+          "reopened.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2/reopened.png",
+            "bytes": 145818,
+            "sha256": "81444056cbcd54254295ccb2310cc8619dede29c3b8f8dec4d90c4197c734a2c"
+          },
+          "trace.zip": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2/trace.zip",
+            "bytes": 2920513,
+            "sha256": "a54f0afcecb0b7416dce8a929b137f39f312c18bb41e7a1eb41bdd18bd40bc12"
+          },
+          "server.stderr": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2/server.stderr",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "vite.log": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/symbol-browser-f6vnu2/vite.log",
+            "bytes": 115,
+            "sha256": "94b8e27532e6ce4a585fe2a8459694b0a2c6f315e87d975cd6b68fcdbdb29f95"
+          }
+        }
+      },
+      {
+        "name": "monitor-exit",
+        "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/monitor-exit/c5a42187-c0ca-4384-8fb1-e448210af16c/report.json",
+        "expected": {
+          "event_count": 1714,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 1199,
+            "instruction_definition": 50,
+            "memory": 462,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "sha256": "29a7b6b39467b902d59700172606b50f6a2c52672f23b8f1544c511b73c9339e",
+          "context": {
+            "session_id": "c5a42187-c0ca-4384-8fb1-e448210af16c",
+            "mode": "monitor",
+            "status": "process_exited",
+            "stage": "completed",
+            "package": "com.aprz.qbdiandroid",
+            "device_serial": "2d32ed71",
+            "device_access_mode": null,
+            "target_module": null,
+            "profile": null,
+            "scenes": []
+          }
+        },
+        "directory": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj",
+        "checks": [
+          "report context and real artifact count",
+          "bounded real timeline and exact total",
+          "instruction filter, real detail, 34-cell register replay and call tree",
+          "real thread filter",
+          "real memory state and history without response-row budget errors",
+          "empty results",
+          "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+        ],
+        "api_counts": {
+          "list_jobs": 13,
+          "pick_and_open_session": 2,
+          "create_projection": 7,
+          "query_timeline": 7,
+          "get_event_detail": 4,
+          "get_register_state": 4,
+          "get_annotation": 4,
+          "get_call_tree": 4,
+          "upsert_annotation": 1,
+          "upsert_highlight": 1,
+          "get_memory_history": 1,
+          "get_memory_state": 1,
+          "close_workspace": 1
+        },
+        "api_errors": [],
+        "page_errors": [],
+        "passed": true,
+        "opened": {
+          "name": "artifacts/1792378390293_5658_5793_fixture-entry_0x71250_0.trace.bin.lz4",
+          "events": 1714,
+          "tids": [
+            5793
+          ],
+          "completeness_rows": 1,
+          "context": {
+            "device_access_mode": null,
+            "device_serial": "2d32ed71",
+            "mode": "monitor",
+            "package": "com.aprz.qbdiandroid",
+            "profile": null,
+            "scenes": [],
+            "session_id": "c5a42187-c0ca-4384-8fb1-e448210af16c",
+            "stage": "completed",
+            "status": "process_exited",
+            "target_module": null
+          }
+        },
+        "first_page_sha256": "bdf712091ae88d90ab5cf24d9877daaa7354cf4ce4d4c07070277408cb046c65",
+        "instruction": {
+          "source_row": 3,
+          "key": {
+            "artifact_sha256": "29a7b6b39467b902d59700172606b50f6a2c52672f23b8f1544c511b73c9339e",
+            "record_ordinal": "3",
+            "sequence": "1",
+            "source_offset": "252",
+            "tid": 5793,
+            "timeline_id": "0"
+          },
+          "register_sha256": "ee53c19555bc1d42829768e2c3568ee35fd0d0cc2d5b46590b853edb104e42f0",
+          "call_tree_nodes": 1
+        },
+        "memory": {
+          "source_row": 6,
+          "state_sha256": "12742cb19a1b7386d41d2b588d5d11c4524592966acd973b971b332e14a210f7",
+          "history_rows": 1
+        },
+        "files": {
+          "result.json": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj/result.json",
+            "bytes": 3036,
+            "sha256": "ef360f449ae482dd545caca539129b3a3d9e2ff55da382e24ffeb4228139e26b"
+          },
+          "memory.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj/memory.png",
+            "bytes": 162494,
+            "sha256": "898730c2c21db4703545230e2f457f945b91620772c50d75d9c87207b1aa197b"
+          },
+          "instruction.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj/instruction.png",
+            "bytes": 159068,
+            "sha256": "0b141bc328b81f16ec764a7d6fbfe6429d22809fedcd005d73e7cb1552499610"
+          },
+          "reopened.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj/reopened.png",
+            "bytes": 145869,
+            "sha256": "e3542a32a308052c7bf63ebe18ac718413574e9bcd59165144cdbf4ba19ca623"
+          },
+          "trace.zip": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj/trace.zip",
+            "bytes": 3279702,
+            "sha256": "fded13b1045fcdce44b4b34d2a1b58bb823a9a68a194ba20995dad86792b23ac"
+          },
+          "server.stderr": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj/server.stderr",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "vite.log": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/monitor-exit-browser-ADQkzj/vite.log",
+            "bytes": 115,
+            "sha256": "a4e420213684695012b6c9e1750f4600674420c7703f772a9e3fabca5c28df9f"
+          }
+        }
+      },
+      {
+        "name": "flight-crash",
+        "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+        "expected": {
+          "event_count": 1185909,
+          "event_counts": {
+            "begin": 255,
+            "discontinuity": 265896,
+            "instruction": 357543,
+            "instruction_definition": 11450,
+            "memory": 159331,
+            "register_checkpoint": 255,
+            "register_delta": 357485,
+            "semantic_call": 31467,
+            "signal_handler_boundary": 1,
+            "string_definition": 2206,
+            "syscall": 1,
+            "thread_lifecycle": 19
+          },
+          "sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+          "context": {
+            "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+            "mode": "monitor",
+            "status": "crash_recovered",
+            "stage": "completed",
+            "package": "com.aprz.qbdiandroid",
+            "device_serial": "2d32ed71",
+            "device_access_mode": null,
+            "target_module": null,
+            "profile": null,
+            "scenes": []
+          }
+        },
+        "directory": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5",
+        "checks": [
+          "report context and real artifact count",
+          "real result pages next/previous without duplicate keys",
+          "distant viewport reaches final real timeline page",
+          "bounded real timeline and exact total",
+          "instruction filter, real detail, 34-cell register replay and call tree",
+          "real thread filter",
+          "real memory state and history without response-row budget errors",
+          "empty results",
+          "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+        ],
+        "api_counts": {
+          "list_jobs": 95,
+          "pick_and_open_session": 2,
+          "create_projection": 7,
+          "query_timeline": 10,
+          "locate_timeline_offset": 2,
+          "get_event_detail": 4,
+          "get_annotation": 4,
+          "get_call_tree": 4,
+          "get_register_state": 4,
+          "upsert_annotation": 1,
+          "upsert_highlight": 1,
+          "get_memory_state": 1,
+          "get_memory_history": 1,
+          "close_workspace": 1
+        },
+        "api_errors": [],
+        "page_errors": [],
+        "passed": true,
+        "opened": {
+          "name": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+          "events": 1185909,
+          "tids": [
+            6284,
+            6285,
+            6286,
+            6287,
+            6288,
+            6289,
+            6290,
+            6291,
+            6292,
+            6293,
+            6294,
+            6295,
+            6297,
+            6298,
+            6299,
+            6300,
+            6302,
+            6305,
+            6306,
+            6311,
+            6312,
+            6313,
+            6314,
+            6320,
+            6321,
+            6324,
+            6325,
+            6328,
+            6331,
+            6336,
+            6367
+          ],
+          "completeness_rows": 24162,
+          "context": {
+            "device_access_mode": null,
+            "device_serial": "2d32ed71",
+            "mode": "monitor",
+            "package": "com.aprz.qbdiandroid",
+            "profile": null,
+            "scenes": [],
+            "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+            "stage": "completed",
+            "status": "crash_recovered",
+            "target_module": null
+          }
+        },
+        "first_page_sha256": "31a2de6886b8edc4f74edaddf330dbd93bc9baf61b472dd41bfbc37816acac52",
+        "last_page_sha256": "8e3393ff2b6e0342188cff6a54549a7dda9eb84ab6a6b5e7f4afaf511d702e2d",
+        "instruction": {
+          "source_row": 44893,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "6",
+            "sequence": "35949041",
+            "source_offset": "524864",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "a17f03673dbbb60c82fd4a2027c20fdf97b76ec42b4813d4fcb7f36e85967a78",
+          "call_tree_nodes": 2
+        },
+        "memory": {
+          "source_row": 44916,
+          "state_sha256": "48e04dd7bc403a435d158156e35985b1b1a5ddad2c0db217fb9ca514e7028721",
+          "history_rows": 286
+        },
+        "files": {
+          "result.json": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5/result.json",
+            "bytes": 3861,
+            "sha256": "5be5654d52156298a54759a9658188b311d2c9c75a6254be165fe9b5860b6383"
+          },
+          "memory.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5/memory.png",
+            "bytes": 196335,
+            "sha256": "6aea4b93d38e1c5c82528163ff620e133ff4eba1e8a4232c358df15278eca480"
+          },
+          "instruction.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5/instruction.png",
+            "bytes": 206392,
+            "sha256": "da3f60e10dd3ef9a0954bd370bf8949dcf22e10421323eaf090160124a9284c3"
+          },
+          "reopened.png": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5/reopened.png",
+            "bytes": 213070,
+            "sha256": "1942e3533af289c1af09eaf24ac6b5307e561440d46ebf09747de4a5c9b68f0c"
+          },
+          "trace.zip": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5/trace.zip",
+            "bytes": 9614379,
+            "sha256": "66952e210db9228496ca06e45f2ca62f8b4a7b9cc3863fa1fcf2d49b20d06587"
+          },
+          "server.stderr": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5/server.stderr",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "vite.log": {
+            "path": "artifacts/xiaomi-capture-2026-10-19/final/flight-crash-browser-p57aM5/vite.log",
+            "bytes": 116,
+            "sha256": "a35ede132726b9ced1d54ac4f4d1c579089fc44ef60481dd584570faf34bbc50"
+          }
+        }
+      }
+    ]
+  },
+  "memory_posting_fix": {
+    "file": "qtrace-ui/crates/qtrace-store/src/index/intervals.rs",
+    "cause": "7,858 overlap candidates were already strictly increasing by source row, but bounded overlap decoding still ran eight radix passes and deduplication.",
+    "change": "Confirm strict source-row ordering during the existing charged interval scan. Return the rows directly when strictly increasing; retain the original bounded radix sort and deduplication otherwise.",
+    "query": {
+      "source_row": 44916,
+      "start": "0x7bea745ef8",
+      "end_exclusive": "0x7bea745f00",
+      "candidates": 7858,
+      "history_rows_through_target": 286
+    },
+    "node_work": {
+      "state_before": 183156,
+      "state_after": 47523,
+      "history_before": 183020,
+      "history_after": 47387,
+      "overlap_decode_before": 151509,
+      "overlap_decode_after": 15876
+    },
+    "work_method": "An unlimited diagnostic guard sums internal Rows and Nodes exactly as production MemoryWorkGuard does; these are operation counts, not CPU timings. The final production-limited offline and browser checks also pass.",
+    "preserved_limits": {
+      "interactive_nodes": 100000,
+      "response_rows": 2000,
+      "memory_history_candidates": 10000,
+      "index_and_cache_resident_bytes": 2147483648,
+      "register_replay_resident_bytes": 536870912
+    },
+    "diagnosis_before": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/memory-diagnosis-interval.stderr",
+      "bytes": 4393,
+      "sha256": "75df55656db9f78e2d8f94e5dc1dedb94834037da44400645c842fcf0f360338"
+    },
+    "diagnosis_after": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/memory-diagnosis-after.stderr",
+      "bytes": 2113,
+      "sha256": "c61588bb23fbec44721b0944110befb65c869d532c5bb36833867bb7d4a1c3d2"
+    },
+    "regression_test": "ordered_memory_candidates_fit_interactive_work_budget",
+    "before_test": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/ordered-memory-before.log",
+      "bytes": 1101,
+      "sha256": "3c0f4e1ea77dbc109fff1466c2846d991adc2e6df714c25b55f9cda97641423a",
+      "exit_code": 101,
+      "result": "Fails with Nodes consumed 103747 / limit 100000 for 8192 ordered candidates"
+    },
+    "after_test": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/ordered-memory-after.log",
+      "bytes": 1272,
+      "sha256": "a785632c4da26810ee834cb0a59c9111f0fb8c420fe050f21cbe0897c088dca9",
+      "exit_code": 0,
+      "result": "All 9 service end-to-end tests pass, including the existing 2000/2001 returned-history boundary and Flight cold/cache cases"
+    }
+  },
+  "validation": {
+    "checks": [
+      {
+        "name": "rust-all-targets",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--workspace",
+          "--all-targets"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 31.057632295000076,
+        "log": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/rust-all-targets.log",
+          "bytes": 48307,
+          "sha256": "067e446aebdc677e38066f6150c5ae88821f76c984d94aca9ea695e226d89871"
+        }
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--workspace",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 1.8225577060002252,
+        "log": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/clippy.log",
+          "bytes": 481,
+          "sha256": "55646950e8a6800f8434d9ebf0552442914dbd8c42f1a9bdcb70a48bbf347bb1"
+        }
+      },
+      {
+        "name": "fmt",
+        "command": [
+          "cargo",
+          "fmt",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--all",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.46524283599865157,
+        "log": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/fmt.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "name": "diff-check",
+        "command": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.032331651003914885,
+        "log": {
+          "path": "artifacts/xiaomi-capture-2026-10-19/diff-check.log",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    ],
+    "ignored_test": "isolated_provider_case_child is intentionally launched only by its property-test parent"
+  },
+  "earlier_failure": {
+    "capture": {
+      "name": "offset",
+      "command": [
+        "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-validation/venv/bin/python",
+        "-m",
+        "qtrace",
+        "demo",
+        "--device",
+        "2d32ed71",
+        "--scenario",
+        "timed",
+        "--scene-form",
+        "offset",
+        "--setup-timeout",
+        "180",
+        "--pull-timeout",
+        "120",
+        "--output",
+        "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset",
+        "--json",
+        "--duration",
+        "2s"
+      ],
+      "started_at": "2026-10-19T02:47:13.749323+00:00",
+      "exit_code": 1,
+      "expected_exit_code": 0,
+      "elapsed_seconds": 24.827750419004587,
+      "stdout": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset.stdout",
+      "stderr": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset.stderr",
+      "environment": {
+        "ANDROID_NDK_HOME": "/home/lyldalek/Android/sdk/ndk/26.1.10909125",
+        "extra_PATH": [
+          "artifacts/xiaomi-validation/venv/bin",
+          "artifacts/xiaomi-validation/tools/usr/bin"
+        ]
+      }
+    },
+    "report": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/offset/7ef57fff-7f79-493c-a13d-14458106f31c.error.report.json",
+      "bytes": 7846,
+      "sha256": "b8df84f68a8321a5b53f412215b46416cb3401309f084d0ec06187a8acd4f88e"
+    },
+    "logcat": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/offset-logcat.txt",
+      "bytes": 383716,
+      "sha256": "d9cf1d832c77483b5b2ee8d6434310bd8e2cb7eee5c42d5ca06d5261b6ef805d"
+    },
+    "cause": "The trace directory was absent when SessionStatusPublisher opened; the debug fixture then timed out waiting for armed native entry status and its PID exited. The binary writer created the directory only at entry, after publisher setup. Retrying after the already-documented manual-gate directory preparation succeeds with the same APK and native libraries.",
+    "resolution": "Preserve the failed trace directory as a unique backup and follow the existing directory-isolation setup. No native status-publisher code was changed.",
+    "first_flight_offline_failure": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/flight-crash-offline.stderr",
+      "bytes": 155,
+      "sha256": "69c0cf7543e165fe2d4b9458e266b6cf8c6a9dd38fff4b43935e1b6a722d2471",
+      "result": "analysis.budget_exceeded: Nodes consumed 103675 / limit 100000",
+      "resolved_by": "memory_posting_fix"
+    }
+  },
+  "harness_source_snapshots": {
+    "capture-new.py": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/capture-new.py",
+      "bytes": 6209,
+      "sha256": "1e9243adacb0653f41d8f7bb698bc8fd1ee0d1ecde890c1573a3c2883cd072d4",
+      "source": "\"\"\"Focused, sequential Xiaomi captures using the existing device acceptance checks.\"\"\"\nimport dataclasses\nimport datetime\nimport json\nimport os\nfrom pathlib import Path\nimport subprocess\nimport sys\nimport time\nimport traceback\nimport uuid\n\nROOT = Path.cwd()\nsys.path.insert(0, str(ROOT))\nfrom scripts import qtrace_device_acceptance as acceptance\n\nFOLDER = Path(__file__).resolve().parent\nDEVICE = \"2d32ed71\"\nEXTRA_PATH = [ROOT / \"artifacts/xiaomi-validation/venv/bin\",\n              ROOT / \"artifacts/xiaomi-validation/tools/usr/bin\"]\nos.environ[\"PATH\"] = os.pathsep.join(map(str, EXTRA_PATH)) + os.pathsep + os.environ[\"PATH\"]\nos.environ[\"ANDROID_NDK_HOME\"] = \"/home/lyldalek/Android/sdk/ndk/26.1.10909125\"\nrunner = acceptance.SubprocessRunner(DEVICE, inject_first_read_failure=False)\nrecords = []\n\ndef write(name, value):\n    (FOLDER / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + \"\\n\")\n\ndef adb(*args):\n    return runner.run((\"adb\", \"-s\", DEVICE, *args), timeout=30.0)\n\ndef main():\n    adb(\"shell\", \"am\", \"force-stop\", acceptance.PACKAGE)\n    isolation = acceptance._isolate_demo_trace_directory(DEVICE, runner, token=uuid.uuid4().hex)\n    write(\"directory-isolation.json\", dataclasses.asdict(isolation))\n    # Preserve the old deterministic result before requesting a fresh baseline.\n    try:\n        old = runner.read_text(Path(acceptance.BASELINE_PATH), timeout=5.0)\n        (FOLDER / \"previous-baseline.json\").write_text(old)\n    except acceptance.AcceptanceNotReadyError:\n        pass\n    adb(\"shell\", \"run-as\", acceptance.PACKAGE, \"rm\", \"-f\", acceptance.BASELINE_PATH)\n    adb(\"shell\", \"am\", \"start\", \"-n\", acceptance.ACTIVITY,\n        \"--ez\", \"qtrace_acceptance\", \"true\", \"--es\", \"qtrace_acceptance_mode\", \"timed\",\n        \"--el\", \"qtrace_acceptance_seed\", str(acceptance.SEED),\n        \"--el\", \"qtrace_acceptance_iterations\", str(acceptance.ITERATIONS))\n    baseline = acceptance._wait_for_baseline(runner)\n    write(\"baseline.json\", baseline)\n    print(\"Fresh baseline:\", baseline, flush=True)\n    scenes = None\n    for name, scenario, form, expected in (\n        (\"offset-v2\", \"timed\", \"offset\", 0),\n        (\"symbol\", \"timed\", \"symbol\", 0),\n        (\"monitor-exit\", \"monitor-exit\", \"offset\", 0),\n        (\"flight-crash\", \"flight-crash\", \"offset\", 2),\n    ):\n        output = FOLDER / name\n        if output.exists():\n            raise RuntimeError(f\"Refusing to reuse capture output: {output}\")\n        command = [str(EXTRA_PATH[0] / \"python\"), \"-m\", \"qtrace\", \"demo\",\n                   \"--device\", DEVICE, \"--scenario\", scenario, \"--scene-form\", form,\n                   \"--setup-timeout\", \"180\", \"--pull-timeout\", \"120\", \"--output\", str(output), \"--json\"]\n        if scenario == \"timed\":\n            command.extend((\"--duration\", \"2s\"))\n        record = {\"name\": name, \"command\": command,\n                  \"started_at\": datetime.datetime.now(datetime.timezone.utc).isoformat(),\n                  \"expected_exit_code\": expected, \"passed\": False,\n                  \"environment\": {\"ANDROID_NDK_HOME\": os.environ[\"ANDROID_NDK_HOME\"],\n                                  \"extra_PATH\": list(map(str, EXTRA_PATH))}}\n        records.append(record)\n        started = time.monotonic()\n        print(\"Starting\", name, flush=True)\n        try:\n            with (FOLDER / f\"{name}.stdout\").open(\"w\") as stdout, (FOLDER / f\"{name}.stderr\").open(\"w\") as stderr:\n                result = subprocess.run(command, cwd=ROOT, stdout=stdout, stderr=stderr, timeout=360)\n            record[\"exit_code\"] = result.returncode\n            if result.returncode != expected:\n                raise RuntimeError(f\"{name}: exit {result.returncode}, expected {expected}\")\n            published = json.loads((FOLDER / f\"{name}.stdout\").read_text())\n            report_path = Path(published[\"report\"])\n            relative = report_path.relative_to(output)\n            record[\"report\"] = str(report_path)\n            if scenario == \"timed\":\n                report, artifact = acceptance._validated_timed_report(runner, output, relative)\n                receipt, entry = acceptance._wait_for_timed_fixture_evidence(runner, report)\n                (FOLDER / f\"{name}-receipt.json\").write_text(receipt)\n                (FOLDER / f\"{name}-entry-status.json\").write_text(entry)\n                oracle = acceptance._wait_for_timed_result(runner)\n                write(f\"{name}-oracle.json\", oracle)\n                if oracle != baseline:\n                    raise RuntimeError(\"Traced result differs from fresh untraced baseline\")\n                adb(\"shell\", \"su\", \"-c\", f\"kill -0 {report['pid']}\")\n                acceptance._validate_timed_artifact_semantics(runner, report, output)\n                normalized = report[\"native\"][\"status\"][\"normalizedScenes\"]\n                if scenes is not None and normalized != scenes:\n                    raise RuntimeError(\"Offset and symbol scenes differ\")\n                scenes = normalized\n                record[\"checks\"] = [\"sealed duration_elapsed stop acknowledged\", \"native entry receipt and injector detach\",\n                                    \"process alive after stop\", \"traced oracle equals fresh baseline\",\n                                    \"binary and metrics-v3 complete duration stop\", \"normalized offset/symbol scene\"]\n            else:\n                status = \"process_exited\" if scenario == \"monitor-exit\" else \"crash_recovered\"\n                report = acceptance._validated_monitor_report(runner, output, relative, status=status)\n                record[\"checks\"] = [f\"classified {status}\", \"expected CLI exit code\"]\n            record[\"status\"] = report[\"status\"]\n            record[\"session_id\"] = report[\"session_id\"]\n            record[\"pid\"] = report[\"pid\"]\n            record[\"passed\"] = True\n        except BaseException:\n            record[\"error\"] = traceback.format_exc()\n            raise\n        finally:\n            record[\"elapsed_seconds\"] = time.monotonic() - started\n            write(f\"{name}-result.json\", record)\n            write(\"captures-final-result.json\", records)\n            print(name, \"PASS\" if record[\"passed\"] else \"FAIL\", f\"{record['elapsed_seconds']:.2f}s\", flush=True)\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "verify-final-offline.py": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/final/verify-final-offline.py",
+      "bytes": 2345,
+      "sha256": "f2db321b8e3001d0c1861a11a585f5ee1164b441c7572c35fc96f4f376b8fded",
+      "source": "\"\"\"Verify fresh captures and retained regression captures with the final binaries.\"\"\"\nimport json\nfrom pathlib import Path\nimport subprocess\nimport time\n\nROOT = Path.cwd()\nFOLDER = Path(__file__).resolve().parent\nrecords = json.loads((FOLDER / \"captures-final-result.json\").read_text())\nassert len(records) == 4 and all(record[\"passed\"] for record in records)\nhistorical = json.loads((ROOT / \"artifacts/xiaomi-browser-acceptance-2026-10-19/capture-scenarios.json\").read_text())\nrecords.extend({\"name\": \"historical-\" + item[\"name\"], \"report\": item[\"source_report\"]} for item in historical)\ncommands = []\nfor case in records:\n    name = case[\"name\"]\n    cache = FOLDER / f\"final-{name}-offline-cache\"\n    assert not cache.exists()\n    command = [str(ROOT / \"qtrace-ui/target/release/examples/verify_capture\"),\n               \"--report\", case[\"report\"], \"--cache\", str(cache)]\n    started = time.monotonic()\n    print(\"Verifying\", name, flush=True)\n    with (FOLDER / f\"final-{name}-offline.json\").open(\"w\") as stdout, (FOLDER / f\"final-{name}-offline.stderr\").open(\"w\") as stderr:\n        result = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=300)\n    record = {\"name\": name, \"command\": command, \"exit_code\": result.returncode,\n              \"elapsed_seconds\": time.monotonic() - started}\n    commands.append(record)\n    (FOLDER / \"final-offline-commands.json\").write_text(json.dumps(commands, indent=2) + \"\\n\")\n    if result.returncode:\n        print((FOLDER / f\"final-{name}-offline.stderr\").read_text(), flush=True)\n        raise SystemExit(result.returncode)\n    data = json.loads((FOLDER / f\"final-{name}-offline.json\").read_text())\n    assert data[\"reopen_equivalent\"] and len(data[\"artifacts\"]) == 1\n    artifact = data[\"artifacts\"][0]\n    print(json.dumps({\"name\": name, \"passed\": True, \"events\": artifact[\"artifact\"][\"event_count\"],\n                      \"cold_seconds\": data[\"cold_open_seconds\"], \"warm_seconds\": data[\"warm_open_seconds\"]}), flush=True)\n    if name.startswith(\"historical-\"):\n        earlier = next(item for item in historical if \"historical-\" + item[\"name\"] == name)\n        assert artifact[\"artifact\"][\"event_count\"] == earlier[\"expected\"][\"event_count\"]\n        assert artifact[\"event_counts\"] == earlier[\"expected\"][\"event_counts\"]\n        assert artifact[\"sha256\"] == earlier[\"expected\"][\"sha256\"]\n"
+    },
+    "verify-browser.cjs": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/final/verify-browser.cjs",
+      "bytes": 13482,
+      "sha256": "e9e43ae10b6f5612b54445d9809220875df3ea04fb359fdcabbfe9ad380ca203",
+      "source": "const fs = require('node:fs');\nconst path = require('node:path');\nconst crypto = require('node:crypto');\nconst { spawn } = require('node:child_process');\nconst { createInterface } = require('node:readline');\nconst { once } = require('node:events');\nconst { chromium, expect } = require(path.resolve('qtrace-ui/src-web/node_modules/@playwright/test'));\n\nconst root = process.cwd();\nconst folder = __dirname;\nconst web = path.join(root, 'qtrace-ui/src-web');\nconst scenarios = JSON.parse(fs.readFileSync(process.argv[2] ?? path.join(folder, 'capture-scenarios.json'), 'utf8'));\nconst delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');\nexpect.configure({ timeout: 30_000 });\n\nasync function stop(child) {\n  if (!child || child.exitCode !== null) return;\n  const exited = once(child, 'exit');\n  child.kill('SIGTERM');\n  await Promise.race([exited, delay(3_000)]);\n  if (child.exitCode === null) {\n    child.kill('SIGKILL');\n    await exited;\n  }\n}\n\nasync function verify(scenario, browser) {\n  const directory = fs.mkdtempSync(path.join(folder, `${scenario.name}-browser-`));\n  const record = { name: scenario.name, origin: scenario.origin, source_report: scenario.source_report, expected: scenario.expected, directory, checks: [], api_counts: {}, api_errors: [], page_errors: [], passed: false };\n  let server, vite, context, page;\n  const serverLog = fs.openSync(path.join(directory, 'server.stderr'), 'w');\n  const viteLog = fs.openSync(path.join(directory, 'vite.log'), 'w');\n  try {\n    const token = crypto.randomBytes(16).toString('hex');\n    server = spawn(path.join(root, 'qtrace-ui/target/release/e2e_server'), ['--fixture-root', scenario.fixture_root, '--xdg-root', path.join(directory, 'data'), '--token', token], { cwd: root, stdio: ['ignore', 'pipe', serverLog] });\n    const ready = await Promise.race([\n      new Promise((resolve, reject) => {\n        const lines = createInterface({ input: server.stdout });\n        lines.once('line', (line) => { try { resolve(JSON.parse(line)); } catch (error) { reject(error); } });\n        server.once('exit', (code) => reject(new Error(`service exited before readiness: ${code}`)));\n      }),\n      delay(15_000).then(() => { throw new Error('service readiness timeout'); }),\n    ]);\n    vite = spawn(path.join(web, 'node_modules/.bin/vite'), ['--mode', 'e2e', '--port', '1421', '--strictPort'], { cwd: web, stdio: ['ignore', viteLog, viteLog], env: { ...process.env, VITE_E2E_URL: ready.url, VITE_E2E_TOKEN: ready.token } });\n    let available = false;\n    for (let attempt = 0; attempt < 150; attempt++) {\n      if (vite.exitCode !== null) throw new Error(`Vite exited ${vite.exitCode}`);\n      try { if ((await fetch('http://localhost:1421')).ok) { available = true; break; } } catch {}\n      await delay(100);\n    }\n    if (!available) throw new Error('Vite readiness timeout');\n    context = await browser.newContext({ viewport: { width: 1600, height: 1100 } });\n    context.setDefaultTimeout(30_000);\n    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });\n    page = await context.newPage();\n    page.on('pageerror', (error) => record.page_errors.push(error.message));\n    page.on('response', async (response) => {\n      if (!response.url().startsWith(ready.url)) return;\n      const command = new URL(response.url()).pathname.slice(1);\n      record.api_counts[command] = (record.api_counts[command] ?? 0) + 1;\n      if (!response.ok()) {\n        try { record.api_errors.push({ command, status: response.status(), body: await response.json() }); }\n        catch { record.api_errors.push({ command, status: response.status() }); }\n      }\n    });\n    const api = (command, predicate = () => true) => page.waitForResponse(async (response) => {\n      if (!response.url().endsWith('/' + command)) return false;\n      return predicate(await response.json());\n    }, { timeout: 60_000 }).then(async (response) => {\n      const body = await response.json();\n      if (!response.ok() || !Object.hasOwn(body, 'ok')) throw new Error(`${command}: ${JSON.stringify(body)}`);\n      return body.ok;\n    });\n    const act = async (command, action, predicate) => {\n      const answer = api(command, predicate);\n      await action();\n      return answer;\n    };\n    const apply = (kind = '') => act('query_timeline', async () => {\n      await page.getByLabel('Kind', { exact: true }).fill(kind);\n      await page.getByRole('button', { name: 'Apply filters', exact: true }).click();\n    });\n    const results = () => page.getByRole('region', { name: 'Search results', exact: true });\n    const selectFirst = async (memory = false) => {\n      const pending = [api('get_event_detail'), api('get_register_state'), api('get_call_tree')];\n      if (memory) pending.push(api('get_memory_state'), api('get_memory_history'));\n      await results().getByRole('listitem').first().getByRole('button').click();\n      const values = await Promise.all(pending);\n      expect(values[1].before).toHaveLength(34);\n      expect(values[1].after).toHaveLength(34);\n      expect(values[2].nodes.length).toBeLessThanOrEqual(100);\n      if (memory) {\n        expect(values[3].key).toEqual(values[0].key);\n        expect(values[4].length).toBeLessThanOrEqual(2_000);\n        await expect(page.getByRole('region', { name: 'Memory', exact: true })).not.toContainText('unsupported');\n      }\n      await expect(page.getByRole('alert')).toHaveCount(0);\n      return values;\n    };\n    await page.goto('http://localhost:1421');\n    const opened = await act('pick_and_open_session', () => page.getByRole('button', { name: 'Open session', exact: true }).click());\n    expect(opened.artifacts).toHaveLength(1);\n    expect(opened.context).toEqual(scenario.expected.context);\n    expect(opened.artifacts[0].event_count).toBe(scenario.expected.event_count);\n    const artifact = opened.artifacts[0];\n    record.opened = { name: artifact.name, events: artifact.event_count, tids: artifact.tids, completeness_rows: artifact.completeness.length, context: opened.context };\n    await expect(page.getByRole('heading', { name: /^Workspace / })).toBeVisible();\n    record.checks.push('report context and real artifact count');\n\n    const first = await apply();\n    expect(first.exact_total).toBe(true);\n    expect(first.total).toBe(scenario.expected.event_count);\n    expect(first.rows.length).toBeLessThanOrEqual(2_000);\n    expect(first.rows[0].key.artifact_sha256).toBe(scenario.expected.sha256);\n    await expect(page.getByRole('grid', { name: 'Visible trace rows' })).toBeVisible();\n    record.first_page_sha256 = digest(first.rows);\n    if (first.total > 2_000) {\n      const second = await act('query_timeline', () => results().getByRole('button', { name: 'Next results page', exact: true }).click());\n      const keys = new Set(first.rows.map((row) => JSON.stringify(row.key)));\n      expect(second.rows.some((row) => keys.has(JSON.stringify(row.key)))).toBe(false);\n      await expect(results()).toContainText('Page 2 of');\n      const previous = await act('query_timeline', () => results().getByRole('button', { name: 'Previous results page', exact: true }).click());\n      expect(previous.rows).toEqual(first.rows);\n      record.checks.push('real result pages next/previous without duplicate keys');\n      const lastPending = api('query_timeline', (body) => body.ok?.total === first.total && body.ok.next_cursor === null);\n      await page.getByRole('region', { name: 'Timeline', exact: true }).evaluate((element, total) => {\n        element.style.height = '320px'; element.scrollTop = (total - 10) * 24;\n        element.dispatchEvent(new Event('scroll', { bubbles: true }));\n      }, first.total);\n      const last = await lastPending;\n      expect(last.rows.length).toBeLessThanOrEqual(2_000);\n      record.last_page_sha256 = digest(last.rows);\n      record.checks.push('distant viewport reaches final real timeline page');\n      await page.getByRole('region', { name: 'Timeline', exact: true }).evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll', { bubbles: true })); });\n    }\n    record.checks.push('bounded real timeline and exact total');\n\n    const instructions = await apply('instruction');\n    expect(instructions.total).toBe(scenario.expected.event_counts.instruction);\n    expect(instructions.rows.every((row) => row.kind === 'instruction')).toBe(true);\n    const selected = await selectFirst();\n    record.instruction = { source_row: selected[0].row, key: selected[0].key, register_sha256: digest(selected[1]), call_tree_nodes: selected[2].nodes.length };\n    record.checks.push('instruction filter, real detail, 34-cell register replay and call tree');\n    const comment = `browser acceptance ${scenario.name}`;\n    await page.getByLabel('Comment', { exact: true }).fill(comment);\n    await act('upsert_annotation', () => page.getByRole('button', { name: 'Save', exact: true }).click());\n    await expect(page.getByText(`Committed: ${comment}`, { exact: true })).toBeVisible();\n    await page.getByLabel('Highlight', { exact: true }).fill('acceptance');\n    await act('upsert_highlight', () => page.getByRole('button', { name: 'Save highlight', exact: true }).click());\n\n    const tid = selected[0].key.tid;\n    if (tid !== null) {\n      const filtered = await act('query_timeline', () => page.getByRole('button', { name: `TID ${tid}`, exact: true }).click());\n      expect(filtered.rows.every((row) => row.key.tid === tid)).toBe(true);\n      record.checks.push('real thread filter');\n      await page.getByLabel('TID', { exact: true }).fill('');\n    }\n    const memoryPage = await apply('memory');\n    expect(memoryPage.total).toBe(scenario.expected.event_counts.memory);\n    const memory = await selectFirst(true);\n    record.memory = { source_row: memory[0].row, state_sha256: digest(memory[3]), history_rows: memory[4].length };\n    record.checks.push('real memory state and history without response-row budget errors');\n    await page.screenshot({ path: path.join(directory, 'memory.png') });\n\n    await page.getByLabel('Sequence', { exact: true }).fill('18446744073709551614:18446744073709551615');\n    const empty = await apply('instruction');\n    expect(empty.total).toBe(0);\n    await expect(results()).toContainText('No rows on this page');\n    record.checks.push('empty results');\n    await page.getByLabel('Sequence', { exact: true }).fill('');\n    await apply('instruction');\n    await selectFirst();\n    await expect(page.getByLabel('Comment', { exact: true })).toHaveValue(comment);\n    await expect(page.getByLabel('Highlight', { exact: true })).toHaveValue('acceptance');\n    await page.screenshot({ path: path.join(directory, 'instruction.png') });\n    await act('close_workspace', () => page.getByRole('button', { name: 'Close', exact: true }).click());\n    const restarted = await fetch(`${ready.url}/restart_service`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' });\n    expect(restarted.ok).toBe(true);\n    await page.reload();\n    const reopened = await act('pick_and_open_session', () => page.getByRole('button', { name: 'Open session', exact: true }).click());\n    expect(reopened.artifacts).toEqual(opened.artifacts);\n    await apply('instruction');\n    const reselected = await selectFirst();\n    expect(reselected[1]).toEqual(selected[1]);\n    await expect(page.getByLabel('Comment', { exact: true })).toHaveValue(comment);\n    await expect(page.getByLabel('Highlight', { exact: true })).toHaveValue('acceptance');\n    record.checks.push('service restart, cache reopen, equivalent registers and persistent comment/highlight');\n    await page.screenshot({ path: path.join(directory, 'reopened.png') });\n    expect(record.api_errors).toEqual([]);\n    expect(record.page_errors).toEqual([]);\n    record.passed = true;\n  } catch (error) {\n    record.error = String(error.stack ?? error);\n    if (page) {\n      try { await page.screenshot({ path: path.join(directory, 'failure.png') }); } catch {}\n      try { record.visible_alerts = await page.getByRole('alert').allTextContents(); } catch {}\n    }\n  } finally {\n    if (context) {\n      try { await context.tracing.stop({ path: path.join(directory, 'trace.zip') }); } catch {}\n      await context.close();\n    }\n    await stop(vite); await stop(server);\n    fs.closeSync(serverLog); fs.closeSync(viteLog);\n    fs.writeFileSync(path.join(directory, 'result.json'), JSON.stringify(record, null, 2) + '\\n');\n  }\n  return record;\n}\n\n(async () => {\n  const browser = await chromium.launch({ headless: true });\n  const report = { chromium: browser.version(), method: 'Actual Chromium UI and Rust production service behind the existing authenticated E2E loopback transport; no response mocks or product-code changes.', scenarios: [] };\n  try {\n    for (const scenario of scenarios) {\n      const result = await verify(scenario, browser);\n      report.scenarios.push(result);\n      console.log(JSON.stringify({ name: result.name, passed: result.passed, checks: result.checks, error: result.error, directory: result.directory }));\n    }\n  } finally {\n    await browser.close();\n    fs.writeFileSync(path.join(folder, 'browser-captures-result.json'), JSON.stringify(report, null, 2) + '\\n');\n  }\n  if (report.scenarios.some((item) => !item.passed)) process.exitCode = 1;\n})().catch((error) => { console.error(error); process.exitCode = 1; });\n"
+    },
+    "prepare-browser.py": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/prepare-browser.py",
+      "bytes": 2181,
+      "sha256": "a72f03ebe6c5439a9311ca6b9032da92211e9f6435bdf1cf64c3ea4f3389e0c9",
+      "source": "\"\"\"Copy fresh published sessions into the existing E2E selector's private roots.\"\"\"\nimport hashlib\nimport json\nfrom pathlib import Path\nimport shutil\n\nROOT = Path.cwd()\nFOLDER = Path(__file__).resolve().parent\ncases = json.loads((FOLDER / \"captures-final-result.json\").read_text())\nassert len(cases) == 4 and all(case[\"passed\"] for case in cases)\nmanifest = []\ncopies = []\nfor case in cases:\n    name = case[\"name\"]\n    report = Path(case[\"report\"])\n    source = report.parent\n    offline = json.loads((FOLDER / f\"final-{name}-offline.json\").read_text())\n    assert offline[\"reopen_equivalent\"] and len(offline[\"artifacts\"]) == 1\n    artifact = offline[\"artifacts\"][0]\n    fixtures = FOLDER / f\"{name}-fixtures\"\n    destination = fixtures / \"sessions/valid-mixed\"\n    assert not fixtures.exists()\n    shutil.copytree(source, destination)\n    for original in source.rglob(\"*\"):\n        assert not original.is_symlink()\n        if original.is_file():\n            copied = destination / original.relative_to(source)\n            digest = hashlib.sha256(original.read_bytes()).hexdigest()\n            assert hashlib.sha256(copied.read_bytes()).hexdigest() == digest\n            copies.append({\"source\": str(original.relative_to(ROOT)),\n                           \"copy\": str(copied.relative_to(ROOT)),\n                           \"bytes\": original.stat().st_size, \"sha256\": digest})\n    manifest.append({\"name\": name, \"origin\": \"new Xiaomi M2011K2C capture, 2026-10-19\",\n                     \"source_report\": str(report), \"fixture_root\": str(fixtures),\n                     \"expected\": {\"event_count\": artifact[\"artifact\"][\"event_count\"],\n                                  \"event_counts\": artifact[\"event_counts\"],\n                                  \"sha256\": artifact[\"sha256\"],\n                                  \"context\": offline[\"workspace\"][\"context\"]}})\n(FOLDER / \"capture-scenarios.json\").write_text(json.dumps(manifest, indent=2) + \"\\n\")\n(FOLDER / \"browser-copy-identities.json\").write_text(json.dumps(copies, indent=2) + \"\\n\")\nprint(json.dumps({\"scenarios\": [case[\"name\"] for case in manifest],\n                  \"copied_files\": len(copies), \"all_copies_byte_identical\": True}))\n"
+    },
+    "diagnose_memory.rs": {
+      "path": "artifacts/xiaomi-capture-2026-10-19/diagnose_memory.rs",
+      "bytes": 3797,
+      "sha256": "bf45c0d751e6b01dc25ee06d7e409de15c5def58bb6f0ef5b1a05194828bb339",
+      "source": "use std::{error::Error, path::PathBuf, sync::{Arc, atomic::{AtomicU64, Ordering}}};\nuse qtrace_analysis::{MemoryAnalyzer, QueryContext};\nuse qtrace_provider::{OperationAbort, WorkDelta, WorkGuard};\nuse qtrace_service::{EventFilterDto, QtraceService};\nuse qtrace_store::{AuthorizedPath, BuildOptions, NormalizedBulkView, NormalizedPostingQuery, OpenPolicy, SessionLoader, TraceStore, TraceStoreView};\n\n#[derive(Default)]\nstruct Counter(AtomicU64);\nimpl WorkGuard for Counter {\n    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {\n        let work = delta.rows.saturating_add(delta.nodes);\n        let before = self.0.fetch_add(work, Ordering::Relaxed);\n        if before < 100_000 && before.saturating_add(work) > 100_000 {\n            eprintln!(\"Crossed 100k: {before} + rows {} + nodes {}\\n{}\", delta.rows, delta.nodes, std::backtrace::Backtrace::force_capture());\n        }\n        Ok(())\n    }\n}\nfn main() -> Result<(), Box<dyn Error>> {\n    let mut args = std::env::args().skip(1);\n    let report = PathBuf::from(args.next().ok_or(\"report\")?);\n    let cache = PathBuf::from(args.next().ok_or(\"cache\")?);\n    let allow = Counter::default();\n    let source = SessionLoader::open_report(AuthorizedPath::new(report.clone()), OpenPolicy::cache_aware(), &allow)?;\n    let store = Arc::new(TraceStore::open_or_build(&cache, &source.artifacts()[0], &BuildOptions::default(), &allow)?);\n    let service = QtraceService::with_cache_root(cache);\n    let opened = service.open_session(AuthorizedPath::new(report)).map_err(|e| format!(\"{e:?}\"))?;\n    let projection = service.create_projection(&opened.workspace.id, 0, EventFilterDto { kinds: vec![\"memory\".into()], ..Default::default() }).map_err(|e| format!(\"{e:?}\"))?;\n    let page = service.query_timeline(&opened.workspace.id, &projection.projection_id, None, 1).map_err(|e| format!(\"{e:?}\"))?;\n    let row = page.rows[0].source_row;\n    let detail = service.get_event_detail(&opened.workspace.id, 0, row).map_err(|e| format!(\"{e:?}\"))?;\n    let range = detail.memory_range.ok_or(\"range\")?;\n    let start = range.start.value();\n    let end = range.end_exclusive.value().min(start + 64);\n    let query = NormalizedPostingQuery::Memory { start, end_exclusive: end };\n    let mut interval_order: Vec<_> = store.memory_rows().iter().filter(|m| m.address < end && start < m.end_exclusive).map(|m| (m.address, m.end_exclusive, m.owner_row)).collect();\n    interval_order.sort_unstable();\n    eprintln!(\"interval-order: entries={} inversions={}\", interval_order.len(), interval_order.windows(2).filter(|w| w[0].2 > w[1].2).count());\n    let guard = Counter::default();\n    let estimate = store.bounded_row_estimate(query, 10_000, &guard)?;\n    eprintln!(\"estimate: rows={} actual_work={} estimated_decode_work={}\", estimate.rows, guard.0.load(Ordering::Relaxed), estimate.decode_work);\n    let guard = Counter::default();\n    let rows = store.bounded_rows(query, 10_000, &guard)?;\n    eprintln!(\"decode: rows={} work={} prefix_through_target={}\", rows.len(), guard.0.load(Ordering::Relaxed), rows.partition_point(|r| *r <= row as usize));\n    let context = Arc::new(QueryContext::new(store.clone())?);\n    let key = store.event_key(row as usize)?.ok_or(\"key\")?;\n    let guard = Counter::default();\n    let analyzer = MemoryAnalyzer::from_context_with_guard(context, &guard)?;\n    let state = analyzer.state_at_with_guard(&key, start..end, &guard)?;\n    eprintln!(\"state: row={row} range={start:#x}..{end:#x} work={} captured={}\", guard.0.load(Ordering::Relaxed), state.observed.iter().filter(|c| c.value.is_some()).count());\n    let guard = Counter::default();\n    let history = analyzer.history_with_guard(&key, start..end, &guard)?;\n    eprintln!(\"history: rows={} work={}\", history.len(), guard.0.load(Ordering::Relaxed));\n    Ok(())\n}\n"
+    }
+  },
+  "limitations": [
+    "This focused four-scenario run does not rerun the complete historical five-round device performance/release gate or manual pull-selector matrix.",
+    "The browser uses the existing authenticated E2E file-selection/transport adapter and the actual Rust service; native Tauri file-dialog interaction is not exercised.",
+    "Browser proof is functional at 1600x1100. Keyboard navigation, high zoom, and responsive layout certification remain separate acceptance items.",
+    "Recovered Flight gaps and unknown termination remain visible; acceptance does not assert a complete capture.",
+    "No new tracer throughput or fixed-host performance benefit is claimed. Earlier provider performance measurements retain their earlier source identities.",
+    "Large device artifacts, caches, screenshots, and browser traces remain local ignored evidence; this manifest records their identities and preserves the harness sources."
+  ],
+  "related_evidence": [
+    "docs/benchmarks/qtrace-browser-acceptance-2026-10-19.json",
+    "docs/benchmarks/qtrace-capture-budget-2026-10-19.json",
+    "docs/benchmarks/qtrace-flight-recovery-2026-10-19.json"
+  ]
+}

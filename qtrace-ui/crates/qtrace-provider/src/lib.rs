@@ -13,7 +13,7 @@ pub use allocation::checked_geometric_capacity as checked_provider_geometric_cap
 
 pub use control::{
     AllocationScope, BudgetDimension, MAX_UNGUARDED_BYTES, MAX_UNGUARDED_RECORDS, OperationAbort,
-    WorkDelta, WorkGuard,
+    WorkDelta, WorkGuard, WorkPhase,
 };
 pub use error::{ProviderError, SourceCoordinate};
 pub use flight::{

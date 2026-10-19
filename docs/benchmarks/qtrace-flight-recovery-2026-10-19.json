@@ -1,0 +1,344 @@
+{
+  "schema": 1,
+  "date": "2026-10-19",
+  "status": "provider_optimization_verified_full_capture_incomplete",
+  "scope": "Offline Flight provider recovery on one preserved real device capture. These are local diagnostics, not a desktop open or rooted-device release gate.",
+  "revision": {
+    "head": "f4cf92b8227fed470f11039e727338ca360f61ae",
+    "branch": "perf/flight-recovery-budget",
+    "workspace": "Uncommitted working tree, retaining the pre-existing capture compatibility and verification changes. Baseline Flight source matches HEAD; the final source hashes below identify the measured changes.",
+    "tested_file_sha256": {
+      "qtrace-ui/crates/qtrace-provider/src/flight/events.rs": "38a5c7ed214a9389a041eb5cc3dde26177aab07a84233c38bc3a5dc2a61664d7",
+      "qtrace-ui/crates/qtrace-provider/src/flight/mod.rs": "ca2e35e6299f36319ba453bd1da117c773185f62cab7e73468850d59e5db8a19",
+      "qtrace-ui/crates/qtrace-provider/src/flight/recovery.rs": "4dd3d4880aa72b4bad17bb073a68535db5df9b103afcbd5bc9e94dac20b219f1",
+      "qtrace-ui/crates/qtrace-provider/src/flight/sort.rs": "9e7b08ccaff06ecad068c8ad5f3b39a752f382202ef99ad6c99d953c477f2785",
+      "qtrace-ui/crates/qtrace-provider/tests/flight_recovery.rs": "1544ce85a2f6d996df2165a3808b4a5a0a2b6b705848b42d54d05cb0a87a8328",
+      "qtrace-ui/crates/qtrace-service/examples/verify_capture.rs": "63a93017bfbfc06a315e6bd695866175476fbbbbedfcf6aff41b56f42fd99d5f",
+      "qtrace-ui/crates/qtrace-service/src/service.rs": "9914ea0897f278f5387412954ef33f83e24877e16f1989383bdaa64e834a310d",
+      "qtrace-ui/Cargo.lock": "b504c781c0ac41bee7ceb7edf296e15974b2146b963662a52627bf0bfd0ada08"
+    }
+  },
+  "environment": {
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "architecture": "x86_64",
+    "cpu_model": "Intel(R) Core(TM) Ultra 7 356H",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8\n",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+    "source_sha256": "2603ca95f497bbf2c629abca1ba8877634f069ec100e765af22af04dbdd81ca0"
+  },
+  "corpus": {
+    "path": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/artifacts/137490380472177_26411_libdemo_target.so.flight.bin",
+    "bytes": 67108864,
+    "sha256": "2603ca95f497bbf2c629abca1ba8877634f069ec100e765af22af04dbdd81ca0",
+    "source_report": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/report.json",
+    "source_report_sha256": "015fe4ccae025f7065481f6871561be9ce91ae3c0d2f6780e69310e5351162b9",
+    "origin": "Preserved historical crash/monitored-process-exit acceptance artifact, not a new Xiaomi capture.",
+    "output_events": 1133180
+  },
+  "method": {
+    "build_command": [
+      "cargo",
+      "build",
+      "--release",
+      "--offline",
+      "--manifest-path",
+      "artifacts/flight-budget-2026-10-19/probe/Cargo.toml"
+    ],
+    "sample_command": [
+      "/usr/bin/time",
+      "-f",
+      "%M",
+      "-o",
+      "<rss-file>",
+      "<probe-binary>",
+      "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/artifacts/137490380472177_26411_libdemo_target.so.flight.bin"
+    ],
+    "sample_resident_limit": "u64::MAX for both baseline and optimized measurements. Separate runs verify the unchanged 2 GiB limit.",
+    "timing": "Instant around FlightProvider::open only. Cursor serialization and hashing run after that timer.",
+    "rss": "Maximum RSS reported by /usr/bin/time for the complete probe process, including cursor serialization and hashing; not provider-only live bytes.",
+    "resident_accounting": "Cumulative positive WorkDelta.resident_bytes authorization, including reallocation capacity. This is not measured live heap or RSS.",
+    "order": "Five baseline runs, then five final optimized runs on the same host and immutable file. No concurrent tests or builds during these samples. OS page-cache state was not reset.",
+    "digest": "SHA-256 of each serde_json EventRecord followed by a newline, then the serialized ProviderSummary. The probe uses the same synthetic artifact digest (32 bytes of 0x66) in both versions; the actual file SHA-256 is recorded separately.",
+    "probe_source_snapshot": {
+      "Cargo.toml": "[package]\nname = \"flight-budget-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\nqtrace-provider = { path = \"../../../qtrace-ui/crates/qtrace-provider\" }\nserde_json = \"1\"\nsha2 = \"0.10\"\n\n[profile.release]\ndebug = 1\n",
+      "src/main.rs": "use std::{fs::File, os::unix::fs::FileExt, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::Instant};\nuse qtrace_provider::{ArtifactDigest, FlightProvider, OperationAbort, ProviderError, ReadAtSource, SourceIdentity, TraceProvider, WorkDelta, WorkGuard};\nuse sha2::{Digest, Sha256};\n\nstruct Source(File, u64);\nimpl ReadAtSource for Source {\n    fn len(&self) -> u64 { self.1 }\n    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), ProviderError> {\n        self.0.read_exact_at(output, offset).map_err(|error| ProviderError::new(\"probe.io\", \"probe\", None, false, error.to_string()))\n    }\n}\n\nstruct Guard { used: [AtomicU64; 6], limit: u64, profile: bool }\nimpl WorkGuard for Guard {\n    fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {\n        for (counter, value) in self.used.iter().zip([delta.input_bytes, delta.decompressed_bytes, delta.events, delta.nodes, delta.rows, delta.resident_bytes]) {\n            counter.fetch_add(value, Ordering::Relaxed);\n        }\n        if self.profile && delta.resident_bytes >= 16 * 1024 * 1024 {\n            eprintln!(\"allocation={}\\n{}\", delta.resident_bytes, std::backtrace::Backtrace::force_capture());\n        }\n        let consumed = self.used[5].load(Ordering::Relaxed);\n        if consumed > self.limit {\n            return Err(OperationAbort::budget_exceeded(qtrace_provider::BudgetDimension::ResidentBytes, self.limit, consumed));\n        }\n        Ok(())\n    }\n}\n\nfn main() -> Result<(), Box<dyn std::error::Error>> {\n    let mut args = std::env::args().skip(1);\n    let path = args.next().ok_or(\"artifact path required\")?;\n    let limit = args.next().map(|value| value.parse::<u64>()).transpose()?.unwrap_or(u64::MAX);\n    let file = File::open(&path)?;\n    let length = file.metadata()?.len();\n    let guard = Guard { used: std::array::from_fn(|_| AtomicU64::new(0)), limit, profile: std::env::var_os(\"FLIGHT_PROFILE_ALLOCATIONS\").is_some() };\n    let identity = SourceIdentity { artifact: ArtifactDigest::new([0x66; 32]), format: \"Flight\".into(), format_major: 2, format_minor: 0, source_bytes: length };\n    let started = Instant::now();\n    let provider = FlightProvider::open(Arc::new(Source(file, length)), identity, &guard);\n    let seconds = started.elapsed().as_secs_f64();\n    let mut evidence = serde_json::json!({\"source\": path, \"source_bytes\": length, \"open_seconds\": seconds, \"resident_limit\": limit, \"open_work\": guard.used.iter().map(|counter| counter.load(Ordering::Relaxed)).collect::<Vec<_>>()});\n    match provider {\n        Ok(provider) => {\n            let mut digest = Sha256::new();\n            let mut events = 0_u64;\n            let mut cursor = Box::new(provider).into_cursor()?;\n            while let Some(event) = cursor.next_event(&guard)? {\n                digest.update(serde_json::to_vec(&event)?);\n                digest.update(b\"\\n\");\n                events += 1;\n            }\n            let summary = cursor.finish()?;\n            digest.update(serde_json::to_vec(&summary)?);\n            evidence[\"status\"] = \"passed\".into();\n            evidence[\"events\"] = events.into();\n            evidence[\"digest\"] = format!(\"{:x}\", digest.finalize()).into();\n            evidence[\"summary\"] = serde_json::to_value(summary)?;\n            println!(\"{}\", serde_json::to_string(&evidence)?);\n        }\n        Err(error) => {\n            evidence[\"status\"] = \"failed\".into();\n            evidence[\"error\"] = error.to_string().into();\n            println!(\"{}\", serde_json::to_string(&evidence)?);\n            std::process::exit(1);\n        }\n    }\n    Ok(())\n}\n",
+      "Cargo.lock": "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"block-buffer\"\nversion = \"0.10.4\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71\"\ndependencies = [\n \"generic-array\",\n]\n\n[[package]]\nname = \"cfg-if\"\nversion = \"1.0.4\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801\"\n\n[[package]]\nname = \"cpufeatures\"\nversion = \"0.2.17\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280\"\ndependencies = [\n \"libc\",\n]\n\n[[package]]\nname = \"crypto-common\"\nversion = \"0.1.7\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a\"\ndependencies = [\n \"generic-array\",\n \"typenum\",\n]\n\n[[package]]\nname = \"digest\"\nversion = \"0.10.7\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292\"\ndependencies = [\n \"block-buffer\",\n \"crypto-common\",\n]\n\n[[package]]\nname = \"flight-budget-probe\"\nversion = \"0.0.0\"\ndependencies = [\n \"qtrace-provider\",\n \"serde_json\",\n \"sha2\",\n]\n\n[[package]]\nname = \"generic-array\"\nversion = \"0.14.7\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a\"\ndependencies = [\n \"typenum\",\n \"version_check\",\n]\n\n[[package]]\nname = \"hex\"\nversion = \"0.4.3\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70\"\n\n[[package]]\nname = \"itoa\"\nversion = \"1.0.18\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682\"\n\n[[package]]\nname = \"libc\"\nversion = \"0.2.189\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2\"\n\n[[package]]\nname = \"lz4_flex\"\nversion = \"0.11.6\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a\"\ndependencies = [\n \"twox-hash\",\n]\n\n[[package]]\nname = \"memchr\"\nversion = \"2.8.3\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98\"\n\n[[package]]\nname = \"proc-macro2\"\nversion = \"1.0.107\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9\"\ndependencies = [\n \"unicode-ident\",\n]\n\n[[package]]\nname = \"qtrace-provider\"\nversion = \"0.1.0\"\ndependencies = [\n \"hex\",\n \"lz4_flex\",\n \"serde\",\n \"twox-hash\",\n]\n\n[[package]]\nname = \"quote\"\nversion = \"1.0.47\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001\"\ndependencies = [\n \"proc-macro2\",\n]\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba\"\ndependencies = [\n \"serde_core\",\n \"serde_derive\",\n]\n\n[[package]]\nname = \"serde_core\"\nversion = \"1.0.229\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48\"\ndependencies = [\n \"serde_derive\",\n]\n\n[[package]]\nname = \"serde_derive\"\nversion = \"1.0.229\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348\"\ndependencies = [\n \"proc-macro2\",\n \"quote\",\n \"syn\",\n]\n\n[[package]]\nname = \"serde_json\"\nversion = \"1.0.151\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14\"\ndependencies = [\n \"itoa\",\n \"memchr\",\n \"serde\",\n \"serde_core\",\n \"zmij\",\n]\n\n[[package]]\nname = \"sha2\"\nversion = \"0.10.9\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283\"\ndependencies = [\n \"cfg-if\",\n \"cpufeatures\",\n \"digest\",\n]\n\n[[package]]\nname = \"syn\"\nversion = \"3.0.4\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f\"\ndependencies = [\n \"proc-macro2\",\n \"quote\",\n \"unicode-ident\",\n]\n\n[[package]]\nname = \"twox-hash\"\nversion = \"2.1.4\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a\"\n\n[[package]]\nname = \"typenum\"\nversion = \"1.20.1\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20\"\n\n[[package]]\nname = \"unicode-ident\"\nversion = \"1.0.24\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75\"\n\n[[package]]\nname = \"version_check\"\nversion = \"0.9.5\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a\"\n\n[[package]]\nname = \"zmij\"\nversion = \"1.0.23\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b\"\n"
+    }
+  },
+  "changes": [
+    "Sort compact row numbers with two checked, authorized scratch allocations, then apply a stable permutation to the owned values.",
+    "Reuse one transactional chunk scan buffer and discard rejected scan contents before reuse.",
+    "Keep the original event table when sorted sequence keys have no collisions.",
+    "Deduplicate sorted PCs in place while retaining bounded cancellation checkpoints."
+  ],
+  "before": {
+    "binary": "artifacts/flight-budget-2026-10-19/probe-before",
+    "binary_sha256": "f2deb130696a88b326ec031870b907ee055641ea701af3750bb56f095079b080",
+    "work_totals": {
+      "input_bytes": 112683480,
+      "decompressed_bytes": 0,
+      "events": 1155279,
+      "nodes": 7282272,
+      "rows": 0,
+      "resident_bytes": 6000546557
+    },
+    "samples": [
+      {
+        "run": 1,
+        "provider_open_seconds": 3.093548602,
+        "max_rss_kib": 878460,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/before-1.json",
+        "raw_json_sha256": "7652b19d044df0ac069ff8c9303b9f8dd5f93b12d043c8d5e575dd0d0e3b1d07",
+        "rss_file": "artifacts/flight-budget-2026-10-19/before-1.rss"
+      },
+      {
+        "run": 2,
+        "provider_open_seconds": 3.025143638,
+        "max_rss_kib": 878424,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/before-2.json",
+        "raw_json_sha256": "919fd4ebea85248b5315e5a4eb68ab58a5bcaad2c7d5c86945b8d3b2de6e31dd",
+        "rss_file": "artifacts/flight-budget-2026-10-19/before-2.rss"
+      },
+      {
+        "run": 3,
+        "provider_open_seconds": 2.957447517,
+        "max_rss_kib": 878516,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/before-3.json",
+        "raw_json_sha256": "bc31bbfbd97d31bb463e6bf2900c9494de4eb28c959cf0c60a93174202292028",
+        "rss_file": "artifacts/flight-budget-2026-10-19/before-3.rss"
+      },
+      {
+        "run": 4,
+        "provider_open_seconds": 3.0585527,
+        "max_rss_kib": 878520,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/before-4.json",
+        "raw_json_sha256": "2615cf41d3b0a59e072642fb12c3db9f80fc510d66b9151097e266a368bac72e",
+        "rss_file": "artifacts/flight-budget-2026-10-19/before-4.rss"
+      },
+      {
+        "run": 5,
+        "provider_open_seconds": 3.060225563,
+        "max_rss_kib": 878448,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/before-5.json",
+        "raw_json_sha256": "521b02cb42baa240b7c2ed45a3244bc2d3b3a11b759aabada7be0cc59501265e",
+        "rss_file": "artifacts/flight-budget-2026-10-19/before-5.rss"
+      }
+    ],
+    "median_provider_open_seconds": 3.0585527,
+    "median_max_rss_kib": 878460
+  },
+  "after": {
+    "binary": "artifacts/flight-budget-2026-10-19/probe-final",
+    "binary_sha256": "3c625e8da7761afc50eae4931cbd932dcfff6f802cb4adba65e27ab870e03b3e",
+    "work_totals": {
+      "input_bytes": 112683480,
+      "decompressed_bytes": 0,
+      "events": 1155279,
+      "nodes": 7282272,
+      "rows": 0,
+      "resident_bytes": 2019964085
+    },
+    "samples": [
+      {
+        "run": 1,
+        "provider_open_seconds": 1.708632176,
+        "max_rss_kib": 658668,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/after-final-1.json",
+        "raw_json_sha256": "70d7010ad1cfb2c5c4d84e29ca8b1b3c687e61c43d620be8a2591d9dd9ea037e",
+        "rss_file": "artifacts/flight-budget-2026-10-19/after-final-1.rss"
+      },
+      {
+        "run": 2,
+        "provider_open_seconds": 1.642074654,
+        "max_rss_kib": 658792,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/after-final-2.json",
+        "raw_json_sha256": "fe71d07496b14155e27f45676c8bdbe74141439e384edd0453988a1e035c724b",
+        "rss_file": "artifacts/flight-budget-2026-10-19/after-final-2.rss"
+      },
+      {
+        "run": 3,
+        "provider_open_seconds": 1.6391345259999999,
+        "max_rss_kib": 658728,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/after-final-3.json",
+        "raw_json_sha256": "ab6952806d48c799ac70f1f1e52a6171b375f910722d6134d3c6ef350282dbb0",
+        "rss_file": "artifacts/flight-budget-2026-10-19/after-final-3.rss"
+      },
+      {
+        "run": 4,
+        "provider_open_seconds": 1.734070701,
+        "max_rss_kib": 658772,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/after-final-4.json",
+        "raw_json_sha256": "3ac65be999638d3342db866cb28876c9180f76af7f637d1b138314db47b175fb",
+        "rss_file": "artifacts/flight-budget-2026-10-19/after-final-4.rss"
+      },
+      {
+        "run": 5,
+        "provider_open_seconds": 1.635897263,
+        "max_rss_kib": 658728,
+        "events": 1133180,
+        "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+        "raw_json": "artifacts/flight-budget-2026-10-19/after-final-5.json",
+        "raw_json_sha256": "5e09db62a2340e275462ad6abbae5178bb9362e9f18ddfd471fbcbc297953119",
+        "rss_file": "artifacts/flight-budget-2026-10-19/after-final-5.rss"
+      }
+    ],
+    "median_provider_open_seconds": 1.642074654,
+    "median_max_rss_kib": 658728
+  },
+  "reduction_percent": {
+    "provider_open_seconds": 46.31203660476408,
+    "max_rss_kib": 25.013318762379622,
+    "cumulative_resident_bytes": 66.33699837486321
+  },
+  "equivalence": {
+    "all_ten_event_summary_hashes_match": true,
+    "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+    "input_event_node_row_work_unchanged": true
+  },
+  "resident_limit_checks": {
+    "limit_bytes": 2147483648,
+    "before": {
+      "error": "control.budget_exceeded at control: ResidentBytes budget exceeded: consumed 2416623848, limit 2147483648",
+      "open_seconds": 1.3710645289999999,
+      "open_work": [
+        112683480,
+        0,
+        875125,
+        768,
+        0,
+        2416623848
+      ],
+      "resident_limit": 2147483648,
+      "source": "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/artifacts/137490380472177_26411_libdemo_target.so.flight.bin",
+      "source_bytes": 67108864,
+      "status": "failed"
+    },
+    "after": {
+      "digest": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+      "events": 1133180,
+      "open_seconds": 1.649144405,
+      "open_work": [
+        112683480,
+        0,
+        1155279,
+        7282272,
+        0,
+        2019964085
+      ],
+      "resident_limit": 2147483648,
+      "source": "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/artifacts/137490380472177_26411_libdemo_target.so.flight.bin",
+      "source_bytes": 67108864,
+      "status": "passed"
+    }
+  },
+  "regression_proof": {
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "qtrace-ui/Cargo.toml",
+      "-p",
+      "qtrace-provider",
+      "--test",
+      "flight_recovery",
+      "recovery_keeps_large_event_tables_within_a_cumulative_allocation_budget",
+      "--",
+      "--exact"
+    ],
+    "before": {
+      "exit_code": 101,
+      "dimension": "ResidentBytes",
+      "limit": 33554432,
+      "consumed_at_rejection": 34355788
+    },
+    "after": "Passed in the final complete workspace run. Checks full events, summary, projections and final registers under the same 32 MiB cumulative budget."
+  },
+  "validation": {
+    "commands": [
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--workspace",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "log": "artifacts/flight-budget-2026-10-19/clippy.log"
+      },
+      {
+        "name": "tests",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--workspace",
+          "--all-targets"
+        ],
+        "exit_code": 0,
+        "log": "artifacts/flight-budget-2026-10-19/tests.log"
+      }
+    ],
+    "test_binaries": 54,
+    "passed": 477,
+    "failed": 0,
+    "ignored": 1,
+    "ignored_reason": "The isolated property-case child is launched by its parent test.",
+    "fmt_check_exit_code": 0,
+    "diff_check_exit_code": 0,
+    "log_sha256": {
+      "artifacts/flight-budget-2026-10-19/clippy.log": "b3304227567e067eb23ec46f702cb70f4bf92f07fe020d4a8f896fe4f0b52098",
+      "artifacts/flight-budget-2026-10-19/tests.log": "41aeafd2148d1fd231ce5677a1d3097e6c2512fadd622368b7826fc77b983280"
+    }
+  },
+  "full_capture_verification": {
+    "command": [
+      "qtrace-ui/target/debug/examples/verify_capture",
+      "--report",
+      "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/report.json",
+      "--cache",
+      "/home/lyldalek/workspace/qbdi-android/artifacts/flight-budget-2026-10-19/flight-cache-final"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 35.276656096000806,
+    "stderr": "Error: \"workspace.no_valid_artifact at open: no artifact could be indexed: artifact.incomplete: flight recorder was recovered after monitored process exit; artifacts/137490380472177_26411_libdemo_target.so.flight.bin: control.budget_exceeded: control.budget_exceeded at control: InputBytes budget exceeded: consumed 67108872, limit 67108864\"\n",
+    "stdout": "artifacts/flight-budget-2026-10-19/flight-capture-final.json",
+    "stderr_path": "artifacts/flight-budget-2026-10-19/flight-capture-final.stderr",
+    "verifier_binary_sha256": "5f7e102cd5f73600bfca4d3fa3e3e47a9099d4378036d742d9887d9d01bdf709",
+    "interpretation": "Both SessionLoader discovery and service discovery now complete. The index-source pass fails the existing 64 MiB input-byte allowance after 67,108,872 bytes; no workspace is published. This run does not prove subsequent index, analysis, or browser stages."
+  },
+  "remaining_work": [
+    "Correctly bound the repeated Flight source reads during service indexing, then validate any later budget boundary without relaxing existing production limits.",
+    "The historical monitor-exit memory query still has the separately recorded 2,000-row budget failure; this round does not change it.",
+    "New Xiaomi Frida capture and browser verification remain outstanding; no device operations or tracer throughput measurements were performed."
+  ],
+  "limitations": [
+    "One real corpus and one development host; these samples do not replace the fixed-host scale gate.",
+    "Production budgets, cache wire format, identity verification and raw capture files remain unchanged.",
+    "Local probe binaries and raw logs are ignored artifacts. The source snapshot, hashes and complete five-round samples are embedded here for audit and reproduction."
+  ]
+}

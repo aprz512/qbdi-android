@@ -50,6 +50,7 @@ impl CacheReader {
         expected: &CacheIdentity,
         guard: &dyn WorkGuard,
     ) -> Result<CacheOpen, CacheError> {
+        let _timing = crate::profile::phase("cache.open");
         expected.validate()?;
         let key = expected.cache_key_guarded(guard)?;
         let Some(directory) = CacheDirectory::open(root, &key, false, guard)? else {
@@ -308,10 +309,15 @@ pub(crate) fn validate_file(
         .map_err(ValidationFailure::Rebuild)?;
     validate_section_layout(&manifest, header.manifest_offset)?;
     let decoded = if guard.parallelism() > 1 {
+        // Event metadata uses only the row count. Decode it beside event keys, then
+        // reuse the second worker for checksums beside catalog validation. Never
+        // exceed the caller's two-worker allowance or skip the checksum result.
+        let prepared = prepare_sections(&file, &manifest, expected, guard);
         std::thread::scope(|scope| -> Result<_, ValidationFailure> {
             let checksum =
                 scope.spawn(|| validate_sections(&file, &manifest, header.manifest_offset, guard));
-            let decoded = decode_sections(&file, &manifest, expected, guard);
+            let decoded = prepared
+                .and_then(|prepared| decode_sections(&file, &manifest, expected, prepared, guard));
             checksum.join().map_err(|_| {
                 ValidationFailure::Fatal(CacheError::resource("cache checksum worker panicked"))
             })??;
@@ -319,7 +325,8 @@ pub(crate) fn validate_file(
         })?
     } else {
         validate_sections(&file, &manifest, header.manifest_offset, guard)?;
-        decode_sections(&file, &manifest, expected, guard)?
+        let prepared = prepare_sections(&file, &manifest, expected, guard)?;
+        decode_sections(&file, &manifest, expected, prepared, guard)?
     };
     directory.verify()?;
     stamp.verify(&file)?;
@@ -346,12 +353,26 @@ struct DecodedSections {
     validated_catalog: Option<ValidatedCatalog>,
 }
 
-fn decode_sections(
+struct PreparedSections {
+    event_count: usize,
+    event_keys_offset: u64,
+    event_kinds_offset: u64,
+    catalog: Option<PreparedCatalog>,
+}
+
+struct PreparedCatalog {
+    keys: Vec<EventKey>,
+    kinds: Vec<EventKind>,
+    events: crate::index::PredecodedEvents,
+}
+
+fn prepare_sections(
     file: &File,
     manifest: &CacheManifest,
     expected: &CacheIdentity,
     guard: &dyn WorkGuard,
-) -> Result<DecodedSections, ValidationFailure> {
+) -> Result<PreparedSections, ValidationFailure> {
+    let _timing = crate::profile::phase("cache.prepare_rows");
     let keys = manifest
         .sections
         .iter()
@@ -384,7 +405,7 @@ fn decode_sections(
     }
     let event_count = usize::try_from(key_count)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("event count")))?;
-    let mut validated_catalog = None;
+    let mut catalog = None;
     if expected.cache_schema == 2 && expected.layout_version == 3 {
         let expected_name_count = 2 + crate::index::binary_section_specs().len();
         let mut expected_names = Vec::new();
@@ -412,15 +433,16 @@ fn decode_sections(
                 "schema-two exact section set",
             )));
         }
-        let (event_keys, event_kinds) = read_event_rows(
-            file,
-            keys.offset,
-            kinds.offset,
-            event_count,
-            &expected.artifact_digest,
-            guard,
-        )?;
-        crate::index::probe_index_memory("reader_after_event_rows");
+        let read_keys = || {
+            read_event_rows(
+                file,
+                keys.offset,
+                kinds.offset,
+                event_count,
+                &expected.artifact_digest,
+                guard,
+            )
+        };
         let event_meta = manifest
             .sections
             .iter()
@@ -439,19 +461,72 @@ fn decode_sections(
                 "event metadata length",
             )));
         }
-        let events = crate::index::stream_event_meta(
-            &event_keys,
-            |relative, bytes| {
-                let offset = event_meta
-                    .offset
-                    .checked_add(relative)
-                    .ok_or_else(|| CacheError::invalid("event metadata offset overflow"))?;
-                read_exact_at(file, offset, bytes, Some(guard))
-            },
-            guard,
-        )
-        .map_err(normalized_validation_failure)?;
+        let read_meta = || {
+            crate::index::stream_event_meta(
+                event_count,
+                |relative, bytes| {
+                    let offset = event_meta
+                        .offset
+                        .checked_add(relative)
+                        .ok_or_else(|| CacheError::invalid("event metadata offset overflow"))?;
+                    read_exact_at(file, offset, bytes, Some(guard))
+                },
+                guard,
+            )
+            .map_err(normalized_validation_failure)
+        };
+        let ((event_keys, event_kinds), events) = if guard.parallelism() > 1 {
+            std::thread::scope(|scope| -> Result<_, ValidationFailure> {
+                let keys = scope.spawn(read_keys);
+                let events = read_meta();
+                let keys = keys.join().map_err(|_| {
+                    ValidationFailure::Fatal(CacheError::resource(
+                        "cache event-key worker panicked",
+                    ))
+                })??;
+                Ok((keys, events?))
+            })?
+        } else {
+            (read_keys()?, read_meta()?)
+        };
+        crate::index::probe_index_memory("reader_after_event_rows");
         crate::index::probe_index_memory("reader_after_streamed_events");
+        catalog = Some(PreparedCatalog {
+            keys: event_keys,
+            kinds: event_kinds,
+            events,
+        });
+    }
+    Ok(PreparedSections {
+        event_count,
+        event_keys_offset: keys.offset,
+        event_kinds_offset: kinds.offset,
+        catalog,
+    })
+}
+
+fn decode_sections(
+    file: &File,
+    manifest: &CacheManifest,
+    expected: &CacheIdentity,
+    prepared: PreparedSections,
+    guard: &dyn WorkGuard,
+) -> Result<DecodedSections, ValidationFailure> {
+    let _timing = crate::profile::phase("cache.decode_sections");
+    let PreparedSections {
+        event_count,
+        event_keys_offset,
+        event_kinds_offset,
+        catalog,
+    } = prepared;
+    let mut validated_catalog = None;
+    if let Some(PreparedCatalog {
+        keys: event_keys,
+        kinds: event_kinds,
+        events,
+    }) = catalog
+    {
+        let binary_timing = crate::profile::phase("cache.read_binary_sections");
         let section_count = crate::index::binary_section_specs().len();
         guard.consume(WorkDelta {
             nodes: section_count as u64,
@@ -498,6 +573,7 @@ fn decode_sections(
             binary.push((*name, bytes));
         }
         crate::index::probe_index_memory("reader_after_binary_sections");
+        drop(binary_timing);
         validated_catalog = Some(
             crate::index::validate_binary_sections(
                 binary,
@@ -513,8 +589,8 @@ fn decode_sections(
     }
     Ok(DecodedSections {
         event_count,
-        event_keys_offset: keys.offset,
-        event_kinds_offset: kinds.offset,
+        event_keys_offset,
+        event_kinds_offset,
         validated_catalog,
     })
 }
@@ -539,6 +615,7 @@ fn read_event_rows(
     expected_artifact: &[u8; 32],
     guard: &dyn WorkGuard,
 ) -> Result<(Vec<EventKey>, Vec<EventKind>), ValidationFailure> {
+    let _timing = crate::profile::phase("cache.read_event_rows");
     let mut keys = Vec::new();
     let mut kinds = Vec::new();
     crate::allocation::try_reserve_vec(
@@ -635,6 +712,7 @@ fn validate_sections(
     manifest_offset: u64,
     guard: &dyn WorkGuard,
 ) -> Result<(), ValidationFailure> {
+    let _timing = crate::profile::phase("cache.section_checksums");
     let mut previous_end = HEADER_BYTES as u64;
     for (ordinal, section) in manifest.sections.iter().enumerate() {
         guard.consume(WorkDelta {

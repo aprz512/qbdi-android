@@ -54,6 +54,7 @@ impl JobRegistry {
                     progress: JobProgressDto {
                         completed: DecimalU64Dto::new(0),
                         total: None,
+                        detail: None,
                     },
                     error: None,
                 },
@@ -96,6 +97,7 @@ impl JobRegistry {
                     progress: JobProgressDto {
                         completed: DecimalU64Dto::new(0),
                         total: None,
+                        detail: None,
                     },
                     error: None,
                 },
@@ -214,11 +216,19 @@ impl JobRegistry {
             .get_mut(id)
             .ok_or_else(|| AppError::new("job.stale", "job", "job not found"))?;
         let bounded = total.map_or(completed, |value| completed.min(value));
-        entry.dto.progress = JobProgressDto {
-            completed: DecimalU64Dto::new(bounded),
-            total: total.map(DecimalU64Dto::new),
-        };
+        entry.dto.progress.completed = DecimalU64Dto::new(bounded);
+        entry.dto.progress.total = total.map(DecimalU64Dto::new);
         Ok(())
+    }
+
+    pub(crate) fn set_open_progress(&self, id: &JobId, detail: crate::JobProgressDetailDto) {
+        if let Ok(mut jobs) = self.inner.jobs.lock() {
+            if let Some(entry) = jobs.get_mut(id) {
+                if matches!(entry.dto.state, JobState::Queued | JobState::Running) {
+                    entry.dto.progress.detail = Some(detail);
+                }
+            }
+        }
     }
     pub async fn wait(&self, id: JobId) -> Result<(), AppError> {
         loop {

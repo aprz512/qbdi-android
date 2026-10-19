@@ -827,6 +827,7 @@ pub(super) fn decode(
     deep_validate: bool,
     guard: &dyn WorkGuard,
 ) -> Result<NormalizedCatalog, IndexError> {
+    let _timing = crate::profile::phase("cache.decode_catalog");
     let capabilities = decode_capabilities(&take(&mut sections, CAPABILITIES)?)?;
     let events = events.0;
     super::probe_index_memory("decode_after_events");
@@ -934,6 +935,7 @@ pub(super) fn decode(
     };
     super::probe_index_memory("decode_before_validation");
     if deep_validate {
+        let _timing = crate::profile::phase("cache.validate_catalog");
         catalog.validate(keys, kinds, guard)?;
         super::probe_index_memory("decode_after_shape_validation");
         super::builder::validate_cached_truth(
@@ -1053,15 +1055,15 @@ fn decode_capabilities(bytes: &[u8]) -> Result<ProviderCapabilities, IndexError>
 
 pub(super) fn decode_events(
     bytes: &[u8],
-    keys: &[EventKey],
+    event_count: usize,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<EventColumn>, IndexError> {
     let c = Cursor::new(bytes, EVENT_META_BYTES)?;
-    if c.rows() != keys.len() {
+    if c.rows() != event_count {
         return Err(IndexError::corrupt("event meta row count"));
     }
-    let mut out = reserved(keys.len(), "event meta", guard)?;
-    for row in 0..keys.len() {
+    let mut out = reserved(event_count, "event meta", guard)?;
+    for row in 0..event_count {
         checkpoint(guard, row)?;
         c.zero(row, 2, 2)?;
         c.zero(row, 20, 4)?;

@@ -1,0 +1,409 @@
+{
+  "schema": 1,
+  "date": "2026-10-19",
+  "status": "both_reported_offline_budget_blockers_resolved",
+  "scope": "Preserved historical Flight and monitor-exit reports through the production desktop service. No new device capture or browser acceptance run.",
+  "revision": {
+    "head": "f4cf92b8227fed470f11039e727338ca360f61ae",
+    "branch": "perf/flight-recovery-budget",
+    "workspace": "Uncommitted working tree, preserving the pre-existing LZ4, report-selection and capture-verifier changes. Source hashes identify the tested implementation; no cache wire/schema change.",
+    "tested_source_sha256": {
+      "qtrace-ui/Cargo.lock": "b504c781c0ac41bee7ceb7edf296e15974b2146b963662a52627bf0bfd0ada08",
+      "qtrace-ui/crates/qtrace-analysis/src/memory.rs": "1531734edfcf77ce9a49c05c9ea575d68163a26f8311ca629c51fa185260132b",
+      "qtrace-ui/crates/qtrace-analysis/src/registers.rs": "6eb54d27bb94eb372c3312478329387fdd0aeba391ac0154deb5b7718ff852f8",
+      "qtrace-ui/crates/qtrace-analysis/src/timeline.rs": "72048401dd925e4423e9e9d60321b148235027a18ea8a6b0ea421a040e52e557",
+      "qtrace-ui/crates/qtrace-analysis/tests/memory_state.rs": "2da24dc0d4e78cbfb4549d3c324596798e4e92205c05e6b91a8744be5114d0c8",
+      "qtrace-ui/crates/qtrace-analysis/tests/pagination.rs": "16276901acba88d0366c9373a2381a39a3df6bcd7834733563133da963953c60",
+      "qtrace-ui/crates/qtrace-analysis/tests/register_state.rs": "12b350e01ad1081ce9128076f7f5a2ad46bd5cfb892725635d32a3866699ab9a",
+      "qtrace-ui/crates/qtrace-provider/src/flight/events.rs": "15c4a88ac9940f623683bb3715bc56eec213dcbc440d2d9114b840f2173b7c0b",
+      "qtrace-ui/crates/qtrace-provider/src/flight/mod.rs": "5db7c6c8ace25fe71339a252c8a2e83f218d172a9173a09264ee708707acff7d",
+      "qtrace-ui/crates/qtrace-provider/src/flight/recovery.rs": "2f3a6479317d8a04390ce5e53bd5f3faec3369b74e2fbde7fcce5d1b646692d1",
+      "qtrace-ui/crates/qtrace-provider/src/flight/sort.rs": "9e7b08ccaff06ecad068c8ad5f3b39a752f382202ef99ad6c99d953c477f2785",
+      "qtrace-ui/crates/qtrace-provider/src/model.rs": "fb015d572dc88307d5dfc18584586c862e480f67600091149a16073dd3c902be",
+      "qtrace-ui/crates/qtrace-provider/src/qtrb/input.rs": "6e8abf66d4777d0adca4d3545fdc546aaeade4406a932fa2a0ce107087f5d490",
+      "qtrace-ui/crates/qtrace-provider/src/source.rs": "8fa4ff97b2bcbeb053ce982c72887579d629ff28cf2d7360d867c444a7c4a434",
+      "qtrace-ui/crates/qtrace-provider/tests/flight_recovery.rs": "1544ce85a2f6d996df2165a3808b4a5a0a2b6b705848b42d54d05cb0a87a8328",
+      "qtrace-ui/crates/qtrace-provider/tests/qtrb_input.rs": "b6b68fe08f9b85275a3b0a109c75154dc06af4bd04fa9461b870bd4c48506bc8",
+      "qtrace-ui/crates/qtrace-service/Cargo.toml": "66c6f0cc6859a4c056fd53ee198e298bc193ab79d960835465b039e2acd84d3e",
+      "qtrace-ui/crates/qtrace-service/examples/verify_capture.rs": "c323ffed4c1966009f27f13d2bd53730e965283a6e52f27c75c2ac4aaa54afcb",
+      "qtrace-ui/crates/qtrace-service/src/budget.rs": "7c782d966b6a6260695c19c95f96f2244c13b6729026e82ea96b402525fa55ae",
+      "qtrace-ui/crates/qtrace-service/src/service.rs": "bf2df239ff4ebea003fa5f4077b410c01abfcb4cb52729397104f0080a32615c",
+      "qtrace-ui/crates/qtrace-service/tests/end_to_end.rs": "62d3aa3d4800921d0abfc23c499fdb67462d73d7d90d1a4ea92219dc4e2b4ac4",
+      "qtrace-ui/crates/qtrace-store/src/index/builder.rs": "93045eee99d5c225d8c9777eb7418be5552d44483f625f5afc5b936c6aa7cb5b",
+      "qtrace-ui/crates/qtrace-store/src/session.rs": "6d9b2025c7e6ccb1bef8b9cc21006a4ab6888516cfe981be4a599bd470d2300f"
+    },
+    "verifier_binary": {
+      "path": "qtrace-ui/target/release/examples/verify_capture",
+      "bytes": 4255416,
+      "sha256": "a079064fd2b13d553a81f93f8e61eaea484c3b22e7d1d711bddc3de8dea0337a"
+    }
+  },
+  "environment": {
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "architecture": "x86_64",
+    "cpu_model": "Intel(R) Core(TM) Ultra 7 356H",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+  },
+  "method": {
+    "build_command": [
+      "cargo",
+      "build",
+      "--release",
+      "--manifest-path",
+      "qtrace-ui/Cargo.toml",
+      "-p",
+      "qtrace-service",
+      "--example",
+      "verify_capture"
+    ],
+    "verification": "Strict report hashes and path confinement; fresh cache; every indexed key/payload/kind/provenance compared with an independent provider pass; complete timeline traversal in 2,000-row pages; instruction filter; first/last instruction details and 34-cell register states; first-instruction call-tree page; first-memory state up to 64 bytes. Close and restart the service, reopen persisted cache, repeat all checks, require equal evidence.",
+    "source_input_accounting": "Flight discovery allows file_size * 3 + 4 KiB (one hash, checksum pass and record pass). Flight index source allows file_size * 2; compressed QTRB allows transport plus decoded bytes. Session sums are checked. Fixed resident/work/output caps remain enforced.",
+    "fixed_production_limits": {
+      "index_and_cache_resident_bytes": 2147483648,
+      "register_replay_resident_bytes": 536870912,
+      "register_replay_nodes": 40000000,
+      "register_replay_deadline_seconds": 30,
+      "call_tree_resident_bytes": 536870912,
+      "interactive_nodes": 100000,
+      "interactive_rows": 2000,
+      "interactive_resident_bytes": 268435456,
+      "interactive_deadline_seconds": 5,
+      "memory_history_candidate_rows": 10000
+    },
+    "timings": "Single-run service diagnostics, excluding initial standalone SessionLoader discovery and subsequent verification work. OS page cache not reset. Not a performance gate or before/after benchmark.",
+    "canonical_digest": "Completeness and provider-summary hashes below use Python JSON sorted keys, compact separators, UTF-8. Raw output hashes cover original bytes. Timeline/analysis hashes are produced by verify_capture."
+  },
+  "fixes": [
+    "Derive Flight input limits from checksum and record passes instead of one physical file size.",
+    "Retain compact physical records; reuse final register snapshot values and canonical JSON buffers; reserve known Flight event counts and discontinuity capacity under allocation guards.",
+    "Validate cached Flight discontinuity evidence by its canonical union without changing individual event facts, causes, domains or provenance.",
+    "Bound discontinuity payload totals by max(16 MiB, rows * 256 B), retain the 1 MiB per-payload cap, byte accounting, cancellation and allocation checks.",
+    "Reuse QueryContext validated gap evidence for register replay and memory analysis. Store global register invalidations once, apply them lazily per thread, and query from the latest invalidation or checkpoint.",
+    "Charge memory posting/sort work to Nodes, returned byte-address/history rows to Rows. Retain both 2,000 response rows and the 100,000-node interactive cap.",
+    "Use a binary-searched gap prefix for memory state so future gaps do not consume past-history capacity. Preserve unordered future cross-thread write conflict checks."
+  ],
+  "acceptance": [
+    {
+      "name": "Flight",
+      "command": [
+        "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+        "--report",
+        "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/report.json",
+        "--cache",
+        "/home/lyldalek/workspace/qbdi-android/artifacts/capture-budget-2026-10-19/flight-cache-v9"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 38.86766711300152,
+      "source_report": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/report.json",
+      "source_report_sha256": "015fe4ccae025f7065481f6871561be9ce91ae3c0d2f6780e69310e5351162b9",
+      "raw_evidence": {
+        "path": "artifacts/capture-budget-2026-10-19/flight-v9.json",
+        "bytes": 16950198,
+        "sha256": "17acb92fc81f1d2109b24bf2f5aa2c5b1d4467dfdf0fa4255bbc5bec487d43ff"
+      },
+      "stderr": {
+        "path": "artifacts/capture-budget-2026-10-19/flight-v9.stderr",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "cold_open_seconds": 8.230118051,
+      "warm_open_seconds": 4.65921188,
+      "reopen_equivalent": true,
+      "artifacts": [
+        {
+          "name": "artifacts/137490380472177_26411_libdemo_target.so.flight.bin",
+          "status": "indexed",
+          "event_count": 1133180,
+          "tid_count": 43,
+          "file_bytes": 67108864,
+          "provider_bytes": 67108864,
+          "file_sha256": "2603ca95f497bbf2c629abca1ba8877634f069ec100e765af22af04dbdd81ca0",
+          "event_counts": {
+            "begin": 255,
+            "discontinuity": 258055,
+            "instruction": 340141,
+            "instruction_definition": 10749,
+            "memory": 151559,
+            "register_checkpoint": 255,
+            "register_delta": 340090,
+            "semantic_call": 29948,
+            "signal_handler_boundary": 1,
+            "string_definition": 2092,
+            "syscall": 1,
+            "thread_lifecycle": 34
+          },
+          "timeline_sha256": "803937f7d127a7b7b4c91765ea029ddc3356322a8e208857d904c72f36670be4",
+          "analysis_sha256": "fb1cb67511ddaa1677b321cb199ab61b0764c7973c4f21e15020f6396a65d7c4",
+          "completeness_rows": 22134,
+          "completeness_sha256": "5d6a5de74d143b363330545c631608cf98f561d57d56f05b4c9e721bb840267b",
+          "provider_summary_sha256": "7a184b15f010b80a7ffd36fcd7dabf8bb8cd4e88ff07dc275430236d02b4ab5a",
+          "provider_counters": {
+            "records_seen": 875125,
+            "events_emitted": 1133180,
+            "opaque_records": 0,
+            "damaged_records": 0,
+            "input_bytes": 112683480,
+            "decompressed_bytes": 0
+          },
+          "provider_termination": null
+        }
+      ]
+    },
+    {
+      "name": "monitor-exit",
+      "command": [
+        "/home/lyldalek/workspace/qbdi-android/qtrace-ui/target/release/examples/verify_capture",
+        "--report",
+        "/home/lyldalek/workspace/qbdi-android/qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/exit/22bfb9bd-e99b-4dd8-a8a2-f2a6be8ef341/report.json",
+        "--cache",
+        "/home/lyldalek/workspace/qbdi-android/artifacts/capture-budget-2026-10-19/exit-cache-final"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.05649991799873533,
+      "source_report": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/exit/22bfb9bd-e99b-4dd8-a8a2-f2a6be8ef341/report.json",
+      "source_report_sha256": "c8d68fcb18acc9506b6fa1b3cde14b2acccfee3a9a615578bb5b3acbb210e259",
+      "raw_evidence": {
+        "path": "artifacts/capture-budget-2026-10-19/exit-final.json",
+        "bytes": 3513,
+        "sha256": "f1956cdddf0a6d07aaba05fd668afc9846b01dc45d573b05fa4dd1f2398d992d"
+      },
+      "stderr": {
+        "path": "artifacts/capture-budget-2026-10-19/exit-final.stderr",
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "cold_open_seconds": 0.015112456,
+      "warm_open_seconds": 0.005287211,
+      "reopen_equivalent": true,
+      "artifacts": [
+        {
+          "name": "artifacts/1787949179017_26040_26105_fixture-entry_0x71250_0.trace.bin.lz4",
+          "status": "indexed",
+          "event_count": 1714,
+          "tid_count": 1,
+          "file_bytes": 24527,
+          "provider_bytes": 87035,
+          "file_sha256": "9d6cf360b7c5bd2f00eb666a33ee9eb975474edbe10c345d8f409d5daacb3f4e",
+          "event_counts": {
+            "begin": 1,
+            "instruction": 1199,
+            "instruction_definition": 50,
+            "memory": 462,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "timeline_sha256": "8ccdb9b6ae0936482b5f984f618c57f9f3d2f94d619e2b366fb809bd6543cc37",
+          "analysis_sha256": "0133e2077c8122b08ebbfcfb73b321d1d5c7cdcda6e7deefd7296b69d8dd35f4",
+          "completeness_rows": 1,
+          "completeness_sha256": "e7bf7478554c9df04230876372cd23fc052bc7a9465e894195cc4211a090bb97",
+          "provider_summary_sha256": "1a0e275e8062746cce542ea3cadc66f18fa73890e99c675e5c95da3aa0e3df7e",
+          "provider_counters": {
+            "records_seen": 1714,
+            "events_emitted": 1714,
+            "opaque_records": 0,
+            "damaged_records": 0,
+            "input_bytes": 87035,
+            "decompressed_bytes": 87035
+          },
+          "provider_termination": {
+            "kind": "completed",
+            "reason": null,
+            "return_value": 1804524732435045419,
+            "elapsed_ms": 3033,
+            "metrics": {
+              "instructions": 1199,
+              "encoded_bytes": 87035,
+              "compressed_bytes": 24527,
+              "cache_hits": 1149,
+              "cache_misses": 50,
+              "cache_collisions": 0,
+              "buffer_swaps": 2,
+              "producer_waits": 1,
+              "producer_wait_ns": 3347087,
+              "effective_buffer_bytes": 67108864
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "baseline_fact_equivalence": {
+    "reference_evidence": "docs/benchmarks/qtrace-flight-recovery-2026-10-19.json",
+    "probe_build_command": [
+      "cargo",
+      "build",
+      "--release",
+      "--offline",
+      "--manifest-path",
+      "artifacts/flight-budget-2026-10-19/probe/Cargo.toml"
+    ],
+    "command": [
+      "artifacts/flight-budget-2026-10-19/probe/target/release/flight-budget-probe",
+      "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/artifacts/137490380472177_26411_libdemo_target.so.flight.bin",
+      "2147483648"
+    ],
+    "probe_binary": {
+      "path": "artifacts/flight-budget-2026-10-19/probe/target/release/flight-budget-probe",
+      "bytes": 8536064,
+      "sha256": "e6fbdda4001a6bc22af3c3806c8007e301234f0a60c01e57bb66620168da56a9"
+    },
+    "raw_evidence": {
+      "path": "artifacts/capture-budget-2026-10-19/provider-final.json",
+      "bytes": 3067169,
+      "sha256": "82645f5c266d57834a545af752d50ca003cf3cb79053d7232ce9a659f0488dc2"
+    },
+    "status": "passed",
+    "events": 1133180,
+    "resident_limit": 2147483648,
+    "work_dimensions": [
+      "input_bytes",
+      "decompressed_bytes",
+      "events",
+      "nodes",
+      "rows",
+      "resident_bytes"
+    ],
+    "open_work": [
+      112683480,
+      0,
+      1155279,
+      7282272,
+      0,
+      1187396453
+    ],
+    "event_summary_sha256": "96815f969d8729e554fdbc3381a4d23c4d296067b3cb33beae5c4510b23bc59d",
+    "matches_original_baseline": true,
+    "digest_definition": "Same probe source and synthetic artifact digest [0x66; 32] as the reference: each serde_json EventRecord plus newline, followed by serde_json ProviderSummary. This checks all Flight facts against the original baseline; it is not a new five-round timing comparison."
+  },
+  "regressions": [
+    {
+      "path": "qtrace-ui/crates/qtrace-service/tests/end_to_end.rs",
+      "test": "budget_memory_queries_separate_posting_work_from_returned_rows",
+      "proof": "2,001 memory candidates allow a small state query; 2,000 returned history rows pass; 2,001 returned rows still fail Rows."
+    },
+    {
+      "path": "qtrace-ui/crates/qtrace-service/tests/end_to_end.rs",
+      "test": "budget_flight_opens_cold_and_cached_with_checksum_and_record_reads",
+      "proof": "Dense checksummed multi-chunk Flight opens from a cold index and persisted cache under production limits."
+    },
+    {
+      "path": "qtrace-ui/crates/qtrace-service/tests/end_to_end.rs",
+      "test": "damaged_flight_proofs_match_merged_completeness_after_cache_reopen",
+      "proof": "Damaged-prefix Flight evidence survives canonical union validation and persisted cache reopen."
+    },
+    {
+      "path": "qtrace-ui/crates/qtrace-analysis/tests/register_state.rs",
+      "test": "many_gaps_keep_replay_bounded_and_preserve_each_invalidation_key",
+      "proof": "44 threads and 12,000 alternating scoped/global gaps build under 16 MiB cumulative authorization; sampled queries fit 2,000 work rows and preserve each evidence key."
+    },
+    {
+      "path": "qtrace-ui/crates/qtrace-analysis/tests/register_state.rs",
+      "test": "shared_global_gaps_override_checkpoints_and_reach_new_threads",
+      "proof": "Shared global gaps invalidate older checkpoints and threads first seen after the gap; recapture and thread-local gaps retain scope."
+    },
+    {
+      "path": "qtrace-ui/crates/qtrace-analysis/tests/register_state.rs",
+      "test": "context_replay_preserves_all_states_without_reading_discontinuities_twice",
+      "proof": "All register states on four production Flight fixtures equal direct replay, with gap input reads removed from replay work."
+    },
+    {
+      "path": "qtrace-ui/crates/qtrace-analysis/tests/pagination.rs",
+      "test": "many_canonical_discontinuities_fit_their_row_derived_context_budget",
+      "proof": "100,000 small canonical payloads above 16 MiB are accepted; existing padded/oversized/cancelled input regressions remain passing."
+    },
+    {
+      "path": "qtrace-ui/crates/qtrace-analysis/tests/pagination.rs",
+      "test": "memory_state_ignores_future_gaps_and_retains_the_past_history_limit",
+      "proof": "An early state query with 10,001 total gaps succeeds without rereading payloads; a prefix exceeding 10,000 gaps still fails."
+    }
+  ],
+  "validation": {
+    "commands": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--workspace",
+          "--all-targets"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 31.384796600999834,
+        "log": "artifacts/capture-budget-2026-10-19/workspace-tests-final.log",
+        "log_sha256": "bc4a21cdc7e96f594c5d5fa9ec0f567bffee9dffbeb611ebf368632e4c436501"
+      },
+      {
+        "command": [
+          "cargo",
+          "clippy",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--workspace",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 3.494314002004103,
+        "log": "artifacts/capture-budget-2026-10-19/clippy-final.log",
+        "log_sha256": "7cf9a89f29df2e6582ff2ecd76d6bb3804cddf0fde2b1a9c41023ccf02c8809a"
+      },
+      {
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--manifest-path",
+          "qtrace-ui/Cargo.toml",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.4911600039995392,
+        "log": "artifacts/capture-budget-2026-10-19/fmt-final.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "command": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.012212610999995377,
+        "log": "artifacts/capture-budget-2026-10-19/diff-final.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "top_level_unfiltered_summaries": 42,
+    "passed": 473,
+    "failed": 0,
+    "ignored": 1,
+    "filtered_subprocess_summaries": 12,
+    "additional_filtered_subprocess_passes": 12,
+    "counting_method": "Sum unfiltered cargo test harness summaries; separately count filtered subprocess summaries to avoid counting their parent tests twice.",
+    "ignored_reason": "isolated_provider_case_child is launched by its parent test."
+  },
+  "earlier_failures": [
+    {
+      "source": "docs/benchmarks/qtrace-flight-recovery-2026-10-19.json",
+      "error": "InputBytes budget exceeded: consumed 67108872, limit 67108864",
+      "resolution": "Correct per-format read-pass accounting and complete later index/cache/analysis verification."
+    },
+    {
+      "source": "docs/benchmarks/qtrace-device-validation-2026-10-18.json",
+      "error": "Rows budget exceeded: consumed 2153, limit 2000",
+      "resolution": "Separate memory candidate work from returned rows, then verify the original monitor-exit report cold and after restart."
+    }
+  ],
+  "limitations": [
+    "Two preserved real reports on one development host. No fixed-host scale/performance gate was rerun.",
+    "Register, call-tree and memory checks sample the documented events; every event and every timeline page is checked. This does not prove every possible analysis query fits an interactive budget.",
+    "Captures retain original damage, gaps and termination uncertainty. Passing verification does not make a partial capture complete.",
+    "New Xiaomi Frida capture still requires Shell root access; browser acceptance remains pending. No tracer throughput claim or device operation in this follow-up.",
+    "Raw capture and verification logs are local ignored artifacts; the repository record retains their hashes, exact commands and compact results.",
+    "First-stage five-round Flight performance results remain tied to their recorded source hashes; this follow-up does not relabel them as measurements of the final implementation."
+  ]
+}

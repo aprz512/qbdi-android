@@ -11,7 +11,7 @@ use qtrace_provider::{
 };
 use qtrace_store::{NormalizedBulkView, RegisterAccess, RegisterObservationRow};
 
-use crate::AnalysisError;
+use crate::{AnalysisError, QueryContext};
 
 const CHECKPOINT_EVENTS: usize = 4_096;
 type ScopeKey = (TimelineId, Option<u32>);
@@ -59,19 +59,37 @@ struct ReplayCheckpoint {
 
 struct ScopeReplay {
     events: Vec<ReplayEvent>,
+    invalidations: Vec<usize>,
     checkpoints: Vec<ReplayCheckpoint>,
     build_state: RegisterSnapshotState,
     since_checkpoint: usize,
+    last_global_row: Option<usize>,
 }
 
 impl ScopeReplay {
     fn new() -> Self {
         Self {
             events: Vec::new(),
+            invalidations: Vec::new(),
             checkpoints: Vec::new(),
             build_state: unknown_snapshot(),
             since_checkpoint: 0,
+            last_global_row: None,
         }
+    }
+
+    fn last_invalidation(
+        &self,
+        target: usize,
+        guard: &dyn WorkGuard,
+    ) -> Result<Option<(usize, ReplayEvent)>, AnalysisError> {
+        let end = guarded_upper_bound(self.invalidations.len(), guard, |index| {
+            self.events[self.invalidations[index]].row <= target
+        })?;
+        Ok(end.checked_sub(1).map(|index| {
+            let event_index = self.invalidations[index];
+            (event_index, self.events[event_index])
+        }))
     }
 }
 
@@ -111,6 +129,22 @@ impl RegisterReplay {
 
     pub fn from_arc_with_guard(
         store: Arc<dyn NormalizedBulkView + Send + Sync>,
+        guard: &dyn WorkGuard,
+    ) -> Result<Self, AnalysisError> {
+        Self::build(store, None, guard)
+    }
+
+    /// Reuse validated discontinuity evidence from the same immutable store.
+    pub fn from_context_with_guard(
+        context: &QueryContext,
+        guard: &dyn WorkGuard,
+    ) -> Result<Self, AnalysisError> {
+        Self::build(context.store(), Some(context), guard)
+    }
+
+    fn build(
+        store: Arc<dyn NormalizedBulkView + Send + Sync>,
+        context: Option<&QueryContext>,
         guard: &dyn WorkGuard,
     ) -> Result<Self, AnalysisError> {
         let observations = store.register_observation_rows();
@@ -175,7 +209,17 @@ impl RegisterReplay {
                 }
                 let row_observations = &observations[observations_start..observation];
                 let invalidates = (kind == EventKind::Discontinuity
-                    && discontinuity_affects_registers(store.as_ref(), row, guard)?)
+                    && if let Some(context) = context {
+                        context
+                            .discontinuity_evidence(row)
+                            .ok_or_else(|| {
+                                AnalysisError::state_invalid("discontinuity evidence is absent")
+                            })?
+                            .domain
+                            != qtrace_provider::RangeDomain::MemoryAddresses
+                    } else {
+                        discontinuity_affects_registers(store.as_ref(), row, guard)?
+                    })
                     || row_observations.iter().any(|item| {
                         item.access == RegisterAccess::Delta
                             && item.provenance == Provenance::Damaged
@@ -187,34 +231,15 @@ impl RegisterReplay {
                     invalidates,
                 };
 
-                if kind == EventKind::Discontinuity && key.tid.is_none() && invalidates {
-                    let global_scope = (key.timeline, None);
-                    if !scopes.contains_key(&global_scope) {
-                        reserve_hash_map(&mut scopes, 1, guard)?;
-                        scopes.insert(global_scope, ScopeReplay::new());
-                    }
-                    for ((timeline, _), scope) in &mut scopes {
-                        if *timeline == key.timeline {
-                            guard
-                                .consume(WorkDelta {
-                                    nodes: 1,
-                                    ..WorkDelta::default()
-                                })
-                                .map_err(AnalysisError::state_budget)?;
-                            append_build_event(
-                                scope,
-                                event,
-                                &key,
-                                row_observations,
-                                store.as_ref(),
-                                guard,
-                                true,
-                            )?;
-                        }
-                    }
-                    continue;
-                }
-
+                // Keep timeline-wide invalidations once in the None scope.
+                // Apply the latest one lazily before the next thread event.
+                let global_event = key.tid.and_then(|_| {
+                    let global = scopes.get(&(key.timeline, None))?;
+                    global
+                        .invalidations
+                        .last()
+                        .map(|index| global.events[*index])
+                });
                 let scope_key = (key.timeline, key.tid);
                 if !scopes.contains_key(&scope_key) {
                     reserve_hash_map(&mut scopes, 1, guard)?;
@@ -225,15 +250,13 @@ impl RegisterReplay {
                         "register replay scope insertion failed",
                     ));
                 };
-                append_build_event(
-                    scope,
-                    event,
-                    &key,
-                    row_observations,
-                    store.as_ref(),
-                    guard,
-                    invalidates,
-                )?;
+                if let Some(global) = global_event {
+                    if scope.last_global_row != Some(global.row) {
+                        apply_stored_event(&mut scope.build_state, store.as_ref(), &global, guard)?;
+                        scope.last_global_row = Some(global.row);
+                    }
+                }
+                append_build_event(scope, event, &key, row_observations, store.as_ref(), guard)?;
             }
         }
         Ok(Self { store, scopes })
@@ -252,8 +275,21 @@ impl RegisterReplay {
             .store
             .row_for_source_key(key)
             .ok_or_else(|| AnalysisError::state_invalid("event key is not in this trace"))?;
+        let global = if key.tid.is_some() {
+            self.scopes
+                .get(&(key.timeline, None))
+                .map(|scope| scope.last_invalidation(target, guard))
+                .transpose()?
+                .flatten()
+                .map(|(_, event)| event)
+        } else {
+            None
+        };
         let Some(scope) = self.scopes.get(&(key.timeline, key.tid)) else {
-            let state = unknown_snapshot();
+            let mut state = unknown_snapshot();
+            if let Some(global) = global {
+                apply_stored_event(&mut state, self.store.as_ref(), &global, guard)?;
+            }
             return Ok(RegisterStateAtEvent {
                 key: key.clone(),
                 before: state.clone(),
@@ -266,12 +302,32 @@ impl RegisterReplay {
         let checkpoint_end = guarded_upper_bound(scope.checkpoints.len(), guard, |index| {
             scope.checkpoints[index].row < target
         })?;
-        let (mut state, replay_start) = if checkpoint_end == 0 {
-            (unknown_snapshot(), 0)
+        let (mut state, mut replay_start, mut state_row) = if checkpoint_end == 0 {
+            (unknown_snapshot(), 0, None)
         } else {
             let checkpoint = &scope.checkpoints[checkpoint_end - 1];
-            (checkpoint.state.clone(), checkpoint.event_index + 1)
+            (
+                checkpoint.state.clone(),
+                checkpoint.event_index + 1,
+                Some(checkpoint.row),
+            )
         };
+        if let Some((index, event)) = scope.last_invalidation(target, guard)? {
+            if index >= replay_start {
+                state = unknown_snapshot();
+                replay_start = index;
+                state_row = Some(event.row);
+            }
+        }
+        if let Some(global) = global {
+            if state_row.is_none_or(|row| global.row > row) {
+                state = unknown_snapshot();
+                apply_stored_event(&mut state, self.store.as_ref(), &global, guard)?;
+                replay_start = guarded_upper_bound(scope.events.len(), guard, |index| {
+                    scope.events[index].row <= global.row
+                })?;
+            }
+        }
         let observations = self.store.register_observation_rows();
         for chunk in scope.events[replay_start..event_end].chunks(CHECKPOINT_EVENTS) {
             guard
@@ -332,9 +388,16 @@ fn append_build_event(
     observations: &[RegisterObservationRow],
     store: &dyn NormalizedBulkView,
     guard: &dyn WorkGuard,
-    force_checkpoint: bool,
 ) -> Result<(), AnalysisError> {
     guarded_vec_push(&mut scope.events, event, guard, "register event index")?;
+    if event.invalidates {
+        guarded_vec_push(
+            &mut scope.invalidations,
+            scope.events.len() - 1,
+            guard,
+            "register invalidation index",
+        )?;
+    }
     apply_transition(
         &mut scope.build_state,
         store,
@@ -344,10 +407,9 @@ fn append_build_event(
         guard,
     )?;
     scope.since_checkpoint = scope.since_checkpoint.saturating_add(1);
-    if force_checkpoint
-        || is_reliable_full_checkpoint(observations)
-        || scope.since_checkpoint == CHECKPOINT_EVENTS
-    {
+    // Invalidation is replayed like any other transition. Snapshotting every gap
+    // duplicates all 34 cells and exhausts the build budget on damaged captures.
+    if is_reliable_full_checkpoint(observations) || scope.since_checkpoint == CHECKPOINT_EVENTS {
         let checkpoint = ReplayCheckpoint {
             event_index: scope.events.len() - 1,
             row: event.row,
@@ -362,6 +424,33 @@ fn append_build_event(
         scope.since_checkpoint = 0;
     }
     Ok(())
+}
+
+fn apply_stored_event(
+    state: &mut RegisterSnapshotState,
+    store: &dyn NormalizedBulkView,
+    event: &ReplayEvent,
+    guard: &dyn WorkGuard,
+) -> Result<(), AnalysisError> {
+    guard
+        .consume(WorkDelta {
+            rows: 1,
+            nodes: 1,
+            ..WorkDelta::default()
+        })
+        .map_err(AnalysisError::state_budget)?;
+    let key = store
+        .event_key(event.row)
+        .map_err(AnalysisError::state_store)?
+        .ok_or_else(|| AnalysisError::state_invalid("invalidation event has no key"))?;
+    apply_transition(
+        state,
+        store,
+        event,
+        &key,
+        &store.register_observation_rows()[event.observations_start..event.observations_end],
+        guard,
+    )
 }
 
 fn apply_transition(

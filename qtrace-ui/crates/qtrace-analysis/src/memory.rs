@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::{borrow::Cow, ops::Range, sync::Arc};
 
 use qtrace_provider::{
     AllocationScope, CaptureBytes, EventKey, MemoryDirection, OperationAbort, Provenance,
@@ -6,7 +6,7 @@ use qtrace_provider::{
 };
 use qtrace_store::{NormalizedBulkView, NormalizedPostingQuery};
 
-use crate::AnalysisError;
+use crate::{AnalysisError, QueryContext};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryEvidence {
@@ -38,6 +38,7 @@ pub struct MemoryStateAtEvent {
 
 pub struct MemoryAnalyzer {
     store: Arc<dyn NormalizedBulkView + Send + Sync>,
+    context: Option<Arc<QueryContext>>,
 }
 
 pub const MAX_MEMORY_STATE_BYTES: usize = 1024 * 1024;
@@ -82,7 +83,20 @@ impl MemoryAnalyzer {
                 ..WorkDelta::default()
             })
             .map_err(AnalysisError::state_budget)?;
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            context: None,
+        })
+    }
+
+    /// Reuse validated, ordered gap evidence from the same immutable store.
+    pub fn from_context_with_guard(
+        context: Arc<QueryContext>,
+        guard: &dyn WorkGuard,
+    ) -> Result<Self, AnalysisError> {
+        let mut analyzer = Self::from_arc_with_guard(context.store(), guard)?;
+        analyzer.context = Some(context);
+        Ok(analyzer)
     }
 
     pub fn state_at(
@@ -130,17 +144,22 @@ impl MemoryAnalyzer {
             .map_err(AnalysisError::state_store)?;
         enforce_history_limit(rows.len())?;
         validate_history_rows(&rows, guard)?;
-        let discontinuity_kinds = [qtrace_provider::EventKind::Discontinuity];
-        let discontinuity_query = NormalizedPostingQuery::Kinds(&discontinuity_kinds);
-        let discontinuity_estimate = self
-            .store
-            .bounded_row_estimate(discontinuity_query, MAX_MEMORY_HISTORY_ROWS, guard)
-            .map_err(AnalysisError::state_store)?;
-        enforce_history_limit(discontinuity_estimate.rows)?;
-        let discontinuities = self
-            .store
-            .bounded_rows(discontinuity_query, MAX_MEMORY_HISTORY_ROWS, guard)
-            .map_err(AnalysisError::state_store)?;
+        let discontinuities = if let Some(context) = self.context.as_ref() {
+            Cow::Borrowed(context.discontinuities_through(target, guard)?)
+        } else {
+            let discontinuity_kinds = [qtrace_provider::EventKind::Discontinuity];
+            let discontinuity_query = NormalizedPostingQuery::Kinds(&discontinuity_kinds);
+            let estimate = self
+                .store
+                .bounded_row_estimate(discontinuity_query, MAX_MEMORY_HISTORY_ROWS, guard)
+                .map_err(AnalysisError::state_store)?;
+            enforce_history_limit(estimate.rows)?;
+            Cow::Owned(
+                self.store
+                    .bounded_rows(discontinuity_query, MAX_MEMORY_HISTORY_ROWS, guard)
+                    .map_err(AnalysisError::state_store)?,
+            )
+        };
         enforce_history_limit(discontinuities.len())?;
         validate_history_rows(&discontinuities, guard)?;
 
@@ -235,6 +254,7 @@ impl MemoryAnalyzer {
                 }
                 apply_temporal_discontinuity(
                     self.store.as_ref(),
+                    self.context.as_deref(),
                     next_discontinuity,
                     key,
                     &range,
@@ -505,6 +525,7 @@ fn memory_evidence(
 
 fn apply_temporal_discontinuity(
     store: &dyn NormalizedBulkView,
+    context: Option<&QueryContext>,
     row: usize,
     target_key: &EventKey,
     query: &Range<u64>,
@@ -520,23 +541,28 @@ fn apply_temporal_discontinuity(
     {
         return Ok(());
     }
-    let bytes = store
-        .payload_bytes(row)
-        .map_err(AnalysisError::state_store)?;
-    for chunk in bytes.chunks(4_096) {
-        guard
-            .consume(WorkDelta {
-                input_bytes: chunk.len() as u64,
-                nodes: chunk.len() as u64,
-                ..WorkDelta::default()
-            })
-            .map_err(AnalysisError::state_budget)?;
-    }
-    let discontinuity = crate::timeline::decode_discontinuity_payload(bytes)?;
-    let affected = match (
-        discontinuity.evidence.domain(),
-        discontinuity.evidence.bounds(),
-    ) {
+    let (domain, bounds) = if let Some(context) = context {
+        let evidence = context
+            .discontinuity_evidence(row)
+            .ok_or_else(|| AnalysisError::state_invalid("discontinuity evidence is absent"))?;
+        (evidence.domain, evidence.bounds)
+    } else {
+        let bytes = store
+            .payload_bytes(row)
+            .map_err(AnalysisError::state_store)?;
+        for chunk in bytes.chunks(4_096) {
+            guard
+                .consume(WorkDelta {
+                    input_bytes: chunk.len() as u64,
+                    nodes: chunk.len() as u64,
+                    ..WorkDelta::default()
+                })
+                .map_err(AnalysisError::state_budget)?;
+        }
+        let evidence = crate::timeline::decode_discontinuity_payload(bytes)?.evidence;
+        (evidence.domain(), evidence.bounds())
+    };
+    let affected = match (domain, bounds) {
         (
             RangeDomain::MemoryAddresses,
             RangeBounds::HalfOpen {

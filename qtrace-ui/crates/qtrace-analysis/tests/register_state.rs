@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use qtrace_analysis::{RegisterReplay, RegisterSlot};
+use qtrace_analysis::{QueryContext, RegisterReplay, RegisterSlot};
 use qtrace_provider::{
     ArtifactDigest, BudgetDimension, CompletenessCause, CompletenessRange, Discontinuity,
     DiscontinuityCause, EventKey, EventKind, EventPayload, InstructionDefinition, OperationAbort,
@@ -684,6 +684,71 @@ fn production_normalized_qtrb_store_replays_registers() {
 }
 
 #[test]
+fn context_replay_preserves_all_states_without_reading_discontinuities_twice() {
+    #[derive(Default)]
+    struct InputGuard(std::sync::atomic::AtomicU64);
+    impl WorkGuard for InputGuard {
+        fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+            self.0
+                .fetch_add(delta.input_bytes, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("fixtures/flight");
+    for name in [
+        "v2-checkpoint-delta.bin",
+        "v2-checksum-damaged.bin",
+        "v2-overwritten.bin",
+        "v2-coverage-gap.bin",
+    ] {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("capture.flight.bin");
+        std::fs::copy(fixtures.join(name), &source).unwrap();
+        let session = SessionLoader::open_artifact(
+            AuthorizedPath::new(source),
+            OpenPolicy::default(),
+            &CountingGuard::default(),
+        )
+        .unwrap();
+        let store = Arc::new(
+            IndexBuilder::build(
+                &session.artifacts()[0],
+                &BuildOptions::default(),
+                &CountingGuard::default(),
+            )
+            .unwrap(),
+        );
+        let context = QueryContext::new(store.clone()).unwrap();
+        let direct_work = InputGuard::default();
+        let reused_work = InputGuard::default();
+        let direct = RegisterReplay::new_with_guard(store.clone(), &direct_work).unwrap();
+        let reused = RegisterReplay::from_context_with_guard(&context, &reused_work).unwrap();
+        let mut discontinuity_bytes = 0_u64;
+        for row in 0..store.event_count() {
+            let key = store.event_key(row).unwrap();
+            assert_eq!(
+                direct.state_at(&key).unwrap(),
+                reused.state_at(&key).unwrap(),
+                "{name}, row {row}"
+            );
+            if store.event_kind(row).unwrap() == EventKind::Discontinuity {
+                discontinuity_bytes += store.payload_bytes(row).unwrap().len() as u64;
+            }
+        }
+        assert_eq!(
+            direct_work.0.load(std::sync::atomic::Ordering::Relaxed),
+            reused_work.0.load(std::sync::atomic::Ordering::Relaxed) + discontinuity_bytes,
+            "{name}",
+        );
+    }
+}
+
+#[test]
 fn timeline_wide_gap_invalidates_every_tid_until_each_native_checkpoint_recovers() {
     let mut store = RegisterStore::qtrb();
     store.source = NormalizedSourceFormat::Flight;
@@ -797,6 +862,102 @@ fn timeline_wide_gap_invalidates_every_tid_until_each_native_checkpoint_recovers
 }
 
 #[test]
+fn shared_global_gaps_override_checkpoints_and_reach_new_threads() {
+    let mut store = RegisterStore::qtrb();
+    let tids = [
+        Some(1),
+        None,
+        Some(1),
+        Some(1),
+        None,
+        None,
+        Some(2),
+        Some(1),
+        Some(1),
+        Some(1),
+        Some(2),
+        None,
+        Some(1),
+    ];
+    store.keys = tids
+        .into_iter()
+        .enumerate()
+        .map(|(row, tid)| {
+            let mut key = store.keys[0].clone();
+            key.record_ordinal = row as u64;
+            key.source_offset = row as u64;
+            key.sequence = Some(row as u64);
+            key.tid = tid;
+            key
+        })
+        .collect();
+    store.kinds = (0..tids.len())
+        .map(|row| match row {
+            1 | 4 | 5 | 8 | 11 => EventKind::Discontinuity,
+            3 => EventKind::RegisterCheckpoint,
+            _ => EventKind::Instruction,
+        })
+        .collect();
+    store.payloads = vec![Vec::new(); tids.len()];
+    store.instructions.clear();
+    store.observations.clear();
+    for (owner_row, slot, value) in [(0, 0, 10), (2, 0, 20), (6, 1, 60), (9, 1, 90)] {
+        store.observations.push(RegisterObservationRow {
+            owner_row,
+            slot,
+            captured_width: 8,
+            access: RegisterAccess::Write,
+            value,
+            provenance: Provenance::Captured,
+        });
+    }
+    for slot in 0..RegisterSlot::COUNT {
+        store.observations.push(RegisterObservationRow {
+            owner_row: 3,
+            slot: slot as u8,
+            captured_width: 8,
+            access: RegisterAccess::Checkpoint,
+            value: 30,
+            provenance: Provenance::Captured,
+        });
+    }
+    store
+        .observations
+        .sort_by_key(|observation| observation.owner_row);
+    let keys = store.keys.clone();
+    let replay = RegisterReplay::new(Arc::new(store)).unwrap();
+    for (row, evidence_row) in [(6, 5), (7, 5), (9, 8), (10, 5), (12, 11)] {
+        let state = replay.state_at(&keys[row]).unwrap();
+        assert_eq!(state.after.cell(RegisterSlot::X0).value, None, "row {row}");
+        assert_eq!(
+            state.after.cell(RegisterSlot::X0).evidence.as_ref(),
+            Some(&keys[evidence_row]),
+            "row {row}"
+        );
+    }
+    for (row, value) in [(0, 10), (2, 20), (3, 30)] {
+        assert_eq!(
+            replay
+                .state_at(&keys[row])
+                .unwrap()
+                .after
+                .cell(RegisterSlot::X0)
+                .value,
+            Some(value)
+        );
+    }
+    assert_eq!(
+        replay
+            .state_at(&keys[10])
+            .unwrap()
+            .after
+            .cell(RegisterSlot::X1)
+            .value,
+        Some(60)
+    );
+}
+
+#[test]
 fn sparse_tid_query_work_is_independent_of_other_tid_rows() {
     let mut measured = Vec::new();
     for unrelated in [128_usize, 256, 512] {
@@ -903,6 +1064,105 @@ fn replay_build_does_not_allocate_two_snapshots_per_event() {
     let guard = AllocationCountingGuard::default();
     RegisterReplay::new_with_guard(Arc::new(store), &guard).unwrap();
     assert!(guard.0.load(std::sync::atomic::Ordering::Relaxed) < 20);
+}
+
+#[test]
+fn many_gaps_keep_replay_bounded_and_preserve_each_invalidation_key() {
+    const LIMIT: u64 = 16 * 1024 * 1024;
+    struct QueryLimit(std::sync::atomic::AtomicU64);
+    impl WorkGuard for QueryLimit {
+        fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+            let consumed = self
+                .0
+                .fetch_add(delta.rows, std::sync::atomic::Ordering::Relaxed)
+                .saturating_add(delta.rows);
+            if consumed > 2_000 {
+                return Err(OperationAbort::budget_exceeded(
+                    BudgetDimension::Rows,
+                    2_000,
+                    consumed,
+                ));
+            }
+            Ok(())
+        }
+    }
+    struct ResidentLimit(std::sync::atomic::AtomicU64);
+    impl WorkGuard for ResidentLimit {
+        fn consume(&self, delta: WorkDelta) -> Result<(), OperationAbort> {
+            let consumed = self
+                .0
+                .fetch_add(delta.resident_bytes, std::sync::atomic::Ordering::Relaxed)
+                .saturating_add(delta.resident_bytes);
+            if consumed > LIMIT {
+                return Err(OperationAbort::budget_exceeded(
+                    BudgetDimension::ResidentBytes,
+                    LIMIT,
+                    consumed,
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    let mut store = RegisterStore::qtrb();
+    store.keys[1].tid = Some(8);
+    for row in 2..44 {
+        let mut key = store.keys[0].clone();
+        key.record_ordinal = row;
+        key.source_offset = row;
+        key.sequence = Some(row);
+        key.tid = Some(row as u32 + 8);
+        store.keys.push(key);
+        store.kinds.push(EventKind::Instruction);
+        store.payloads.push(Vec::new());
+    }
+    for row in 44..12_044 {
+        let mut key = store.keys[0].clone();
+        key.record_ordinal = row;
+        key.source_offset = row;
+        key.sequence = Some(row);
+        key.tid = if row % 2 == 0 { Some(7) } else { None };
+        store.keys.push(key);
+        store.kinds.push(EventKind::Discontinuity);
+        store.payloads.push(Vec::new());
+    }
+    let last_gap = store.keys.last().unwrap().clone();
+    let mut recovered = last_gap.clone();
+    recovered.record_ordinal += 1;
+    recovered.source_offset += 1;
+    recovered.sequence = Some(12_044);
+    recovered.tid = Some(7);
+    store.keys.push(recovered.clone());
+    store.kinds.push(EventKind::Instruction);
+    store.payloads.push(Vec::new());
+    store.observations.push(RegisterObservationRow {
+        owner_row: 12_044,
+        slot: RegisterSlot::X0.index() as u8,
+        captured_width: 8,
+        access: RegisterAccess::Read,
+        value: 42,
+        provenance: Provenance::Captured,
+    });
+    let sampled = [44, 45, 4_095, 4_096, 4_097, 12_042, 12_043].map(|row| store.keys[row].clone());
+    let guard = ResidentLimit(std::sync::atomic::AtomicU64::new(0));
+    let replay = RegisterReplay::new_with_guard(Arc::new(store), &guard).unwrap();
+    for key in sampled {
+        let state = replay
+            .state_at_with_guard(&key, &QueryLimit(std::sync::atomic::AtomicU64::new(0)))
+            .unwrap();
+        for snapshot in [&state.before, &state.after] {
+            let cell = snapshot.cell(RegisterSlot::X0);
+            assert_eq!(cell.value, None);
+            assert_eq!(cell.provenance, Provenance::Damaged);
+            assert_eq!(cell.evidence.as_ref(), Some(&key));
+        }
+    }
+    let state = replay.state_at(&recovered).unwrap();
+    assert_eq!(state.after.cell(RegisterSlot::X0).value, Some(42));
+    assert_eq!(
+        state.after.cell(RegisterSlot::X1).evidence.as_ref(),
+        Some(&last_gap)
+    );
 }
 
 #[test]

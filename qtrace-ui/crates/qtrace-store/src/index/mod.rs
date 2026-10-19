@@ -95,13 +95,14 @@ pub(crate) fn validate_binary_sections(
 pub(crate) struct PredecodedEvents(Vec<EventColumn>);
 
 pub(crate) fn stream_event_meta(
-    keys: &[EventKey],
+    event_count: usize,
     mut read: impl FnMut(u64, &mut [u8]) -> Result<(), CacheError>,
     guard: &dyn WorkGuard,
 ) -> Result<PredecodedEvents, IndexError> {
+    let _timing = crate::profile::phase("cache.read_event_meta");
     const CHUNK_ROWS: usize = 4096;
     let mut events = Vec::new();
-    crate::allocation::try_reserve_vec(&mut events, keys.len(), guard, "event metadata decode")?;
+    crate::allocation::try_reserve_vec(&mut events, event_count, guard, "event metadata decode")?;
     let mut bytes = Vec::new();
     crate::allocation::try_reserve_vec(
         &mut bytes,
@@ -110,19 +111,15 @@ pub(crate) fn stream_event_meta(
         "event metadata read buffer",
     )?;
     bytes.resize(CHUNK_ROWS * wire::EVENT_META_BYTES as usize, 0);
-    for start in (0..keys.len()).step_by(CHUNK_ROWS) {
-        let end = (start + CHUNK_ROWS).min(keys.len());
+    for start in (0..event_count).step_by(CHUNK_ROWS) {
+        let end = (start + CHUNK_ROWS).min(event_count);
         let size = (end - start) * wire::EVENT_META_BYTES as usize;
         let offset = u64::try_from(start)
             .ok()
             .and_then(|row| row.checked_mul(u64::from(wire::EVENT_META_BYTES)))
             .ok_or_else(|| IndexError::corrupt("event metadata offset overflow"))?;
         read(offset, &mut bytes[..size])?;
-        events.extend(wire::decode_events(
-            &bytes[..size],
-            &keys[start..end],
-            guard,
-        )?);
+        events.extend(wire::decode_events(&bytes[..size], end - start, guard)?);
     }
     Ok(PredecodedEvents(events))
 }
@@ -2629,6 +2626,7 @@ impl TraceStore {
         cache_guard: &dyn WorkGuard,
     ) -> Result<Self, IndexError> {
         options.validate()?;
+        cache_guard.begin_phase(qtrace_provider::WorkPhase::OpenCache);
         let identity = cache_identity(source, options, cache_guard)?;
         cache_guard.consume(WorkDelta::default())?;
         match CacheReader::open(cache_root, &identity, cache_guard)? {
@@ -2638,9 +2636,11 @@ impl TraceStore {
             CacheOpen::Missing | CacheOpen::Rebuild(_) => {}
         }
         source_guard.consume(WorkDelta::default())?;
+        source_guard.begin_phase(qtrace_provider::WorkPhase::BuildIndex);
         let owned = IndexBuilder::build(source, options, source_guard)?;
         probe_index_memory("after_index_build");
         cache_guard.consume(WorkDelta::default())?;
+        cache_guard.begin_phase(qtrace_provider::WorkPhase::PublishCache);
         let (outcome, receipt) = CacheWriter::new(
             identity.try_clone_guarded(cache_guard)?,
             owned.into_cache_view_with_catalog(cache_guard)?,
@@ -2648,6 +2648,7 @@ impl TraceStore {
         .publish_with_receipt(cache_root, cache_guard)?;
         probe_index_memory("after_publish");
         let reopened = (|| {
+            cache_guard.begin_phase(qtrace_provider::WorkPhase::ReopenCache);
             cache_guard.consume(WorkDelta::default())?;
             let view = match CacheReader::open(cache_root, &identity, cache_guard)? {
                 CacheOpen::Ready(view) => view,
@@ -2739,6 +2740,7 @@ fn cache_identity(
     options: &BuildOptions,
     guard: &dyn WorkGuard,
 ) -> Result<CacheIdentity, IndexError> {
+    let _timing = crate::profile::phase("cache.identity");
     let provider = source.identity().provider();
     Ok(CacheIdentity {
         analyzer_version: crate::allocation::try_copy_string(

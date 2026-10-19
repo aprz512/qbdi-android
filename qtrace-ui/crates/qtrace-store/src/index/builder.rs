@@ -36,6 +36,7 @@ impl IndexBuilder {
         guard: &dyn WorkGuard,
     ) -> Result<OwnedTraceStore, IndexError> {
         let source_format = NormalizedSourceFormat::parse(&provider.identity().format)?;
+        let event_count = provider.event_count_hint();
         let mut capabilities = provider.capabilities().clone();
         let mut cursor = {
             let resident = provider.cursor_resident_bytes()?;
@@ -43,6 +44,26 @@ impl IndexBuilder {
             provider.into_cursor()?
         };
         let mut state = BuildState::new(options)?;
+        if let Some(rows) = event_count {
+            crate::allocation::try_reserve_vec(
+                &mut state.keys,
+                rows,
+                guard,
+                "event key allocation",
+            )?;
+            crate::allocation::try_reserve_vec(
+                &mut state.kinds,
+                rows,
+                guard,
+                "event kind allocation",
+            )?;
+            crate::allocation::try_reserve_vec(
+                &mut state.events,
+                rows,
+                guard,
+                "event column allocation",
+            )?;
+        }
         while let Some(event) = cursor.next_event(guard)? {
             guard.consume(WorkDelta {
                 events: 1,
@@ -64,6 +85,7 @@ impl IndexBuilder {
 struct BuildState<'a> {
     next_row: usize,
     retain_source_columns: bool,
+    payload_scratch: Vec<u8>,
     keys: Vec<qtrace_provider::EventKey>,
     kinds: Vec<EventKind>,
     events: Vec<EventColumn>,
@@ -114,6 +136,7 @@ impl<'a> BuildState<'a> {
         Ok(Self {
             next_row: 0,
             retain_source_columns,
+            payload_scratch: Vec::new(),
             keys: Vec::new(),
             kinds: Vec::new(),
             events: Vec::new(),
@@ -144,8 +167,8 @@ impl<'a> BuildState<'a> {
     }
 
     fn append(&mut self, event: EventRecord, guard: &dyn WorkGuard) -> Result<(), IndexError> {
-        let payload_bytes = canonical_bytes(&event.payload, guard)?;
-        let payload_blob = self.payloads.intern(&payload_bytes, guard)?;
+        canonical_bytes_into(&event.payload, &mut self.payload_scratch, guard)?;
+        let payload_blob = self.payloads.intern(&self.payload_scratch, guard)?;
         self.append_with_payload_blob(event, payload_blob, guard)
     }
 
@@ -647,6 +670,7 @@ pub(super) fn validate_cached_truth(
     )?;
     let mut validated_opaque_payloads = HashMap::<u32, ()>::new();
     let mut last_validated_opaque = None;
+    let mut canonical_scratch = Vec::new();
     for (row, kind) in kinds.iter().copied().enumerate() {
         if row % 4096 == 0 {
             guard.consume(WorkDelta::default())?;
@@ -671,8 +695,8 @@ pub(super) fn validate_cached_truth(
                         IndexError::corrupt("canonical event payload cannot be decoded")
                     })?
                 };
-                if !matches!(decoded, EventPayload::OpaqueOptional(_))
-                    || canonical_bytes(&decoded, guard)? != bytes
+                canonical_bytes_into(&decoded, &mut canonical_scratch, guard)?;
+                if !matches!(decoded, EventPayload::OpaqueOptional(_)) || canonical_scratch != bytes
                 {
                     return Err(IndexError::corrupt(
                         "opaque event payload bytes are not canonical",
@@ -699,7 +723,8 @@ pub(super) fn validate_cached_truth(
             serde_json::from_slice(bytes)
                 .map_err(|_| IndexError::corrupt("canonical event payload cannot be decoded"))?
         };
-        if canonical_bytes(&payload, guard)? != bytes {
+        canonical_bytes_into(&payload, &mut canonical_scratch, guard)?;
+        if canonical_scratch != bytes {
             return Err(IndexError::corrupt("event payload bytes are not canonical"));
         }
         if let EventPayload::Discontinuity(discontinuity) = &payload {
@@ -789,8 +814,7 @@ pub(super) fn validate_cached_truth(
     }
     validate_completeness_rows(source_completeness, guard).map_err(cached_rebuild_error)?;
     if source_format.eq_ignore_ascii_case("flight") {
-        cancellable_sort_by(&mut discontinuities, guard, compare_completeness_rows)?;
-        discontinuities.dedup();
+        canonicalize_discontinuity_evidence(&mut discontinuities, guard)?;
         let mut evidence = discontinuities.iter();
         for (ordinal, source) in source_completeness
             .iter()
@@ -898,6 +922,35 @@ fn compare_completeness_rows(
         .to_range()
         .map(|range| qtrace_provider::completeness_canonical_key(&range));
     left.cmp(&right)
+}
+
+fn canonicalize_discontinuity_evidence(
+    rows: &mut Vec<CompletenessRow>,
+    guard: &dyn WorkGuard,
+) -> Result<(), IndexError> {
+    cancellable_sort_by(rows, guard, compare_completeness_rows)?;
+    let mut retained = 0;
+    for index in 0..rows.len() {
+        if index % 4096 == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        let current = rows[index]
+            .to_range()
+            .ok_or_else(|| IndexError::corrupt("invalid discontinuity evidence range"))?;
+        if retained != 0 {
+            let previous = rows[retained - 1]
+                .to_range()
+                .ok_or_else(|| IndexError::corrupt("invalid discontinuity evidence range"))?;
+            if let Some(merged) = qtrace_provider::merge_canonical_completeness(previous, current) {
+                rows[retained - 1] = CompletenessRow::from_range(merged);
+                continue;
+            }
+        }
+        rows[retained] = rows[index];
+        retained += 1;
+    }
+    rows.truncate(retained);
+    Ok(())
 }
 
 fn same_completeness_class(left: &CompletenessRow, right: &CompletenessRow) -> bool {
@@ -1612,6 +1665,16 @@ pub(super) fn canonical_bytes<T: Serialize>(
     value: &T,
     guard: &dyn WorkGuard,
 ) -> Result<Vec<u8>, IndexError> {
+    let mut bytes = Vec::new();
+    canonical_bytes_into(value, &mut bytes, guard)?;
+    Ok(bytes)
+}
+
+fn canonical_bytes_into<T: Serialize>(
+    value: &T,
+    bytes: &mut Vec<u8>,
+    guard: &dyn WorkGuard,
+) -> Result<(), IndexError> {
     #[derive(Default)]
     struct Counter(usize);
 
@@ -1632,14 +1695,9 @@ pub(super) fn canonical_bytes<T: Serialize>(
     let mut counter = Counter::default();
     serde_json::to_writer(&mut counter, value)
         .map_err(|error| IndexError::invalid(format!("cannot size normalized payload: {error}")))?;
-    let mut bytes = Vec::new();
-    crate::allocation::try_reserve_vec(
-        &mut bytes,
-        counter.0,
-        guard,
-        "normalized payload allocation",
-    )?;
-    serde_json::to_writer(&mut bytes, value).map_err(|error| {
+    bytes.clear();
+    crate::allocation::try_reserve_vec(bytes, counter.0, guard, "normalized payload allocation")?;
+    serde_json::to_writer(&mut *bytes, value).map_err(|error| {
         IndexError::invalid(format!("cannot encode normalized payload: {error}"))
     })?;
     if bytes.len() != counter.0 {
@@ -1647,7 +1705,7 @@ pub(super) fn canonical_bytes<T: Serialize>(
             "normalized payload serialization was not deterministic",
         ));
     }
-    Ok(bytes)
+    Ok(())
 }
 
 fn try_copy_bytes(

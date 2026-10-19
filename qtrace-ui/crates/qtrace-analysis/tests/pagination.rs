@@ -1086,6 +1086,41 @@ fn discontinuity_payload_and_context_byte_limits_fail_before_decode() {
 }
 
 #[test]
+fn many_canonical_discontinuities_fit_their_row_derived_context_budget() {
+    let mut store = CountingStore::new(100_000, 9, false);
+    store.discontinuity_rows = store.keys.len();
+    assert!(
+        store.discontinuity_payload.len() * store.discontinuity_rows
+            > MAX_DISCONTINUITY_TOTAL_BYTES
+    );
+    QueryContext::new(Arc::new(store)).expect("bounded canonical discontinuity context");
+}
+
+#[test]
+fn memory_state_ignores_future_gaps_and_retains_the_past_history_limit() {
+    let mut store = CountingStore::new(10_001, 9, false);
+    store.discontinuity_rows = store.keys.len();
+    let first = store.keys[0].clone();
+    let last = store.keys.last().unwrap().clone();
+    let store = Arc::new(store);
+    let context = Arc::new(QueryContext::new(store.clone()).unwrap());
+    let guard = AllocationCountGuard {
+        allocations: AtomicUsize::new(0),
+        checkpoints: AtomicUsize::new(0),
+    };
+    let analyzer =
+        qtrace_analysis::MemoryAnalyzer::from_context_with_guard(context, &guard).unwrap();
+    store.payload_calls.store(0, Ordering::Relaxed);
+    let state = analyzer.state_at(&first, 0..1).unwrap();
+    assert_eq!(state.before[0].provenance, Provenance::Damaged);
+    assert_eq!(store.payload_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        analyzer.state_at(&last, 0..1).unwrap_err().code(),
+        "analysis.budget_exceeded"
+    );
+}
+
+#[test]
 fn discontinuity_posting_preserves_cancel_code() {
     let mut store = CountingStore::new(1, 9, false);
     store.cancel_discontinuity_posting = true;

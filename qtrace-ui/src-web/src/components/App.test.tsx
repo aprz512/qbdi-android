@@ -39,7 +39,7 @@ function fakeApi(overrides: Partial<QtraceApi> = {}): QtraceApi {
     getLocalSymbolName: unsupported,
     upsertLocalSymbolName: unsupported,
     deleteLocalSymbolName: unsupported,
-    listJobs: vi.fn().mockResolvedValue([{ id: "job-1", workspace_id: "workspace-7", kind: "projection", state: "completed", progress: { completed: "1", total: "1" }, error: null }]),
+    listJobs: vi.fn().mockResolvedValue([{ id: "job-1", workspace_id: "workspace-7", kind: "projection", state: "completed", progress: { completed: "1", total: "1", detail: null }, error: null }]),
     cancelJob: unsupported,
     ...overrides,
   };

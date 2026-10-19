@@ -156,6 +156,30 @@ pub enum JobState {
 pub struct JobProgressDto {
     pub completed: DecimalU64Dto,
     pub total: Option<DecimalU64Dto>,
+    #[serde(default)]
+    pub detail: Option<JobProgressDetailDto>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenStageDto {
+    VerifySource,
+    OpenCache,
+    BuildIndex,
+    PublishCache,
+    ReopenCache,
+    PrepareAnalysis,
+    PublishWorkspace,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
+pub struct JobProgressDetailDto {
+    pub stage: OpenStageDto,
+    pub artifact: Option<String>,
+    // Accounted work in this stage; repeated validation passes count separately.
+    pub processed_bytes: DecimalU64Dto,
+    pub processed_events: DecimalU64Dto,
+    pub processed_rows: DecimalU64Dto,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
 pub struct JobDto {

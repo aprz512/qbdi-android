@@ -1,0 +1,388 @@
+{
+  "schema": 1,
+  "recorded_at": "2026-10-18T13:42:58.678574+00:00",
+  "base_commit": "f4cf92b8227fed470f11039e727338ca360f61ae",
+  "tested_state": "Uncommitted working tree; source hashes identify tested Rust inputs. Android and Python sources remain identical to base_commit.",
+  "candidate_source_sha256": {
+    "qtrace-ui/crates/qtrace-provider/src/qtrb/input.rs": "6e8abf66d4777d0adca4d3545fdc546aaeade4406a932fa2a0ce107087f5d490",
+    "qtrace-ui/crates/qtrace-provider/tests/qtrb_input.rs": "b6b68fe08f9b85275a3b0a109c75154dc06af4bd04fa9461b870bd4c48506bc8",
+    "qtrace-ui/crates/qtrace-service/src/service.rs": "9914ea0897f278f5387412954ef33f83e24877e16f1989383bdaa64e834a310d",
+    "qtrace-ui/crates/qtrace-service/tests/end_to_end.rs": "e9762a0c8c8d02dcfd303896ae6bd03d6771f20e558dbe95a4e09b8017d24c98",
+    "qtrace-ui/crates/qtrace-service/examples/verify_capture.rs": "63a93017bfbfc06a315e6bd695866175476fbbbbedfcf6aff41b56f42fd99d5f",
+    "qtrace-ui/crates/qtrace-service/Cargo.toml": "66c6f0cc6859a4c056fd53ee198e298bc193ab79d960835465b039e2acd84d3e",
+    "qtrace-ui/Cargo.lock": "b504c781c0ac41bee7ceb7edf296e15974b2146b963662a52627bf0bfd0ada08"
+  },
+  "fixes": [
+    "Decode native LZ4 skippable padding with bounded scratch space and strict input, cancellation, and truncation checks.",
+    "Use the existing session discovery budget when selecting report.json, matching directory selection.",
+    "Account for both compressed transport reads and logical QTRB reads during cold indexing."
+  ],
+  "regression_proof": [
+    {
+      "command": "cd qtrace-ui && cargo test -p qtrace-provider --test qtrb_input skippable",
+      "before": "Four new tests failed with source.qtrb.compression:expected standard LZ4 frame magic.",
+      "after": "All 14 qtrb_input tests passed."
+    },
+    {
+      "command": "cd qtrace-ui && cargo test -p qtrace-service --test end_to_end selecting_report_file",
+      "before": "control.budget_exceeded selecting report.json.",
+      "after": "Report file and session directory produce equal artifact, context, warning and capability summaries."
+    },
+    {
+      "command": "cd qtrace-ui && cargo test -p qtrace-service --test end_to_end compressed_capture",
+      "before": "InputBytes budget exceeded: consumed 467, limit 451.",
+      "after": "Compressed single-file/report cold and cached opens pass."
+    }
+  ],
+  "checks": [
+    {
+      "command": "./gradlew :app:assembleDebug :tracer:assembleDebug :tracer:copyTracerDebug nativeHostTest --no-daemon",
+      "status": "passed",
+      "native_tests": 45
+    },
+    {
+      "command": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+      "status": "passed",
+      "tests_run": 842,
+      "skipped": 8,
+      "evidence_note": "Observed command result. Relevant Python and Android sources remain unchanged; updated scaffold/fixture checks were rerun separately."
+    },
+    {
+      "command": "python3 -m unittest scripts.tests.test_qtrace_ui_scaffold scripts.tests.test_qtrace_ui_fixtures",
+      "status": "passed",
+      "tests_run": 18
+    },
+    {
+      "command": "cd qtrace-ui && cargo test -p qtrace-provider -p qtrace-store -p qtrace-analysis -p qtrace-service --locked",
+      "status": "passed",
+      "passed": 468,
+      "failed": 0,
+      "ignored": 1,
+      "raw_log": "artifacts/xiaomi-validation/rust-tests.log"
+    },
+    {
+      "command": "cd qtrace-ui && cargo clippy -p qtrace-provider -p qtrace-store -p qtrace-analysis -p qtrace-service --all-targets --locked -- -D warnings",
+      "status": "passed",
+      "raw_log": "artifacts/xiaomi-validation/clippy.log"
+    },
+    {
+      "command": "cd qtrace-ui && cargo fmt --all --check",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    }
+  ],
+  "xiaomi": {
+    "device": {
+      "ro.product.manufacturer": "Xiaomi",
+      "ro.product.model": "M2011K2C",
+      "ro.product.device": "venus",
+      "ro.build.version.release": "16",
+      "ro.build.version.sdk": "36",
+      "ro.product.cpu.abi": "arm64-v8a",
+      "ro.build.fingerprint": "Xiaomi/venus_global/venus:14/UKQ1.240624.001/OS2.0.3.0.UKBMIXM:user/release-keys",
+      "serial": "2d32ed71",
+      "selinux": "Enforcing"
+    },
+    "apk_sha256": "c1c01cd0f10ccb443d37a2c312a638b2a3a04439d2c4214d6181bf0d7700212b",
+    "installed_apk_sha256": "c1c01cd0f10ccb443d37a2c312a638b2a3a04439d2c4214d6181bf0d7700212b",
+    "tracer_sha256": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+    "companion_sha256": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd",
+    "ui_smoke": {
+      "device": "2d32ed71",
+      "tracing": false,
+      "scenes": [
+        {
+          "scene": "Trace JNI Case",
+          "status": "passed",
+          "output": "Trace JNI Case\njni: class=NativeDemo, string='QBDI Android JNI scene', length=22"
+        },
+        {
+          "scene": "Trace Libc Case",
+          "status": "passed",
+          "output": "Trace Libc Case\nlibc: strlen=15, memcmp=0, maps_access=0, maps_sample=98, sdk=36"
+        },
+        {
+          "scene": "Trace Algorithm Case",
+          "status": "passed",
+          "output": "Trace Algorithm Case\nalgorithm: size=24, hash=0xfa9247ed3343fba5"
+        },
+        {
+          "scene": "Trace Integrity Case",
+          "status": "passed",
+          "output": "Trace Integrity Case\nintegrity: text=ok, maps=ok, hash=0xb623cf5bdbb9d0a8"
+        },
+        {
+          "scene": "Run Trace Benchmark",
+          "status": "passed",
+          "output": "Run Trace Benchmark\nbenchmark: iterations=256, result=0x20a128f3d199a008"
+        }
+      ]
+    },
+    "untraced_timed_oracle": {
+      "iterations": 30,
+      "seed": 5855319310239641971,
+      "result": "0x190af5aef1329c2b"
+    },
+    "frida": {
+      "host_version": "17.24.2",
+      "staged_server_version": "17.24.2",
+      "server_path": "/data/local/tmp/qtrace-frida-server-17.24.2",
+      "server_sha256": "550b98c139c3001e6276ee85c61133b9ee0c70bca74db6128c56da3226cfd9fb",
+      "server_started": false
+    },
+    "instrumented_capture": {
+      "status": "blocked",
+      "command": "adb -s 2d32ed71 shell su -c id",
+      "exit_code": 13,
+      "stderr": "Permission denied",
+      "required_external_action": "Allow Shell (com.android.shell) root access in Magisk."
+    }
+  },
+  "capture_check_command": "cargo run --manifest-path qtrace-ui/Cargo.toml -p qtrace-service --example verify_capture -- --report /absolute/path/session/report.json --cache /absolute/path/new-cache > /absolute/path/capture-evidence.json",
+  "capture_checker_binary_sha256": "0854f4687dbf52fff11ff411694df4a14e5a882c8f9c104554c83f8a0586e987",
+  "historical_gate_manifest": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/historical-benchmark-gate.success.json",
+  "historical_gate_manifest_sha256": "a8378f54835457bb2cc4b8ad62a77502a2e9323911efe3c1282d15ebe8720561",
+  "real_capture_checks": [
+    {
+      "scenario": "timed-offset",
+      "status": "passed",
+      "capture_origin": "Preserved historical device acceptance; not a new Xiaomi capture.",
+      "source_report": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/offset/e904b74a-cd10-4470-bfbe-9b793306dbfd/report.json",
+      "source_report_sha256": "8c2710736c68f93c037f3f268bbafbff0dbaa41983888664df9248d939b26ecc",
+      "raw_evidence": "artifacts/xiaomi-validation/real-offset.json",
+      "raw_evidence_sha256": "bfd8dccf13c5046c0d6ce4d4c1eb2e715af9c395b4487920c41a9ec136888858",
+      "context": {
+        "session_id": "e904b74a-cd10-4470-bfbe-9b793306dbfd",
+        "mode": "run",
+        "status": "sealed",
+        "stage": "completed",
+        "package": "com.aprz.qbdiandroid",
+        "device_serial": "192.168.50.149:5555",
+        "device_access_mode": null,
+        "target_module": null,
+        "profile": null,
+        "scenes": []
+      },
+      "artifacts": [
+        {
+          "artifact": {
+            "index": 0,
+            "name": "artifacts/1787949093235_25003_25065_fixture-entry_0x71250_0.trace.bin.lz4",
+            "status": "indexed",
+            "event_count": 1041,
+            "tids": [
+              25065
+            ],
+            "completeness": [
+              {
+                "domain": "source_bytes",
+                "start": "0",
+                "end": "53826",
+                "end_inclusive": false,
+                "cause": "retained",
+                "provenance": "captured"
+              }
+            ]
+          },
+          "sha256": "87ba9024e703b34e4fb621d624c067ea0b06746c111486fc6d6654793dc8695f",
+          "file_bytes": 15605,
+          "provider_bytes": 53826,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 717,
+            "instruction_definition": 46,
+            "memory": 275,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "timeline_sha256": "31c7ad6c47b846169022786c339f21b5f73240188339e83898a561615f1d08c5",
+          "analysis_sha256": "bbe3648ef4daa11604c891b45ee3fce8e2540738b2da86aed8fd8e6767b39ca9",
+          "provider_summary": {
+            "timelines": [
+              {
+                "id": 0,
+                "tid": 25065,
+                "label": "QTRB"
+              }
+            ],
+            "termination": {
+              "kind": "stopped",
+              "reason": "duration_elapsed",
+              "return_value": null,
+              "elapsed_ms": 1819,
+              "metrics": {
+                "instructions": 717,
+                "encoded_bytes": 53826,
+                "compressed_bytes": 15605,
+                "cache_hits": 671,
+                "cache_misses": 46,
+                "cache_collisions": 0,
+                "buffer_swaps": 2,
+                "producer_waits": 1,
+                "producer_wait_ns": 2338541,
+                "effective_buffer_bytes": 67108864
+              }
+            },
+            "counters": {
+              "records_seen": 1041,
+              "events_emitted": 1041,
+              "opaque_records": 0,
+              "damaged_records": 0,
+              "input_bytes": 53826,
+              "decompressed_bytes": 53826
+            },
+            "completeness": [
+              {
+                "domain": "source_bytes",
+                "bounds": {
+                  "half_open": {
+                    "start": 0,
+                    "end_exclusive": 53826
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              }
+            ]
+          }
+        }
+      ],
+      "reopen_equivalent": true
+    },
+    {
+      "scenario": "timed-symbol",
+      "status": "passed",
+      "capture_origin": "Preserved historical device acceptance; not a new Xiaomi capture.",
+      "source_report": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/symbol/fc48d769-2915-46ca-8d93-a741b6f1b85b/report.json",
+      "source_report_sha256": "b68682fe9cb0c80fe97585089a1b401b0cc663be7be97e059a53a28fb380e078",
+      "raw_evidence": "artifacts/xiaomi-validation/real-symbol.json",
+      "raw_evidence_sha256": "a6db2027e14eb54614068aabc3c2acaa7c706fdc3f041f52edd982dcf08e2ab8",
+      "context": {
+        "session_id": "fc48d769-2915-46ca-8d93-a741b6f1b85b",
+        "mode": "run",
+        "status": "sealed",
+        "stage": "completed",
+        "package": "com.aprz.qbdiandroid",
+        "device_serial": "192.168.50.149:5555",
+        "device_access_mode": null,
+        "target_module": null,
+        "profile": null,
+        "scenes": []
+      },
+      "artifacts": [
+        {
+          "artifact": {
+            "index": 0,
+            "name": "artifacts/1787949127346_25390_25453_fixture-entry_0x71250_0.trace.bin.lz4",
+            "status": "indexed",
+            "event_count": 1041,
+            "tids": [
+              25453
+            ],
+            "completeness": [
+              {
+                "domain": "source_bytes",
+                "start": "0",
+                "end": "53826",
+                "end_inclusive": false,
+                "cause": "retained",
+                "provenance": "captured"
+              }
+            ]
+          },
+          "sha256": "87db7fa4ab72b7f0dfa8f21f7b0272e645c2ae66aeaae5d28f8d510be65fb471",
+          "file_bytes": 15608,
+          "provider_bytes": 53826,
+          "event_counts": {
+            "begin": 1,
+            "instruction": 717,
+            "instruction_definition": 46,
+            "memory": 275,
+            "module_definition": 1,
+            "termination": 1
+          },
+          "timeline_sha256": "5359e8dbc883b03c503aeb040c571238eb5d9bcbb37ad53dd9a42f23dcfa160c",
+          "analysis_sha256": "1aba9fd753695b7158b96e21e37c47749e62813365709a710494ef297a40c28a",
+          "provider_summary": {
+            "timelines": [
+              {
+                "id": 0,
+                "tid": 25453,
+                "label": "QTRB"
+              }
+            ],
+            "termination": {
+              "kind": "stopped",
+              "reason": "duration_elapsed",
+              "return_value": null,
+              "elapsed_ms": 1818,
+              "metrics": {
+                "instructions": 717,
+                "encoded_bytes": 53826,
+                "compressed_bytes": 15608,
+                "cache_hits": 671,
+                "cache_misses": 46,
+                "cache_collisions": 0,
+                "buffer_swaps": 2,
+                "producer_waits": 1,
+                "producer_wait_ns": 4049642,
+                "effective_buffer_bytes": 67108864
+              }
+            },
+            "counters": {
+              "records_seen": 1041,
+              "events_emitted": 1041,
+              "opaque_records": 0,
+              "damaged_records": 0,
+              "input_bytes": 53826,
+              "decompressed_bytes": 53826
+            },
+            "completeness": [
+              {
+                "domain": "source_bytes",
+                "bounds": {
+                  "half_open": {
+                    "start": 0,
+                    "end_exclusive": 53826
+                  }
+                },
+                "provenance": "captured",
+                "cause": "retained"
+              }
+            ]
+          }
+        }
+      ],
+      "reopen_equivalent": true
+    }
+  ],
+  "remaining_budget_failures": [
+    {
+      "stage": "monitor-exit memory query",
+      "status": "failed",
+      "exit_code": 1,
+      "error": "Error: \"analysis.budget_exceeded at analysis: Rows budget exceeded: consumed 2153, limit 2000\"",
+      "source_report": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/exit/22bfb9bd-e99b-4dd8-a8a2-f2a6be8ef341/report.json",
+      "source_report_sha256": "c8d68fcb18acc9506b6fa1b3cde14b2acccfee3a9a615578bb5b3acbb210e259",
+      "stderr": "artifacts/xiaomi-validation/real-exit.stderr"
+    },
+    {
+      "stage": "Flight provider discovery",
+      "status": "failed",
+      "exit_code": 1,
+      "error": "Error: ProviderError { code: \"control.budget_exceeded\", stage: \"control\", source: None, retryable: false, detail: Abort(BudgetExceeded { dimension: ResidentBytes, limit: 2147483648, consumed: 2416667872 }) }",
+      "source_report": "qtrace-acceptance-evidence/569578fb-507e-4a92-b8d0-079f81636157/crash/239f967c-0a26-4196-8632-b9e9c88a64ec/report.json",
+      "source_report_sha256": "015fe4ccae025f7065481f6871561be9ce91ae3c0d2f6780e69310e5351162b9",
+      "stderr": "artifacts/xiaomi-validation/real-flight.stderr"
+    }
+  ],
+  "limitations": [
+    "No Xiaomi Frida capture, throughput benchmark, simpleperf sample, or full rooted-device release gate completed.",
+    "Historical offset/symbol captures validate the current offline service; they are not Xiaomi capture evidence.",
+    "The verifier exercises the desktop backend, not browser rendering. Single-run debug open timings are diagnostic only.",
+    "Existing row and resident budgets remain unchanged. Monitor-exit memory analysis and historical Flight discovery still fail their stated budgets."
+  ]
+}
