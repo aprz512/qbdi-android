@@ -21,6 +21,7 @@ FIXTURES = ROOT / "qtrace-ui" / "fixtures"
 
 
 EXPECTED_CLASSES = {
+    "elf.aarch64-loadable-symbols",
     "elf.aarch64-symbols",
     "flight.v2-active-chunk",
     "flight.v2-checksum-damaged-sealed",
@@ -439,6 +440,43 @@ class QtraceUiFixtureTests(unittest.TestCase):
         self.assertEqual((4, 20, 3), (name_size, description_size, note_type))
         self.assertEqual(b"GNU\0", note_data[12:16])
         self.assertEqual(bytes(range(1, 21)), note_data[16:36])
+
+    def test_loadable_elf_fixture_covers_the_trace_pc_and_native_symbol(self):
+        data = (FIXTURES / "elf/lib.so").read_bytes()
+        header = struct.unpack_from("<16sHHIQQQIHHHHHH", data)
+        self.assertEqual(b"\x7fELF\x02\x01\x01", header[0][:7])
+        self.assertEqual((3, 183, 1), header[1:4])
+        self.assertEqual((64, 56, 1), (header[5], header[9], header[10]))
+        load = struct.unpack_from("<IIQQQQQQ", data, header[5])
+        self.assertEqual((1, 5), load[:2])
+        self.assertEqual(len(data), load[5])
+        self.assertLessEqual(load[3], 0x2345)
+        self.assertLess(0x2345, load[3] + load[6])
+
+        sections = [
+            struct.unpack_from("<IIQQQQIIQQ", data, header[6] + index * header[11])
+            for index in range(header[12])
+        ]
+        names_section = sections[header[13]]
+        names = data[names_section[4]:names_section[4] + names_section[5]]
+
+        def string_at(blob: bytes, offset: int) -> str:
+            return blob[offset:blob.index(b"\0", offset)].decode("ascii")
+
+        by_name = {string_at(names, section[0]): section for section in sections[1:]}
+        symbols = by_name[".symtab"]
+        symbol = struct.unpack_from("<IBBHQQ", data, symbols[4] + symbols[9])
+        strings_section = sections[symbols[6]]
+        strings = data[strings_section[4]:strings_section[4] + strings_section[5]]
+        self.assertEqual("native_work", string_at(strings, symbol[0]))
+        self.assertEqual((0x12, 1, 0x2340, 0x20),
+                         (symbol[1], symbol[3], symbol[4], symbol[5]))
+        self.assertEqual(5, 0x2345 - symbol[4])
+        self.assertLess(0x2345, symbol[4] + symbol[5])
+        note = by_name[".note.gnu.build-id"]
+        note_data = data[note[4]:note[4] + note[5]]
+        self.assertEqual((4, 20, 3), struct.unpack_from("<III", note_data))
+        self.assertEqual(b"GNU\0" + bytes([0x42]) * 20, note_data[12:36])
 
     def test_oracle_is_bounded_and_rejects_unknown_modes(self):
         completed = self.run_tool(str(ORACLE), "unknown", "missing.bin", timeout=5)

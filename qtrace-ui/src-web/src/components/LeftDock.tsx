@@ -13,5 +13,5 @@ interface LeftDockProps {
 }
 
 export function LeftDock({ workspaceId, tids, selectedTid, callTree, onSelectTid, onJump, onLoadCallTreePage }: LeftDockProps) {
-  return <nav className="left-dock" aria-label="Trace navigation"><h2>Trace</h2><ThreadPane tids={tids} selected={selectedTid} onSelect={onSelectTid} /><CallTreePane key={`${workspaceId}:${callTree?.identity ?? "none"}`} tree={callTree} onJump={onJump} loadPage={onLoadCallTreePage} /></nav>;
+  return <nav id="trace-panel" tabIndex={-1} className="left-dock" aria-label="Trace navigation"><h2>Trace</h2><ThreadPane tids={tids} selected={selectedTid} onSelect={onSelectTid} /><CallTreePane key={`${workspaceId}:${callTree?.identity ?? "none"}`} tree={callTree} onJump={onJump} loadPage={onLoadCallTreePage} /></nav>;
 }

@@ -1,0 +1,37 @@
+{
+  "fixtures": [
+    {
+      "bytes": 65536,
+      "format": "Flight",
+      "path": "flight-active.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "4673d8abd93ee65ba936a4bed678c531bddb38e119ad2c1f0598b82b317dc260",
+      "version": "2"
+    },
+    {
+      "bytes": 65536,
+      "format": "Flight",
+      "path": "flight-sealed.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "8c083a51030c36e0e028275780e9cdfcb3b34a03e8222beebc400a7aeea2527f",
+      "version": "2"
+    },
+    {
+      "bytes": 672,
+      "format": "QTRB",
+      "path": "qtrb-completed.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "3e7d1e5084721c824d9bd63de0f90d8ded9057652d00c77d22d8c2f005ff9025",
+      "version": "1.2"
+    },
+    {
+      "bytes": 671,
+      "format": "QTRB",
+      "path": "qtrb-stopped.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "f0084f0a7a244fdbd36fede813728264c149e91da66b916cbe6d24998f17836b",
+      "version": "1.2"
+    }
+  ],
+  "generator_schema": 1
+}

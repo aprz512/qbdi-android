@@ -114,7 +114,7 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
     const bool continues = action == QBDI::CONTINUE && gpr != nullptr;
     const bool tracing_after_rule = trace_gate_ == nullptr || trace_gate_->enabled();
     if (tracing_after_rule && profile_ == TraceProfile::Full) {
-        const CachedInstruction empty{};
+        static constexpr CachedInstruction empty{};
         const CachedInstruction &decoded = current_view_.decoded != nullptr
                                                    ? *current_view_.decoded
                                                    : empty;

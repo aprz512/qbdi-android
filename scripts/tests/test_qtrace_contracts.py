@@ -2665,7 +2665,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 "run.trace.txt.lz4": uncompressed_lz4_frame(COMPLETE_TERMINAL),
             })
             output = parent / "compressed"
-            with patch("qtrace.artifacts.shutil.which", return_value=str(lz4)):
+            with patch("qtrace._artifact_validation.shutil.which", return_value=str(lz4)):
                 result = ArtifactProcessor(
                     client_factory=lambda _d, _p: compressed_client,
                 ).pull_manual(

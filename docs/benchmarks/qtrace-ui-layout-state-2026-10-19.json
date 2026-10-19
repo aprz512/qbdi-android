@@ -1,0 +1,3044 @@
+{
+  "schema": 1,
+  "date": "2026-10-19",
+  "status": "completed_frontend_scope",
+  "head": "72548df9c099f3e7813016eba5bd46da34099760",
+  "branch": "perf/complete-optimization-2026-10-19",
+  "identity_note": "Dirty shared worktree. Existing UI-06 TimelinePages and SegmentCache changes are retained; frontend agent did not modify their files or timeline_pages.mjs.",
+  "owned_files": [
+    {
+      "path": "qtrace-ui/src-web/src/App.tsx",
+      "sha256": "63f6deeef1e360c68dea3d9a83b5d4b39d987f463d414aa9a7b852effbd7676b"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/api/E2eQtraceApi.ts",
+      "sha256": "efa8121a2f55fc1a92dc41a021eb6a48bd311e3ea8a13d9d1b827c13abbd7bef"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/state/RequestScope.ts",
+      "sha256": "e43b23f5bf68b58312854d1e0b2569a40bc8076306d34fbd60832cc87d7bab52"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/state/useRequestScope.ts",
+      "sha256": "7d6278b695ab3de96bd69a4fd7ff921b1c936004f2f3b4a86c2133723b237dda"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/state/useEventDetails.ts",
+      "sha256": "4f0f91fbc39bd025f39699eb7760102f453852d5d3729e52f504f8a0952b5ef8"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/state/usePersistentEdits.ts",
+      "sha256": "9eff5356edf028cf3405416847500519101ae262bd75450d96bb5099774164e2"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/state/useTimelineNavigation.ts",
+      "sha256": "babf00f5d602becb54d0cfb4352eff0e8067ebeaee97ffc5b1089a23198313b1"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/AnnotationEditor.tsx",
+      "sha256": "adff4d95e8559396d647d4259a074ee9b6e243ca9103f6920ccfa859f9770dc9"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/AnnotationEditor.test.tsx",
+      "sha256": "2216503a1cf81b71aae644177986368d5f7ac01d39462b9bf350ee969738c616"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/App.test.tsx",
+      "sha256": "62c4fd73053d6f45db0de54c59ad9bc9d7d2b9a4098f763c82f63fd186b4e6e3"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/BottomDock.tsx",
+      "sha256": "70b2ea98f1f9bbfaa51e4d4fc6311c01e329587580f013fd6c938ea7406075d2"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/LeftDock.tsx",
+      "sha256": "2c0b5d9cc52214f90d27c39ad891438c57570b12ffd462f4d813c00bb9d28441"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/RightDock.tsx",
+      "sha256": "82b52cc721df58bd8cf7719360c071431fe5b29df23b8b13d1d68c451ff9fbd2"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/CallTreePane.tsx",
+      "sha256": "ff59d41cabad755c27dde027ac80b710a35cece9ba23e1ebcfcb06382ca14d4c"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/components/SymbolPane.tsx",
+      "sha256": "72ef413e01882262cf1f84b2f8e407027103b030b838c16db45167ea11de8009"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/timeline/VirtualTimeline.tsx",
+      "sha256": "323ddc795e66134473b810f7037a433546af4b67d8f54852a17330c472c19dad"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/timeline/TraceCanvasRenderer.ts",
+      "sha256": "5d06553350ffe5687147977c99c6063db13bf1a1a39c4eb7269a88c8670077fc"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/styles/global.css",
+      "sha256": "692efb8932ffd7cddd8145ba15507cb44715a37bc67d0a2cdbce9fff1268bedb"
+    },
+    {
+      "path": "qtrace-ui/src-web/src/styles/timeline.css",
+      "sha256": "26792a7c13613abeedf278a388227e7fda5eb69529a1626c11304dbde77a10c1"
+    },
+    {
+      "path": "qtrace-ui/src-web/tests/e2e/global-setup.ts",
+      "sha256": "7792c12851098f221de755d82ca95f42556184503b778c91c90624a86ab41acb"
+    },
+    {
+      "path": "qtrace-ui/src-web/tests/e2e/restart.spec.ts",
+      "sha256": "ccb34aa2e67dbf83fc220c6074efb25e8cb9ebd90d8bd45e457882869d8f4c7b"
+    },
+    {
+      "path": "qtrace-ui/src-web/playwright.production.config.ts",
+      "sha256": "3593fc4f6608d2e28608e8b5a23c5f71abb040092da51d2cdce173da72700fac"
+    },
+    {
+      "path": "qtrace-ui/tools/ui_layout_state.mjs",
+      "sha256": "250b2a6e12c2341b4cd128ba667804fca5b461d5b6df8f47893dd30e8da35432"
+    },
+    {
+      "path": "qtrace-ui/tools/ui_register_interactions.mjs",
+      "sha256": "f92502e6d59fd57b687cc43b184ff27033a1dd075597cb50524d30da8bb7a539"
+    },
+    {
+      "path": "qtrace-ui/tools/ui_call_tree_interactions.mjs",
+      "sha256": "8c54ae0c119d68ae3dded54e93dba7dafb22c2aceeb9372337048e35bccc31cb"
+    },
+    {
+      "path": "qtrace-ui/tools/ui_results_interactions.mjs",
+      "sha256": "0d570f2c26f3416f4c9d08305c86b4e91abcae5155ae717db81b9d8c84f43142"
+    },
+    {
+      "path": "qtrace-ui/tools/ui_elf_interactions.mjs",
+      "sha256": "e68f9675d3b7dac1d8b9101294742a466131c577c6a3943f525641f37868a66b"
+    }
+  ],
+  "checks": [
+    {
+      "command": "npm test -- --reporter=dot",
+      "before": {
+        "files": 16,
+        "passed": 69
+      },
+      "after": {
+        "files": 17,
+        "passed": 76
+      },
+      "exit_code": 0,
+      "cwd": "qtrace-ui/src-web"
+    },
+    {
+      "command": "npm run build",
+      "exit_code": 0,
+      "chunks": {
+        "js": "index-Ccy72Rii.js",
+        "css": "index-5DoGuiaZ.css"
+      },
+      "cwd": "qtrace-ui/src-web"
+    },
+    {
+      "command": "npm run lint",
+      "exit_code": 0,
+      "cwd": "qtrace-ui/src-web"
+    },
+    {
+      "cwd": "qtrace-ui/src-web",
+      "command": "QTRACE_E2E_SERVER=/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/e2e-server-final npx playwright test tests/e2e/workspace.spec.ts tests/e2e/restart.spec.ts",
+      "passed": 14,
+      "exit_code": 0,
+      "final_elf_refresh_recheck": "passed",
+      "note": "Restart test waits for the reopened Workspace before entering module fields; SymbolPane intentionally resets previous-workspace inputs."
+    },
+    {
+      "cwd": "qtrace-ui/src-web",
+      "command": "npm run e2e:production",
+      "passed": 1,
+      "exit_code": 0,
+      "final_elf_refresh_recheck": "passed"
+    },
+    {
+      "command": "git diff --check -- qtrace-ui/src-web qtrace-ui/tools docs/benchmarks/qtrace-ui-layout-state-2026-10-19.md docs/benchmarks/qtrace-ui-layout-state-2026-10-19.json",
+      "exit_code": 0
+    }
+  ],
+  "regressions": {
+    "annotation_app_before": "Two added App tests fail on original selection/write ownership, then pass after extraction and gates.",
+    "annotation_editor_before": {
+      "command": "npx vitest run src/components/AnnotationEditor.baseline-proof.test.tsx --reporter=dot",
+      "method": "An isolated adjacent fixture contains git show HEAD:.../AnnotationEditor.tsx; the real component is never replaced. Temporary fixture/test are removed in finally.",
+      "failed": 2,
+      "exit_code": 1,
+      "log": "artifacts/ui-layout-state-2026-10-19/editor-baseline-proof.log"
+    },
+    "elf_before": "Cached-timeline symbol refresh test fails before adding refreshSymbols; passes afterward. Two additional tests reject an Attach completed after workspace or projection replacement.",
+    "app_isolated_before": {
+      "method": "Isolated git HEAD App plus its matching git HEAD SegmentCache; import paths only are rewritten. The live App/cache are never replaced. Current three focused regression tests import the isolated App. All temporary sources are removed in finally.",
+      "command": "npx vitest run src/components/App.baseline-proof.test.tsx --reporter=dot -t 'refreshes cached timeline symbols|keeps a late annotation save|keeps a saved comment'",
+      "exit_code": 1,
+      "baseline_app_sha256": "87fe8f2cebd7e18e133ec3826e953eb59e378cbbcc4d9c2a92610f8108bf774d",
+      "baseline_cache_sha256": "e790439192d8ca1475ff9dc7b491a7302fac72daa505397f7f53a97587aa72f7",
+      "log": "artifacts/ui-layout-state-2026-10-19/app-isolated-baseline-proof.log",
+      "earlier_attempt": "app-baseline-proof.log mixed the old App with the new explicit-weight cache API and is not behavior regression proof.",
+      "failed": 3,
+      "assertion_failures": [
+        "Cached timeline lacks newly attached native_work+0x5",
+        "Old event save changes committed annotation after selecting the second event",
+        "An earlier annotation read replaces the saved comment"
+      ],
+      "argv": [
+        "npx",
+        "vitest",
+        "run",
+        "src/components/App.baseline-proof.test.tsx",
+        "--reporter=dot",
+        "-t",
+        "refreshes cached timeline symbols|keeps a late annotation save|keeps a saved comment"
+      ]
+    }
+  },
+  "layout": {
+    "before": {
+      "method": "Actual Chromium UI with authenticated Rust E2E service. 200% zoom uses half-sized CSS viewport and deviceScaleFactor=2; it does not test WebKit or OS scaling.",
+      "scenarios": [
+        {
+          "width": 800,
+          "zoom": 1,
+          "css_width": 800,
+          "layout": {
+            "viewport": 800,
+            "document_width": 800,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 220,
+                "right": 220,
+                "scroll_width": 219,
+                "client_width": 219
+              },
+              {
+                "panel": "workspace",
+                "left": 220,
+                "width": 300,
+                "right": 520,
+                "scroll_width": 300,
+                "client_width": 300
+              },
+              {
+                "panel": "right-dock",
+                "left": 520,
+                "width": 280,
+                "right": 800,
+                "scroll_width": 1730,
+                "client_width": 279
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 800,
+                "right": 800,
+                "scroll_width": 800,
+                "client_width": 800
+              }
+            ]
+          },
+          "keyboard": []
+        },
+        {
+          "width": 800,
+          "zoom": 2,
+          "css_width": 400,
+          "layout": {
+            "viewport": 400,
+            "document_width": 800,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": -269,
+                "width": 220,
+                "right": -49,
+                "scroll_width": 219,
+                "client_width": 219
+              },
+              {
+                "panel": "workspace",
+                "left": -49,
+                "width": 300,
+                "right": 251,
+                "scroll_width": 300,
+                "client_width": 300
+              },
+              {
+                "panel": "right-dock",
+                "left": 251,
+                "width": 280,
+                "right": 531,
+                "scroll_width": 1730,
+                "client_width": 279
+              },
+              {
+                "panel": "bottom-dock",
+                "left": -269,
+                "width": 800,
+                "right": 531,
+                "scroll_width": 800,
+                "client_width": 800
+              }
+            ]
+          },
+          "keyboard": []
+        },
+        {
+          "width": 1024,
+          "zoom": 1,
+          "css_width": 1024,
+          "layout": {
+            "viewport": 1024,
+            "document_width": 1024,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 220,
+                "right": 220,
+                "scroll_width": 219,
+                "client_width": 219
+              },
+              {
+                "panel": "workspace",
+                "left": 220,
+                "width": 524,
+                "right": 744,
+                "scroll_width": 524,
+                "client_width": 524
+              },
+              {
+                "panel": "right-dock",
+                "left": 744,
+                "width": 280,
+                "right": 1024,
+                "scroll_width": 1730,
+                "client_width": 279
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 1024,
+                "right": 1024,
+                "scroll_width": 1024,
+                "client_width": 1024
+              }
+            ]
+          },
+          "keyboard": []
+        },
+        {
+          "width": 1024,
+          "zoom": 2,
+          "css_width": 512,
+          "layout": {
+            "viewport": 512,
+            "document_width": 800,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": -157,
+                "width": 220,
+                "right": 63,
+                "scroll_width": 219,
+                "client_width": 219
+              },
+              {
+                "panel": "workspace",
+                "left": 63,
+                "width": 300,
+                "right": 363,
+                "scroll_width": 300,
+                "client_width": 300
+              },
+              {
+                "panel": "right-dock",
+                "left": 363,
+                "width": 280,
+                "right": 643,
+                "scroll_width": 1730,
+                "client_width": 279
+              },
+              {
+                "panel": "bottom-dock",
+                "left": -157,
+                "width": 800,
+                "right": 643,
+                "scroll_width": 800,
+                "client_width": 800
+              }
+            ]
+          },
+          "keyboard": []
+        },
+        {
+          "width": 1366,
+          "zoom": 1,
+          "css_width": 1366,
+          "layout": {
+            "viewport": 1366,
+            "document_width": 1366,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 220,
+                "right": 220,
+                "scroll_width": 219,
+                "client_width": 219
+              },
+              {
+                "panel": "workspace",
+                "left": 220,
+                "width": 866,
+                "right": 1086,
+                "scroll_width": 866,
+                "client_width": 866
+              },
+              {
+                "panel": "right-dock",
+                "left": 1086,
+                "width": 280,
+                "right": 1366,
+                "scroll_width": 1730,
+                "client_width": 279
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 1366,
+                "right": 1366,
+                "scroll_width": 1366,
+                "client_width": 1366
+              }
+            ]
+          },
+          "keyboard": []
+        },
+        {
+          "width": 1366,
+          "zoom": 2,
+          "css_width": 683,
+          "layout": {
+            "viewport": 683,
+            "document_width": 800,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 220,
+                "right": 220,
+                "scroll_width": 219,
+                "client_width": 219
+              },
+              {
+                "panel": "workspace",
+                "left": 220,
+                "width": 300,
+                "right": 520,
+                "scroll_width": 300,
+                "client_width": 300
+              },
+              {
+                "panel": "right-dock",
+                "left": 520,
+                "width": 280,
+                "right": 800,
+                "scroll_width": 1730,
+                "client_width": 279
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 800,
+                "right": 800,
+                "scroll_width": 800,
+                "client_width": 800
+              }
+            ]
+          },
+          "keyboard": []
+        }
+      ],
+      "page_errors": [],
+      "chromium": "153.0.8010.12",
+      "passed": false
+    },
+    "after": {
+      "method": "Actual Chromium UI with authenticated Rust E2E service. 200% zoom uses half-sized CSS viewport and deviceScaleFactor=2; it does not test WebKit or OS scaling.",
+      "scenarios": [
+        {
+          "width": 800,
+          "zoom": 1,
+          "css_width": 800,
+          "layout": {
+            "viewport": 800,
+            "document_width": 800,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 400,
+                "right": 400,
+                "scroll_width": 400,
+                "client_width": 400
+              },
+              {
+                "panel": "workspace",
+                "left": 0,
+                "width": 800,
+                "right": 800,
+                "scroll_width": 800,
+                "client_width": 800
+              },
+              {
+                "panel": "right-dock",
+                "left": 400,
+                "width": 400,
+                "right": 800,
+                "scroll_width": 399,
+                "client_width": 399
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 800,
+                "right": 800,
+                "scroll_width": 800,
+                "client_width": 800
+              }
+            ]
+          },
+          "keyboard": [
+            {
+              "target": "timeline-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "trace-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "details-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "results-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            }
+          ],
+          "long_text": {
+            "scroll_width": 399,
+            "client_width": 399,
+            "raw_wrap": "pre-wrap"
+          }
+        },
+        {
+          "width": 800,
+          "zoom": 2,
+          "css_width": 400,
+          "layout": {
+            "viewport": 400,
+            "document_width": 400,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 400,
+                "right": 400,
+                "scroll_width": 400,
+                "client_width": 400
+              },
+              {
+                "panel": "workspace",
+                "left": 0,
+                "width": 400,
+                "right": 400,
+                "scroll_width": 400,
+                "client_width": 400
+              },
+              {
+                "panel": "right-dock",
+                "left": 0,
+                "width": 400,
+                "right": 400,
+                "scroll_width": 400,
+                "client_width": 400
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 400,
+                "right": 400,
+                "scroll_width": 400,
+                "client_width": 400
+              }
+            ]
+          },
+          "keyboard": [
+            {
+              "target": "timeline-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "trace-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "details-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "results-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            }
+          ],
+          "long_text": {
+            "scroll_width": 400,
+            "client_width": 400,
+            "raw_wrap": "pre-wrap"
+          }
+        },
+        {
+          "width": 1024,
+          "zoom": 1,
+          "css_width": 1024,
+          "layout": {
+            "viewport": 1024,
+            "document_width": 1024,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 512,
+                "right": 512,
+                "scroll_width": 512,
+                "client_width": 512
+              },
+              {
+                "panel": "workspace",
+                "left": 0,
+                "width": 1024,
+                "right": 1024,
+                "scroll_width": 1024,
+                "client_width": 1024
+              },
+              {
+                "panel": "right-dock",
+                "left": 512,
+                "width": 512,
+                "right": 1024,
+                "scroll_width": 511,
+                "client_width": 511
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 1024,
+                "right": 1024,
+                "scroll_width": 1024,
+                "client_width": 1024
+              }
+            ]
+          },
+          "keyboard": [
+            {
+              "target": "timeline-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "trace-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "details-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "results-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            }
+          ],
+          "long_text": {
+            "scroll_width": 511,
+            "client_width": 511,
+            "raw_wrap": "pre-wrap"
+          }
+        },
+        {
+          "width": 1024,
+          "zoom": 2,
+          "css_width": 512,
+          "layout": {
+            "viewport": 512,
+            "document_width": 512,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 512,
+                "right": 512,
+                "scroll_width": 512,
+                "client_width": 512
+              },
+              {
+                "panel": "workspace",
+                "left": 0,
+                "width": 512,
+                "right": 512,
+                "scroll_width": 512,
+                "client_width": 512
+              },
+              {
+                "panel": "right-dock",
+                "left": 0,
+                "width": 512,
+                "right": 512,
+                "scroll_width": 512,
+                "client_width": 512
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 512,
+                "right": 512,
+                "scroll_width": 512,
+                "client_width": 512
+              }
+            ]
+          },
+          "keyboard": [
+            {
+              "target": "timeline-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "trace-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "details-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "results-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            }
+          ],
+          "long_text": {
+            "scroll_width": 512,
+            "client_width": 512,
+            "raw_wrap": "pre-wrap"
+          }
+        },
+        {
+          "width": 1366,
+          "zoom": 1,
+          "css_width": 1366,
+          "layout": {
+            "viewport": 1366,
+            "document_width": 1366,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 220,
+                "right": 220,
+                "scroll_width": 219,
+                "client_width": 219
+              },
+              {
+                "panel": "workspace",
+                "left": 220,
+                "width": 866,
+                "right": 1086,
+                "scroll_width": 866,
+                "client_width": 866
+              },
+              {
+                "panel": "right-dock",
+                "left": 1086,
+                "width": 280,
+                "right": 1366,
+                "scroll_width": 279,
+                "client_width": 279
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 1366,
+                "right": 1366,
+                "scroll_width": 1366,
+                "client_width": 1366
+              }
+            ]
+          },
+          "keyboard": [
+            {
+              "target": "timeline-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "trace-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "details-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "results-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            }
+          ],
+          "long_text": {
+            "scroll_width": 279,
+            "client_width": 279,
+            "raw_wrap": "pre-wrap"
+          }
+        },
+        {
+          "width": 1366,
+          "zoom": 2,
+          "css_width": 683,
+          "layout": {
+            "viewport": 683,
+            "document_width": 683,
+            "panels": [
+              {
+                "panel": "left-dock",
+                "left": 0,
+                "width": 683,
+                "right": 683,
+                "scroll_width": 683,
+                "client_width": 683
+              },
+              {
+                "panel": "workspace",
+                "left": 0,
+                "width": 683,
+                "right": 683,
+                "scroll_width": 683,
+                "client_width": 683
+              },
+              {
+                "panel": "right-dock",
+                "left": 0,
+                "width": 683,
+                "right": 683,
+                "scroll_width": 683,
+                "client_width": 683
+              },
+              {
+                "panel": "bottom-dock",
+                "left": 0,
+                "width": 683,
+                "right": 683,
+                "scroll_width": 683,
+                "client_width": 683
+              }
+            ]
+          },
+          "keyboard": [
+            {
+              "target": "timeline-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "trace-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "details-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            },
+            {
+              "target": "results-panel",
+              "focus_visible": true,
+              "outline": "solid"
+            }
+          ],
+          "long_text": {
+            "scroll_width": 683,
+            "client_width": 683,
+            "raw_wrap": "pre-wrap"
+          }
+        }
+      ],
+      "page_errors": [],
+      "service_sha256": "c32d879cafa8a9321471c7c7d7552d339764f220f5d6e1c8908eae24ef4ab8ca",
+      "chromium": "153.0.8010.12",
+      "passed": true
+    },
+    "final_elf_refresh_recheck": "passed",
+    "evidence_paths": {
+      "before": "artifacts/ui-layout-state-2026-10-19/baseline/layout.json",
+      "after": "artifacts/ui-layout-state-2026-10-19/layout-integrated/layout.json"
+    }
+  },
+  "register_interactions": {
+    "status": "passed_final_quiet_window",
+    "coordinated_quiet_window": true,
+    "evidence_path": "artifacts/ui-layout-state-2026-10-19/registers-integrated/registers.json",
+    "evidence": {
+      "method": "50 actual Chromium result clicks against the retained Xiaomi Flight capture and authenticated release Rust service. Register DOM timing includes transport, concurrent selection requests, React, DOM checks, and browser automation; ui_ms additionally waits for the detail key. No baseline speedup is claimed.",
+      "samples": [
+        {
+          "click": 1,
+          "source_row": 44893,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "6",
+            "sequence": "35949041",
+            "source_offset": "524864",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "a17f03673dbbb60c82fd4a2027c20fdf97b76ec42b4813d4fcb7f36e85967a78",
+          "rendered_cells": 68,
+          "register_dom_ms": 2384.5,
+          "ui_ms": 2405.89999999851
+        },
+        {
+          "click": 2,
+          "source_row": 44901,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "9",
+            "sequence": "35949049",
+            "source_offset": "525096",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "98cd4b638ac7fc0f7166e2298ca56e581e82f38478301bfb470d7b56aafa5d3e",
+          "rendered_cells": 68,
+          "register_dom_ms": 768.2999999970198,
+          "ui_ms": 791.8999999985099
+        },
+        {
+          "click": 3,
+          "source_row": 44907,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "12",
+            "sequence": "35949055",
+            "source_offset": "525352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e55d04d6fbb59d681ac4bf61eef82e7e320ed20ffd5e0230dd0db1a5c5711076",
+          "rendered_cells": 68,
+          "register_dom_ms": 768.4000000059605,
+          "ui_ms": 788.6000000014901
+        },
+        {
+          "click": 4,
+          "source_row": 44914,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "15",
+            "sequence": "35949062",
+            "source_offset": "525632",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "ae33001b66200545ae20ce1c9b63fd59b4a2397d2c0fca0d4b419f1222f22efd",
+          "rendered_cells": 68,
+          "register_dom_ms": 542.8000000044703,
+          "ui_ms": 563.5
+        },
+        {
+          "click": 5,
+          "source_row": 44922,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "19",
+            "sequence": "35949070",
+            "source_offset": "525984",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "586b15581165e1a8fd0c85b7f8031a5f87dbafb61c171cc518907ea06c4abcc1",
+          "rendered_cells": 68,
+          "register_dom_ms": 865.7999999970198,
+          "ui_ms": 889.3999999985099
+        },
+        {
+          "click": 6,
+          "source_row": 46406,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "35",
+            "sequence": "35950554",
+            "source_offset": "526904",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3a462aebb03cd1fdd099acaf4d1c63987f2006c169b7b2058ee9de627329b09",
+          "rendered_cells": 68,
+          "register_dom_ms": 786.3000000044703,
+          "ui_ms": 807.1000000014901
+        },
+        {
+          "click": 7,
+          "source_row": 46409,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "38",
+            "sequence": "35950557",
+            "source_offset": "527152",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "cbd76c6dd8df8a11c6054b773ecafd5e36805812737f7b49566e0451b1f3e47a",
+          "rendered_cells": 68,
+          "register_dom_ms": 723.9000000059605,
+          "ui_ms": 745.3000000044703
+        },
+        {
+          "click": 8,
+          "source_row": 46412,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "41",
+            "sequence": "35950560",
+            "source_offset": "527352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3ac9c1a00ae56391807ce630e04a0b137d2661f44cd7f751db40f147e8d14f3",
+          "rendered_cells": 68,
+          "register_dom_ms": 800,
+          "ui_ms": 883.1000000014901
+        },
+        {
+          "click": 9,
+          "source_row": 46415,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "44",
+            "sequence": "35950563",
+            "source_offset": "527576",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "42738ede755af37d150a544774d93132a12acf5e75a4b836938eebbd232cb032",
+          "rendered_cells": 68,
+          "register_dom_ms": 642.2000000029802,
+          "ui_ms": 662.8999999985099
+        },
+        {
+          "click": 10,
+          "source_row": 46419,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "47",
+            "sequence": "35950567",
+            "source_offset": "527816",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "b12cc93d7e7f91047bedbe828f1b8add2ad62f0d0177b8c39f8c81d867d8b5a7",
+          "rendered_cells": 68,
+          "register_dom_ms": 708.2000000029802,
+          "ui_ms": 730.7000000029802
+        },
+        {
+          "click": 11,
+          "source_row": 44893,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "6",
+            "sequence": "35949041",
+            "source_offset": "524864",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "a17f03673dbbb60c82fd4a2027c20fdf97b76ec42b4813d4fcb7f36e85967a78",
+          "rendered_cells": 68,
+          "register_dom_ms": 762.1000000014901,
+          "ui_ms": 783.7999999970198
+        },
+        {
+          "click": 12,
+          "source_row": 44901,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "9",
+            "sequence": "35949049",
+            "source_offset": "525096",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "98cd4b638ac7fc0f7166e2298ca56e581e82f38478301bfb470d7b56aafa5d3e",
+          "rendered_cells": 68,
+          "register_dom_ms": 755.2000000029802,
+          "ui_ms": 776.5
+        },
+        {
+          "click": 13,
+          "source_row": 44907,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "12",
+            "sequence": "35949055",
+            "source_offset": "525352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e55d04d6fbb59d681ac4bf61eef82e7e320ed20ffd5e0230dd0db1a5c5711076",
+          "rendered_cells": 68,
+          "register_dom_ms": 534.6000000014901,
+          "ui_ms": 554
+        },
+        {
+          "click": 14,
+          "source_row": 44914,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "15",
+            "sequence": "35949062",
+            "source_offset": "525632",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "ae33001b66200545ae20ce1c9b63fd59b4a2397d2c0fca0d4b419f1222f22efd",
+          "rendered_cells": 68,
+          "register_dom_ms": 781.7999999970198,
+          "ui_ms": 802.0999999940395
+        },
+        {
+          "click": 15,
+          "source_row": 44922,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "19",
+            "sequence": "35949070",
+            "source_offset": "525984",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "586b15581165e1a8fd0c85b7f8031a5f87dbafb61c171cc518907ea06c4abcc1",
+          "rendered_cells": 68,
+          "register_dom_ms": 779.3999999985099,
+          "ui_ms": 800.7000000029802
+        },
+        {
+          "click": 16,
+          "source_row": 46406,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "35",
+            "sequence": "35950554",
+            "source_offset": "526904",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3a462aebb03cd1fdd099acaf4d1c63987f2006c169b7b2058ee9de627329b09",
+          "rendered_cells": 68,
+          "register_dom_ms": 543.1999999955297,
+          "ui_ms": 562.8999999985099
+        },
+        {
+          "click": 17,
+          "source_row": 46409,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "38",
+            "sequence": "35950557",
+            "source_offset": "527152",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "cbd76c6dd8df8a11c6054b773ecafd5e36805812737f7b49566e0451b1f3e47a",
+          "rendered_cells": 68,
+          "register_dom_ms": 902.1999999955297,
+          "ui_ms": 922.5999999940395
+        },
+        {
+          "click": 18,
+          "source_row": 46412,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "41",
+            "sequence": "35950560",
+            "source_offset": "527352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3ac9c1a00ae56391807ce630e04a0b137d2661f44cd7f751db40f147e8d14f3",
+          "rendered_cells": 68,
+          "register_dom_ms": 785.2999999970198,
+          "ui_ms": 805.5
+        },
+        {
+          "click": 19,
+          "source_row": 46415,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "44",
+            "sequence": "35950563",
+            "source_offset": "527576",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "42738ede755af37d150a544774d93132a12acf5e75a4b836938eebbd232cb032",
+          "rendered_cells": 68,
+          "register_dom_ms": 763.7999999970198,
+          "ui_ms": 784.1000000014901
+        },
+        {
+          "click": 20,
+          "source_row": 46419,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "47",
+            "sequence": "35950567",
+            "source_offset": "527816",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "b12cc93d7e7f91047bedbe828f1b8add2ad62f0d0177b8c39f8c81d867d8b5a7",
+          "rendered_cells": 68,
+          "register_dom_ms": 702.1000000014901,
+          "ui_ms": 721.3000000044703
+        },
+        {
+          "click": 21,
+          "source_row": 44893,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "6",
+            "sequence": "35949041",
+            "source_offset": "524864",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "a17f03673dbbb60c82fd4a2027c20fdf97b76ec42b4813d4fcb7f36e85967a78",
+          "rendered_cells": 68,
+          "register_dom_ms": 602.2000000029802,
+          "ui_ms": 623.7999999970198
+        },
+        {
+          "click": 22,
+          "source_row": 44901,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "9",
+            "sequence": "35949049",
+            "source_offset": "525096",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "98cd4b638ac7fc0f7166e2298ca56e581e82f38478301bfb470d7b56aafa5d3e",
+          "rendered_cells": 68,
+          "register_dom_ms": 751.5,
+          "ui_ms": 772.3999999985099
+        },
+        {
+          "click": 23,
+          "source_row": 44907,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "12",
+            "sequence": "35949055",
+            "source_offset": "525352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e55d04d6fbb59d681ac4bf61eef82e7e320ed20ffd5e0230dd0db1a5c5711076",
+          "rendered_cells": 68,
+          "register_dom_ms": 715.9000000059605,
+          "ui_ms": 737.4000000059605
+        },
+        {
+          "click": 24,
+          "source_row": 44914,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "15",
+            "sequence": "35949062",
+            "source_offset": "525632",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "ae33001b66200545ae20ce1c9b63fd59b4a2397d2c0fca0d4b419f1222f22efd",
+          "rendered_cells": 68,
+          "register_dom_ms": 598.6000000014901,
+          "ui_ms": 618.3999999985099
+        },
+        {
+          "click": 25,
+          "source_row": 44922,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "19",
+            "sequence": "35949070",
+            "source_offset": "525984",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "586b15581165e1a8fd0c85b7f8031a5f87dbafb61c171cc518907ea06c4abcc1",
+          "rendered_cells": 68,
+          "register_dom_ms": 760.2000000029802,
+          "ui_ms": 781
+        },
+        {
+          "click": 26,
+          "source_row": 46406,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "35",
+            "sequence": "35950554",
+            "source_offset": "526904",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3a462aebb03cd1fdd099acaf4d1c63987f2006c169b7b2058ee9de627329b09",
+          "rendered_cells": 68,
+          "register_dom_ms": 787.2000000029802,
+          "ui_ms": 812.5
+        },
+        {
+          "click": 27,
+          "source_row": 46409,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "38",
+            "sequence": "35950557",
+            "source_offset": "527152",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "cbd76c6dd8df8a11c6054b773ecafd5e36805812737f7b49566e0451b1f3e47a",
+          "rendered_cells": 68,
+          "register_dom_ms": 763.1000000014901,
+          "ui_ms": 785.6999999955297
+        },
+        {
+          "click": 28,
+          "source_row": 46412,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "41",
+            "sequence": "35950560",
+            "source_offset": "527352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3ac9c1a00ae56391807ce630e04a0b137d2661f44cd7f751db40f147e8d14f3",
+          "rendered_cells": 68,
+          "register_dom_ms": 594.6000000014901,
+          "ui_ms": 615
+        },
+        {
+          "click": 29,
+          "source_row": 46415,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "44",
+            "sequence": "35950563",
+            "source_offset": "527576",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "42738ede755af37d150a544774d93132a12acf5e75a4b836938eebbd232cb032",
+          "rendered_cells": 68,
+          "register_dom_ms": 699.1000000014901,
+          "ui_ms": 719.8999999985099
+        },
+        {
+          "click": 30,
+          "source_row": 46419,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "47",
+            "sequence": "35950567",
+            "source_offset": "527816",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "b12cc93d7e7f91047bedbe828f1b8add2ad62f0d0177b8c39f8c81d867d8b5a7",
+          "rendered_cells": 68,
+          "register_dom_ms": 846.8000000044703,
+          "ui_ms": 867
+        },
+        {
+          "click": 31,
+          "source_row": 44893,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "6",
+            "sequence": "35949041",
+            "source_offset": "524864",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "a17f03673dbbb60c82fd4a2027c20fdf97b76ec42b4813d4fcb7f36e85967a78",
+          "rendered_cells": 68,
+          "register_dom_ms": 785,
+          "ui_ms": 805.6000000014901
+        },
+        {
+          "click": 32,
+          "source_row": 44901,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "9",
+            "sequence": "35949049",
+            "source_offset": "525096",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "98cd4b638ac7fc0f7166e2298ca56e581e82f38478301bfb470d7b56aafa5d3e",
+          "rendered_cells": 68,
+          "register_dom_ms": 560.3000000044703,
+          "ui_ms": 583.1000000014901
+        },
+        {
+          "click": 33,
+          "source_row": 44907,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "12",
+            "sequence": "35949055",
+            "source_offset": "525352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e55d04d6fbb59d681ac4bf61eef82e7e320ed20ffd5e0230dd0db1a5c5711076",
+          "rendered_cells": 68,
+          "register_dom_ms": 779,
+          "ui_ms": 798.5999999940395
+        },
+        {
+          "click": 34,
+          "source_row": 44914,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "15",
+            "sequence": "35949062",
+            "source_offset": "525632",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "ae33001b66200545ae20ce1c9b63fd59b4a2397d2c0fca0d4b419f1222f22efd",
+          "rendered_cells": 68,
+          "register_dom_ms": 843.8000000044703,
+          "ui_ms": 869.7000000029802
+        },
+        {
+          "click": 35,
+          "source_row": 44922,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "19",
+            "sequence": "35949070",
+            "source_offset": "525984",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "586b15581165e1a8fd0c85b7f8031a5f87dbafb61c171cc518907ea06c4abcc1",
+          "rendered_cells": 68,
+          "register_dom_ms": 771.5,
+          "ui_ms": 792
+        },
+        {
+          "click": 36,
+          "source_row": 46406,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "35",
+            "sequence": "35950554",
+            "source_offset": "526904",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3a462aebb03cd1fdd099acaf4d1c63987f2006c169b7b2058ee9de627329b09",
+          "rendered_cells": 68,
+          "register_dom_ms": 529,
+          "ui_ms": 550.3999999985099
+        },
+        {
+          "click": 37,
+          "source_row": 46409,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "38",
+            "sequence": "35950557",
+            "source_offset": "527152",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "cbd76c6dd8df8a11c6054b773ecafd5e36805812737f7b49566e0451b1f3e47a",
+          "rendered_cells": 68,
+          "register_dom_ms": 759,
+          "ui_ms": 778.8999999985099
+        },
+        {
+          "click": 38,
+          "source_row": 46412,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "41",
+            "sequence": "35950560",
+            "source_offset": "527352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3ac9c1a00ae56391807ce630e04a0b137d2661f44cd7f751db40f147e8d14f3",
+          "rendered_cells": 68,
+          "register_dom_ms": 757.8999999985099,
+          "ui_ms": 777.6000000014901
+        },
+        {
+          "click": 39,
+          "source_row": 46415,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "44",
+            "sequence": "35950563",
+            "source_offset": "527576",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "42738ede755af37d150a544774d93132a12acf5e75a4b836938eebbd232cb032",
+          "rendered_cells": 68,
+          "register_dom_ms": 697.7000000029802,
+          "ui_ms": 719.3999999985099
+        },
+        {
+          "click": 40,
+          "source_row": 46419,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "47",
+            "sequence": "35950567",
+            "source_offset": "527816",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "b12cc93d7e7f91047bedbe828f1b8add2ad62f0d0177b8c39f8c81d867d8b5a7",
+          "rendered_cells": 68,
+          "register_dom_ms": 593.3000000044703,
+          "ui_ms": 615
+        },
+        {
+          "click": 41,
+          "source_row": 44893,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "6",
+            "sequence": "35949041",
+            "source_offset": "524864",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "a17f03673dbbb60c82fd4a2027c20fdf97b76ec42b4813d4fcb7f36e85967a78",
+          "rendered_cells": 68,
+          "register_dom_ms": 758.9000000059605,
+          "ui_ms": 778.7000000029802
+        },
+        {
+          "click": 42,
+          "source_row": 44901,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "9",
+            "sequence": "35949049",
+            "source_offset": "525096",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "98cd4b638ac7fc0f7166e2298ca56e581e82f38478301bfb470d7b56aafa5d3e",
+          "rendered_cells": 68,
+          "register_dom_ms": 704.1000000014901,
+          "ui_ms": 729.1999999955297
+        },
+        {
+          "click": 43,
+          "source_row": 44907,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "12",
+            "sequence": "35949055",
+            "source_offset": "525352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e55d04d6fbb59d681ac4bf61eef82e7e320ed20ffd5e0230dd0db1a5c5711076",
+          "rendered_cells": 68,
+          "register_dom_ms": 938.2999999970198,
+          "ui_ms": 963.5999999940395
+        },
+        {
+          "click": 44,
+          "source_row": 44914,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "15",
+            "sequence": "35949062",
+            "source_offset": "525632",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "ae33001b66200545ae20ce1c9b63fd59b4a2397d2c0fca0d4b419f1222f22efd",
+          "rendered_cells": 68,
+          "register_dom_ms": 617.1000000014901,
+          "ui_ms": 641.7000000029802
+        },
+        {
+          "click": 45,
+          "source_row": 44922,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "19",
+            "sequence": "35949070",
+            "source_offset": "525984",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "586b15581165e1a8fd0c85b7f8031a5f87dbafb61c171cc518907ea06c4abcc1",
+          "rendered_cells": 68,
+          "register_dom_ms": 712.7000000029802,
+          "ui_ms": 734.7000000029802
+        },
+        {
+          "click": 46,
+          "source_row": 46406,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "35",
+            "sequence": "35950554",
+            "source_offset": "526904",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3a462aebb03cd1fdd099acaf4d1c63987f2006c169b7b2058ee9de627329b09",
+          "rendered_cells": 68,
+          "register_dom_ms": 762.1000000014901,
+          "ui_ms": 782
+        },
+        {
+          "click": 47,
+          "source_row": 46409,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "38",
+            "sequence": "35950557",
+            "source_offset": "527152",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "cbd76c6dd8df8a11c6054b773ecafd5e36805812737f7b49566e0451b1f3e47a",
+          "rendered_cells": 68,
+          "register_dom_ms": 758.8000000044703,
+          "ui_ms": 778.9000000059605
+        },
+        {
+          "click": 48,
+          "source_row": 46412,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "41",
+            "sequence": "35950560",
+            "source_offset": "527352",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "e3ac9c1a00ae56391807ce630e04a0b137d2661f44cd7f751db40f147e8d14f3",
+          "rendered_cells": 68,
+          "register_dom_ms": 548.5,
+          "ui_ms": 571.8999999985099
+        },
+        {
+          "click": 49,
+          "source_row": 46415,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "44",
+            "sequence": "35950563",
+            "source_offset": "527576",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "42738ede755af37d150a544774d93132a12acf5e75a4b836938eebbd232cb032",
+          "rendered_cells": 68,
+          "register_dom_ms": 774.6000000014901,
+          "ui_ms": 794.1000000014901
+        },
+        {
+          "click": 50,
+          "source_row": 46419,
+          "key": {
+            "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "record_ordinal": "47",
+            "sequence": "35950567",
+            "source_offset": "527816",
+            "tid": 6302,
+            "timeline_id": "0"
+          },
+          "register_sha256": "b12cc93d7e7f91047bedbe828f1b8add2ad62f0d0177b8c39f8c81d867d8b5a7",
+          "rendered_cells": 68,
+          "register_dom_ms": 776.2999999970198,
+          "ui_ms": 795.8999999985099
+        }
+      ],
+      "page_errors": [],
+      "api_errors": [],
+      "fixture": {
+        "name": "flight-crash",
+        "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+        "fixture_root": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash-fixtures",
+        "expected": {
+          "event_count": 1185909,
+          "event_counts": {
+            "begin": 255,
+            "discontinuity": 265896,
+            "instruction": 357543,
+            "instruction_definition": 11450,
+            "memory": 159331,
+            "register_checkpoint": 255,
+            "register_delta": 357485,
+            "semantic_call": 31467,
+            "signal_handler_boundary": 1,
+            "string_definition": 2206,
+            "syscall": 1,
+            "thread_lifecycle": 19
+          },
+          "sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+          "context": {
+            "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+            "mode": "monitor",
+            "status": "crash_recovered",
+            "stage": "completed",
+            "package": "com.aprz.qbdiandroid",
+            "device_serial": "2d32ed71",
+            "device_access_mode": null,
+            "target_module": null,
+            "profile": null,
+            "scenes": []
+          }
+        }
+      },
+      "service_sha256": "c32d879cafa8a9321471c7c7d7552d339764f220f5d6e1c8908eae24ef4ab8ca",
+      "frontend_sha256": {
+        "src/App.tsx": "63f6deeef1e360c68dea3d9a83b5d4b39d987f463d414aa9a7b852effbd7676b",
+        "src/state/RequestScope.ts": "e43b23f5bf68b58312854d1e0b2569a40bc8076306d34fbd60832cc87d7bab52",
+        "src/state/useRequestScope.ts": "7d6278b695ab3de96bd69a4fd7ff921b1c936004f2f3b4a86c2133723b237dda",
+        "src/state/useEventDetails.ts": "4f0f91fbc39bd025f39699eb7760102f453852d5d3729e52f504f8a0952b5ef8",
+        "src/state/usePersistentEdits.ts": "9eff5356edf028cf3405416847500519101ae262bd75450d96bb5099774164e2",
+        "src/state/useTimelineNavigation.ts": "babf00f5d602becb54d0cfb4352eff0e8067ebeaee97ffc5b1089a23198313b1",
+        "src/timeline/TimelinePages.ts": "66b631f6725aea0d56fd53ce05832721458f7915e0ee7f0bd25f1c4c95d9a170",
+        "src/timeline/VirtualTimeline.tsx": "323ddc795e66134473b810f7037a433546af4b67d8f54852a17330c472c19dad",
+        "src/timeline/TraceCanvasRenderer.ts": "5d06553350ffe5687147977c99c6063db13bf1a1a39c4eb7269a88c8670077fc",
+        "src/components/AnnotationEditor.tsx": "adff4d95e8559396d647d4259a074ee9b6e243ca9103f6920ccfa859f9770dc9"
+      },
+      "chromium": "153.0.8010.12",
+      "workspace": {
+        "artifact_count": 1,
+        "generation": 0,
+        "id": "1"
+      },
+      "unique_events": 10,
+      "p95_ui_ms": 922.5999999940395,
+      "p95_register_dom_ms": 902.1999999955297,
+      "closed_workspace": {
+        "status": 400,
+        "body": {
+          "error": {
+            "code": "workspace.stale",
+            "detail": "workspace is closed or stale",
+            "retryable": false,
+            "source": null,
+            "stage": "workspace"
+          }
+        },
+        "note": "Closed workspace rejects further reads; Arc release is covered separately by the Rust replay lifecycle test."
+      },
+      "passed": true
+    }
+  },
+  "call_tree_interactions": {
+    "method": "Actual CallTreePane in Chromium with synthetic bounded page responses. Deep chain=512; wide roots=10,000. No Rust IPC or backend tree-build cost is claimed.",
+    "page_errors": [],
+    "chromium": "153.0.8010.12",
+    "deep": {
+      "depth": 512,
+      "max_dom_nodes": 15,
+      "requests": 511,
+      "expand_ms": [
+        33.29999999701977,
+        33.20000000298023,
+        33.20000000298023,
+        33.5,
+        33.599999994039536,
+        33.30000000447035,
+        33.19999999552965,
+        33.19999999552965,
+        33.30000000447035,
+        33.19999999552965,
+        33.5,
+        33.19999999552965,
+        33.29999999701977,
+        33.30000000447035,
+        32.70000000298023,
+        33,
+        33.19999999552965,
+        32.899999998509884,
+        33.100000001490116,
+        33.100000001490116,
+        33.19999999552965,
+        33.30000000447035,
+        33.30000000447035,
+        33.20000000298023,
+        33.19999999552965,
+        33.100000001490116,
+        33.20000000298023,
+        32.69999999552965,
+        33.5,
+        33.20000000298023,
+        32.69999999552965,
+        33.100000001490116,
+        33.30000000447035,
+        33.29999999701977,
+        33.399999998509884,
+        33.100000001490116,
+        33.29999999701977,
+        33.29999999701977,
+        33.599999994039536,
+        33.30000000447035,
+        32.899999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        33.19999999552965,
+        33.19999999552965,
+        33.399999998509884,
+        33.100000001490116,
+        32.80000000447035,
+        33.100000001490116,
+        33.29999999701977,
+        33.100000001490116,
+        33.29999999701977,
+        33.30000000447035,
+        33.100000001490116,
+        33.100000001490116,
+        33.29999999701977,
+        32.70000000298023,
+        33.5,
+        33.19999999552965,
+        33.20000000298023,
+        33.29999999701977,
+        33.400000005960464,
+        33,
+        33.29999999701977,
+        33.100000001490116,
+        33.20000000298023,
+        33.399999998509884,
+        33.20000000298023,
+        33.29999999701977,
+        33.399999998509884,
+        33.100000001490116,
+        33.100000001490116,
+        33,
+        33.399999998509884,
+        33.399999998509884,
+        33.20000000298023,
+        33.5,
+        33.400000005960464,
+        33.19999999552965,
+        33.19999999552965,
+        33,
+        33.20000000298023,
+        33.29999999701977,
+        33.5,
+        33.30000000447035,
+        33,
+        33.100000001490116,
+        33.400000005960464,
+        33.100000001490116,
+        33.20000000298023,
+        33.100000001490116,
+        33.29999999701977,
+        33.29999999701977,
+        33.20000000298023,
+        33.100000001490116,
+        33.29999999701977,
+        33.20000000298023,
+        33.5,
+        33,
+        33,
+        33.100000001490116,
+        33,
+        33.30000000447035,
+        33.600000001490116,
+        33.19999999552965,
+        33.100000001490116,
+        33.399999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        33.19999999552965,
+        33.600000001490116,
+        33.30000000447035,
+        33.20000000298023,
+        33.29999999701977,
+        33.100000001490116,
+        33.20000000298023,
+        33.099999994039536,
+        33.30000000447035,
+        33.20000000298023,
+        33.19999999552965,
+        33.600000001490116,
+        32.70000000298023,
+        33,
+        33.20000000298023,
+        33.100000001490116,
+        33,
+        33.20000000298023,
+        33.399999998509884,
+        33.19999999552965,
+        33.399999998509884,
+        33.30000000447035,
+        33.399999998509884,
+        33.30000000447035,
+        33.20000000298023,
+        33.399999998509884,
+        33.100000001490116,
+        33.30000000447035,
+        33.19999999552965,
+        33.29999999701977,
+        33.400000005960464,
+        33.399999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        33.100000001490116,
+        33.30000000447035,
+        33.20000000298023,
+        33.29999999701977,
+        33.19999999552965,
+        33.30000000447035,
+        33.100000001490116,
+        33,
+        33,
+        33.29999999701977,
+        33.20000000298023,
+        33.30000000447035,
+        32.899999998509884,
+        33.599999994039536,
+        33.20000000298023,
+        33,
+        33.29999999701977,
+        33.20000000298023,
+        33.100000001490116,
+        33.100000001490116,
+        33.20000000298023,
+        33.20000000298023,
+        33.29999999701977,
+        33.599999994039536,
+        33.20000000298023,
+        33.100000001490116,
+        33.30000000447035,
+        33.30000000447035,
+        33.399999998509884,
+        33.399999998509884,
+        32.899999998509884,
+        33.19999999552965,
+        32.899999998509884,
+        33.29999999701977,
+        33.29999999701977,
+        33.20000000298023,
+        33.400000005960464,
+        33.19999999552965,
+        33.30000000447035,
+        33.20000000298023,
+        33,
+        33.20000000298023,
+        32.900000005960464,
+        33.20000000298023,
+        33.20000000298023,
+        33.099999994039536,
+        32.899999998509884,
+        33.399999998509884,
+        33.30000000447035,
+        33.19999999552965,
+        33.20000000298023,
+        32.899999998509884,
+        33.100000001490116,
+        33,
+        33.19999999552965,
+        33.5,
+        33,
+        33.100000001490116,
+        33.600000001490116,
+        33.399999998509884,
+        33,
+        33.100000001490116,
+        33.29999999701977,
+        33.30000000447035,
+        33.19999999552965,
+        33.19999999552965,
+        33.20000000298023,
+        33.399999998509884,
+        33.20000000298023,
+        33.30000000447035,
+        33.399999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        33.099999994039536,
+        33.29999999701977,
+        33.5,
+        33.20000000298023,
+        33,
+        33.19999999552965,
+        33.399999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        33.20000000298023,
+        33.399999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        32.899999998509884,
+        32.80000000447035,
+        33.19999999552965,
+        33.20000000298023,
+        33.20000000298023,
+        33.20000000298023,
+        33.399999998509884,
+        33.30000000447035,
+        33.19999999552965,
+        33.29999999701977,
+        33.100000001490116,
+        33.399999998509884,
+        33.29999999701977,
+        33.399999998509884,
+        33.19999999552965,
+        33.29999999701977,
+        33.100000001490116,
+        33.19999999552965,
+        33.19999999552965,
+        33,
+        33.100000001490116,
+        33.30000000447035,
+        33,
+        32.900000005960464,
+        33.100000001490116,
+        33.20000000298023,
+        33.100000001490116,
+        33.29999999701977,
+        33,
+        33.20000000298023,
+        32.600000001490116,
+        33,
+        33.400000005960464,
+        33.29999999701977,
+        33.29999999701977,
+        33.100000001490116,
+        33.19999999552965,
+        33.30000000447035,
+        33.20000000298023,
+        33,
+        33.19999999552965,
+        33.400000005960464,
+        33.29999999701977,
+        33.29999999701977,
+        33.30000000447035,
+        33.20000000298023,
+        33.29999999701977,
+        33.30000000447035,
+        33.70000000298023,
+        33.29999999701977,
+        33.100000001490116,
+        33.399999998509884,
+        33,
+        33.100000001490116,
+        33.100000001490116,
+        33.099999994039536,
+        33.100000001490116,
+        33.399999998509884,
+        33.100000001490116,
+        33.20000000298023,
+        33.20000000298023,
+        33.19999999552965,
+        33.29999999701977,
+        33.20000000298023,
+        33.29999999701977,
+        33.20000000298023,
+        33,
+        33.400000005960464,
+        33.30000000447035,
+        33.100000001490116,
+        33.29999999701977,
+        32.80000000447035,
+        33,
+        33.29999999701977,
+        33.400000005960464,
+        33.20000000298023,
+        33.099999994039536,
+        33.20000000298023,
+        33,
+        33.19999999552965,
+        33.19999999552965,
+        33.20000000298023,
+        33.400000005960464,
+        33.399999998509884,
+        33.30000000447035,
+        33.29999999701977,
+        33.600000001490116,
+        33.30000000447035,
+        33.19999999552965,
+        33.19999999552965,
+        33.20000000298023,
+        33.29999999701977,
+        33.29999999701977,
+        33.399999998509884,
+        33.20000000298023,
+        33.5,
+        33.399999998509884,
+        33.29999999701977,
+        33.29999999701977,
+        33.100000001490116,
+        33.19999999552965,
+        33.100000001490116,
+        32.899999998509884,
+        33.100000001490116,
+        33.399999998509884,
+        33.100000001490116,
+        33.29999999701977,
+        33.29999999701977,
+        33.20000000298023,
+        33.19999999552965,
+        33.29999999701977,
+        33.100000001490116,
+        33.100000001490116,
+        33.400000005960464,
+        33.29999999701977,
+        33.20000000298023,
+        33.100000001490116,
+        33.400000005960464,
+        33.100000001490116,
+        33.29999999701977,
+        33.20000000298023,
+        33.70000000298023,
+        32.899999998509884,
+        33.5,
+        33.100000001490116,
+        33.100000001490116,
+        33.5,
+        33.30000000447035,
+        33.399999998509884,
+        33.100000001490116,
+        33.29999999701977,
+        33.20000000298023,
+        33.5,
+        33.20000000298023,
+        33.399999998509884,
+        33.29999999701977,
+        32.899999998509884,
+        33.19999999552965,
+        33,
+        33.20000000298023,
+        33.29999999701977,
+        33.19999999552965,
+        33.30000000447035,
+        33.20000000298023,
+        33.100000001490116,
+        33.30000000447035,
+        33.29999999701977,
+        33.20000000298023,
+        33.5,
+        33.20000000298023,
+        33.20000000298023,
+        33.30000000447035,
+        33.70000000298023,
+        33.69999999552965,
+        33.19999999552965,
+        33.5,
+        33.20000000298023,
+        33.29999999701977,
+        33.399999998509884,
+        33.399999998509884,
+        33.400000005960464,
+        33,
+        33.19999999552965,
+        33.20000000298023,
+        33.19999999552965,
+        33.29999999701977,
+        33.100000001490116,
+        33.399999998509884,
+        33.100000001490116,
+        33,
+        33.100000001490116,
+        33.399999998509884,
+        33.20000000298023,
+        33.29999999701977,
+        33.29999999701977,
+        33.20000000298023,
+        33.5,
+        33,
+        33.30000000447035,
+        33.20000000298023,
+        33.29999999701977,
+        33.20000000298023,
+        33.29999999701977,
+        33.19999999552965,
+        33.100000001490116,
+        33.29999999701977,
+        33.19999999552965,
+        33.30000000447035,
+        33.29999999701977,
+        33.20000000298023,
+        33.20000000298023,
+        33.19999999552965,
+        33.399999998509884,
+        33.30000000447035,
+        33.099999994039536,
+        33.19999999552965,
+        33.20000000298023,
+        32.900000005960464,
+        33.399999998509884,
+        33.30000000447035,
+        33.19999999552965,
+        33.399999998509884,
+        33.29999999701977,
+        33.20000000298023,
+        33.29999999701977,
+        33.29999999701977,
+        33.29999999701977,
+        32.79999999701977,
+        33.20000000298023,
+        32.899999998509884,
+        33.19999999552965,
+        33.20000000298023,
+        33.19999999552965,
+        33.29999999701977,
+        33.30000000447035,
+        33.19999999552965,
+        33.099999994039536,
+        33.29999999701977,
+        33.100000001490116,
+        33.099999994039536,
+        33.29999999701977,
+        33.399999998509884,
+        33.19999999552965,
+        33.19999999552965,
+        33.30000000447035,
+        33.30000000447035,
+        33.20000000298023,
+        33.5,
+        33.19999999552965,
+        33.30000000447035,
+        33.20000000298023,
+        33.29999999701977,
+        33.100000001490116,
+        33.30000000447035,
+        33.100000001490116,
+        33.100000001490116,
+        33.29999999701977,
+        33.399999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        33.399999998509884,
+        33.19999999552965,
+        33.400000005960464,
+        33.5,
+        33,
+        33.100000001490116,
+        33.20000000298023,
+        33.399999998509884,
+        33,
+        33,
+        33,
+        33.20000000298023,
+        33.29999999701977,
+        33.29999999701977,
+        32.899999998509884,
+        33.20000000298023,
+        33.29999999701977,
+        33.399999998509884,
+        33.20000000298023,
+        33.399999998509884,
+        33.30000000447035,
+        33.100000001490116,
+        33.29999999701977,
+        33.400000005960464,
+        33.20000000298023,
+        33.29999999701977,
+        33.5,
+        33.5,
+        33.19999999552965,
+        33.20000000298023,
+        33.30000000447035,
+        33.19999999552965,
+        33.5,
+        33.20000000298023,
+        33.100000001490116,
+        33.399999998509884,
+        33.20000000298023,
+        33.100000001490116,
+        33.099999994039536,
+        33.20000000298023,
+        33.20000000298023,
+        33.600000001490116
+      ],
+      "p95_expand_ms": 33.5,
+      "last_jump": 511,
+      "last_title_length": 308,
+      "truncated": true,
+      "panel_width": 188,
+      "tree_scroll_width": 188
+    },
+    "wide": {
+      "roots": 10000,
+      "requests": 99,
+      "max_dom_nodes": 13,
+      "last_jump": 9999,
+      "scroll_height": 3234
+    },
+    "identity": {
+      "mismatched_page_ignored": true,
+      "unmounted_page_ignored": true
+    },
+    "responses": {
+      "max_nodes": 1,
+      "max_bytes": 573
+    },
+    "heap": {
+      "before_bytes": 2644472,
+      "after_bytes": 3859364,
+      "note": "After includes a page reload and root replacement; it is diagnostic, not a retained-cache limit."
+    },
+    "component_sha256": "ff59d41cabad755c27dde027ac80b710a35cece9ba23e1ebcfcb06382ca14d4c",
+    "passed": true
+  },
+  "flight_interactions": {
+    "method": "Actual Chromium interactions against the retained Xiaomi Flight capture and authenticated release Rust service. Covers summaries, report/single-artifact context, >2,000 real results, cross-page hits, empty results, and a delayed real response across workspace replacement.",
+    "checks": [
+      "report context equals retained report; missing profile remains unavailable",
+      "instruction, memory, semantic, and discontinuity summaries match actual rendered accessible rows and typed details",
+      "real >2,000 matches: next/previous pages and hits cross page 1/2 in both directions",
+      "empty result keeps navigation disabled",
+      "delayed real results response cannot change replacement workspace or add a stale error",
+      "same retained artifact opens without fabricated session context and remains queryable"
+    ],
+    "page_errors": [],
+    "summaries": [
+      {
+        "kind": "instruction",
+        "source_row": 44893,
+        "location": "libdemo_target.so+0x6fdb4",
+        "summary": "MOVZWi mov w0, #0x3e8",
+        "provenance": "captured",
+        "detail_sha256": "032369ff4028d62f215f318dd91e03d71685ad0f6d79848f0a2de2e86d8ad5aa"
+      },
+      {
+        "kind": "memory",
+        "source_row": 44916,
+        "location": "libdemo_target.so+0xeb044",
+        "summary": "read [0x7bea745ef8] 8 B",
+        "provenance": "captured",
+        "detail_sha256": "a3a20616a967e4d6c7d6122e251b300615dfedd9987d21e2fa443e44b669411b"
+      },
+      {
+        "kind": "semantic_call",
+        "source_row": 44931,
+        "location": "offset 0x807e0",
+        "summary": "transfer/call: source=0x7bea73904c target=0x7e9a37021c x0=0x3e8 x1=0x2 x2=0x4 x3=0x0 x8=0x0",
+        "provenance": "captured",
+        "detail_sha256": "23a34e9709a51ac80f7a7c0e7a25de1f39829ce0338470f175b861bef692c743"
+      },
+      {
+        "kind": "discontinuity",
+        "source_row": 920013,
+        "location": "offset 0x40000",
+        "summary": "discontinuity",
+        "provenance": "captured",
+        "detail_sha256": "7eaa158daf7f85ac2bbe818017b06284955924f58dbda8d46e29749af4c99465"
+      }
+    ],
+    "fixture": {
+      "name": "flight-crash",
+      "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+      "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+      "fixture_root": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash-fixtures",
+      "expected": {
+        "event_count": 1185909,
+        "event_counts": {
+          "begin": 255,
+          "discontinuity": 265896,
+          "instruction": 357543,
+          "instruction_definition": 11450,
+          "memory": 159331,
+          "register_checkpoint": 255,
+          "register_delta": 357485,
+          "semantic_call": 31467,
+          "signal_handler_boundary": 1,
+          "string_definition": 2206,
+          "syscall": 1,
+          "thread_lifecycle": 19
+        },
+        "sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+        "context": {
+          "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+          "mode": "monitor",
+          "status": "crash_recovered",
+          "stage": "completed",
+          "package": "com.aprz.qbdiandroid",
+          "device_serial": "2d32ed71",
+          "device_access_mode": null,
+          "target_module": null,
+          "profile": null,
+          "scenes": []
+        }
+      }
+    },
+    "service_sha256": "c32d879cafa8a9321471c7c7d7552d339764f220f5d6e1c8908eae24ef4ab8ca",
+    "picker_fixture": {
+      "root": "/home/lyldalek/workspace/qbdi-android/artifacts/ui-layout-state-2026-10-19/interactions-integrated/fixture-root",
+      "source_name": "463853640854272_6207_libdemo_target.so.flight.bin",
+      "note": "Copied retained Flight at the fixed single-artifact picker path; session JSON is unchanged, and both API artifact digests must match the original."
+    },
+    "chromium": "153.0.8010.12",
+    "results": {
+      "total": 357543,
+      "page_size": 2000,
+      "second_page_first": {
+        "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+        "record_ordinal": "5180",
+        "sequence": "35966636",
+        "source_offset": "865712",
+        "tid": 6297,
+        "timeline_id": "0"
+      },
+      "previous_hit": {
+        "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+        "record_ordinal": "5177",
+        "sequence": "35966627",
+        "source_offset": "865512",
+        "tid": 6297,
+        "timeline_id": "0"
+      }
+    },
+    "passed": true
+  },
+  "elf_interactions": {
+    "method": "Actual Chromium Attach ELF, Resolve symbol, and automatic timeline refresh within the existing projection against the authenticated Rust service and a fixed valid AArch64 ELF fixture. No API response mocks.",
+    "checks": [
+      "real Attach ELF and Resolve symbol show native_work from the verified fixture",
+      "automatic refresh uses the existing projection and same stable event key without changing captured location or summary",
+      "wrong module digest is refused and the previously verified symbols remain usable"
+    ],
+    "page_errors": [],
+    "elf": {
+      "bytes": 1120,
+      "expected": {
+        "class": "elf.aarch64-loadable-symbols",
+        "outcome": "success"
+      },
+      "format": "ELF",
+      "generator_schema": 2,
+      "path": "elf/lib.so",
+      "role": "standalone",
+      "session": null,
+      "sha256": "4c8e353ecccc9f23c3d54055efd4fe477d18d7404c74d9fe69125d5c4fd57a13",
+      "version": "ELF64/AArch64"
+    },
+    "service_sha256": "c32d879cafa8a9321471c7c7d7552d339764f220f5d6e1c8908eae24ef4ab8ca",
+    "chromium": "153.0.8010.12",
+    "before": {
+      "discontinuity": false,
+      "key": {
+        "artifact_sha256": "ce2ed1947dbde81671ecb4524c8b0698240f3f1b3200707961656ad2a121337a",
+        "record_ordinal": "3",
+        "sequence": "1",
+        "source_offset": "235",
+        "tid": 13,
+        "timeline_id": "0"
+      },
+      "kind": "instruction",
+      "location": "lib.so+0x2345",
+      "provenance": "captured",
+      "source_row": 3,
+      "summary": "B.EQ x0, #0x4",
+      "symbol": null
+    },
+    "after": {
+      "discontinuity": false,
+      "key": {
+        "artifact_sha256": "ce2ed1947dbde81671ecb4524c8b0698240f3f1b3200707961656ad2a121337a",
+        "record_ordinal": "3",
+        "sequence": "1",
+        "source_offset": "235",
+        "tid": 13,
+        "timeline_id": "0"
+      },
+      "kind": "instruction",
+      "location": "lib.so+0x2345",
+      "provenance": "captured",
+      "source_row": 3,
+      "summary": "B.EQ x0, #0x4",
+      "symbol": "native_work+0x5"
+    },
+    "projection_id": "2",
+    "denied": {
+      "request": {
+        "workspace_id": "1",
+        "module_name": "lib.so",
+        "module_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "expected_build_id": null
+      },
+      "status": 400,
+      "body": {
+        "error": {
+          "code": "symbol.module_identity_mismatch",
+          "detail": "symbol.module_identity_mismatch: ELF digest does not match module identity",
+          "retryable": false,
+          "source": null,
+          "stage": "symbol"
+        }
+      }
+    },
+    "passed": true
+  },
+  "limitations": [
+    "Chromium on current Linux host only. 200% layout uses half CSS viewport and DPR=2; no Tauri WebKit, native browser zoom, OS scaling, or screen-reader audit.",
+    "902.2 ms p95 register DOM timing includes browser automation, authenticated loopback transport, concurrent detail work, React and DOM assertions. 922.6 ms p95 UI timing also waits for the detail key. Neither is a baseline speedup or pure IPC number.",
+    "Call-tree 512-depth/10,000-width test uses actual CallTreePane with synthetic bounded pages; Rust first full-tree construction, real IPC bytes, and replay Arc release are proven separately by the parent service tests.",
+    "Flight single-artifact picker proof uses copies of the retained 67,108,864-byte Flight at the fixed main.trace.bin picker path. Session JSON and captured SHA identity remain unchanged.",
+    "Production readiness waits for Vite stdout with strictPort because a closed IPv4-port readiness probe silently stalls on this host."
+  ],
+  "next": [
+    "No frontend implementation or acceptance run remains in this assigned scope. Parent integrates independent Rust first-build, IPC and replay lifecycle evidence."
+  ],
+  "diagnostic_commands": [
+    {
+      "command": "QTRACE_E2E_SERVER=/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/e2e-server-final node qtrace-ui/tools/ui_layout_state.mjs artifacts/ui-layout-state-2026-10-19/layout-integrated",
+      "exit_code": 0
+    },
+    {
+      "command": "QTRACE_E2E_SERVER=/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/e2e-server-final node qtrace-ui/tools/ui_register_interactions.mjs artifacts/ui-layout-state-2026-10-19/registers-integrated",
+      "exit_code": 0
+    },
+    {
+      "command": "node qtrace-ui/tools/ui_call_tree_interactions.mjs artifacts/ui-layout-state-2026-10-19/call-tree-final.json",
+      "exit_code": 0
+    },
+    {
+      "command": "QTRACE_E2E_SERVER=/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/e2e-server-final node qtrace-ui/tools/ui_results_interactions.mjs artifacts/ui-layout-state-2026-10-19/interactions-integrated",
+      "exit_code": 0
+    },
+    {
+      "command": "QTRACE_E2E_SERVER=/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/e2e-server-final node qtrace-ui/tools/ui_elf_interactions.mjs artifacts/ui-layout-state-2026-10-19/elf-integrated",
+      "exit_code": 0
+    }
+  ],
+  "service_identities": {
+    "quiet_window_and_focused_checks": {
+      "binary": "artifacts/complete-optimization-2026-10-19/e2e-server-final",
+      "sha256": "c32d879cafa8a9321471c7c7d7552d339764f220f5d6e1c8908eae24ef4ab8ca"
+    },
+    "four_retained_capture_rerun": {
+      "binary": "qtrace-ui/target/release/e2e_server",
+      "sha256": "3cce8666d64aed47c6d4ee0025e9d263d39a6a887a8dc5ab216926f470d96c78",
+      "bytes": 7454432
+    },
+    "relationship_note": "Parent root reported the later rebuild changes only checked-u32 metadata test entry, unit-test placement and formatting, and preserves the c32 product path. The 50-click timing is attributed to c32; four retained capture browser checks use 3cce8666. No latency equivalence is inferred from the functional rerun."
+  },
+  "retained_capture_browser": {
+    "command": "node artifacts/complete-optimization-2026-10-19/browser/verify-browser.cjs",
+    "exit_code": 0,
+    "evidence_path": "artifacts/complete-optimization-2026-10-19/browser/browser-captures-result.json",
+    "script_sha256": "1f6d49889ce774b4069d90413e201019240a29163fb122cc9eaea8011d1087e4",
+    "scenarios_sha256": "2c716ddb8f23d6bdb57ec69c3164a60642299121fb5055e10bb3ef42a45f9c16",
+    "source_script": "artifacts/timeline-pages-2026-10-19/final/verify-browser.cjs",
+    "note": "Script and scenarios copied unchanged into the new directory because __dirname owns outputs; original evidence remains untouched.",
+    "evidence": {
+      "chromium": "153.0.8010.12",
+      "method": "Actual Chromium UI and Rust production service behind the existing authenticated E2E loopback transport; no response mocks or product-code changes.",
+      "scenarios": [
+        {
+          "name": "offset-v2",
+          "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+          "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset-v2/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/report.json",
+          "expected": {
+            "event_count": 987,
+            "event_counts": {
+              "begin": 1,
+              "instruction": 678,
+              "instruction_definition": 46,
+              "memory": 260,
+              "module_definition": 1,
+              "termination": 1
+            },
+            "sha256": "6cb602c21419fe076be95e79e7cf630bff70e88af980688ef75be4e44f547213",
+            "context": {
+              "session_id": "1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d",
+              "mode": "run",
+              "status": "sealed",
+              "stage": "completed",
+              "package": "com.aprz.qbdiandroid",
+              "device_serial": "2d32ed71",
+              "device_access_mode": null,
+              "target_module": null,
+              "profile": null,
+              "scenes": []
+            }
+          },
+          "directory": "/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/browser/offset-v2-browser-Fqtyw8",
+          "checks": [
+            "report context and real artifact count",
+            "bounded real timeline and exact total",
+            "instruction filter, real detail, 34-cell register replay and call tree",
+            "real call-tree child expansion, collapse, cached re-expansion and event jump",
+            "real thread filter",
+            "real memory state and history without response-row budget errors",
+            "empty results",
+            "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+          ],
+          "api_counts": {
+            "list_jobs": 14,
+            "pick_and_open_session": 2,
+            "create_projection": 8,
+            "query_timeline": 8,
+            "get_event_detail": 6,
+            "get_register_state": 6,
+            "get_call_tree": 7,
+            "get_annotation": 6,
+            "upsert_annotation": 1,
+            "upsert_highlight": 1,
+            "get_memory_state": 1,
+            "get_memory_history": 1,
+            "close_workspace": 1
+          },
+          "api_errors": [],
+          "page_errors": [],
+          "passed": true,
+          "opened": {
+            "name": "artifacts/1792378340896_4369_4502_fixture-entry_0x71250_0.trace.bin.lz4",
+            "events": 987,
+            "tids": [
+              4502
+            ],
+            "completeness_rows": 1,
+            "context": {
+              "device_access_mode": null,
+              "device_serial": "2d32ed71",
+              "mode": "run",
+              "package": "com.aprz.qbdiandroid",
+              "profile": null,
+              "scenes": [],
+              "session_id": "1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d",
+              "stage": "completed",
+              "status": "sealed",
+              "target_module": null
+            }
+          },
+          "first_page_sha256": "d0e45fbeaf4e067cd793f08791a49e7cf9024b4d2b9a2745c4e370ce01fb3c69",
+          "instruction": {
+            "source_row": 3,
+            "key": {
+              "artifact_sha256": "6cb602c21419fe076be95e79e7cf630bff70e88af980688ef75be4e44f547213",
+              "record_ordinal": "3",
+              "sequence": "1",
+              "source_offset": "252",
+              "tid": 4502,
+              "timeline_id": "0"
+            },
+            "register_sha256": "8fa0091ff95ad258a7b8a09b7ed916057066098066c338eb6534ec74102f074a",
+            "call_tree_nodes": 1
+          },
+          "call_tree": {
+            "roots": 1,
+            "initial_nodes": 1,
+            "identity": "ee795ac08187c1d55285caf0267277ef66a9a2b79e71d9b87e2d0d2884c085db",
+            "child_jump_source_row": 27
+          },
+          "memory": {
+            "source_row": 6,
+            "state_sha256": "daf031aa944a0a5048f8135069795000d57b31007ca28099b5f0b41458ff1f14",
+            "history_rows": 1
+          }
+        },
+        {
+          "name": "symbol",
+          "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+          "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/symbol/feb418a4-b5c4-4827-817c-1f04a4c77ef8/report.json",
+          "expected": {
+            "event_count": 987,
+            "event_counts": {
+              "begin": 1,
+              "instruction": 678,
+              "instruction_definition": 46,
+              "memory": 260,
+              "module_definition": 1,
+              "termination": 1
+            },
+            "sha256": "cc1b25fd9cfab74b57e0d1e9fbae210c1b5a0db3cbf02ccbde8954aa50382dbf",
+            "context": {
+              "session_id": "feb418a4-b5c4-4827-817c-1f04a4c77ef8",
+              "mode": "run",
+              "status": "sealed",
+              "stage": "completed",
+              "package": "com.aprz.qbdiandroid",
+              "device_serial": "2d32ed71",
+              "device_access_mode": null,
+              "target_module": null,
+              "profile": null,
+              "scenes": []
+            }
+          },
+          "directory": "/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/browser/symbol-browser-KKbZJq",
+          "checks": [
+            "report context and real artifact count",
+            "bounded real timeline and exact total",
+            "instruction filter, real detail, 34-cell register replay and call tree",
+            "real call-tree child expansion, collapse, cached re-expansion and event jump",
+            "real thread filter",
+            "real memory state and history without response-row budget errors",
+            "empty results",
+            "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+          ],
+          "api_counts": {
+            "list_jobs": 14,
+            "pick_and_open_session": 2,
+            "create_projection": 8,
+            "query_timeline": 8,
+            "get_event_detail": 6,
+            "get_register_state": 6,
+            "get_call_tree": 7,
+            "get_annotation": 6,
+            "upsert_annotation": 1,
+            "upsert_highlight": 1,
+            "get_memory_history": 1,
+            "get_memory_state": 1,
+            "close_workspace": 1
+          },
+          "api_errors": [],
+          "page_errors": [],
+          "passed": true,
+          "opened": {
+            "name": "artifacts/1792378365684_5010_5139_fixture-entry_0x71250_0.trace.bin.lz4",
+            "events": 987,
+            "tids": [
+              5139
+            ],
+            "completeness_rows": 1,
+            "context": {
+              "device_access_mode": null,
+              "device_serial": "2d32ed71",
+              "mode": "run",
+              "package": "com.aprz.qbdiandroid",
+              "profile": null,
+              "scenes": [],
+              "session_id": "feb418a4-b5c4-4827-817c-1f04a4c77ef8",
+              "stage": "completed",
+              "status": "sealed",
+              "target_module": null
+            }
+          },
+          "first_page_sha256": "416dfd7b247055eab3580bed55a3ae75d21c832443a8ee127b1895d778e6d9c8",
+          "instruction": {
+            "source_row": 3,
+            "key": {
+              "artifact_sha256": "cc1b25fd9cfab74b57e0d1e9fbae210c1b5a0db3cbf02ccbde8954aa50382dbf",
+              "record_ordinal": "3",
+              "sequence": "1",
+              "source_offset": "252",
+              "tid": 5139,
+              "timeline_id": "0"
+            },
+            "register_sha256": "8fbc70ed6851259dff02866b584bff8f20ba30ceadd565342884d47f408cfef1",
+            "call_tree_nodes": 1
+          },
+          "call_tree": {
+            "roots": 1,
+            "initial_nodes": 1,
+            "identity": "0edbf6e634792f15acfcfa06ded36051730a63abe68704a719019e47718d6806",
+            "child_jump_source_row": 27
+          },
+          "memory": {
+            "source_row": 6,
+            "state_sha256": "86cf6a83ebc1d35b0a354c50ecd0b5a152b3396e3e8994c66096f3f613bf4f43",
+            "history_rows": 1
+          }
+        },
+        {
+          "name": "monitor-exit",
+          "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+          "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/monitor-exit/c5a42187-c0ca-4384-8fb1-e448210af16c/report.json",
+          "expected": {
+            "event_count": 1714,
+            "event_counts": {
+              "begin": 1,
+              "instruction": 1199,
+              "instruction_definition": 50,
+              "memory": 462,
+              "module_definition": 1,
+              "termination": 1
+            },
+            "sha256": "29a7b6b39467b902d59700172606b50f6a2c52672f23b8f1544c511b73c9339e",
+            "context": {
+              "session_id": "c5a42187-c0ca-4384-8fb1-e448210af16c",
+              "mode": "monitor",
+              "status": "process_exited",
+              "stage": "completed",
+              "package": "com.aprz.qbdiandroid",
+              "device_serial": "2d32ed71",
+              "device_access_mode": null,
+              "target_module": null,
+              "profile": null,
+              "scenes": []
+            }
+          },
+          "directory": "/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/browser/monitor-exit-browser-Iy5d4s",
+          "checks": [
+            "report context and real artifact count",
+            "bounded real timeline and exact total",
+            "instruction filter, real detail, 34-cell register replay and call tree",
+            "real call-tree child expansion, collapse, cached re-expansion and event jump",
+            "real thread filter",
+            "real memory state and history without response-row budget errors",
+            "empty results",
+            "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+          ],
+          "api_counts": {
+            "list_jobs": 15,
+            "pick_and_open_session": 2,
+            "create_projection": 8,
+            "query_timeline": 8,
+            "get_event_detail": 6,
+            "get_register_state": 6,
+            "get_call_tree": 7,
+            "get_annotation": 6,
+            "upsert_annotation": 1,
+            "upsert_highlight": 1,
+            "get_memory_state": 1,
+            "get_memory_history": 1,
+            "close_workspace": 1
+          },
+          "api_errors": [],
+          "page_errors": [],
+          "passed": true,
+          "opened": {
+            "name": "artifacts/1792378390293_5658_5793_fixture-entry_0x71250_0.trace.bin.lz4",
+            "events": 1714,
+            "tids": [
+              5793
+            ],
+            "completeness_rows": 1,
+            "context": {
+              "device_access_mode": null,
+              "device_serial": "2d32ed71",
+              "mode": "monitor",
+              "package": "com.aprz.qbdiandroid",
+              "profile": null,
+              "scenes": [],
+              "session_id": "c5a42187-c0ca-4384-8fb1-e448210af16c",
+              "stage": "completed",
+              "status": "process_exited",
+              "target_module": null
+            }
+          },
+          "first_page_sha256": "bdf712091ae88d90ab5cf24d9877daaa7354cf4ce4d4c07070277408cb046c65",
+          "instruction": {
+            "source_row": 3,
+            "key": {
+              "artifact_sha256": "29a7b6b39467b902d59700172606b50f6a2c52672f23b8f1544c511b73c9339e",
+              "record_ordinal": "3",
+              "sequence": "1",
+              "source_offset": "252",
+              "tid": 5793,
+              "timeline_id": "0"
+            },
+            "register_sha256": "ee53c19555bc1d42829768e2c3568ee35fd0d0cc2d5b46590b853edb104e42f0",
+            "call_tree_nodes": 1
+          },
+          "call_tree": {
+            "roots": 1,
+            "initial_nodes": 1,
+            "identity": "147108436e0c6c1bcb2f60028f19f3f19af95e897e1585f5f5fcd2459ac43129",
+            "child_jump_source_row": 27
+          },
+          "memory": {
+            "source_row": 6,
+            "state_sha256": "12742cb19a1b7386d41d2b588d5d11c4524592966acd973b971b332e14a210f7",
+            "history_rows": 1
+          }
+        },
+        {
+          "name": "flight-crash",
+          "origin": "new Xiaomi M2011K2C capture, 2026-10-19",
+          "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+          "expected": {
+            "event_count": 1185909,
+            "event_counts": {
+              "begin": 255,
+              "discontinuity": 265896,
+              "instruction": 357543,
+              "instruction_definition": 11450,
+              "memory": 159331,
+              "register_checkpoint": 255,
+              "register_delta": 357485,
+              "semantic_call": 31467,
+              "signal_handler_boundary": 1,
+              "string_definition": 2206,
+              "syscall": 1,
+              "thread_lifecycle": 19
+            },
+            "sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+            "context": {
+              "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+              "mode": "monitor",
+              "status": "crash_recovered",
+              "stage": "completed",
+              "package": "com.aprz.qbdiandroid",
+              "device_serial": "2d32ed71",
+              "device_access_mode": null,
+              "target_module": null,
+              "profile": null,
+              "scenes": []
+            }
+          },
+          "directory": "/home/lyldalek/workspace/qbdi-android/artifacts/complete-optimization-2026-10-19/browser/flight-crash-browser-pAcLEf",
+          "checks": [
+            "report context and real artifact count",
+            "real result pages next/previous without duplicate keys",
+            "distant viewport reaches final real timeline page",
+            "bounded real timeline and exact total",
+            "instruction filter, real detail, 34-cell register replay and call tree",
+            "real call-tree child expansion, collapse, cached re-expansion and event jump",
+            "real thread filter",
+            "real memory state and history without response-row budget errors",
+            "empty results",
+            "service restart, cache reopen, equivalent registers and persistent comment/highlight"
+          ],
+          "api_counts": {
+            "list_jobs": 103,
+            "pick_and_open_session": 2,
+            "create_projection": 8,
+            "query_timeline": 11,
+            "locate_timeline_offset": 3,
+            "get_event_detail": 6,
+            "get_annotation": 6,
+            "get_call_tree": 7,
+            "get_register_state": 6,
+            "upsert_annotation": 1,
+            "upsert_highlight": 1,
+            "get_memory_history": 1,
+            "get_memory_state": 1,
+            "close_workspace": 1
+          },
+          "api_errors": [],
+          "page_errors": [],
+          "passed": true,
+          "opened": {
+            "name": "artifacts/463853640854272_6207_libdemo_target.so.flight.bin",
+            "events": 1185909,
+            "tids": [
+              6284,
+              6285,
+              6286,
+              6287,
+              6288,
+              6289,
+              6290,
+              6291,
+              6292,
+              6293,
+              6294,
+              6295,
+              6297,
+              6298,
+              6299,
+              6300,
+              6302,
+              6305,
+              6306,
+              6311,
+              6312,
+              6313,
+              6314,
+              6320,
+              6321,
+              6324,
+              6325,
+              6328,
+              6331,
+              6336,
+              6367
+            ],
+            "completeness_rows": 24162,
+            "context": {
+              "device_access_mode": null,
+              "device_serial": "2d32ed71",
+              "mode": "monitor",
+              "package": "com.aprz.qbdiandroid",
+              "profile": null,
+              "scenes": [],
+              "session_id": "d9fc09a8-7358-4d8c-a6c1-a426eea60380",
+              "stage": "completed",
+              "status": "crash_recovered",
+              "target_module": null
+            }
+          },
+          "first_page_sha256": "31a2de6886b8edc4f74edaddf330dbd93bc9baf61b472dd41bfbc37816acac52",
+          "last_page_sha256": "8e3393ff2b6e0342188cff6a54549a7dda9eb84ab6a6b5e7f4afaf511d702e2d",
+          "instruction": {
+            "source_row": 44893,
+            "key": {
+              "artifact_sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+              "record_ordinal": "6",
+              "sequence": "35949041",
+              "source_offset": "524864",
+              "tid": 6302,
+              "timeline_id": "0"
+            },
+            "register_sha256": "a17f03673dbbb60c82fd4a2027c20fdf97b76ec42b4813d4fcb7f36e85967a78",
+            "call_tree_nodes": 2
+          },
+          "call_tree": {
+            "roots": 2,
+            "initial_nodes": 2,
+            "identity": "2176dfde1032f11b8fae50d8343eb3de2897aae2264dc40e1d31f969a188bfbf",
+            "child_jump_source_row": 46425
+          },
+          "memory": {
+            "source_row": 44916,
+            "state_sha256": "48e04dd7bc403a435d158156e35985b1b1a5ddad2c0db217fb9ca514e7028721",
+            "history_rows": 286
+          }
+        }
+      ]
+    }
+  }
+}

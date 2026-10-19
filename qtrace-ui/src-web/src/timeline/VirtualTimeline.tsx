@@ -29,6 +29,7 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
   const [selected, setSelected] = useState<number | null>(null);
   const [visible, setVisible] = useState({ start: 0, end: Math.min(rows.length, 64) });
   const [scrollPosition, setScrollPosition] = useState({ physical: 0, logical: 0 });
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 320 });
   const controller = useMemo(() => {
     void controllerIdentity;
     return new ViewportController(async (request, signal) => {
@@ -56,7 +57,24 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
       updateViewport();
     }
   };
-  useEffect(updateViewport, [updateViewport]);
+  useEffect(() => {
+    const element = viewport.current;
+    if (element === null) return;
+    const resize = () => {
+      const width = element.clientWidth;
+      const height = Math.max(320, element.clientHeight);
+      setViewportSize(previous => previous.width === width && previous.height === height ? previous : { width, height });
+      updateViewport();
+    };
+    resize();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", resize);
+      return () => window.removeEventListener("resize", resize);
+    }
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [updateViewport]);
   useEffect(() => {
     const element = canvas.current;
     const context = element?.getContext("2d");
@@ -74,13 +92,13 @@ export function VirtualTimeline({ rows, pageStart = 0, totalRows = rows.length, 
       selectedSourceRow: selected,
       theme: { background: "#111827", foreground: "#e5e7eb", selected: "#1d4ed8", muted: "#9ca3af", damaged: "#7f1d1d", gap: "#422006" },
     });
-  }, [displayRows, selected]);
-  const scrollHeight = ViewportController.scrollHeight({ canvasHeight: 320, rowHeight: 24, totalRows });
+  }, [displayRows, selected, viewportSize]);
+  const scrollHeight = ViewportController.scrollHeight({ canvasHeight: viewportSize.height, rowHeight: 24, totalRows });
   const windowOffset = scrollPosition.physical + (pageStart + localStart) * 24 - scrollPosition.logical;
   return (
     <section ref={viewport} className="virtual-timeline" aria-label="Timeline" onScroll={updateViewport}>
       <div className="timeline-scroll-space" style={{ height: scrollHeight }}>
-        <div className="timeline-window" style={{ transform: `translateY(${windowOffset}px)` }}>
+        <div className="timeline-window" style={{ height: viewportSize.height, transform: `translateY(${windowOffset}px)` }}>
           <canvas ref={canvas} aria-hidden="true" />
           <InteractionLayer rows={displayRows} selectedSourceRow={selected} onSelect={(sourceRow) => { setSelected(sourceRow); const row = rows.find((item) => item.source_row === sourceRow); if (row !== undefined) onSelect?.(row); }} onExpand={setSelected} />
         </div>

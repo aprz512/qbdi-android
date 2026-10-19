@@ -142,6 +142,7 @@ add_trace_test(flight_artifact_test
     ../../main/cpp/flight/flight_artifact.cpp)
 target_link_libraries(flight_artifact_test PRIVATE Threads::Threads)
 target_link_options(flight_artifact_test PRIVATE
+    -Wl,--wrap=fstatvfs
     -Wl,--wrap=ftruncate
     -Wl,--wrap=mmap)
 
@@ -158,6 +159,18 @@ add_trace_test(flight_encoder_test
     ../../main/cpp/flight/flight_encoder.cpp
     ../../main/cpp/events/binary_trace_encoder.cpp)
 target_link_libraries(flight_encoder_test PRIVATE Threads::Threads)
+
+add_executable(protocol_fixture_emitter
+    protocol_fixture_emitter.cpp
+    ../../main/cpp/flight/flight_artifact.cpp
+    ../../main/cpp/flight/flight_chunk_writer.cpp
+    ../../main/cpp/flight/flight_encoder.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp)
+target_compile_features(protocol_fixture_emitter PRIVATE cxx_std_20)
+target_compile_definitions(protocol_fixture_emitter PRIVATE QTRACE_HOST_TEST=1)
+target_include_directories(protocol_fixture_emitter PRIVATE
+    ../../main/cpp ../../main/cpp/third_party/qbdi/include)
+target_link_libraries(protocol_fixture_emitter PRIVATE Threads::Threads)
 
 add_trace_test(flight_trace_sink_test
     flight_trace_sink_test.cpp
@@ -415,6 +428,7 @@ target_link_options(termination_syscall_test PRIVATE -Wl,--gc-sections)
 add_trace_test(tracer_entry_proxy_test
     tracer_entry_proxy_test.cpp
     ../../main/cpp/tracer_entry.cpp
+    ../../main/cpp/core/tracer_json_endpoint.cpp
     ../../main/cpp/hooks/thread_create_gateway.cpp
     ../../main/cpp/core/capture_coordinator.cpp
     ../../main/cpp/core/qbdi_execution_control.cpp

@@ -1,25 +1,52 @@
 name: qtrace-ui fuzz
 on:
+  push:
+    paths: ['qtrace-ui/**', 'qtrace/report.py', 'scripts/**', 'tracer/src/**', '.github/workflows/qtrace-ui-fuzz.yml']
+  pull_request:
+    paths: ['qtrace-ui/**', 'qtrace/report.py', 'scripts/**', 'tracer/src/**', '.github/workflows/qtrace-ui-fuzz.yml']
   workflow_dispatch:
   schedule:
     - cron: '23 3 * * 1'
 permissions:
   contents: read
 jobs:
+  protocol-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Production C++ encoders and independent Python/Rust readers
+        run: python3 qtrace-ui/tools/check_protocol_matrix.py --check
+      - name: Bounded storage corpus and property checks
+        run: cargo test --manifest-path qtrace-ui/fuzz/Cargo.toml --locked -j 2 --tests
+      - name: Guarded annotation cancellation and migration rollback
+        run: cargo test --manifest-path qtrace-ui/Cargo.toml --locked -j 2 -p qtrace-store --test annotation_guard
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        target: [qtrb, flight]
+        include:
+          - { target: qtrb, max_len: 16777216 }
+          - { target: flight, max_len: 16777216 }
+          - { target: cache_manifest, max_len: 1048576 }
+          - { target: session_report, max_len: 1048576 }
+          - { target: annotations, max_len: 262144 }
+    env:
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly-2026-08-15
       - run: cargo install cargo-fuzz --locked --version 0.13.1
       - name: Fuzz ${{ matrix.target }}
         working-directory: qtrace-ui
-        run: cargo +nightly-2026-08-15 fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- -max_total_time=1800 -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/
+        env:
+          FUZZ_SECONDS: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1800' || '60' }}
+        run: |
+          mkdir -p fuzz/artifacts/${{ matrix.target }}/
+          cargo +nightly-2026-08-15 fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- -max_total_time="$FUZZ_SECONDS" -max_len=${{ matrix.max_len }} -timeout=3 -rss_limit_mb=512 -malloc_limit_mb=128 -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

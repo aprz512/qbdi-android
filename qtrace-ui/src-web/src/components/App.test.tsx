@@ -1,9 +1,9 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { ApiProvider } from "../api/ApiContext";
 import type { QtraceApi } from "../api/QtraceApi";
-import type { EventDetailDto } from "../api/generated";
+import type { AnnotationDto, EventDetailDto, TimelinePageDto } from "../api/generated";
 import { AppStateProvider } from "../state/AppStateProvider";
 import { SymbolPane } from "./SymbolPane";
 
@@ -53,6 +53,161 @@ const eventRow = (source_row: number) => ({
 });
 
 describe("desktop shell", () => {
+  it.each(["workspace", "projection"])("ignores an ELF attachment after replacing its %s", async replacement => {
+    let attached!: () => void;
+    const opened = await fakeApi().pickAndOpenSession();
+    if (opened === null) throw new Error("Missing test workspace");
+    const api = fakeApi({
+      pickAndOpenSession: vi.fn()
+        .mockResolvedValueOnce(opened)
+        .mockResolvedValueOnce({ ...opened, workspace: { ...opened.workspace, id: "replacement" } }),
+      createProjection: vi.fn()
+        .mockResolvedValueOnce({ projection_id: "original", job_id: "job-1", generation: 1 })
+        .mockResolvedValueOnce({ projection_id: "replacement", job_id: "job-1", generation: 2 }),
+      queryTimeline: vi.fn()
+        .mockResolvedValueOnce({ rows: [eventRow(1)], next_cursor: null, total: 1, exact_total: true })
+        .mockResolvedValueOnce({ rows: [eventRow(2)], next_cursor: null, total: 1, exact_total: true }),
+      pickAndAttachElf: vi.fn(() => new Promise<void>(resolve => { attached = resolve; })),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply filters" }));
+    await screen.findByRole("row", { name: /^1 thread 7/ });
+    fireEvent.change(screen.getByLabelText("Module digest"), { target: { value: "b".repeat(64) } });
+    fireEvent.change(screen.getByLabelText("Relative PC"), { target: { value: "0x5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Attach ELF" }));
+    await waitFor(() => expect(api.pickAndAttachElf).toHaveBeenCalledTimes(1));
+    if (replacement === "workspace") {
+      fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+      await screen.findByText(/Workspace replacement/);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+    await screen.findByRole("row", { name: /^2 thread 7/ });
+    await act(async () => attached());
+    expect(api.queryTimeline).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("row", { name: /^2 thread 7/ })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("refreshes cached timeline symbols after attaching ELF without rebuilding the projection", async () => {
+    const row = eventRow(1);
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "symbols", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn()
+        .mockResolvedValueOnce({ rows: [row], next_cursor: null, total: 1, exact_total: true })
+        .mockResolvedValueOnce({ rows: [{ ...row, symbol: "native_work+0x5" }], next_cursor: null, total: 1, exact_total: true }),
+      pickAndAttachElf: vi.fn().mockResolvedValue(undefined),
+      locateTimelineOffset: vi.fn().mockResolvedValue({ start: 0, cursor: null }),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply filters" }));
+    await screen.findByRole("row", { name: /^1 thread 7/ });
+    fireEvent.change(screen.getByLabelText("Module name"), { target: { value: "lib.so" } });
+    fireEvent.change(screen.getByLabelText("Module digest"), { target: { value: "b".repeat(64) } });
+    fireEvent.change(screen.getByLabelText("Relative PC"), { target: { value: "0x5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Attach ELF" }));
+    expect(await screen.findByRole("row", { name: /native_work\+0x5/ })).toBeVisible();
+    expect(api.createProjection).toHaveBeenCalledTimes(1);
+    expect(api.queryTimeline).toHaveBeenLastCalledWith("workspace-7", "symbols", null, 2_000);
+  });
+
+  it("keeps a late annotation save on its original event", async () => {
+    let saved!: () => void;
+    const rows = [eventRow(1), eventRow(2)];
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "edit-race", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn().mockResolvedValue({ rows, next_cursor: null, total: 2, exact_total: true }),
+      getEventDetail: vi.fn((_workspace, _artifact, row) => Promise.resolve({ artifact_index: 0, row, key: rows[row - 1].key, kind: "instruction", provenance: "captured", raw_payload: "{}", module: null, relative_pc: null, memory_range: null })),
+      getRegisterState: vi.fn().mockResolvedValue({ key: rows[0].key, before: [], after: [] }),
+      getCallTree: vi.fn().mockResolvedValue({ identity: "tree", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 0, total: 0, nodes: [] }),
+      getAnnotation: vi.fn((_workspace, _artifact, row) => Promise.resolve({ key: rows[row - 1].key, comment: row === 2 ? "second event" : "", highlight: null })),
+      upsertAnnotation: vi.fn(() => new Promise<void>(resolve => { saved = resolve; })),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply filters" }));
+    fireEvent.click(await screen.findByRole("row", { name: /^1 thread 7/ }));
+    fireEvent.change(await screen.findByLabelText("Comment"), { target: { value: "first event edit" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    fireEvent.click(screen.getByRole("row", { name: /^2 thread 7/ }));
+    await waitFor(() => expect(screen.getByLabelText("Comment")).toHaveValue("second event"));
+    saved();
+    await waitFor(() => expect(screen.getByLabelText("Comment")).toHaveValue("second event"));
+    expect(screen.getByText("Committed: second event")).toBeVisible();
+    expect(api.upsertAnnotation).toHaveBeenCalledWith("workspace-7", 0, 1, "first event edit");
+  });
+
+  it("keeps a saved comment when its earlier annotation read arrives", async () => {
+    let read!: (value: { key: ReturnType<typeof eventRow>["key"]; comment: string; highlight: string }) => void;
+    const row = eventRow(1);
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "read-edit-race", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn().mockResolvedValue({ rows: [row], next_cursor: null, total: 1, exact_total: true }),
+      getEventDetail: vi.fn().mockResolvedValue({ artifact_index: 0, row: 1, key: row.key, kind: "instruction", provenance: "captured", raw_payload: "{}", module: null, relative_pc: null, memory_range: null }),
+      getRegisterState: vi.fn().mockResolvedValue({ key: row.key, before: [], after: [] }),
+      getCallTree: vi.fn().mockResolvedValue({ identity: "tree", artifact_index: 0, timeline_id: "1", tid: 7, parent: null, offset: 0, total: 0, nodes: [] }),
+      getAnnotation: vi.fn(() => new Promise<AnnotationDto>(resolve => { read = resolve; })),
+      upsertAnnotation: vi.fn().mockResolvedValue(undefined),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply filters" }));
+    fireEvent.click(await screen.findByRole("row", { name: /^1 thread 7/ }));
+    fireEvent.change(await screen.findByLabelText("Comment"), { target: { value: "new comment" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    await screen.findByText("Committed: new comment");
+    read({ key: row.key, comment: "old comment", highlight: "preserved highlight" });
+    await waitFor(() => expect(screen.getByLabelText("Highlight")).toHaveValue("preserved highlight"));
+    expect(screen.getByLabelText("Comment")).toHaveValue("new comment");
+  });
+
+  it("shares a page request when adjacent virtual viewports supersede one another", async () => {
+    const firstPage = { rows: Array.from({ length: 2_000 }, (_, index) => eventRow(index + 1)), next_cursor: "second", total: 6_000, exact_total: true };
+    const pending: Array<(page: TimelinePageDto) => void> = [];
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "shared-page", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn((_workspace, _projection, cursor) => cursor === null
+        ? Promise.resolve(firstPage)
+        : new Promise<TimelinePageDto>(resolve => pending.push(resolve))),
+      locateTimelineOffset: vi.fn().mockResolvedValue({ start: 2_000, cursor: "second" }),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply filters" }));
+    await screen.findByRole("row", { name: /^1 thread 7/ });
+    const timeline = screen.getByLabelText("Timeline");
+    Object.defineProperty(timeline, "clientHeight", { configurable: true, value: 320 });
+    fireEvent.scroll(timeline, { target: { scrollTop: 2_200 * 24 } });
+    await waitFor(() => expect(pending.length).toBeGreaterThan(0));
+    fireEvent.scroll(timeline, { target: { scrollTop: 2_210 * 24 } });
+    await waitFor(() => expect(api.locateTimelineOffset).toHaveBeenCalledTimes(2));
+    const secondPage = { rows: Array.from({ length: 2_000 }, (_, index) => eventRow(index + 2_001)), next_cursor: "third", total: 6_000, exact_total: true };
+    for (const resolve of pending) resolve(secondPage);
+    await screen.findByRole("row", { name: /^2211 thread 7/ });
+    expect(api.queryTimeline).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a timeline response after closing its workspace", async () => {
+    let resolve!: (page: TimelinePageDto) => void;
+    const api = fakeApi({
+      createProjection: vi.fn().mockResolvedValue({ projection_id: "closing-page", job_id: "job-1", generation: 1 }),
+      queryTimeline: vi.fn(() => new Promise<TimelinePageDto>(done => { resolve = done; })),
+    });
+    render(<ApiProvider api={api}><AppStateProvider><App /></AppStateProvider></ApiProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply filters" }));
+    await waitFor(() => expect(api.queryTimeline).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Close" })).toBeDisabled());
+    resolve({ rows: [eventRow(123)], next_cursor: null, total: 1, exact_total: true });
+    await waitFor(() => expect(screen.queryByLabelText("Timeline")).not.toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+    await screen.findByText(/Workspace workspace-7/);
+    expect(screen.queryByLabelText("Timeline")).not.toBeInTheDocument();
+  });
+
   it("retries cleanup when replacing a workspace whose close initially fails", async () => {
     const closeWorkspace = vi.fn()
       .mockRejectedValueOnce(new Error("busy"))
@@ -183,6 +338,7 @@ describe("desktop shell", () => {
     await waitFor(() => expect(api.locateTimeline).toHaveBeenCalledWith("workspace-7", "projection-history", 1, 2_000));
     await waitFor(() => expect(api.queryTimeline).toHaveBeenCalledWith("workspace-7", "projection-history", "history-next", 2_000));
     await waitFor(() => expect(api.getEventDetail).toHaveBeenLastCalledWith("workspace-7", 0, 1));
+    expect(await screen.findByText("detail-1")).toBeVisible();
   });
 
   it("jumps from the call tree to an event on a later timeline page", async () => {

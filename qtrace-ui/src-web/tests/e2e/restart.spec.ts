@@ -37,6 +37,7 @@ test("local rename survives a service restart with the same XDG data root", asyn
   await restartService();
   await page.reload();
   await page.getByRole("button", { name: "Open session" }).click();
+  await expect(page.getByText(/Workspace /)).toBeVisible();
   await page.getByLabel("Module digest").fill(digest);
   await page.getByLabel("Relative PC").fill("0x120");
   const [, resolved] = await Promise.all([

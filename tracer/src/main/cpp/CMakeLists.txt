@@ -100,6 +100,7 @@ add_library(qbdi_tracer SHARED
         flight/flight_trace_sink.cpp
         core/trace_config.cpp
         core/tracer_configuration.cpp
+        core/tracer_json_endpoint.cpp
         hooks/inline_hook_adapter.cpp
         hooks/thread_create_gateway.cpp
         core/qbdi_runner.cpp
@@ -120,6 +121,7 @@ add_library(qbdi_tracer SHARED
 set_source_files_properties(
         tracer_entry.cpp
         core/tracer_configuration.cpp
+        core/tracer_json_endpoint.cpp
         PROPERTIES
         COMPILE_OPTIONS "-fexceptions")
 

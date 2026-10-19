@@ -10,6 +10,7 @@
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
@@ -17,6 +18,7 @@
 #include <vector>
 
 extern "C" int __real_ftruncate(int descriptor, off_t length);
+extern "C" int __real_fstatvfs(int descriptor, struct statvfs *space);
 extern "C" void *__real_mmap(void *address, size_t length, int protection, int flags,
                               int descriptor, off_t offset);
 
@@ -24,10 +26,32 @@ namespace {
 
 int g_file_operation_order = 0;
 int g_ftruncate_order = 0;
+int g_space_check_order = 0;
+int g_space_checked_descriptor = -1;
+int g_space_error = 0;
+bool g_override_space = false;
+uint64_t g_available_blocks = 0;
+uint64_t g_fragment_bytes = 4096;
 int g_shared_mmap_order = 0;
 bool g_fail_shared_mmap = false;
 
 } // namespace
+
+extern "C" int __wrap_fstatvfs(int descriptor, struct statvfs *space) {
+    g_space_check_order = ++g_file_operation_order;
+    g_space_checked_descriptor = descriptor;
+    if (g_space_error != 0) {
+        errno = g_space_error;
+        return -1;
+    }
+    const int result = __real_fstatvfs(descriptor, space);
+    if (result == 0 && g_override_space) {
+        space->f_bavail = g_available_blocks;
+        space->f_frsize = g_fragment_bytes;
+        space->f_bsize = g_fragment_bytes;
+    }
+    return result;
+}
 
 extern "C" int __wrap_ftruncate(int descriptor, off_t length) {
     g_ftruncate_order = ++g_file_operation_order;
@@ -94,10 +118,13 @@ void creates_checked_private_mapping_and_publishes_superblock_last() {
     TemporaryArtifact file;
     g_file_operation_order = 0;
     g_ftruncate_order = 0;
+    g_space_check_order = 0;
     g_shared_mmap_order = 0;
     FlightArtifact artifact;
     CHECK(artifact.create(file.path.c_str(), test_options(), test_identity()));
     CHECK(artifact.valid());
+    CHECK(g_space_check_order > 0);
+    CHECK(g_ftruncate_order > g_space_check_order);
     CHECK(g_ftruncate_order > 0);
     CHECK(g_shared_mmap_order > g_ftruncate_order);
 
@@ -149,6 +176,63 @@ void mmap_failure_closes_and_removes_the_partial_artifact() {
     CHECK(!artifact.valid());
     CHECK(::access(file.path.c_str(), F_OK) == -1);
     CHECK(errno == ENOENT);
+}
+
+void space_preflight_rejects_low_storage_and_failed_checks_before_mapping() {
+    for (const int failure : {ENOSPC, EIO}) {
+        TemporaryArtifact file;
+        g_space_error = failure == EIO ? EIO : 0;
+        g_override_space = failure == ENOSPC;
+        g_available_blocks = test_options().capacity_bytes / 4096U - 1U;
+        g_fragment_bytes = 4096;
+        g_space_checked_descriptor = -1;
+        g_ftruncate_order = 0;
+        g_shared_mmap_order = 0;
+        FlightArtifact artifact;
+        const bool created = artifact.create(file.path.c_str(), test_options(), test_identity());
+        const int create_error = errno;
+        g_override_space = false;
+        g_space_error = 0;
+        CHECK(!created);
+        CHECK(create_error == failure);
+        CHECK(!artifact.valid());
+        CHECK(artifact.fd() == -1);
+        CHECK(artifact.size() == 0);
+        CHECK(g_space_checked_descriptor >= 0);
+        CHECK(::fcntl(g_space_checked_descriptor, F_GETFD) == -1);
+        CHECK(errno == EBADF);
+        CHECK(g_ftruncate_order == 0);
+        CHECK(g_shared_mmap_order == 0);
+        CHECK(::access(file.path.c_str(), F_OK) == -1);
+        CHECK(errno == ENOENT);
+    }
+}
+
+void space_preflight_rounds_up_required_blocks_without_product_overflow() {
+    TemporaryArtifact file;
+    FlightOptions options = test_options();
+    ++options.capacity_bytes;
+    g_override_space = true;
+    g_available_blocks = test_options().capacity_bytes / 4096U;
+    g_fragment_bytes = 4096;
+    FlightArtifact artifact;
+    CHECK(!artifact.create(file.path.c_str(), options, test_identity()));
+    CHECK(errno == ENOSPC);
+    ++g_available_blocks;
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
+    artifact.close();
+    CHECK(::unlink(file.path.c_str()) == 0);
+    g_available_blocks = UINT64_MAX;
+    g_fragment_bytes = UINT64_MAX;
+    CHECK(artifact.create(file.path.c_str(), options, test_identity()));
+    artifact.close();
+    CHECK(::unlink(file.path.c_str()) == 0);
+    g_fragment_bytes = 0;
+    CHECK(!artifact.create(file.path.c_str(), options, test_identity()));
+    CHECK(errno == EIO);
+    CHECK(::access(file.path.c_str(), F_OK) == -1);
+    CHECK(errno == ENOENT);
+    g_override_space = false;
 }
 
 void rejects_invalid_layout_without_leaving_a_file() {
@@ -689,6 +773,8 @@ void constructor_time_loading_has_no_transient_incomplete_state() {
 } // namespace
 
 int main() {
+    space_preflight_rejects_low_storage_and_failed_checks_before_mapping();
+    space_preflight_rounds_up_required_blocks_without_product_overflow();
     creates_checked_private_mapping_and_publishes_superblock_last();
     mmap_failure_closes_and_removes_the_partial_artifact();
     rejects_invalid_layout_without_leaving_a_file();

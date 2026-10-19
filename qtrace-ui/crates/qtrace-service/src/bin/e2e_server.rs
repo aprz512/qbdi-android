@@ -195,6 +195,16 @@ fn dispatch(command: &str, value: Value, state: &State) -> Result<Value, AppErro
                 "sessions/valid-mixed/artifacts/main.trace.bin",
             )?))?)
         }
+        "pick_and_attach_elf" => {
+            service.attach_elf(
+                &field(&value, "workspace_id")?,
+                AuthorizedPath::new(member(&state.fixture_root, "elf/lib.so")?),
+                field(&value, "module_name")?,
+                field(&value, "module_digest")?,
+                optional(&value, "expected_build_id")?,
+            )?;
+            to_value(Some(()))
+        }
         "close_workspace" => {
             service.close_workspace(&field(&value, "workspace_id")?)?;
             Ok(Value::Null)
@@ -362,6 +372,7 @@ fn member(root: &Path, name: &str) -> Result<PathBuf, AppError> {
         "sessions/valid-mixed"
             | "sessions/one-invalid-artifact"
             | "sessions/valid-mixed/artifacts/main.trace.bin"
+            | "elf/lib.so"
     ) {
         return Err(AppError::new(
             "e2e.fixture_denied",

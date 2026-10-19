@@ -9,6 +9,7 @@
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 namespace {
@@ -86,6 +87,25 @@ bool artifact_basename_is_safe(const char *basename, size_t size) noexcept {
             character == 0x7fU) {
             return false;
         }
+    }
+    return true;
+}
+
+bool artifact_capacity_available(int descriptor, uint64_t required_bytes) noexcept {
+    struct statvfs space {};
+    if (::fstatvfs(descriptor, &space) != 0) return false;
+    const uint64_t fragment_bytes = space.f_frsize != 0 ? space.f_frsize : space.f_bsize;
+    if (fragment_bytes == 0) {
+        errno = EIO;
+        return false;
+    }
+    // Compare block counts instead of multiplying a potentially overflowing
+    // filesystem counter. f_bavail excludes space unavailable to the app UID.
+    const uint64_t required_blocks = required_bytes / fragment_bytes +
+                                     (required_bytes % fragment_bytes != 0 ? 1U : 0U);
+    if (static_cast<uint64_t>(space.f_bavail) < required_blocks) {
+        errno = ENOSPC;
+        return false;
     }
     return true;
 }
@@ -369,7 +389,8 @@ bool FlightArtifact::create(const char *path, const FlightOptions &options,
 
     const int descriptor = ::open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
     if (descriptor == -1) return false;
-    if (::fchmod(descriptor, 0600) != 0 ||
+    if (!artifact_capacity_available(descriptor, options.capacity_bytes) ||
+        ::fchmod(descriptor, 0600) != 0 ||
         ::ftruncate(descriptor, static_cast<off_t>(options.capacity_bytes)) != 0) {
         const int error = errno;
         (void)::close(descriptor);

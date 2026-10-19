@@ -11,9 +11,15 @@ use crate::ArtifactSource;
 use super::{
     BuildOptions, ByteArena, CompletenessRow, DefinitionRow, EventColumn, IndexCatalog, IndexError,
     InstructionRow, MemoryRow, ModuleRow, NormalizedCatalog, NormalizedSourceFormat,
-    OwnedTraceStore, SemanticRow, SortedMap, SourceKeyRow, checkpoints::RegisterAccess,
-    checkpoints::RegisterObservationRow, intervals::IntervalEntry, intervals::IntervalIndex,
-    postings::PostingList, validation::validate_external_payload_tag,
+    OwnedTraceStore, SemanticRow, SortedMap,
+    checkpoints::RegisterAccess,
+    checkpoints::RegisterObservationRow,
+    intervals::IntervalEntry,
+    intervals::IntervalIndex,
+    postings::PostingList,
+    sorting::{cancellable_sort, cancellable_sort_by},
+    source_keys::SourceKeyIndex,
+    validation::validate_external_payload_tag,
 };
 
 pub struct IndexBuilder;
@@ -1149,33 +1155,7 @@ pub(super) fn build_indexes(
     }
     let memory = IntervalIndex::build(intervals, options.interval_block_rows as usize, guard)?;
 
-    let mut source_keys = Vec::new();
-    crate::allocation::try_reserve_vec(
-        &mut source_keys,
-        keys.len(),
-        guard,
-        "source-key index allocation",
-    )?;
-    for row in 0..keys.len() {
-        if row % 4096 == 0 {
-            guard.consume(WorkDelta::default())?;
-        }
-        source_keys.push(SourceKeyRow { row });
-    }
-    if !keys
-        .windows(2)
-        .all(|pair| super::compare_event_keys(&pair[0], &pair[1]).is_lt())
-    {
-        cancellable_sort_by(&mut source_keys, guard, |left, right| {
-            super::compare_event_keys(&keys[left.row], &keys[right.row])
-        })?;
-    }
-    if source_keys
-        .windows(2)
-        .any(|pair| super::compare_event_keys(&keys[pair[0].row], &keys[pair[1].row]).is_eq())
-    {
-        return Err(IndexError::duplicate_key("duplicate source EventKey"));
-    }
+    let source_keys = SourceKeyIndex::build(keys, guard)?;
     Ok(IndexCatalog {
         timeline,
         tid,
@@ -1382,22 +1362,7 @@ pub(super) fn validate_index_families(
     let memory = IntervalIndex::build(intervals, options.interval_block_rows as usize, guard)?;
     require_equal(memory, &indexes.memory, "memory interval")?;
 
-    let mut source_keys = Vec::new();
-    crate::allocation::try_reserve_vec(
-        &mut source_keys,
-        keys.len(),
-        guard,
-        "source validation allocation",
-    )?;
-    source_keys.extend((0..keys.len()).map(|row| SourceKeyRow { row }));
-    if !keys
-        .windows(2)
-        .all(|pair| super::compare_event_keys(&pair[0], &pair[1]).is_lt())
-    {
-        cancellable_sort_by(&mut source_keys, guard, |left, right| {
-            super::compare_event_keys(&keys[left.row], &keys[right.row])
-        })?;
-    }
+    let source_keys = SourceKeyIndex::build(keys, guard)?;
     require_equal(source_keys, &indexes.source_keys, "source key")?;
     Ok(())
 }
@@ -1584,81 +1549,6 @@ fn keyed_values<K: Ord + Clone, V: Ord + Clone>(
         first = last;
     }
     SortedMap::from_sorted(result)
-}
-
-pub(super) fn cancellable_sort<T: Ord + Clone>(
-    rows: &mut Vec<T>,
-    guard: &dyn WorkGuard,
-) -> Result<(), IndexError> {
-    cancellable_sort_by(rows, guard, Ord::cmp)
-}
-
-pub(super) fn cancellable_sort_by<T: Clone>(
-    rows: &mut Vec<T>,
-    guard: &dyn WorkGuard,
-    compare: impl Fn(&T, &T) -> std::cmp::Ordering + Copy,
-) -> Result<(), IndexError> {
-    const CHUNK: usize = 4096;
-    for chunk in rows.chunks_mut(CHUNK) {
-        guard.consume(WorkDelta::default())?;
-        chunk.sort_unstable_by(compare);
-    }
-    if rows.len() <= CHUNK {
-        return Ok(());
-    }
-    let mut scratch = Vec::new();
-    crate::allocation::try_reserve_vec(
-        &mut scratch,
-        rows.len(),
-        guard,
-        "merge-sort scratch allocation",
-    )?;
-    let mut width = CHUNK;
-    while width < rows.len() {
-        scratch.clear();
-        for first in (0..rows.len()).step_by(width.saturating_mul(2)) {
-            guard.consume(WorkDelta::default())?;
-            let middle = first.saturating_add(width).min(rows.len());
-            let end = middle.saturating_add(width).min(rows.len());
-            let (mut left, mut right) = (first, middle);
-            let mut output_since_checkpoint = 0_usize;
-            while left < middle && right < end {
-                if compare(&rows[left], &rows[right]).is_le() {
-                    scratch.push(rows[left].clone());
-                    left += 1;
-                } else {
-                    scratch.push(rows[right].clone());
-                    right += 1;
-                }
-                output_since_checkpoint += 1;
-                if output_since_checkpoint == 4096 {
-                    guard.consume(WorkDelta::default())?;
-                    output_since_checkpoint = 0;
-                }
-            }
-            while left < middle {
-                scratch.push(rows[left].clone());
-                left += 1;
-                output_since_checkpoint += 1;
-                if output_since_checkpoint == 4096 {
-                    guard.consume(WorkDelta::default())?;
-                    output_since_checkpoint = 0;
-                }
-            }
-            while right < end {
-                scratch.push(rows[right].clone());
-                right += 1;
-                output_since_checkpoint += 1;
-                if output_since_checkpoint == 4096 {
-                    guard.consume(WorkDelta::default())?;
-                    output_since_checkpoint = 0;
-                }
-            }
-        }
-        std::mem::swap(rows, &mut scratch);
-        width = width.saturating_mul(2);
-    }
-    Ok(())
 }
 
 pub(super) fn canonical_bytes<T: Serialize>(

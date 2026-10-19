@@ -2,7 +2,7 @@
 
 **首次整理：** 2026-09-24
 
-**状态更新：** 2026-10-19（基于 HEAD `5c269e0` 的工作区；新增 UI-10 页面缓存本机验收与保留产物浏览器回归）
+**状态更新：** 2026-10-19（基于 HEAD `72548df` 的 `perf/complete-optimization-2026-10-19` 工作区；28 项均完成其记录范围内的实施或复验）
 
 **性质：** 持续维护的优化清单；实施与验收状态以各条目及对应证据为准
 
@@ -12,10 +12,17 @@
 
 仓库的主链路是 `app` 演示目标、`tracer` 设备端采集、`qtrace` 主机编排与产物发布，以及 `qtrace-ui` 离线分析。`qtrace-ui` 已采用 provider → store → analysis → service → Tauri/React 的分层；host CI、定期 fuzz、固定主机性能门禁和手动设备门禁都已存在。优化应先解决已经能从代码或现有证据确认的高成本路径，再处理结构复杂度；不要为了减小代码量削弱身份校验、预算、取消、完整性或原子发布。
 
-PERF-01/PERF-02 已在用户指定的当前环境验收通过，真实小米采集到浏览器的功能链路也已打通。PERF-03 的缓存阶段测量与有界并行、UI-07 的加载进度、UI-09 的首次分析取消，以及 UI-10 的页面缓存上限与淘汰重取已完成本机验收。后续优先推进 **UI-06 请求所有权、UI-08 布局与规模边界复验**。寄存器复用、调用树分页、时间线摘要、session 上下文、结果分页和开发机诊断模式已有实现，后续重点是针对各条目的剩余条件复验。历史大规模性能门禁不能替代当前版本的交互和真实事件负载验证。
+本轮已完成清单全部待实施、部分完成和待复验条件。新增源键隐式索引、共享预算的双 artifact 打开、完整 IPC 边界、Full collector 常量 fallback、Flight 空间预检、产物事务模块化、进程故障矩阵、跨语言 encoder 契约、存储 fuzz、布局与前端请求所有权。寄存器、调用树、摘要、ELF 更新、session 降级、跨页命中、关闭和持久化均已复验。
+
+验收范围按证据区分：本机 Chromium/Rust、Pixel 6 五轮 benchmark，以及保留小米产物的 provider/service/浏览器回归。历史参考门槛与原始证据保留；诊断结果没有升级为固定主机门禁，也没有声称已测 WebKit、原生系统缩放、设备掉电持久性或远程 CI。完整命令、状态和报告映射见 [本轮总验收](../../benchmarks/qtrace-project-optimization-2026-10-19.md)。
 
 ### 证据边界
 
+- 本轮完成：Rust 全量 520 通过、2 个环境依赖测试保持 ignored；Python 全量 858 项检查通过、8 skipped；前端 76 单测、14 E2E、1 production、build/lint 通过；native 45/45 和 Android app/tracer 构建通过。真实 C++/Python/Rust 矩阵、五个 ASan target、存储 property 及结构后 Flight ASan 均通过。源码身份、测量校正和范围限制见 [总验收](../../benchmarks/qtrace-project-optimization-2026-10-19.md)。
+- STORE-01/02：10M/512 MiB 同机五轮，源键优化 RSS 中位数 -6.58%、冷开 -2.79%；2/4 artifact 冷开约 -40%、热开约 -46%，峰值 RSS 小幅增加，原累计预算不变。新旧缓存字节相同并互读，无重建。见 [store 与边界报告](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)。
+- CORE-01/02：Pixel 6 同 APK/target 前后各三档五轮全部通过；Full 每条回调的 0x524-byte 清零消除。保留默认 512 MiB，13 份真实 Flight 容量/每线程窗口调查、启动低存储注入和正常/未 seal 退出恢复均有证据。31→26 ms 是本批 Full 中位数观测，不声称稳定百分比收益。见 [native 报告](../../benchmarks/qtrace-native-optimization-2026-10-19.md)。
+- UI-01–05/UI-08/MAINT-02：最终 50 次真实点击的稳定键和 34+34 寄存器等价；实际组件深宽树 DOM 有界，真实 Rust 5000 层/10000 根树完整分页，六布局场景与键盘焦点通过。摘要、ELF 同 projection 自动刷新、context 降级、真实跨页命中与 workspace 竞态均通过。见 [交互报告](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)。
+- 2026-10-19 UI-06：`TimelinePages` 统一时间线滚动、翻页、跳转和历史恢复的 identity、共享请求与缓存；游标位置随页面淘汰，不再扩展稀疏数组。保留每页 2,000 行、128 页与 32 MiB 计量上限，改用字段长度与对象预留空间计量，取消和新导航不能提交旧响应或旧错误。相同 100k 合成滚动负载前后各五轮，25 个唯一页面的查询从每轮 72 降至 25 次，整页序列化从 53 降至 0 次；视口加载 p95 中位数从 185.5 降至 124.1 ms（-33.10%），GC 后页面 heap 增量从 19,448,228 降至 14,162,728 B（-27.18%），帧时间基本不变，时间线 DOM 最大均为 22 行。固定 60 ms 响应延迟用于制造重叠请求，数字不代表 Rust 或设备速度；heap 变化也受更保守的缓存计量影响。新增 13 项测试、最终 69 项前端测试、15 项 E2E、生产桥接隔离、构建和 ESLint 通过；实际 App 的共享查询回归在原实现上失败。四份小米保留产物通过最终版本与真实 Rust 服务的浏览器复验，包括 1,185,909 事件 Flight 的末页、结果翻页、分析与持久化。没有重新采集，未测 Tauri WebKit 或高缩放布局。见 [方法与范围](../../benchmarks/qtrace-ui-timeline-pages.md) 和 [原始样本及身份](../../benchmarks/qtrace-timeline-pages-2026-10-19.json)。
 - 2026-10-19 UI-10：调用树改为每个父节点保留一个至多 100 节点的兄弟窗口，缓存同时限制 8,192 节点与 4 MiB 计量权重；LRU 淘汰可重取分支，清理不可达后代并保护请求的祖先路径。相同合成浏览负载前后各五轮，强制 GC 后的页面 heap 增量中位数从 4,272,520 降至 3,407,176 B（-20.25%），DOM 最大均为 18 个调用节点，帧时间基本不变。计量权重不等于浏览器 heap 限额；祖先路径单独超限时保留当前视图并提示限制，已有 5,000 层路径可保留。双向翻页、滚动、淘汰重取及迟到响应均有回归；原组件的两个交互回归均失败。四份小米保留产物通过真实服务到 Chromium 的调用树展开、折叠、重开及子节点跳转，其他分析与持久化流程也通过。未重新采集、未测 Tauri WebKit 或高缩放布局。方法见 [调用树分页与页面缓存诊断](../../benchmarks/qtrace-ui-call-tree-pages.md)，原始样本与身份见 [UI-10 证据](../../benchmarks/qtrace-call-tree-memory-2026-10-19.json)。
 - 2026-10-19 后续长任务优化：相同 10M QTRB / 512 MiB Flight 语料交错各五轮，warm open 中位数 1.167 降至 0.808 秒（-30.75%），冷索引 8.077 降至 7.554 秒（-6.48%），峰值 RSS 基本不变，缓存大小与正确性摘要一致。阶段数据将成本定位到事件键读取/解码；改为事件键与元数据两路解码，再复用第二个 worker 做 checksum，保留全部身份、内容和篡改校验、原累计预算及 schema 2 / layout 3。服务缓存验证采用相同的最多两 worker 边界。打开任务新增七个阶段和字节/事件/行工作量，计数包含重复处理，不推算百分比或剩余时间。真实 1,185,909 事件 Flight 在 Chromium 中验证进度更新、建索引取消不发布工作区或缓存、重试与缓存重开；四份小米产物再次通过离线逐事件、分页与分析核对。工作区关闭绑定寄存器/调用树首次构建的取消令牌，release 单次取消后分别约 9.2 / 16.9 毫秒退出，缓存保持空且 store 引用释放；这不是取消延迟门禁。Rust 全工作区、最终 service 套件、clippy/fmt、生成物、前端 45 项测试、15 项 E2E 与生产桥接隔离通过。原始样本、源码/二进制身份、回归及截图见 [长任务优化与验收](../../benchmarks/qtrace-long-operations-2026-10-19.json)。这是本机对比与保留产物功能验收，未覆盖新的设备性能、rich 性能门禁或高缩放布局；固定参考报告保持不变。
 - 2026-10-19 小米新采集验收：用户允许 Shell root 后，在 `M2011K2C`（`2d32ed71`、Android 16、Frida host/server 17.24.2）完成四份新 session。offset/symbol timed 各 987 个事件，均按原生 2 秒期限停止，应用仍存活，计算结果与本轮无追踪基线一致；monitor-exit 为 1,714 个事件；64 MiB Flight 恢复为 1,185,909 个事件，保留崩溃后的完整性缺口及未知终止原因。四份产物均通过逐事件离线核对、完整分页、分析抽样和缓存重开；随后通过 Chromium 与真实 Rust 服务完成上下文、筛选、寄存器、调用树、内存及历史、标注、高亮与服务重启恢复，Flight 另覆盖跨页与末页定位，均无接口或页面错误。新 Flight 暴露的有序内存候选重复排序已修复，原 100,000 Nodes 与 2,000 返回行限制保留。Rust 全工作区测试、clippy、fmt 均通过。首次目录缺失的失败证据和旧目录备份均保留；成功重试沿用现有设备门禁的目录准备流程。身份、命令、回归测试、截图及 trace 哈希见 [小米新采集与浏览器验收](../../benchmarks/qtrace-xiaomi-capture-2026-10-19.json)。本轮为功能验收，未重跑完整历史五轮设备性能门禁。
@@ -78,52 +85,51 @@ qtrace-ui provider → store/cache → analysis → service → Tauri → React
 - `[已验收]`：仅在对应验收条件满足、记录命令及证据路径后使用。
 - `[已验收·本机]`：本机对比或保留产物的服务/浏览器功能验收通过；具体测量范围见条目，不替代固定主机或 Android 设备性能门禁。
 - `[已验收·当前环境]`：实现、当前环境规模门禁及 rich/UI 证据核对均通过；不代表 Android 设备发布门禁通过。
+- `[已验收·Pixel 6 当前环境]`：同一 Pixel 6、固定 APK/target 的五轮 profile benchmark 及事实/压缩门禁通过；不推广为其他设备的稳定吞吐保证。
 - `[暂缓]`：需记录暂缓原因与重新评估条件；不因缺少设备自动标为暂缓。
 
-本次共 28 项：6 项 `[已实现·待复验]`、2 项 `[已验收·当前环境]`、1 项 `[已验收·小米当前环境]`、4 项 `[已验收·本机]`、1 项 `[部分完成]`、14 项 `[待实施]`。
+本次共 28 项：24 项 `[已验收·本机]`、2 项 `[已验收·当前环境]`、1 项 `[已验收·小米当前环境]`、1 项 `[已验收·Pixel 6 当前环境]`；没有待实施、部分完成或待复验条目。
 
 状态与证据强度独立。更新时保留 ID，记录日期、提交或报告路径；不得以提交存在代替性能收益证明。
 
-优先级：P0 是当前功能成本或体验的明显瓶颈；P1 需要测量或局部设计；P2 是规模扩展和维护性工作。证据强度：“确认”表示代码直接显示行为；“待测”表示值得验证的假设。每项的验收条件是后续实施的停止标准，不要求本轮全部执行。
+优先级：P0 是当前功能成本或体验的明显瓶颈；P1 需要测量或局部设计；P2 是规模扩展和维护性工作。证据强度：“确认”表示代码直接显示行为；“待测”表示值得验证的假设。每项的验收条件是本轮实施与复验的停止标准；本轮已逐项满足并记录证据。
 
-| ID | 优先级 | 状态 | 方向 | 现状与代码依据 | 下一步及验收条件 | 证据 |
+| ID | 优先级 | 状态 | 方向 | 当前实现 | 实施与验收结果 | 证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| UI-01 | P0 | [已实现·待复验] | 寄存器交互 | `service.rs::get_register_state` 按 artifact 懒建并共享 `Arc<RegisterReplay>`；`workspace.rs::ArtifactWorkspace` 持有 replay。提交 `0715262`。 | 保留缓存；复验同轨迹连续点击 50 次 p95、结果等价及关闭释放。已有 `register_replay_is_shared_by_queries_and_released_with_workspace` 覆盖共享、并发查询和释放。 | 确认实现；性能待复验 |
-| UI-02 | P0 | [已实现·待复验] | 调用树规模 | `service.rs::get_call_tree` 缓存树并按父节点每页返回至多 100 个节点；`CallTreePane.tsx` 分页展开、虚拟渲染。提交 `0134db7`。 | 复验深树/宽树 IPC、DOM 上限与 stale identity。剩余前端累计页面内存见 UI-10；后端仍全量建树，需测首次构建成本。 | 确认实现；规模待复验 |
-| UI-03 | P0 | [已实现·待复验] | 时间线可读性 | `EventRowDto` 已含 location、symbol、summary；`timeline/VirtualTimeline.tsx` 映射到位置、符号与指令列。提交 `8ba7929`。 | 复验指令/内存/语义摘要、附加 ELF 后符号更新及损坏数据。`service_contract.rs` 已有摘要与 160 字节上限断言。 | 确认实现；交互待复验 |
-| UI-04 | P0 | [已实现·待复验] | Session 上下文 | `OpenWorkspaceDto` 已含 context 与 missing_capabilities；`publish_session` 从 session 传递字段，`SessionOverview.tsx` 展示上下文与降级。提交 `ff351a7`。 | 复验 report 与单文件打开；缺失字段继续显示 unavailable，配置不得伪造为 captured。已有 `SessionOverview.test.tsx`。 | 确认实现；流程待复验 |
+| UI-01 | P0 | [已验收·本机] | 寄存器交互 | artifact 懒建并共享 Arc<RegisterReplay>，关闭取消并释放；详情请求由 useEventDetails 统一持有。 | 同一真实 1,185,909 事件 Flight 连续点击 50 次，稳定键、34 before + 34 after 与 DOM 68 格全部等价；最终寄存器 DOM p95 902.2 ms（含自动化，非纯 IPC 或收益比较）。Rust 证明共享、并发等价和 Arc 释放。 | [布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)；[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| UI-02 | P0 | [已验收·本机] | 调用树规模 | 后端缓存整树、100 siblings 分页并校验 identity；前端有界缓存和虚拟渲染。 | 真实 Rust 5000 层/10000 根树各五轮完整遍历、来源跳转和 stale 拒绝；首次构建中位 13.114 / 35.781 ms，最大 IPC 367 / 19077 B。组件 512 层/10000 根场景 DOM 最多15/13行；缓存 Arc 复用与关闭释放通过。 | [布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)；[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| UI-03 | P0 | [已验收·本机] | 时间线可读性 | location/symbol/summary 有界显示，typed detail 保持来源；ELF 附加后主动刷新当前 projection 页面。 | 真实 instruction/memory/semantic/discontinuity 摘要对齐，损坏与缺口明确；有效 AArch64 ELF 自动更新 native_work+0x5，键/位置/捕获摘要不变；错误 digest 和迟到 Attach 不污染当前页。 | [布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md) |
+| UI-04 | P0 | [已验收·本机] | Session 上下文 | SessionOverview 展示真实 context 与 missing capabilities，不伪造缺失配置。 | 报告 context 与真实保留报告完全一致；同 SHA Flight 单文件打开 context=null，明确 unavailable 且仍可查询；损坏 artifact 隔离与健康时间线可用。 | [布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md) |
 | PERF-01 | P0 | [已验收·当前环境] | 性能语料 | 流式生成 100k/1M/10M 富事件；100k、1M 固定语义哈希；独立 Flight 四线程与缺口 oracle。rich gate 五轮测 store/analysis、回放等价和 IPC；真实 service 到 UI 测 50 次筛选。CI 已接入正式参考主机运行和证据上传。 | 本机五轮和 UI 已通过，详见 [报告](../../benchmarks/qtrace-ui-optimization-2026-09-26.md)。当前环境规模门禁通过，原阈值保持不变；历史基线保留。1M store/analysis 与 100k IPC/UI 分开计量；1M service 累计 2 GiB budget 拒绝，未放宽预算。 | 实现与当前环境验收通过 |
 | PERF-02 | P0 | [已验收·当前环境] | 冷索引内存 | EventColumn 复用 EventKey 坐标，56 B 降为 24 B；posting 直接编码 runs；编码后释放事件表。保留原二分查找，并通过等价、取消、预算、篡改和原子发布测试；缓存布局未变，旧缓存重开通过。 | 相同 10M/512 MiB 语料前后各五轮：RSS 中位数 1464.30 降至 1158.96 MiB（-20.85%），耗时 10.304 降至 9.508 s（-7.73%），摘要一致。达到本机下降 ≥10%、耗时回退 ≤10% 条件；当前环境规模门禁另行通过（冷 8.308 s、热 1.130 s、RSS 1158.95 MiB）。见 [报告](../../benchmarks/qtrace-ui-optimization-2026-09-26.md)。 | 本机收益与当前环境门禁通过 |
 | PERF-03 | P1 | [已验收·本机] | warm open | 新增 `QTRACE_UI_OPEN_PROFILE` 的哈希、身份、事件行、section checksum 与 catalog 阶段测量；事件键和元数据独立解码，再以第二个 worker 校验 checksum。源与缓存校验保留，服务每 artifact 最多两个 worker。 | 相同 10M/512 MiB 语料各五轮：热开 1.167 降至 0.808 秒（-30.75%），冷索引 8.077 降至 7.554 秒（-6.48%）；RSS 基本不变，缓存大小和摘要一致。已有缓存及顺序/并行篡改、预算、取消与原子发布测试通过。参考报告未替换；不将这些数字当作完整服务或 UI 延迟。 | [长任务优化与验收](../../benchmarks/qtrace-long-operations-2026-10-19.json) |
-| UI-05 | P1 | [已实现·待复验] | 查询结果分页 | `ResultsPane.tsx` 独立保存页面、游标和 hit，通过 queryTimeline/locateTimelineOffset 跨页导航并展示 exact/indexing 总数。提交 `5dbff3a`。 | 复验超过 2,000 命中的 Previous/Next、跨页 hit、空结果及切换 workspace 竞态。已有 `ResultsPane.test.tsx`。 | 确认实现；流程待复验 |
-| UI-06 | P1 | [待实施] | 数据请求所有权 | `App.tsx:94-335` 多处重复 cache key、`queryTimeline`、generation/abort 检查与 cursor 记录；`SegmentCache.ts:42-44` 每次写入通过 JSON 序列化估重。 | 提取一个页面仓库管理 identity、游标、请求合并和缓存权重；避免在主线程为每页重复序列化。保留已有取消/切换竞态测试，并测滚动帧时间。 | 确认重复，收益待测 |
+| UI-05 | P1 | [已验收·本机] | 查询结果分页 | ResultsPane 独立保存页面、游标和 hit，使用 query/locate 跨页。 | 真实 Flight 超过357k instruction命中，双向页面及跨页 hit 稳定；空结果禁用导航；延迟真实旧页后关闭、重开，旧响应不改变新页/busy/error。 | [布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md) |
+| UI-06 | P1 | [已验收·本机] | 数据请求所有权 | `TimelinePages.ts` 按 workspace/projection/generation 管理共享查询、定位、导航所有权和 LRU；游标位置随缓存淘汰。字段长度计量替代整页 JSON，保留每页 2,000 行、128 页和 32 MiB 上限；关闭与切换拒绝旧响应。 | 同一 100k 合成负载前后各五轮，页面查询每轮 72 降至 25，整页序列化 53 降至 0；视口加载 p95 中位数 -33.10%，heap 增量 -27.18%，frame p95 均为 16.8 ms，DOM 最大 22 行。13 项新增测试及四份小米保留产物最终浏览器回归通过。权重不等于 heap 限额；合成延迟不代表 Rust/设备性能，Tauri WebKit 和高缩放未测。 | [方法](../../benchmarks/qtrace-ui-timeline-pages.md)；[原始证据](../../benchmarks/qtrace-timeline-pages-2026-10-19.json) |
 | UI-07 | P1 | [已验收·本机] | 加载反馈 | 打开任务报告源验证、缓存验证、建索引、缓存发布、缓存重开、分析准备与工作区发布；artifact 总数独立保留。阶段工作量按块合并，分析准备也报告行工作量；分配授权区间内仅记录计数，延迟通知分配。界面显示 `Cancelling…`，提交失败可重试。 | 真实 1,185,909 事件 Flight 的 Rust/Chromium 链路覆盖七阶段、单文件索引中的变化、取消后无工作区/缓存、重新打开和缓存重开。单文件取消保持 `job.cancelled`；字节/事件/行数包含重复处理，不表示唯一覆盖率或 ETA。 | [长任务优化与验收](../../benchmarks/qtrace-long-operations-2026-10-19.json) |
-| UI-08 | P1 | [待实施] | 布局与可访问性 | `global.css:7-15` 固定三列和 800×600 最小宽高；时间线已有 ARIA grid，但多个侧栏直接铺开长列表。 | 先做 800–1366 px 与高缩放下的面板可达性、键盘焦点和长文本截断检查，再调整布局；不引入设计规格排除的拖拽 dock。 | 待测 |
-| STORE-01 | P1 | [待实施] | 源键索引 | `builder.rs:1103-1129` 为每个事件另建 `SourceKeyRow { row }` 并在必要时排序；1000 万事件约有额外 80 MB 原始行索引。 | 评估单调键的隐式顺序表示或压缩排列，并保留非单调 Flight 的明确索引。需要缓存 schema 兼容/重建策略、重复键检测与 owned/mapped 等价测试。 | 确认成本，收益待测 |
-| STORE-02 | P1 | [待实施] | 多 artifact 打开 | `service.rs:162-192` 逐 artifact 构建/打开，最后才发布 workspace。 | 先测多 artifact session 的等待时间和峰值；若并发有收益，使用受控并行数及统一内存预算，保持单 artifact 失败隔离和结果顺序。 | 确认顺序，收益待测 |
-| CORE-01 | P1 | [待实施] | tracer 热路径 | `instruction_collector.cpp:68-135` 每条指令协调 pending、signal/syscall、rule、寄存器和内存路径；历史吞吐报告把剩余开销定位到 collector 与 formatter/output。 | 在同一设备/二进制身份下用 simpleperf 和现有五轮 benchmark 分 profile 采样，再针对占比最高分支优化。必须保留指令数、寄存器/内存事实、返回值、压缩大小门禁。 | 已有历史诊断，当前待测 |
-| CORE-02 | P1 | [待实施] | Flight 默认容量 | `trace_config.h:30-37` 默认预分配 512 MiB；README 已要求检查设备存储。 | 收集实际 session 的占用和保留窗口需求，评估可配置预设与启动前空间预检；不改变 Flight 的固定容量环形语义。验收覆盖低存储、崩溃恢复和正常关闭。 | 确认默认值，收益待测 |
-| CLI-01 | P1 | [待实施] | 产物发布复杂度 | `qtrace/artifacts.py` 同时负责拉取、校验、事务发布、报告刷新和失败回收（约 1,630 行）；`qtrace/session.py` 又编排生命周期与发布。 | 先画清状态/所有权图，再按“远端读取、校验、原子发布、报告刷新”拆内部模块，不改变公开 CLI 或恢复语义；用现有故障注入测试证明每个可见状态。 | 确认职责集中 |
-| CLI-02 | P1 | [待实施] | 子进程边界 | `scripts/bounded_process.py` 有 supervisor、PID 身份、取消、子进程回收和流式输出，`qtrace/injector.py`、device/acceptance 都依赖它。 | 增加跨入口的统一故障矩阵：超时、取消、ADB 断连、PID 复用、输出上限、孤儿进程；仅在矩阵证明安全后抽象共用接口。 | 确认复杂路径，风险待测 |
-| PROTO-01 | P1 | [待实施] | 多语言协议同步 | `binary_trace_format.h` 定义设备端 QTRB；`scripts/trace_binary.py`、`scripts/flight_trace.py` 和 Rust `qtrace-provider` 分别解析同一格式。现有差分 fixture 已覆盖不少情况。 | 给每次协议变更加入跨语言兼容矩阵：C++ encoder 产物由 Python/Rust 读取，旧版本及 malformed fixture 保持固定；优先生成常量/规范，不生成相互依赖的解析器。 | 确认多实现 |
+| UI-08 | P1 | [已验收·本机] | 布局与可访问性 | 宽屏三栏；1100px以下重排，700px以下单列；长文本换行、树缩进有界，增加面板键盘入口及焦点轮廓。 | 800/1024/1366px 与对应200%等效400/512/683 CSS px共六场景均无页面/详情横向溢出；四面板实际 Tab/Enter 可达，焦点可见。未声称原生浏览器缩放或WebKit实测。 | [布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md) |
+| STORE-01 | P1 | [已验收·本机] | 源键索引 | SourceKeyIndex 拥有隐式有序映射与非单调显式排列；排序归属 index/sorting.rs。 | 10M/512MiB 五轮 RSS -6.58%、冷开 -2.79%；schema/wire bytes不变，新旧互读且不重建；重复键、owned/mapped、非单调Flight、预算和取消通过。 | [store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| STORE-02 | P1 | [已验收·本机] | 多 artifact 打开 | opening.rs 每批最多两个 worker，共享原 source/cache 累计预算，按报告次序合并。 | 2/4个100k富artifact前后各五轮冷开约快40%、热开约快46%，RSS小幅增加；顺序/事实/失败隔离保持。panic及创建失败先join，控制错误不发布workspace。 | [store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| CORE-01 | P1 | [已验收·Pixel 6 当前环境] | tracer 热路径 | 按simpleperf三档采样选择Full collector；静态只读fallback消除每次重复构造，不削减必要内存读取。 | Pixel6同APK/target前后各三档五轮全部通过；30份trace指令/寄存器/内存形状、return、footer/sidecar和压缩门禁一致。Full栈临时区0x780降至0x1d0，0x524清零消失；31到26ms仅本批中位观测。 | [native 报告](../../benchmarks/qtrace-native-optimization-2026-10-19.md) |
+| CORE-02 | P1 | [已验收·本机] | Flight 默认容量 | 默认512MiB、固定环语义及已有64–2048MiB配置保留；同文件描述符上增加fstatvfs空间预检。 | 13份真实环占用与每线程序号窗口调查支持保留默认值；不能从无事件时钟的数据伪造秒级窗口。低空间/EIO注入零遗留，默认512MiB正常关闭和未seal退出的Python恢复通过，Android构建通过。 | [native 报告](../../benchmarks/qtrace-native-optimization-2026-10-19.md) |
+| CLI-01 | P1 | [已验收·本机] | 产物发布复杂度 | artifacts facade保留编排，远端读取、验证、原子发布、报告刷新分别归属四个内部模块，descriptor/token转移有所有权图。 | 公开CLI、恢复和提交边界保持；原82项产物故障注入及369项相关Python通过，全量858项检查通过（8skip）。 | [CLI/OPS 报告](../../benchmarks/qtrace-cli-optimization-2026-10-19.md) |
+| CLI-02 | P1 | [已验收·本机] | 子进程边界 | 沿用bounded_process；Frida失败清理绑定原session脚本RPC及process-terminated回执，无法确认时明确cleanup_incomplete。 | 六真实命令入口×超时/取消/ADB断连/PID复用/输出上限/孤儿共36格通过；不使用裸PID猜杀。原实现反证、实际本机及Pixel原session退出验证通过。 | [CLI/OPS 报告](../../benchmarks/qtrace-cli-optimization-2026-10-19.md) |
+| PROTO-01 | P1 | [已验收·本机] | 多语言协议同步 | 真实C++ encoder四产物与常量/固定字节契约，由独立Python/Rust读取；CI接入兼容矩阵。 | 37个exporter fixture，Python16/Rust25矩阵通过；QTRB1.0–1.2、Flightv2及malformed固定证据保留，encoder重复生成逐字节一致。 | [协议/fuzz 报告](../../benchmarks/qtrace-protocol-fuzz-2026-10-19.md) |
 | QA-01 | P1 | [已验收·小米当前环境] | 真实采集到 UI | 新 offset/symbol、monitor-exit 与 Flight 四份 session 均通过真实设备采集、离线逐事件核对、完整分页、分析抽样及缓存重开；在 Chromium 与真实 Rust 服务中完成分页、筛选、寄存器/调用树/内存、标注及服务重启恢复。新 Flight 为 1,185,909 个事件，已修复有序内存候选重复排序；历史 Flight 与 monitor-exit 也复验通过。 | 当前环境功能链路已验收。完整历史设备性能门禁、原生文件对话框及高缩放/键盘布局检查不属于本次证明；保留产物的真实完整性状态。 | [小米新采集及浏览器验收](../../benchmarks/qtrace-xiaomi-capture-2026-10-19.json)；此前 [预算验收](../../benchmarks/qtrace-capture-budget-2026-10-19.json) 与 [历史产物浏览器记录](../../benchmarks/qtrace-browser-acceptance-2026-10-19.json) 保留 |
-| QA-02 | P1 | [已实现·待复验] | 性能门禁漂移 | `performance_gate.py` 已有 --diagnostic 与 --diagnostic-baseline，同机/同语料比较、五轮校验，并拒绝覆盖 tracked reference 文件。提交 `2a6004c`。 | 复验同机前后比较与 host/corpus mismatch 拒绝路径。README 已写本机流程；官方验收继续使用固定主机，不将诊断结果升级为门禁通过。 | 确认实现；工具待复验 |
-| SCALE-01 | P2 | [待实施] | 行数上限 | `dto.rs:186,220,231,237` 与 `service.rs:221,386,395-438` 将事件数、source row、total/start 限为 `u32`；部分摘要溢出时饱和为 `u32::MAX`。 | 明确支持上限并在打开前报结构化错误，或整体迁到字符串化 `u64` DTO；不能只放宽一个字段。以超过 2³² 行的模拟 view 测协议，不必生成巨型文件。 | 确认 |
-| SCALE-02 | P2 | [部分完成] | 大型分析结果 | 调用树已按 100 个节点分页并校验分页 identity；`list_symbols` 等数组输入及 IPC 输出体积仍需统一核对。 | 复验跨页导航，并对其余 IPC 命令统一审计输入数组、输出字节、节点数与超时预算。大结果优先分页或流式 job；恶意参数不能造成无界单次 DTO。 | 调用树分页已实现；其余边界待审计 |
-| MAINT-01 | P2 | [待实施] | 大模块边界 | `timeline.rs` 约 5,457 行（后段含单元测试），`index/mod.rs` 约 2,798 行，`tracer_entry.cpp` 约 2,157 行，`flight/recovery.rs` 约 2,182 行。 | 按状态/不变量和依赖方向抽出内部模块；先固定行为测试，再分批移动代码。验收看接口清晰和调用路径，而非行数下降。 | 确认规模，设计待定 |
-| MAINT-02 | P2 | [待实施] | 前端状态所有权 | `App.tsx` 同时管 workspace、projection、分页、缓存、历史、详情和标注；已有 generation 竞态测试较多。 | 将分页导航、详情加载和持久编辑拆为独立 hooks/控制器，统一 stale-response 规则；每次重构保留 e2e/workspace 竞态用例。 | 确认职责集中 |
-| QA-03 | P2 | [待实施] | fuzz 覆盖 | 定期 fuzz 工作流只跑 QTRB、Flight 两个目标（`.github/workflows/qtrace-ui-fuzz.yml`）；cache manifest、session report、annotation 数据库也是不可信输入。 | 根据事故/攻击面为这些边界增加结构化 corpus 和 bounded fuzz/property tests；在 CI 时间预算内先做离线短跑。 | 确认覆盖范围 |
-| OPS-01 | P2 | [待实施] | 验收证据容量 | `qtrace-acceptance-evidence/` 和 `qtrace-acceptance-failures/` 留有多个本地目录；README 明确脚本不会自动删除。 | 提供只读目录清单与人工保留策略，再加显式 opt-in 清理命令；默认绝不删除失败证据。 | 确认现状 |
+| QA-02 | P1 | [已验收·本机] | 性能门禁漂移 | diagnostic按host/generator/corpus比较，不读写参考摘要或覆盖tracked reference。 | 当前10M五轮before/after经生产比较器通过；host/corpus/wrong oracle/reference mode与覆盖拒绝测试通过。原参考SHA与阈值不变，本机诊断不升级为固定主机通过。 | [store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| SCALE-01 | P2 | [已验收·本机] | 行数上限 | metadata view在分析准备和workspace发布前检查单artifact的u32协议上限，摘要/位置一律checked转换。 | 4,294,967,295可表达；超过2³²行的模拟view仅读取计数即返回workspace.event_limit_exceeded，任何行访问均被测试禁止；不生成巨型文件、不饱和。既有资源预算仍更早约束实际规模。 | [store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| SCALE-02 | P2 | [已验收·本机] | 大型分析结果 | 25个IPC命令统一审计，数组/文本visitors和service双层验证，JSON Write counter限16MiB；jobs最多8active/512retained。 | 保留timeline2000行、calltree100节点、symbols2000PC；SQLite绑定交互预算/VM轮询/workspace取消；过大输入不改变generation/jobs或访问文件，输出转义和恶意size hint回归通过。 | [store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| MAINT-01 | P2 | [已验收·本机] | 大模块边界 | 提取timeline discontinuity与semantic executor、Flight emergency选择、index源键/排序和native JSON endpoint。 | 公开接口、配置mutex、activation顺序、信号和恢复规则保持；同一行为套件前后通过，逐函数规范化对比一致。Rust全量520、native45、Android全构建及结构后ASan/矩阵通过。 | [模块边界证明](../../benchmarks/qtrace-module-boundaries-2026-10-19.md)；[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md) |
+| MAINT-02 | P2 | [已验收·本机] | 前端状态所有权 | App组合界面；导航、详情、持久编辑分属三个hooks，RequestScope统一成功/错误迟到规则。 | 原69单测与14E2E基线保留；新增标注竞态和ELF刷新回归具旧实现失败证明。最终76单测、14E2E、1production及四保留产物浏览器全部通过。 | [布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md) |
+| QA-03 | P2 | [已验收·本机] | fuzz 覆盖 | 新增cache manifest/session report/annotations三个target、结构化corpus与有界property；PR/push短跑，定时/手动长跑。 | 三个存储target覆盖input/row/node/resident/cancel与SQLite VM/rollback；64case property通过。五target ASan925984输入、结构后Flight324353输入，零crash；CI已配置，未声称托管执行。 | [协议/fuzz 报告](../../benchmarks/qtrace-protocol-fuzz-2026-10-19.md) |
+| OPS-01 | P2 | [已验收·本机] | 验收证据容量 | qtrace_evidence.py提供只读inventory、保留/保护策略与显式opt-in清理，默认保护失败证据。 | 真实目录只读统计；2份成功约1.46GB、24份失败约3.61GB。所有删除回归仅临时目录，实际旧成功/失败证据未删除。 | [CLI/OPS 报告](../../benchmarks/qtrace-cli-optimization-2026-10-19.md) |
 | UI-09 | P1 | [已验收·本机] | 首次分析取消 | `Workspace` 持有独立生命周期取消令牌；寄存器回放与调用树首次构建、状态查询绑定同一令牌，关闭与服务取消可中止持有 Arc 的构建。保留共享 slot 的单次构建与完整结果复用。 | 等待 slot 的两个回归用例修复前在关闭后仍返回成功，修复后返回 `job.cancelled`。真实 Flight 的两个构建运行 20 ms 后关闭，release 单次分别在 9.2 / 16.9 ms 内退出，slot 保持空且 Weak store 引用释放。原 512 MiB 构建预算及共享/并发/释放回归保留；非延迟门禁。 | [长任务优化与验收](../../benchmarks/qtrace-long-operations-2026-10-19.json) |
 | UI-10 | P1 | [已验收·本机] | 调用树页面内存 | `CallTreePages.ts` 限制 8,192 节点和 4 MiB 计量权重；每个父节点一个至多 100 节点的兄弟窗口，LRU 淘汰后可重取，回收不可达后代并保护祖先路径。`CallTreePane.tsx` 保留身份/上下文校验、请求合并、双向翻页、滚动锚点与事件跳转。 | 相同负载前后各五轮，页面 heap 增量中位数 4.07 降至 3.25 MiB（-20.25%），DOM 最大均为 18 节点，帧时间基本不变。11 项新增测试与四份小米保留产物浏览器回归通过，5,000 层路径可保留；单独超限的祖先路径拒绝新增页面。计量权重不等于实际 heap 上限；未测 Tauri WebKit 与高缩放布局。 | [方法](../../benchmarks/qtrace-ui-call-tree-pages.md)；[原始证据](../../benchmarks/qtrace-call-tree-memory-2026-10-19.json) |
 
-## 4. 推荐实施顺序
+## 4. 本轮完成与后续维护
 
-1. **后续交互复验。** PERF-01/PERF-02 当前环境验收已完成，见 [当前基线](../../benchmarks/qtrace-ui-performance-current.md)。UI-01–05 按表复验，不重新实现。
-2. **后续索引测量。** PERF-02 与 PERF-03 本机五轮对比已完成；以保存的事件键、section 与 catalog 阶段数据评估 STORE-01，另行分析 rich service 的累计预算边界。
-3. **继续交互边界。** UI-07 的加载进度、UI-09 的关闭取消与 UI-10 的页面缓存已完成本机验收；下一步处理 UI-06 请求所有权和 UI-08 可访问性。
-4. **设备与跨层验证。** QA-01 已有小米新采集到浏览器的功能证据，后续改动沿用同样方法回归；CORE-01 先设备采样；CLI-01/02 和 PROTO-01 用故障矩阵及跨语言 fixture 约束改动。
-5. **长期规模与维护。** 最后处理行数上限、巨型模块、额外 fuzz、证据保留及 STORE-02 并行打开；每项先证明成本，再设计边界。
+本轮实施计划与验收均已完成，见 [实施计划](../plans/2026-10-19-complete-project-optimization.md) 和 [总验收报告](../../benchmarks/qtrace-project-optimization-2026-10-19.md)。所有原始产物、历史参考、失败证据和本次测量校正均保留；改动未自动提交或推送。
+
+今后的新协议、新负载、其他设备、不同最小保留窗口或打包WebKit要求，继续沿用以下验收规则独立评估。本轮未覆盖的平台或耐久性不因此被描述为已通过。
 
 ## 5. 统一验收规则
 

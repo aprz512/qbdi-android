@@ -33,7 +33,7 @@ export class E2eQtraceApi implements QtraceApi {
   getMemoryState: QtraceApi["getMemoryState"] = (workspace_id, artifact_index, row, start, end_exclusive) => request("get_memory_state", { workspace_id, artifact_index, row, start, end_exclusive });
   getMemoryHistory: QtraceApi["getMemoryHistory"] = (workspace_id, artifact_index, row, start, end_exclusive) => request("get_memory_history", { workspace_id, artifact_index, row, start, end_exclusive });
   getCallTree: QtraceApi["getCallTree"] = (workspace_id, artifact_index, timeline_id, tid, parent = null, offset = 0, expected_identity = null) => request("get_call_tree", { workspace_id, artifact_index, timeline_id, tid, parent, offset, expected_identity });
-  pickAndAttachElf: QtraceApi["pickAndAttachElf"] = () => Promise.resolve(null);
+  pickAndAttachElf: QtraceApi["pickAndAttachElf"] = (workspace_id, module_name, module_digest, expected_build_id) => request("pick_and_attach_elf", { workspace_id, module_name, module_digest, expected_build_id });
   listSymbols: QtraceApi["listSymbols"] = (workspace_id, module_name, relative_pcs) => request("list_symbols", { workspace_id, module_name, relative_pcs });
   getAnnotation: QtraceApi["getAnnotation"] = (workspace_id, artifact_index, row) => request("get_annotation", { workspace_id, artifact_index, row });
   upsertAnnotation: QtraceApi["upsertAnnotation"] = (workspace_id, artifact_index, row, comment) => request("upsert_annotation", { workspace_id, artifact_index, row, comment });

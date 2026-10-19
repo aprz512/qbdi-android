@@ -13,7 +13,7 @@ export class SegmentCache<T> {
     if (this.maxBytes <= 0 || this.maxSegments <= 0) throw new RangeError("cache bounds must be positive");
   }
 
-  set(key: string, value: T, weight = estimateWeight(value)): boolean {
+  set(key: string, value: T, weight: number): boolean {
     if (!Number.isSafeInteger(weight) || weight < 0) throw new RangeError("invalid segment weight");
     if (weight > this.maxBytes) return false;
     const previous = this.entries.get(key);
@@ -39,8 +39,16 @@ export class SegmentCache<T> {
   }
   get currentWeight(): number { return this.bytes; }
   get count(): number { return this.entries.size; }
-}
 
-function estimateWeight(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength + 64;
+  find(predicate: (value: T) => boolean): T | undefined {
+    for (const [key, entry] of this.entries) {
+      if (predicate(entry.value)) return this.get(key);
+    }
+    return undefined;
+  }
+
+  clear(): void {
+    this.entries.clear();
+    this.bytes = 0;
+  }
 }

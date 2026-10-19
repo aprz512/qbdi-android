@@ -5,6 +5,21 @@ const PATH_CAPACITY = 4096;
 const POLL_INTERVAL_MS = 50;
 const MAX_DETAIL_CHARS = 512;
 
+// This RPC runs only inside the script's original process. A stale session can
+// never resolve a reused PID into a different process. Host uses it only before
+// successful resume, and requires process-terminated on that same session.
+if (typeof rpc !== "undefined") {
+  rpc.exports = {
+    qtraceAbort() {
+      const exitProcess = new NativeFunction(
+        Module.getGlobalExportByName("_exit"), "void", ["int"],
+      );
+      setImmediate(() => exitProcess(137));
+      return Process.id;
+    },
+  };
+}
+
 class AgentFailure extends Error {
   constructor(stage, code, detail) {
     super(String(detail));

@@ -25,6 +25,14 @@ impl WorkGuard for AllowAll {
 }
 
 fn fixture_path(name: &str) -> PathBuf {
+    if let Some(name) = name.strip_prefix("native/") {
+        return std::env::var_os("QTRACE_NATIVE_FIXTURES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures-native")
+            })
+            .join(name);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/qtrb")
         .join(name)
@@ -265,6 +273,8 @@ fn every_valid_fixture_matches_the_python_oracle_exactly() {
         "v1.2-completed.bin",
         "v1.2-partial.bin",
         "v1.2-stopped.bin",
+        "native/qtrb-completed.bin",
+        "native/qtrb-stopped.bin",
     ] {
         let path = fixture_path(name);
         let bytes = std::fs::read(&path).unwrap();

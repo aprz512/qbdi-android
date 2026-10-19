@@ -10,7 +10,10 @@ export default async function globalSetup() {
   const root = resolve("..");
   const data = await mkdtemp(join(tmpdir(), "qtrace-e2e-"));
   const token = randomBytes(16).toString("hex");
-  const server = spawn("cargo", ["run", "-q", "-p", "qtrace-service", "--features", "e2e-fixture", "--bin", "e2e_server", "--", "--fixture-root", process.env.QTRACE_E2E_FIXTURE_ROOT ?? join(root, "fixtures"), "--xdg-root", data, "--token", token], { cwd: root, stdio: ["ignore", "pipe", "inherit"] });
+  const serverArgs = ["--fixture-root", process.env.QTRACE_E2E_FIXTURE_ROOT ?? join(root, "fixtures"), "--xdg-root", data, "--token", token];
+  const server = process.env.QTRACE_E2E_SERVER === undefined
+    ? spawn("cargo", ["run", "-q", "-p", "qtrace-service", "--features", "e2e-fixture", "--bin", "e2e_server", "--", ...serverArgs], { cwd: root, stdio: ["ignore", "pipe", "inherit"] })
+    : spawn(resolve(process.env.QTRACE_E2E_SERVER), serverArgs, { cwd: root, stdio: ["ignore", "pipe", "inherit"] });
   const readiness = await new Promise<{ url: string; token: string }>((resolveReady, reject) => {
     const lines = createInterface({ input: server.stdout! });
     lines.once("line", (line) => { try { resolveReady(JSON.parse(line)); } catch (error) { reject(error); } });

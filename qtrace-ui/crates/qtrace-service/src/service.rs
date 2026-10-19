@@ -15,20 +15,19 @@ use qtrace_analysis::{
     locate_event, locate_offset, query_events,
 };
 use qtrace_provider::{
-    ArtifactDigest, CompletenessCause, EventKey, EventKind, MemoryDirection, OperationAbort,
-    Provenance, RangeBounds, RangeDomain, RegisterSlot, WorkDelta, WorkGuard,
+    ArtifactDigest, CompletenessCause, EventKey, EventKind, MemoryDirection, Provenance,
+    RangeBounds, RangeDomain, RegisterSlot, WorkDelta, WorkGuard,
 };
 use qtrace_store::{
-    AnnotationOpenRequest, AnnotationStore, AuthorizedPath, BuildOptions, ElfLoadRequest,
-    ElfProducerIdentity, ElfSymbolIndex, EventAnnotation, Highlight, LocalSymbolName,
-    ModuleIdentity, OpenPolicy, SessionCapability, SessionLoader, TraceStore, TraceStoreView,
+    AnnotationOpenRequest, AnnotationStore, AuthorizedPath, ElfLoadRequest, ElfProducerIdentity,
+    ElfSymbolIndex, EventAnnotation, Highlight, LocalSymbolName, ModuleIdentity, OpenPolicy,
+    SessionCapability, SessionLoader, TraceStore, TraceStoreView,
 };
 
 use crate::budget::MemoryWorkGuard;
+use crate::ipc;
 use crate::progress::{OpenProgress, ProgressGuard};
-use crate::workspace::{
-    ArtifactWorkspace, CachedCallTree, ProjectionWorkspace, RegisterReplaySlot, Workspace,
-};
+use crate::workspace::{CachedCallTree, ProjectionWorkspace, RegisterReplaySlot, Workspace};
 use crate::{
     AddressRangeDto, AnnotationDto, AppError, ArtifactSummaryDto, CallNodeDto, CallTreeDto,
     CompletenessRangeDto, DecimalU64Dto, EventDetailDto, EventFilterDto, EventKeyDto, EventRowDto,
@@ -55,6 +54,14 @@ pub struct CallTreePageQuery {
 struct ProjectionInput {
     context: Arc<QueryContext>,
     store: Arc<TraceStore>,
+}
+
+struct PreparedProjection {
+    input: ProjectionInput,
+    generation: u32,
+    projection_id: ProjectionId,
+    job_id: JobId,
+    cancellation: crate::JobCancellation,
 }
 
 struct ArtifactAnalysis {
@@ -118,7 +125,7 @@ impl QtraceService {
         session_report: bool,
     ) -> Result<OpenWorkspaceDto, AppError> {
         let workspace_id = WorkspaceId::from_u64(self.next_id());
-        let (job_id, cancellation) = self.jobs.begin(workspace_id.clone(), "open");
+        let (job_id, cancellation) = self.jobs.begin_bounded(workspace_id.clone(), "open")?;
         let progress = OpenProgress::new(self.jobs.clone(), job_id.clone());
         let result = (|| {
             // A report describes additional files; its own length cannot bound
@@ -227,48 +234,17 @@ impl QtraceService {
             inner: &cache_budget,
             progress,
         };
-        for (artifact_position, source) in session.artifacts().iter().enumerate() {
-            source_budget.consume(WorkDelta::default())?;
-            progress.artifact(Some(source.local_path()));
-            let probe_adjusted = InputProbeAdjustedGuard::new(&source_budget);
-            let artifact_guard: &dyn WorkGuard =
-                if matches!(source.format(), qtrace_store::ArtifactFormat::QtrbLz4) {
-                    &probe_adjusted
-                } else {
-                    &source_budget
-                };
-            match TraceStore::open_or_build_with_guards(
-                &self.cache_root,
-                source,
-                &BuildOptions::default(),
-                artifact_guard,
-                &cache_budget,
-            ) {
-                Ok(store) => {
-                    let store = Arc::new(store);
-                    cache_budget.begin_phase(qtrace_provider::WorkPhase::PrepareAnalysis);
-                    let context =
-                        Arc::new(QueryContext::new_with_guard(store.clone(), &cache_budget)?);
-                    artifacts.push(ArtifactWorkspace {
-                        name: source.local_path().to_owned(),
-                        store,
-                        context,
-                        register_replay: Arc::new(Mutex::new(None)),
-                    });
-                }
-                Err(error)
-                    if error.code() == "job.cancelled" || error.code().starts_with("control.") =>
-                {
-                    return Err(error.into());
-                }
-                Err(error) => warnings.push(format!("{}: {error}", source.local_path())),
-            }
-            self.jobs.set_progress(
-                job_id,
-                u64::try_from(artifact_position + 1).unwrap_or(u64::MAX),
-                Some(artifact_total),
-            )?;
-        }
+        let opened_artifacts = crate::opening::open_artifacts(
+            &self.cache_root,
+            session.artifacts(),
+            &source_budget,
+            &cache_budget,
+            progress,
+            &self.jobs,
+            job_id,
+        )?;
+        artifacts.extend(opened_artifacts.artifacts);
+        warnings.extend(opened_artifacts.warnings);
         if artifacts.is_empty() {
             let detail = if warnings.is_empty() {
                 "no artifact could be indexed".to_owned()
@@ -294,10 +270,10 @@ impl QtraceService {
             .enumerate()
             .map(|(index, artifact)| {
                 Ok(ArtifactSummaryDto {
-                    index: u32::try_from(index).unwrap_or(u32::MAX),
+                    index: as_u32(index)?,
                     name: artifact.name.clone(),
                     status: "indexed".into(),
-                    event_count: u32::try_from(artifact.store.event_count()).unwrap_or(u32::MAX),
+                    event_count: ipc::event_count(artifact.store.event_count())?,
                     tids: artifact.store.thread_ids()?,
                     completeness: artifact
                         .store
@@ -309,6 +285,14 @@ impl QtraceService {
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
+        let opened = OpenWorkspaceDto {
+            workspace: summary,
+            artifacts: artifact_dtos,
+            warnings,
+            context,
+            missing_capabilities,
+        };
+        ipc::check_output(&opened)?;
         progress.artifact(None);
         cache_budget.begin_phase(qtrace_provider::WorkPhase::PublishWorkspace);
         source_budget.consume(WorkDelta::default())?;
@@ -327,13 +311,7 @@ impl QtraceService {
                     call_tree: Arc::new(Mutex::new(None)),
                 },
             );
-        Ok(OpenWorkspaceDto {
-            workspace: summary,
-            artifacts: artifact_dtos,
-            warnings,
-            context,
-            missing_capabilities,
-        })
+        Ok(opened)
     }
 
     pub fn create_projection(
@@ -342,9 +320,14 @@ impl QtraceService {
         artifact_index: u32,
         filter: EventFilterDto,
     ) -> Result<ProjectionJobDto, AppError> {
-        let (input, generation, projection_id) =
-            self.prepare_projection(workspace, artifact_index)?;
-        let (job_id, cancellation) = self.jobs.begin(workspace.clone(), "projection");
+        ipc::filter(&filter)?;
+        let PreparedProjection {
+            input,
+            generation,
+            projection_id,
+            job_id,
+            cancellation,
+        } = self.prepare_projection(workspace, artifact_index)?;
         self.jobs.set_progress(&job_id, 0, Some(1))?;
         let result = build_and_publish_projection(
             &self.workspaces,
@@ -362,7 +345,7 @@ impl QtraceService {
         );
         self.jobs.prune_workspace(workspace, 64);
         result?;
-        Ok(ProjectionJobDto {
+        ipc::output(ProjectionJobDto {
             projection_id,
             job_id,
             generation,
@@ -375,9 +358,14 @@ impl QtraceService {
         artifact_index: u32,
         filter: EventFilterDto,
     ) -> Result<ProjectionJobDto, AppError> {
-        let (input, generation, projection_id) =
-            self.prepare_projection(&workspace, artifact_index)?;
-        let (job_id, cancellation) = self.jobs.begin(workspace.clone(), "projection");
+        ipc::filter(&filter)?;
+        let PreparedProjection {
+            input,
+            generation,
+            projection_id,
+            job_id,
+            cancellation,
+        } = self.prepare_projection(&workspace, artifact_index)?;
         self.jobs.set_progress(&job_id, 0, Some(1))?;
         let dto = ProjectionJobDto {
             projection_id: projection_id.clone(),
@@ -413,7 +401,7 @@ impl QtraceService {
         &self,
         workspace: &WorkspaceId,
         artifact_index: u32,
-    ) -> Result<(ProjectionInput, u32, ProjectionId), AppError> {
+    ) -> Result<PreparedProjection, AppError> {
         let mut all = self
             .workspaces
             .lock()
@@ -421,7 +409,7 @@ impl QtraceService {
         let item = all
             .get_mut(workspace)
             .ok_or_else(AppError::stale_workspace)?;
-        item.generation = item.generation.checked_add(1).ok_or_else(|| {
+        let generation = item.generation.checked_add(1).ok_or_else(|| {
             AppError::new(
                 "workspace.generation_overflow",
                 "workspace",
@@ -435,14 +423,19 @@ impl QtraceService {
                 "artifact index is invalid",
             )
         })?;
-        Ok((
-            ProjectionInput {
-                context: artifact.context.clone(),
-                store: artifact.store.clone(),
-            },
-            item.generation,
-            ProjectionId::from_u64(self.next_id()),
-        ))
+        let input = ProjectionInput {
+            context: artifact.context.clone(),
+            store: artifact.store.clone(),
+        };
+        let (job_id, cancellation) = self.jobs.begin_bounded(workspace.clone(), "projection")?;
+        item.generation = generation;
+        Ok(PreparedProjection {
+            input,
+            generation,
+            projection_id: ProjectionId::from_u64(self.next_id()),
+            job_id,
+            cancellation,
+        })
     }
 
     pub fn query_timeline(
@@ -452,6 +445,9 @@ impl QtraceService {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<TimelinePageDto, AppError> {
+        if let Some(cursor) = &cursor {
+            ipc::text(cursor, ipc::MAX_CURSOR_BYTES, "timeline cursor")?;
+        }
         let (projection, store, symbols) = {
             let all = self
                 .workspaces
@@ -475,10 +471,10 @@ impl QtraceService {
             .into_iter()
             .map(|row| event_row(row, store.as_ref(), &symbols))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(TimelinePageDto {
+        ipc::output(TimelinePageDto {
             rows,
             next_cursor: page.next.map(|value| value.as_str().to_owned()),
-            total: u32::try_from(page.total).unwrap_or(u32::MAX),
+            total: ipc::event_count(page.total)?,
             exact_total: page.exact_total,
         })
     }
@@ -500,14 +496,16 @@ impl QtraceService {
                 .map(|item| item.projection.clone())
                 .ok_or_else(AppError::stale_workspace)?
         };
-        locate_event(&projection, source_row as usize, limit as usize)
-            .map(|location| {
-                location.map(|value| TimelineLocationDto {
-                    start: u32::try_from(value.start).unwrap_or(u32::MAX),
+        let location = locate_event(&projection, source_row as usize, limit as usize)?;
+        let dto = location
+            .map(|value| {
+                Ok::<_, AppError>(TimelineLocationDto {
+                    start: as_u32(value.start)?,
                     cursor: value.cursor.map(|cursor| cursor.as_str().to_owned()),
                 })
             })
-            .map_err(AppError::from)
+            .transpose()?;
+        ipc::output(dto)
     }
 
     pub fn locate_timeline_offset(
@@ -527,14 +525,16 @@ impl QtraceService {
                 .map(|item| item.projection.clone())
                 .ok_or_else(AppError::stale_workspace)?
         };
-        locate_offset(&projection, offset as usize, limit as usize)
-            .map(|location| {
-                location.map(|value| TimelineLocationDto {
-                    start: u32::try_from(value.start).unwrap_or(u32::MAX),
+        let location = locate_offset(&projection, offset as usize, limit as usize)?;
+        let dto = location
+            .map(|value| {
+                Ok::<_, AppError>(TimelineLocationDto {
+                    start: as_u32(value.start)?,
                     cursor: value.cursor.map(|cursor| cursor.as_str().to_owned()),
                 })
             })
-            .map_err(AppError::from)
+            .transpose()?;
+        ipc::output(dto)
     }
 
     pub fn get_event_detail(
@@ -554,7 +554,7 @@ impl QtraceService {
             .map(|value| (value.module, Some(value.relative_pc)))
             .or_else(|| memory.map(|value| (value.module, Some(value.relative_pc))))
             .unwrap_or((None, None));
-        Ok(EventDetailDto {
+        ipc::output(EventDetailDto {
             artifact_index,
             row,
             key: event_key_dto(&key),
@@ -602,7 +602,7 @@ impl QtraceService {
         };
         let budget = ServiceBudget::with_cancellation(ServiceLimits::interactive(), cancellation);
         let state = replay.state_at_with_guard(&key, &budget)?;
-        Ok(RegisterStateDto {
+        ipc::output(RegisterStateDto {
             key: event_key_dto(&state.key),
             before: register_cells(&state.before),
             after: register_cells(&state.after),
@@ -635,7 +635,7 @@ impl QtraceService {
             rows: state.observed.len() as u64,
             ..WorkDelta::default()
         })?;
-        Ok(MemoryStateDto {
+        ipc::output(MemoryStateDto {
             key: event_key_dto(&state.key),
             start: HexU64Dto::new(state.range.start),
             end_exclusive: HexU64Dto::new(state.range.end),
@@ -672,7 +672,12 @@ impl QtraceService {
             rows: history.len() as u64,
             ..WorkDelta::default()
         })?;
-        history.into_iter().map(memory_evidence).collect()
+        ipc::output(
+            history
+                .into_iter()
+                .map(memory_evidence)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
     }
 
     pub fn get_call_tree(
@@ -683,6 +688,9 @@ impl QtraceService {
         tid: u32,
         page: CallTreePageQuery,
     ) -> Result<CallTreeDto, AppError> {
+        if let Some(identity) = &page.expected_identity {
+            ipc::text(identity, 256, "call tree identity")?;
+        }
         const PAGE_SIZE: usize = 100;
         let CallTreePageQuery {
             parent,
@@ -774,7 +782,7 @@ impl QtraceService {
         };
         let start = (offset as usize).min(siblings.len());
         let end = start.saturating_add(PAGE_SIZE).min(siblings.len());
-        Ok(CallTreeDto {
+        ipc::output(CallTreeDto {
             identity: hex_bytes(tree.identity.as_bytes()),
             artifact_index,
             timeline_id: DecimalU64Dto::new(tree.timeline.0),
@@ -811,6 +819,10 @@ impl QtraceService {
         module_digest: String,
         expected_build_id: Option<Vec<u8>>,
     ) -> Result<(), AppError> {
+        ipc::text(&module_name, ipc::MAX_TEXT_BYTES, "module name")?;
+        if let Some(id) = &expected_build_id {
+            ipc::items(id.len(), ipc::MAX_TEXT_BYTES, "ELF build ID")?;
+        }
         let digest = ArtifactDigest::from_hex(&module_digest).ok_or_else(|| {
             AppError::new(
                 "symbol.module_identity_invalid",
@@ -844,6 +856,12 @@ impl QtraceService {
         module: &str,
         relative_pcs: &[u64],
     ) -> Result<Vec<SymbolDto>, AppError> {
+        ipc::text(module, ipc::MAX_TEXT_BYTES, "module name")?;
+        ipc::items(
+            relative_pcs.len(),
+            ipc::MAX_SYMBOL_QUERIES,
+            "symbol queries",
+        )?;
         let index = {
             let all = self
                 .workspaces
@@ -856,17 +874,25 @@ impl QtraceService {
                     AppError::new("symbol.not_attached", "symbol", "ELF is not attached")
                 })?
         };
-        Ok(relative_pcs
-            .iter()
-            .filter_map(|pc| index.resolve(*pc))
-            .map(|symbol| SymbolDto {
-                module: module.to_owned(),
-                name: symbol.name().to_owned(),
-                relative_address: HexU64Dto::new(symbol.relative_address()),
-                size: DecimalU64Dto::new(symbol.size()),
-                offset: DecimalU64Dto::new(symbol.offset()),
-            })
-            .collect())
+        let budget = ServiceBudget::new(ServiceLimits::interactive());
+        let mut symbols = Vec::new();
+        for pc in relative_pcs {
+            budget.consume(WorkDelta {
+                nodes: 1,
+                rows: 1,
+                ..WorkDelta::default()
+            })?;
+            if let Some(symbol) = index.resolve(*pc) {
+                symbols.push(SymbolDto {
+                    module: module.to_owned(),
+                    name: symbol.name().to_owned(),
+                    relative_address: HexU64Dto::new(symbol.relative_address()),
+                    size: DecimalU64Dto::new(symbol.size()),
+                    offset: DecimalU64Dto::new(symbol.offset()),
+                });
+            }
+        }
+        ipc::output(symbols)
     }
 
     pub fn get_annotation(
@@ -877,13 +903,13 @@ impl QtraceService {
         row: u32,
     ) -> Result<Option<AnnotationDto>, AppError> {
         let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
-        let store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let store = self.annotation_store(workspace, data_home, identity)?;
         let comment = store.event_annotation(&key)?;
         let highlight = store.highlight(&key)?;
         if comment.is_none() && highlight.is_none() {
             return Ok(None);
         }
-        Ok(Some(AnnotationDto {
+        ipc::output(Some(AnnotationDto {
             key: event_key_dto(&key),
             comment: comment
                 .as_ref()
@@ -900,8 +926,9 @@ impl QtraceService {
         row: u32,
         comment: String,
     ) -> Result<(), AppError> {
+        ipc::text(&comment, ipc::MAX_COMMENT_BYTES, "event comment")?;
         let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
-        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut store = self.annotation_store(workspace, data_home, identity)?;
         let annotation = EventAnnotation::new(key, comment)?;
         let mut tx = store.begin_transaction()?;
         tx.put_event_annotation(&annotation)?;
@@ -917,7 +944,7 @@ impl QtraceService {
         row: u32,
     ) -> Result<(), AppError> {
         let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
-        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut store = self.annotation_store(workspace, data_home, identity)?;
         let mut tx = store.begin_transaction()?;
         tx.delete_event_annotation(&key)?;
         tx.commit()?;
@@ -932,8 +959,9 @@ impl QtraceService {
         row: u32,
         value: String,
     ) -> Result<(), AppError> {
+        ipc::text(&value, 256, "highlight")?;
         let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
-        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut store = self.annotation_store(workspace, data_home, identity)?;
         let highlight = Highlight::new(key, value)?;
         let mut tx = store.begin_transaction()?;
         tx.put_highlight(&highlight)?;
@@ -949,7 +977,7 @@ impl QtraceService {
         row: u32,
     ) -> Result<(), AppError> {
         let (key, identity) = self.annotation_target(workspace, artifact_index, row)?;
-        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut store = self.annotation_store(workspace, data_home, identity)?;
         let mut tx = store.begin_transaction()?;
         tx.delete_highlight(&key)?;
         tx.commit()?;
@@ -966,14 +994,16 @@ impl QtraceService {
     ) -> Result<Option<LocalSymbolNameDto>, AppError> {
         let digest = parse_module_digest(&module_digest)?;
         let identity = self.annotation_identity(workspace, artifact_index)?;
-        let store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
-        Ok(store
-            .local_symbol_name(digest, relative_pc)?
-            .map(|value| LocalSymbolNameDto {
-                module_digest,
-                relative_pc: HexU64Dto::new(relative_pc),
-                name: value.name().to_owned(),
-            }))
+        let store = self.annotation_store(workspace, data_home, identity)?;
+        ipc::output(
+            store
+                .local_symbol_name(digest, relative_pc)?
+                .map(|value| LocalSymbolNameDto {
+                    module_digest,
+                    relative_pc: HexU64Dto::new(relative_pc),
+                    name: value.name().to_owned(),
+                }),
+        )
     }
 
     pub fn upsert_local_symbol_name(
@@ -985,9 +1015,10 @@ impl QtraceService {
         relative_pc: u64,
         name: String,
     ) -> Result<(), AppError> {
+        ipc::text(&name, ipc::MAX_TEXT_BYTES, "local symbol name")?;
         let digest = parse_module_digest(&module_digest)?;
         let identity = self.annotation_identity(workspace, artifact_index)?;
-        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut store = self.annotation_store(workspace, data_home, identity)?;
         let value = LocalSymbolName::new(digest, relative_pc, name)?;
         let mut tx = store.begin_transaction()?;
         tx.put_local_symbol_name(&value)?;
@@ -1005,7 +1036,7 @@ impl QtraceService {
     ) -> Result<(), AppError> {
         let digest = parse_module_digest(&module_digest)?;
         let identity = self.annotation_identity(workspace, artifact_index)?;
-        let mut store = AnnotationStore::open(AnnotationOpenRequest::new(data_home, identity))?;
+        let mut store = self.annotation_store(workspace, data_home, identity)?;
         let mut tx = store.begin_transaction()?;
         tx.delete_local_symbol_name(digest, relative_pc)?;
         tx.commit()?;
@@ -1032,7 +1063,7 @@ impl QtraceService {
         item.generation += 1;
         let projection_id = ProjectionId::from_u64(self.next_id());
         item.current = Some(projection_id.clone());
-        Ok(ProjectionJobDto {
+        ipc::output(ProjectionJobDto {
             projection_id,
             job_id: JobId::from_u64(self.next_id()),
             generation: item.generation,
@@ -1070,10 +1101,10 @@ impl QtraceService {
             .lock()
             .map_err(|_| AppError::worker_failed())?;
         let item = all.get(workspace).ok_or_else(AppError::stale_workspace)?;
-        Ok(WorkspaceSummaryDto {
+        ipc::output(WorkspaceSummaryDto {
             id: workspace.clone(),
             generation: item.generation,
-            artifact_count: item.artifacts.len() as u32,
+            artifact_count: as_u32(item.artifacts.len())?,
         })
     }
     pub fn list_jobs(&self) -> Vec<crate::JobDto> {
@@ -1126,6 +1157,30 @@ impl QtraceService {
             cancellation: item.cancellation.clone(),
         })
     }
+    fn annotation_store(
+        &self,
+        workspace: &WorkspaceId,
+        data_home: AuthorizedPath,
+        identity: ArtifactDigest,
+    ) -> Result<AnnotationStore, AppError> {
+        let cancellation = self
+            .workspaces
+            .lock()
+            .map_err(|_| AppError::worker_failed())?
+            .get(workspace)
+            .ok_or_else(AppError::stale_workspace)?
+            .cancellation
+            .clone();
+        let guard = Arc::new(ServiceBudget::with_cancellation(
+            ServiceLimits::interactive(),
+            cancellation,
+        ));
+        Ok(AnnotationStore::open_guarded(
+            AnnotationOpenRequest::new(data_home, identity),
+            guard,
+        )?)
+    }
+
     fn annotation_target(
         &self,
         workspace: &WorkspaceId,
@@ -1310,40 +1365,6 @@ fn session_input_bytes(session: &qtrace_store::SessionSource) -> Result<u64, App
         })
 }
 
-/// Removes LZ4's pre-authorized EOF probe from transport accounting. The source
-/// budget separately includes compressed transport bytes and logical QTRB reads.
-struct InputProbeAdjustedGuard<'a> {
-    inner: &'a dyn WorkGuard,
-    pending_probe: AtomicU64,
-}
-
-impl<'a> InputProbeAdjustedGuard<'a> {
-    fn new(inner: &'a dyn WorkGuard) -> Self {
-        Self {
-            inner,
-            pending_probe: AtomicU64::new(1),
-        }
-    }
-}
-
-impl WorkGuard for InputProbeAdjustedGuard<'_> {
-    fn begin_phase(&self, phase: qtrace_provider::WorkPhase) {
-        self.inner.begin_phase(phase);
-    }
-
-    fn consume(&self, mut delta: WorkDelta) -> Result<(), OperationAbort> {
-        if delta.input_bytes != 0
-            && self
-                .pending_probe
-                .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            delta.input_bytes -= 1;
-        }
-        self.inner.consume(delta)
-    }
-}
-
 fn default_cache_root() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
         .filter(|value| Path::new(value).is_absolute())
@@ -1415,6 +1436,7 @@ fn completeness_cause(value: CompletenessCause) -> &'static str {
     }
 }
 fn convert_filter(value: EventFilterDto) -> Result<EventFilter, AppError> {
+    ipc::filter(&value)?;
     let mut filter = EventFilter {
         tids: value.tids,
         modules: value.modules,
@@ -1982,6 +2004,52 @@ mod register_replay_cache_tests {
         drop(first);
         drop(second);
         drop(replay_slot);
+        service.close_workspace(&workspace).unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn call_tree_is_shared_by_pages_and_released_with_workspace() {
+        let cache = tempfile::tempdir().unwrap();
+        let service = QtraceService::with_cache_root(cache.path().join("indexes"));
+        let workspace = service
+            .open_session(AuthorizedPath::new(fixture()))
+            .unwrap()
+            .workspace
+            .id;
+        let (slot, timeline, tid) = {
+            let all = service.workspaces.lock().unwrap();
+            let item = all.get(&workspace).unwrap();
+            let store = &item.artifacts[0].store;
+            (
+                item.call_tree.clone(),
+                store.event_key(0).unwrap().unwrap().timeline.0,
+                store.thread_ids().unwrap()[0],
+            )
+        };
+        let page = service
+            .get_call_tree(&workspace, 0, timeline, tid, Default::default())
+            .unwrap();
+        let first = slot.lock().unwrap().as_ref().unwrap().tree.clone();
+        let second_page = service
+            .get_call_tree(
+                &workspace,
+                0,
+                timeline,
+                tid,
+                super::CallTreePageQuery {
+                    expected_identity: Some(page.identity.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let second = slot.lock().unwrap().as_ref().unwrap().tree.clone();
+        assert_eq!(page, second_page);
+        assert!(Arc::ptr_eq(&first, &second));
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        drop(second);
+        drop(slot);
         service.close_workspace(&workspace).unwrap();
         assert!(weak.upgrade().is_none());
     }

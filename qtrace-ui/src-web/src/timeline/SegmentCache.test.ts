@@ -23,4 +23,17 @@ describe("SegmentCache", () => {
     expect(cache.get("session-a:projection:1")).toBe("new");
     expect(cache.get("session-b:projection:1")).toBe("other");
   });
+
+  it("refreshes matched entries and releases all accounting on clear", () => {
+    const cache = new SegmentCache<string>({ maxBytes: 8, maxSegments: 2 });
+    cache.set("a", "first", 4);
+    cache.set("b", "second", 4);
+    expect(cache.find(value => value === "first")).toBe("first");
+    cache.set("c", "third", 4);
+    expect(cache.get("b")).toBeUndefined();
+    cache.clear();
+    expect(cache.count).toBe(0);
+    expect(cache.currentWeight).toBe(0);
+    expect(cache.find(() => true)).toBeUndefined();
+  });
 });

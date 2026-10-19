@@ -1,0 +1,293 @@
+{
+  "schema": 1,
+  "date": "2026-10-19",
+  "recorded_utc": "2026-10-19T06:54:41.749990+00:00",
+  "base_commit": "72548df9c099f3e7813016eba5bd46da34099760",
+  "branch": "perf/complete-optimization-2026-10-19",
+  "scope": [
+    "PROTO-01",
+    "QA-03"
+  ],
+  "state": "uncommitted working tree",
+  "native_fixtures": 4,
+  "generated_fixture_count_at_matrix_run": 37,
+  "verification": [
+    {
+      "command": "python3 qtrace-ui/tools/check_protocol_matrix.py --check",
+      "result": "pass",
+      "python_tests": 16,
+      "rust_tests": 25,
+      "scope": "Production C++ encoders, independent Python/Rust readers, fixed legacy and malformed corpus",
+      "log": "artifacts/complete-optimization-2026-10-19/protocol-maint/protocol-matrix.log"
+    },
+    {
+      "command": "cargo test --manifest-path qtrace-ui/fuzz/Cargo.toml --locked -j 2 --tests",
+      "result": "pass",
+      "tests": 6,
+      "property_cases": 64,
+      "property_seed": "0x20261019"
+    },
+    {
+      "command": "cargo test --manifest-path qtrace-ui/Cargo.toml --locked -j 2 -p qtrace-store --test annotation_guard --test annotations",
+      "result": "pass",
+      "tests": 15
+    },
+    {
+      "command": "cargo clippy --manifest-path qtrace-ui/fuzz/Cargo.toml --locked -j 2 --tests -- -D warnings",
+      "result": "pass"
+    },
+    {
+      "command": "cargo clippy --manifest-path qtrace-ui/Cargo.toml --locked -j 2 -p qtrace-store --test annotation_guard -- -D warnings",
+      "result": "pass"
+    },
+    {
+      "command": "CARGO_BUILD_JOBS=2 cargo +nightly fuzz build",
+      "result": "pass",
+      "targets": 5
+    },
+    {
+      "command": "cmake --build build/native-host-tests --target tracer_entry_proxy_test production_trace_contract_test protocol_fixture_emitter --parallel 2",
+      "result": "pass"
+    },
+    {
+      "command": "Temporary workspace: remove only SQLite progress_handler registration; run annotation_guard::sqlite_vm_budget_interrupts_untrusted_migration_and_preserves_schema",
+      "result": "expected assertion failure",
+      "exit_code": 101,
+      "actual_error": "annotation.sqlite: view event_annotations may not be altered",
+      "expected_error": "control.budget_exceeded",
+      "log": "/tmp/qtrace-guard-negative-proof.log"
+    }
+  ],
+  "fuzz_smoke": {
+    "directory": "/tmp/qtrace-protocol-fuzz-20261019-evf1g0_3",
+    "results": [
+      {
+        "target": "qtrb",
+        "exit_code": 0,
+        "seconds_requested": 10,
+        "wall_seconds": 10.424,
+        "runs": 514347,
+        "log": "/tmp/qtrace-protocol-fuzz-20261019-evf1g0_3/qtrb.log",
+        "crashes": []
+      },
+      {
+        "target": "flight",
+        "exit_code": 0,
+        "seconds_requested": 10,
+        "wall_seconds": 39.558,
+        "runs": 336787,
+        "log": "/tmp/qtrace-protocol-fuzz-20261019-evf1g0_3/flight.log",
+        "crashes": []
+      },
+      {
+        "target": "cache_manifest",
+        "exit_code": 0,
+        "seconds_requested": 10,
+        "wall_seconds": 12.281,
+        "runs": 31698,
+        "log": "/tmp/qtrace-protocol-fuzz-20261019-evf1g0_3/cache_manifest.log",
+        "crashes": []
+      },
+      {
+        "target": "session_report",
+        "exit_code": 0,
+        "seconds_requested": 10,
+        "wall_seconds": 11.398,
+        "runs": 33186,
+        "log": "/tmp/qtrace-protocol-fuzz-20261019-evf1g0_3/session_report.log",
+        "crashes": []
+      },
+      {
+        "target": "annotations",
+        "exit_code": 0,
+        "seconds_requested": 10,
+        "wall_seconds": 12.442,
+        "runs": 9966,
+        "log": "/tmp/qtrace-protocol-fuzz-20261019-evf1g0_3/annotations.log",
+        "crashes": []
+      }
+    ]
+  },
+  "fuzz_total_runs": 925984,
+  "fuzz_command": "CARGO_BUILD_JOBS=2 cargo +nightly fuzz run <target> <temporary-corpus-copy> -- -max_total_time=10 -max_len=<target-input-limit> -seed=20261019 -timeout=3 -rss_limit_mb=512 -malloc_limit_mb=128 -artifact_prefix=<temporary-artifacts>/",
+  "ci": {
+    "configuration": ".github/workflows/qtrace-ui-fuzz.yml",
+    "events": [
+      "relevant push",
+      "relevant pull_request",
+      "schedule",
+      "workflow_dispatch"
+    ],
+    "pull_request_seconds_per_target": 60,
+    "scheduled_seconds_per_target": 1800,
+    "targets": [
+      "qtrb",
+      "flight",
+      "cache_manifest",
+      "session_report",
+      "annotations"
+    ],
+    "hosted_run": "not executed; no commit or push authorized by this task",
+    "paths": [
+      "qtrace-ui/**",
+      "qtrace/report.py",
+      "scripts/**",
+      "tracer/src/**",
+      ".github/workflows/qtrace-ui-fuzz.yml"
+    ]
+  },
+  "toolchain": {
+    "rust_stable": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "rust_nightly": "rustc 1.100.0-nightly (fd7ed57df 2026-08-29)",
+    "cargo_fuzz": "cargo-fuzz 0.13.2",
+    "cxx": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+  },
+  "sha256": {
+    ".github/workflows/qtrace-ui-fuzz.yml": "d462bcb67f4bfb7c243da8df0ae8d30e30502ec225eb033ecc1905b8b56ffc78",
+    "qtrace-ui/crates/qtrace-provider/tests/flight_differential.rs": "420fb06c5086c726a6267bf4aae7fdc3763ecce9e587464efa1760ab65d321d4",
+    "qtrace-ui/crates/qtrace-provider/tests/qtrb_differential.rs": "fea66f8d34161d0cc48ff2bca24d3ebe0589a89214036abc08607b2645d0f034",
+    "qtrace-ui/crates/qtrace-store/Cargo.toml": "bb4e0e95d06bbbf4a3495d0068af85524eced05e15f8ab92be63e1d01c6ad124",
+    "qtrace-ui/crates/qtrace-store/src/annotations.rs": "da8fa42a3eef479a9a348df4fe32f4c598427b0fee6893999e91bfe946844daf",
+    "qtrace-ui/crates/qtrace-store/tests/annotation_guard.rs": "3431d94969e7dd051fbecaab5d8a05471f5342854546b6f67e0b29eedd60a980",
+    "qtrace-ui/fixtures-native/constants.json": "31a630e0d69613e02bc847c9d2b6e15ba576e4222a00275e81a6684f3382ad33",
+    "qtrace-ui/fixtures-native/flight-active.bin": "4673d8abd93ee65ba936a4bed678c531bddb38e119ad2c1f0598b82b317dc260",
+    "qtrace-ui/fixtures-native/flight-sealed.bin": "8c083a51030c36e0e028275780e9cdfcb3b34a03e8222beebc400a7aeea2527f",
+    "qtrace-ui/fixtures-native/manifest.json": "a39904750bcb0f8a9ca02195699dac3e34bb73131d606b15393d4021d813f662",
+    "qtrace-ui/fixtures-native/qtrb-completed.bin": "3e7d1e5084721c824d9bd63de0f90d8ded9057652d00c77d22d8c2f005ff9025",
+    "qtrace-ui/fixtures-native/qtrb-stopped.bin": "f0084f0a7a244fdbd36fede813728264c149e91da66b916cbe6d24998f17836b",
+    "qtrace-ui/fuzz/.gitignore": "6565783967344f6df617229578c8dc8b983cd88977e87bf45d8c57c4c6a78c03",
+    "qtrace-ui/fuzz/Cargo.lock": "92eb878bdf00d43d47bf67c3f0c60496a8ba986f4b7d310c36d238b46eacf319",
+    "qtrace-ui/fuzz/Cargo.toml": "993e2103860bdd4e8c59abbb2457322e29d65c62749411be0e8be1ed3857b7f5",
+    "qtrace-ui/fuzz/README.md": "7d7944d50a3c547351eedb08f8c4450cbd80594ab34b4704c8ff299830681c46",
+    "qtrace-ui/fuzz/corpus/annotations/legacy-v1": "bebac40082cd5775fd2c4629616524ee766f4cf1802d63d450b5dda3247a9c01",
+    "qtrace-ui/fuzz/corpus/annotations/legacy-v2": "d14685e62ff506323ebf6e28686e8c378fcd6fb31c0f379cf71847e53ab57039",
+    "qtrace-ui/fuzz/corpus/annotations/not-a-database": "ae78f817addcc51888edb0d3ed03e13829a934a582b982a34f0ad3a8a3c6459b",
+    "qtrace-ui/fuzz/corpus/annotations/oversized-text": "cc0b0caacf28aa1a974e6282b1502c122fdcca0497046f3c6d25eddf63e20b31",
+    "qtrace-ui/fuzz/corpus/annotations/recursive-view": "18c0df88ad64d8012959c4f034cfc7e7739e9305d93b8f5aec01d9a7494225ee",
+    "qtrace-ui/fuzz/corpus/annotations/truncated-sqlite-header": "3f8434aff012ffcb594ad7527d6042841ce94f499887f86ab828f84a9a275f91",
+    "qtrace-ui/fuzz/corpus/annotations/valid": "3ad21768ee3caec2a44c78966b0954ea779cc8a0da3a87d5d1446c3a2c50d462",
+    "qtrace-ui/fuzz/corpus/annotations/wrong-type": "10f7a45e40bf32327927c10a09a27894e64a85415ba442159ca697a9ba63612b",
+    "qtrace-ui/fuzz/corpus/cache_manifest/identity": "c212f354aa6608bebf145dd5fbdbc974bda4ec0684aad32df7e89bcc3bbc10b2",
+    "qtrace-ui/fuzz/corpus/cache_manifest/overflow": "786833eb3dbccc73ca7774292f0769399fcb57c758514f9776385e97fe2a8adc",
+    "qtrace-ui/fuzz/corpus/cache_manifest/overlap": "2b697c85f5013ad6854fb426d1cad178c8ba82cf7da7259f11d0997e44ca6f36",
+    "qtrace-ui/fuzz/corpus/cache_manifest/section-count": "9d808579881513ba0a59cd35f764d764f479d2a49affd2f7ff978106c9ccbd33",
+    "qtrace-ui/fuzz/corpus/cache_manifest/truncated": "5ea545d1c347b3b4d8ed3e3945e542d4779cc72fead6bae179f37c05d5fa1279",
+    "qtrace-ui/fuzz/corpus/cache_manifest/unknown-field": "eb1dbd567ba0cb5d88a2f1e072f30d59d168bcfe32b164e0573063ef95e6aa30",
+    "qtrace-ui/fuzz/corpus/cache_manifest/valid": "a39bddec2d03bc3907c0b4c016f64458416096715a40105f934f1c20112c8da6",
+    "qtrace-ui/fuzz/corpus/flight/.gitignore": "cffec1b710829c3c762d442daa450e509d265633ccc780dca333b7aeb1c975d7",
+    "qtrace-ui/fuzz/corpus/flight/v2-active": "4223ac29add5184c0449e37018ae4a9d18a105642b88785867c783248edf52ac",
+    "qtrace-ui/fuzz/corpus/flight/v2-checkpoint-delta": "87c18cabc9acd038c213c07bc1558f363ecf3e47b19551d2a0223e72f06862a6",
+    "qtrace-ui/fuzz/corpus/flight/v2-checksum-damaged": "4255236e9ddff59fb38189fe03329add0af0afe3ba505798418bcac1f1d52c37",
+    "qtrace-ui/fuzz/corpus/flight/v2-complete": "ddb3a705c1146bed3a91fa8d0e7a36af780a203f47af50ba9b3d60177a8b0674",
+    "qtrace-ui/fuzz/corpus/flight/v2-coverage-gap": "0d064b151a10e76fb2c065de679832f5ec7bb250a1fb574b1b4497a1aa633a45",
+    "qtrace-ui/fuzz/corpus/flight/v2-incomplete-fragment": "97ef6b6e3f4a7b1d1eca62e11f47c784af1b61c9b331f646a2b886497325d982",
+    "qtrace-ui/fuzz/corpus/flight/v2-overwritten": "39711b6e4ea401a0cc3de4a13a0998d042617c50a6cfaf801823b5956f310c2b",
+    "qtrace-ui/fuzz/corpus/flight/v2-stale-directory": "1d5267b01117486fb97cef8efd9cfda24863fcfb1bafbeaf4de38766c8f77dc7",
+    "qtrace-ui/fuzz/corpus/qtrb/.gitignore": "cffec1b710829c3c762d442daa450e509d265633ccc780dca333b7aeb1c975d7",
+    "qtrace-ui/fuzz/corpus/qtrb/bad-header": "28dbf008435f201e54eb790a562595bf27617dcac14b4d3ddc152189e4f3c310",
+    "qtrace-ui/fuzz/corpus/qtrb/lz4-concatenated-frames": "69ca0b641f849ca5ab5c3aabe488d466649dacd4da373f43a290e7d06cdabc23",
+    "qtrace-ui/fuzz/corpus/qtrb/lz4-linked-blocks": "55418e0577e53b9db55ecba0b9a0eef522626998962c0c6ee4caec43a8078533",
+    "qtrace-ui/fuzz/corpus/qtrb/lz4-standard": "17cbeb39c03b8cfc4d83dcb30b5fe4f6d643191f3a96490249c9b22deed92328",
+    "qtrace-ui/fuzz/corpus/qtrb/oversized-record": "c921aed4b37706141781ab9b4b6d24ba703df1f4a96dd2b0ad42b538efcef992",
+    "qtrace-ui/fuzz/corpus/qtrb/record-after-terminal": "640d2aa9053815e5df18eb22aab8a383334a6ddbe30b62a070b60a130b19dda2",
+    "qtrace-ui/fuzz/corpus/qtrb/sequence-gap": "abaa96ef5ab6c2201a819adaeccbc367a054ee326ae45f702b570acfb235346c",
+    "qtrace-ui/fuzz/corpus/qtrb/truncated-payload": "5c1be5f5a2a166d1a787980dc202cff9ddbe107e45e4965af6946b27320d8674",
+    "qtrace-ui/fuzz/corpus/qtrb/undefined-metadata": "10eb379551e9d66d33e5f5eca932506f8b419b55b6803549049cdb9b9ff96b07",
+    "qtrace-ui/fuzz/corpus/qtrb/unsupported-feature": "2602862968c20295c7f5818a3d6955c8d027e74b5de76770282941b035324e47",
+    "qtrace-ui/fuzz/corpus/qtrb/v1.0-completed": "8095c8a608ac9e8184e0566b9def65465db0183d10b8b7e1704a2d06bc61f072",
+    "qtrace-ui/fuzz/corpus/qtrb/v1.1-chunked": "de3ac9a9c9239e1ddfa13b0c1c623643ac6909585028758685b8dfd0a9d853a7",
+    "qtrace-ui/fuzz/corpus/qtrb/v1.2-completed": "87fc907d12dcdf1da28d37180345b546834f143cbd5c3db138012fcbc26c945a",
+    "qtrace-ui/fuzz/corpus/qtrb/v1.2-partial": "1e7cfbea8fded41adf2ec2cb86db83cdcb9dd2955e4fa7f4dc37bce7497c9288",
+    "qtrace-ui/fuzz/corpus/qtrb/v1.2-stopped": "71190b2727ae44d9e212e05d898cd4baf59e8063274d9aed82c3e6c3bfcca927",
+    "qtrace-ui/fuzz/corpus/session_report/collection-limit": "c1bff2db49ce97190aa75906085f3b5ff58d3e866a7baa289a0fd0d0a7f21261",
+    "qtrace-ui/fuzz/corpus/session_report/deep-json": "ecd8beb0ba3e847ddc0a914c0d5f8d7b116792c6a6f630f400be3cf250d4c4e0",
+    "qtrace-ui/fuzz/corpus/session_report/nul-path": "4a8ded73a8f34b3376ad2b9d1be865b77ca6d23778af28c45e58e1b67d2673ed",
+    "qtrace-ui/fuzz/corpus/session_report/path-escape": "a2275f1740b7cdb8fe88441a281a7dac63f3ad353fc806e974b13be40df40ebe",
+    "qtrace-ui/fuzz/corpus/session_report/size-overflow": "27433e83109aed5fe4572a18ee1edf82b2100f29d4d3a214ef041f1f5bdf1b17",
+    "qtrace-ui/fuzz/corpus/session_report/unknown-field": "c8b3ce3f75c67b30dc434fc8c1cebd7f7ea4a484ef9a18812ff7db6a5ae98b0e",
+    "qtrace-ui/fuzz/corpus/session_report/valid": "3eba37dd60af6a205c31a17f80f905b8e5c28fd447fe8ac4f8525b3247dae616",
+    "qtrace-ui/fuzz/fuzz_targets/annotations.rs": "95d23bb69a02932d7fe6036b71a1cc1437f0c3e4386345fa3e077fdf5b44d965",
+    "qtrace-ui/fuzz/fuzz_targets/cache_manifest.rs": "592e32004a61241309d3149e4f924577afb305c41f8b286429c77f33011d51be",
+    "qtrace-ui/fuzz/fuzz_targets/flight.rs": "09578058f393c521f6ce882fa156855ed09b36f0f8b422d04a63edca85b21fdf",
+    "qtrace-ui/fuzz/fuzz_targets/qtrb.rs": "d876395cddb400d842122c189bf216902fecb1c600547e87896c0313e8741339",
+    "qtrace-ui/fuzz/fuzz_targets/session_report.rs": "e4f7a14411673ffb1a3b4e7786a8b330362a2200f11151a69f8e401db888c234",
+    "qtrace-ui/fuzz/fuzz_targets/storage_support.rs": "87cf152475ee6e0712cf9a393ad0282390542f97287761d8e8f63cd09491ba74",
+    "qtrace-ui/fuzz/fuzz_targets/support.rs": "5bfd064adad769fa66e4306676f16257f660bb467e4e27614492fa0e167e7cf9",
+    "qtrace-ui/fuzz/tests/seed_paths.rs": "d92475e4b04111f1eb82ffa633e5c52f8c655d54a1d61f5b28109615a7323104",
+    "qtrace-ui/fuzz/tests/storage_paths.rs": "9792ec3587900eb3c9c1d10d3412ed9901dbd8bae9f9db5bf9a5fa732a23b803",
+    "qtrace-ui/tools/check_protocol_matrix.py": "d8775c3e5e60c3b052781f1557c796ccfa2e7aa93da3a251767999e2d2167d8f",
+    "tracer/src/test/cpp/protocol_fixture_emitter.cpp": "063d3654cd615bfe57f9ecbc2299f185945e562ac4f81b814dfb15de5583e8c7",
+    "scripts/tests/test_qtrace_ui_fixtures.py": "ad193048786fe12f4032a7a2632545abbf3b9ee4db7d27edcf53abaaa4919ac8"
+  },
+  "limitations": [
+    "ASan smoke used the locally installed nightly and cargo-fuzz; hosted CI pins nightly-2026-08-15 and cargo-fuzz 0.13.1.",
+    "Long scheduled fuzz remains a recurring check, not a proof of absence of defects."
+  ],
+  "post_module_extraction": {
+    "module_report": "docs/benchmarks/qtrace-module-boundaries-2026-10-19.md",
+    "verification": "artifacts/complete-optimization-2026-10-19/protocol-maint/verification.json",
+    "fixture_count": 37,
+    "matrix_python_tests": 16,
+    "matrix_rust_tests": 25,
+    "storage_tests": 6,
+    "property_cases": 64,
+    "flight_fuzz": {
+      "name": "flight-asan-after",
+      "command": [
+        "cargo",
+        "+nightly",
+        "fuzz",
+        "run",
+        "flight",
+        "/tmp/qtrace-module-after-20261019-oau_y5dn/flight-corpus",
+        "--",
+        "-max_total_time=10",
+        "-max_len=16777216",
+        "-seed=20261019",
+        "-timeout=3",
+        "-rss_limit_mb=512",
+        "-malloc_limit_mb=128",
+        "-artifact_prefix=/tmp/qtrace-module-after-20261019-oau_y5dn/flight-artifacts/"
+      ],
+      "exit_code": 0,
+      "wall_seconds": 37.664,
+      "runs": 324353,
+      "log": "artifacts/complete-optimization-2026-10-19/protocol-maint/flight-asan.log",
+      "crashes": []
+    },
+    "first_matrix_rerun": "Expected-class list had omitted the newly added loadable ELF fixture; narrowed fixture contract update passed full rerun."
+  },
+  "integration": {
+    "rust_tests": {
+      "passed": 520,
+      "ignored": 2,
+      "log": "artifacts/complete-optimization-2026-10-19/rust-final.log"
+    },
+    "clippy": {
+      "exit_code": 0,
+      "log": "artifacts/complete-optimization-2026-10-19/clippy-final.log"
+    },
+    "generated": {
+      "exit_code": 0,
+      "log": "artifacts/complete-optimization-2026-10-19/generated-final.log"
+    },
+    "python": {
+      "tests": 858,
+      "skipped": 8,
+      "result": "OK",
+      "log": "artifacts/complete-optimization-2026-10-19/python-final-recheck.log"
+    },
+    "native": {
+      "host_tests": 45,
+      "failed": 0,
+      "host_wall_seconds": 15.21,
+      "gradle_result": "BUILD SUCCESSFUL",
+      "android_tasks": [
+        "app:assembleDebug",
+        "tracer:assembleDebug",
+        "tracer:copyTracerDebug"
+      ],
+      "log": "artifacts/complete-optimization-2026-10-19/native/gradle-final-integration-retry.log"
+    }
+  }
+}

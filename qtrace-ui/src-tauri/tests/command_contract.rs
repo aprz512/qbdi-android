@@ -29,6 +29,41 @@ fn fixture(path: &str) -> PathBuf {
 }
 
 #[test]
+fn requests_reject_oversized_members_during_deserialization() {
+    let query = serde_json::json!({
+        "workspace_id": "1", "projection_id": "2", "limit": 2000,
+        "cursor": "x".repeat(qtrace_service::ipc::MAX_CURSOR_BYTES + 1),
+    });
+    assert!(serde_json::from_value::<QueryTimelineRequest>(query).is_err());
+    let call_tree = serde_json::json!({
+        "workspace_id": "1", "artifact_index": 0, "timeline_id": "1", "tid": 1,
+        "expected_identity": "x".repeat(257),
+    });
+    assert!(serde_json::from_value::<CallTreeRequest>(call_tree).is_err());
+    let symbols = serde_json::json!({
+        "workspace_id": "1", "module_name": "lib.so",
+        "relative_pcs": vec!["0x1"; qtrace_service::ipc::MAX_SYMBOL_QUERIES + 1],
+    });
+    assert!(serde_json::from_value::<ListSymbolsRequest>(symbols).is_err());
+    let comment = serde_json::json!({
+        "workspace_id": "1", "artifact_index": 0, "row": 0,
+        "comment": "x".repeat(qtrace_service::ipc::MAX_COMMENT_BYTES + 1),
+    });
+    assert!(serde_json::from_value::<UpsertAnnotationRequest>(comment).is_err());
+    let elf = serde_json::json!({
+        "workspace_id": "1", "module_name": "lib.so", "module_digest": "00".repeat(32),
+        "expected_build_id": vec![0; 4097],
+    });
+    assert!(serde_json::from_value::<AttachElfRequest>(elf).is_err());
+    assert!(
+        serde_json::from_value::<WorkspaceRequest>(serde_json::json!({
+            "workspace_id": "1".repeat(257),
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn adapter_mirrors_the_service_contract() {
     let data = tempfile::tempdir().unwrap();
     let picker = FakePicker {

@@ -5,6 +5,7 @@ use std::{
     fs::File,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use qtrace_provider::{ArtifactDigest, EventKey, OperationAbort, WorkDelta, WorkGuard};
@@ -15,7 +16,7 @@ use rustix::fs::{Mode, OFlags, openat};
 use rustix::io::Errno;
 
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use crate::{
     AuthorizedPath,
@@ -64,6 +65,48 @@ struct AllowAll;
 impl WorkGuard for AllowAll {
     fn consume(&self, _delta: WorkDelta) -> Result<(), OperationAbort> {
         Ok(())
+    }
+}
+
+// SQLite owns its progress callback until the connection closes, so the guard is shared.
+// Keep the first abort sticky: cleanup must never turn interrupted work into success.
+struct AnnotationBudget {
+    guard: Arc<dyn WorkGuard>,
+    abort: Mutex<Option<OperationAbort>>,
+}
+
+impl AnnotationBudget {
+    fn consume(&self, delta: WorkDelta) -> Result<(), AnnotationError> {
+        let mut abort = self
+            .abort
+            .lock()
+            .map_err(|_| AnnotationError::resource("annotation guard lock poisoned"))?;
+        if let Some(abort) = abort.as_ref() {
+            return Err(AnnotationError::abort(abort));
+        }
+        if let Err(error) = self.guard.consume(delta) {
+            let result = AnnotationError::abort(&error);
+            *abort = Some(error);
+            return Err(result);
+        }
+        Ok(())
+    }
+
+    fn finish<T>(&self, result: Result<T, AnnotationError>) -> Result<T, AnnotationError> {
+        let abort = self
+            .abort
+            .lock()
+            .map_err(|_| AnnotationError::resource("annotation guard lock poisoned"))?
+            .clone();
+        match abort.as_ref() {
+            Some(abort) => Err(AnnotationError::abort(abort)),
+            None => result,
+        }
+    }
+
+    fn sqlite(&self, error: rusqlite::Error) -> AnnotationError {
+        self.finish::<()>(Err(AnnotationError::sqlite(error)))
+            .unwrap_err()
     }
 }
 
@@ -166,6 +209,7 @@ pub struct AnnotationStore {
     vfs: DescriptorVfs,
     connection: Option<Connection>,
     database_path: PathBuf,
+    budget: Arc<AnnotationBudget>,
 }
 
 impl fmt::Debug for AnnotationStore {
@@ -179,13 +223,63 @@ impl fmt::Debug for AnnotationStore {
 
 impl AnnotationStore {
     pub fn open(request: AnnotationOpenRequest) -> Result<Self, AnnotationError> {
+        Self::open_budgeted(
+            request,
+            Arc::new(AllowAll),
+            std::time::Duration::from_secs(5),
+        )
+    }
+
+    /// Opens an annotation database with cancellation, SQLite VM work, and text budgets.
+    /// The shared guard also applies to subsequent reads and transactions on this store.
+    pub fn open_guarded(
+        request: AnnotationOpenRequest,
+        guard: Arc<dyn WorkGuard>,
+    ) -> Result<Self, AnnotationError> {
+        // SQLite's busy timeout does not invoke its progress callback. Guarded callers must
+        // receive a lock conflict promptly so a held lock cannot bypass cancellation deadlines.
+        Self::open_budgeted(request, guard, std::time::Duration::ZERO)
+    }
+
+    fn open_budgeted(
+        request: AnnotationOpenRequest,
+        guard: Arc<dyn WorkGuard>,
+        busy_timeout: std::time::Duration,
+    ) -> Result<Self, AnnotationError> {
+        let budget = Arc::new(AnnotationBudget {
+            guard,
+            abort: Mutex::new(None),
+        });
+        budget.consume(WorkDelta::default())?;
+        let result = Self::open_with_budget(request, budget.clone(), busy_timeout);
+        budget.finish(result)
+    }
+
+    fn open_with_budget(
+        request: AnnotationOpenRequest,
+        budget: Arc<AnnotationBudget>,
+        busy_timeout: std::time::Duration,
+    ) -> Result<Self, AnnotationError> {
         let key = request.session_identity.to_hex();
-        let directory =
-            CacheDirectory::open_data(request.data_home.as_path(), &key, true, &AllowAll)
-                .map_err(AnnotationError::from_initial_cache)?
-                .ok_or_else(|| AnnotationError::io("annotation data directory was not created"))?;
+        let directory = CacheDirectory::open_data(
+            request.data_home.as_path(),
+            &key,
+            true,
+            budget.guard.as_ref(),
+        )
+        .map_err(AnnotationError::from_initial_cache)?
+        .ok_or_else(|| AnnotationError::io("annotation data directory was not created"))?;
         let (database, _, database_created) = open_database_leaf(&directory)?;
-        let sidecars = inspect_sidecars(&directory)?;
+        budget.consume(WorkDelta {
+            input_bytes: database
+                .metadata()
+                .map_err(|error| AnnotationError::io(error.to_string()))?
+                .len(),
+            resident_bytes: 2 * 1024 * 1024,
+            nodes: 1,
+            ..WorkDelta::default()
+        })?;
+        let sidecars = inspect_sidecars(&directory, &budget)?;
         if sidecars[1].is_some() {
             return Err(AnnotationError::path(
                 "preexisting SQLite shared-memory sidecar is forbidden",
@@ -204,6 +298,23 @@ impl AnnotationStore {
             vfs.name(),
         )
         .map_err(AnnotationError::sqlite)?;
+        // Authorize the first VM quantum before SQLite executes any statement.
+        budget.consume(WorkDelta {
+            nodes: 1000,
+            ..WorkDelta::default()
+        })?;
+        let progress = budget.clone();
+        connection.progress_handler(
+            1000,
+            Some(move || {
+                progress
+                    .consume(WorkDelta {
+                        nodes: 1000,
+                        ..WorkDelta::default()
+                    })
+                    .is_err()
+            }),
+        );
         configure_sqlite_limits(&connection)?;
         let locking: String = connection
             .query_row("PRAGMA locking_mode=EXCLUSIVE", [], |row| row.get(0))
@@ -216,7 +327,7 @@ impl AnnotationStore {
         configure_persistent_wal(&connection)?;
         configure_sqlite_pragmas(&connection)?;
         connection
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .busy_timeout(busy_timeout)
             .map_err(AnnotationError::sqlite)?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
@@ -234,6 +345,7 @@ impl AnnotationStore {
             vfs,
             connection: Some(connection),
             database_path,
+            budget,
         })
     }
 
@@ -250,11 +362,12 @@ impl AnnotationStore {
             .as_mut()
             .expect("annotation connection is present until drop")
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(AnnotationError::sqlite)?;
+            .map_err(|error| self.budget.sqlite(error))?;
         Ok(AnnotationTransaction {
             transaction,
             directory,
             vfs,
+            budget: &self.budget,
         })
     }
 
@@ -276,6 +389,7 @@ impl AnnotationStore {
             "event_key=?1",
             &parameters,
             MAX_COMMENT_BYTES,
+            &self.budget,
         )?;
         comment
             .map(|comment| EventAnnotation::new(event.clone(), comment))
@@ -302,6 +416,7 @@ impl AnnotationStore {
             "module_digest=?1 AND relative_pc=?2",
             &parameters,
             MAX_LOCAL_NAME_BYTES,
+            &self.budget,
         )?;
         name.map(|name| LocalSymbolName::new(module_digest, relative_pc, name))
             .transpose()
@@ -322,6 +437,7 @@ impl AnnotationStore {
             "event_key=?1",
             &parameters,
             MAX_HIGHLIGHT_BYTES,
+            &self.budget,
         )?;
         value
             .map(|value| Highlight::new(event.clone(), value))
@@ -329,6 +445,10 @@ impl AnnotationStore {
     }
 
     fn verify_bindings(&self) -> Result<(), AnnotationError> {
+        self.budget.consume(WorkDelta {
+            nodes: 1,
+            ..WorkDelta::default()
+        })?;
         self.directory
             .verify()
             .map_err(|_| AnnotationError::identity("annotation data directory was replaced"))?;
@@ -348,11 +468,16 @@ pub struct AnnotationTransaction<'store> {
     transaction: Transaction<'store>,
     directory: &'store CacheDirectory,
     vfs: &'store DescriptorVfs,
+    budget: &'store AnnotationBudget,
 }
 
 impl AnnotationTransaction<'_> {
     pub fn put_event_annotation(&mut self, value: &EventAnnotation) -> Result<(), AnnotationError> {
         self.verify_bindings()?;
+        self.budget.consume(WorkDelta {
+            input_bytes: value.comment().len() as u64,
+            ..WorkDelta::default()
+        })?;
         let key = encode_event_key(value.event());
         self.transaction
             .execute(
@@ -360,7 +485,7 @@ impl AnnotationTransaction<'_> {
                  ON CONFLICT(event_key) DO UPDATE SET comment=excluded.comment",
                 params![key.as_slice(), value.comment()],
             )
-            .map_err(AnnotationError::sqlite)?;
+            .map_err(|error| self.budget.sqlite(error))?;
         Ok(())
     }
 
@@ -372,7 +497,7 @@ impl AnnotationTransaction<'_> {
                 "DELETE FROM event_annotations WHERE event_key=?1",
                 [key.as_slice()],
             )
-            .map_err(AnnotationError::sqlite)?;
+            .map_err(|error| self.budget.sqlite(error))?;
         Ok(())
     }
 
@@ -381,6 +506,10 @@ impl AnnotationTransaction<'_> {
         value: &LocalSymbolName,
     ) -> Result<(), AnnotationError> {
         self.verify_bindings()?;
+        self.budget.consume(WorkDelta {
+            input_bytes: value.name().len() as u64,
+            ..WorkDelta::default()
+        })?;
         let pc = value.relative_pc().to_le_bytes();
         self.transaction
             .execute(
@@ -388,7 +517,7 @@ impl AnnotationTransaction<'_> {
                  ON CONFLICT(module_digest, relative_pc) DO UPDATE SET name=excluded.name",
                 params![value.module_digest().as_bytes().as_slice(), pc.as_slice(), value.name()],
             )
-            .map_err(AnnotationError::sqlite)?;
+            .map_err(|error| self.budget.sqlite(error))?;
         Ok(())
     }
 
@@ -404,12 +533,16 @@ impl AnnotationTransaction<'_> {
                 "DELETE FROM local_symbol_names WHERE module_digest=?1 AND relative_pc=?2",
                 params![module_digest.as_bytes().as_slice(), pc.as_slice()],
             )
-            .map_err(AnnotationError::sqlite)?;
+            .map_err(|error| self.budget.sqlite(error))?;
         Ok(())
     }
 
     pub fn put_highlight(&mut self, value: &Highlight) -> Result<(), AnnotationError> {
         self.verify_bindings()?;
+        self.budget.consume(WorkDelta {
+            input_bytes: value.value().len() as u64,
+            ..WorkDelta::default()
+        })?;
         let key = encode_event_key(value.event());
         self.transaction
             .execute(
@@ -417,7 +550,7 @@ impl AnnotationTransaction<'_> {
                  ON CONFLICT(event_key) DO UPDATE SET value=excluded.value",
                 params![key.as_slice(), value.value()],
             )
-            .map_err(AnnotationError::sqlite)?;
+            .map_err(|error| self.budget.sqlite(error))?;
         Ok(())
     }
 
@@ -429,20 +562,28 @@ impl AnnotationTransaction<'_> {
                 "DELETE FROM highlights WHERE event_key=?1",
                 [key.as_slice()],
             )
-            .map_err(AnnotationError::sqlite)?;
+            .map_err(|error| self.budget.sqlite(error))?;
         Ok(())
     }
 
     pub fn commit(self) -> Result<(), AnnotationError> {
         self.verify_bindings()?;
-        self.transaction.commit().map_err(AnnotationError::sqlite)
+        self.transaction
+            .commit()
+            .map_err(|error| self.budget.sqlite(error))
     }
 
     pub fn rollback(self) -> Result<(), AnnotationError> {
-        self.transaction.rollback().map_err(AnnotationError::sqlite)
+        self.transaction
+            .rollback()
+            .map_err(|error| self.budget.sqlite(error))
     }
 
     fn verify_bindings(&self) -> Result<(), AnnotationError> {
+        self.budget.consume(WorkDelta {
+            nodes: 1,
+            ..WorkDelta::default()
+        })?;
         self.directory
             .verify()
             .map_err(|_| AnnotationError::identity("annotation data directory was replaced"))?;
@@ -506,6 +647,8 @@ fn configure_sqlite_pragmas(connection: &Connection) -> Result<(), AnnotationErr
         "PRAGMA page_size=4096",
         "PRAGMA max_page_count=262144",
         "PRAGMA temp_store=MEMORY",
+        "PRAGMA cache_size=-1024",
+        "PRAGMA mmap_size=0",
         "PRAGMA recursive_triggers=OFF",
         "PRAGMA journal_size_limit=67108864",
         "PRAGMA wal_autocheckpoint=1000",
@@ -535,6 +678,7 @@ fn read_bounded_text(
     predicate: &str,
     parameters: &[&dyn rusqlite::ToSql],
     maximum: usize,
+    budget: &AnnotationBudget,
 ) -> Result<Option<String>, AnnotationError> {
     let metadata_sql = format!(
         "SELECT typeof({column}), length(CAST({column} AS BLOB)) FROM {table} WHERE {predicate}"
@@ -544,7 +688,7 @@ fn read_bounded_text(
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
         .optional()
-        .map_err(AnnotationError::sqlite)?;
+        .map_err(|error| budget.sqlite(error))?;
     let Some((kind, length)) = metadata else {
         return Ok(None);
     };
@@ -560,10 +704,15 @@ fn read_bounded_text(
             "annotation text exceeds its UTF-8 byte limit",
         ));
     }
+    budget.consume(WorkDelta {
+        resident_bytes: length as u64,
+        nodes: 1,
+        ..WorkDelta::default()
+    })?;
     let value_sql = format!("SELECT {column} FROM {table} WHERE {predicate}");
     let value = connection
         .query_row(&value_sql, parameters, |row| row.get::<_, String>(0))
-        .map_err(AnnotationError::sqlite)?;
+        .map_err(|error| budget.sqlite(error))?;
     if value.len() != length || value.contains('\0') {
         return Err(AnnotationError::schema(
             "annotation text changed type or length while reading",
@@ -835,6 +984,7 @@ fn inspect_database_leaf(
 
 fn inspect_sidecars(
     directory: &CacheDirectory,
+    budget: &AnnotationBudget,
 ) -> Result<[Option<ObjectIdentity>; 3], AnnotationError> {
     let mut identities = [None; 3];
     for (slot, name) in identities.iter_mut().zip(SIDECAR_NAMES) {
@@ -855,6 +1005,14 @@ fn inspect_sidecars(
         let file = File::from(descriptor);
         let identity = ObjectIdentity::regular_file(&file).map_err(|_| {
             AnnotationError::path(format!("SQLite sidecar {name} is not a regular file"))
+        })?;
+        budget.consume(WorkDelta {
+            input_bytes: file
+                .metadata()
+                .map_err(|error| AnnotationError::io(error.to_string()))?
+                .len(),
+            nodes: 1,
+            ..WorkDelta::default()
         })?;
         let mode = file
             .metadata()
@@ -891,6 +1049,13 @@ pub struct AnnotationError {
 }
 
 impl AnnotationError {
+    fn abort(abort: &OperationAbort) -> Self {
+        let code = match abort {
+            OperationAbort::Cancelled => "control.cancelled",
+            OperationAbort::BudgetExceeded { .. } => "control.budget_exceeded",
+        };
+        Self::new(code, abort.to_string())
+    }
     fn new(code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             code,
@@ -933,7 +1098,8 @@ impl AnnotationError {
     fn from_initial_cache(error: CacheError) -> Self {
         let code = match error.code() {
             "control.resource_exhausted" => "control.resource_exhausted",
-            "job.cancelled" => "job.cancelled",
+            "control.budget_exceeded" => "control.budget_exceeded",
+            "job.cancelled" | "control.cancelled" => "control.cancelled",
             "cache.permission_denied" => "annotation.permission_denied",
             _ => "annotation.path_escape",
         };

@@ -282,7 +282,12 @@ def _align_blob(blob: bytearray, alignment: int) -> None:
     blob.extend(b"\0" * ((-len(blob)) % alignment))
 
 
-def _minimal_aarch64_elf() -> bytes:
+def _minimal_aarch64_elf(*, loadable: bool = False) -> bytes:
+    # Keep the original section-only fixture byte-identical. The loadable member
+    # exercises a successful attachment to lib.so at the QTRB fixture's 0x2345 PC.
+    text_address = 0x2300 if loadable else 0x1000
+    symbol_address = 0x2340 if loadable else 0x1000
+    symbol_size = 0x20 if loadable else 4
     section_names = (
         b"\0.text\0.dynstr\0.dynsym\0.strtab\0.symtab\0.note.gnu.build-id\0.shstrtab\0"
     )
@@ -292,18 +297,20 @@ def _minimal_aarch64_elf() -> bytes:
 
     sections: list[tuple[bytes, int, int, int, bytes, int, int, int]] = [
         (b"", 0, 0, 0, b"", 0, 0, 0),
-        (b".text", 1, 0x6, 0x1000, b"\xc0\x03\x5f\xd6", 0, 0, 4),
+        (b".text", 1, 0x6, text_address,
+         b"\xc0\x03\x5f\xd6" * (64 if loadable else 1), 0, 0, 4),
         (b".dynstr", 3, 0, 0, b"\0dyn_func\0", 0, 0, 1),
         (b".dynsym", 11, 0, 0,
-         bytes(24) + struct.pack("<IBBHQQ", 1, 0x12, 0, 1, 0x1000, 4), 2, 1, 8),
-        (b".strtab", 3, 0, 0, b"\0local_func\0", 0, 0, 1),
+         bytes(24) + struct.pack("<IBBHQQ", 1, 0x12, 0, 1, symbol_address, symbol_size), 2, 1, 8),
+        (b".strtab", 3, 0, 0, b"\0native_work\0" if loadable else b"\0local_func\0", 0, 0, 1),
         (b".symtab", 2, 0, 0,
-         bytes(24) + struct.pack("<IBBHQQ", 1, 0x12, 0, 1, 0x1000, 4), 4, 1, 8),
+         bytes(24) + struct.pack("<IBBHQQ", 1, 0x12, 0, 1, symbol_address, symbol_size), 4, 1, 8),
         (b".note.gnu.build-id", 7, 0x2, 0,
-         struct.pack("<III", 4, 20, 3) + b"GNU\0" + bytes(range(1, 21)), 0, 0, 4),
+         struct.pack("<III", 4, 20, 3) + b"GNU\0"
+         + (bytes([0x42]) * 20 if loadable else bytes(range(1, 21))), 0, 0, 4),
         (b".shstrtab", 3, 0, 0, section_names, 0, 0, 1),
     ]
-    blob = bytearray(64)
+    blob = bytearray(64 + (56 if loadable else 0))
     layout: list[tuple[int, int]] = [(0, 0)]
     for _, section_type, _, _, data, _, _, alignment in sections[1:]:
         _align_blob(blob, alignment)
@@ -331,10 +338,12 @@ def _minimal_aarch64_elf() -> bytes:
     ident = b"\x7fELF" + bytes((2, 1, 1, 0)) + bytes(8)
     header = struct.pack(
         "<16sHHIQQQIHHHHHH",
-        ident, 3, 183, 1, 0, 0, section_header_offset, 0,
-        64, 0, 0, 64, len(sections), 7,
+        ident, 3, 183, 1, 0, 64 if loadable else 0, section_header_offset, 0,
+        64, 56 if loadable else 0, 1 if loadable else 0, 64, len(sections), 7,
     )
     blob[:64] = header
+    if loadable:
+        blob[64:120] = struct.pack("<IIQQQQQQ", 1, 5, 0, 0, 0, len(blob), 0x2400, 0x1000)
     return bytes(blob)
 
 
@@ -483,7 +492,11 @@ def _all_fixtures() -> tuple[Fixture, ...]:
         "ELF64/AArch64",
         "elf.aarch64-symbols",
     )
-    fixtures = qtrb + flight + _session_fixtures(qtrb, flight) + (elf,)
+    loadable_elf = Fixture(
+        "elf/lib.so", _minimal_aarch64_elf(loadable=True), "ELF", "ELF64/AArch64",
+        "elf.aarch64-loadable-symbols",
+    )
+    fixtures = qtrb + flight + _session_fixtures(qtrb, flight) + (elf, loadable_elf)
     paths = [fixture.path for fixture in fixtures]
     if len(paths) != len(set(paths)):
         raise ValueError("duplicate fixture path")

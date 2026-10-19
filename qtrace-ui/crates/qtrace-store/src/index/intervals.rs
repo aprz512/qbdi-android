@@ -165,7 +165,7 @@ impl IntervalIndex {
                 "interval block rows must be a non-zero power of two",
             ));
         }
-        super::builder::cancellable_sort_by(&mut entries, guard, |left, right| {
+        super::sorting::cancellable_sort_by(&mut entries, guard, |left, right| {
             (left.start, left.end_exclusive, left.row).cmp(&(
                 right.start,
                 right.end_exclusive,

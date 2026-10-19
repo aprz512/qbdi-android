@@ -1,0 +1,494 @@
+{
+  "date": "2026-10-19",
+  "status": "complete_authorized_checklist",
+  "branch": "perf/complete-optimization-2026-10-19",
+  "base_commit": "72548df9c099f3e7813016eba5bd46da34099760",
+  "checklist_items": [
+    {
+      "id": "UI-01",
+      "status": "[已验收·本机]",
+      "area": "寄存器交互",
+      "implementation": "artifact 懒建并共享 Arc<RegisterReplay>，关闭取消并释放；详情请求由 useEventDetails 统一持有。",
+      "acceptance": "同一真实 1,185,909 事件 Flight 连续点击 50 次，稳定键、34 before + 34 after 与 DOM 68 格全部等价；最终寄存器 DOM p95 902.2 ms（含自动化，非纯 IPC 或收益比较）。Rust 证明共享、并发等价和 Arc 释放。",
+      "evidence": "[布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)；[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "UI-02",
+      "status": "[已验收·本机]",
+      "area": "调用树规模",
+      "implementation": "后端缓存整树、100 siblings 分页并校验 identity；前端有界缓存和虚拟渲染。",
+      "acceptance": "真实 Rust 5000 层/10000 根树各五轮完整遍历、来源跳转和 stale 拒绝；首次构建中位 13.114 / 35.781 ms，最大 IPC 367 / 19077 B。组件 512 层/10000 根场景 DOM 最多15/13行；缓存 Arc 复用与关闭释放通过。",
+      "evidence": "[布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)；[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "UI-03",
+      "status": "[已验收·本机]",
+      "area": "时间线可读性",
+      "implementation": "location/symbol/summary 有界显示，typed detail 保持来源；ELF 附加后主动刷新当前 projection 页面。",
+      "acceptance": "真实 instruction/memory/semantic/discontinuity 摘要对齐，损坏与缺口明确；有效 AArch64 ELF 自动更新 native_work+0x5，键/位置/捕获摘要不变；错误 digest 和迟到 Attach 不污染当前页。",
+      "evidence": "[布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)"
+    },
+    {
+      "id": "UI-04",
+      "status": "[已验收·本机]",
+      "area": "Session 上下文",
+      "implementation": "SessionOverview 展示真实 context 与 missing capabilities，不伪造缺失配置。",
+      "acceptance": "报告 context 与真实保留报告完全一致；同 SHA Flight 单文件打开 context=null，明确 unavailable 且仍可查询；损坏 artifact 隔离与健康时间线可用。",
+      "evidence": "[布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)"
+    },
+    {
+      "id": "PERF-01",
+      "status": "[已验收·当前环境]",
+      "area": "性能语料",
+      "implementation": "流式生成 100k/1M/10M 富事件；100k、1M 固定语义哈希；独立 Flight 四线程与缺口 oracle。rich gate 五轮测 store/analysis、回放等价和 IPC；真实 service 到 UI 测 50 次筛选。CI 已接入正式参考主机运行和证据上传。",
+      "acceptance": "本机五轮和 UI 已通过，详见 [报告](../../benchmarks/qtrace-ui-optimization-2026-09-26.md)。当前环境规模门禁通过，原阈值保持不变；历史基线保留。1M store/analysis 与 100k IPC/UI 分开计量；1M service 累计 2 GiB budget 拒绝，未放宽预算。",
+      "evidence": "实现与当前环境验收通过"
+    },
+    {
+      "id": "PERF-02",
+      "status": "[已验收·当前环境]",
+      "area": "冷索引内存",
+      "implementation": "EventColumn 复用 EventKey 坐标，56 B 降为 24 B；posting 直接编码 runs；编码后释放事件表。保留原二分查找，并通过等价、取消、预算、篡改和原子发布测试；缓存布局未变，旧缓存重开通过。",
+      "acceptance": "相同 10M/512 MiB 语料前后各五轮：RSS 中位数 1464.30 降至 1158.96 MiB（-20.85%），耗时 10.304 降至 9.508 s（-7.73%），摘要一致。达到本机下降 ≥10%、耗时回退 ≤10% 条件；当前环境规模门禁另行通过（冷 8.308 s、热 1.130 s、RSS 1158.95 MiB）。见 [报告](../../benchmarks/qtrace-ui-optimization-2026-09-26.md)。",
+      "evidence": "本机收益与当前环境门禁通过"
+    },
+    {
+      "id": "PERF-03",
+      "status": "[已验收·本机]",
+      "area": "warm open",
+      "implementation": "新增 `QTRACE_UI_OPEN_PROFILE` 的哈希、身份、事件行、section checksum 与 catalog 阶段测量；事件键和元数据独立解码，再以第二个 worker 校验 checksum。源与缓存校验保留，服务每 artifact 最多两个 worker。",
+      "acceptance": "相同 10M/512 MiB 语料各五轮：热开 1.167 降至 0.808 秒（-30.75%），冷索引 8.077 降至 7.554 秒（-6.48%）；RSS 基本不变，缓存大小和摘要一致。已有缓存及顺序/并行篡改、预算、取消与原子发布测试通过。参考报告未替换；不将这些数字当作完整服务或 UI 延迟。",
+      "evidence": "[长任务优化与验收](../../benchmarks/qtrace-long-operations-2026-10-19.json)"
+    },
+    {
+      "id": "UI-05",
+      "status": "[已验收·本机]",
+      "area": "查询结果分页",
+      "implementation": "ResultsPane 独立保存页面、游标和 hit，使用 query/locate 跨页。",
+      "acceptance": "真实 Flight 超过357k instruction命中，双向页面及跨页 hit 稳定；空结果禁用导航；延迟真实旧页后关闭、重开，旧响应不改变新页/busy/error。",
+      "evidence": "[布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)"
+    },
+    {
+      "id": "UI-06",
+      "status": "[已验收·本机]",
+      "area": "数据请求所有权",
+      "implementation": "`TimelinePages.ts` 按 workspace/projection/generation 管理共享查询、定位、导航所有权和 LRU；游标位置随缓存淘汰。字段长度计量替代整页 JSON，保留每页 2,000 行、128 页和 32 MiB 上限；关闭与切换拒绝旧响应。",
+      "acceptance": "同一 100k 合成负载前后各五轮，页面查询每轮 72 降至 25，整页序列化 53 降至 0；视口加载 p95 中位数 -33.10%，heap 增量 -27.18%，frame p95 均为 16.8 ms，DOM 最大 22 行。13 项新增测试及四份小米保留产物最终浏览器回归通过。权重不等于 heap 限额；合成延迟不代表 Rust/设备性能，Tauri WebKit 和高缩放未测。",
+      "evidence": "[方法](../../benchmarks/qtrace-ui-timeline-pages.md)；[原始证据](../../benchmarks/qtrace-timeline-pages-2026-10-19.json)"
+    },
+    {
+      "id": "UI-07",
+      "status": "[已验收·本机]",
+      "area": "加载反馈",
+      "implementation": "打开任务报告源验证、缓存验证、建索引、缓存发布、缓存重开、分析准备与工作区发布；artifact 总数独立保留。阶段工作量按块合并，分析准备也报告行工作量；分配授权区间内仅记录计数，延迟通知分配。界面显示 `Cancelling…`，提交失败可重试。",
+      "acceptance": "真实 1,185,909 事件 Flight 的 Rust/Chromium 链路覆盖七阶段、单文件索引中的变化、取消后无工作区/缓存、重新打开和缓存重开。单文件取消保持 `job.cancelled`；字节/事件/行数包含重复处理，不表示唯一覆盖率或 ETA。",
+      "evidence": "[长任务优化与验收](../../benchmarks/qtrace-long-operations-2026-10-19.json)"
+    },
+    {
+      "id": "UI-08",
+      "status": "[已验收·本机]",
+      "area": "布局与可访问性",
+      "implementation": "宽屏三栏；1100px以下重排，700px以下单列；长文本换行、树缩进有界，增加面板键盘入口及焦点轮廓。",
+      "acceptance": "800/1024/1366px 与对应200%等效400/512/683 CSS px共六场景均无页面/详情横向溢出；四面板实际 Tab/Enter 可达，焦点可见。未声称原生浏览器缩放或WebKit实测。",
+      "evidence": "[布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)"
+    },
+    {
+      "id": "STORE-01",
+      "status": "[已验收·本机]",
+      "area": "源键索引",
+      "implementation": "SourceKeyIndex 拥有隐式有序映射与非单调显式排列；排序归属 index/sorting.rs。",
+      "acceptance": "10M/512MiB 五轮 RSS -6.58%、冷开 -2.79%；schema/wire bytes不变，新旧互读且不重建；重复键、owned/mapped、非单调Flight、预算和取消通过。",
+      "evidence": "[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "STORE-02",
+      "status": "[已验收·本机]",
+      "area": "多 artifact 打开",
+      "implementation": "opening.rs 每批最多两个 worker，共享原 source/cache 累计预算，按报告次序合并。",
+      "acceptance": "2/4个100k富artifact前后各五轮冷开约快40%、热开约快46%，RSS小幅增加；顺序/事实/失败隔离保持。panic及创建失败先join，控制错误不发布workspace。",
+      "evidence": "[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "CORE-01",
+      "status": "[已验收·Pixel 6 当前环境]",
+      "area": "tracer 热路径",
+      "implementation": "按simpleperf三档采样选择Full collector；静态只读fallback消除每次重复构造，不削减必要内存读取。",
+      "acceptance": "Pixel6同APK/target前后各三档五轮全部通过；30份trace指令/寄存器/内存形状、return、footer/sidecar和压缩门禁一致。Full栈临时区0x780降至0x1d0，0x524清零消失；31到26ms仅本批中位观测。",
+      "evidence": "[native 报告](../../benchmarks/qtrace-native-optimization-2026-10-19.md)"
+    },
+    {
+      "id": "CORE-02",
+      "status": "[已验收·本机]",
+      "area": "Flight 默认容量",
+      "implementation": "默认512MiB、固定环语义及已有64–2048MiB配置保留；同文件描述符上增加fstatvfs空间预检。",
+      "acceptance": "13份真实环占用与每线程序号窗口调查支持保留默认值；不能从无事件时钟的数据伪造秒级窗口。低空间/EIO注入零遗留，默认512MiB正常关闭和未seal退出的Python恢复通过，Android构建通过。",
+      "evidence": "[native 报告](../../benchmarks/qtrace-native-optimization-2026-10-19.md)"
+    },
+    {
+      "id": "CLI-01",
+      "status": "[已验收·本机]",
+      "area": "产物发布复杂度",
+      "implementation": "artifacts facade保留编排，远端读取、验证、原子发布、报告刷新分别归属四个内部模块，descriptor/token转移有所有权图。",
+      "acceptance": "公开CLI、恢复和提交边界保持；原82项产物故障注入及369项相关Python通过，全量858项检查通过（8skip）。",
+      "evidence": "[CLI/OPS 报告](../../benchmarks/qtrace-cli-optimization-2026-10-19.md)"
+    },
+    {
+      "id": "CLI-02",
+      "status": "[已验收·本机]",
+      "area": "子进程边界",
+      "implementation": "沿用bounded_process；Frida失败清理绑定原session脚本RPC及process-terminated回执，无法确认时明确cleanup_incomplete。",
+      "acceptance": "六真实命令入口×超时/取消/ADB断连/PID复用/输出上限/孤儿共36格通过；不使用裸PID猜杀。原实现反证、实际本机及Pixel原session退出验证通过。",
+      "evidence": "[CLI/OPS 报告](../../benchmarks/qtrace-cli-optimization-2026-10-19.md)"
+    },
+    {
+      "id": "PROTO-01",
+      "status": "[已验收·本机]",
+      "area": "多语言协议同步",
+      "implementation": "真实C++ encoder四产物与常量/固定字节契约，由独立Python/Rust读取；CI接入兼容矩阵。",
+      "acceptance": "37个exporter fixture，Python16/Rust25矩阵通过；QTRB1.0–1.2、Flightv2及malformed固定证据保留，encoder重复生成逐字节一致。",
+      "evidence": "[协议/fuzz 报告](../../benchmarks/qtrace-protocol-fuzz-2026-10-19.md)"
+    },
+    {
+      "id": "QA-01",
+      "status": "[已验收·小米当前环境]",
+      "area": "真实采集到 UI",
+      "implementation": "新 offset/symbol、monitor-exit 与 Flight 四份 session 均通过真实设备采集、离线逐事件核对、完整分页、分析抽样及缓存重开；在 Chromium 与真实 Rust 服务中完成分页、筛选、寄存器/调用树/内存、标注及服务重启恢复。新 Flight 为 1,185,909 个事件，已修复有序内存候选重复排序；历史 Flight 与 monitor-exit 也复验通过。",
+      "acceptance": "当前环境功能链路已验收。完整历史设备性能门禁、原生文件对话框及高缩放/键盘布局检查不属于本次证明；保留产物的真实完整性状态。",
+      "evidence": "[小米新采集及浏览器验收](../../benchmarks/qtrace-xiaomi-capture-2026-10-19.json)；此前 [预算验收](../../benchmarks/qtrace-capture-budget-2026-10-19.json) 与 [历史产物浏览器记录](../../benchmarks/qtrace-browser-acceptance-2026-10-19.json) 保留"
+    },
+    {
+      "id": "QA-02",
+      "status": "[已验收·本机]",
+      "area": "性能门禁漂移",
+      "implementation": "diagnostic按host/generator/corpus比较，不读写参考摘要或覆盖tracked reference。",
+      "acceptance": "当前10M五轮before/after经生产比较器通过；host/corpus/wrong oracle/reference mode与覆盖拒绝测试通过。原参考SHA与阈值不变，本机诊断不升级为固定主机通过。",
+      "evidence": "[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "SCALE-01",
+      "status": "[已验收·本机]",
+      "area": "行数上限",
+      "implementation": "metadata view在分析准备和workspace发布前检查单artifact的u32协议上限，摘要/位置一律checked转换。",
+      "acceptance": "4,294,967,295可表达；超过2³²行的模拟view仅读取计数即返回workspace.event_limit_exceeded，任何行访问均被测试禁止；不生成巨型文件、不饱和。既有资源预算仍更早约束实际规模。",
+      "evidence": "[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "SCALE-02",
+      "status": "[已验收·本机]",
+      "area": "大型分析结果",
+      "implementation": "25个IPC命令统一审计，数组/文本visitors和service双层验证，JSON Write counter限16MiB；jobs最多8active/512retained。",
+      "acceptance": "保留timeline2000行、calltree100节点、symbols2000PC；SQLite绑定交互预算/VM轮询/workspace取消；过大输入不改变generation/jobs或访问文件，输出转义和恶意size hint回归通过。",
+      "evidence": "[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "MAINT-01",
+      "status": "[已验收·本机]",
+      "area": "大模块边界",
+      "implementation": "提取timeline discontinuity与semantic executor、Flight emergency选择、index源键/排序和native JSON endpoint。",
+      "acceptance": "公开接口、配置mutex、activation顺序、信号和恢复规则保持；同一行为套件前后通过，逐函数规范化对比一致。Rust全量520、native45、Android全构建及结构后ASan/矩阵通过。",
+      "evidence": "[模块边界证明](../../benchmarks/qtrace-module-boundaries-2026-10-19.md)；[store 与资源边界](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)"
+    },
+    {
+      "id": "MAINT-02",
+      "status": "[已验收·本机]",
+      "area": "前端状态所有权",
+      "implementation": "App组合界面；导航、详情、持久编辑分属三个hooks，RequestScope统一成功/错误迟到规则。",
+      "acceptance": "原69单测与14E2E基线保留；新增标注竞态和ELF刷新回归具旧实现失败证明。最终76单测、14E2E、1production及四保留产物浏览器全部通过。",
+      "evidence": "[布局与交互复验](../../benchmarks/qtrace-ui-layout-state-2026-10-19.md)"
+    },
+    {
+      "id": "QA-03",
+      "status": "[已验收·本机]",
+      "area": "fuzz 覆盖",
+      "implementation": "新增cache manifest/session report/annotations三个target、结构化corpus与有界property；PR/push短跑，定时/手动长跑。",
+      "acceptance": "三个存储target覆盖input/row/node/resident/cancel与SQLite VM/rollback；64case property通过。五target ASan925984输入、结构后Flight324353输入，零crash；CI已配置，未声称托管执行。",
+      "evidence": "[协议/fuzz 报告](../../benchmarks/qtrace-protocol-fuzz-2026-10-19.md)"
+    },
+    {
+      "id": "OPS-01",
+      "status": "[已验收·本机]",
+      "area": "验收证据容量",
+      "implementation": "qtrace_evidence.py提供只读inventory、保留/保护策略与显式opt-in清理，默认保护失败证据。",
+      "acceptance": "真实目录只读统计；2份成功约1.46GB、24份失败约3.61GB。所有删除回归仅临时目录，实际旧成功/失败证据未删除。",
+      "evidence": "[CLI/OPS 报告](../../benchmarks/qtrace-cli-optimization-2026-10-19.md)"
+    },
+    {
+      "id": "UI-09",
+      "status": "[已验收·本机]",
+      "area": "首次分析取消",
+      "implementation": "`Workspace` 持有独立生命周期取消令牌；寄存器回放与调用树首次构建、状态查询绑定同一令牌，关闭与服务取消可中止持有 Arc 的构建。保留共享 slot 的单次构建与完整结果复用。",
+      "acceptance": "等待 slot 的两个回归用例修复前在关闭后仍返回成功，修复后返回 `job.cancelled`。真实 Flight 的两个构建运行 20 ms 后关闭，release 单次分别在 9.2 / 16.9 ms 内退出，slot 保持空且 Weak store 引用释放。原 512 MiB 构建预算及共享/并发/释放回归保留；非延迟门禁。",
+      "evidence": "[长任务优化与验收](../../benchmarks/qtrace-long-operations-2026-10-19.json)"
+    },
+    {
+      "id": "UI-10",
+      "status": "[已验收·本机]",
+      "area": "调用树页面内存",
+      "implementation": "`CallTreePages.ts` 限制 8,192 节点和 4 MiB 计量权重；每个父节点一个至多 100 节点的兄弟窗口，LRU 淘汰后可重取，回收不可达后代并保护祖先路径。`CallTreePane.tsx` 保留身份/上下文校验、请求合并、双向翻页、滚动锚点与事件跳转。",
+      "acceptance": "相同负载前后各五轮，页面 heap 增量中位数 4.07 降至 3.25 MiB（-20.25%），DOM 最大均为 18 节点，帧时间基本不变。11 项新增测试与四份小米保留产物浏览器回归通过，5,000 层路径可保留；单独超限的祖先路径拒绝新增页面。计量权重不等于实际 heap 上限；未测 Tauri WebKit 与高缩放布局。",
+      "evidence": "[方法](../../benchmarks/qtrace-ui-call-tree-pages.md)；[原始证据](../../benchmarks/qtrace-call-tree-memory-2026-10-19.json)"
+    }
+  ],
+  "status_counts": {
+    "[已验收·本机]": 24,
+    "[已验收·当前环境]": 2,
+    "[已验收·Pixel 6 当前环境]": 1,
+    "[已验收·小米当前环境]": 1
+  },
+  "checks": {
+    "rust": {
+      "command": "cd qtrace-ui && cargo test --workspace -j 2",
+      "passed": 520,
+      "ignored": 2,
+      "exit_code": 0,
+      "log": "rust-final.log",
+      "log_sha256": "124a13f5789117c442b2b31482178904bcd46b2c2494af1139b520fa6aaa9189"
+    },
+    "clippy": {
+      "command": "cd qtrace-ui && cargo clippy --workspace --all-targets --features qtrace-service/e2e-fixture -j 2 -- -D warnings",
+      "exit_code": 0,
+      "log": "clippy-final.log",
+      "log_sha256": "78e1c2d46c32ac5a743706fcbc4c522e0f4592413c77c97d58963ce836654f1c"
+    },
+    "format": {
+      "command": "cd qtrace-ui && cargo fmt --all --check",
+      "exit_code": 0,
+      "log": "format-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "generated": {
+      "command": "python3 qtrace-ui/tools/check_generated.py",
+      "exit_code": 0,
+      "log": "generated-final.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "python": {
+      "command": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+      "tests": 858,
+      "skipped": 8,
+      "exit_code": 0,
+      "log": "python-final-recheck.log",
+      "log_sha256": "b56d99e0a37b43b303e63044c715cd06e2dd69e50eac654a9b491b795192251f"
+    },
+    "native_android": {
+      "command": "./gradlew nativeHostTest :app:testDebugUnitTest :app:assembleDebug :tracer:assembleDebug :tracer:copyTracerDebug --no-daemon",
+      "native_passed": 45,
+      "exit_code": 0,
+      "log": "native/gradle-final-integration-retry.log",
+      "log_sha256": "35cf3f47776c30994315f240f13a0e80a241daa37e90d4c4c248f7dbef69f738"
+    },
+    "frontend": {
+      "unit_passed": 76,
+      "e2e_passed": 14,
+      "production_passed": 1,
+      "build_exit_code": 0,
+      "lint_exit_code": 0,
+      "report": "docs/benchmarks/qtrace-ui-layout-state-2026-10-19.json"
+    },
+    "protocol_fuzz": {
+      "matrix_python": 16,
+      "matrix_rust": 25,
+      "exporter_members": 37,
+      "initial_asan_inputs": 925984,
+      "post_refactor_flight_asan_inputs": 324353,
+      "crashes": 0,
+      "property_tests": 6,
+      "property_cases": 64,
+      "report": "docs/benchmarks/qtrace-protocol-fuzz-2026-10-19.json"
+    }
+  },
+  "source_sha256": {
+    ".github/workflows/qtrace-ui-fuzz.yml": "d462bcb67f4bfb7c243da8df0ae8d30e30502ec225eb033ecc1905b8b56ffc78",
+    "qtrace-ui/README.md": "c2845252bf62b951cb9a5c0a8a5c98e2ad894225bd28f7fbd9efba7abe482fd0",
+    "qtrace-ui/crates/qtrace-analysis/src/timeline.rs": "344b61ab3fbf887b6eee88b1e7b25f4b3a9d90e0102b6157aa13ade56a422c85",
+    "qtrace-ui/crates/qtrace-analysis/src/timeline/discontinuity.rs": "4193f61e53834dcba73842d987e35f5af26c0fa2bb66654b80a8a0ccd87422a3",
+    "qtrace-ui/crates/qtrace-analysis/src/timeline/semantic_executor.rs": "300d35eaa82d39826c7ac7e93f5d24eb6a19c30a6c4dfdc23872871c533624c4",
+    "qtrace-ui/crates/qtrace-provider/src/flight/recovery.rs": "935667360229961f24690f003d8ff1361520887db92e0ddb08ef8bf84e594d70",
+    "qtrace-ui/crates/qtrace-provider/src/flight/recovery/emergency.rs": "0973c8a04ed91441f04e511d3747051834ef20fa774afa8af41fe66e169cee4f",
+    "qtrace-ui/crates/qtrace-provider/tests/flight_differential.rs": "420fb06c5086c726a6267bf4aae7fdc3763ecce9e587464efa1760ab65d321d4",
+    "qtrace-ui/crates/qtrace-provider/tests/qtrb_differential.rs": "fea66f8d34161d0cc48ff2bca24d3ebe0589a89214036abc08607b2645d0f034",
+    "qtrace-ui/crates/qtrace-service/examples/open_session_bench.rs": "ddd8291383bd5030ef8195398aad71cab2a392c9a9731c1e3d6e4b1b31164960",
+    "qtrace-ui/crates/qtrace-service/src/bin/e2e_server.rs": "2947b3eb7c7051e9b6f742df97e709092e3c17811919f902e6ce4c0d204ed292",
+    "qtrace-ui/crates/qtrace-service/src/dto.rs": "cc2854f54122810fe6458cc30ff7d2a7fbb55698b769ea16f016d6953426b393",
+    "qtrace-ui/crates/qtrace-service/src/ipc.rs": "c42638dced62086df40415a5033c6eef6887d93603ba17946057f0570c3e3e97",
+    "qtrace-ui/crates/qtrace-service/src/ipc/row_limit_tests.rs": "67773cd459a391862297916929ecd87d1c98f64ce75c88d1357fdfbd95d223b7",
+    "qtrace-ui/crates/qtrace-service/src/jobs.rs": "6f9baa45f94eaaf336465860dd12e717e420f067674184597e50c04f26496c2d",
+    "qtrace-ui/crates/qtrace-service/src/lib.rs": "1e8299941e27569fede4ad0826f276594a50e7aee88bf8c65152c5736b66fa92",
+    "qtrace-ui/crates/qtrace-service/src/opening.rs": "8999fa99ab6fe85db2d9098981af8cec07d23e56d54b2366ba364a555cacd7c3",
+    "qtrace-ui/crates/qtrace-service/src/service.rs": "50bfaa88090e0facff21b3a6a5092008ed82fd98169e0f066d3560e3e33502a5",
+    "qtrace-ui/crates/qtrace-service/tests/resource_boundaries.rs": "3e6a5326feaa7205fd070ab9acd6167ee6bbaeefeacd9fa7043b8e7770dd1183",
+    "qtrace-ui/crates/qtrace-store/Cargo.toml": "bb4e0e95d06bbbf4a3495d0068af85524eced05e15f8ab92be63e1d01c6ad124",
+    "qtrace-ui/crates/qtrace-store/src/annotations.rs": "da8fa42a3eef479a9a348df4fe32f4c598427b0fee6893999e91bfe946844daf",
+    "qtrace-ui/crates/qtrace-store/src/index/builder.rs": "018679936cc2046d9981ad0a8c1c1a94797ccc3b676a431e68865d70cce903ef",
+    "qtrace-ui/crates/qtrace-store/src/index/intervals.rs": "86a9e8a8d6123d1621627af90c1a7293eea0ef8ae89dbba189d2c0ef64c2e1c4",
+    "qtrace-ui/crates/qtrace-store/src/index/mod.rs": "20bff8b6a2b6214c4f51d8ef8f564ad0a387a15328c9cecca38c725eaed8566c",
+    "qtrace-ui/crates/qtrace-store/src/index/sorting.rs": "27b01995642ad9254ecf6047775efc96a2b8e14b2ad6103516f78d52a3576afc",
+    "qtrace-ui/crates/qtrace-store/src/index/source_keys.rs": "eb60e165ed675faf5c1c6638f3d488ff4735cc5ea2f27a5ca2fd7312a49e90ea",
+    "qtrace-ui/crates/qtrace-store/src/index/wire.rs": "fc5c0cc3905f56afc28c34b3a939c8f1a8b6149430f0937954fbac752295b027",
+    "qtrace-ui/crates/qtrace-store/tests/annotation_guard.rs": "3431d94969e7dd051fbecaab5d8a05471f5342854546b6f67e0b29eedd60a980",
+    "qtrace-ui/fixtures-native/constants.json": "31a630e0d69613e02bc847c9d2b6e15ba576e4222a00275e81a6684f3382ad33",
+    "qtrace-ui/fixtures-native/flight-active.bin": "4673d8abd93ee65ba936a4bed678c531bddb38e119ad2c1f0598b82b317dc260",
+    "qtrace-ui/fixtures-native/flight-sealed.bin": "8c083a51030c36e0e028275780e9cdfcb3b34a03e8222beebc400a7aeea2527f",
+    "qtrace-ui/fixtures-native/manifest.json": "a39904750bcb0f8a9ca02195699dac3e34bb73131d606b15393d4021d813f662",
+    "qtrace-ui/fixtures-native/qtrb-completed.bin": "3e7d1e5084721c824d9bd63de0f90d8ded9057652d00c77d22d8c2f005ff9025",
+    "qtrace-ui/fixtures-native/qtrb-stopped.bin": "f0084f0a7a244fdbd36fede813728264c149e91da66b916cbe6d24998f17836b",
+    "qtrace-ui/fixtures/elf/lib.so": "4c8e353ecccc9f23c3d54055efd4fe477d18d7404c74d9fe69125d5c4fd57a13",
+    "qtrace-ui/fixtures/manifest.json": "1e53b6cd8eaf3ca6834495113215a63e8dee200ca7d99f4bcf6ae25f4fc3630c",
+    "qtrace-ui/fuzz/.gitignore": "6565783967344f6df617229578c8dc8b983cd88977e87bf45d8c57c4c6a78c03",
+    "qtrace-ui/fuzz/Cargo.lock": "92eb878bdf00d43d47bf67c3f0c60496a8ba986f4b7d310c36d238b46eacf319",
+    "qtrace-ui/fuzz/Cargo.toml": "993e2103860bdd4e8c59abbb2457322e29d65c62749411be0e8be1ed3857b7f5",
+    "qtrace-ui/fuzz/README.md": "7d7944d50a3c547351eedb08f8c4450cbd80594ab34b4704c8ff299830681c46",
+    "qtrace-ui/fuzz/corpus/annotations/legacy-v1": "bebac40082cd5775fd2c4629616524ee766f4cf1802d63d450b5dda3247a9c01",
+    "qtrace-ui/fuzz/corpus/annotations/legacy-v2": "d14685e62ff506323ebf6e28686e8c378fcd6fb31c0f379cf71847e53ab57039",
+    "qtrace-ui/fuzz/corpus/annotations/not-a-database": "ae78f817addcc51888edb0d3ed03e13829a934a582b982a34f0ad3a8a3c6459b",
+    "qtrace-ui/fuzz/corpus/annotations/oversized-text": "cc0b0caacf28aa1a974e6282b1502c122fdcca0497046f3c6d25eddf63e20b31",
+    "qtrace-ui/fuzz/corpus/annotations/recursive-view": "18c0df88ad64d8012959c4f034cfc7e7739e9305d93b8f5aec01d9a7494225ee",
+    "qtrace-ui/fuzz/corpus/annotations/truncated-sqlite-header": "3f8434aff012ffcb594ad7527d6042841ce94f499887f86ab828f84a9a275f91",
+    "qtrace-ui/fuzz/corpus/annotations/valid": "3ad21768ee3caec2a44c78966b0954ea779cc8a0da3a87d5d1446c3a2c50d462",
+    "qtrace-ui/fuzz/corpus/annotations/wrong-type": "10f7a45e40bf32327927c10a09a27894e64a85415ba442159ca697a9ba63612b",
+    "qtrace-ui/fuzz/corpus/cache_manifest/identity": "c212f354aa6608bebf145dd5fbdbc974bda4ec0684aad32df7e89bcc3bbc10b2",
+    "qtrace-ui/fuzz/corpus/cache_manifest/overflow": "786833eb3dbccc73ca7774292f0769399fcb57c758514f9776385e97fe2a8adc",
+    "qtrace-ui/fuzz/corpus/cache_manifest/overlap": "2b697c85f5013ad6854fb426d1cad178c8ba82cf7da7259f11d0997e44ca6f36",
+    "qtrace-ui/fuzz/corpus/cache_manifest/section-count": "9d808579881513ba0a59cd35f764d764f479d2a49affd2f7ff978106c9ccbd33",
+    "qtrace-ui/fuzz/corpus/cache_manifest/truncated": "5ea545d1c347b3b4d8ed3e3945e542d4779cc72fead6bae179f37c05d5fa1279",
+    "qtrace-ui/fuzz/corpus/cache_manifest/unknown-field": "eb1dbd567ba0cb5d88a2f1e072f30d59d168bcfe32b164e0573063ef95e6aa30",
+    "qtrace-ui/fuzz/corpus/cache_manifest/valid": "a39bddec2d03bc3907c0b4c016f64458416096715a40105f934f1c20112c8da6",
+    "qtrace-ui/fuzz/corpus/session_report/collection-limit": "c1bff2db49ce97190aa75906085f3b5ff58d3e866a7baa289a0fd0d0a7f21261",
+    "qtrace-ui/fuzz/corpus/session_report/deep-json": "ecd8beb0ba3e847ddc0a914c0d5f8d7b116792c6a6f630f400be3cf250d4c4e0",
+    "qtrace-ui/fuzz/corpus/session_report/nul-path": "4a8ded73a8f34b3376ad2b9d1be865b77ca6d23778af28c45e58e1b67d2673ed",
+    "qtrace-ui/fuzz/corpus/session_report/path-escape": "a2275f1740b7cdb8fe88441a281a7dac63f3ad353fc806e974b13be40df40ebe",
+    "qtrace-ui/fuzz/corpus/session_report/size-overflow": "27433e83109aed5fe4572a18ee1edf82b2100f29d4d3a214ef041f1f5bdf1b17",
+    "qtrace-ui/fuzz/corpus/session_report/unknown-field": "c8b3ce3f75c67b30dc434fc8c1cebd7f7ea4a484ef9a18812ff7db6a5ae98b0e",
+    "qtrace-ui/fuzz/corpus/session_report/valid": "3eba37dd60af6a205c31a17f80f905b8e5c28fd447fe8ac4f8525b3247dae616",
+    "qtrace-ui/fuzz/fuzz_targets/annotations.rs": "95d23bb69a02932d7fe6036b71a1cc1437f0c3e4386345fa3e077fdf5b44d965",
+    "qtrace-ui/fuzz/fuzz_targets/cache_manifest.rs": "592e32004a61241309d3149e4f924577afb305c41f8b286429c77f33011d51be",
+    "qtrace-ui/fuzz/fuzz_targets/session_report.rs": "e4f7a14411673ffb1a3b4e7786a8b330362a2200f11151a69f8e401db888c234",
+    "qtrace-ui/fuzz/fuzz_targets/storage_support.rs": "87cf152475ee6e0712cf9a393ad0282390542f97287761d8e8f63cd09491ba74",
+    "qtrace-ui/fuzz/fuzz_targets/support.rs": "5bfd064adad769fa66e4306676f16257f660bb467e4e27614492fa0e167e7cf9",
+    "qtrace-ui/fuzz/tests/storage_paths.rs": "9792ec3587900eb3c9c1d10d3412ed9901dbd8bae9f9db5bf9a5fa732a23b803",
+    "qtrace-ui/src-tauri/src/commands.rs": "df2df13acb009f8890802dfe1e0276b1244042bc1e805dfba43d3b71a4b36757",
+    "qtrace-ui/src-tauri/tests/command_contract.rs": "1d256f388faefc7bba931efbccdf8e71c6d8600ecbd2268266a95e773bf808f1",
+    "qtrace-ui/src-web/playwright.production.config.ts": "3593fc4f6608d2e28608e8b5a23c5f71abb040092da51d2cdce173da72700fac",
+    "qtrace-ui/src-web/src/App.tsx": "63f6deeef1e360c68dea3d9a83b5d4b39d987f463d414aa9a7b852effbd7676b",
+    "qtrace-ui/src-web/src/api/E2eQtraceApi.ts": "efa8121a2f55fc1a92dc41a021eb6a48bd311e3ea8a13d9d1b827c13abbd7bef",
+    "qtrace-ui/src-web/src/components/AnnotationEditor.test.tsx": "2216503a1cf81b71aae644177986368d5f7ac01d39462b9bf350ee969738c616",
+    "qtrace-ui/src-web/src/components/AnnotationEditor.tsx": "adff4d95e8559396d647d4259a074ee9b6e243ca9103f6920ccfa859f9770dc9",
+    "qtrace-ui/src-web/src/components/App.test.tsx": "62c4fd73053d6f45db0de54c59ad9bc9d7d2b9a4098f763c82f63fd186b4e6e3",
+    "qtrace-ui/src-web/src/components/BottomDock.tsx": "70b2ea98f1f9bbfaa51e4d4fc6311c01e329587580f013fd6c938ea7406075d2",
+    "qtrace-ui/src-web/src/components/CallTreePane.tsx": "ff59d41cabad755c27dde027ac80b710a35cece9ba23e1ebcfcb06382ca14d4c",
+    "qtrace-ui/src-web/src/components/LeftDock.tsx": "2c0b5d9cc52214f90d27c39ad891438c57570b12ffd462f4d813c00bb9d28441",
+    "qtrace-ui/src-web/src/components/RightDock.tsx": "82b52cc721df58bd8cf7719360c071431fe5b29df23b8b13d1d68c451ff9fbd2",
+    "qtrace-ui/src-web/src/components/SymbolPane.tsx": "72ef413e01882262cf1f84b2f8e407027103b030b838c16db45167ea11de8009",
+    "qtrace-ui/src-web/src/state/RequestScope.ts": "e43b23f5bf68b58312854d1e0b2569a40bc8076306d34fbd60832cc87d7bab52",
+    "qtrace-ui/src-web/src/state/useEventDetails.ts": "4f0f91fbc39bd025f39699eb7760102f453852d5d3729e52f504f8a0952b5ef8",
+    "qtrace-ui/src-web/src/state/usePersistentEdits.ts": "9eff5356edf028cf3405416847500519101ae262bd75450d96bb5099774164e2",
+    "qtrace-ui/src-web/src/state/useRequestScope.ts": "7d6278b695ab3de96bd69a4fd7ff921b1c936004f2f3b4a86c2133723b237dda",
+    "qtrace-ui/src-web/src/state/useTimelineNavigation.ts": "babf00f5d602becb54d0cfb4352eff0e8067ebeaee97ffc5b1089a23198313b1",
+    "qtrace-ui/src-web/src/styles/global.css": "692efb8932ffd7cddd8145ba15507cb44715a37bc67d0a2cdbce9fff1268bedb",
+    "qtrace-ui/src-web/src/styles/timeline.css": "26792a7c13613abeedf278a388227e7fda5eb69529a1626c11304dbde77a10c1",
+    "qtrace-ui/src-web/src/timeline/SegmentCache.test.ts": "a58bc80e463696619337dd8ff3a32526a28fd65ce0cca681f2ec7e47aeb63d15",
+    "qtrace-ui/src-web/src/timeline/SegmentCache.ts": "9110946570c1845454abdb9b9232d195c415c6798dc7f81c100efc7bb999a61a",
+    "qtrace-ui/src-web/src/timeline/TimelinePages.test.ts": "19b4da234c50ab06dd7580a7ed2f6d30714f60b6d5db5e10eda8b3e53c9e4505",
+    "qtrace-ui/src-web/src/timeline/TimelinePages.ts": "66b631f6725aea0d56fd53ce05832721458f7915e0ee7f0bd25f1c4c95d9a170",
+    "qtrace-ui/src-web/src/timeline/TraceCanvasRenderer.ts": "5d06553350ffe5687147977c99c6063db13bf1a1a39c4eb7269a88c8670077fc",
+    "qtrace-ui/src-web/src/timeline/VirtualTimeline.tsx": "323ddc795e66134473b810f7037a433546af4b67d8f54852a17330c472c19dad",
+    "qtrace-ui/src-web/tests/e2e/global-setup.ts": "7792c12851098f221de755d82ca95f42556184503b778c91c90624a86ab41acb",
+    "qtrace-ui/src-web/tests/e2e/restart.spec.ts": "ccb34aa2e67dbf83fc220c6074efb25e8cb9ebd90d8bd45e457882869d8f4c7b",
+    "qtrace-ui/tools/check_protocol_matrix.py": "d8775c3e5e60c3b052781f1557c796ccfa2e7aa93da3a251767999e2d2167d8f",
+    "qtrace-ui/tools/export_contract_fixtures.py": "93c8bf5823ead5dd49703b2eddedff55201e6edde56d2bd9f0224a24da89dcb1",
+    "qtrace-ui/tools/timeline_pages.mjs": "e1be16410f886ceb1c5bbb12acba4667915e3883210f4a17632e986a64d39272",
+    "qtrace-ui/tools/ui_call_tree_interactions.mjs": "8c54ae0c119d68ae3dded54e93dba7dafb22c2aceeb9372337048e35bccc31cb",
+    "qtrace-ui/tools/ui_elf_interactions.mjs": "e68f9675d3b7dac1d8b9101294742a466131c577c6a3943f525641f37868a66b",
+    "qtrace-ui/tools/ui_layout_state.mjs": "250b2a6e12c2341b4cd128ba667804fca5b461d5b6df8f47893dd30e8da35432",
+    "qtrace-ui/tools/ui_register_interactions.mjs": "f92502e6d59fd57b687cc43b184ff27033a1dd075597cb50524d30da8bb7a539",
+    "qtrace-ui/tools/ui_results_interactions.mjs": "0d570f2c26f3416f4c9d08305c86b4e91abcae5155ae717db81b9d8c84f43142",
+    "qtrace/_artifact_common.py": "5da2809225a985698fa7db1c42114d31d48b5c6b5a84b403e8f67d5007778121",
+    "qtrace/_artifact_publication.py": "01e7d29121ad3ec9b806bd7b28cfb722a390c6df6ab64cdefc012c130e5b130d",
+    "qtrace/_artifact_remote.py": "fd037a3033dd09fd9e494c7326ed420232c47ce696050c981232895fc9ab8164",
+    "qtrace/_artifact_reports.py": "d236f0af8017bd32cf9bddccb666c22da93a7a7bf687a7023181eb815a4f0653",
+    "qtrace/_artifact_validation.py": "d8948a2931f162d432041bb3033718b19b779edf5490adbf748718670c0884bb",
+    "qtrace/agent.js": "1433ce9fadbadbf3dd1c947014280d30a1397f5769a8e14fad05dcd199a3045e",
+    "qtrace/artifacts.py": "60f561c31395fcd040666e81e3c65160f6719d0257e1c5745499c82fd675a764",
+    "qtrace/injector.py": "caf0f77861307d91934b471966891cf5f62b20e098285e62a7c75b10f3991437",
+    "scripts/qtrace_evidence.py": "f72c609a259a130a78e15f6032c37018ce6c15dc83ecf8f8c5af16a4c47b9c3f",
+    "scripts/tests/test_qtrace_artifacts.py": "23162b9d3abdb187ec06f2bc383506a05f8f5f062d9fcb6afb61dc709afaec21",
+    "scripts/tests/test_qtrace_contracts.py": "be8c20bdc91185315bf639a3208ba40d3ab433fb260473d7e990dbcb66f8ec4e",
+    "scripts/tests/test_qtrace_evidence.py": "0a36fc2ca590b058d7a3eecf6c35dc704d5378bc596b6b7d135d9b270cdf846b",
+    "scripts/tests/test_qtrace_injector.py": "69999a6aa892c3326ed9270c0321128d9c655d1d70bada3f32fa6602b5c602bb",
+    "scripts/tests/test_qtrace_process_fault_matrix.py": "f07e47eabcbba13e01b06a4013cef98b5679478fd7bb2ba556ba42d5f8180225",
+    "scripts/tests/test_qtrace_ui_fixtures.py": "ad193048786fe12f4032a7a2632545abbf3b9ee4db7d27edcf53abaaa4919ac8",
+    "tracer/src/main/cpp/CMakeLists.txt": "f6f4782d23beab230b320b9769c749eb1c5bf482a8e0bf2122c0eb24702404e9",
+    "tracer/src/main/cpp/core/instruction_collector.cpp": "86d64a9e85861b4a556ce0248b1b901f9c95e11d692021ad84dcfb53f0fce835",
+    "tracer/src/main/cpp/core/tracer_json_endpoint.cpp": "d50437bd5da8e45ffb028135d9755e20356200695927e80d04f418a319bb787c",
+    "tracer/src/main/cpp/core/tracer_json_endpoint.h": "ec05f988eb6e09a9c3d9ed6bdbb8723114c4820cb37acd62e50c369180bc3058",
+    "tracer/src/main/cpp/flight/flight_artifact.cpp": "16394ec90af2c948f901d8218dfd0b569c1cbef4ee58e26ebd63b9b2d0511bca",
+    "tracer/src/main/cpp/tracer_entry.cpp": "62142d2bfa240b64bf790673b0b51ce2e5ee7efdbc19a5948eba04f2305436e0",
+    "tracer/src/test/cpp/CMakeLists.txt": "dc96004efef6f915bde613c57a22af94b1eedb493fb3e4ddfd2216e24b36a85d",
+    "tracer/src/test/cpp/flight_artifact_test.cpp": "8d5003b83edb5a7ee0353cbe9a82f9353e87ad431da8fe39afa5606d6334c8a8",
+    "tracer/src/test/cpp/protocol_fixture_emitter.cpp": "063d3654cd615bfe57f9ecbc2299f185945e562ac4f81b814dfb15de5583e8c7",
+    "tracer/src/test/cpp/shadowhook_retention_contract_test.cpp": "ff5f6da9f9d2525638f40efed53a7847def44edb67c9f933cd826116885dddb9"
+  },
+  "reports": {
+    "store": "qtrace-store-boundaries-2026-10-19.md",
+    "frontend": "qtrace-ui-layout-state-2026-10-19.md",
+    "cli_ops": "qtrace-cli-optimization-2026-10-19.md",
+    "native": "qtrace-native-optimization-2026-10-19.md",
+    "protocol_fuzz": "qtrace-protocol-fuzz-2026-10-19.md",
+    "module_boundaries": "qtrace-module-boundaries-2026-10-19.md"
+  },
+  "offline": {
+    "binary_sha256": "3c8afa3640759f0e1b1785399a5bdc171c316dfdfee12fffc0bb307a5bf718e0",
+    "captures": [
+      {
+        "name": "offset-v2",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/offset-v2/1bd685d1-0bc3-4cb8-8b44-86e3c5fe7a1d/report.json",
+        "sha256": "6cb602c21419fe076be95e79e7cf630bff70e88af980688ef75be4e44f547213",
+        "events": 987,
+        "reopen_equivalent": true,
+        "output": "artifacts/complete-optimization-2026-10-19/offline/offset-v2.json"
+      },
+      {
+        "name": "symbol",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/symbol/feb418a4-b5c4-4827-817c-1f04a4c77ef8/report.json",
+        "sha256": "cc1b25fd9cfab74b57e0d1e9fbae210c1b5a0db3cbf02ccbde8954aa50382dbf",
+        "events": 987,
+        "reopen_equivalent": true,
+        "output": "artifacts/complete-optimization-2026-10-19/offline/symbol.json"
+      },
+      {
+        "name": "monitor-exit",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/monitor-exit/c5a42187-c0ca-4384-8fb1-e448210af16c/report.json",
+        "sha256": "29a7b6b39467b902d59700172606b50f6a2c52672f23b8f1544c511b73c9339e",
+        "events": 1714,
+        "reopen_equivalent": true,
+        "output": "artifacts/complete-optimization-2026-10-19/offline/monitor-exit.json"
+      },
+      {
+        "name": "flight-crash",
+        "source_report": "/home/lyldalek/workspace/qbdi-android/artifacts/xiaomi-capture-2026-10-19/flight-crash/d9fc09a8-7358-4d8c-a6c1-a426eea60380/report.json",
+        "sha256": "e58a11a496565ce10fcb360175c13d6bbd303093c8cf5aecb7c1d6e241d63e34",
+        "events": 1185909,
+        "reopen_equivalent": true,
+        "output": "artifacts/complete-optimization-2026-10-19/offline/flight-crash.json"
+      }
+    ]
+  },
+  "final_ipc": {
+    "binary_sha256": "ba872e39c8caddcef6580e05c8d6effed9f31c0e8fdb9364f452573c7fe8986d",
+    "four_existing_memory_directions": "pass",
+    "memory_rows": 1,
+    "five_directions_rejected_before_generation_or_jobs_change": true,
+    "closed": true
+  },
+  "browser_evidence": "artifacts/complete-optimization-2026-10-19/browser/browser-captures-result.json",
+  "browser_evidence_sha256": "ef8110e7f0386547294e87702bdbd855496280c6e44466c6d5a581511145b520",
+  "measurement_report": "docs/benchmarks/qtrace-store-boundaries-2026-10-19.json",
+  "current_reference_sha256": "195a26bc81aa59b4fa664d7fcc16d927aba6a799d9b9ae70f140c94021a606a8",
+  "scope_limits": [
+    "Local Chromium reflow uses equivalent 200% viewport/DPR; no native browser/OS zoom, WebKit or screen-reader claim.",
+    "Five-round Pixel 6 batches prove this target and configured admission; no stable percentage throughput promise or other-device claim.",
+    "Flight startup precheck and host crash/close recovery do not assert Android power-loss durability.",
+    "Hosted CI was configured and locally exercised; no push or remote CI run was performed."
+  ],
+  "workspace": "Changes remain uncommitted and unpushed; historical evidence and references retained."
+}

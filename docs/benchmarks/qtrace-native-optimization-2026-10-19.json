@@ -1,0 +1,755 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-19",
+  "scope": [
+    "CORE-01",
+    "CORE-02"
+  ],
+  "device": "1C111FDF600G6S",
+  "device_model": "Pixel 6",
+  "sampling": {
+    "fast": {
+      "method": "Nearest recognized frame in the fixed tracer DSO assigns each recorded sample once. Denominator is recognized collector/encoder/output/compression samples, not all process CPU or wall time. Unwinding can omit ancestors; raw simpleperf data retained.",
+      "periods": {
+        "collector": 282759593,
+        "encoder": 203338999,
+        "output": 78309484,
+        "compression": 460741237
+      },
+      "samples": {
+        "collector": 576,
+        "encoder": 393,
+        "output": 153,
+        "compression": 1889
+      },
+      "period_fraction": {
+        "collector": 0.27582283811177855,
+        "encoder": 0.19835061724320738,
+        "output": 0.0763883689984973,
+        "compression": 0.4494381756465168
+      },
+      "top_leaves": [
+        {
+          "component": "compression",
+          "symbol": "LZ4HC_compress_generic_noDictCtx",
+          "period": 455931879
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::on_pre(QBDI::VM*, QBDI::GPRState*, QBDI::FPRState*)",
+          "period": 127122015
+        },
+        {
+          "component": "encoder",
+          "symbol": "(anonymous namespace)::append_u64((anonymous namespace)::AppendBuffer&, unsigned long)",
+          "period": 109924613
+        },
+        {
+          "component": "encoder",
+          "symbol": "BinaryTraceEncoder::encode_instruction(unsigned char*, unsigned long, unsigned int, unsigned int, InstructionRecord const&) const",
+          "period": 51024111
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCache::resolve(unsigned int, bool (*)(unsigned int, void*, CachedInstruction*) noexcept, void*, CachedInstruction*)",
+          "period": 48382200
+        },
+        {
+          "component": "encoder",
+          "symbol": "(anonymous namespace)::append_record_header((anonymous namespace)::AppendBuffer&, BinaryRecordType, unsigned long, unsigned short)",
+          "period": 40167077
+        },
+        {
+          "component": "collector",
+          "symbol": "PendingInstructionCollector::begin(InstructionView const&, RegisterSnapshot const&)",
+          "period": 24619464
+        },
+        {
+          "component": "output",
+          "symbol": "BinaryTraceWriter::instruction(TraceContext const&, InstructionRecord const&)",
+          "period": 15554725
+        },
+        {
+          "component": "output",
+          "symbol": "TraceDictionary::resolve(unsigned int, unsigned int*, bool*) const",
+          "period": 15420537
+        },
+        {
+          "component": "output",
+          "symbol": "AsyncTraceWriter::reserve(unsigned long)",
+          "period": 13987293
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::emit(InstructionRecord const&, RegisterSnapshot const&)",
+          "period": 11126386
+        },
+        {
+          "component": "collector",
+          "symbol": "Arm64InstructionResolver::resolve(unsigned long, InstructionCache*, bool (*)(unsigned int, void*, CachedInstruction*) noexcept, void*, CachedInstruction*, bool)",
+          "period": 10448193
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCache::store(CachedInstruction const&)",
+          "period": 9405715
+        },
+        {
+          "component": "output",
+          "symbol": "AsyncTraceWriter::failed() const",
+          "period": 9095419
+        },
+        {
+          "component": "output",
+          "symbol": "AsyncTraceWriter::commit(unsigned long)",
+          "period": 8704540
+        },
+        {
+          "component": "collector",
+          "symbol": "PendingInstructionCollector::complete_pending(RegisterSnapshot const&)",
+          "period": 7836630
+        },
+        {
+          "component": "output",
+          "symbol": "BinaryTraceWriter::failed() const",
+          "period": 6573390
+        },
+        {
+          "component": "collector",
+          "symbol": "CodeRuleEngine::on_pre_instruction(CodeRuleContext&)",
+          "period": 6503997
+        },
+        {
+          "component": "collector",
+          "symbol": "OffsetCodeRule::matches(CodeRuleContext const&) const",
+          "period": 3216374
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::pre_callback(QBDI::VM*, QBDI::GPRState*, QBDI::FPRState*, void*)",
+          "period": 2780996
+        }
+      ]
+    },
+    "balanced": {
+      "method": "Nearest recognized frame in the fixed tracer DSO assigns each recorded sample once. Denominator is recognized collector/encoder/output/compression samples, not all process CPU or wall time. Unwinding can omit ancestors; raw simpleperf data retained.",
+      "periods": {
+        "collector": 467531924,
+        "encoder": 201676539,
+        "output": 96125074,
+        "compression": 580705825
+      },
+      "samples": {
+        "collector": 903,
+        "encoder": 384,
+        "output": 186,
+        "compression": 2121
+      },
+      "period_fraction": {
+        "collector": 0.34733896882875853,
+        "encoder": 0.14982959985682795,
+        "output": 0.07141327119674529,
+        "compression": 0.43141816011766826
+      },
+      "top_leaves": [
+        {
+          "component": "compression",
+          "symbol": "LZ4HC_compress_generic_noDictCtx",
+          "period": 576109393
+        },
+        {
+          "component": "encoder",
+          "symbol": "(anonymous namespace)::append_u64((anonymous namespace)::AppendBuffer&, unsigned long)",
+          "period": 96880607
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::on_pre(QBDI::VM*, QBDI::GPRState*, QBDI::FPRState*)",
+          "period": 83086286
+        },
+        {
+          "component": "encoder",
+          "symbol": "BinaryTraceEncoder::encode_instruction(unsigned char*, unsigned long, unsigned int, unsigned int, InstructionRecord const&) const",
+          "period": 54612279
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCache::resolve(unsigned int, bool (*)(unsigned int, void*, CachedInstruction*) noexcept, void*, CachedInstruction*)",
+          "period": 51901749
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::on_memory(QBDI::VM*, QBDI::GPRState*)",
+          "period": 35001895
+        },
+        {
+          "component": "encoder",
+          "symbol": "(anonymous namespace)::append_record_header((anonymous namespace)::AppendBuffer&, BinaryRecordType, unsigned long, unsigned short)",
+          "period": 32291458
+        },
+        {
+          "component": "collector",
+          "symbol": "scudo::HybridMutex::unlock()",
+          "period": 31266969
+        },
+        {
+          "component": "collector",
+          "symbol": "scudo::HybridMutex::tryLock()",
+          "period": 23355942
+        },
+        {
+          "component": "output",
+          "symbol": "TraceDictionary::resolve(unsigned int, unsigned int*, bool*) const",
+          "period": 21120357
+        },
+        {
+          "component": "collector",
+          "symbol": "QBDI::(anonymous namespace)::analyseMemoryAccessAddrValue(QBDI::ExecBlock const&, llvm::ArrayRef<QBDI::ShadowInfo>&, std::__ndk1::vector<QBDI::MemoryAccess, std::__ndk1::allocator<QBDI::MemoryAccess> >&, QBDI::LLVMCPU const&)",
+          "period": 20230968
+        },
+        {
+          "component": "collector",
+          "symbol": "Arm64InstructionResolver::resolve(unsigned long, InstructionCache*, bool (*)(unsigned int, void*, CachedInstruction*) noexcept, void*, CachedInstruction*, bool)",
+          "period": 18774807
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::emit(InstructionRecord const&, RegisterSnapshot const&)",
+          "period": 18450619
+        },
+        {
+          "component": "encoder",
+          "symbol": "BinaryTraceEncoder::encode_memory(unsigned char*, unsigned long, unsigned int, unsigned long, MemoryRecord const&) const",
+          "period": 16238820
+        },
+        {
+          "component": "output",
+          "symbol": "AsyncTraceWriter::commit(unsigned long)",
+          "period": 15468753
+        },
+        {
+          "component": "output",
+          "symbol": "BinaryTraceWriter::instruction(TraceContext const&, InstructionRecord const&)",
+          "period": 14374152
+        },
+        {
+          "component": "collector",
+          "symbol": "PendingInstructionCollector::begin(InstructionView const&, RegisterSnapshot const&)",
+          "period": 14240757
+        },
+        {
+          "component": "output",
+          "symbol": "AsyncTraceWriter::failed() const",
+          "period": 13825793
+        },
+        {
+          "component": "output",
+          "symbol": "AsyncTraceWriter::reserve(unsigned long)",
+          "period": 12004324
+        },
+        {
+          "component": "collector",
+          "symbol": "scudo::Allocator<scudo::AndroidNormalConfig, &(scudo_malloc_postinit)>::allocate(unsigned long, scudo::Chunk::Origin, unsigned long, bool)",
+          "period": 11735362
+        }
+      ]
+    },
+    "full": {
+      "method": "Nearest recognized frame in the fixed tracer DSO assigns each recorded sample once. Denominator is recognized collector/encoder/output/compression samples, not all process CPU or wall time. Unwinding can omit ancestors; raw simpleperf data retained.",
+      "periods": {
+        "collector": 998729263,
+        "encoder": 122685907,
+        "output": 58906571,
+        "compression": 531975149
+      },
+      "samples": {
+        "collector": 3055,
+        "encoder": 383,
+        "output": 174,
+        "compression": 2656
+      },
+      "period_fraction": {
+        "collector": 0.5832687478629948,
+        "encoder": 0.07164990353980027,
+        "output": 0.03440207790133871,
+        "compression": 0.3106792706958663
+      },
+      "top_leaves": [
+        {
+          "component": "collector",
+          "symbol": "process_vm_readv",
+          "period": 596370669
+        },
+        {
+          "component": "compression",
+          "symbol": "LZ4HC_compress_generic_noDictCtx",
+          "period": 527327211
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::on_pre(QBDI::VM*, QBDI::GPRState*, QBDI::FPRState*)",
+          "period": 100201062
+        },
+        {
+          "component": "encoder",
+          "symbol": "(anonymous namespace)::append_u64((anonymous namespace)::AppendBuffer&, unsigned long)",
+          "period": 56936956
+        },
+        {
+          "component": "encoder",
+          "symbol": "BinaryTraceEncoder::encode_instruction(unsigned char*, unsigned long, unsigned int, unsigned int, InstructionRecord const&) const",
+          "period": 28003359
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCache::resolve(unsigned int, bool (*)(unsigned int, void*, CachedInstruction*) noexcept, void*, CachedInstruction*)",
+          "period": 27696126
+        },
+        {
+          "component": "collector",
+          "symbol": "MemoryTracePolicy::capture_after_rule(TraceProfile, bool, CachedInstruction const&, RegisterSnapshot const&, unsigned long, bool (*)(unsigned long, void*, unsigned long))",
+          "period": 26401452
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCollector::on_memory(QBDI::VM*, QBDI::GPRState*)",
+          "period": 26382041
+        },
+        {
+          "component": "encoder",
+          "symbol": "(anonymous namespace)::append_record_header((anonymous namespace)::AppendBuffer&, BinaryRecordType, unsigned long, unsigned short)",
+          "period": 19326041
+        },
+        {
+          "component": "encoder",
+          "symbol": "BinaryTraceEncoder::encode_memory(unsigned char*, unsigned long, unsigned int, unsigned long, MemoryRecord const&) const",
+          "period": 17731614
+        },
+        {
+          "component": "collector",
+          "symbol": "QBDI::(anonymous namespace)::analyseMemoryAccessAddrValue(QBDI::ExecBlock const&, llvm::ArrayRef<QBDI::ShadowInfo>&, std::__ndk1::vector<QBDI::MemoryAccess, std::__ndk1::allocator<QBDI::MemoryAccess> >&, QBDI::LLVMCPU const&)",
+          "period": 16395104
+        },
+        {
+          "component": "collector",
+          "symbol": "PendingInstructionCollector::begin(InstructionView const&, RegisterSnapshot const&)",
+          "period": 14881227
+        },
+        {
+          "component": "output",
+          "symbol": "TraceDictionary::resolve(unsigned int, unsigned int*, bool*) const",
+          "period": 14687681
+        },
+        {
+          "component": "collector",
+          "symbol": "__memset_aarch64",
+          "period": 11675165
+        },
+        {
+          "component": "collector",
+          "symbol": "scudo::HybridMutex::tryLock()",
+          "period": 11301810
+        },
+        {
+          "component": "collector",
+          "symbol": "InstructionCache::store(CachedInstruction const&)",
+          "period": 11156180
+        },
+        {
+          "component": "output",
+          "symbol": "BinaryTraceWriter::instruction(TraceContext const&, InstructionRecord const&)",
+          "period": 10564108
+        },
+        {
+          "component": "collector",
+          "symbol": "safe_read_memory(unsigned long, void*, unsigned long)",
+          "period": 10283636
+        },
+        {
+          "component": "output",
+          "symbol": "AsyncTraceWriter::commit(unsigned long)",
+          "period": 10045153
+        },
+        {
+          "component": "collector",
+          "symbol": "scudo::HybridMutex::unlock()",
+          "period": 9815586
+        }
+      ]
+    }
+  },
+  "benchmark": {
+    "fast": {
+      "before": {
+        "raw_elapsed_ms": [
+          13,
+          13,
+          13,
+          18,
+          13
+        ],
+        "median_ms": 13,
+        "instructions": 21718,
+        "return": "0x5745c858653f5a7f",
+        "max_compressed_bytes": 267182,
+        "historical_max_compressed_bytes": 307925,
+        "rate_target_pass": true,
+        "all_five_compressed_size_targets_pass": true,
+        "tracer_sha256": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "installed_apk_sha256": "13366b591c368f2c328bde5dac7447df36c7688c4e59286605afc1666947594e",
+        "target_library_sha256": "b4dcaa6a9d317d84f30765dcb7bd3cce28f92ee4eea888c2f5afbc126af67c85",
+        "target_library_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+        "raw_report": "artifacts/complete-optimization-2026-10-19/native/before-fast.json"
+      },
+      "after": {
+        "raw_elapsed_ms": [
+          20,
+          12,
+          12,
+          13,
+          13
+        ],
+        "median_ms": 13,
+        "instructions": 21718,
+        "return": "0x5745c858653f5a7f",
+        "max_compressed_bytes": 267171,
+        "historical_max_compressed_bytes": 307925,
+        "rate_target_pass": true,
+        "all_five_compressed_size_targets_pass": true,
+        "tracer_sha256": "b06bd71aa8d60906b0f3a618328cd6f2b38b6d71f81d2d7411aff1a83cf9a358",
+        "installed_apk_sha256": "13366b591c368f2c328bde5dac7447df36c7688c4e59286605afc1666947594e",
+        "target_library_sha256": "b4dcaa6a9d317d84f30765dcb7bd3cce28f92ee4eea888c2f5afbc126af67c85",
+        "target_library_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+        "raw_report": "artifacts/complete-optimization-2026-10-19/native/after-fast.json"
+      }
+    },
+    "balanced": {
+      "before": {
+        "raw_elapsed_ms": [
+          15,
+          22,
+          18,
+          16,
+          17
+        ],
+        "median_ms": 17,
+        "instructions": 21718,
+        "return": "0x5745c858653f5a7f",
+        "max_compressed_bytes": 360680,
+        "historical_max_compressed_bytes": 365877,
+        "rate_target_pass": true,
+        "all_five_compressed_size_targets_pass": true,
+        "tracer_sha256": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "installed_apk_sha256": "13366b591c368f2c328bde5dac7447df36c7688c4e59286605afc1666947594e",
+        "target_library_sha256": "b4dcaa6a9d317d84f30765dcb7bd3cce28f92ee4eea888c2f5afbc126af67c85",
+        "target_library_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+        "raw_report": "artifacts/complete-optimization-2026-10-19/native/before-balanced.json"
+      },
+      "after": {
+        "raw_elapsed_ms": [
+          16,
+          16,
+          15,
+          16,
+          16
+        ],
+        "median_ms": 16,
+        "instructions": 21718,
+        "return": "0x5745c858653f5a7f",
+        "max_compressed_bytes": 362198,
+        "historical_max_compressed_bytes": 365877,
+        "rate_target_pass": true,
+        "all_five_compressed_size_targets_pass": true,
+        "tracer_sha256": "b06bd71aa8d60906b0f3a618328cd6f2b38b6d71f81d2d7411aff1a83cf9a358",
+        "installed_apk_sha256": "13366b591c368f2c328bde5dac7447df36c7688c4e59286605afc1666947594e",
+        "target_library_sha256": "b4dcaa6a9d317d84f30765dcb7bd3cce28f92ee4eea888c2f5afbc126af67c85",
+        "target_library_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+        "raw_report": "artifacts/complete-optimization-2026-10-19/native/after-balanced.json"
+      }
+    },
+    "full": {
+      "before": {
+        "raw_elapsed_ms": [
+          26,
+          31,
+          28,
+          32,
+          33
+        ],
+        "median_ms": 31,
+        "instructions": 21718,
+        "return": "0x5745c858653f5a7f",
+        "max_compressed_bytes": 378790,
+        "historical_max_compressed_bytes": 429199,
+        "rate_target_pass": true,
+        "all_five_compressed_size_targets_pass": true,
+        "tracer_sha256": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "installed_apk_sha256": "13366b591c368f2c328bde5dac7447df36c7688c4e59286605afc1666947594e",
+        "target_library_sha256": "b4dcaa6a9d317d84f30765dcb7bd3cce28f92ee4eea888c2f5afbc126af67c85",
+        "target_library_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+        "raw_report": "artifacts/complete-optimization-2026-10-19/native/before-full.json"
+      },
+      "after": {
+        "raw_elapsed_ms": [
+          26,
+          26,
+          25,
+          25,
+          26
+        ],
+        "median_ms": 26,
+        "instructions": 21718,
+        "return": "0x5745c858653f5a7f",
+        "max_compressed_bytes": 379717,
+        "historical_max_compressed_bytes": 429199,
+        "rate_target_pass": true,
+        "all_five_compressed_size_targets_pass": true,
+        "tracer_sha256": "b06bd71aa8d60906b0f3a618328cd6f2b38b6d71f81d2d7411aff1a83cf9a358",
+        "installed_apk_sha256": "13366b591c368f2c328bde5dac7447df36c7688c4e59286605afc1666947594e",
+        "target_library_sha256": "b4dcaa6a9d317d84f30765dcb7bd3cce28f92ee4eea888c2f5afbc126af67c85",
+        "target_library_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+        "raw_report": "artifacts/complete-optimization-2026-10-19/native/after-full.json"
+      }
+    }
+  },
+  "benchmark_interpretation": "One five-round batch before and after, one warmup each. Same physical device and exact APK/raw/canonical target library. Final binary also includes the separately verified JSON endpoint extraction and Flight startup check. Observed medians are not a statistically isolated stable percentage gain. Assembly proves removal of the per-Full-instruction fallback initialization. Historical references were not rewritten.",
+  "assembly": {
+    "before": {
+      "symbol": "_ZN20InstructionCollector6on_preEPN4QBDI2VMEPNS0_8GPRStateEPNS0_8FPRStateE",
+      "key_instructions": [
+        "  4526c8: d11e03ff     \tsub\tsp, sp, #0x780",
+        "  45280c: 911e03ff     \tadd\tsp, sp, #0x780",
+        "  452a08: 5280a482     \tmov\tw2, #0x524",
+        "  452a30: 940dd624     \tbl\t0x7c82c0 <memset@plt>"
+      ]
+    },
+    "after": {
+      "symbol": "_ZN20InstructionCollector6on_preEPN4QBDI2VMEPNS0_8GPRStateEPNS0_8FPRStateE",
+      "key_instructions": [
+        "  452880: d10743ff     \tsub\tsp, sp, #0x1d0",
+        "  4529f8: 910743ff     \tadd\tsp, sp, #0x1d0"
+      ]
+    }
+  },
+  "facts": {
+    "report": "artifacts/complete-optimization-2026-10-19/native/benchmark-facts.json",
+    "all_thirty_measured_runs_same_profile_shape": true,
+    "register_read_facts_per_run": 25960,
+    "register_write_facts_per_run": 15689,
+    "balanced_and_full_memory_read_facts_per_run": 5910,
+    "balanced_and_full_memory_write_facts_per_run": 3857,
+    "full_memory_value_byte_agreements_per_run": 9767,
+    "limitation": "Absolute register/heap/stack values vary with process allocation and ASLR. These values are not equated across processes. Exact value semantics are covered by existing native collector/memory tests plus value-versus-bytes consistency per artifact."
+  },
+  "flight_space": {
+    "default_capacity_bytes": 536870912,
+    "fixed_ring_semantics_unchanged": true,
+    "capacity_inventory": "artifacts/complete-optimization-2026-10-19/native/flight-capacity-inventory.json",
+    "check": "fstatvfs on the exclusive newly created artifact descriptor before fchmod/ftruncate/mmap, ceil(capacity/fragment_size) <= f_bavail; f_bsize fallback if f_frsize is zero",
+    "failure": "ENOSPC/EIO retains errno, closes descriptor, unlinks the zero-length artifact, no mapped state/superblock published",
+    "faults": [
+      "one block short",
+      "fstatvfs EIO",
+      "non-block-aligned capacity",
+      "exact sufficient capacity",
+      "large block counters without multiplication overflow",
+      "invalid fragment sizes"
+    ],
+    "red": "New tests against previous flight_artifact.cpp aborted with !created assertion (exit 134)",
+    "green": "flight_artifact_test and final nativeHostTest passed (exit 0)",
+    "lifecycle": "artifacts/complete-optimization-2026-10-19/native/flight-lifecycle-recovery.json",
+    "lifecycle_scope": "Current native code, host fork/_exit without seal/detach/close versus normal seal/close, both default 512 MiB artifacts, unchanged Python decoder. Active artifact still has unknown termination attribution; no power-loss durability or Android low-storage claim.",
+    "space_limit": "Availability preflight, not a reservation against concurrent writers or later quota changes. No real device storage was filled. No capacity preset added because observed record retention is workload dependent and has no elapsed-time timestamps.",
+    "capacity_and_retained_window_summary": "artifacts/complete-optimization-2026-10-19/native/flight-capacity-window-summary.json",
+    "observed_capacity_groups": [
+      {
+        "capacity_bytes": 67108864,
+        "sessions": 8,
+        "allocated_bytes_range": [
+          67108864,
+          67112960
+        ],
+        "sealed_committed_bytes_lower_bound_range": [
+          54382648,
+          58136744
+        ],
+        "sealed_committed_fraction_lower_bound_range": [
+          0.8103646039962769,
+          0.8663049936294556
+        ],
+        "sealed_physical_record_lower_bound_range": [
+          824299,
+          886049
+        ],
+        "max_generation_range": [
+          40,
+          49
+        ],
+        "registered_threads_range": [
+          31,
+          44
+        ]
+      },
+      {
+        "capacity_bytes": 536870912,
+        "sessions": 5,
+        "allocated_bytes_range": [
+          536875008,
+          536875008
+        ],
+        "sealed_committed_bytes_lower_bound_range": [
+          525991432,
+          526828496
+        ],
+        "sealed_committed_fraction_lower_bound_range": [
+          0.9797353893518448,
+          0.9812945425510406
+        ],
+        "sealed_physical_record_lower_bound_range": [
+          7798375,
+          7851901
+        ],
+        "max_generation_range": [
+          5,
+          5
+        ],
+        "registered_threads_range": [
+          38,
+          39
+        ]
+      }
+    ],
+    "retained_window_method": "Read fixed superblock/chunk headers only. Sealed header byte/record counters omit committed records in ACTIVE chunks and therefore are lower bounds. Per-thread min/max sequence endpoints can surround overwritten gaps and are not contiguous retained windows. No source writes/deletes; no payload decode/integrity claim from this inventory.",
+    "preset_evaluation": "Observed rings have already wrapped: maximum generations40-49 for64MiB and5 for512MiB, while sealed retained content alone occupies81.04-86.63% and97.97-98.13% respectively. Existing configurable capacityMb64..2048 can express workload-specific choices. Different devices/workloads are not a controlled capacity comparison; there is no evidence to reduce512MiB or add named presets.",
+    "elapsed_window_limitation": "No per-event monotonic timestamp in Flight. A minimum retained duration in seconds cannot be inferred from sequence endpoints or wall-clock capture monitoring. Preserve default512MiB/fixed ring and use explicit capacity plus space preflight until a caller specifies a required time window and workload rate.",
+    "existing_capacity_mb_range": [
+      64,
+      2048
+    ],
+    "capacity_presets_added": false
+  },
+  "transport": {
+    "frida": "17.24.2",
+    "python_bindings": "artifacts/xiaomi-validation/venv/lib/python3.11/site-packages",
+    "host_python": "python3 (3.12, uses ABI3 Frida bindings)",
+    "frida_tools": "14.11.0 installed into existing venv using uv, Frida version pinned",
+    "remote_port": 27043,
+    "diagnostic_adapter": "artifacts/complete-optimization-2026-10-19/native/benchmark_chunked.py",
+    "reason": "Sequential real Pixel transport probe accepted padded scripts through 65536 bytes and terminated at 131072/262144 bytes; Java bridge plus agent exceeds this transport threshold.",
+    "semantics": "Original source is evaluated in the same script using bounded 4096-character posts. Existing benchmark process ownership, timeout, measurement, identity admission, decoding, footer and size gates are retained. Loading occurs before target timing. Production CLI and historical reference remain unchanged."
+  },
+  "verification": [
+    {
+      "command": "ANDROID_HOME=/home/lyldalek/Android/sdk ANDROID_NDK_HOME=/home/lyldalek/Android/sdk/ndk/26.1.10909125 ./gradlew nativeHostTest :app:testDebugUnitTest :app:assembleDebug :tracer:assembleDebug :tracer:copyTracerDebug --no-daemon",
+      "exit_code": 0,
+      "native_tests": 45,
+      "passed_native_tests": 45,
+      "log": "artifacts/complete-optimization-2026-10-19/native/gradle-final-integration-retry.log",
+      "wall_seconds_reported": 27
+    }
+  ],
+  "initial_identity": {
+    "schema": 1,
+    "snapshot_before_native_edits": [
+      {
+        "source": "out/arm64-v8a/libqbdi_tracer.so",
+        "snapshot": "artifacts/complete-optimization-2026-10-19/native/before-libqbdi_tracer.so",
+        "sha256": "7101529d8940daa2f614b27c705ef79929d537cdcbc2593eeb201970c691bd86",
+        "bytes": 12920832
+      },
+      {
+        "source": "out/arm64-v8a/libshadowhook_nothing.so",
+        "snapshot": "artifacts/complete-optimization-2026-10-19/native/before-libshadowhook_nothing.so",
+        "sha256": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd",
+        "bytes": 1208
+      },
+      {
+        "source": "tracer/build/intermediates/cxx/Debug/4j2i401z/obj/arm64-v8a/libqbdi_tracer.so",
+        "snapshot": "artifacts/complete-optimization-2026-10-19/native/before-libqbdi_tracer-unstripped.so",
+        "sha256": "57546cf279ea95fb116cc3dcb22fa4c53ed5abf516d1568565081d7471c8e20c",
+        "bytes": 74937264
+      },
+      {
+        "source": "app/build/outputs/apk/debug/app-debug.apk",
+        "snapshot": "artifacts/complete-optimization-2026-10-19/native/before-local-app-debug.apk",
+        "sha256": "c1c01cd0f10ccb443d37a2c312a638b2a3a04439d2c4214d6181bf0d7700212b",
+        "bytes": 16201672
+      }
+    ],
+    "pixel_installed_demo_before_work": "absent: pm path com.aprz.qbdiandroid returned 1",
+    "pixel_serial": "1C111FDF600G6S"
+  },
+  "final_identity": {
+    "snapshots": [
+      {
+        "source": "out/arm64-v8a/libqbdi_tracer.so",
+        "snapshot": "artifacts/complete-optimization-2026-10-19/native/after-libqbdi_tracer.so",
+        "bytes": 12922920,
+        "sha256": "b06bd71aa8d60906b0f3a618328cd6f2b38b6d71f81d2d7411aff1a83cf9a358"
+      },
+      {
+        "source": "out/arm64-v8a/libshadowhook_nothing.so",
+        "snapshot": "artifacts/complete-optimization-2026-10-19/native/after-libshadowhook_nothing.so",
+        "bytes": 1208,
+        "sha256": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+      },
+      {
+        "source": "tracer/build/intermediates/cxx/Debug/4j2i401z/obj/arm64-v8a/libqbdi_tracer.so",
+        "snapshot": "artifacts/complete-optimization-2026-10-19/native/after-libqbdi_tracer-unstripped.so",
+        "bytes": 75004512,
+        "sha256": "e23245b47e80dcaca2f15768c0d3847d2891120de5333b91dcebbd5aaad40848"
+      }
+    ],
+    "sources": {
+      "tracer/src/main/cpp/core/instruction_collector.cpp": "86d64a9e85861b4a556ce0248b1b901f9c95e11d692021ad84dcfb53f0fce835",
+      "tracer/src/main/cpp/flight/flight_artifact.cpp": "16394ec90af2c948f901d8218dfd0b569c1cbef4ee58e26ebd63b9b2d0511bca",
+      "tracer/src/main/cpp/core/tracer_json_endpoint.cpp": "d50437bd5da8e45ffb028135d9755e20356200695927e80d04f418a319bb787c",
+      "tracer/src/main/cpp/core/tracer_json_endpoint.h": "ec05f988eb6e09a9c3d9ed6bdbb8723114c4820cb37acd62e50c369180bc3058",
+      "tracer/src/main/cpp/tracer_entry.cpp": "62142d2bfa240b64bf790673b0b51ce2e5ee7efdbc19a5948eba04f2305436e0",
+      "tracer/src/main/cpp/CMakeLists.txt": "f6f4782d23beab230b320b9769c749eb1c5bf482a8e0bf2122c0eb24702404e9"
+    },
+    "elf_notes": {
+      "after-libqbdi_tracer.so": "Displaying notes found in: .note.android.ident\n  Owner                Data size \tDescription\n  Android              0x00000084\tNT_ANDROID_TYPE_IDENT\n   description data: 18 00 00 00 72 32 36 62 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 31 30 39 30 39 31 32 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nDisplaying notes found in: .note.gnu.build-id\n  Owner                Data size \tDescription\n  GNU                  0x00000014\tNT_GNU_BUILD_ID (unique build ID bitstring)\n    Build ID: 54b71756b3c98d5c5a0b561ff0c8d913cb2c2ec2\n",
+      "after-libqbdi_tracer-unstripped.so": "Displaying notes found in: .note.android.ident\n  Owner                Data size \tDescription\n  Android              0x00000084\tNT_ANDROID_TYPE_IDENT\n   description data: 18 00 00 00 72 32 36 62 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 31 30 39 30 39 31 32 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nDisplaying notes found in: .note.gnu.build-id\n  Owner                Data size \tDescription\n  GNU                  0x00000014\tNT_GNU_BUILD_ID (unique build ID bitstring)\n    Build ID: 54b71756b3c98d5c5a0b561ff0c8d913cb2c2ec2\n"
+    }
+  },
+  "device_final_state": {
+    "installed_apk": "13366b591c368f2c328bde5dac7447df36c7688c4e59286605afc1666947594e  /data/app/~~5HnCkPELiQBtDzUyDkhimA==/com.aprz.qbdiandroid-LSXSroOTkqKoMJcBvHKlzg==/base.apk",
+    "staged_tracer": "b06bd71aa8d60906b0f3a618328cd6f2b38b6d71f81d2d7411aff1a83cf9a358  files/libqbdi_tracer.so",
+    "package_before_task": "absent",
+    "installed_package_now": "historical fixed benchmark fixture APK retained",
+    "owned_frida_server": "17.24.2 daemon started on Pixel127.0.0.1:27043, original PID17670; intentional service retained for repeatable inspection, not silently killed by a guessed PID",
+    "forward": "host tcp27043 -> Pixel tcp27043 retained",
+    "evidence": "New benchmark/profile outputs retained locally and on the fixed demo package; no existing evidence deleted."
+  },
+  "source_sha256": {
+    "tracer/src/main/cpp/core/instruction_collector.cpp": "86d64a9e85861b4a556ce0248b1b901f9c95e11d692021ad84dcfb53f0fce835",
+    "tracer/src/main/cpp/flight/flight_artifact.cpp": "16394ec90af2c948f901d8218dfd0b569c1cbef4ee58e26ebd63b9b2d0511bca",
+    "tracer/src/test/cpp/flight_artifact_test.cpp": "8d5003b83edb5a7ee0353cbe9a82f9353e87ad431da8fe39afa5606d6334c8a8",
+    "tracer/src/test/cpp/CMakeLists.txt": "dc96004efef6f915bde613c57a22af94b1eedb493fb3e4ddfd2216e24b36a85d",
+    "tracer/src/main/cpp/core/tracer_json_endpoint.cpp": "d50437bd5da8e45ffb028135d9755e20356200695927e80d04f418a319bb787c",
+    "tracer/src/main/cpp/core/tracer_json_endpoint.h": "ec05f988eb6e09a9c3d9ed6bdbb8723114c4820cb37acd62e50c369180bc3058",
+    "tracer/src/main/cpp/tracer_entry.cpp": "62142d2bfa240b64bf790673b0b51ce2e5ee7efdbc19a5948eba04f2305436e0",
+    "tracer/src/main/cpp/core/trace_config.h": "ef17a68510e9efbc261c357242ab5d48f4140b79d37c15f0f57f3b6511955525",
+    "tracer/src/main/cpp/core/tracer_configuration.cpp": "fac13f22001c627681f55db573825aaf7caf3f8e7eef62ae9d40e3838b5368c1"
+  },
+  "evidence_sha256": {
+    "artifacts/complete-optimization-2026-10-19/native/initial-identities.json": "b94dbcdc85d6cff9814d27dd345f0b1151835e04dd8bbfbe3f55e79e313641c4",
+    "artifacts/complete-optimization-2026-10-19/native/after-identities.json": "984ccc093a50215dbb6419a11b746d98129dffb53da3d766f05bed02e8fe6347",
+    "artifacts/complete-optimization-2026-10-19/native/historical-build.json": "5418b04ca48898621afcfe5a0aa954461706a9bd632af2bd36f351951dcaacdb",
+    "artifacts/complete-optimization-2026-10-19/native/before-batch-commands.json": "543bad8e92795a5eda86a053a0f5f6cc1d403aa8735fea9860add5cc0cd61ed4",
+    "artifacts/complete-optimization-2026-10-19/native/after-batch-commands.json": "9d0dc70dc32c6dc693337180ab725d1e702920bfbe3d68ae498e969d24b36620",
+    "artifacts/complete-optimization-2026-10-19/native/simpleperf-components.json": "7203e35cc4907f0c0a384a3055d95894f0fcacfd32419e8c892dd8827a102151",
+    "artifacts/complete-optimization-2026-10-19/native/simpleperf-before-fast-components.json": "9b29edd94eedd1bc6cfab8daf5a0b2a1e759414dd384e6e2ba98630d1940c954",
+    "artifacts/complete-optimization-2026-10-19/native/simpleperf-before-balanced-components.json": "f14e693da88ca9bdf628a377f81fafe20b7b4fac7c5e5f5f37ab62a77e60778f",
+    "artifacts/complete-optimization-2026-10-19/native/benchmark-facts.json": "7c7d0eefef86b10caacfd5fe073189c1ef1eb71bd6c0bbc444c41ffd116b97bd",
+    "artifacts/complete-optimization-2026-10-19/native/collector-assembly-proof.json": "5debf1567e22e5ab9d820f956e51e125e3c230fd8e59a33bbd936f2c23575a2a",
+    "artifacts/complete-optimization-2026-10-19/native/flight-capacity-inventory.json": "d95f7f4be306c823b49adb631e42e1578145b2ea267904f3205d3ce0a00d263b",
+    "artifacts/complete-optimization-2026-10-19/native/flight-lifecycle-recovery.json": "6a3112f4cbd18d9b975f18d92432c30f571a8fb924025eb8d2643bdf74ddd8da",
+    "artifacts/complete-optimization-2026-10-19/native/host-space-red.log": "5ea048f14e9fbaaa1512deae53a5f6f76b7510986b192c755f8cfdc9da94162c",
+    "artifacts/complete-optimization-2026-10-19/native/host-space-green-build.log": "d2b8a0c102a1c143e0398a748ee9b420c805804b33ade3971acb419cb6d7fdcf",
+    "artifacts/complete-optimization-2026-10-19/native/gradle-final-integration.log": "5c287df71d19a251a70d3bc71da8311ba45e9d92521beb05082844dc59126fc9",
+    "artifacts/complete-optimization-2026-10-19/native/gradle-final-integration-retry.log": "35cf3f47776c30994315f240f13a0e80a241daa37e90d4c4c248f7dbef69f738",
+    "artifacts/complete-optimization-2026-10-19/native/flight-capacity-window-summary.json": "bd8b6f9f64e2babcb2f4b245b2c9f0505b2bf4321a5caec8a1dbba36ff8154a8"
+  }
+}

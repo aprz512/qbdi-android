@@ -417,7 +417,7 @@ class ArtifactTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as root:
             decoder = fake_lz4_executable(Path(root))
-            with patch("qtrace.artifacts.shutil.which", return_value=str(decoder)):
+            with patch("qtrace._artifact_validation.shutil.which", return_value=str(decoder)):
                 result = self._processor(FakeClient({
                     name: compressed,
                     name + ".crash": crash_marker(),
@@ -934,7 +934,7 @@ class ArtifactTests(unittest.TestCase):
 
             descriptor = os.open(parent, os.O_RDONLY)
             try:
-                with patch("qtrace.artifacts.conditional_replace_at", side_effect=apply_then_replace):
+                with patch("qtrace._artifact_reports.conditional_replace_at", side_effect=apply_then_replace):
                     current = artifacts_module._rewrite_published_report(
                         descriptor, session, (), (), expected_identity=expected)
             finally:
@@ -1276,7 +1276,7 @@ class ArtifactTests(unittest.TestCase):
 
             primary = QtraceError("artifact.destination_replaced", "artifact", "output replaced")
             try:
-                with patch("qtrace.artifacts._rename_noreplace", side_effect=rename_after_replacement):
+                with patch("qtrace._artifact_publication._rename_noreplace", side_effect=rename_after_replacement):
                     _close_token_and_reclaim(parent, held, session, None, primary)
             finally:
                 os.close(held)
@@ -1316,7 +1316,7 @@ class ArtifactTests(unittest.TestCase):
                     replacement.write_text("replacement", encoding="utf-8")
 
             try:
-                with patch("qtrace.artifacts._rename_noreplace", side_effect=quarantine_then_replace):
+                with patch("qtrace._artifact_publication._rename_noreplace", side_effect=quarantine_then_replace):
                     with self.assertRaisesRegex(OSError, "recovery directory=") as raised:
                         _reclaim_committed_session(parent, held, session)
             finally:
@@ -1365,7 +1365,7 @@ class ArtifactTests(unittest.TestCase):
                 real_rename(fd, source, destination)
 
             try:
-                with patch("qtrace.artifacts._rename_noreplace", side_effect=replace_before_quarantine):
+                with patch("qtrace._artifact_publication._rename_noreplace", side_effect=replace_before_quarantine):
                     with self.assertRaisesRegex(OSError, "recovery directory=") as raised:
                         _reclaim_committed_session(parent, held, session)
             finally:
@@ -1411,7 +1411,7 @@ class ArtifactTests(unittest.TestCase):
                 return info
 
             try:
-                with patch("qtrace.artifacts._rename_noreplace", side_effect=capture_rename), patch(
+                with patch("qtrace._artifact_publication._rename_noreplace", side_effect=capture_rename), patch(
                         "qtrace.artifacts.os.fstat", side_effect=fstat_then_swap):
                     with self.assertRaisesRegex(OSError, "recovery file=") as raised:
                         _reclaim_parent_fallback_sibling(parent, fallback, expected)
@@ -1456,7 +1456,7 @@ class ArtifactTests(unittest.TestCase):
                 return info
 
             try:
-                with patch("qtrace.artifacts._rename_noreplace", side_effect=capture_rename), patch(
+                with patch("qtrace._artifact_publication._rename_noreplace", side_effect=capture_rename), patch(
                         "qtrace.artifacts.os.fstat", side_effect=fstat_then_swap):
                     with self.assertRaisesRegex(OSError, "recovery directory=") as raised:
                         _reclaim_committed_session(parent, held, session)

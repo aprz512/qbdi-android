@@ -55,7 +55,14 @@ export class TraceCanvasRenderer {
       context.setLineDash(row.provenance === "unknown" ? [3, 3] : []);
       const values = [row.sequence, row.tid?.toString() ?? "—", row.location, row.symbol, row.instruction, row.badges.join(" ")];
       const columns = [8, 82, 132, 286, 430, Math.max(600, frame.width - 100)];
-      values.forEach((value, column) => context.fillText(value, columns[column], y + frame.rowHeight / 2));
+      values.forEach((value, column) => {
+        context.save();
+        context.beginPath();
+        context.rect(columns[column], y, (columns[column + 1] ?? frame.width) - columns[column] - 8, frame.rowHeight);
+        context.clip();
+        context.fillText(value, columns[column], y + frame.rowHeight / 2);
+        context.restore();
+      });
       hits.push({ sourceRow: row.sourceRow, x: 0, y, width: frame.width, height: frame.rowHeight });
     }
     context.setLineDash([]);

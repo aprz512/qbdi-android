@@ -6,7 +6,9 @@
 mod budget;
 mod dto;
 mod error;
+pub mod ipc;
 mod jobs;
+mod opening;
 mod progress;
 mod service;
 mod workspace;

@@ -164,7 +164,7 @@ int main() {
     assert(spawn.find("Process.attachModuleObserver") == std::string::npos);
     const std::string accepted_configuration =
             function_body(tracer, "static void apply_accepted_configuration(",
-                          "static int32_t write_json_result(");
+                          "static bool tracer_json_ready() noexcept");
     const size_t initialize_hooks =
             accepted_configuration.find("init_inline_hook()");
     const size_t prepare_callbacks =
@@ -176,6 +176,28 @@ int main() {
     assert(find_loaded_target != std::string::npos);
     assert(initialize_hooks < prepare_callbacks);
     assert(prepare_callbacks < find_loaded_target);
+    const std::string endpoint_binding =
+            function_body(tracer, "static constinit TracerJsonEndpoint g_json_endpoint(",
+                          "extern \"C\"");
+    assert(endpoint_binding.find("g_tracer_configuration, g_configuration_call_lock,") !=
+           std::string::npos);
+    assert(endpoint_binding.find("tracer_json_ready, apply_accepted_configuration") !=
+           std::string::npos);
+    const std::string endpoint = read_cpp_source("core/tracer_json_endpoint.cpp");
+    const std::string endpoint_configure =
+            function_body(endpoint, "int32_t TracerJsonEndpoint::configure(",
+                          "int32_t TracerJsonEndpoint::status(");
+    const size_t copy_response =
+            endpoint_configure.find("write_result(result, response, response_size)");
+    const size_t activate_configuration = endpoint_configure.find("activate_(");
+    assert(copy_response != std::string::npos);
+    assert(activate_configuration != std::string::npos);
+    assert(copy_response < activate_configuration);
+    for (const char *lifecycle_operation : {"init_inline_hook(",
+                                            "prepare_module_callbacks(",
+                                            "find_loaded_module("}) {
+        assert(endpoint.find(lifecycle_operation) == std::string::npos);
+    }
     const std::string tracer_child =
             function_body(tracer, "static void tracer_atfork_child()",
                           "static void install_hooks_for_module");

@@ -2,6 +2,8 @@ mod builder;
 mod checkpoints;
 mod intervals;
 mod postings;
+mod sorting;
+mod source_keys;
 mod validation;
 mod wire;
 
@@ -779,11 +781,6 @@ impl CompletenessRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-struct SourceKeyRow {
-    row: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct SortedMap<K, V> {
     entries: Vec<(K, V)>,
 }
@@ -853,7 +850,7 @@ struct IndexCatalog {
     sequence: Vec<(u64, usize)>,
     module_pc: SortedMap<u32, Vec<(u64, usize)>>,
     memory: intervals::IntervalIndex,
-    source_keys: Vec<SourceKeyRow>,
+    source_keys: source_keys::SourceKeyIndex,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1701,19 +1698,11 @@ fn rows_for_semantic_bytes(
 }
 
 fn row_for_source<T: HasNormalizedCatalog>(store: &T, key: &EventKey) -> Option<usize> {
-    let rows = &store.normalized_catalog().indexes.source_keys;
-    let mut left = 0;
-    let mut right = rows.len();
-    while left < right {
-        let middle = left + (right - left) / 2;
-        let row = rows[middle].row;
-        match compare_event_keys(&store.base_event_key(row).ok()?, key) {
-            std::cmp::Ordering::Less => left = middle + 1,
-            std::cmp::Ordering::Greater => right = middle,
-            std::cmp::Ordering::Equal => return Some(row),
-        }
-    }
-    None
+    store
+        .normalized_catalog()
+        .indexes
+        .source_keys
+        .find(key, |row| store.base_event_key(row))
 }
 
 fn rows_for_sequence(catalog: &NormalizedCatalog, start: u64, end: u64) -> Vec<usize> {

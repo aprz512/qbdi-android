@@ -4,11 +4,14 @@ use ts_rs::TS;
 
 macro_rules! string_id {
     ($name:ident) => {
-        #[derive(
-            Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize, TS,
-        )]
+        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
         #[ts(type = "string")]
         pub struct $name(String);
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                crate::ipc::deserialize_identifier(d).map(Self)
+            }
+        }
         impl $name {
             pub fn from_u64(value: u64) -> Self {
                 Self(value.to_string())
@@ -36,7 +39,7 @@ impl DecimalU64Dto {
 }
 impl<'de> Deserialize<'de> for DecimalU64Dto {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(d)?;
+        let text = crate::ipc::deserialize_identifier(d)?;
         let value = text.parse::<u64>().map_err(serde::de::Error::custom)?;
         if value.to_string() != text {
             return Err(serde::de::Error::custom("non-canonical u64"));
@@ -55,7 +58,7 @@ impl DecimalI64Dto {
 }
 impl<'de> Deserialize<'de> for DecimalI64Dto {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(d)?;
+        let text = crate::ipc::deserialize_identifier(d)?;
         let value = text.parse::<i64>().map_err(serde::de::Error::custom)?;
         if value.to_string() != text {
             return Err(serde::de::Error::custom("non-canonical i64"));
@@ -77,7 +80,7 @@ impl HexU64Dto {
 }
 impl<'de> Deserialize<'de> for HexU64Dto {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(d)?;
+        let text = crate::ipc::deserialize_identifier(d)?;
         let digits = text
             .strip_prefix("0x")
             .ok_or_else(|| serde::de::Error::custom("hex value needs 0x"))?;
@@ -96,31 +99,31 @@ pub struct SourceCoordinateDto {
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, TS)]
 pub struct EventFilterDto {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_items")]
     pub tids: Vec<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_strings")]
     pub kinds: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_items")]
     pub modules: Vec<u32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_items")]
     pub relative_pc: Vec<AddressRangeDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_items")]
     pub absolute_pc: Vec<AddressRangeDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_items")]
     pub sequence: Vec<SequenceRangeDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_items")]
     pub mnemonic: Vec<MnemonicFilterDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_strings")]
     pub register_reads: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_strings")]
     pub register_writes: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_items")]
     pub memory: Vec<MemoryFilterDto>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_strings")]
     pub semantic_categories: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_strings")]
     pub semantic_names: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::ipc::deserialize_filter_strings")]
     pub semantic_detail_contains: Vec<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
@@ -135,12 +138,15 @@ pub struct SequenceRangeDto {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
 pub struct MnemonicFilterDto {
+    #[serde(deserialize_with = "crate::ipc::deserialize_text")]
     pub mode: String,
+    #[serde(deserialize_with = "crate::ipc::deserialize_text")]
     pub value: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]
 pub struct MemoryFilterDto {
     pub range: AddressRangeDto,
+    #[serde(deserialize_with = "crate::ipc::deserialize_memory_directions")]
     pub directions: Vec<String>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, TS)]

@@ -1,6 +1,20 @@
 {
   "fixtures": [
     {
+      "bytes": 1120,
+      "expected": {
+        "class": "elf.aarch64-loadable-symbols",
+        "outcome": "success"
+      },
+      "format": "ELF",
+      "generator_schema": 2,
+      "path": "elf/lib.so",
+      "role": "standalone",
+      "session": null,
+      "sha256": "4c8e353ecccc9f23c3d54055efd4fe477d18d7404c74d9fe69125d5c4fd57a13",
+      "version": "ELF64/AArch64"
+    },
+    {
       "bytes": 808,
       "expected": {
         "class": "elf.aarch64-symbols",

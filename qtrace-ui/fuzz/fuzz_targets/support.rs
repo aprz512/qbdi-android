@@ -34,13 +34,13 @@ struct Totals {
     resident_bytes: u64,
 }
 
-struct StrictGuard {
+pub struct StrictGuard {
     started: Instant,
     totals: Mutex<Totals>,
 }
 
 impl StrictGuard {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             started: Instant::now(),
             totals: Mutex::new(Totals::default()),

@@ -1,0 +1,544 @@
+{
+  "artifact_characterization_after_extraction": {
+    "bounds_and_recovery_preserved": true,
+    "command": "python3 -m unittest scripts.tests.test_qtrace_artifacts -q",
+    "elapsed_seconds": 0.785,
+    "passed": true,
+    "tests": 82
+  },
+  "baseline": {
+    "command": "python3 -m unittest scripts.tests.test_qtrace_artifacts scripts.tests.test_qtrace_process scripts.tests.test_bounded_process -q",
+    "elapsed_seconds": 12.873,
+    "passed": true,
+    "tests": 122
+  },
+  "branch": "perf/complete-optimization-2026-10-19",
+  "date": "2026-10-19",
+  "evidence_inventory": {
+    "captured_at": "2026-10-19T06:36:18.462357+00:00",
+    "cleanup_policy": "Success root only; explicit UUID, unchanged inventory digest, and --apply; failures/unknown/symlink/special/replacement trees retained.",
+    "cleanup_tests": "Temporary directories only; no deletion of existing evidence.",
+    "command": "python3 scripts/qtrace_evidence.py",
+    "existing_evidence_deleted": false,
+    "failure_logical_bytes": 3607605629,
+    "failure_runs": 24,
+    "inventory": {
+      "roots": [
+        {
+          "root": "qtrace-acceptance-evidence",
+          "runs": [
+            {
+              "allocated_bytes": 731414528,
+              "bytes": 731026274,
+              "completed_at": "2026-08-28T18:06:39.590Z",
+              "device": "192.168.50.149:5555",
+              "entries": 127,
+              "head_commit": "489b38f0be479ecd054975236ddbb115a787285a",
+              "identity": [
+                2096,
+                1084791
+              ],
+              "inventory_sha256": "575ef5560766b0b570099cd864734f6c4c5a7eaac585af3f44398b431003b621",
+              "name": "074b2c83-06f3-4960-a708-6ef808d24d90",
+              "reason": "validated success manifest",
+              "status": "successful",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 732385280,
+              "bytes": 731985756,
+              "completed_at": "2026-08-28T20:36:04.530Z",
+              "device": "192.168.50.149:5555",
+              "entries": 128,
+              "head_commit": "18c81fffacc1925d7b9fd8bbb8fdd67a7f001818",
+              "identity": [
+                2096,
+                1193701
+              ],
+              "inventory_sha256": "e8b059eb917fa22a6c70c3d92cbce1473750568ec21b66cf87d85b56b894acef",
+              "name": "569578fb-507e-4a92-b8d0-079f81636157",
+              "reason": "validated success manifest",
+              "status": "successful",
+              "unsafe_members": false
+            }
+          ],
+          "status": "present"
+        },
+        {
+          "root": "qtrace-acceptance-failures",
+          "runs": [
+            {
+              "allocated_bytes": 0,
+              "bytes": 0,
+              "entries": 0,
+              "identity": [
+                2096,
+                553487
+              ],
+              "inventory_sha256": "e32ed00247f94091babaf35a1d797eca9400acc09f5bc52e75740b0350b578f6",
+              "name": "064dc07b2c884fa68ea70b705f7595b7",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 8192,
+              "bytes": 4778,
+              "entries": 1,
+              "identity": [
+                2096,
+                1032011
+              ],
+              "inventory_sha256": "c37efa14c13cfd6a6727f2626178d7a69d4eeebbf1871691397bfc7ef02915ec",
+              "name": "3d529f0199b2495ca30f5a017b912326",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 1290240,
+              "bytes": 1193179,
+              "entries": 33,
+              "identity": [
+                2096,
+                556398
+              ],
+              "inventory_sha256": "c3521b83683d75ec999ecaa37cb37a508bc02cbda36b06d9d7427a3a189b9d32",
+              "name": "435084b8a2454c27a4954a55cdb178e2",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 368640,
+              "bytes": 335782,
+              "entries": 11,
+              "identity": [
+                2096,
+                1301064
+              ],
+              "inventory_sha256": "f2dcb95fde68eaac2fe43816322bc5d2fb5f50ecc2977894a8cf7f82c34dc6ce",
+              "name": "53d02ebcc5324ac99b6b01274882f8aa",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 0,
+              "bytes": 0,
+              "entries": 0,
+              "identity": [
+                2096,
+                1021242
+              ],
+              "inventory_sha256": "d44fd10e287c12a2294c309b270d148397d76f76f1749b539e86451e99ec4262",
+              "name": "540d28af8bf94bc6b055f57e59dd0c04",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 16384,
+              "bytes": 6069,
+              "entries": 3,
+              "identity": [
+                2096,
+                851094
+              ],
+              "inventory_sha256": "5645b0ce67350baf883232ba293590dec9c7265d1953afa63ee3c9db962b304b",
+              "name": "563928b3cc6146418f83e55bc72d06de",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 710152192,
+              "bytes": 709887934,
+              "entries": 83,
+              "identity": [
+                2096,
+                1286611
+              ],
+              "inventory_sha256": "7f206110022fc82bd69f6589219da4d594380d3e3e596154e99817b4a78c20d3",
+              "name": "5e4d85df652d426cb0dfe4160640e7ac",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 20480,
+              "bytes": 12898,
+              "entries": 3,
+              "identity": [
+                2096,
+                1194602
+              ],
+              "inventory_sha256": "24414cc4bbcd157679e7199f0f8bdba91ac91f5d67768bef17403cee3c606b2d",
+              "name": "5edab6918304495d98a49a2027ca32ad",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 717479936,
+              "bytes": 717188765,
+              "entries": 92,
+              "identity": [
+                2096,
+                769128
+              ],
+              "inventory_sha256": "cd668cdfa2b48a8e91b434e961c3fc7f042e4de772fb2737b8496ff895a00619",
+              "name": "68213cdd40014f5db85e1b03e66931fc",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 8192,
+              "bytes": 4655,
+              "entries": 1,
+              "identity": [
+                2096,
+                1219967
+              ],
+              "inventory_sha256": "d3ec5dd149cad21e429ce50910481bacc1a4963512ed66274f8cc714e038b33a",
+              "name": "7d17af53b5fc4f3ebaaffdeafdc4041d",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 704512,
+              "bytes": 642176,
+              "entries": 21,
+              "identity": [
+                2096,
+                1149994
+              ],
+              "inventory_sha256": "efd500419cd60f77cf9f5089ac98431f4ca278848c44c2b34a0e419b0ce598c5",
+              "name": "8b160358-7a82-4f75-879c-a67c5b950393",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 0,
+              "bytes": 0,
+              "entries": 0,
+              "identity": [
+                2096,
+                759634
+              ],
+              "inventory_sha256": "9398f3eb3e8cd7ffa4142dcf99f668f688f6ab0c822cceb0ff8b0d0cf4fab894",
+              "name": "8f03a735d63e4ef8b49e92c0a0cbdd31",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 725901312,
+              "bytes": 725638695,
+              "entries": 84,
+              "identity": [
+                2096,
+                559170
+              ],
+              "inventory_sha256": "4fce48a1568e2beca57b2cbbd171c594311fca8e0c687e3cb9cdbe2045ec1bc4",
+              "name": "9ebb02271f2a40858408f4104bc80d90",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 0,
+              "bytes": 0,
+              "entries": 0,
+              "identity": [
+                2096,
+                560049
+              ],
+              "inventory_sha256": "900f0f7698389332e5bd8fad79e2bcebf1b75500ae22c99b4068e1a8359cef4d",
+              "name": "a282b3334c9a41068fe8750971882007",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 2658304,
+              "bytes": 2429949,
+              "entries": 75,
+              "identity": [
+                2096,
+                766734
+              ],
+              "inventory_sha256": "d3ecb5cb07eb7914b843fa8ee8c7b9b904789c471fb3bd3218a9defd0059245d",
+              "name": "a5ddb12e-9f0e-4b2a-8a38-33fa5d74048b",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 8192,
+              "bytes": 4878,
+              "entries": 1,
+              "identity": [
+                2096,
+                1018124
+              ],
+              "inventory_sha256": "2f4cc5ee79b8c96b78cd691778b62d987715ddf34bde72bb4b76472a36464b87",
+              "name": "aa98e07e41704a96a46b6eac01794f9c",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 2670592,
+              "bytes": 2438053,
+              "entries": 77,
+              "identity": [
+                2096,
+                1349130
+              ],
+              "inventory_sha256": "62c6a33ff3a005566b77fd9f0a9a7df9569985dcf3f9083ce11273b4f63d552f",
+              "name": "acec9141-914f-4c46-99e9-598929eac758",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 730722304,
+              "bytes": 730549652,
+              "entries": 52,
+              "identity": [
+                2096,
+                1086089
+              ],
+              "inventory_sha256": "13b581297df8c1b8dc9fe664efa09a766bd49d6566457b16d9d01c380bee73f5",
+              "name": "acec9141-914f-4c46-99e9-598929eac758-retry-crash",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 8192,
+              "bytes": 4883,
+              "entries": 1,
+              "identity": [
+                2096,
+                559396
+              ],
+              "inventory_sha256": "69eabdf619c6fad3daff8136cca188ef46d1ca30217d4382377215f8c2fe3a18",
+              "name": "bf28e96db5e44e7b8c4795121c04965e",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 8192,
+              "bytes": 4753,
+              "entries": 1,
+              "identity": [
+                2096,
+                1214213
+              ],
+              "inventory_sha256": "7cc50b754966cf3530a097578e4966eff4b2b6eb422ce382f959fdb57c59cd47",
+              "name": "bf3248a758524b8ab52d49974694e542",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 720896,
+              "bytes": 654841,
+              "entries": 23,
+              "identity": [
+                2096,
+                87248
+              ],
+              "inventory_sha256": "d099f809e7a73f35e8785960e652d97a3d965ef163b990ff94492ec93257543d",
+              "name": "caedf213142345568410b75ed74f13bb",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 716206080,
+              "bytes": 715945556,
+              "entries": 84,
+              "identity": [
+                2096,
+                557743
+              ],
+              "inventory_sha256": "edbb0da91407229f8dd3e1de1fb78e55132da68b9c2e120985d67aa3bc0158c4",
+              "name": "cf1bfda3be544b9e8ae2847b9ee52df9",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 724992,
+              "bytes": 658133,
+              "entries": 23,
+              "identity": [
+                2096,
+                768763
+              ],
+              "inventory_sha256": "0941e158591ac6049786affa05db65eddd75cd67c3305cca062435c59d97743a",
+              "name": "ec902f738379470f9f677b33c12676a4",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            },
+            {
+              "allocated_bytes": 0,
+              "bytes": 0,
+              "entries": 0,
+              "identity": [
+                2096,
+                1149857
+              ],
+              "inventory_sha256": "6e315b8fd7bb4f1e696150823c9b6fd57b6d27a5288de0161132b4a19084a18b",
+              "name": "f9c47f3cbf3f4d80aee9382cda907118",
+              "reason": "failure evidence is always retained",
+              "status": "protected",
+              "unsafe_members": false
+            }
+          ],
+          "status": "present"
+        }
+      ],
+      "schema": 1,
+      "workspace": "/home/lyldalek/workspace/qbdi-android"
+    },
+    "read_only": true,
+    "success_logical_bytes": 1463012030,
+    "success_runs": 2
+  },
+  "final_verification": {
+    "actual_local_frida_probe_passed": true,
+    "command": "python3 -m unittest scripts.tests.test_qtrace_artifacts scripts.tests.test_qtrace_process scripts.tests.test_qtrace_process_fault_matrix scripts.tests.test_qtrace_injector scripts.tests.test_qtrace_device scripts.tests.test_qtrace_evidence scripts.tests.test_bounded_process scripts.tests.test_qtrace_contracts scripts.tests.test_qtrace_session scripts.tests.test_qtrace_cli -q",
+    "elapsed_seconds": 37.283,
+    "exit_code": 0,
+    "log": "artifacts/complete-optimization-2026-10-19/cli/python-focused-final.log",
+    "log_sha256": "41d804c212b54dfb8127bad1e8abe1a58b495e1b740623b39ce8a5d327987393",
+    "matrix_cells_passed": 36,
+    "scope": "CLI artifacts/process/injector/device/evidence/contracts/session/CLI; no Android capture or native gate claimed.",
+    "status": "passed",
+    "tests": 369
+  },
+  "frida_actual_android_probe": {
+    "record_path": "artifacts/complete-optimization-2026-10-19/cli/frida-pixel-cleanup.json",
+    "result": {
+      "detached_reason": "process-terminated",
+      "elapsed_ms": 501.8689839998842,
+      "kind": "actual Android suspended-process cleanup with full fixed agent",
+      "package": "com.aprz.qbdiandroid",
+      "passed": true,
+      "pid": 19313,
+      "receipt": true,
+      "rpc_response": 19313,
+      "serial": "1C111FDF600G6S",
+      "version": "17.24.2"
+    },
+    "scope": "Actual Pixel 6 suspended fixed demo process, full agent, no native tracer request; one success-path ownership/termination proof, not a latency gate."
+  },
+  "frida_actual_runtime_probe": {
+    "command": "PYTHONPATH=artifacts/xiaomi-validation/venv/lib/python3.11/site-packages timeout 10s python3 /tmp/qtrace-frida-owned-cleanup-probe.py",
+    "first_attempt": {
+      "command": "timeout 10s artifacts/xiaomi-validation/venv/bin/python /tmp/qtrace-frida-owned-cleanup-probe.py",
+      "original_target_cleanup": "Natural exit confirmed by exact process absence before successful retry.",
+      "status": "unavailable Python 3.11 os.pidfd_open"
+    },
+    "result": {
+      "detached_ms": 47.121565003180876,
+      "detached_reason": "process-terminated",
+      "frida_version": "17.24.2",
+      "method": "Actual Frida local suspended process and repository agent; no tracer request is posted.",
+      "passed": true,
+      "pid": 322662,
+      "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+      "rpc_response": 322662,
+      "terminated": true
+    },
+    "scope": "Local Linux Frida suspended process and full fixed agent; no tracer startup request; not Android performance or device transport-loss delivery.",
+    "source": "import json, os, platform, signal, sys, threading, time\nfrom pathlib import Path\nimport frida\n\nresult = {'frida_version': frida.__version__, 'platform': platform.platform(),\n          'method': 'Actual Frida local suspended process and repository agent; no tracer request is posted.'}\ndevice = frida.get_local_device()\npid = device.spawn([sys.executable, '-c', 'import time; time.sleep(30)'])\npidfd = os.pidfd_open(pid)\nsession = None\nterminated = threading.Event()\nstarted = time.monotonic()\ntry:\n    result['pid'] = pid\n    session = device.attach(pid)\n    def detached(reason, *details):\n        result['detached_reason'] = reason\n        result['detached_ms'] = (time.monotonic() - started) * 1000\n        terminated.set()\n    session.on('detached', detached)\n    script = session.create_script(Path('qtrace/agent.js').read_text())\n    script.load()\n    try:\n        result['rpc_response'] = script.exports_sync.qtrace_abort()\n    except Exception as error:\n        result['rpc_error'] = type(error).__name__ + ': ' + str(error)\n    result['terminated'] = terminated.wait(2)\n    result['passed'] = result['terminated'] and result.get('detached_reason') == 'process-terminated'\nfinally:\n    try:\n        signal.pidfd_send_signal(pidfd, signal.SIGKILL)\n    except ProcessLookupError:\n        pass\n    os.close(pidfd)\n    if session is not None:\n        try: session.detach()\n        except Exception: pass\nprint(json.dumps(result, indent=2))\nif not result.get('passed'): raise SystemExit(1)\n"
+  },
+  "head": "72548df9c099f3e7813016eba5bd46da34099760",
+  "injector_regression_against_original_source": {
+    "actual_failures": 3,
+    "errors": 0,
+    "expected_failures": 3,
+    "head": "72548df9c099f3e7813016eba5bd46da34099760",
+    "method": "Temporary qtrace package overlay with HEAD injector.py/agent.js and current safety regression tests; working tree not reverted.",
+    "test_names": [
+      "test_pre_resume_load_failure_retains_cleanup_incomplete_without_raw_pid_kill",
+      "test_pre_resume_cleanup_uses_original_session_termination_receipt",
+      "test_disconnected_original_session_never_kills_a_reused_remote_pid"
+    ],
+    "tests": 3
+  },
+  "items": [
+    "CLI-01",
+    "CLI-02",
+    "OPS-01"
+  ],
+  "limits": [
+    "Unconfirmed pre-resume process termination is explicitly incomplete; original suspended process can remain alive.",
+    "Metadata inventory digest is not a checksum of artifact content.",
+    "No process API abstraction added; existing ownership boundaries retained.",
+    "Actual Pixel positive cleanup receipt is exercised; disconnected-session/PID-reuse cases use controlled fault injection, not forced Android PID recycling."
+  ],
+  "process_fault_matrix": {
+    "cells": 36,
+    "command_timeout_seconds": 0.6,
+    "device_transport": "temporary fake ADB; real host processes, namespace, cancellation, output and reaping",
+    "entries": [
+      "capture_bounded",
+      "BoundedRunner.capture",
+      "BoundedRunner.stream",
+      "AdbDevice.shell",
+      "FridaInjector.install force-stop",
+      "SubprocessRunner.run"
+    ],
+    "faults": [
+      "timeout",
+      "cancel",
+      "ADB disconnect",
+      "PID reuse",
+      "output limit",
+      "setsid double-fork orphan"
+    ],
+    "pid_reuse_injection": "Changed wrapper starttime with pidfd path disabled; raw kill prohibited; test-owned original pidfd provides final cleanup.",
+    "process_identity": "AF_UNIX peer credentials plus host PID/starttime",
+    "production_helper_changed": false,
+    "stdout_bounds_bytes": {
+      "AdbDevice.shell": 256,
+      "BoundedRunner.capture": 256,
+      "BoundedRunner.stream": 256,
+      "FridaInjector.install force-stop": 65536,
+      "SubprocessRunner.run": 1048576,
+      "capture_bounded": 256
+    },
+    "test": "scripts.tests.test_qtrace_process_fault_matrix.ProcessFaultMatrixTests.test_fault_matrix_rejects_success_and_reaps_exact_target_identities",
+    "wall_assertion_seconds": 1.5
+  },
+  "schema": 1,
+  "source_sha256": {
+    "qtrace/_artifact_common.py": "5da2809225a985698fa7db1c42114d31d48b5c6b5a84b403e8f67d5007778121",
+    "qtrace/_artifact_publication.py": "01e7d29121ad3ec9b806bd7b28cfb722a390c6df6ab64cdefc012c130e5b130d",
+    "qtrace/_artifact_remote.py": "fd037a3033dd09fd9e494c7326ed420232c47ce696050c981232895fc9ab8164",
+    "qtrace/_artifact_reports.py": "d236f0af8017bd32cf9bddccb666c22da93a7a7bf687a7023181eb815a4f0653",
+    "qtrace/_artifact_validation.py": "d8948a2931f162d432041bb3033718b19b779edf5490adbf748718670c0884bb",
+    "qtrace/agent.js": "1433ce9fadbadbf3dd1c947014280d30a1397f5769a8e14fad05dcd199a3045e",
+    "qtrace/artifacts.py": "60f561c31395fcd040666e81e3c65160f6719d0257e1c5745499c82fd675a764",
+    "qtrace/injector.py": "caf0f77861307d91934b471966891cf5f62b20e098285e62a7c75b10f3991437",
+    "scripts/bounded_process.py": "138505647ff639cef2ccbef1c7fe864a861aba718fef787900759be3701b35f5",
+    "scripts/qtrace_evidence.py": "f72c609a259a130a78e15f6032c37018ce6c15dc83ecf8f8c5af16a4c47b9c3f",
+    "scripts/tests/test_qtrace_artifacts.py": "23162b9d3abdb187ec06f2bc383506a05f8f5f062d9fcb6afb61dc709afaec21",
+    "scripts/tests/test_qtrace_contracts.py": "be8c20bdc91185315bf639a3208ba40d3ab433fb260473d7e990dbcb66f8ec4e",
+    "scripts/tests/test_qtrace_evidence.py": "0a36fc2ca590b058d7a3eecf6c35dc704d5378bc596b6b7d135d9b270cdf846b",
+    "scripts/tests/test_qtrace_injector.py": "69999a6aa892c3326ed9270c0321128d9c655d1d70bada3f32fa6602b5c602bb",
+    "scripts/tests/test_qtrace_process_fault_matrix.py": "f07e47eabcbba13e01b06a4013cef98b5679478fd7bb2ba556ba42d5f8180225"
+  },
+  "state": "working tree, unrelated UI changes retained"
+}

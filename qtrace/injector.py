@@ -415,6 +415,7 @@ class _Mailbox:
         self.resume_phase = "before"
         self.initialized = False
         self.installed = False
+        self.detached_reason: object = None
         self.generation: int | None = None
         self.normalized_scenes: tuple[ResolvedScene, ...] | None = None
 
@@ -437,8 +438,20 @@ class _Mailbox:
 
     def on_detached(self, reason: object, *details: object) -> None:
         with self.lock:
+            self.detached_reason = reason
             self.events.append(("detached", reason, details))
             self.event.set()
+
+    def wait_for_process_exit(self, deadline: float) -> bool:
+        """Accept termination only from the session already attached to this spawn."""
+        while True:
+            with self.lock:
+                if self.detached_reason is not None:
+                    return self.detached_reason == "process-terminated"
+                self.event.clear()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self.event.wait(remaining):
+                return False
 
     def wait_for(self, phase: str, deadline: float) -> None:
         while True:
@@ -605,6 +618,7 @@ def _run_injection_worker(
     source: str,
     provider: FridaProvider,
     deadline: float,
+    cleanup_deadline: float,
     channel: Any,
 ) -> None:
     request = validated.request
@@ -612,6 +626,10 @@ def _run_injection_worker(
     script: Any | None = None
     primary: BaseException | None = None
     result: InjectionResult | None = None
+    pid: int | None = None
+    mailbox: _Mailbox | None = None
+    script_loaded = False
+    resumed = False
 
     def budget() -> float:
         remaining = deadline - time.monotonic()
@@ -656,6 +674,7 @@ def _run_injection_worker(
             lambda: script.on("message", mailbox.on_message),
         )
         _external("frida.load_failed", "inject.load", script.load)
+        script_loaded = True
         remaining_ms = max(1, int(budget() * 1000))
         envelope = {
             "package": request.package,
@@ -688,6 +707,7 @@ def _run_injection_worker(
             lambda: frida_device.resume(pid),
         )
         mailbox.mark_resumed()
+        resumed = True
         _send_worker_event(channel, "resumed", pid)
         mailbox.wait_for("installed", deadline)
         assert mailbox.generation is not None and mailbox.normalized_scenes is not None
@@ -703,6 +723,26 @@ def _run_injection_worker(
     finally:
         cleanup_error: BaseException | None = None
         detach_succeeded = False
+        if pid is not None and not resumed:
+            cleaned = False
+            detail = "original process script was not loaded"
+            if mailbox is not None and mailbox.detached_reason == "process-terminated":
+                cleaned, detail = True, "original process already terminated"
+            elif script_loaded and mailbox is not None and time.monotonic() < cleanup_deadline:
+                try:
+                    response = script.exports_sync.qtrace_abort()
+                    if type(response) is not int or response != pid:
+                        raise ValueError("spawn cleanup RPC returned a different PID")
+                    cleaned = mailbox.wait_for_process_exit(cleanup_deadline)
+                    detail = ("original process termination confirmed" if cleaned else
+                              "original process termination was not confirmed")
+                except BaseException as error:
+                    cleaned = mailbox.wait_for_process_exit(cleanup_deadline)
+                    detail = ("original process termination confirmed" if cleaned else
+                              f"original process cleanup RPC failed: {error}")
+            _send_worker_event(channel, "spawn_cleanup", {
+                "pid": pid, "complete": cleaned, "detail": detail[:512],
+            })
         callbacks = (
             ("unload", getattr(script, "unload", None) if script is not None else None),
             ("detach", getattr(session, "detach", None) if session is not None else None),
@@ -745,6 +785,7 @@ class _WorkerState:
     outcome: object = None
     complete: bool = False
     cleanup_error: object = None
+    spawn_cleanup: Mapping[str, object] | None = None
 
 
 def _record_worker_event(state: _WorkerState, event: object) -> None:
@@ -762,6 +803,16 @@ def _record_worker_event(state: _WorkerState, event: object) -> None:
         if state.pid is None or state.resumed or state.outcome_kind is not None or payload != state.pid:
             _fail("frida.worker_protocol_invalid", "inject.worker", "worker resumed event is invalid")
         state.resumed = True
+        return
+    if kind == "spawn_cleanup":
+        if (state.pid is None or state.resumed or state.spawn_cleanup is not None
+                or state.outcome_kind is not None or type(payload) is not dict
+                or set(payload) != {"pid", "complete", "detail"}
+                or type(payload["pid"]) is not int or payload["pid"] != state.pid
+                or type(payload["complete"]) is not bool
+                or type(payload["detail"]) is not str or len(payload["detail"]) > 512):
+            _fail("frida.worker_protocol_invalid", "inject.worker", "worker spawn cleanup event is invalid")
+        state.spawn_cleanup = payload
         return
     if kind == "result":
         if (
@@ -831,6 +882,7 @@ class FridaInjector:
             setup_timeout * _CLEANUP_BUDGET_FRACTION,
         )
         worker_deadline = deadline - cleanup_budget
+        worker_cleanup_deadline = deadline - cleanup_budget * 0.5
 
         def budget() -> float:
             remaining = deadline - time.monotonic()
@@ -852,7 +904,7 @@ class FridaInjector:
         receiver, sender = context.Pipe(duplex=False)
         worker = context.Process(
             target=_run_injection_worker,
-            args=(validated, source, provider, worker_deadline, sender),
+            args=(validated, source, provider, worker_deadline, worker_cleanup_deadline, sender),
             name="qtrace-frida-owner",
         )
         state = _WorkerState()
@@ -867,7 +919,7 @@ class FridaInjector:
             sender.close()
             provider = None
             while not state.complete:
-                remaining = worker_deadline - time.monotonic()
+                remaining = worker_cleanup_deadline - time.monotonic()
                 if remaining <= 0 or not receiver.poll(remaining):
                     timed_out = True
                     break
@@ -892,7 +944,7 @@ class FridaInjector:
                         break
             try:
                 if worker_started:
-                    graceful = max(0.0, worker_deadline - time.monotonic()) if state.complete else 0.0
+                    graceful = max(0.0, worker_cleanup_deadline - time.monotonic()) if state.complete else 0.0
                     forced = _kill_and_reap_worker(worker, graceful)
                     worker_exitcode = worker.exitcode
             except BaseException as error:
@@ -903,38 +955,29 @@ class FridaInjector:
                 if worker_started and not worker.is_alive():
                     worker.close()
 
-        cleanup_error: BaseException | None = None
-        if state.pid is not None and not state.resumed:
-            cleanup_remaining = deadline - time.monotonic()
-            if cleanup_remaining <= 0:
-                cleanup_error = QtraceError(
-                    "inject.cleanup_timeout",
-                    "inject.cleanup",
-                    f"no setup budget remained to kill spawned PID {state.pid}",
-                )
-            else:
-                try:
-                    self._device.target_shell(
-                        "kill", "-9", str(state.pid),
-                        timeout=min(_CLEANUP_TIMEOUT_SECONDS, cleanup_remaining),
-                        maximum_bytes=_ADB_OUTPUT_BYTES,
-                    )
-                except BaseException as error:
-                    cleanup_error = error
+        def include_cleanup_evidence(error: BaseException) -> BaseException:
+            if (state.pid is None or state.resumed or
+                    (state.spawn_cleanup is not None and state.spawn_cleanup["complete"])):
+                return error
+            detail = (state.spawn_cleanup["detail"] if state.spawn_cleanup is not None else
+                      "worker ended without a termination receipt from the original process")
+            bounded_detail = str(detail).encode("utf-8")[:160].decode("utf-8", errors="ignore")
+            marker = f"inject.cleanup_incomplete: spawned PID {state.pid}; {bounded_detail}"
+            if isinstance(error, QtraceError):
+                return QtraceError(error.code, error.stage, f"{marker}; primary: {error.detail}",
+                                   exit_code=error.exit_code)
+            error.add_note(marker)
+            return error
 
         if monitor_error is not None:
-            raise monitor_error
+            raise include_cleanup_evidence(monitor_error)
         if state.outcome_kind == "error":
-            raise _restore_worker_error(state.outcome)
+            raise include_cleanup_evidence(_restore_worker_error(state.outcome))
         if timed_out or forced or not state.complete:
-            _fail("inject.timeout", "inject.wait", "Frida setup worker exceeded the setup deadline")
+            raise include_cleanup_evidence(QtraceError(
+                "inject.timeout", "inject.wait", "Frida setup worker exceeded the setup deadline"))
         if worker_exitcode != 0:
             _fail("frida.worker_failed", "inject.worker", f"Frida worker exited with status {worker_exitcode}")
-        if cleanup_error is not None:
-            if isinstance(cleanup_error, QtraceError):
-                raise cleanup_error
-            wrapped = QtraceError("device.kill_failed", "inject.cleanup", f"spawned PID cleanup failed: {cleanup_error}")
-            raise wrapped from cleanup_error
         if state.cleanup_error is not None:
             raise _restore_worker_error(state.cleanup_error)
         if state.outcome_kind != "result" or not isinstance(state.outcome, InjectionResult):

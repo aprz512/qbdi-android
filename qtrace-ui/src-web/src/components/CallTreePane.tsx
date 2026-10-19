@@ -144,10 +144,10 @@ function CallTreeView({ tree, onJump, loadPage }: Omit<Props, "tree"> & { tree: 
     {view.error !== null && <p role="alert">{view.error}</p>}
     <div ref={viewport} role="tree" aria-label="Call frames" style={{ height: VIEW_HEIGHT, overflowY: "auto" }} onScroll={event => setScrollTop(event.currentTarget.scrollTop)}>
       <div style={{ position: "relative", height: rows.length * ROW_HEIGHT }}>
-        {rows.slice(first, last).map((row, index) => <div key={"node" in row ? `node-${row.node.id}` : `page-${row.parent}-${row.previous}`} style={{ position: "absolute", top: (first + index) * ROW_HEIGHT, height: ROW_HEIGHT, left: row.depth * 16, whiteSpace: "nowrap" }}>
-          {"node" in row ? <div role="treeitem" aria-level={row.depth + 1} aria-posinset={row.position} aria-setsize={row.total} aria-expanded={row.node.child_count > 0 ? view.expanded.has(row.node.id) : undefined}>
+        {rows.slice(first, last).map((row, index) => <div key={"node" in row ? `node-${row.node.id}` : `page-${row.parent}-${row.previous}`} style={{ position: "absolute", top: (first + index) * ROW_HEIGHT, height: ROW_HEIGHT, left: Math.min(row.depth, 6) * 16, right: 0, whiteSpace: "nowrap" }}>
+          {"node" in row ? <div className="call-tree-item" role="treeitem" aria-level={row.depth + 1} aria-posinset={row.position} aria-setsize={row.total} aria-expanded={row.node.child_count > 0 ? view.expanded.has(row.node.id) : undefined}>
             <button aria-label={`${view.expanded.has(row.node.id) ? "Collapse" : "Expand"} ${row.node.display}`} disabled={row.node.child_count === 0} onClick={() => toggle(row.node)}>{view.expanded.has(row.node.id) ? "−" : "+"}</button>
-            <button onClick={() => onJump(row.node.source_row_start)}>{row.node.display} · {row.node.state}</button>
+            <button className="call-tree-jump" title={`${row.node.display} · ${row.node.state}`} onClick={() => onJump(row.node.source_row_start)}>{row.node.display} · {row.node.state}</button>
           </div> : <button disabled={view.pending.has(row.parent ?? -1)} onClick={() => void fetchPage(row.parent, row.offset)}>{row.previous ? "Previous calls" : row.offset === 0 ? "Load calls" : "Load more calls"}</button>}
         </div>)}
       </div>

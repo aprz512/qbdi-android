@@ -13,10 +13,11 @@ use crate::cache::{OwnedSection, OwnedSectionData, map_io_error};
 use super::{
     BuildOptions, ByteArena, ByteSpan, CompletenessRow, DefinitionRow, EventColumn, IndexCatalog,
     IndexError, InstructionRow, MemoryRow, ModuleRow, NormalizedCatalog, PredecodedEvents,
-    SemanticRow, SortedMap, SourceKeyRow,
+    SemanticRow, SortedMap,
     checkpoints::{RegisterAccess, RegisterObservationRow},
     intervals::{IntervalEntry, IntervalIndex},
     postings::{DeltaRun, PostingList},
+    source_keys::SourceKeyIndex,
 };
 
 pub(super) const CAPABILITIES: &str = "capabilities.v2";
@@ -736,11 +737,11 @@ fn encode_block_max(rows: &[u64], guard: &dyn WorkGuard) -> Result<Vec<u8>, Inde
     }
     out.finish()
 }
-fn encode_source_rows(rows: &[SourceKeyRow], guard: &dyn WorkGuard) -> Result<Vec<u8>, IndexError> {
+fn encode_source_rows(rows: &SourceKeyIndex, guard: &dyn WorkGuard) -> Result<Vec<u8>, IndexError> {
     let mut out = Encoder::rows(rows.len(), 8, guard)?;
-    for (i, v) in rows.iter().enumerate() {
+    for (i, row) in rows.rows().enumerate() {
         checkpoint(guard, i)?;
-        out.u64(v.row as u64);
+        out.u64(row as u64);
     }
     out.finish()
 }
@@ -1420,20 +1421,12 @@ fn decode_source_rows(
     bytes: &[u8],
     keys: &[EventKey],
     guard: &dyn WorkGuard,
-) -> Result<Vec<SourceKeyRow>, IndexError> {
-    let c = Cursor::new(bytes, 8)?;
-    if c.rows() != keys.len() {
+) -> Result<SourceKeyIndex, IndexError> {
+    let cursor = Cursor::new(bytes, 8)?;
+    if cursor.rows() != keys.len() {
         return Err(IndexError::corrupt("source row cardinality"));
     }
-    let mut out = reserved(c.rows(), "source rows", guard)?;
-    for r in 0..c.rows() {
-        checkpoint(guard, r)?;
-        let row = usize_value(c.u64(r, 0)?)?;
-        keys.get(row)
-            .ok_or_else(|| IndexError::corrupt("source row outside keys"))?;
-        out.push(SourceKeyRow { row });
-    }
-    Ok(out)
+    SourceKeyIndex::read(cursor.rows(), |row| usize_value(cursor.u64(row, 0)?), guard)
 }
 
 fn reserved<T>(

@@ -7,6 +7,7 @@
 #include "core/trace_config.h"
 #include "core/trace_process_lifecycle.h"
 #include "core/tracer_configuration.h"
+#include "core/tracer_json_endpoint.h"
 #include "handlers/call_handlers.h"
 #include "hooks/inline_hook_adapter.h"
 #include "hooks/thread_create_gateway.h"
@@ -2028,89 +2029,27 @@ static void apply_accepted_configuration(TraceConfig config,
     }
 }
 
-static int32_t write_json_result(const JsonCallResult &result, char *response,
-                                 uint64_t *response_size) noexcept {
-    *response_size = result.required_size;
-    if (result.transport_code != QTRACE_JSON_OK) return result.transport_code;
-    if (result.required_size != result.payload.size() + 1) {
-        *response_size = 0;
-        return QTRACE_JSON_INVALID_ARGUMENT;
-    }
-    std::memcpy(response, result.payload.c_str(), result.payload.size() + 1);
-    return QTRACE_JSON_OK;
+static bool tracer_json_ready() noexcept {
+    return !trace_process_child_detached() && tracer_fork_lifecycle_ready();
 }
 
-static int32_t write_internal_error_json(
-        char *response, uint64_t response_capacity,
-        uint64_t *response_size) noexcept {
-    static constexpr char payload[] =
-            R"json({"responseSchemaVersion":1,"ok":false,"error":{"code":"INTERNAL_ERROR","path":"$","message":"internal tracer configuration error"}})json";
-    constexpr uint64_t required_size = sizeof(payload);
-    *response_size = required_size;
-    if (response_capacity < required_size) {
-        return QTRACE_JSON_RESPONSE_TOO_SMALL;
-    }
-    std::memcpy(response, payload, sizeof(payload));
-    return QTRACE_JSON_OK;
-}
+static constinit TracerJsonEndpoint g_json_endpoint(
+        g_tracer_configuration, g_configuration_call_lock,
+        tracer_json_ready, apply_accepted_configuration);
 
 extern "C" __attribute__((visibility("default"))) int32_t
 qbdi_tracer_configure_json(const char *request, uint64_t request_size,
                            char *response, uint64_t response_capacity,
                            uint64_t *response_size) noexcept {
-    if (response_size == nullptr) return QTRACE_JSON_INVALID_ARGUMENT;
-    *response_size = 0;
-    if (request == nullptr || response == nullptr ||
-        request_size > std::numeric_limits<size_t>::max() ||
-        response_capacity > std::numeric_limits<size_t>::max()) {
-        return QTRACE_JSON_INVALID_ARGUMENT;
-    }
-    if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) {
-        return QTRACE_JSON_INVALID_ARGUMENT;
-    }
-
-    try {
-        std::lock_guard<std::mutex> call_guard(g_configuration_call_lock);
-        JsonCallResult result = g_tracer_configuration.configure(
-                std::string_view(request, static_cast<size_t>(request_size)),
-                response_capacity);
-        const int32_t transport_code = write_json_result(
-                result, response, response_size);
-        if (transport_code != QTRACE_JSON_OK) return transport_code;
-        if (result.published()) {
-            apply_accepted_configuration(
-                    std::move(result.published_config),
-                    std::move(result.active_config),
-                    result.published_generation);
-        }
-        return QTRACE_JSON_OK;
-    } catch (...) {
-        return write_internal_error_json(response, response_capacity,
-                                         response_size);
-    }
+    return g_json_endpoint.configure(request, request_size, response,
+                                     response_capacity, response_size);
 }
 
 extern "C" __attribute__((visibility("default"))) int32_t
 qbdi_tracer_get_status_json(uint64_t generation, char *response,
                             uint64_t response_capacity,
                             uint64_t *response_size) noexcept {
-    if (response_size == nullptr) return QTRACE_JSON_INVALID_ARGUMENT;
-    *response_size = 0;
-    if (response == nullptr ||
-        response_capacity > std::numeric_limits<size_t>::max()) {
-        return QTRACE_JSON_INVALID_ARGUMENT;
-    }
-    if (trace_process_child_detached() || !tracer_fork_lifecycle_ready()) {
-        return QTRACE_JSON_INVALID_ARGUMENT;
-    }
-    try {
-        return write_json_result(g_tracer_configuration.status(
-                                         generation, response_capacity),
-                                 response, response_size);
-    } catch (...) {
-        return write_internal_error_json(response, response_capacity,
-                                         response_size);
-    }
+    return g_json_endpoint.status(generation, response, response_capacity, response_size);
 }
 
 extern "C" __attribute__((visibility("default"))) int

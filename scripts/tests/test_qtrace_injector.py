@@ -190,6 +190,8 @@ class Scenario:
         self.detach_error = None
         self.kill_error = None
         self.kill_sleeps_for_timeout = False
+        self.abort_error = None
+        self.abort_blocks = False
 
 
 class FakeScript:
@@ -198,6 +200,19 @@ class FakeScript:
         self.events = events
         self.handler = None
         self.posts = SharedLog()
+
+    @property
+    def exports_sync(self):
+        return self
+
+    def qtrace_abort(self):
+        self.events.append(("abort-original-process", 4242))
+        if self.scenario.abort_blocks:
+            time.sleep(2.0)
+        if self.scenario.abort_error:
+            raise self.scenario.abort_error
+        self.handler.__self__.on_detached("process-terminated")
+        return 4242
 
     def on(self, event, handler):
         self.events.append(("on", event))
@@ -492,6 +507,16 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertEqual("inject.request_invalid", caught.exception.code)
         self.assertEqual([], harness.events.snapshot())
 
+    def test_oversized_native_request_fails_before_adb_or_worker_start(self):
+        harness = InjectorHarness()
+        request = native_request()
+        request["padding"] = "x" * (1024 * 1024)
+        with self.assertRaises(QtraceError) as caught:
+            harness.install(harness.request(native_request=request))
+        self.assertEqual("inject.request_invalid", caught.exception.code)
+        self.assertIn("exceeds 1 MiB", caught.exception.detail)
+        self.assertEqual([], harness.events.snapshot())
+
     def test_module_load_is_authoritative_for_ok_and_deferred_deployments(self):
         for load_probe_status in ("ok", "deferred"):
             scenario = Scenario()
@@ -507,7 +532,7 @@ class FridaInjectorTests(unittest.TestCase):
                 harness.install()
 
             self.assertEqual(ErrorCode.TRACER_LOAD_FAILED.value, caught.exception.code)
-            self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+            self.assertEqual([], harness.adb.kill_calls)
             self.assertIn("unload", harness.events)
             self.assertIn("detach", harness.events)
             self.assertFalse(any(event == ("resume", 4242) for event in harness.events))
@@ -524,7 +549,7 @@ class FridaInjectorTests(unittest.TestCase):
             with self.subTest(code=code), self.assertRaises(QtraceError) as caught:
                 harness.install()
             self.assertEqual(code, caught.exception.code)
-            self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+            self.assertEqual([], harness.adb.kill_calls)
 
     def test_rejects_malformed_outer_messages_data_and_script_errors(self):
         cases = (
@@ -540,7 +565,7 @@ class FridaInjectorTests(unittest.TestCase):
             harness = InjectorHarness(scenario)
             with self.subTest(message=message), self.assertRaises(QtraceError):
                 harness.install()
-            self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+            self.assertEqual([], harness.adb.kill_calls)
 
         scenario = Scenario()
         harness = InjectorHarness(scenario)
@@ -553,7 +578,7 @@ class FridaInjectorTests(unittest.TestCase):
         harness.provider.device.script.post = post_with_data
         with self.assertRaises(QtraceError):
             harness.install()
-        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+        self.assertEqual([], harness.adb.kill_calls)
         self.assertTrue(callable(original_post))
 
     def test_rejects_message_order_duplicates_and_identity_mismatches(self):
@@ -580,7 +605,7 @@ class FridaInjectorTests(unittest.TestCase):
             harness = InjectorHarness(scenario)
             with self.subTest(messages=messages), self.assertRaises(QtraceError):
                 harness.install()
-            self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+            self.assertEqual([], harness.adb.kill_calls)
 
         scenario = Scenario()
         scenario.resume_messages = [installed_message(), installed_message()]
@@ -601,7 +626,7 @@ class FridaInjectorTests(unittest.TestCase):
 
         self.assertEqual("inject.protocol_invalid", caught.exception.code)
         self.assertFalse(any(event == ("resume", 4242) for event in harness.events))
-        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+        self.assertEqual([], harness.adb.kill_calls)
 
     def test_rejects_installed_message_that_arrived_before_resume_returned(self):
         scenario = Scenario()
@@ -664,7 +689,7 @@ class FridaInjectorTests(unittest.TestCase):
             harness.install(harness.request(setup_timeout=0.25))
         self.assertEqual("inject.timeout", caught.exception.code)
         self.assertLess(time.monotonic() - started, 0.75)
-        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+        self.assertEqual([], harness.adb.kill_calls)
 
         post_resume = Scenario()
         post_resume.resume_messages = []
@@ -676,10 +701,10 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 0.75)
         self.assertEqual([], harness.adb.kill_calls)
 
-    def test_pre_resume_kill_uses_budget_reserved_inside_setup_deadline(self):
+    def test_pre_resume_cleanup_rpc_stays_inside_setup_deadline(self):
         scenario = Scenario()
         scenario.post_messages = []
-        scenario.kill_sleeps_for_timeout = True
+        scenario.abort_blocks = True
         harness = InjectorHarness(scenario)
         setup_timeout = 0.15
 
@@ -689,9 +714,9 @@ class FridaInjectorTests(unittest.TestCase):
         elapsed = time.monotonic() - started
 
         self.assertEqual("inject.timeout", caught.exception.code)
-        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
-        self.assertEqual(1, len(harness.adb.kill_timeouts))
-        self.assertLessEqual(harness.adb.kill_timeouts[0], setup_timeout * 0.4)
+        self.assertEqual([], harness.adb.kill_calls)
+        self.assertIn(("abort-original-process", 4242), harness.events)
+        self.assertIn("inject.cleanup_incomplete", caught.exception.detail)
         self.assertLess(elapsed, setup_timeout + 0.1)
 
     def test_process_exit_uses_spawned_pid_and_never_kills_after_resume(self):
@@ -730,7 +755,7 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertIn("device-lost", caught.exception.detail)
         self.assertEqual([], harness.adb.kill_calls)
 
-    def test_pre_resume_frida_failure_kills_only_exact_spawned_pid(self):
+    def test_pre_resume_load_failure_retains_cleanup_incomplete_without_raw_pid_kill(self):
         scenario = Scenario()
         scenario.load_error = RuntimeError("load failed\nraw")
         harness = InjectorHarness(scenario)
@@ -738,7 +763,9 @@ class FridaInjectorTests(unittest.TestCase):
             harness.install()
         self.assertEqual("frida.load_failed", caught.exception.code)
         self.assertNotIn("\n", str(caught.exception))
-        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+        self.assertEqual([], harness.adb.kill_calls)
+        self.assertIn("inject.cleanup_incomplete: spawned PID 4242", caught.exception.detail)
+        self.assertNotIn(("abort-original-process", 4242), harness.events)
         self.assertNotIn(("adb", ("am", "force-stop", PACKAGE)), harness.events[1:])
 
     def test_keyboard_interrupt_is_preserved_after_stage_aware_cleanup(self):
@@ -749,7 +776,7 @@ class FridaInjectorTests(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             harness.install()
 
-        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+        self.assertEqual([], harness.adb.kill_calls)
         self.assertIn("unload", harness.events)
         self.assertIn("detach", harness.events)
 
@@ -758,14 +785,14 @@ class FridaInjectorTests(unittest.TestCase):
         scenario.post_messages = [error_message(ErrorCode.TRACER_LOAD_FAILED.value)]
         scenario.unload_error = RuntimeError("unload failed")
         scenario.detach_error = RuntimeError("detach failed")
-        scenario.kill_error = QtraceError("device.kill_failed", "inject.cleanup", "kill failed")
+        scenario.abort_error = RuntimeError("original session is disconnected")
         harness = InjectorHarness(scenario)
         with self.assertRaises(QtraceError) as caught:
             harness.install()
         self.assertEqual(ErrorCode.TRACER_LOAD_FAILED.value, caught.exception.code)
         self.assertIn("unload", harness.events)
         self.assertIn("detach", harness.events)
-        self.assertEqual([("kill", "-9", "4242")], harness.adb.kill_calls)
+        self.assertEqual([], harness.adb.kill_calls)
 
     def test_cleanup_failure_without_a_primary_error_is_reported_after_both_attempts(self):
         scenario = Scenario()
@@ -776,6 +803,73 @@ class FridaInjectorTests(unittest.TestCase):
             harness.install()
         self.assertEqual("frida.cleanup_failed", caught.exception.code)
         self.assertLess(harness.events.index("unload"), harness.events.index("detach"))
+        self.assertEqual([], harness.adb.kill_calls)
+
+    def test_pre_resume_cleanup_uses_original_session_termination_receipt(self):
+        scenario = Scenario()
+        scenario.post_messages = [error_message("NATIVE_CONFIG_REJECTED")]
+        harness = InjectorHarness(scenario)
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+        self.assertEqual("NATIVE_CONFIG_REJECTED", caught.exception.code)
+        self.assertIn(("abort-original-process", 4242), harness.events)
+        self.assertNotIn("inject.cleanup_incomplete", caught.exception.detail)
+        self.assertEqual([], harness.adb.kill_calls)
+
+    def test_disconnected_original_session_never_kills_a_reused_remote_pid(self):
+        scenario = Scenario()
+        scenario.post_messages = [error_message("NATIVE_CONFIG_REJECTED")]
+        scenario.abort_error = RuntimeError("original session destroyed; PID 4242 now belongs to another process")
+        harness = InjectorHarness(scenario)
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+        self.assertEqual("NATIVE_CONFIG_REJECTED", caught.exception.code)
+        self.assertIn("inject.cleanup_incomplete: spawned PID 4242", caught.exception.detail)
+        self.assertEqual([], harness.adb.kill_calls)
+        self.assertNotIn(("adb", ("am", "force-stop", PACKAGE)), harness.events[1:])
+
+    def test_attach_failure_records_unowned_spawn_without_guessing_pid_identity(self):
+        scenario = Scenario()
+        scenario.attach_error = RuntimeError("ADB transport disconnected")
+        harness = InjectorHarness(scenario)
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+        self.assertEqual("frida.attach_failed", caught.exception.code)
+        self.assertIn("inject.cleanup_incomplete: spawned PID 4242", caught.exception.detail)
+        self.assertEqual([], harness.adb.kill_calls)
+        self.assertNotIn(("abort-original-process", 4242), harness.events)
+
+    def test_long_primary_error_cannot_truncate_cleanup_incomplete_evidence(self):
+        scenario = Scenario()
+        scenario.load_error = RuntimeError("x" * 4096)
+        harness = InjectorHarness(scenario)
+        with self.assertRaises(QtraceError) as caught:
+            harness.install()
+        self.assertEqual("frida.load_failed", caught.exception.code)
+        self.assertIn("inject.cleanup_incomplete: spawned PID 4242", caught.exception.detail)
+        self.assertIn("primary: operation failed: ", caught.exception.detail)
+        self.assertLessEqual(len(caught.exception.detail.encode("utf-8")), 512)
+
+    def test_parent_cancellation_reaps_real_worker_and_records_unconfirmed_spawn(self):
+        scenario = Scenario()
+        scenario.post_messages = []
+        harness = InjectorHarness(scenario)
+        before = {worker.pid for worker in multiprocessing.active_children()}
+        from qtrace.injector import _record_worker_event
+
+        def cancel_after_pid(state, event):
+            _record_worker_event(state, event)
+            if event[0] == "pid":
+                raise KeyboardInterrupt("cancel injection after owned spawn")
+
+        # Cancel at the parent ownership transfer. No observer thread starts
+        # before fork, and no timing guess can race the target's setup deadline.
+        with patch("qtrace.injector._record_worker_event", side_effect=cancel_after_pid):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                harness.install(harness.request(setup_timeout=1.0))
+        self.assertIn("inject.cleanup_incomplete: spawned PID 4242",
+                      " ".join(getattr(caught.exception, "__notes__", ())))
+        self.assertEqual(before, {worker.pid for worker in multiprocessing.active_children()})
         self.assertEqual([], harness.adb.kill_calls)
 
     def test_raw_provider_and_frida_errors_are_stable_one_line_qtrace_errors(self):
@@ -908,8 +1002,8 @@ class FridaInjectorTests(unittest.TestCase):
         for stage, result in observed.items():
             self.assertLess(result["elapsed"], 0.7, (stage, result))
             self.assertEqual([], result["children"], (stage, result))
-        self.assertEqual([("kill", "-9", "4242")], observed["attach"]["kills"])
-        self.assertEqual([("kill", "-9", "4242")], observed["resume"]["kills"])
+        self.assertEqual([], observed["attach"]["kills"])
+        self.assertEqual([], observed["resume"]["kills"])
         self.assertEqual([], observed["unload"]["kills"])
         self.assertEqual([], observed["detach"]["kills"])
 
@@ -1085,12 +1179,38 @@ process.stdout.write(JSON.stringify([
             TARGET_MODULE,
             "libdemo_target.so",
             "com.aprz.qbdiandroid",
-            "rpc.exports",
             "qtrace-stop",
             "acceptance-release",
         ):
             self.assertNotIn(forbidden, source)
         self.assertEqual(1, source.count('recv("qtrace-startup"'))
+
+    @unittest.skipUnless(shutil.which("node"), "agent RPC contract requires Node")
+    def test_cleanup_rpc_exits_only_its_own_process_and_takes_no_pid(self):
+        program = r'''
+const fs = require("fs"), vm = require("vm"), assert = require("assert");
+const calls = [], pending = [];
+const context = {
+  rpc: {}, Process: {id: 4242}, recv() {},
+  Module: {getGlobalExportByName(name) { calls.push(["symbol", name]); return name; }},
+  NativeFunction: function(symbol, result, arguments_) {
+    assert.equal(symbol, "_exit"); assert.equal(result, "void");
+    assert.deepEqual(Array.from(arguments_), ["int"]);
+    return code => calls.push(["exit", code]);
+  },
+  setImmediate(callback) { pending.push(callback); },
+};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync(process.argv[1], "utf8"), context);
+assert.deepEqual(Object.keys(context.rpc.exports), ["qtraceAbort"]);
+assert.equal(context.rpc.exports.qtraceAbort.length, 0);
+assert.equal(context.rpc.exports.qtraceAbort(99999), 4242);
+assert.deepEqual(calls, [["symbol", "_exit"]]);
+pending.shift()();
+assert.deepEqual(calls, [["symbol", "_exit"], ["exit", 137]]);
+'''
+        subprocess.run(["node", "-e", program, str(AGENT_PATH)], check=True,
+                       capture_output=True, timeout=5)
 
 
 if __name__ == "__main__":

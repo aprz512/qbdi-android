@@ -22,6 +22,14 @@ impl WorkGuard for AllowAll {
 }
 
 fn fixture_path(name: &str) -> PathBuf {
+    if let Some(name) = name.strip_prefix("native/") {
+        return std::env::var_os("QTRACE_NATIVE_FIXTURES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures-native")
+            })
+            .join(name);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/flight")
         .join(name)
@@ -57,11 +65,17 @@ fn collect(name: &str) -> Collected {
     let size = bytes.len() as u64;
     let calculated = ArtifactDigest::new(Sha256::digest(&bytes).into());
     let manifest: Value = serde_json::from_slice(
-        &fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/manifest.json"))
-            .expect("read fixture manifest"),
+        &fs::read(if name.starts_with("native/") {
+            fixture_path("native/manifest.json")
+        } else {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/manifest.json")
+        })
+        .expect("read fixture manifest"),
     )
     .expect("parse fixture manifest");
-    let relative = format!("flight/{name}");
+    let relative = name
+        .strip_prefix("native/")
+        .map_or_else(|| format!("flight/{name}"), str::to_owned);
     let manifest_digest = manifest["fixtures"]
         .as_array()
         .expect("fixture manifest entries")
@@ -1118,6 +1132,8 @@ fn every_flight_fixture_matches_the_python_recovery_oracle() {
         "v2-incomplete-fragment.bin",
         "v2-overwritten.bin",
         "v2-stale-directory.bin",
+        "native/flight-active.bin",
+        "native/flight-sealed.bin",
     ] {
         let expected = oracle(&fixture_path(name));
         let actual = collect(name);

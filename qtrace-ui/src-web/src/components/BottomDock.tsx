@@ -20,7 +20,7 @@ interface BottomDockProps {
 
 export function BottomDock({ initialResultsPage, workspaceId, projectionId, generation, jobs, canGoBack, canGoForward, hiddenHistoryTarget, onJump, onCancel, onBack, onForward, onReveal }: BottomDockProps) {
   return (
-    <footer className="bottom-dock" aria-label="Results and jobs">
+    <footer id="results-panel" tabIndex={-1} className="bottom-dock" aria-label="Results and jobs">
       <nav aria-label="Navigation history">
         <button disabled={!canGoBack} onClick={onBack}>Back</button>
         <button disabled={!canGoForward} onClick={onForward}>Forward</button>

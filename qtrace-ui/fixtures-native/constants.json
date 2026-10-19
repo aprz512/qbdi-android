@@ -1,0 +1,4 @@
+{
+"qtrb":{"major":1,"minor":2,"features":1,"stream_header":16,"record_header":8,"instruction_fixed":26,"definition_fixed":40,"memory_operand":19,"end_payload":97,"stop_payload":96,"max_record":4620},
+"flight":{"version":2,"superblock":4096,"directory_entry":64,"chunk_header":64,"record_header":24,"emergency_record":64,"emergency_slot":128,"record_commit":1363365204}
+}

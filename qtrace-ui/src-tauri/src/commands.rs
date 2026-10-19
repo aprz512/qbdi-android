@@ -35,6 +35,7 @@ pub struct CreateProjectionRequest {
 pub struct QueryTimelineRequest {
     pub workspace_id: WorkspaceId,
     pub projection_id: ProjectionId,
+    #[serde(default, deserialize_with = "qtrace_service::ipc::deserialize_cursor")]
     pub cursor: Option<String>,
     pub limit: u32,
 }
@@ -86,7 +87,10 @@ pub struct CallTreeRequest {
     pub parent: Option<u32>,
     #[serde(default)]
     pub offset: u32,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "qtrace_service::ipc::deserialize_optional_identifier"
+    )]
     pub expected_identity: Option<String>,
 }
 
@@ -94,8 +98,14 @@ pub struct CallTreeRequest {
 #[serde(deny_unknown_fields)]
 pub struct AttachElfRequest {
     pub workspace_id: WorkspaceId,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_text")]
     pub module_name: String,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_text")]
     pub module_digest: String,
+    #[serde(
+        default,
+        deserialize_with = "qtrace_service::ipc::deserialize_build_id"
+    )]
     pub expected_build_id: Option<Vec<u8>>,
 }
 
@@ -103,7 +113,9 @@ pub struct AttachElfRequest {
 #[serde(deny_unknown_fields)]
 pub struct ListSymbolsRequest {
     pub workspace_id: WorkspaceId,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_text")]
     pub module_name: String,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_symbol_queries")]
     pub relative_pcs: Vec<HexU64Dto>,
 }
 
@@ -113,6 +125,7 @@ pub struct UpsertAnnotationRequest {
     pub workspace_id: WorkspaceId,
     pub artifact_index: u32,
     pub row: u32,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_comment")]
     pub comment: String,
 }
 
@@ -122,6 +135,7 @@ pub struct UpsertHighlightRequest {
     pub workspace_id: WorkspaceId,
     pub artifact_index: u32,
     pub row: u32,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_highlight")]
     pub value: String,
 }
 
@@ -130,6 +144,7 @@ pub struct UpsertHighlightRequest {
 pub struct LocalSymbolRequest {
     pub workspace_id: WorkspaceId,
     pub artifact_index: u32,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_text")]
     pub module_digest: String,
     pub relative_pc: HexU64Dto,
 }
@@ -139,8 +154,10 @@ pub struct LocalSymbolRequest {
 pub struct UpsertLocalSymbolRequest {
     pub workspace_id: WorkspaceId,
     pub artifact_index: u32,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_text")]
     pub module_digest: String,
     pub relative_pc: HexU64Dto,
+    #[serde(deserialize_with = "qtrace_service::ipc::deserialize_text")]
     pub name: String,
 }
 
