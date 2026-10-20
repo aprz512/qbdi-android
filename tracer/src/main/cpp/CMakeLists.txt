@@ -1,6 +1,8 @@
-cmake_minimum_required(VERSION 3.22.1)
+cmake_minimum_required(VERSION 3.28)
 project(qbdi_tracer)
 enable_language(ASM)
+# No C++20 modules are used; NDK 26 does not ship clang-scan-deps.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 set(ANDROID_16KB_PAGE_LINK_OPTIONS "-Wl,-z,max-page-size=16384")
 
@@ -75,9 +77,7 @@ target_link_options(shadowhook_nothing PRIVATE
         -nostartfiles
         -nodefaultlibs)
 
-add_library(qbdi_static STATIC IMPORTED)
-set_target_properties(qbdi_static PROPERTIES
-        IMPORTED_LOCATION ${QBDI_ROOT}/lib/arm64-v8a/libQBDI.a)
+add_subdirectory(cmake/qbdi)
 
 add_library(qbdi_tracer SHARED
         tracer_entry.cpp
@@ -156,7 +156,6 @@ target_link_options(qbdi_tracer PRIVATE
         -Wl,-z,nodelete
         -Wl,-Bsymbolic-functions)
 target_include_directories(qbdi_tracer PRIVATE
-        ${QBDI_ROOT}/include
         ${SHADOWHOOK_ROOT}/third_party/xdl
         ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(qbdi_tracer PRIVATE
@@ -166,7 +165,7 @@ if(QTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK)
 endif()
 
 target_link_libraries(qbdi_tracer PRIVATE
-        qbdi_static
+        QBDI::QBDI_static
         shadowhook_static
         lz4_static
         android

@@ -1,0 +1,4 @@
+[submodule "tracer/src/main/cpp/third_party/qbdi"]
+	path = tracer/src/main/cpp/third_party/qbdi
+	url = https://github.com/QBDI/QBDI.git
+	shallow = true

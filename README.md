@@ -23,19 +23,24 @@ Frida spawn 注入 -> ShadowHook 入口 hook -> QBDI 采集
 ## 快速开始
 
 准备 Python 3.11+、ADB、匹配的 Frida 主机工具及设备端环境、JDK 17、Android SDK/NDK、
-CMake 3.22.1、Git LFS 和主机 `lz4`。配置 `ANDROID_HOME`，以及 `ANDROID_NDK_HOME`
-或 `ANDROID_NDK_ROOT`。设备须支持 spawn 注入，且允许 root 或对目标应用使用 `run-as`。
+CMake 3.22.1 与 3.31.6、Git、主机 C/C++ 编译器和 `lz4`。配置 `ANDROID_HOME`，
+以及 `ANDROID_NDK_HOME` 或 `ANDROID_NDK_ROOT`。设备须支持 spawn 注入，且允许 root
+或对目标应用使用 `run-as`。
 详细要求见[环境准备](docs/usage.md#环境要求)。
 
 在仓库根目录运行设备验收 demo，将 `SERIAL` 替换为设备序列号：
 
 ```bash
-git lfs pull
+git submodule update --init --recursive
+./gradlew :app:assembleDebug :tracer:copyTracerDebug --no-daemon
 adb devices -l
 python3 -m qtrace demo --scenario timed --duration 10s --scene-form offset --device SERIAL
 ```
 
 `demo` 会构建并安装本仓库 fixture，再走统一的采集流程；默认报告和产物写入 `qtrace-output/`。
+QBDI 从固定版本的 submodule 源码编译；首次构建需要联网下载并编译 LLVM 等依赖，耗时明显长于增量构建。
+先执行上面的 Gradle 构建，避免首次编译超过 CLI 默认的 90 秒 setup/build 时限。
+依赖同步、版本升级与回退见[QBDI 源码依赖](docs/development.md#qbdi-源码依赖)。
 查看结果时，优先在 [qtrace-ui](qtrace-ui/README.md) 中打开 session report。
 
 追踪外部应用时，按[使用指南](docs/usage.md#qtrace-命令行)编写 `target.json`，再运行：

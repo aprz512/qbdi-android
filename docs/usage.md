@@ -8,7 +8,8 @@
 ## 环境要求
 
 - 仅构建 `arm64-v8a`，最低 Android API 24；示例当前使用 compile/target SDK 35。
-- 主机需要 Python 3.11+、Android SDK、NDK、CMake 3.22.1、JDK 17 和 Git LFS。
+- 主机需要 Python 3.11+、Android SDK、NDK、CMake 3.22.1 与 3.31.6、JDK 17、Git 和主机 C/C++ 编译器。
+- tracer 使用 CMake 3.31.6 构建 QBDI 源码；fixture 和主机测试仍使用 CMake 3.22.1。首次 Android 构建需要联网下载 LLVM、spdlog，并为 LLVM 编译主机工具。
 - 安装 Frida Python bindings 与 CLI，并保证 host/server 版本匹配。配置 `ANDROID_HOME`，以及 `ANDROID_NDK_HOME` 或 `ANDROID_NDK_ROOT`。
 - 需要可执行 spawn 注入的 Frida 环境。root 设备通常使用与主机版本匹配的 `frida-server`；jailed/non-root 设备通常需要 Frida Gadget。
 - APK 的 release 变体明确设置为 `debuggable false`；实验所需的注入流程使用 debug 变体。
@@ -22,15 +23,24 @@
 adb version
 frida --version
 java -version
-git lfs version
+git --version
 ```
 
 Frida 主机工具与设备端 server 应使用匹配版本。QTRB `.trace.bin.lz4` 始终需要主机 `lz4`，包括 `--compressed-only`。后者只抑制转换文本发布，仍会解压校验 QTRB 版本、terminal 和 sidecar。遗留 `.trace.txt.lz4` 与 Flight Recorder `.flight.bin` 使用 `--compressed-only` 可原样拉取，无需解压。
 
-拉取由 Git LFS 管理的 QBDI 静态库：
+初始化 QBDI 源码 submodule（新克隆也可使用 `git clone --recurse-submodules`）：
 
 ```bash
-git lfs pull
+git submodule update --init --recursive
+```
+
+之后每次拉取父仓库更新，都执行同一条命令同步固定的 QBDI commit。
+依赖版本、构建缓存、升级与回退见[QBDI 源码依赖](development.md#qbdi-源码依赖)。
+
+首次使用 CLI 前，先完成 APK 和 tracer 的源码构建，避免 LLVM 编译超过默认的 90 秒 setup/build 时限：
+
+```bash
+./gradlew :app:assembleDebug :tracer:copyTracerDebug --no-daemon
 ```
 
 ## qtrace 命令行
@@ -215,6 +225,23 @@ integrity 场景包含 `.text` hash 校验和 `/proc/self/maps` 检查。通用 
 [数码宝贝 UP / AppGuard 实测](research/2026-10-19-appguard-dgup.md)。
 
 ## 常见问题
+
+### 构建提示 `QBDI submodule is missing`
+
+在仓库根目录运行 `git submodule update --init --recursive`，再重试构建。
+父仓库的源码压缩包不包含 submodule 源码；请使用 Git 克隆并初始化依赖。
+
+### tracer 构建提示 CMake 版本过低
+
+安装 Android SDK 中的固定版本：`sdkmanager 'cmake;3.22.1' 'cmake;3.31.6'`。
+Gradle 使用 3.31.6 构建 tracer；直接调用 CMake 构建 tracer 时也应选择该版本。
+3.22.1 供 fixture 和主机测试使用。
+
+### 首次 CLI 构建超时
+
+CLI 默认的 setup/build 时限为 90 秒，首次下载和编译 LLVM 可能超过该时限。
+先运行 `./gradlew :app:assembleDebug :tracer:copyTracerDebug --no-daemon`，完成后再运行 CLI。
+后续构建使用已有缓存；也可通过 `--setup-timeout SECONDS` 显式调整 CLI 时限。
 
 ### Frida 提示 `need Gadget to attach on jailed Android`
 

@@ -4,6 +4,9 @@ enable_testing()
 find_package(Threads REQUIRED)
 option(QTRACE_ENABLE_TSAN "Build opt-in ThreadSanitizer concurrency tests" OFF)
 
+include(../../main/cpp/cmake/QBDIHeaders.cmake)
+qtrace_configure_qbdi_headers("${CMAKE_CURRENT_BINARY_DIR}/qbdi-include")
+
 set(LZ4_ROOT ../../main/cpp/third_party/lz4/lib)
 add_library(lz4_static STATIC
     ${LZ4_ROOT}/lz4.c
@@ -19,7 +22,7 @@ function(add_trace_test name)
     target_compile_definitions(${name} PRIVATE QTRACE_HOST_TEST=1)
     target_include_directories(${name} PRIVATE
         ../../main/cpp
-        ../../main/cpp/third_party/qbdi/include)
+        ${QTRACE_QBDI_INCLUDE_DIRS})
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
@@ -73,7 +76,7 @@ if(QTRACE_ENABLE_TSAN)
         target_compile_definitions(${name} PRIVATE QTRACE_HOST_TEST=1)
         target_include_directories(${name} PRIVATE
             ../../main/cpp
-            ../../main/cpp/third_party/qbdi/include)
+            ${QTRACE_QBDI_INCLUDE_DIRS})
         target_compile_options(${name} PRIVATE
             -fsanitize=thread
             -fno-omit-frame-pointer)
@@ -173,7 +176,7 @@ add_executable(protocol_fixture_emitter
 target_compile_features(protocol_fixture_emitter PRIVATE cxx_std_20)
 target_compile_definitions(protocol_fixture_emitter PRIVATE QTRACE_HOST_TEST=1)
 target_include_directories(protocol_fixture_emitter PRIVATE
-    ../../main/cpp ../../main/cpp/third_party/qbdi/include)
+    ../../main/cpp ${QTRACE_QBDI_INCLUDE_DIRS})
 target_link_libraries(protocol_fixture_emitter PRIVATE Threads::Threads)
 
 add_trace_test(flight_trace_sink_test

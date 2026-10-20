@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,16 @@ def run(arguments: list[str], **kwargs: object) -> None:
 
 def build_emitter(output: Path) -> None:
     cpp = ROOT / "tracer/src/main/cpp"
+    headers = output.parent / "qbdi-include"
+    cmake = os.environ.get("CMAKE") or shutil.which("cmake")
+    if not cmake and os.environ.get("ANDROID_HOME"):
+        cmake = str(Path(os.environ["ANDROID_HOME"]) / "cmake/3.22.1/bin/cmake")
+    if not cmake:
+        raise RuntimeError("CMake is required to generate QBDI headers; install CMake or set CMAKE")
+    run([
+        cmake, f"-DQTRACE_QBDI_HEADER_DIR={headers}",
+        "-P", str(cpp / "cmake/QBDIHeaders.cmake"),
+    ])
     sources = [
         ROOT / "tracer/src/test/cpp/protocol_fixture_emitter.cpp",
         *(cpp / name for name in (
@@ -42,7 +53,8 @@ def build_emitter(output: Path) -> None:
     run([
         *shlex.split(os.environ.get("CXX", "c++")), "-std=c++20", "-O1",
         "-DQTRACE_HOST_TEST=1", "-pthread", f"-I{cpp}",
-        f"-I{cpp / 'third_party/qbdi/include'}", *map(str, sources), "-o", str(output),
+        f"-I{headers}", f"-I{cpp / 'third_party/qbdi/include'}",
+        *map(str, sources), "-o", str(output),
     ])
 
 

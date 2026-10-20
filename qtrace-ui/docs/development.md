@@ -33,6 +33,26 @@ npm run e2e:production
 npm run tauri -- build --bundles deb,appimage
 ```
 
+## Native protocol fixtures
+
+The native protocol check requires Python 3.11+, a host C++20 compiler, CMake
+3.22.1 or newer, and the initialized QBDI submodule. Run from the repository root:
+
+```bash
+git submodule update --init --recursive
+python3 qtrace-ui/tools/check_protocol_matrix.py --check
+```
+
+This check generates Android AARCH64 headers from the pinned QBDI source and
+compiles the production encoders for the host. It does not download or build
+LLVM or require an Android tracer build. It compares the generated fixtures with
+the checked-in bytes and verifies the independent Python and Rust readers.
+Use `--skip-rust` for a focused C++/Python check; it does not verify the Rust reader.
+
+If CMake is not on `PATH`, set `CMAKE` to its executable path. The tool also detects
+Android SDK CMake 3.22.1 through `ANDROID_HOME`. Submodule synchronization and
+version changes follow the [QBDI dependency workflow](../../docs/development.md#qbdi-源码依赖).
+
 ## Open-phase profiling
 
 Set `QTRACE_UI_OPEN_PROFILE=1` when running the performance driver to emit

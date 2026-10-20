@@ -11,10 +11,13 @@
 先完成[环境准备](usage.md#环境要求)，再构建 Debug APK、standalone tracer 和 companion：
 
 ```bash
+git submodule update --init --recursive
 ./gradlew :app:assembleDebug
 ./gradlew :tracer:assembleDebug :tracer:copyTracerDebug
 ```
 
+QBDI 由 submodule 源码构建；首次编译会下载并编译 LLVM 等依赖。tracer 使用 CMake
+3.31.6，fixture 使用 3.22.1。版本同步与升级见[QBDI 源码依赖](development.md#qbdi-源码依赖)，
 产物路径及主机验证见[开发指南](development.md)。
 
 ## 安装与部署

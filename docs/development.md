@@ -7,6 +7,20 @@
 
 ## 构建
 
+首次构建前初始化源码依赖，并安装两套固定版本的 CMake：
+
+```bash
+git submodule update --init --recursive
+sdkmanager 'cmake;3.22.1' 'cmake;3.31.6'
+```
+
+两套 CMake 的用途如下；tracer 所依赖的 QBDI v0.12.1 最低要求 CMake 3.28。
+
+| 构建范围 | 本仓库固定使用的 CMake |
+| --- | --- |
+| Android tracer 与 QBDI 引擎 | 3.31.6 |
+| 演示 APK 的 native fixture、主机原生测试 | 3.22.1 |
+
 构建演示 APK，并把 standalone tracer 与 ShadowHook companion 复制到 `out/arm64-v8a/`：
 
 ```bash
@@ -26,6 +40,60 @@ out/arm64-v8a/libshadowhook_nothing.so
 以及 vendored nlohmann/json 3.12.0。JSON 单头文件与许可证分别位于
 `tracer/src/main/cpp/third_party/nlohmann/json.hpp` 和
 `tracer/src/main/cpp/third_party/nlohmann/LICENSE.MIT`。
+
+## QBDI 源码依赖
+
+QBDI 使用[官方仓库](https://github.com/QBDI/QBDI)的 Git submodule，位于
+`tracer/src/main/cpp/third_party/qbdi`，固定在 `v0.12.1`
+（`09b2efb66d242b3616a4723e4b487f623b0e93d7`）。tracer 通过 CMake 3.31.6
+编译并静态链接 `QBDI::QBDI_static`，不再依赖 Git LFS 或提交预编译的 `.a`。
+QBDI 引擎始终按 Release 配置构建，避免 Debug tracer 开启引擎逐指令调试日志。
+
+### 初始化与同步
+
+新克隆可使用 `git clone --recurse-submodules`。已克隆的工作副本运行
+`git submodule update --init --recursive`，即可检出父仓库记录的 QBDI commit。
+之后每次拉取父仓库更新，都同步 submodule：
+
+```bash
+git pull
+git submodule update --init --recursive
+git submodule status -- tracer/src/main/cpp/third_party/qbdi
+```
+
+构建版本由父仓库中的 submodule 指针决定；初始化与同步不会自动升级到上游最新版本。
+
+### 构建与缓存
+
+首次 Android 构建会下载上游固定版本并校验哈希的 LLVM 19.1.5、spdlog 1.15.0，
+并用主机 C/C++ 编译器构建 LLVM TableGen；需要联网，耗时和磁盘占用较大。
+下载与编译产物留在 tracer 的 `.cxx/` 构建目录，不修改 submodule。
+后续构建使用增量缓存；删除对应的 `.cxx/` 目录后需要重新准备依赖并编译。
+主机测试通过 `tracer/src/main/cpp/cmake/QBDIHeaders.cmake` 从同一个 submodule
+生成 Android AARCH64 头文件，不下载或编译 LLVM，也不要求先完成 Android tracer 构建。
+协议兼容矩阵使用相同的头文件生成入口，命令见[分析器开发指南](../qtrace-ui/docs/development.md#native-protocol-fixtures)。
+首次使用 CLI 或运行设备验收前先完成上述 Gradle 构建，避免冷构建超过流程时限。
+
+### 升级与回退
+
+升级时将下面的 `QBDI_REV` 替换为目标 tag 或 commit，再构建和测试。
+头文件与静态库都从所选源码生成，无需另外下载或替换 `.a`。
+
+```bash
+QBDI_REV=v0.12.1
+git -C tracer/src/main/cpp/third_party/qbdi fetch --tags origin
+git -C tracer/src/main/cpp/third_party/qbdi checkout --detach "$QBDI_REV"
+./gradlew nativeHostTest :tracer:assembleDebug :tracer:copyTracerDebug --no-daemon
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+git add tracer/src/main/cpp/third_party/qbdi
+git diff --cached --submodule=short -- tracer/src/main/cpp/third_party/qbdi
+```
+
+确认验证通过后，提交 submodule 指针及所需的兼容性改动。若目标 commit 尚未下载，先在
+submodule 中执行 `git fetch origin COMMIT`，将 `COMMIT` 替换为目标提交。
+其他工作副本在拉取父仓库更新后运行 `git submodule update --init --recursive`。
+回退时将 `QBDI_REV` 设为先前验证过的 tag 或 commit，执行相同的 checkout、构建和测试，
+再提交回退后的指针。设备发布前仍需运行下文的手动设备门禁；主机测试和构建成功不代表设备验收完成。
 
 ## 主机测试
 

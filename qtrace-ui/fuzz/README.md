@@ -33,6 +33,12 @@ The workflow runs corpus/property checks, the C++/Python/Rust compatibility
 matrix, and 60 seconds per target on relevant pushes and pull requests. Scheduled
 and manual runs retain 1,800 seconds per target. Crash inputs are uploaded.
 
+The protocol matrix requires Python 3.11+, a host C++20 compiler, CMake 3.22.1
+or newer, and `git submodule update --init --recursive` from the repository root.
+It generates QBDI headers without downloading or building LLVM. CMake discovery
+and the focused host-only command are documented in
+[Native protocol fixtures](../docs/development.md#native-protocol-fixtures).
+
 Protocol changes also require `python3 qtrace-ui/tools/check_protocol_matrix.py
 --check`. It compiles production C++ encoders, generates fixtures twice, checks
 the reviewed bytes and wire constants, verifies QTRB 1.0–1.2 and Flight v2 plus

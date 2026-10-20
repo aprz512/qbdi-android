@@ -12,7 +12,7 @@
 | [使用指南](usage.md) | 环境要求、CLI 配置、采集档位、拉取转换、恢复判断与常见问题 |
 | [手动 Frida 追踪](manual-tracing.md) | 脚本配置、APK 与 tracer 部署、spawn 注入、入口定位 |
 | [架构与设计](architecture.md) | 模块职责、会话与停止、样本身份、写入恢复、配置状态与 JSON ABI |
-| [开发与验证](development.md) | 构建产物、依赖、主机测试、设备发布门禁与配置验收 |
+| [开发与验证](development.md) | 构建产物、QBDI submodule 管理、主机测试、设备发布门禁与配置验收 |
 | [性能与基线复现](benchmarking.md) | 历史设备性能、benchmark 复现、身份检查与计时边界 |
 | [分析器使用](../qtrace-ui/docs/usage.md) | 打开轨迹、导航、证据分级、缓存与批注 |
 | [分析器设计](../qtrace-ui/docs/design.md) | 分层、分页缓存、取消与服务资源边界 |
@@ -20,6 +20,7 @@
 
 ## 格式与专题
 
+- [QBDI submodule 初始化、升级与回退](development.md#qbdi-源码依赖)
 - [QTRB v1、文本格式 4、指标与崩溃恢复](trace-format.md)
 - [IDA/objdump 场景偏移定位](ida-offsets.md)
 - [完整性检查与 CodeRules](integrity-bypass.md)
