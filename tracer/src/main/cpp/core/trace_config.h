@@ -29,6 +29,9 @@ struct TraceOptions {
 
 struct FlightOptions {
     bool enabled = false;
+    // Disable automatic pthread lifecycle capture for scene-only runs. This
+    // leaves explicit scene hooks active and reserves their thread slots.
+    bool follow_threads = true;
     std::string entry_scene;
     uint64_t capacity_bytes = 512ULL * 1024 * 1024;
     uint32_t chunk_bytes = 256U * 1024;

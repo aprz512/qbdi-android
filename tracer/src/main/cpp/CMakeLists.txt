@@ -20,6 +20,8 @@ if(NOT QTRACE_USER_RULES_SOURCE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/rules/user
 endif()
 option(QTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK
         "Allow 20-byte entry patches when no nearby branch island is available (startup experiments)" OFF)
+option(QTRACE_SHADOWHOOK_DISABLE_ELF_GAPS
+        "Avoid ELF-gap islands shared with independent hook runtimes in the target process" OFF)
 
 add_library(lz4_static STATIC
         ${LZ4_ROOT}/lz4.c
@@ -52,6 +54,9 @@ add_library(shadowhook_static STATIC ${SHADOWHOOK_SRC})
 target_compile_features(shadowhook_static PRIVATE c_std_11)
 if(QTRACE_SHADOWHOOK_LONG_JUMP_FALLBACK)
     target_compile_definitions(shadowhook_static PRIVATE SH_CONFIG_TRY_HOOK_WITHOUT_ISLAND)
+endif()
+if(QTRACE_SHADOWHOOK_DISABLE_ELF_GAPS)
+    target_compile_definitions(shadowhook_static PRIVATE SH_CONFIG_DISABLE_ELF_GAPS)
 endif()
 target_compile_options(shadowhook_static PRIVATE -Os -ffunction-sections -fdata-sections)
 target_include_directories(shadowhook_static PUBLIC ${SHADOWHOOK_ROOT}/include)

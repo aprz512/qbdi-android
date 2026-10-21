@@ -505,6 +505,50 @@ void unrelated_native_lifecycle_releases_session_for_scene_reentry() {
   g_lifecycle_reentry_coordinator = nullptr;
 }
 
+void scene_only_capture_reserves_slots_for_late_scene_entry() {
+  reset_runtime();
+  Factory factory;
+  auto coordinator = std::make_shared<CaptureCoordinator>(factories(&factory));
+  TraceConfig config = flight_config(1);
+  config.flight.follow_threads = false;
+  CHECK(coordinator->start(config, module_for(identity_start), 38));
+  ThreadCreateGateway gateway(fake_hook_symbol_address);
+  CHECK(gateway.install(coordinator));
+  struct NativeWait {
+    std::atomic<size_t> started{0};
+    std::atomic<bool> released{false};
+  } wait;
+  const auto native_start = +[](void *argument) -> void * {
+    auto *wait = static_cast<NativeWait *>(argument);
+    wait->started.fetch_add(1, std::memory_order_release);
+    while (!wait->released.load(std::memory_order_acquire))
+      ::sched_yield();
+    return argument;
+  };
+  pthread_t threads[4]{};
+  for (pthread_t &thread : threads)
+    CHECK(gateway.create(&thread, nullptr, native_start, &wait) == 0);
+  while (wait.started.load(std::memory_order_acquire) != 4)
+    ::sched_yield();
+  QbdiThreadSession *session = coordinator->enter(
+      static_cast<uint32_t>(::syscall(SYS_gettid)), config.scenes[0]);
+  CHECK(session != nullptr);
+  const uint64_t args[8]{23};
+  const TraceRunResult result = session->call(
+      reinterpret_cast<uintptr_t>(identity_start), args, 0);
+  CHECK(result.target_returned && result.value == 23);
+  coordinator->leave(session);
+  wait.released.store(true, std::memory_order_release);
+  for (pthread_t thread : threads) {
+    void *value = nullptr;
+    CHECK(::pthread_join(thread, &value) == 0);
+    CHECK(value == &wait);
+  }
+  CHECK(factory.session_creates.load(std::memory_order_relaxed) == 1);
+  CHECK(factory.thread_begins.load(std::memory_order_relaxed) == 0);
+  CHECK(factory.coverage_gaps.load(std::memory_order_relaxed) == 0);
+}
+
 __attribute__((noinline)) void *retained_identity_start(void *argument) {
   return argument;
 }
@@ -1096,6 +1140,7 @@ int main() {
   persistent_install_captures_every_new_flight_thread();
   preserves_attributes_argument_return_for_all_flight_threads();
   unrelated_native_lifecycle_releases_session_for_scene_reentry();
+  scene_only_capture_reserves_slots_for_late_scene_entry();
   hooked_scene_start_uses_the_retained_control_only_gateway();
   queued_hooked_start_snapshots_creator_generation_control();
   active_creator_tls_propagates_nested_ownership();

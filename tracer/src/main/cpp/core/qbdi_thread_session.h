@@ -233,6 +233,13 @@ private:
             uintptr_t control_start, size_t execution_bytes,
             const uint64_t args[8],
             uint64_t indirect_result) QTRACE_SESSION_CALL_NOEXCEPT;
+    // Run the complete target/continuation lifetime before releasing the caller's
+    // stack. The production entry switches only the engine to a separate stack.
+    TraceRunResult call_on_engine_stack(
+            uintptr_t logical_entry, uintptr_t execution_entry,
+            uintptr_t control_start, size_t execution_bytes,
+            const uint64_t args[8],
+            uint64_t indirect_result) QTRACE_SESSION_CALL_NOEXCEPT;
     TraceRunResult continue_execution() QTRACE_SESSION_CALL_NOEXCEPT;
     bool seal_observed_stop(TraceStopReason reason) noexcept;
     void set_stop_control(QbdiStopControl control) noexcept;

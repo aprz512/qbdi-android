@@ -1634,12 +1634,13 @@ static void install_hooks_for_module(const ModuleRange &module,
         }
         flight_coordinator->set_thread_start_resolver(
                 resolve_flight_thread_start, flight_coordinator.get());
+        const bool follow_threads = g_config.flight.follow_threads;
         // The persistent pthread gateway enters ShadowHook, which may acquire
         // bionic's linker lock and synchronously invoke a module callback. Do
         // not hold the registry anywhere across that external transition.
         guard.unlock();
         const bool gateway_installed =
-                process_thread_create_gateway().install(flight_coordinator);
+                !follow_threads || process_thread_create_gateway().install(flight_coordinator);
         const int gateway_hook_error = gateway_installed
                                        ? 0
                                        : process_thread_create_gateway().hook_error();
@@ -1649,7 +1650,7 @@ static void install_hooks_for_module(const ModuleRange &module,
                 g_config.flight.enabled &&
                 g_capture_coordinator == flight_coordinator;
         if (!flight_still_current) {
-            if (gateway_installed) {
+            if (follow_threads && gateway_installed) {
                 process_thread_create_gateway().deactivate_if(
                         flight_coordinator);
             }

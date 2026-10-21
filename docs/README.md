@@ -25,6 +25,8 @@
 - [IDA/objdump 场景偏移定位](ida-offsets.md)
 - [完整性检查与 CodeRules](integrity-bypass.md)
 - [数码宝贝 UP / AppGuard 实测](research/2026-10-19-appguard-dgup.md)
+- [数码宝贝 UP / AppGuard 环境检测清单](research/2026-10-20-appguard-dgup-environment.md)
+- [qbdi-android 实战体验与优化建议：AppGuard 防护库分析](research/2026-10-21-qbdi-dgup-tool-experience.md)
 - [离线分析器前期调研](research/2026-08-30-trace-ui-analysis.md)
 
 ## 设计与历史记录

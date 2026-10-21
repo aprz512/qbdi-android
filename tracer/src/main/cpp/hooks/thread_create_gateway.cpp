@@ -151,7 +151,7 @@ void *thread_start_trampoline(void *opaque) {
 bool capture_flight_thread(CaptureCoordinator *coordinator,
                            PthreadStartRoutine start_routine) noexcept {
   if (coordinator == nullptr || start_routine == nullptr ||
-      !coordinator->started() || coordinator->detached()) {
+      !coordinator->thread_following_enabled() || coordinator->detached()) {
     return false;
   }
   return true;

@@ -392,13 +392,15 @@ bool parse_flight(const json &flight, FlightOptions *options, ConfigurationIssue
         *issue = {"TYPE_MISMATCH", "$.flight", "flight must be an object"};
         return false;
     }
-    if (!exact_keys(flight, {"enabled", "entryScene", "capacityMb", "chunkKb", "maxThreads",
+    if (!exact_keys(flight, {"enabled", "followThreads", "entryScene", "capacityMb", "chunkKb", "maxThreads",
                              "protectedChunks"}, issue, "$.flight")) return false;
     uint64_t capacity_mb = 0;
     uint64_t chunk_kb = 0;
     uint64_t max_threads = 0;
     uint64_t protected_chunks = 0;
     if (!boolean_member(flight, "enabled", &options->enabled, issue, "$.flight")) return false;
+    if (flight.contains("followThreads") &&
+        !boolean_member(flight, "followThreads", &options->follow_threads, issue, "$.flight")) return false;
     const json *entry_scene = required_member(flight, "entryScene", issue, "$.flight");
     if (entry_scene == nullptr) {
         if (options->enabled) {

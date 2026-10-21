@@ -103,6 +103,11 @@ Flight Recorder 启用时，`flight.entryScene` 必须精确命名 `scenes` 中�
 不再隐含入口语义。若只需要普通单场景轨迹，在这个唯一配置中把 `flight.enabled`
 设为 `false`。
 
+需要保留持久 flight、但只跟踪显式场景时，可设置 `flight.followThreads: false`。
+此可选布尔值默认 `true`，保留自动 pthread 跟踪；`false` 时不为新线程自动记录生命周期或
+分配 flight 线程槽，场景 Hook 仍正常进入采集。大量模块外线程会占用 `maxThreads` 时，
+可用此选项为稍后命中的目标函数保留槽位；它不补录场景入口之前的线程活动。
+
 tracer 不依赖运行时符号名。要确定本次构建的地址，打开：
 
 ```text
@@ -144,6 +149,20 @@ Frida 只负责启动期加载、配置和 hook 安装；`Installed` 发布后�
 关闭 writer；已进入 QBDI 的目标线程会在观察到请求后各自 seal，再以 control-only 方式运行到
 真实目标返回。阻塞在目标代码或系统调用中的线程可能延迟 acknowledgement，因此时长是停止请求
 的 deadline，不是强制退出时刻。qtrace 不会为了满足时长而 kill App。
+
+场景和 pthread gateway 的目标调用使用当前 pthread 的真实栈，QBDI 引擎移到独立的 16 MiB 栈。
+实现复用固定版本 QBDI 的 `switchStack`，与其[官方 stack-switch 调用语义](https://qbdi.readthedocs.io/en/stable/api_cpp.html)一致；目标调用、停止和 control-only continuation 全部在同一次栈切换内结束，之后才释放引擎栈。目标 SP 只在该调用寿命内有效，不能跨调用复用。原有 signal probe 的独立栈不因此改写。
+
+小米 API36 的 JNI 对照先在堆目标栈上触发 `StackOverflowError`；真实栈实现后，
+`ActivityManager$RunningServiceInfo` 与 `java/util/List` 查询成功，目标 SP 位于暂停时记录的主线程 stack mapping 内。
+四组 runner/session/coordinator 生命周期回归通过。该结果验证了已附加主线程的 JNI 路径，未代替其它线程及完整应用业务验收。
+
+Android arm64 的新 VM 还会从同一个 pthread 保留 `x18`，遵循 Android 的
+[平台保留寄存器约定](https://developer.android.com/ndk/guides/abis#arm64-v8a)。
+只初始化参数寄存器会让 VM 中的 `x18` 变为零，即使目标使用真实线程栈，JNI 回调仍可能失败。
+Pixel 6 的独立夹具先复现原值非零、traced 值为零；修复后两个实际 Guest actor 的值一致，
+`Integer.parseInt("42")` 的基线与 traced 回调均返回 42，且没有 pending exception。
+这项结果不替代具体游戏的 JNI 场景回归；`vfork/CLONE_VM` 的采集状态共享仍需单独验证。
 
 `session` 仅含 `id`、省略 `durationMs` 时即为 monitor 采集：它没有 native deadline，会持续
 采集到 App 自行退出或用户结束 App；后续仍可用手动拉取命令读取 app-private 产物。strict

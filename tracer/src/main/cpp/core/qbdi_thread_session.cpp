@@ -36,6 +36,7 @@
 #include <QBDI.h>
 #include <QBDI/Memory.hpp>
 #include <QBDI/State.h>
+#include "third_party/qbdi/src/Utility/StackSwitch.h"
 
 #include <array>
 #include <cstdio>
@@ -215,7 +216,6 @@ struct QbdiThreadSession::Impl {
             }
             chunk_writer.detach();
         }
-        if (fakestack != nullptr) QBDI::alignedFree(fakestack);
     }
 
     void initialize_collector() noexcept {
@@ -514,19 +514,18 @@ struct QbdiThreadSession::Impl {
                               uint64_t indirect_result) noexcept {
         QBDI::GPRState *gpr = vm.getGPRState();
         if (gpr == nullptr) return fail_setup("QBDI GPR state unavailable");
-        if (fakestack == nullptr) {
-            constexpr uint32_t kVirtualStackSize = 0x1000000;
-            if (!QBDI::allocateVirtualStack(gpr, kVirtualStackSize,
-                                            &fakestack)) {
-                return fail_setup("allocateVirtualStack failed");
-            }
-            initial_sp = gpr->sp;
-        }
+        if (initial_sp == 0) return fail_setup("target thread stack is not bound");
         for (size_t index = 0; index < call_arguments.size(); ++index) {
             call_arguments[index] = static_cast<QBDI::rword>(args[index]);
             QBDI_GPR_SET(gpr, index, args[index]);
         }
         gpr->x8 = indirect_result;
+#if defined(__ANDROID__) && defined(__aarch64__)
+        // Android reserves x18 for the current pthread's ShadowCallStack. A fresh
+        // VM starts with zeroed registers; native/JNI callees must retain the
+        // platform register from this same pthread even on the engine stack.
+        asm volatile("mov %0, x18" : "=r"(gpr->x18));
+#endif
         gpr->sp = initial_sp;
         gpr->pc = execution_entry;
         gateway_logical_entry = logical_entry;
@@ -740,7 +739,6 @@ struct QbdiThreadSession::Impl {
     QBDI::VM vm;
     InstructionCollector *collector = nullptr;
     std::array<QBDI::rword, 8> call_arguments{};
-    uint8_t *fakestack = nullptr;
     QBDI::rword initial_sp = 0;
     uintptr_t last_target_pc = 0;
     uintptr_t gateway_logical_entry = 0;
@@ -978,6 +976,57 @@ TraceRunResult QbdiThreadSession::call_gateway(
         return {};
     }
 
+#if defined(QTRACE_HOST_TEST)
+    return call_on_engine_stack(logical_entry, execution_entry, control_start,
+                                execution_bytes, args, indirect_result);
+#else
+    if (impl_ == nullptr) return {};
+    // ART validates JNI/managed calls against the real pthread stack bounds.
+    // Use QBDI's own stack-switch primitive (also used by switchStackAndCallA),
+    // retaining our explicit return sentinel, signal lifecycle and stop loop.
+    constexpr size_t kEngineStackBytes = 0x1000000;
+    auto *engine_stack = static_cast<uint8_t *>(
+            QBDI::alignedAlloc(kEngineStackBytes, 16));
+    if (engine_stack == nullptr) {
+        mark_coverage_gap(logical_entry);
+        return {};
+    }
+    struct StackCall {
+        QbdiThreadSession *session;
+        uintptr_t logical_entry;
+        uintptr_t execution_entry;
+        uintptr_t control_start;
+        size_t execution_bytes;
+        const uint64_t *args;
+        uint64_t indirect_result;
+        TraceRunResult result{};
+    } call{this, logical_entry, execution_entry, control_start,
+           execution_bytes, args, indirect_result};
+    // Capture one pointer so QBDI's std::function stays in inline storage even
+    // when a raw-fork child returns through this frame without allocator repair.
+    QBDI::switchStack(engine_stack + kEngineStackBytes - sizeof(QBDI::rword),
+                      [&call](QBDI::rword original_sp) {
+        call.session->impl_->initial_sp =
+                (original_sp - sizeof(QBDI::rword)) & ~QBDI::rword{0xf};
+        call.result = call.session->call_on_engine_stack(
+                call.logical_entry, call.execution_entry, call.control_start,
+                call.execution_bytes, call.args, call.indirect_result);
+        return QBDI::rword{0};
+    });
+    // The caller owns this engine stack, so releasing the capture owner inside
+    // leave() cannot free the stack under the running engine. Detached children
+    // retain their inherited allocation, matching their existing no-teardown rule.
+    if (!trace_process_child_detached()) QBDI::alignedFree(engine_stack);
+    return call.result;
+#endif
+}
+
+TraceRunResult QbdiThreadSession::call_on_engine_stack(
+        uintptr_t logical_entry, uintptr_t execution_entry,
+        uintptr_t control_start, size_t execution_bytes,
+        const uint64_t args[8], uint64_t indirect_result)
+        QTRACE_SESSION_CALL_NOEXCEPT {
+
     bool entered_here = false;
     if (!entered_) {
         if (!try_enter()) {
@@ -1006,7 +1055,7 @@ TraceRunResult QbdiThreadSession::call_gateway(
     bool state_available = copy_execution_state(&execution_state);
     if (state_available) (void)no_progress.observe(execution_state);
     size_t state_unavailable_attempts = 0;
-    // Once QBDI has executed on its virtual stack, restarting the native entry
+    // Once QBDI has executed the target, restarting the native entry
     // repeats side effects and returning an invented value breaks the pthread or
     // scene ABI. Exact no-progress therefore stays in control-only fail-stop and
     // yields periodically until QBDI can reach the real return/deferred exit.

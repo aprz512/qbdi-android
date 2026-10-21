@@ -84,6 +84,10 @@ public:
     bool started() const noexcept {
         return started_.load(std::memory_order_acquire);
     }
+    bool thread_following_enabled() const noexcept {
+        // start() publishes this immutable configuration before started_.
+        return started() && config_.flight.follow_threads;
+    }
     bool incomplete() const noexcept {
         return incomplete_.load(std::memory_order_acquire);
     }

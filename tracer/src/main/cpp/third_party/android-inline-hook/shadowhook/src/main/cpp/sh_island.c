@@ -63,10 +63,14 @@ void sh_island_alloc(sh_island_t *self, size_t size, uintptr_t range_low, uintpt
   self->addr = sh_trampo_alloc_between(&sh_island_trampo_mgr, range_low, range_high);
   if (0 != self->addr) goto ok;
 
+  // Independent hook runtimes do not share sh_elf's per-instance allocation bitmap.
+  // Container diagnostics can restrict islands to privately owned mmap pages.
+#ifndef SH_CONFIG_DISABLE_ELF_GAPS
   // try to allocate in ELF gaps
   self->type = SH_ISLAND_TYPE_ELF_GAP;
   self->addr = sh_elf_alloc(size, range_low, range_high, pc, addr_info, trace);
   if (0 != self->addr) goto ok;
+#endif
 
   return;
 

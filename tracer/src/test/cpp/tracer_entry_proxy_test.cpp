@@ -929,6 +929,30 @@ void accepted_nonflight_generation_deactivates_the_flight_gateway() {
     CHECK(failing_coordinator->incomplete());
 }
 
+void scene_only_generation_keeps_scene_hooks_without_following_threads() {
+    reset_fakes();
+    trace_proxy_test_reset(config_named("scene-only-reset"));
+    const ModuleRange module = module_named("/data/app/libscene-only.so");
+    auto request = nlohmann::json::parse(json_abi_request(
+            "com.example.scene-only", "libscene-only.so", true, "entry",
+            nlohmann::json::array({
+                    {{"name", "entry"}, {"location", {{"offset", "0x40"}}}},
+            })));
+    request["flight"]["followThreads"] = false;
+    const auto accepted = call_json_configure(request.dump());
+    CHECK(accepted.at("ok") == true);
+    uint64_t generation = 0;
+    TraceConfig config;
+    CHECK(trace_proxy_test_current_configuration(&generation, &config));
+    CHECK(!config.flight.follow_threads);
+    const auto coordinator = start_flight_proxy_coordinator(config, module);
+    trace_proxy_test_install_loading_module(module);
+    CHECK(call_json_status(generation).at("state") == "installed");
+    CHECK(coordinator->started());
+    CHECK(!process_thread_create_gateway().should_capture(
+            reinterpret_cast<PthreadStartRoutine>(old_target)));
+}
+
 void invalid_target_module_observation_finishes_with_a_stable_code() {
     reset_fakes();
     trace_proxy_test_reset(config_named("module-observation-reset"));
@@ -3720,6 +3744,7 @@ int main(int argc, char **argv) {
     callback_registration_failure_preserves_the_shadowhook_error();
     flight_gateway_install_never_holds_the_registry_across_shadowhook();
     accepted_nonflight_generation_deactivates_the_flight_gateway();
+    scene_only_generation_keeps_scene_hooks_without_following_threads();
     branch_before_registry_that_is_retired_never_enters_qbdi();
     entrant_registration_and_snapshot_are_atomic_with_install();
     stopped_generation_proxy_bypasses_qbdi_before_allocation();

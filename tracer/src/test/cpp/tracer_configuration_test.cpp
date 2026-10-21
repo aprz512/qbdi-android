@@ -343,6 +343,15 @@ int main() {
     CHECK(prepared.config.scenes[1].offset == 0x6db38);
     CHECK(prepared.config.scenes[1].end_offset == 0x6dc00);
     CHECK(prepared.config.flight.entry_scene == "init");
+    CHECK(prepared.config.flight.follow_threads);
+    const auto scene_only = prepare_tracer_configuration(replace_once(
+            request, "\"enabled\": true, \"entryScene\": \"init\"",
+            "\"enabled\": true, \"followThreads\": false, \"entryScene\": \"init\""));
+    CHECK(scene_only.accepted());
+    CHECK(!scene_only.config.flight.follow_threads);
+    expect_rejection(replace_once(request, "\"enabled\": true, \"entryScene\": \"init\"",
+            "\"enabled\": true, \"followThreads\": 0, \"entryScene\": \"init\""),
+            "TYPE_MISMATCH", "$.flight.followThreads");
 
     const auto timed_session = prepare_tracer_configuration(document_with_session(
             R"json({"id":"7d5807cf-cf09-4f21-92de-1ad92802610a","durationMs":60000})json"));
