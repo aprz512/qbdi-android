@@ -148,6 +148,23 @@ python3 -m qtrace demo --scenario timed --duration 10s --scene-form offset --dev
 session report 保存包名、设备、目标和配置上下文。离线分析优先在 [qtrace-ui](../qtrace-ui/README.md) 中打开 report；
 单个轨迹文件也可打开，但缺少这些上下文。成功、部分恢复和停止失败应结合退出码与报告判断。
 
+`run`、`monitor`、`pull` 和 `demo` 默认在 stderr 显示采集结果摘要，stdout 继续只列出报告与产物路径。
+摘要复用本次已校验的数据，不重新读取报告或扫描轨迹；`--json` 保留原有单个结果对象。
+例如，采集已封口、目标仍未确认返回时：
+
+```text
+qtrace: Collection: complete (exit 0)
+qtrace: Capture: sealed; process: unknown
+qtrace: Target wait (TID 42): open at status snapshot; capture sealed; return unknown
+qtrace: Capture run.trace.bin: target return unknown; duration_elapsed
+qtrace: File completeness does not prove target return.
+```
+
+`observed` 仅表示存在明确返回证据，不证明业务成功；`unknown` 不能解释为目标没有返回。
+开放 scene 描述 status 快照时刻，单独拉取文件不推断进程当前存活状态。
+Flight 另显示保留数据完整性、已保留 scene 的返回证据、省略与无效边界数量，以及缺失 sequence 区间和 coverage gap 数量。
+缺失区间的具体原因和范围以恢复报告为准，环形覆盖不等同于损坏。每次最多列出8份轨迹与4个开放 scene，其余条目在报告中查看。
+
 ## 采集配置
 
 | Profile | 指令与寄存器 | 内存访问元数据 | 内存前后字节 | 适用场景 |

@@ -328,6 +328,73 @@ class QtraceCliTests(unittest.TestCase):
             self.assertEqual(1, cli.main(["run", "--config", "target.json", "--duration", "1s"]))
         self.assertEqual(1, len(stderr.getvalue().splitlines()))
 
+    def test_human_output_distinguishes_sealed_capture_from_target_return(self):
+        from qtrace import cli
+
+        lifecycle = {
+            "capture_state": "sealed", "process_state": "unknown",
+            "open_scenes": [{"scene": "wait", "tid": 42, "capture_sealed": True,
+                             "state": "open_at_snapshot", "target_returned": None}],
+        }
+        result = SimpleNamespace(
+            exit_code=0, report=Path("out/report.json"), outputs=(Path("out/run.trace.bin"),),
+            session_report=SimpleNamespace(native={"lifecycle": lifecycle}, artifacts=({
+                "decoder": "qtrb", "remote_name": "run.trace.bin", "termination": "stopped",
+                "target_stop_reason": "duration_elapsed", "target_returned_in_capture": False,
+            },)),
+        )
+        orchestrator = Mock()
+        orchestrator.run.return_value = result
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(cli, "load_config", return_value=config()), \
+                patch.object(cli, "_make_orchestrator", return_value=orchestrator), \
+                patch.object(Path, "open", side_effect=AssertionError("must reuse in-memory evidence")), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.assertEqual(0, cli.main(["run", "--config", "target.json", "--duration", "1s"]))
+
+        self.assertEqual("out/report.json\nout/run.trace.bin\n", stdout.getvalue())
+        self.assertIn("Capture: sealed; process: unknown", stderr.getvalue())
+        self.assertIn("wait (TID 42): open at status snapshot; capture sealed; return unknown", stderr.getvalue())
+        self.assertIn("target return unknown; duration_elapsed", stderr.getvalue())
+
+    def test_pull_displays_retained_flight_evidence_without_claiming_target_return(self):
+        from qtrace import cli
+
+        result = ArtifactResult(Path("out/session"), (), (), 0)
+        object.__setattr__(result, "_records", ({
+            "decoder": "flight", "remote_name": "run.flight.bin", "recovery_status": "complete",
+            "scene_lifecycle": [{"state": "capture_stopped", "target_returned": None}],
+            "scene_lifecycle_omitted": 2, "scene_lifecycle_invalid": 1,
+            "missing_sequence_ranges": 3, "coverage_gap_count": 4,
+        },))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(cli, "_select_device", return_value=Mock()), \
+                patch.object(cli, "bind_package_access", return_value=Mock()), \
+                patch.object(cli, "ArtifactProcessor") as processor, \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            processor.return_value.pull_manual.return_value = result
+            self.assertEqual(0, cli.main(["pull", "--package", "com.example.app"]))
+
+        self.assertEqual("out/session/report.json\n", stdout.getvalue())
+        self.assertIn("retained data complete", stderr.getvalue())
+        self.assertIn("scene returns observed 0; unconfirmed 1", stderr.getvalue())
+        self.assertIn("omitted 2; invalid 1", stderr.getvalue())
+        self.assertIn("missing sequence ranges 3; coverage gaps 4", stderr.getvalue())
+        self.assertIn("File completeness does not prove target return", stderr.getvalue())
+
+    def test_json_result_skips_human_summary_even_with_capture_evidence(self):
+        from qtrace import cli
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        report = SimpleNamespace(native={"lifecycle": {}}, artifacts=({"decoder": "flight"},))
+        with patch.object(cli, "format_capture_summary", side_effect=AssertionError("human output only")), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            cli._emit_result(Path("out/report.json"), (), 2, True, session_report=report)
+
+        self.assertEqual({"report": "out/report.json", "artifacts": [], "exitCode": 2},
+                         json.loads(stdout.getvalue()))
+        self.assertEqual("", stderr.getvalue())
+
     def test_keyboard_interrupt_maps_to_130_after_orchestrator_returns_control(self):
         from qtrace import cli
 

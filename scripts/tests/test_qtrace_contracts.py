@@ -2702,13 +2702,51 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 PullSelection(PullMode.NAME, "run.flight.bin"), output, 1.0,
             )
             self.assertEqual(0, result.exit_code)
-            with RootedReader(output) as held:
-                _validated_pull_report(
-                    SubprocessRunner("SERIAL", inject_first_read_failure=False),
-                    str(result.output_dir / "report.json"),
-                    held,
-                    named="run.flight.bin",
-                )
+            report_path = result.output_dir / "report.json"
+            document = json.loads(report_path.read_text(encoding="utf-8"))
+            record = next(item for item in document["artifacts"] if item.get("decoder") == "flight")
+            counters = ("scene_lifecycle_omitted", "scene_lifecycle_invalid",
+                        "missing_sequence_ranges", "coverage_gap_count")
+            for variant in ("current", "unavailable", "legacy"):
+                with self.subTest(variant=variant):
+                    if variant == "unavailable":
+                        record.update(dict.fromkeys(counters))
+                    elif variant == "legacy":
+                        for field in counters:
+                            record.pop(field)
+                    report_path.write_text(json.dumps(document), encoding="utf-8")
+                    with RootedReader(output) as held:
+                        _validated_pull_report(
+                            SubprocessRunner("SERIAL", inject_first_read_failure=False),
+                            str(report_path), held, named="run.flight.bin",
+                        )
+
+    def test_pull_validator_rejects_invalid_flight_summary_counters(self):
+        from scripts.qtrace_device_acceptance import RootedReader, SubprocessRunner, _validated_pull_report
+
+        client = FakeClient({"run.flight.bin": recoverable_flight_artifact()})
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "flight"
+            result = ArtifactProcessor(client_factory=lambda _d, _p: client).pull_manual(
+                BOUND_DEVICE, "com.example.app", PullSelection(PullMode.NAME, "run.flight.bin"), output, 1.0,
+            )
+            report_path = result.output_dir / "report.json"
+            document = json.loads(report_path.read_text(encoding="utf-8"))
+            record = next(item for item in document["artifacts"] if item.get("decoder") == "flight")
+            for field in ("scene_lifecycle_omitted", "scene_lifecycle_invalid",
+                          "missing_sequence_ranges", "coverage_gap_count"):
+                original = record[field]
+                for invalid in (-1, True, 0.5, "0"):
+                    with self.subTest(field=field, invalid=invalid):
+                        record[field] = invalid
+                        report_path.write_text(json.dumps(document), encoding="utf-8")
+                        with RootedReader(output) as held, self.assertRaisesRegex(
+                                RuntimeError, "invalid flight summary counters"):
+                            _validated_pull_report(
+                                SubprocessRunner("SERIAL", inject_first_read_failure=False),
+                                str(report_path), held, named="run.flight.bin",
+                            )
+                record[field] = original
 
     def test_pull_validator_stats_large_artifacts_without_reading_them(self):
         from scripts.qtrace_device_acceptance import RootedReader, _validated_pull_report

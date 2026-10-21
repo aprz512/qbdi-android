@@ -172,9 +172,15 @@ def validate_pulled_artifacts(
                 summary = json.loads(derived[-1].read_text(encoding="utf-8"))
                 if type(summary) is not dict or type(summary.get("complete")) is not bool:
                     raise ValueError("flight recovery summary is malformed")
+                missing_ranges = summary.get("lost_sequences")
+                coverage_gaps = summary.get("coverage_gaps")
                 record.update(decoder="flight", termination=summary.get("termination"),
                              target_returned_in_capture=None,
                              scene_lifecycle=summary.get("scene_lifecycle", []),
+                             scene_lifecycle_omitted=summary.get("scene_lifecycle_omitted"),
+                             scene_lifecycle_invalid=summary.get("scene_lifecycle_invalid"),
+                             missing_sequence_ranges=len(missing_ranges) if type(missing_ranges) is list else None,
+                             coverage_gap_count=len(coverage_gaps) if type(coverage_gaps) is list else None,
                              recovery_status=recovery_status(summary))
                 process_exited = (status is not None and
                                   status.get("_process_exited") is True)

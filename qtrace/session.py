@@ -89,6 +89,7 @@ class SessionResult:
     exit_code: int
     report: Path
     outputs: tuple[Path, ...]
+    session_report: SessionReport | None = None
 
 
 @dataclass(frozen=True)
@@ -422,7 +423,7 @@ class SessionOrchestrator:
                     if type(collector_token) is not tuple:
                         raise
                 else:
-                    return SessionResult(session_id, exit_code, target_report, outputs)
+                    return SessionResult(session_id, exit_code, target_report, outputs, report)
             target_report = report_path
             no_replace = False
             if error is not None or (collector_token is None and report_path.exists()):
@@ -436,7 +437,7 @@ class SessionOrchestrator:
                 if "no_replace" not in str(publication_error):
                     raise
                 self._report_writer.write_atomic(target_report, report)
-            return SessionResult(session_id, exit_code, target_report, outputs)
+            return SessionResult(session_id, exit_code, target_report, outputs, report)
 
         context = None
         entered = False

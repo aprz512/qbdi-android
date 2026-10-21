@@ -13,6 +13,10 @@ vfork、exec、进程退出与 pthread_exit 的封口已有设备正向对照。
 无逐指令时间戳、原生子分支覆盖边界和未证明 CPU 加速等限制仍保留。
 这些通用结果不替代下文防护库场景的实测，也不扩展其历史结论。
 
+后续体验改进将已有生命周期与恢复证据直接显示在 CLI 结束摘要中，区分采集完成、
+status 快照中的开放目标和实际返回，并显示 Flight 的缺口计数与摘要省略信息。
+本项通过主机回归验证，不涉及新的设备采集，也不作为公开 CLI/UI 的完整实战评测。
+
 本文分析 DIGIMON UP `com.bandainamcoent.dgup_ww` 1.5.0(55) 中的 AppGuard 防护库，
 重点为 native configure/status API、logical region、Flight 回收和 JNI 观测。
 本轮没有完整评测公开 qtrace CLI 或 qtrace-ui，不能把实验脚本的问题直接当作这些入口的缺陷。

@@ -579,6 +579,13 @@ class ArtifactTests(unittest.TestCase):
                                                          PullSelection(PullMode.NAME, "run.flight.bin"), Path(root), 1)
             self.assertEqual(0, result.exit_code)
             self.assertTrue((result.output_dir / "artifacts" / "run.flight.json").is_file())
+            summary = json.loads((result.output_dir / "artifacts" / "run.flight.json").read_text(encoding="utf-8"))
+            record = next(item for item in result._records if item.get("decoder") == "flight")
+            self.assertEqual(summary["scene_lifecycle"], record["scene_lifecycle"])
+            self.assertEqual(summary["scene_lifecycle_omitted"], record["scene_lifecycle_omitted"])
+            self.assertEqual(summary["scene_lifecycle_invalid"], record["scene_lifecycle_invalid"])
+            self.assertEqual(len(summary["lost_sequences"]), record["missing_sequence_ranges"])
+            self.assertEqual(len(summary["coverage_gaps"]), record["coverage_gap_count"])
 
     def test_corrupt_member_is_not_in_published_files(self):
         client = FakeClient({"bad.trace.bin": b"bad", "good.trace.txt": COMPLETE_TERMINAL})

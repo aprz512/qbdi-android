@@ -1080,6 +1080,9 @@ _PULL_QTRB_LIFECYCLE_KEYS = _PULL_ARTIFACT_KEYS | {
     "target_returned_in_capture", "target_stop_reason", "scene_name", "tid", "target_offset"}
 _PULL_FLIGHT_LIFECYCLE_KEYS = _PULL_FLIGHT_ARTIFACT_KEYS | {
     "target_returned_in_capture", "scene_lifecycle"}
+_PULL_FLIGHT_SUMMARY_COUNTERS = frozenset({
+    "scene_lifecycle_omitted", "scene_lifecycle_invalid", "missing_sequence_ranges", "coverage_gap_count"})
+_PULL_FLIGHT_SUMMARY_KEYS = _PULL_FLIGHT_LIFECYCLE_KEYS | _PULL_FLIGHT_SUMMARY_COUNTERS
 
 
 def _strict_session_report(runner: Runner, root: Path, relative: Path) -> dict[str, object]:
@@ -1486,7 +1489,7 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
     for item in records:
         if not isinstance(item, dict) or set(item) not in {
                 _PULL_ARTIFACT_KEYS, _PULL_FLIGHT_ARTIFACT_KEYS,
-                _PULL_QTRB_LIFECYCLE_KEYS, _PULL_FLIGHT_LIFECYCLE_KEYS}:
+                _PULL_QTRB_LIFECYCLE_KEYS, _PULL_FLIGHT_LIFECYCLE_KEYS, _PULL_FLIGHT_SUMMARY_KEYS}:
             raise RuntimeError("manual pull report has an invalid artifact record")
         name, local = item["remote_name"], item["local_path"]
         local_parts = Path(local).parts if isinstance(local, str) else ()
@@ -1519,7 +1522,8 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
         termination = item["termination"]
         if decoder == "flight":
             recovery = item.get("recovery_status")
-            if (set(item) not in {_PULL_FLIGHT_ARTIFACT_KEYS, _PULL_FLIGHT_LIFECYCLE_KEYS} or recovery != "complete" or
+            if (set(item) not in {_PULL_FLIGHT_ARTIFACT_KEYS, _PULL_FLIGHT_LIFECYCLE_KEYS,
+                                 _PULL_FLIGHT_SUMMARY_KEYS} or recovery != "complete" or
                     type(termination) is not dict or
                     set(termination) != {"cause", "initiator_tid"} or
                     termination.get("cause") not in {"unknown", "termination_intent"} or
@@ -1529,13 +1533,17 @@ def _validated_pull_report(runner: Runner, stdout: str, root: Path | RootedReade
                      (type(termination.get("initiator_tid")) is not int or
                       termination["initiator_tid"] <= 0))):
                 raise RuntimeError("manual pull report has invalid flight recovery status")
-            if set(item) == _PULL_FLIGHT_LIFECYCLE_KEYS and (
+            if set(item) in {_PULL_FLIGHT_LIFECYCLE_KEYS, _PULL_FLIGHT_SUMMARY_KEYS} and (
                     item["target_returned_in_capture"] is not None or
                     type(item["scene_lifecycle"]) is not list or len(item["scene_lifecycle"]) > 256 or
                     any(type(scene) is not dict or scene.get("state") not in {"returned","capture_stopped","open_at_end"} or
                         scene.get("target_returned") is not (True if scene.get("state") == "returned" else None)
                         for scene in item["scene_lifecycle"])):
                 raise RuntimeError("manual pull report has invalid scene lifecycle")
+            if set(item) == _PULL_FLIGHT_SUMMARY_KEYS and any(
+                    item[key] is not None and (type(item[key]) is not int or item[key] < 0)
+                    for key in _PULL_FLIGHT_SUMMARY_COUNTERS):
+                raise RuntimeError("manual pull report has invalid flight summary counters")
         elif (set(item) not in {_PULL_ARTIFACT_KEYS, _PULL_QTRB_LIFECYCLE_KEYS} or
               (set(item) == _PULL_QTRB_LIFECYCLE_KEYS and decoder != "qtrb") or
               (decoder == "qtrb" and termination not in {"completed", "stopped"}) or

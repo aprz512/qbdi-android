@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from qtrace.artifacts import ArtifactProcessor, PullMode, PullSelection
 from qtrace.config import load_config, parse_duration_ms
@@ -22,7 +22,9 @@ from qtrace.elf import ElfInspector, TargetResolver
 from qtrace.errors import EXIT_INTERRUPTED, QtraceError
 from qtrace.preflight import bind_package_access
 from qtrace.process import BoundedRunner
+from qtrace.report import SessionReport
 from qtrace.session import MonitorRequest, RunRequest, SessionOrchestrator
+from qtrace.summary import format_capture_summary
 
 
 _DEFAULT_SETUP_TIMEOUT = 90.0
@@ -359,11 +361,18 @@ def _progress(message: str) -> None:
     print(f"qtrace: {message}", file=sys.stderr)
 
 
-def _emit_result(report: Path, artifacts: Sequence[Path], exit_code: int, as_json: bool) -> None:
+def _emit_result(report: Path, artifacts: Sequence[Path], exit_code: int, as_json: bool, *,
+                 session_report: SessionReport | None = None,
+                 records: Sequence[Mapping[str, object]] = ()) -> None:
     if as_json:
         print(json.dumps({"report": str(report), "artifacts": [str(item) for item in artifacts],
                           "exitCode": exit_code}, separators=(",", ":"), ensure_ascii=False))
         return
+    if session_report is not None:
+        records = session_report.artifacts
+    lifecycle = session_report.native.get("lifecycle") if session_report is not None else None
+    for line in format_capture_summary(exit_code, records, lifecycle=lifecycle):
+        _progress(line)
     print(report)
     for artifact in artifacts:
         print(artifact)
@@ -377,7 +386,8 @@ def _run(arguments: argparse.Namespace, repo_root: Path) -> int:
                          abi_report=arguments.abi_report)
     _progress("starting timed session")
     result = _make_orchestrator(repo_root).run(request)
-    _emit_result(result.report, result.outputs, result.exit_code, arguments.json)
+    _emit_result(result.report, result.outputs, result.exit_code, arguments.json,
+                 session_report=result.session_report)
     return result.exit_code
 
 
@@ -388,7 +398,8 @@ def _monitor(arguments: argparse.Namespace, repo_root: Path) -> int:
                              abi_report=arguments.abi_report)
     _progress("starting monitor session")
     result = _make_orchestrator(repo_root).monitor(request)
-    _emit_result(result.report, result.outputs, result.exit_code, arguments.json)
+    _emit_result(result.report, result.outputs, result.exit_code, arguments.json,
+                 session_report=result.session_report)
     return result.exit_code
 
 
@@ -399,7 +410,8 @@ def _pull(arguments: argparse.Namespace) -> int:
     device = bind_package_access(device, arguments.package, timeout=arguments.adb_timeout)
     result = ArtifactProcessor().pull_manual(device, arguments.package, _selection(arguments),
                                              arguments.output, arguments.pull_timeout)
-    _emit_result(result.output_dir / "report.json", result.files, result.exit_code, arguments.json)
+    _emit_result(result.output_dir / "report.json", result.files, result.exit_code, arguments.json,
+                 records=getattr(result, "_records", ()))
     return result.exit_code
 
 
@@ -433,7 +445,8 @@ def _demo(arguments: argparse.Namespace, repo_root: Path) -> int:
         result = orchestrator.monitor(MonitorRequest(config, arguments.device, arguments.output,
                                                      arguments.setup_timeout, arguments.adb_timeout,
                                                      arguments.pull_timeout, action))
-    _emit_result(result.report, result.outputs, result.exit_code, arguments.json)
+    _emit_result(result.report, result.outputs, result.exit_code, arguments.json,
+                 session_report=result.session_report)
     return result.exit_code
 
 

@@ -403,6 +403,8 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(document["effective_config"]["config"])
         self.assertTrue(document["native"]["request"])
         self.assertEqual(7, document["native"]["status"]["generation"])
+        self.assertEqual(document["native"]["lifecycle"], result.session_report.native["lifecycle"])
+        self.assertEqual(document["artifacts"], list(result.session_report.artifacts))
 
     def test_timed_run_retries_only_initial_exact_status_enoent(self) -> None:
         path = f"/data/user/0/{PACKAGE}/files/qbdi-traces/session-{SESSION_ID}.status.json"
