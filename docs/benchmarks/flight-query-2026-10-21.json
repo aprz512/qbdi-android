@@ -1,0 +1,311 @@
+{
+  "schema": 1,
+  "date": "2026-10-21",
+  "base_commit": "18297336506bc909c5c220cce9b784aab4c0e271",
+  "branch": "perf/flight-query-20261021",
+  "working_tree": "uncommitted changes; main unchanged",
+  "scope": "offline synthetic production-encoder fixture; no new device or browser acceptance",
+  "input": {
+    "original": "/home/lyldalek/workspace/qbdi-android/artifacts/qbdi-generic-2026-10-21/query-256m.flight.bin",
+    "bytes": 268435456,
+    "sha256": "19ccad6bc9338a3c953fd2ce044618c5630e219c2bfc34990ba2e0a3ef462f29",
+    "synthetic": true,
+    "groups": 60000
+  },
+  "input_unchanged": true,
+  "limits": {
+    "source_and_cache_cumulative_allocation_bytes": 2147483648,
+    "payload_arena_bytes": 8589934592,
+    "name_arena_bytes": 16777216,
+    "blob_arena_bytes": 67108864,
+    "raised": false
+  },
+  "cache_layout": {
+    "before": 3,
+    "after": 4,
+    "old_cache": "rebuild under the new identity"
+  },
+  "baseline": {
+    "result": "control.budget_exceeded",
+    "measurement": {
+      "elapsed": "0:04.28",
+      "max_rss_kib": 938932,
+      "raw_time_log": "artifacts/flight-query-2026-10-21/before-dense.time"
+    },
+    "stderr": "artifacts/flight-query-2026-10-21/before-dense.stderr"
+  },
+  "dense_cold": {
+    "service_open_seconds": 10.025130794,
+    "measurement": {
+      "elapsed": "0:10.58",
+      "max_rss_kib": 1104220,
+      "raw_time_log": "artifacts/flight-query-2026-10-21/final-cold.time"
+    },
+    "events": 585002,
+    "queries": [
+      {
+        "filter": "instructions",
+        "max_page_json_bytes": 686284,
+        "max_page_rows": 2000,
+        "pages": 30,
+        "rows": 60000,
+        "seconds": 0.17228719
+      },
+      {
+        "filter": "calls",
+        "max_page_json_bytes": 871284,
+        "max_page_rows": 2000,
+        "pages": 30,
+        "rows": 60000,
+        "seconds": 0.292054734
+      },
+      {
+        "filter": "address",
+        "max_page_json_bytes": 686284,
+        "max_page_rows": 2000,
+        "pages": 15,
+        "rows": 30000,
+        "seconds": 0.062262602
+      },
+      {
+        "filter": "sequence",
+        "max_page_json_bytes": 334694,
+        "max_page_rows": 901,
+        "pages": 1,
+        "rows": 901,
+        "seconds": 0.002322032
+      }
+    ],
+    "workspace_closed": true
+  },
+  "dense_warm": {
+    "service_open_seconds": 4.628420313,
+    "measurement": {
+      "elapsed": "0:05.06",
+      "max_rss_kib": 706792,
+      "raw_time_log": "artifacts/flight-query-2026-10-21/final-warm.time"
+    },
+    "queries": [
+      {
+        "filter": "instructions",
+        "max_page_json_bytes": 686284,
+        "max_page_rows": 2000,
+        "pages": 30,
+        "rows": 60000,
+        "seconds": 0.130314774
+      },
+      {
+        "filter": "calls",
+        "max_page_json_bytes": 871284,
+        "max_page_rows": 2000,
+        "pages": 30,
+        "rows": 60000,
+        "seconds": 0.21686399
+      },
+      {
+        "filter": "address",
+        "max_page_json_bytes": 686284,
+        "max_page_rows": 2000,
+        "pages": 15,
+        "rows": 30000,
+        "seconds": 0.061190348
+      },
+      {
+        "filter": "sequence",
+        "max_page_json_bytes": 334694,
+        "max_page_rows": 901,
+        "pages": 1,
+        "rows": 901,
+        "seconds": 0.001417013
+      }
+    ],
+    "workspace_closed": true
+  },
+  "full_verification": {
+    "measurement": {
+      "elapsed": "0:38.33",
+      "max_rss_kib": 1836036,
+      "raw_time_log": "artifacts/flight-query-2026-10-21/final-verify.time"
+    },
+    "cold_open_seconds": 10.577475122,
+    "warm_open_seconds": 4.228046365,
+    "reopen_equivalent": true,
+    "events_checked_per_open": 585002,
+    "event_counts": {
+      "begin": 15000,
+      "instruction": 60000,
+      "instruction_definition": 15000,
+      "memory": 60000,
+      "register_checkpoint": 15000,
+      "semantic_call": 60000,
+      "semantic_rule": 120000,
+      "string_definition": 240000,
+      "thread_lifecycle": 2
+    },
+    "timeline_sha256": "4af22726619de9be8142e61ef51ac5491c206d138c1044fb59b0ecc658c6a0e5",
+    "analysis_sha256": "760bc0d740b3157f4315a53bdcd03f8a96c94645d4a64719ae16a392bbe169ce",
+    "checks": [
+      "provider/store key, kind, provenance and typed payload equality for every event",
+      "complete service pagination without omissions or duplicates",
+      "instruction filter count",
+      "register, call-tree and memory samples",
+      "restart and cache reopen equivalence"
+    ]
+  },
+  "scene_events": {
+    "measurement": {
+      "elapsed": "0:26.80",
+      "max_rss_kib": 29780,
+      "raw_time_log": "artifacts/flight-query-2026-10-21/final-scene-events.time"
+    },
+    "range_ns": [
+      1100000000,
+      1102500000
+    ],
+    "selected_whole_scenes": 3,
+    "scene_ids": [
+      101,
+      102,
+      103
+    ],
+    "rows": 15,
+    "time_source": "scene_interval",
+    "individual_event_timestamps": false,
+    "payload_bytes_read": 223581832,
+    "metadata_bytes_read": 1052672,
+    "unpaired_boundaries": 0,
+    "invalid_boundaries": 0,
+    "first_two_pages_match_dense_prefix": true,
+    "scan_limit_bytes": 536870912,
+    "row_limit": 2000,
+    "json_limit_bytes": 16777216,
+    "open_scene_limit": 4096,
+    "maximum_chunk_bytes": 1048576
+  },
+  "cancellation": {
+    "final-cancel": {
+      "cancel_requested_during": {
+        "artifact": null,
+        "processed_bytes": "0",
+        "processed_events": "0",
+        "processed_rows": "0",
+        "stage": "verify_source"
+      },
+      "cancellation_seconds": 0.00017904,
+      "error": "job.cancelled",
+      "job": {
+        "error": {
+          "code": "job.cancelled",
+          "detail": "operation cancelled",
+          "retryable": false,
+          "source": null,
+          "stage": "control"
+        },
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "2949120",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "cancelled",
+        "workspace_id": "1"
+      },
+      "result": "cancelled",
+      "seconds": 0.00129781,
+      "worker_joined": true
+    },
+    "final-cancel-index": {
+      "cancel_requested_during": {
+        "artifact": "query-256m.flight.bin",
+        "processed_bytes": "41944152",
+        "processed_events": "54761",
+        "processed_rows": "0",
+        "stage": "build_index"
+      },
+      "cancellation_seconds": 0.011354475,
+      "error": "job.cancelled",
+      "job": {
+        "error": {
+          "code": "job.cancelled",
+          "detail": "operation cancelled",
+          "retryable": false,
+          "source": null,
+          "stage": "control"
+        },
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "query-256m.flight.bin",
+            "processed_bytes": "42343332",
+            "processed_events": "55293",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "cancelled",
+        "workspace_id": "1"
+      },
+      "result": "cancelled",
+      "seconds": 2.058679733,
+      "worker_joined": true
+    },
+    "final-scene-interrupt": {
+      "exit_code": 130,
+      "signal": "SIGINT",
+      "joined": true,
+      "seconds_after_signal": 0.015542968001682311
+    }
+  },
+  "checks": {
+    "python": {
+      "command": "python3 -m unittest discover -s scripts/tests",
+      "tests": 917,
+      "skipped": 9,
+      "result": "pass"
+    },
+    "rust_core": {
+      "command": "cargo test -p qtrace-provider -p qtrace-store -p qtrace-analysis -p qtrace-service",
+      "passed": 519,
+      "ignored": 2,
+      "result": "pass"
+    },
+    "clippy": {
+      "command": "cargo clippy -p qtrace-provider -p qtrace-store -p qtrace-analysis -p qtrace-service --all-targets -- -D warnings",
+      "result": "pass"
+    },
+    "fmt": "pass",
+    "generated_fixtures_and_bindings": "pass",
+    "diff_check": "pass",
+    "independent_review": "pass; fragment dictionary scan corrected; no remaining confirmed findings"
+  },
+  "cleanup": {
+    "removed_worktree": "/home/lyldalek/.codex/worktrees/ca0a/qbdi-android",
+    "removed_merged_branch": "fix/qbdi-generic-20261021",
+    "preserved_artifacts": [
+      "/home/lyldalek/workspace/qbdi-android/artifacts/qbdi-generic-2026-10-21",
+      "/home/lyldalek/workspace/qbdi-android/artifacts/qbdi-jni-fixed-2026-10-21",
+      "/home/lyldalek/workspace/qbdi-android/artifacts/qbdi-p0-2026-10-21"
+    ],
+    "remaining_worktrees": [
+      "main",
+      "perf/flight-query-20261021"
+    ]
+  },
+  "identity_manifest": "artifacts/flight-query-2026-10-21/final/manifest.json",
+  "notes": [
+    "Measurements are single local observations, not latency or cross-host performance guarantees.",
+    "Cumulative allocation authorization and peak RSS are different quantities.",
+    "Native capture format and public provider JSON serialization remain unchanged.",
+    "The earlier missing-TypeScript dependency and intermediate resource rejections remain in raw logs."
+  ]
+}

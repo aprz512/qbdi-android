@@ -721,16 +721,6 @@ fn add_discontinuity_events(
         ..WorkDelta::default()
     };
     context.guard.consume(evidence_delta)?;
-    let event_capacity = events
-        .len()
-        .checked_add(evidence_capacity)
-        .ok_or_else(|| allocation_error("discontinuity event count overflow"))?;
-    allocation::try_reserve_vec_exact(
-        events,
-        event_capacity,
-        context.guard,
-        "Flight discontinuity event allocation failed",
-    )?;
     let mut proof_ranges = fallible_vec(sequence_proofs.len(), context)?;
     for (index, proof) in sequence_proofs.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
@@ -749,6 +739,28 @@ fn add_discontinuity_events(
         guard_checkpoint(context.guard, index)?;
         proof_coverage.insert(range, ());
     }
+    let mut additional = sequence_proofs.len();
+    for (index, evidence) in completeness.iter().enumerate() {
+        guard_checkpoint(context.guard, index)?;
+        if evidence.cause() != CompletenessCause::Retained
+            && !(matches!(evidence.bounds(), RangeBounds::InclusiveSequence { .. })
+                && proof_coverage.contains_key(evidence))
+        {
+            additional = additional
+                .checked_add(1)
+                .ok_or_else(|| allocation_error("discontinuity event count overflow"))?;
+        }
+    }
+    let event_capacity = events
+        .len()
+        .checked_add(additional)
+        .ok_or_else(|| allocation_error("discontinuity event count overflow"))?;
+    allocation::try_reserve_vec_exact(
+        events,
+        event_capacity,
+        context.guard,
+        "Flight discontinuity event allocation failed",
+    )?;
     for (index, evidence) in completeness.iter().copied().enumerate() {
         guard_checkpoint(context.guard, index)?;
         if evidence.cause() == CompletenessCause::Retained {

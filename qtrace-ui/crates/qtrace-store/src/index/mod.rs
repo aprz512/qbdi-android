@@ -1,6 +1,7 @@
 mod builder;
 mod checkpoints;
 mod intervals;
+mod payload;
 mod postings;
 mod sorting;
 mod source_keys;
@@ -727,8 +728,8 @@ impl NormalizedContentIdentity {
 }
 
 const NORMALIZED_LAYOUT_FINGERPRINT: [u8; 32] = [
-    0x70, 0x9a, 0x76, 0x70, 0x96, 0x41, 0x78, 0x36, 0xfb, 0x0a, 0xde, 0x5a, 0xb4, 0xc6, 0xeb, 0x26,
-    0x36, 0xa3, 0xd0, 0x42, 0xa0, 0x5c, 0x1a, 0x4e, 0x35, 0x4d, 0xee, 0x23, 0x0d, 0x7a, 0xb8, 0xf2,
+    0xca, 0x53, 0x07, 0x68, 0x71, 0x35, 0x09, 0x8b, 0x5a, 0xa1, 0x7a, 0x42, 0x4d, 0x76, 0x66, 0xc4,
+    0x86, 0xff, 0xf0, 0xbe, 0x20, 0xf7, 0x32, 0xe2, 0x65, 0x20, 0x07, 0x53, 0xc4, 0xde, 0x9a, 0x69,
 ];
 
 impl CompletenessRow {
@@ -926,6 +927,23 @@ fn derive_normalized_content_identity(
 }
 
 impl NormalizedCatalog {
+    fn detail_bytes(&self, row: u32) -> Result<&[u8], IndexError> {
+        let event = self
+            .events
+            .get(row as usize)
+            .ok_or_else(|| IndexError::corrupt("semantic detail event is out of range"))?;
+        payload::literal_detail(self.payloads.get(event.payload_blob)?)
+            .ok_or_else(|| IndexError::corrupt("semantic detail is not literal payload text"))
+    }
+
+    fn blob_bytes(&self, id: u32) -> Result<&[u8], IndexError> {
+        if id & payload::DETAIL_ROW_BIT != 0 {
+            self.detail_bytes(id & !payload::DETAIL_ROW_BIT)
+        } else {
+            self.blobs.get(id)
+        }
+    }
+
     fn validate_shape(&self, event_count: usize, guard: &dyn WorkGuard) -> Result<(), IndexError> {
         if self.schema != 2 || self.events.len() != event_count {
             return Err(IndexError::corrupt(
@@ -1008,7 +1026,7 @@ impl NormalizedCatalog {
                 row.owner_row >= event_count
                     || row.category.is_some_and(|id| self.strings.get(id).is_err())
                     || self.strings.get(row.name).is_err()
-                    || self.blobs.get(row.detail_blob).is_err()
+                    || self.blob_bytes(row.detail_blob).is_err()
             }) {
                 return Err(invalid());
             }
@@ -2089,8 +2107,7 @@ impl<T: HasNormalizedCatalog> TraceStoreView for T {
     }
     fn blob_bytes(&self, blob_id: u32) -> Result<&[u8], IndexError> {
         self.normalized_catalog()
-            .blobs
-            .get(blob_id)
+            .blob_bytes(blob_id)
             .map_err(|_| IndexError::invalid("blob ID is out of range"))
     }
     fn memory_before_bytes(&self, event_row: usize) -> Result<Option<&[u8]>, IndexError> {
@@ -2741,7 +2758,7 @@ fn cache_identity(
         build_option_digest: options.digest(),
         cache_schema: 2,
         endian: crate::allocation::try_copy_string("little", guard, "cache endian")?,
-        layout_version: 3,
+        layout_version: 4,
         source_features: 0,
         source_format: crate::allocation::try_copy_string(
             &provider.format,

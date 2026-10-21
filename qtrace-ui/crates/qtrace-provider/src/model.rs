@@ -470,7 +470,39 @@ pub struct RegisterDelta {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StringDefinition {
     pub id: u32,
+    #[serde(deserialize_with = "deserialize_string_bytes")]
     pub bytes: Vec<u8>,
+}
+
+// Store layout 4 uses JSON text for UTF-8 definitions. Wire readers and the
+// public serializer retain byte arrays, including arbitrary non-UTF-8 evidence.
+fn deserialize_string_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    struct BytesVisitor;
+    impl<'de> serde::de::Visitor<'de> for BytesVisitor {
+        type Value = Vec<u8>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a byte array or UTF-8 string")
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Vec<u8>, E> {
+            Ok(value.as_bytes().to_vec())
+        }
+        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Vec<u8>, E> {
+            Ok(value.into_bytes())
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Vec<u8>, A::Error> {
+            let mut bytes = Vec::new();
+            while let Some(byte) = sequence.next_element::<u8>()? {
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+    deserializer.deserialize_any(BytesVisitor)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

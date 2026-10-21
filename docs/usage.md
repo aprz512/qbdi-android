@@ -193,7 +193,26 @@ python3 -m qtrace scenes-flight run.flight.bin \
 该查询校验所解码 chunk，不进行全文件恢复或调用配对。指令记录没有逐事件时间戳，不能按这些场景时间推算指令执行时刻。
 超出预算或截止时间会明确失败；Ctrl-C 会停止扫描。
 类型、地址和 sequence 分页查询继续使用分析器现有入口，单页最多 2000 行；索引本身也受资源预算和取消控制。
-256 MiB 密集输入的预算拒绝与较低占用输入的成功测量分别记录在[通用优化验收](benchmarks/qbdi-generic-2026-10-21.md)。
+原有的密集输入预算拒绝保留在[通用优化验收](benchmarks/qbdi-generic-2026-10-21.md)。
+后续密集索引与场景事件查询的验证见[Flight 查询优化](benchmarks/flight-query-2026-10-21.md)。
+
+需要查看场景中的指令、memory 和 call 时，使用：
+
+```bash
+python3 -m qtrace events-flight run.flight.bin \
+  --since-ns 1100000000 --until-ns 1102500000 --limit 2000 --timeout 120
+```
+
+`events-flight` 选择与时间区间重叠的完整场景，再按全局 sequence 返回场景内事件。
+它包含进入和结束边界，时间端点均包含，不将场景内事件裁剪成貌似精确的逐事件时间范围。
+每行的 `time_source` 为 `scene_interval`，`event_monotonic_ns` 为 `null`；`scenes` 提供实际进入、结束时间与返回状态。
+只有配对的 enter/return 或 enter/capture_stopped 记录建立区间；开放或缺少入口的场景仅计入 `unpaired_boundaries`。
+嵌套场景中的事件只返回一次，关联最内层的匹配场景。跨 chunk 的语义 fragment 原样标为 `semantic_fragment`，不冒充完整 call。
+
+该操作默认 30 秒、每页 2000 行；两遍扫描共享 512 MiB payload 上限，单 chunk 最多 1 MiB，元数据最多 8 MiB，
+最多保留 4096 个开放场景，输出 JSON 最多 16 MiB。超限明确失败，不返回截断后貌似完整的结果。
+下一页使用 `next_after_sequence`，保持文件与时间条件不变；每页重新扫描，取消与截止时间在 chunk 及事件批次之间检查。
+该查询验证所读 chunk；完整恢复和全局缺口分析仍使用分析器。首次打开旧缓存时，分析器按需重建缓存，原始轨迹保持只读。
 
 ## Pull Traces
 

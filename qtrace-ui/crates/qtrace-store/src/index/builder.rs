@@ -5,6 +5,7 @@ use qtrace_provider::{
     RegisterSlot, TraceProvider, WorkDelta, WorkGuard,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::ArtifactSource;
 
@@ -16,6 +17,7 @@ use super::{
     checkpoints::RegisterObservationRow,
     intervals::IntervalEntry,
     intervals::IntervalIndex,
+    payload::{DETAIL_ROW_BIT, Payload, literal_detail},
     postings::PostingList,
     sorting::{cancellable_sort, cancellable_sort_by},
     source_keys::SourceKeyIndex,
@@ -44,12 +46,31 @@ impl IndexBuilder {
         let source_format = NormalizedSourceFormat::parse(&provider.identity().format)?;
         let event_count = provider.event_count_hint();
         let mut capabilities = provider.capabilities().clone();
+        let payload_capacity = provider
+            .resident_events()
+            .map(|events| payload_capacity(events, guard))
+            .transpose()?;
         let mut cursor = {
             let resident = provider.cursor_resident_bytes()?;
             let _scope = crate::allocation::scope(guard, resident, 0)?;
             provider.into_cursor()?
         };
         let mut state = BuildState::new(options)?;
+        if let Some(capacity) = payload_capacity {
+            if capacity as u64 > state.payloads.max_bytes {
+                return Err(IndexError::new(
+                    "control.budget_exceeded",
+                    "bounded payload arena byte limit exceeded",
+                ));
+            }
+            crate::allocation::try_reserve_vec(
+                state.payloads.bytes.owned_mut()?,
+                capacity,
+                guard,
+                "normalized payload arena allocation",
+            )?;
+        }
+        super::probe_index_memory("before_source_scan");
         if let Some(rows) = event_count {
             crate::allocation::try_reserve_vec(
                 &mut state.keys,
@@ -117,6 +138,7 @@ struct BuildState<'a> {
     saw_memory_before_after: bool,
     saw_lifecycle: bool,
     saw_signal_or_termination: bool,
+    legacy_payloads: bool,
     current_module: HashMap<EventScope, (u64, Vec<u8>)>,
 }
 
@@ -168,12 +190,13 @@ impl<'a> BuildState<'a> {
             saw_memory_before_after: false,
             saw_lifecycle: false,
             saw_signal_or_termination: false,
+            legacy_payloads: false,
             current_module: HashMap::new(),
         })
     }
 
     fn append(&mut self, event: EventRecord, guard: &dyn WorkGuard) -> Result<(), IndexError> {
-        canonical_bytes_into(&event.payload, &mut self.payload_scratch, guard)?;
+        canonical_bytes_into(&Payload(&event.payload), &mut self.payload_scratch, guard)?;
         let payload_blob = self.payloads.intern(&self.payload_scratch, guard)?;
         self.append_with_payload_blob(event, payload_blob, guard)
     }
@@ -485,6 +508,20 @@ impl<'a> BuildState<'a> {
                     guard,
                     "semantic column allocation",
                 )?;
+                let detail_blob = if !self.legacy_payloads
+                    && row < DETAIL_ROW_BIT as usize
+                    && (!self.retain_source_columns
+                        || literal_detail(self.payloads.get(payload_blob)?)
+                            == Some(value.detail.as_bytes()))
+                    && !value
+                        .detail
+                        .bytes()
+                        .any(|byte| byte < 0x20 || matches!(byte, b'"' | b'\\'))
+                {
+                    DETAIL_ROW_BIT | row as u32
+                } else {
+                    self.blobs.intern(value.detail.as_bytes(), guard)?
+                };
                 self.semantics.push(SemanticRow {
                     owner_row: row,
                     category: value
@@ -493,7 +530,7 @@ impl<'a> BuildState<'a> {
                         .map(|value| self.strings.intern(value.as_bytes(), guard))
                         .transpose()?,
                     name: self.strings.intern(value.name.as_bytes(), guard)?,
-                    detail_blob: self.blobs.intern(value.detail.as_bytes(), guard)?,
+                    detail_blob,
                 });
             }
             EventPayload::RegisterCheckpoint(checkpoint) => {
@@ -545,7 +582,11 @@ impl<'a> BuildState<'a> {
                 }
             }
             EventPayload::StringDefinition(value) => {
-                let _ = self.strings.intern(&value.bytes, guard)?;
+                // Source definitions remain exact in the canonical payload.
+                // Only normalized names belong in the searchable string arena.
+                if self.legacy_payloads {
+                    let _ = self.strings.intern(&value.bytes, guard)?;
+                }
             }
             EventPayload::ThreadLifecycle(_) => self.saw_lifecycle = true,
             EventPayload::Signal(_)
@@ -724,14 +765,28 @@ pub(super) fn validate_cached_truth(
             continue;
         }
         let payload: EventPayload = {
-            let resident = crate::allocation::payload_decode_upper_bound(kind, bytes.len())?;
+            let resident = crate::allocation::payload_decode_bound_for_bytes(kind, bytes)?;
             let _scope = crate::allocation::scope(guard, resident, resident)?;
             serde_json::from_slice(bytes)
                 .map_err(|_| IndexError::corrupt("canonical event payload cannot be decoded"))?
         };
-        canonical_bytes_into(&payload, &mut canonical_scratch, guard)?;
+        canonical_bytes_into(&Payload(&payload), &mut canonical_scratch, guard)?;
+        state.legacy_payloads = false;
+        if canonical_scratch != bytes && kind == EventKind::StringDefinition {
+            canonical_bytes_into(&payload, &mut canonical_scratch, guard)?;
+            state.legacy_payloads = true;
+        }
         if canonical_scratch != bytes {
             return Err(IndexError::corrupt("event payload bytes are not canonical"));
+        }
+        if matches!(
+            kind,
+            EventKind::SemanticCall | EventKind::SemanticRule | EventKind::SemanticError
+        ) {
+            state.legacy_payloads = catalog
+                .semantics
+                .get(semantic_cursor)
+                .is_some_and(|row| row.detail_blob & DETAIL_ROW_BIT == 0);
         }
         if let EventPayload::Discontinuity(discontinuity) = &payload {
             guard.consume(WorkDelta {
@@ -1551,6 +1606,35 @@ fn keyed_values<K: Ord + Clone, V: Ord + Clone>(
     SortedMap::from_sorted(result)
 }
 
+fn payload_capacity(events: &[EventRecord], guard: &dyn WorkGuard) -> Result<usize, IndexError> {
+    let mut seen = HashMap::new();
+    let mut scratch = Vec::new();
+    let mut capacity = 0usize;
+    for event in events {
+        guard.consume(WorkDelta {
+            nodes: 1,
+            ..WorkDelta::default()
+        })?;
+        canonical_bytes_into(&Payload(&event.payload), &mut scratch, guard)?;
+        let hash: [u8; 32] = Sha256::digest(&scratch).into();
+        if !seen.contains_key(&hash) {
+            crate::allocation::try_reserve_hash_map(
+                &mut seen,
+                1,
+                guard,
+                "payload sizing hash allocation",
+            )?;
+            seen.insert(hash, ());
+            capacity = capacity
+                .checked_add(scratch.len())
+                .ok_or_else(|| IndexError::resource("payload arena size overflow"))?;
+        }
+    }
+    // Hashes size the initial reservation only. Interning still compares exact
+    // bytes and performs guarded growth if distinct values share a hash.
+    Ok(capacity)
+}
+
 pub(super) fn canonical_bytes<T: Serialize>(
     value: &T,
     guard: &dyn WorkGuard,
@@ -1976,9 +2060,86 @@ mod tests {
             &AllowAll,
         )
         .expect("invalid UTF-8 remains byte evidence");
-        let bytes = TraceStoreView::string_bytes(&store, 0).expect("string bytes");
-        assert_eq!(bytes, &[0xff, 0x00, 0x80]);
-        assert!(std::str::from_utf8(bytes).is_err());
+        let decoded: EventPayload =
+            serde_json::from_slice(store.payload_bytes(0).unwrap()).unwrap();
+        assert!(
+            matches!(decoded, EventPayload::StringDefinition(value) if value.bytes == [0xff, 0x00, 0x80])
+        );
+    }
+
+    #[test]
+    fn semantic_bodies_share_payload_text_without_consuming_name_or_blob_arenas() {
+        use super::super::HasNormalizedCatalog;
+        let event = |ordinal, payload| {
+            let mut value = memory_event(ordinal, 0, 0);
+            value.payload = payload;
+            value
+        };
+        let detail = "x".repeat(3000);
+        let definition = event(
+            1,
+            EventPayload::StringDefinition(StringDefinition {
+                id: 1,
+                bytes: detail.as_bytes().to_vec(),
+            }),
+        );
+        let call = event(
+            2,
+            EventPayload::SemanticCall(qtrace_provider::SemanticEvent {
+                category: Some("jni".into()),
+                name: "helper".into(),
+                detail: detail.clone(),
+                fragment_sequences: Vec::new(),
+            }),
+        );
+        let escaped = "quote\" slash\\ newline\n\0☃";
+        let rule = event(
+            3,
+            EventPayload::SemanticRule(qtrace_provider::SemanticEvent {
+                category: None,
+                name: "rule".into(),
+                detail: escaped.into(),
+                fragment_sequences: Vec::new(),
+            }),
+        );
+        let options = BuildOptions {
+            max_string_bytes: 32,
+            max_blob_bytes: 64,
+            ..BuildOptions::default()
+        };
+        let store = IndexBuilder::build_provider(
+            provider(vec![definition, call, rule]),
+            &options,
+            &AllowAll,
+        )
+        .unwrap();
+        let body = store.semantic(1).unwrap();
+        assert_eq!(
+            store.blob_bytes(body.detail_blob).unwrap(),
+            detail.as_bytes()
+        );
+        assert!(body.detail_blob & super::DETAIL_ROW_BIT != 0);
+        let escaped_body = store.semantic(2).unwrap();
+        assert_eq!(
+            store.blob_bytes(escaped_body.detail_blob).unwrap(),
+            escaped.as_bytes()
+        );
+        assert_eq!(escaped_body.detail_blob & super::DETAIL_ROW_BIT, 0);
+        let decoded: EventPayload =
+            serde_json::from_slice(store.payload_bytes(0).unwrap()).unwrap();
+        assert!(
+            matches!(decoded, EventPayload::StringDefinition(value) if value.bytes == detail.as_bytes())
+        );
+        let catalog = store.normalized_catalog();
+        assert!(catalog.strings.bytes.as_slice().len() < 32);
+        assert_eq!(catalog.blobs.bytes.as_slice(), escaped.as_bytes());
+        let keys: Vec<_> = (0..store.event_count())
+            .map(|row| store.event_key(row).unwrap())
+            .collect();
+        let kinds: Vec<_> = (0..store.event_count())
+            .map(|row| store.event_kind(row).unwrap())
+            .collect();
+        super::validate_cached_truth(catalog, &[], &keys, &kinds, "qtrb", &AllowAll).unwrap();
     }
 
     #[test]

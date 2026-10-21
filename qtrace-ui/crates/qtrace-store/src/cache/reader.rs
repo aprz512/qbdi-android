@@ -406,7 +406,7 @@ fn prepare_sections(
     let event_count = usize::try_from(key_count)
         .map_err(|_| ValidationFailure::Rebuild(RebuildReason::Section("event count")))?;
     let mut catalog = None;
-    if expected.cache_schema == 2 && expected.layout_version == 3 {
+    if expected.cache_schema == 2 && matches!(expected.layout_version, 3 | 4) {
         let expected_name_count = 2 + crate::index::binary_section_specs().len();
         let mut expected_names = Vec::new();
         crate::allocation::try_reserve_vec(

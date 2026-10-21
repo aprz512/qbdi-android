@@ -273,6 +273,84 @@ pub(crate) fn payload_decode_upper_bound(
         ))
 }
 
+/// Literal JSON strings are borrowed by serde_json before each owned field is
+/// copied once. Recognize the exact closed, well-typed literal shape before
+/// using this bound. Malformed fields, arrays, escapes and fragmented events
+/// retain the general bounds, including room for error construction.
+pub(crate) fn payload_decode_bound_for_bytes(
+    kind: EventKind,
+    bytes: &[u8],
+) -> Result<u64, AllocationFailure> {
+    if literal_payload_shape(kind, bytes) {
+        u64::try_from(bytes.len())
+            .map_err(|_| AllocationFailure::Overflow("event payload decode allocation bound"))
+    } else {
+        payload_decode_upper_bound(kind, bytes.len())
+    }
+}
+
+fn literal_payload_shape(kind: EventKind, mut bytes: &[u8]) -> bool {
+    fn take(bytes: &mut &[u8], prefix: &[u8]) -> bool {
+        if let Some(rest) = bytes.strip_prefix(prefix) {
+            *bytes = rest;
+            true
+        } else {
+            false
+        }
+    }
+    fn text(bytes: &mut &[u8]) -> bool {
+        if !take(bytes, b"\"") {
+            return false;
+        }
+        let Some(end) = bytes.iter().position(|byte| *byte == b'"') else {
+            return false;
+        };
+        if bytes[..end]
+            .iter()
+            .any(|byte| *byte < 0x20 || *byte == b'\\')
+            || std::str::from_utf8(&bytes[..end]).is_err()
+        {
+            return false;
+        }
+        *bytes = &bytes[end + 1..];
+        true
+    }
+    let tag = match kind {
+        EventKind::SemanticCall => b"{\"semantic_call\":{\"category\":".as_slice(),
+        EventKind::SemanticRule => b"{\"semantic_rule\":{\"category\":",
+        EventKind::SemanticError => b"{\"semantic_error\":{\"category\":",
+        EventKind::StringDefinition => {
+            if !take(&mut bytes, b"{\"string_definition\":{\"id\":") {
+                return false;
+            }
+            let Some(end) = bytes.iter().position(|byte| *byte == b',') else {
+                return false;
+            };
+            let id = &bytes[..end];
+            if id.is_empty()
+                || !id.iter().all(u8::is_ascii_digit)
+                || id.len() > 1 && id[0] == b'0'
+                || std::str::from_utf8(id)
+                    .ok()
+                    .and_then(|id| id.parse::<u32>().ok())
+                    .is_none()
+            {
+                return false;
+            }
+            bytes = &bytes[end..];
+            return take(&mut bytes, b",\"bytes\":") && text(&mut bytes) && bytes == b"}}";
+        }
+        _ => return false,
+    };
+    take(&mut bytes, tag)
+        && (take(&mut bytes, b"null") || text(&mut bytes))
+        && take(&mut bytes, b",\"name\":")
+        && text(&mut bytes)
+        && take(&mut bytes, b",\"detail\":")
+        && text(&mut bytes)
+        && bytes == b"}}"
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::{
@@ -283,6 +361,42 @@ pub(crate) mod tests {
     };
 
     use super::{payload_decode_upper_bound, scope};
+
+    #[test]
+    fn literal_semantic_and_compact_definition_bounds_cover_real_allocations() {
+        use qtrace_provider::{EventKind, EventPayload};
+        for (kind, encoded) in [
+            (
+                EventKind::SemanticCall,
+                format!(
+                    r#"{{"semantic_call":{{"category":"jni","name":"helper","detail":"{}"}}}}"#,
+                    "☃".repeat(3000)
+                ),
+            ),
+            (
+                EventKind::SemanticRule,
+                r#"{"semantic_rule":{"category":null,"name":"","detail":""}}"#.to_owned(),
+            ),
+            (
+                EventKind::StringDefinition,
+                format!(
+                    r#"{{"string_definition":{{"id":1,"bytes":"{}"}}}}"#,
+                    "x".repeat(4096)
+                ),
+            ),
+        ] {
+            let bound = super::payload_decode_bound_for_bytes(kind, encoded.as_bytes()).unwrap();
+            assert_eq!(bound, encoded.len() as u64);
+            activate_allocation_oracle();
+            let decoded: EventPayload = {
+                let _scope = scope(&DecodeGuard, bound, bound).unwrap();
+                serde_json::from_str(&encoded).unwrap()
+            };
+            let unauthorized = finish_allocation_oracle();
+            assert_eq!(unauthorized, 0, "{kind:?}");
+            assert_eq!(decoded.kind(), kind);
+        }
+    }
     use qtrace_provider::{
         BeginMetadata, CaptureBytes, CompletenessCause, CompletenessRange, CoverageGap,
         Discontinuity, DiscontinuityCause, EventKind, EventPayload, Instruction,

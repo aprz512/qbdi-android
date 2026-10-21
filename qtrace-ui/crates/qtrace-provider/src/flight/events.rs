@@ -43,7 +43,8 @@ struct ChunkState {
     prefix: PrefixState,
     prefix_damage_recorded: bool,
     module_base: u64,
-    strings: HashMap<u32, Arc<[u8]>>,
+    strings: HashMap<u32, usize>,
+    fragment_strings: HashMap<u32, Arc<[u8]>>,
     definitions: HashMap<u32, InstructionDefinition>,
     registers: Option<RegisterSnapshot>,
 }
@@ -289,6 +290,7 @@ pub(super) fn decode(
                 superblock,
                 &mut fragments,
                 &mut target_pcs,
+                &output,
                 guard,
             );
             match decoded {
@@ -474,6 +476,7 @@ fn decode_chunk_record(
     superblock: &Superblock,
     fragments: &mut Vec<Fragment>,
     target_pcs: &mut Vec<u64>,
+    output: &[EventRecord],
     guard: &dyn WorkGuard,
 ) -> Result<Option<EventRecord>, ChunkDecodeError> {
     let coordinate = SourceCoordinate {
@@ -481,6 +484,21 @@ fn decode_chunk_record(
         record_ordinal: Some(key.record_ordinal),
     };
     let tid = identity.tid;
+    if (raw.record_type, raw.flags) == (6, 3) {
+        let id = match validate_string(&raw.bytes, &state.strings) {
+            Ok(id) => id,
+            Err(_) => return Err(ChunkDecodeError::Payload(raw)),
+        };
+        state.strings.insert(id, output.len());
+        let mut bytes = raw.bytes;
+        bytes.drain(..8);
+        return Ok(Some(EventRecord::new_scoped(
+            key.clone(),
+            provenance,
+            scope,
+            EventPayload::StringDefinition(StringDefinition { id, bytes }),
+        )));
+    }
     let result = match (raw.record_type, raw.flags) {
         (9, 1) => decode_checkpoint(&raw.bytes, superblock.pointer_width, guard)
             .map(|(checkpoint, snapshot)| {
@@ -565,15 +583,46 @@ fn decode_chunk_record(
             push_pc(target_pcs, pc);
             Ok(EventPayload::Memory(memory))
         }),
-        (6, 3) => {
-            decode_string(&raw.bytes, &mut state.strings, guard).map(EventPayload::StringDefinition)
+        (kind @ 6..=8, 0) => {
+            decode_semantic(kind, &raw.bytes, &state.strings, output, Vec::new(), guard)
         }
-        (kind @ 6..=8, 0) => decode_semantic(kind, &raw.bytes, &state.strings, Vec::new(), guard),
         (kind @ 6..=8, 4) => {
+            // Fragment assembly outlives the chunk decoder. Only fragmented
+            // records need shared dictionary ownership; ordinary strings remain
+            // owned once by their emitted definition event.
+            let field_count = if kind == 6 { 3 } else { 2 };
+            if raw.bytes.len() != 16 + field_count * 4 {
+                return Err(ChunkDecodeError::Payload(raw));
+            }
+            allocation::try_reserve_hash_map(
+                &mut state.fragment_strings,
+                field_count,
+                guard,
+                "Flight fragment dictionary allocation failed",
+            )
+            .map_err(ChunkDecodeError::Control)?;
+            for field in 0..field_count {
+                let Some(id) = raw_u32(&raw.bytes, 16 + field * 4) else {
+                    return Err(ChunkDecodeError::Payload(raw));
+                };
+                let Some(&row) = state.strings.get(&id) else {
+                    return Err(ChunkDecodeError::Payload(raw));
+                };
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    state.fragment_strings.entry(id)
+                {
+                    let EventPayload::StringDefinition(value) = &output[row].payload else {
+                        return Err(ChunkDecodeError::Payload(raw));
+                    };
+                    entry.insert(
+                        shared_string(&value.bytes, guard).map_err(ChunkDecodeError::Control)?,
+                    );
+                }
+            }
             let fragment = match fragments::decode(
                 kind,
                 &raw.bytes,
-                &state.strings,
+                &state.fragment_strings,
                 key.clone(),
                 provenance,
                 chunk_index,
@@ -929,11 +978,7 @@ fn decode_delta(
     })
 }
 
-fn decode_string(
-    bytes: &[u8],
-    strings: &mut HashMap<u32, Arc<[u8]>>,
-    guard: &dyn WorkGuard,
-) -> Result<StringDefinition, ProviderError> {
+fn validate_string(bytes: &[u8], strings: &HashMap<u32, usize>) -> Result<u32, ProviderError> {
     if bytes.len() < 8 {
         return Err(payload_error(
             SourceCoordinate {
@@ -970,11 +1015,11 @@ fn decode_string(
             "invalid string definition",
         ));
     }
-    let owned = allocation::try_copy_bytes(
-        &bytes[8..],
-        guard,
-        "Flight string dictionary bytes allocation failed",
-    )?;
+    Ok(id)
+}
+
+fn shared_string(bytes: &[u8], guard: &dyn WorkGuard) -> Result<Arc<[u8]>, ProviderError> {
+    let size = bytes.len();
     let arc_alignment = std::mem::align_of::<usize>();
     let unaligned_arc_bytes = size
         .checked_add(std::mem::size_of::<usize>().saturating_mul(2))
@@ -1003,19 +1048,16 @@ fn decode_string(
     let arc_slack = arc_bytes.saturating_sub(unaligned_arc_bytes as u64);
     let arc_scope =
         crate::AllocationScope::begin(guard, arc_bytes, arc_slack).map_err(ProviderError::from)?;
-    let value: Arc<[u8]> = Arc::from(owned);
+    let value: Arc<[u8]> = Arc::from(bytes);
     drop(arc_scope);
-    strings.insert(id, Arc::clone(&value));
-    Ok(StringDefinition {
-        id,
-        bytes: allocation::try_copy_bytes(&value, guard, "Flight string event allocation failed")?,
-    })
+    Ok(value)
 }
 
 fn decode_semantic(
     kind: u16,
     bytes: &[u8],
-    strings: &HashMap<u32, Arc<[u8]>>,
+    strings: &HashMap<u32, usize>,
+    output: &[EventRecord],
     fragment_sequences: Vec<u64>,
     guard: &dyn WorkGuard,
 ) -> Result<EventPayload, ProviderError> {
@@ -1046,15 +1088,25 @@ fn decode_semantic(
                 "truncated semantic string reference",
             )
         })?;
-        let raw = strings.get(&id).ok_or_else(|| {
-            payload_error(
-                SourceCoordinate {
-                    offset: 0,
-                    record_ordinal: None,
-                },
-                "undefined string reference",
-            )
-        })?;
+        let raw = strings
+            .get(&id)
+            .and_then(|row| output.get(*row))
+            .and_then(|event| {
+                if let EventPayload::StringDefinition(value) = &event.payload {
+                    Some(value.bytes.as_slice())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                payload_error(
+                    SourceCoordinate {
+                        offset: 0,
+                        record_ordinal: None,
+                    },
+                    "undefined string reference",
+                )
+            })?;
         fields.push(allocation::try_copy_string(
             std::str::from_utf8(raw).map_err(|_| {
                 payload_error(

@@ -61,7 +61,16 @@ identity, event-key and metadata reads, binary section reads, checksums, and
 catalog validation. Some spans include others and some overlap; do not sum them
 as elapsed time. The reader uses held file descriptors and bounded reads. Timing
 lines contain phase names and seconds, without source paths or captured payloads.
-The cache format is unchanged, so existing caches use the same validation path.
+Profiling itself does not change the cache format. The current index uses cache
+layout 4; older indexes are rebuilt under the new cache identity. UTF-8 string
+definition payloads use JSON text, while arbitrary bytes retain their array form.
+The public provider serializer still emits byte arrays, and its reader accepts
+both forms. Literal semantic detail can refer to its owning payload row; escaped
+detail retains an ordinary blob entry. Cache validation checks both forms against
+the reconstructed facts under the original resource limits.
+
+Dense Flight indexing and scene interval event queries are documented in the
+[2026-10-21 validation](../../docs/benchmarks/flight-query-2026-10-21.md).
 
 Local phase measurements, cancellation checks, and retained-capture browser
 acceptance are recorded in the [2026-10-19 long-operation evidence](../../docs/benchmarks/qtrace-long-operations-2026-10-19.json).

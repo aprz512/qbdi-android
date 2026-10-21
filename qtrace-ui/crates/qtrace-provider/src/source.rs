@@ -17,6 +17,11 @@ pub trait EventCursor {
 }
 
 pub trait TraceProvider: Send + Sync {
+    /// Already materialized events, when available. Borrowing must not read or
+    /// decode additional source data; streaming providers keep the default.
+    fn resident_events(&self) -> Option<&[EventRecord]> {
+        None
+    }
     fn identity(&self) -> &SourceIdentity;
     fn capabilities(&self) -> &ProviderCapabilities;
     fn timelines(&self) -> &[TimelineDescriptor];

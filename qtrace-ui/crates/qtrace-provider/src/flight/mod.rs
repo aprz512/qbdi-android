@@ -55,14 +55,6 @@ mod allocation {
         )
     }
 
-    pub(super) fn try_copy_bytes(
-        bytes: &[u8],
-        guard: &dyn WorkGuard,
-        detail: &'static str,
-    ) -> Result<Vec<u8>, ProviderError> {
-        shared::try_copy_bytes_in(bytes, guard, detail, shared::FLIGHT_RECOVERY_ALLOCATION)
-    }
-
     pub(super) fn try_copy_string(
         value: &str,
         guard: &dyn WorkGuard,
@@ -340,6 +332,9 @@ impl FlightProvider {
 }
 
 impl TraceProvider for FlightProvider {
+    fn resident_events(&self) -> Option<&[EventRecord]> {
+        Some(&self.events)
+    }
     fn identity(&self) -> &SourceIdentity {
         &self.identity
     }

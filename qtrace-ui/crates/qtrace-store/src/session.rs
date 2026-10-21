@@ -846,6 +846,9 @@ struct IdentityCheckedProvider {
 }
 
 impl TraceProvider for IdentityCheckedProvider {
+    fn resident_events(&self) -> Option<&[EventRecord]> {
+        self.inner.resident_events()
+    }
     fn identity(&self) -> &ProviderSourceIdentity {
         self.inner.identity()
     }

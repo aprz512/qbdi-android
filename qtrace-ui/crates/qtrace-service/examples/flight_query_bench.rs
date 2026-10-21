@@ -24,8 +24,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     if arguments[2] == "cancel" || arguments[2] == "cancel-index" {
         let worker_service = service.clone();
-        let worker =
-            thread::spawn(move || worker_service.open_artifact(AuthorizedPath::new(input)));
+        let worker = thread::spawn(move || {
+            worker_service
+                .open_artifact(AuthorizedPath::new(input))
+                .map_err(Box::new)
+        });
         let job = loop {
             if let Some(job) = service.list_jobs().into_iter().find(|job| {
                 job.state == JobState::Running
@@ -70,7 +73,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let opened = service
         .open_artifact(AuthorizedPath::new(input))
-        .map_err(|error| format!("{}: {}", error.code, error.detail))?;
+        .map_err(|error| {
+            eprintln!("{}", json!({"failed_open_jobs": service.list_jobs()}));
+            format!("{}: {}", error.code, error.detail)
+        })?;
     let open_seconds = started.elapsed().as_secs_f64();
     let mut queries = Vec::new();
     let filters = [

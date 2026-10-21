@@ -93,6 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
     scenes.add_argument("--limit", type=int, default=2000)
     scenes.add_argument("--timeout", type=_positive_timeout, default=5.0)
 
+    events = commands.add_parser("events-flight", help="page events in whole scenes overlapping a captured time range")
+    events.add_argument("path", type=Path)
+    events.add_argument("--since-ns", type=int, default=0)
+    events.add_argument("--until-ns", type=int, default=2**64 - 1)
+    events.add_argument("--after-sequence", type=int, default=0)
+    events.add_argument("--limit", type=int, default=2000)
+    events.add_argument("--timeout", type=_positive_timeout, default=30.0)
+
     run = commands.add_parser("run", help="run a duration-bounded trace session")
     _add_common(run, config=True)
     run.add_argument("--duration", type=_duration, required=True, metavar="DURATION",
@@ -433,6 +441,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
     try:
+        if arguments.command == "events-flight":
+            from qtrace.flight_scene_events import query_scene_events_path
+            from scripts.flight_trace import FlightTraceError
+            try:
+                result = query_scene_events_path(arguments.path, since_ns=arguments.since_ns,
+                    until_ns=arguments.until_ns, after_sequence=arguments.after_sequence,
+                    limit=arguments.limit, timeout=arguments.timeout)
+            except (OSError, FlightTraceError) as error:
+                raise QtraceError("flight.scene_events_failed", "flight.scene_events", str(error)) from error
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if arguments.command == "scenes-flight":
             from qtrace.flight_inspection import query_scene_path
             from scripts.flight_trace import FlightTraceError
