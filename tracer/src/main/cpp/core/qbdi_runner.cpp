@@ -138,6 +138,7 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
     state->session.observe_execution_setup(execution_setup_ok);
 
     TraceTargetOutcome target{};
+    TraceRunResult target_call{};
     if (state->session.target_should_run()) {
         const uintptr_t execution_address = invocation.execution_address != 0
                                                     ? invocation.execution_address
@@ -146,6 +147,7 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
                 invocation.target_address, execution_address, execution_address,
                 invocation.execution_bytes, invocation.args.data(),
                 invocation.indirect_result);
+        target_call = call;
         if (trace_process_child_detached()) {
             state->writer.detach_after_fork_child();
             (void)qbdi.release();
@@ -175,6 +177,16 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
         }
         finalization.completion_success = state->stop.sealed() && writer_closed;
         finalization.should_log_success = finalization.completion_success;
+    } else if (target_call.exit_requested) {
+        // pthread_exit never returns to the selected function. Flush a typed
+        // non-return terminal before the proxy performs the real thread exit.
+        finalization.target_ran = target.ran;
+        finalization.outward_return_value = target.return_value;
+        const bool stopped = state->writer.stop(TraceStopReason::ThreadExit,
+                                                elapsed_ms_since(state->started));
+        const bool closed = state->writer.close();
+        finalization.completion_success = stopped && closed;
+        finalization.should_log_success = finalization.completion_success;
     } else {
         finalization = state->session.finalize(
                 state->writer, elapsed_ms_since(state->started));
@@ -192,15 +204,15 @@ TraceRunResult run_with_qbdi(const TraceConfig &config, const TraceInvocation &i
                        crash_marker_finished);
     if (finalization.should_log_success && crash_marker_finished) {
         QTRACE_I("trace %s %s path=%.*s", invocation.scene->name.c_str(),
-                 state->stop.stop_observed() ? "stopped" : "complete",
+                 state->stop.stop_observed() ? "stopped" : target_call.exit_requested ? "thread_exit" : "complete",
                  static_cast<int>(state->writer.path().size()),
                  state->writer.path().data());
     } else {
         QTRACE_E("trace %s write failed path=%.*s", invocation.scene->name.c_str(),
                  static_cast<int>(state->writer.path().size()), state->writer.path().data());
     }
-    TraceRunResult result{
-            finalization.target_ran, finalization.outward_return_value};
+    TraceRunResult result{finalization.target_ran, target_call.target_returned,
+                          target_call.exit_requested, finalization.outward_return_value};
     result.admission_finished = state->stop.admission_finished();
     return result;
 }

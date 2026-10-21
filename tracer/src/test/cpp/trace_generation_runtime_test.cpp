@@ -627,6 +627,62 @@ void timed_status_publishes_the_actual_native_deadline() {
           native_deadline);
 }
 
+// A sealed writer can precede the real target return by an arbitrarily long
+// native/Java wait. Keep that invocation visible independently of capture state.
+void sealed_capture_keeps_the_unreturned_target_visible() {
+    TemporaryDirectory directory;
+    ControlledStatusPoll poll;
+    TraceConfig config{};
+    config.package_name = "com.example.runtime";
+    config.session.id = "7d5807cf-cf09-4f21-92de-1ad92802610a";
+    config.scenes = {{0, "entry", 16, 32}};
+    TraceGenerationStatusOptions status{};
+    status.config = config;
+    status.output_directory = directory.path;
+    status.poll_wait = StatusPollWait{&poll, &ControlledStatusPoll::wait};
+    auto runtime = TraceGenerationRuntime::create(
+            44, config.session, TraceGenerationLimits{}, DeadlineWait{}, std::move(status));
+    CHECK(runtime != nullptr && runtime->arm());
+    wait_for_count(poll.waits, 1);
+    const auto admission = admit(runtime, 44, 0, 101);
+    CHECK(runtime->request_stop(TraceStopReason::DurationElapsed));
+    runtime->acknowledge_sealed(admission);
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+    poll.allow_one();
+    wait_for_count(poll.waits, 2);
+    const std::string path = directory.path + "/session-" + config.session.id + ".status.json";
+    const auto sealed = nlohmann::json::parse(read_text(path));
+    CHECK(sealed.at("state") == "sealed");
+    CHECK(sealed.at("activeScenes").size() == 1);
+    CHECK(sealed.at("activeScenes").at(0).at("sceneIndex") == 0);
+    CHECK(sealed.at("activeScenes").at(0).at("tid") == 101);
+    CHECK(sealed.at("activeScenes").at(0).at("sealed") == true);
+    runtime->finish_target_call(TraceAdmission{45, 0, 101, admission.serial});
+    runtime->finish_target_call(TraceAdmission{44, 1, 101, admission.serial});
+    runtime->finish_target_call(TraceAdmission{44, 0, 101, admission.serial + 1});
+    runtime->finish_target_call(admission);
+    runtime->finish_target_call(admission);
+    poll.allow_one();
+    wait_for_count(poll.waits, 3);
+    const auto returned = nlohmann::json::parse(read_text(path));
+    CHECK(returned.at("state") == "sealed");
+    CHECK(returned.at("activeScenes").empty());
+}
+
+void sealed_but_open_target_still_rejects_duplicate_admission() {
+    SessionOptions session{};
+    session.id = "monitor-open-target";
+    auto runtime = TraceGenerationRuntime::create(45, session);
+    CHECK(runtime != nullptr && runtime->arm());
+    const auto first = admit(runtime, 45, 0, 101);
+    runtime->acknowledge_sealed(first);
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::Running);
+    CHECK(runtime->try_begin_call(45, 0, 101).status == TraceAdmissionStatus::Duplicate);
+    runtime->finish_target_call(first);
+    const auto second = admit(runtime, 45, 0, 101);
+    runtime->finish_call(second, true);
+}
+
 void status_worker_failure_preserves_initial_and_final_publication() {
     const auto run_case = [](const char *session_id, uint64_t generation,
                              bool fail_context, bool fail_thread,
@@ -967,6 +1023,8 @@ void repeated_metadata_rejections_do_not_republish_unchanged_status() {
 } // namespace
 
 int main() {
+    sealed_capture_keeps_the_unreturned_target_visible();
+    sealed_but_open_target_still_rejects_duplicate_admission();
     deadline_requests_stop_and_the_active_call_seals_the_generation();
     wrong_pair_and_repeated_acknowledgements_are_idempotent();
     idle_generation_seals_immediately_after_the_deadline();

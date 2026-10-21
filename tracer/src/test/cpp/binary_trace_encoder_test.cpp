@@ -468,7 +468,7 @@ void stopped_terminal_rejects_unknown_reason_without_writing() {
     std::fill(bytes.begin(), bytes.end(), 0x5a);
 
     const BinaryEncodeResult result = BinaryTraceEncoder{}.encode_stop(
-            bytes.data(), bytes.size(), static_cast<TraceStopReason>(2), 17, {});
+            bytes.data(), bytes.size(), static_cast<TraceStopReason>(255), 17, {});
 
     CHECK(!result.ok);
     CHECK(result.size == 0);
@@ -690,6 +690,11 @@ void declared_record_maxima_are_exact_and_encodable() {
 } // namespace
 
 int main() {
+    uint8_t stopped[kBinaryTraceStopRecordBytes]{};
+    for (uint8_t reason = 2; reason <= 4; ++reason) {
+        CHECK(BinaryTraceEncoder{}.encode_stop(stopped, sizeof(stopped),
+                static_cast<TraceStopReason>(reason), 17, {}).ok);
+    }
     stream_header_is_exact_and_tagged();
     trace_begin_has_exact_golden_bytes();
     module_definition_has_exact_golden_bytes();

@@ -146,7 +146,11 @@ Failed executions write no terminal; readers reject legacy `success=0` terminals
 `TRACE_STOP` is valid only for `(minor, required_features) = (2, 1)`, has zero flags, and has an
 exactly 96-byte payload. Its first byte is `reason`; the following seven reserved bytes are zero;
 the remaining eleven `u64` fields occur in exactly the order shown in the table. Reason `1` means
-`duration_elapsed`; reason `0` is invalid; every other value is reserved and rejected.
+`duration_elapsed`; reason `2` means `thread_exit`, `3` means `process_exit`, and `4` means
+`exec_boundary`. Reason `0` and all other values are rejected. None of these stopped terminals
+contains a valid target return. An exec boundary records the attempt before the native call;
+the call can fail and the target can later return outside the capture. Readers predating these
+reason extensions reject reasons 2–4 and need an update to read those artifacts.
 
 ### Nested wire layouts
 
@@ -328,10 +332,24 @@ pthread lifecycles. Recorder sessions cover target-owned threads: target start r
 threads created by an active target scene. Within those sessions QBDI emits instruction, memory,
 and GPR records only for the target module; retained hook trampolines are control-only.
 
-Flight collection is the full profile regardless of the ordinary trace profile: all target
+With default `trace.events: "all"`, Flight collection is the full profile regardless of the ordinary trace profile: all target
 instructions, QBDI memory accesses with bounded pre/post bytes, and checkpoints/deltas for
 `x0`–`x30`, `sp`, `pc`, and `nzcv`. The artifact is a process-wide persistent ring, so overwriting
 old unprotected chunks is expected and represented as sequence ranges rather than silently hidden.
+
+Optional `trace.events: "calls"` suppresses instruction, memory and per-instruction register
+delta events while retaining semantic transfers, target `svc` entry summaries, chunk checkpoints
+and scene metadata. `RULE qtrace.capture` describes that selection. It does not claim whole-process
+call or syscall coverage, nor syscall return observations.
+
+`RULE qtrace.scene` has JSON fields `schema` (1), `id` (positive invocation number within the
+thread session), `phase` (`enter`, `return` or `capture_stopped`), `address` (hexadecimal logical
+entry), `monotonicNs` (actual clock reading), and `returnValue` (hexadecimal on return, otherwise
+null). Identity is the TID and invocation number in this artifact. These ordinary semantic
+records add no Flight wire layout. They can be overwritten with their ring chunks. Recovery
+keeps at most 256 recent invocation outcomes and reports omitted/invalid metadata counts.
+Only an explicit return event proves a return; file completeness cannot establish it.
+Instructions retain sequence ordering without individual clock timestamps.
 
 The signal broker virtualizes guest dispositions, including direct `rt_sigaction` syscalls, while
 guest handlers execute natively and are excluded from QBDI. Explicit signal-handler begin/return

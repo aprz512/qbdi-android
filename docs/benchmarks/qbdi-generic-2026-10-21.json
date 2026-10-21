@@ -1,0 +1,2084 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-21",
+  "scope": "generic tool correctness, lifecycle, bounded queries, event selection and process boundaries",
+  "head": "0660cc21d48bd05e490d35fc9e9850d31156dc88",
+  "tracer_sha256": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+  "device": {
+    "serial": "1C111FDF600G6S",
+    "server": "tcp:localhost:5037",
+    "model": "Pixel 6",
+    "fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+    "abi": "arm64-v8a",
+    "sdk": "36",
+    "android_user": "0"
+  },
+  "device_reports": [
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-flight-1/report.json",
+      "sha256": "43ebb30b61f8b632d55dc0ebc4651b2051730b4941a67f88b69473362dff7840",
+      "session_id": "4d945918-f592-4a92-825f-f141cca69cc7",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "flight_target_return_observed": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 1,
+      "profile": "full",
+      "flight": true,
+      "trace_summaries": [
+        {
+          "name": "1305356567383889_28889_libruntime_probe.so.flight.bin",
+          "bytes": 67108864,
+          "complete": true,
+          "scene_lifecycle": [
+            {
+              "tid": 28903,
+              "id": 1,
+              "address": "0x7ad79d98a8",
+              "entry_sequence": 6,
+              "entered_monotonic_ns": 1358919128630123,
+              "last_sequence": 105,
+              "last_monotonic_ns": 1358919130760209,
+              "target_returned": true,
+              "state": "returned",
+              "return_value": "0x2a"
+            }
+          ],
+          "scene_lifecycle_invalid": 0,
+          "coverage_gaps": [],
+          "recovery_damage": []
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-flight-4/report.json",
+      "sha256": "14cb7c4c16ba8f8249518df590811bf65cdd7372aa70c540ee1ede8b8b6a701c",
+      "session_id": "50410393-3f7b-4253-824d-91ac05457c09",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 4,
+      "profile": "full",
+      "flight": true,
+      "trace_summaries": [
+        {
+          "name": "1303264747666544_29375_libruntime_probe.so.flight.bin",
+          "bytes": 67108864,
+          "complete": true,
+          "scene_lifecycle": [
+            {
+              "tid": 29395,
+              "id": 1,
+              "address": "0x74057d28a8",
+              "entry_sequence": 6,
+              "entered_monotonic_ns": 1358931841827517,
+              "last_sequence": 135,
+              "last_monotonic_ns": 1358931846796999,
+              "target_returned": null,
+              "state": "capture_stopped",
+              "return_value": null
+            }
+          ],
+          "scene_lifecycle_invalid": 0,
+          "coverage_gaps": [],
+          "recovery_damage": []
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-flight-5/report.json",
+      "sha256": "06206494a93d2844e5a435ea8be4737f17618cc246dcaf40a4dc2c16a177d1da",
+      "session_id": "e0c20677-5704-4956-8b36-a87889784175",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 5,
+      "profile": "full",
+      "flight": true,
+      "trace_summaries": [
+        {
+          "name": "1309912987228144_29864_libruntime_probe.so.flight.bin",
+          "bytes": 67108864,
+          "complete": true,
+          "scene_lifecycle": [
+            {
+              "tid": 29885,
+              "id": 1,
+              "address": "0x772822b8a8",
+              "entry_sequence": 6,
+              "entered_monotonic_ns": 1358944363650358,
+              "last_sequence": 130,
+              "last_monotonic_ns": 1358944367552621,
+              "target_returned": null,
+              "state": "capture_stopped",
+              "return_value": null
+            }
+          ],
+          "scene_lifecycle_invalid": 0,
+          "coverage_gaps": [],
+          "recovery_damage": []
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-flight-6/report.json",
+      "sha256": "5365e8a9a0e0be1b4754858f67a0a9964eddf3c1418e6bf9f437294a9cbe1a41",
+      "session_id": "b3a46042-e1a1-4bbb-8f46-1c10afb481d2",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 6,
+      "profile": "full",
+      "flight": true,
+      "trace_summaries": [
+        {
+          "name": "1307129588735658_30501_libruntime_probe.so.flight.bin",
+          "bytes": 67108864,
+          "complete": true,
+          "scene_lifecycle": [
+            {
+              "tid": 30550,
+              "id": 1,
+              "address": "0x6d993938a8",
+              "entry_sequence": 6,
+              "entered_monotonic_ns": 1358957003865859,
+              "last_sequence": 6,
+              "last_monotonic_ns": 1358957003865859,
+              "target_returned": null,
+              "state": "open_at_end",
+              "return_value": null
+            }
+          ],
+          "scene_lifecycle_invalid": 0,
+          "coverage_gaps": [],
+          "recovery_damage": []
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-flight-7/report.json",
+      "sha256": "81ca54dd2eb92aef72568e01bb9d480df69de5e22012b13c2e5118898f9db159",
+      "session_id": "675dd1d9-2551-4747-b424-509f58f7d38f",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "sealed_target_still_visible": true,
+        "actual_return_clears_open_target": true,
+        "file_complete_is_not_target_return": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 7,
+      "profile": "full",
+      "flight": true,
+      "trace_summaries": [
+        {
+          "name": "1319357469663845_31755_libruntime_probe.so.flight.bin",
+          "bytes": 67108864,
+          "complete": true,
+          "scene_lifecycle": [
+            {
+              "tid": 31759,
+              "id": 1,
+              "address": "0x7c92d6a8a8",
+              "entry_sequence": 6,
+              "entered_monotonic_ns": 1358969981176331,
+              "last_sequence": 32180,
+              "last_monotonic_ns": 1358970054006694,
+              "target_returned": null,
+              "state": "capture_stopped",
+              "return_value": null
+            }
+          ],
+          "scene_lifecycle_invalid": 0,
+          "coverage_gaps": [],
+          "recovery_damage": []
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-jni/report.json",
+      "sha256": "ca283180ae4a31eabe12adf6232c1a59ea3de4adecacd934ab8537d350b2d6f3",
+      "session_id": "37f1f2ee-dd80-4c46-9874-728b6f4832ca",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_java_values": true,
+        "baseline_returns_exceptions": true,
+        "traced_java_values": true,
+        "traced_returns_exceptions": true,
+        "platform_register": true,
+        "real_thread_stack": true,
+        "attach_callback": true,
+        "jni_enter_leave_pairs": true,
+        "jni_argument_text": true,
+        "floating_return_text": true,
+        "fixed_floating_argument_text": true,
+        "fixed_floating_return_text": true,
+        "trace_termination": true,
+        "native_status": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libjni_abi_probe.so": "55594f91cc985ef235907128e1c0fd7f48375884a5e9d94acaaef8296a542cee",
+        "classes.dex": "7c926b31065303f82a0b785edeb5bc8162855a8c4518d50b657b128a089b5031"
+      },
+      "scenarios": 27,
+      "raw_traces": 30
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-profile-balanced/report.json",
+      "sha256": "f31c0be47554a1956b1debfaf71f1fb4c26930361e413769cf8de55850de90cc",
+      "session_id": "0c4090a2-f767-4d60-9f2d-05f56b15f7ba",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_side_effects": true,
+        "traced_semantics": true,
+        "traced_side_effects": true,
+        "trace_decoding": true,
+        "profile_event_contract": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 0,
+      "profile": "balanced",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577833188_21921_21932_runtime_0x48a8_0.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833199_21921_21932_runtime_0x48a8_1.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833218_21921_21932_runtime_0x48a8_2.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833231_21921_21932_runtime_0x48a8_3.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833243_21921_21932_runtime_0x48a8_4.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-profile-calls/report.json",
+      "sha256": "8b3964491a5ba78302dafb6aa5460b248192e1fee54fb58fc762ad10e2c75f82",
+      "session_id": "fc001ce9-a068-4577-905f-b163eb80cf9e",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_side_effects": true,
+        "traced_semantics": true,
+        "traced_side_effects": true,
+        "trace_decoding": true,
+        "profile_event_contract": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 0,
+      "profile": "calls",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577843751_22961_22972_runtime_0x48a8_0.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843767_22961_22972_runtime_0x48a8_1.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843777_22961_22972_runtime_0x48a8_2.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843788_22961_22972_runtime_0x48a8_3.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843799_22961_22972_runtime_0x48a8_4.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-profile-fast/report.json",
+      "sha256": "66738f9a1118c661c26fcf1faeb51757ca601bf247362d02be0e53748c5f7ac4",
+      "session_id": "a7d4385c-9f89-4bb9-9ae0-90287d49e1ea",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_side_effects": true,
+        "traced_semantics": true,
+        "traced_side_effects": true,
+        "trace_decoding": true,
+        "profile_event_contract": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 0,
+      "profile": "fast",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577827650_21465_21476_runtime_0x48a8_0.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827666_21465_21476_runtime_0x48a8_1.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827673_21465_21476_runtime_0x48a8_2.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827684_21465_21476_runtime_0x48a8_3.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827693_21465_21476_runtime_0x48a8_4.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-profile-full/report.json",
+      "sha256": "fdc05450708264957e9c1d21d0517d72d64dc8c849a3141d79cb7dc3331501ce",
+      "session_id": "b2755437-1d7c-445c-b3a5-ecb29632bd31",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_side_effects": true,
+        "traced_semantics": true,
+        "traced_side_effects": true,
+        "trace_decoding": true,
+        "profile_event_contract": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 0,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577838244_22410_22423_runtime_0x48a8_0.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838261_22410_22423_runtime_0x48a8_1.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838272_22410_22423_runtime_0x48a8_2.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838283_22410_22423_runtime_0x48a8_3.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838295_22410_22423_runtime_0x48a8_4.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-1/report.json",
+      "sha256": "6f8afa97f9fa526570d643f9aadd7adedfefc7cc1ed029d7932ec2a303fb9cd0",
+      "session_id": "cff3108f-4f8b-4d35-b5b7-0e21149fce97",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "parent_capture_returned": true,
+        "indirect_and_tail_branch_observed": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 1,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577848691_23402_23420_runtime_0x48a8_0.trace.bin",
+          "bytes": 5413,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 28,
+          "memory": 14,
+          "captured_memory": 14,
+          "calls": 1,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 1,
+          "br": 1
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-10/report.json",
+      "sha256": "0c6bec02a85e085223b4d4fab4397bdca589a07d0c65c3dac5897750b49bba14",
+      "session_id": "ee477510-a89f-46ef-9f37-7bbb74e8414b",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_child_status": true,
+        "traced_semantics": true,
+        "traced_child_status": true,
+        "trace_decoding": true,
+        "parent_capture_returned": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 10,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577908241_28425_28446_runtime_0x48a8_0.trace.bin",
+          "bytes": 9352,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 55,
+          "memory": 13,
+          "captured_memory": 13,
+          "calls": 4,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        },
+        {
+          "name": "1792577908241_28425_28447_runtime_0x48a8_1.trace.bin",
+          "bytes": 9352,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 55,
+          "memory": 13,
+          "captured_memory": 13,
+          "calls": 4,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-2/report.json",
+      "sha256": "a531765cc3d7a49f203d7a3c3e71d215b5879c077e6b55c95fea50919ad1ee18",
+      "session_id": "18b183c2-fa8a-44d0-8bcc-382cbf9e8ef7",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_child_status": true,
+        "traced_semantics": true,
+        "traced_child_status": true,
+        "trace_decoding": true,
+        "parent_capture_returned": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 2,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577853816_23873_23887_runtime_0x48a8_0.trace.bin",
+          "bytes": 9086,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 53,
+          "memory": 13,
+          "captured_memory": 13,
+          "calls": 5,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-3/report.json",
+      "sha256": "f12122e2bdafcfe19547a34a14d8a667d7fbc0fd6c3c75187edb17eeaed41464",
+      "session_id": "3eef3eee-923c-4b4c-a857-626294c40df3",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_child_status": true,
+        "traced_semantics": true,
+        "traced_child_status": true,
+        "trace_decoding": true,
+        "parent_capture_returned": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 3,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577859809_24346_24366_runtime_0x48a8_0.trace.bin",
+          "bytes": 9254,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 55,
+          "memory": 13,
+          "captured_memory": 13,
+          "calls": 4,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-4/report.json",
+      "sha256": "35b49eb2c80fa5fe11092dca21cb002b8856ef02948c3804c20482c5663c32e8",
+      "session_id": "049e5440-49c9-4dcc-983b-3dbc856b7d7d",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "boundary_capture_sealed": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 4,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577866729_25165_25192_runtime_0x48a8_0.trace.bin",
+          "bytes": 5899,
+          "termination": "stopped",
+          "stop_reason": "exec_boundary",
+          "instructions": 35,
+          "memory": 8,
+          "captured_memory": 8,
+          "calls": 4,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-5/report.json",
+      "sha256": "0b81588ff8313b55539735b1f04eebea8c8cbfe8dfada93289e5b64fe2aa4b90",
+      "session_id": "42115415-4185-4356-bfa9-ba7804fb1547",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "boundary_capture_sealed": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 5,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577873373_25808_25824_runtime_0x48a8_0.trace.bin",
+          "bytes": 5731,
+          "termination": "stopped",
+          "stop_reason": "process_exit",
+          "instructions": 33,
+          "memory": 8,
+          "captured_memory": 8,
+          "calls": 4,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-6/report.json",
+      "sha256": "c26a6f9098a78d16a3078b771112fbdd647c0430e91a02c6e2741d726720f3b0",
+      "session_id": "5b32ffc8-0a30-47eb-b827-3e7878e2e556",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "boundary_capture_sealed": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 6,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577880007_26270_26284_runtime_0x48a8_0.trace.bin",
+          "bytes": 5924,
+          "termination": "stopped",
+          "stop_reason": "thread_exit",
+          "instructions": 36,
+          "memory": 8,
+          "captured_memory": 8,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-7/report.json",
+      "sha256": "491ce44c02e9b8f78d38a765e28b5fd2fed36d244b5ca0661ae6fe664fbc0829",
+      "session_id": "5abc3aec-7838-405b-ac98-5d65dca3b95f",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "sealed_target_still_visible": true,
+        "actual_return_clears_open_target": true,
+        "file_complete_is_not_target_return": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 7,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577887098_26852_26856_runtime_0x48a8_0.trace.bin",
+          "bytes": 2078202,
+          "termination": "stopped",
+          "stop_reason": "duration_elapsed",
+          "instructions": 26592,
+          "memory": 9495,
+          "captured_memory": 9495,
+          "calls": 3797,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 1898
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-8/report.json",
+      "sha256": "fa77bfdce81b48f78b88ac8ee0cff7ecdec190a4c4b4685a1f630c4f53d8e18c",
+      "session_id": "492e1c53-5998-4895-80b6-3436fd0baee2",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_child_status": true,
+        "traced_semantics": true,
+        "traced_child_status": true,
+        "trace_decoding": true,
+        "parent_capture_returned": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 8,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577894798_27307_27364_runtime_0x48a8_0.trace.bin",
+          "bytes": 9252,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 55,
+          "memory": 13,
+          "captured_memory": 13,
+          "calls": 4,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 2
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-runtime-9/report.json",
+      "sha256": "224ef0e50742e01139584fb34e9adbaf6459fa043db625f2d08cb450f71c6216",
+      "session_id": "b3be5d54-8cd7-4783-9e67-995947f7220a",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_single_invocation": true,
+        "traced_semantics": true,
+        "traced_single_invocation": true,
+        "trace_decoding": true,
+        "boundary_capture_sealed": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 9,
+      "profile": "full",
+      "flight": false,
+      "trace_summaries": [
+        {
+          "name": "1792577901580_27916_27938_runtime_0x48a8_0.trace.bin",
+          "bytes": 5266,
+          "termination": "stopped",
+          "stop_reason": "exec_boundary",
+          "instructions": 29,
+          "memory": 8,
+          "captured_memory": 8,
+          "calls": 2,
+          "syscall_entries": 0,
+          "svc": 0,
+          "blr": 0,
+          "br": 1
+        }
+      ]
+    },
+    {
+      "path": "artifacts/qbdi-generic-2026-10-21/accepted-flight-calls/report.json",
+      "sha256": "e7383030ab5202eef4db04421070e1690d276c0e59b9983f8aedcfa87a476432",
+      "session_id": "c675a4b8-f54d-4496-b6cd-95ba8e39945b",
+      "result": "pass",
+      "cleanup": true,
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_side_effects": true,
+        "traced_semantics": true,
+        "traced_side_effects": true,
+        "trace_decoding": true
+      },
+      "artifacts": {
+        "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libruntime_probe.so": "01ec81b43025183c329a2bec35a4ec6f7455acecc12b645bc77633c28a28ed9f",
+        "runtime_probe": "330556d332f7def47eb294f1d1530970ebc324ff952ae5c85c6956adc47d3bf5"
+      },
+      "scenario": 0,
+      "profile": "calls",
+      "flight": true,
+      "trace_summaries": [
+        {
+          "name": "1367974733461833_2169_libruntime_probe.so.flight.bin",
+          "bytes": 67108864,
+          "complete": true,
+          "scene_lifecycle": [
+            {
+              "tid": 2182,
+              "id": 1,
+              "address": "0x740bd5e8a8",
+              "entry_sequence": 9,
+              "entered_monotonic_ns": 1359354751258754,
+              "last_sequence": 28,
+              "last_monotonic_ns": 1359354754928594,
+              "target_returned": true,
+              "state": "returned",
+              "return_value": "0x2a"
+            },
+            {
+              "tid": 2182,
+              "id": 2,
+              "address": "0x740bd5e8a8",
+              "entry_sequence": 31,
+              "entered_monotonic_ns": 1359354754998296,
+              "last_sequence": 40,
+              "last_monotonic_ns": 1359354757574834,
+              "target_returned": true,
+              "state": "returned",
+              "return_value": "0x2a"
+            },
+            {
+              "tid": 2182,
+              "id": 3,
+              "address": "0x740bd5e8a8",
+              "entry_sequence": 43,
+              "entered_monotonic_ns": 1359354757619716,
+              "last_sequence": 52,
+              "last_monotonic_ns": 1359354760223923,
+              "target_returned": true,
+              "state": "returned",
+              "return_value": "0x2a"
+            },
+            {
+              "tid": 2182,
+              "id": 4,
+              "address": "0x740bd5e8a8",
+              "entry_sequence": 55,
+              "entered_monotonic_ns": 1359354760262050,
+              "last_sequence": 64,
+              "last_monotonic_ns": 1359354762810186,
+              "target_returned": true,
+              "state": "returned",
+              "return_value": "0x2a"
+            },
+            {
+              "tid": 2182,
+              "id": 5,
+              "address": "0x740bd5e8a8",
+              "entry_sequence": 67,
+              "entered_monotonic_ns": 1359354762839524,
+              "last_sequence": 74,
+              "last_monotonic_ns": 1359354765385381,
+              "target_returned": true,
+              "state": "returned",
+              "return_value": "0x2a"
+            }
+          ],
+          "scene_lifecycle_invalid": 0,
+          "coverage_gaps": [],
+          "recovery_damage": []
+        }
+      ]
+    }
+  ],
+  "profile_measurements": {
+    "balanced": {
+      "baseline": {
+        "elapsed_ns": [
+          7161,
+          2360,
+          2156,
+          2198,
+          2157
+        ],
+        "median_excluding_first_ns": 2177.5
+      },
+      "traced": {
+        "elapsed_ns": [
+          11115967,
+          18806071,
+          13100220,
+          11905030,
+          14226399
+        ],
+        "median_excluding_first_ns": 13663309.5
+      },
+      "trace_summaries": [
+        {
+          "name": "1792577833188_21921_21932_runtime_0x48a8_0.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833199_21921_21932_runtime_0x48a8_1.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833218_21921_21932_runtime_0x48a8_2.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833231_21921_21932_runtime_0x48a8_3.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577833243_21921_21932_runtime_0x48a8_4.trace.bin",
+          "bytes": 178904,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        }
+      ]
+    },
+    "calls": {
+      "baseline": {
+        "elapsed_ns": [
+          5371,
+          2605,
+          3133,
+          1018,
+          977
+        ],
+        "median_excluding_first_ns": 1811.5
+      },
+      "traced": {
+        "elapsed_ns": [
+          16023600,
+          10809652,
+          10558024,
+          11285888,
+          17918619
+        ],
+        "median_excluding_first_ns": 11047770.0
+      },
+      "trace_summaries": [
+        {
+          "name": "1792577843751_22961_22972_runtime_0x48a8_0.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843767_22961_22972_runtime_0x48a8_1.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843777_22961_22972_runtime_0x48a8_2.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843788_22961_22972_runtime_0x48a8_3.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        },
+        {
+          "name": "1792577843799_22961_22972_runtime_0x48a8_4.trace.bin",
+          "bytes": 726,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 0,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 4,
+          "syscall_entries": 1,
+          "svc": 0,
+          "blr": 0,
+          "br": 0
+        }
+      ]
+    },
+    "fast": {
+      "baseline": {
+        "elapsed_ns": [
+          8301,
+          2604,
+          2035,
+          1994,
+          1994
+        ],
+        "median_excluding_first_ns": 2014.5
+      },
+      "traced": {
+        "elapsed_ns": [
+          16155111,
+          7582031,
+          10612833,
+          8965047,
+          16758626
+        ],
+        "median_excluding_first_ns": 9788940.0
+      },
+      "trace_summaries": [
+        {
+          "name": "1792577827650_21465_21476_runtime_0x48a8_0.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827666_21465_21476_runtime_0x48a8_1.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827673_21465_21476_runtime_0x48a8_2.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827684_21465_21476_runtime_0x48a8_3.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577827693_21465_21476_runtime_0x48a8_4.trace.bin",
+          "bytes": 153361,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 0,
+          "captured_memory": 0,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        }
+      ]
+    },
+    "full": {
+      "baseline": {
+        "elapsed_ns": [
+          7527,
+          2605,
+          2563,
+          2645,
+          2442
+        ],
+        "median_excluding_first_ns": 2584.0
+      },
+      "traced": {
+        "elapsed_ns": [
+          17795817,
+          10448649,
+          10753092,
+          12588175,
+          16629436
+        ],
+        "median_excluding_first_ns": 11670633.5
+      },
+      "trace_summaries": [
+        {
+          "name": "1792577838244_22410_22423_runtime_0x48a8_0.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838261_22410_22423_runtime_0x48a8_1.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838272_22410_22423_runtime_0x48a8_2.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838283_22410_22423_runtime_0x48a8_3.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        },
+        {
+          "name": "1792577838295_22410_22423_runtime_0x48a8_4.trace.bin",
+          "bytes": 185224,
+          "termination": "completed",
+          "stop_reason": null,
+          "instructions": 2849,
+          "memory": 527,
+          "captured_memory": 527,
+          "calls": 3,
+          "syscall_entries": 0,
+          "svc": 1,
+          "blr": 1,
+          "br": 0
+        }
+      ]
+    }
+  },
+  "query_measurements": {
+    "dense": {
+      "fixture": {
+        "capacity_bytes": 268435456,
+        "groups": 60000,
+        "instructions": 60000,
+        "memory": 60000,
+        "calls": 60000,
+        "scene_boundaries": 120000
+      },
+      "preview": {
+        "format_version": 2,
+        "run_id": 270544960,
+        "pid": 4242,
+        "target_module": "libquery.so",
+        "artifact_bytes": 268435456,
+        "artifact_flags": 0,
+        "tids": [
+          42
+        ],
+        "chunk_count": 16383,
+        "active_chunks": 0,
+        "sealed_chunks": 15000,
+        "claimed_records": 585002,
+        "claimed_committed_bytes": 223552088,
+        "metadata_bytes_read": 1052672,
+        "payload_verification": "not_performed",
+        "target_returned": null
+      },
+      "preview_timing": {
+        "wall_time": "0:00.10",
+        "peak_rss_kib": 23700,
+        "exit_status": 0
+      },
+      "index_timing": {
+        "wall_time": "0:03.50",
+        "peak_rss_kib": 938876,
+        "exit_status": 1
+      },
+      "index_result": "budget_rejection",
+      "error": "Error: \"control.budget_exceeded: ResidentBytes budget exceeded: consumed 2151308951, limit 2147483648\""
+    },
+    "lower_occupancy": {
+      "fixture": {
+        "capacity_bytes": 268435456,
+        "groups": 4000,
+        "instructions": 4000,
+        "memory": 4000,
+        "calls": 4000,
+        "scene_boundaries": 8000
+      },
+      "cold": {
+        "open_seconds": 1.075403572,
+        "opened": {
+          "artifacts": [
+            {
+              "completeness": [
+                {
+                  "cause": "retained",
+                  "domain": "captured_sequence",
+                  "end": "39002",
+                  "end_inclusive": true,
+                  "provenance": "captured",
+                  "start": "1"
+                }
+              ],
+              "event_count": 39002,
+              "index": 0,
+              "name": "query-256m-4k.flight.bin",
+              "status": "indexed",
+              "tids": [
+                42
+              ]
+            }
+          ],
+          "context": null,
+          "missing_capabilities": [
+            "package",
+            "device",
+            "target",
+            "effective_config"
+          ],
+          "warnings": [
+            "session.capability_missing: single-artifact session lacks Package context",
+            "session.capability_missing: single-artifact session lacks Device context",
+            "session.capability_missing: single-artifact session lacks Target context",
+            "session.capability_missing: single-artifact session lacks EffectiveConfig context"
+          ],
+          "workspace": {
+            "artifact_count": 1,
+            "generation": 0,
+            "id": "1"
+          }
+        },
+        "queries": [
+          {
+            "filter": "instructions",
+            "max_page_json_bytes": 677623,
+            "max_page_rows": 2000,
+            "pages": 2,
+            "rows": 4000,
+            "seconds": 0.006245199
+          },
+          {
+            "filter": "calls",
+            "max_page_json_bytes": 860624,
+            "max_page_rows": 2000,
+            "pages": 2,
+            "rows": 4000,
+            "seconds": 0.007146259
+          },
+          {
+            "filter": "address",
+            "max_page_json_bytes": 674977,
+            "max_page_rows": 2000,
+            "pages": 1,
+            "rows": 2000,
+            "seconds": 0.002725808
+          },
+          {
+            "filter": "sequence",
+            "max_page_json_bytes": 334694,
+            "max_page_rows": 901,
+            "pages": 1,
+            "rows": 901,
+            "seconds": 0.001288078
+          }
+        ],
+        "time_model": "sequence ranges; wall-clock timestamps are not present on instruction events",
+        "workspace_closed": true
+      },
+      "warm": {
+        "open_seconds": 0.641876915,
+        "opened": {
+          "artifacts": [
+            {
+              "completeness": [
+                {
+                  "cause": "retained",
+                  "domain": "captured_sequence",
+                  "end": "39002",
+                  "end_inclusive": true,
+                  "provenance": "captured",
+                  "start": "1"
+                }
+              ],
+              "event_count": 39002,
+              "index": 0,
+              "name": "query-256m-4k.flight.bin",
+              "status": "indexed",
+              "tids": [
+                42
+              ]
+            }
+          ],
+          "context": null,
+          "missing_capabilities": [
+            "package",
+            "device",
+            "target",
+            "effective_config"
+          ],
+          "warnings": [
+            "session.capability_missing: single-artifact session lacks Package context",
+            "session.capability_missing: single-artifact session lacks Device context",
+            "session.capability_missing: single-artifact session lacks Target context",
+            "session.capability_missing: single-artifact session lacks EffectiveConfig context"
+          ],
+          "workspace": {
+            "artifact_count": 1,
+            "generation": 0,
+            "id": "1"
+          }
+        },
+        "queries": [
+          {
+            "filter": "instructions",
+            "max_page_json_bytes": 677623,
+            "max_page_rows": 2000,
+            "pages": 2,
+            "rows": 4000,
+            "seconds": 0.005782105
+          },
+          {
+            "filter": "calls",
+            "max_page_json_bytes": 860624,
+            "max_page_rows": 2000,
+            "pages": 2,
+            "rows": 4000,
+            "seconds": 0.006788852
+          },
+          {
+            "filter": "address",
+            "max_page_json_bytes": 674977,
+            "max_page_rows": 2000,
+            "pages": 1,
+            "rows": 2000,
+            "seconds": 0.002700504
+          },
+          {
+            "filter": "sequence",
+            "max_page_json_bytes": 334694,
+            "max_page_rows": 901,
+            "pages": 1,
+            "rows": 901,
+            "seconds": 0.001580569
+          }
+        ],
+        "time_model": "sequence ranges; wall-clock timestamps are not present on instruction events",
+        "workspace_closed": true
+      },
+      "cold_timing": {
+        "wall_time": "0:01.09",
+        "peak_rss_kib": 162332,
+        "exit_status": 0
+      },
+      "warm_timing": {
+        "wall_time": "0:00.66",
+        "peak_rss_kib": 113648,
+        "exit_status": 0
+      }
+    },
+    "scene_time": {
+      "first": {
+        "rows": [
+          {
+            "sequence": 978,
+            "tid": 42,
+            "id": 101,
+            "address": "0x71000098",
+            "monotonic_ns": 1100000000,
+            "phase": "enter",
+            "return_value": null
+          },
+          {
+            "sequence": 989,
+            "tid": 42,
+            "id": 101,
+            "address": "0x71000098",
+            "monotonic_ns": 1100500000,
+            "phase": "return",
+            "return_value": "0x2a"
+          }
+        ],
+        "has_more": true,
+        "next_after_sequence": 989,
+        "matched_boundaries": 6,
+        "invalid_boundaries": 0,
+        "payload_bytes_read": 14896088,
+        "decoded_chunks": 1000,
+        "verification_scope": "decoded chunks; no global recovery or call pairing",
+        "time_model": "scene monotonic timestamps only; instructions have no timestamps"
+      },
+      "next": {
+        "rows": [
+          {
+            "sequence": 991,
+            "tid": 42,
+            "id": 102,
+            "address": "0x7100009c",
+            "monotonic_ns": 1101000000,
+            "phase": "enter",
+            "return_value": null
+          },
+          {
+            "sequence": 999,
+            "tid": 42,
+            "id": 102,
+            "address": "0x7100009c",
+            "monotonic_ns": 1101500000,
+            "phase": "return",
+            "return_value": "0x2a"
+          }
+        ],
+        "has_more": true,
+        "next_after_sequence": 999,
+        "matched_boundaries": 4,
+        "invalid_boundaries": 0,
+        "payload_bytes_read": 14523936,
+        "decoded_chunks": 975,
+        "verification_scope": "decoded chunks; no global recovery or call pairing",
+        "time_model": "scene monotonic timestamps only; instructions have no timestamps"
+      },
+      "first_timing": {
+        "wall_time": "0:02.19",
+        "peak_rss_kib": 24188,
+        "exit_status": 0
+      },
+      "next_timing": {
+        "wall_time": "0:01.76",
+        "peak_rss_kib": 23960,
+        "exit_status": 0
+      }
+    },
+    "cancellation": {
+      "cancellation_seconds": 0.000255681,
+      "error": "job.cancelled",
+      "job": {
+        "error": {
+          "code": "job.cancelled",
+          "detail": "operation cancelled",
+          "retryable": false,
+          "source": null,
+          "stage": "control"
+        },
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": null,
+            "processed_bytes": "589824",
+            "processed_events": "0",
+            "processed_rows": "0",
+            "stage": "verify_source"
+          },
+          "total": null
+        },
+        "state": "cancelled",
+        "workspace_id": "1"
+      },
+      "result": "cancelled",
+      "seconds": 0.001378761,
+      "worker_joined": true
+    },
+    "corpora": {
+      "artifacts/qbdi-generic-2026-10-21/query-256m.flight.bin": "19ccad6bc9338a3c953fd2ce044618c5630e219c2bfc34990ba2e0a3ef462f29",
+      "artifacts/qbdi-generic-2026-10-21/query-256m-4k.flight.bin": "5f8de13080c01fbfa89e1f80004bb06e2cc8b1048cb0775055f3d71d759dbed8"
+    },
+    "benchmark_binary_sha256": "7c155c5a10e27b227b1e6a7cc297e9bbe4bedb20400e204c0776f6577d91b505",
+    "limitations": [
+      "Dense input is rejected within existing budgets; it was not fully indexed.",
+      "ResidentBytes is cumulative allocation accounting, not peak RSS.",
+      "Only scene boundaries have monotonic timestamps; instructions have no per-event timestamp.",
+      "Observed durations are individual local measurements, not worst-case limits."
+    ],
+    "index_cancellation": {
+      "cancel_requested_during": {
+        "artifact": "query-256m.flight.bin",
+        "processed_bytes": "42993165",
+        "processed_events": "56131",
+        "processed_rows": "0",
+        "stage": "build_index"
+      },
+      "cancellation_seconds": 0.005165889,
+      "error": "job.cancelled",
+      "job": {
+        "error": {
+          "code": "job.cancelled",
+          "detail": "operation cancelled",
+          "retryable": false,
+          "source": null,
+          "stage": "control"
+        },
+        "id": "1",
+        "kind": "open",
+        "progress": {
+          "completed": "0",
+          "detail": {
+            "artifact": "query-256m.flight.bin",
+            "processed_bytes": "43086525",
+            "processed_events": "56259",
+            "processed_rows": "0",
+            "stage": "build_index"
+          },
+          "total": "1"
+        },
+        "state": "cancelled",
+        "workspace_id": "1"
+      },
+      "result": "cancelled",
+      "seconds": 2.14594771,
+      "worker_joined": true
+    },
+    "index_cancellation_timing": {
+      "wall_time": "0:02.15",
+      "peak_rss_kib": 903740,
+      "exit_status": 0
+    }
+  },
+  "verification": [
+    {
+      "suite": "host",
+      "command": "/home/lyldalek/Android/sdk/cmake/3.31.6/bin/ctest --test-dir out/p0-host --output-on-failure",
+      "result": "pass",
+      "log": "artifacts/qbdi-generic-2026-10-21/host-accepted-tests.log",
+      "log_sha256": "16b1ff8f807ff2cca011974b0260c0246a68df67ab55e5c1bb8f8a98a3e64768",
+      "targets": 50
+    },
+    {
+      "suite": "python",
+      "command": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+      "result": "pass",
+      "log": "artifacts/qbdi-generic-2026-10-21/python-accepted-recheck.log",
+      "log_sha256": "6caf2528bbde63606b138db1aa168c6a0d790489ea73b27dcfc7a4c5c0738461",
+      "tests": 906,
+      "skipped": 9
+    },
+    {
+      "suite": "rust",
+      "command": "cargo test --manifest-path qtrace-ui/Cargo.toml -p qtrace-provider -p qtrace-store -p qtrace-analysis -p qtrace-service -j3",
+      "result": "pass",
+      "log": "artifacts/qbdi-generic-2026-10-21/rust-all-final.log",
+      "log_sha256": "47b05b95c5dadf9ec5044322ded6ff26f13242f9dab2a4c3f891d8e88fb80dd3"
+    },
+    {
+      "suite": "diff",
+      "command": "git diff --check",
+      "result": "pass",
+      "log": "artifacts/qbdi-generic-2026-10-21/diff-check.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "suite": "rust_format",
+      "command": "cargo fmt --manifest-path qtrace-ui/Cargo.toml --all --check",
+      "result": "pass",
+      "log": "artifacts/qbdi-generic-2026-10-21/rust-fmt-check.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "abi_preflight": {
+    "report_sha256": "ca283180ae4a31eabe12adf6232c1a59ea3de4adecacd934ab8537d350b2d6f3",
+    "session_id": "37f1f2ee-dd80-4c46-9874-728b6f4832ca",
+    "device": {
+      "serial": "1C111FDF600G6S",
+      "server": "tcp:localhost:5037",
+      "model": "Pixel 6",
+      "fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+      "abi": "arm64-v8a",
+      "sdk": "36",
+      "android_user": "0"
+    },
+    "artifacts": {
+      "libqbdi_tracer.so": "f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5",
+      "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa"
+    }
+  },
+  "original_worktree": {
+    "source": "/home/lyldalek/workspace/qbdi-android",
+    "baseline_manifest": "artifacts/qbdi-p0-2026-10-21/baseline/manifest.json",
+    "files_checked": 20,
+    "changed": [],
+    "untouched": true
+  },
+  "retained_failure_logs": {
+    "artifacts/qbdi-generic-2026-10-21/normal-stop-red-tests.log": "0f45e06a784333b27bbbe4f707b22a2c3cc4424f7e0c9ce5eee59cae185529c8",
+    "artifacts/qbdi-generic-2026-10-21/open-duplicate-valid-red-tests.log": "0f530913cf8532b895911d6761edd9fad1fb38ce1c6b356b61ab9abb50a8b184",
+    "artifacts/qbdi-generic-2026-10-21/cancel-red-tests.log": "63440fabd28b9f935814da36f626d249f4fe6829c823bc609ecef9836ea93c4b",
+    "artifacts/qbdi-generic-2026-10-21/thread-exit-protocol-red.log": "b90db838f6ff26c9578a7774e2b17fb9df642975ec9e6dd0842643c644fcbd61",
+    "artifacts/qbdi-generic-2026-10-21/thread-exit-encoder-red-tests.log": "5030f8025d50a57dd7fe42bb8fa84bc4c7cd07131be014a2314255d1b776251f",
+    "artifacts/qbdi-generic-2026-10-21/python-all-tests.log": "d70a5f1571fbd52584670f18fa05cd379e509c9cebd720769238668b1e5a7bc5",
+    "artifacts/qbdi-generic-2026-10-21/python-accepted-tests.log": "f95a3ffcc4f3215329b557439e95b3731b40f9f30b8355320ce0e7cfa3d29d99",
+    "artifacts/qbdi-generic-2026-10-21/rust-all.log": "035d76104621f843f74a6852910539eafd17151ab4c93011cab95f5083b62c25"
+  },
+  "host": {
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "final_source_manifest": "artifacts/qbdi-generic-2026-10-21/final/manifest.json",
+  "all_final_device_resources_cleaned": true,
+  "flight_calls_contract": {
+    "result": "pass",
+    "report": "artifacts/qbdi-generic-2026-10-21/accepted-flight-calls/report.json",
+    "report_sha256": "e7383030ab5202eef4db04421070e1690d276c0e59b9983f8aedcfa87a476432",
+    "event_counts": {
+      "rule": 11,
+      "register_delta": 5,
+      "call": 25
+    },
+    "checks": {
+      "baseline_and_traced_oracle": true,
+      "no_instructions": true,
+      "no_memory": true,
+      "five_syscall_entries": true,
+      "five_real_returns": true,
+      "no_coverage_gaps": true,
+      "no_recovery_damage": true
+    },
+    "scene_lifecycle": [
+      {
+        "tid": 2182,
+        "id": 1,
+        "address": "0x740bd5e8a8",
+        "entry_sequence": 9,
+        "entered_monotonic_ns": 1359354751258754,
+        "last_sequence": 28,
+        "last_monotonic_ns": 1359354754928594,
+        "target_returned": true,
+        "state": "returned",
+        "return_value": "0x2a"
+      },
+      {
+        "tid": 2182,
+        "id": 2,
+        "address": "0x740bd5e8a8",
+        "entry_sequence": 31,
+        "entered_monotonic_ns": 1359354754998296,
+        "last_sequence": 40,
+        "last_monotonic_ns": 1359354757574834,
+        "target_returned": true,
+        "state": "returned",
+        "return_value": "0x2a"
+      },
+      {
+        "tid": 2182,
+        "id": 3,
+        "address": "0x740bd5e8a8",
+        "entry_sequence": 43,
+        "entered_monotonic_ns": 1359354757619716,
+        "last_sequence": 52,
+        "last_monotonic_ns": 1359354760223923,
+        "target_returned": true,
+        "state": "returned",
+        "return_value": "0x2a"
+      },
+      {
+        "tid": 2182,
+        "id": 4,
+        "address": "0x740bd5e8a8",
+        "entry_sequence": 55,
+        "entered_monotonic_ns": 1359354760262050,
+        "last_sequence": 64,
+        "last_monotonic_ns": 1359354762810186,
+        "target_returned": true,
+        "state": "returned",
+        "return_value": "0x2a"
+      },
+      {
+        "tid": 2182,
+        "id": 5,
+        "address": "0x740bd5e8a8",
+        "entry_sequence": 67,
+        "entered_monotonic_ns": 1359354762839524,
+        "last_sequence": 74,
+        "last_monotonic_ns": 1359354765385381,
+        "target_returned": true,
+        "state": "returned",
+        "return_value": "0x2a"
+      }
+    ]
+  }
+}

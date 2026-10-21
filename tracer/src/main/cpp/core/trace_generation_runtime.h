@@ -140,6 +140,9 @@ public:
             uint64_t generation, size_t scene_index, uint32_t tid) noexcept;
     void finish_call(const TraceAdmission &admission, bool sealed) noexcept;
     void acknowledge_sealed(const TraceAdmission &admission) noexcept;
+    // Sealing only ends collection. The proxy calls this after the actual
+    // target returns/exits, including a control-only continuation after stop.
+    void finish_target_call(const TraceAdmission &admission) noexcept;
     // Cold-path producer API for installation/sealing code. These calls may
     // lock and copy metadata and are forbidden from instruction callbacks.
     bool record_artifact(std::string_view artifact_basename) noexcept;
@@ -211,7 +214,8 @@ private:
     bool prepare_deadline() noexcept;
     void publish_deadline_stop_locked() noexcept;
     void complete_stop_if_idle_locked() noexcept;
-    void complete_call_locked(const TraceAdmission &admission, bool sealed) noexcept;
+    void complete_call_locked(const TraceAdmission &admission, bool sealed,
+                              bool target_open = false) noexcept;
     void join_deadline() noexcept;
     void start_status() noexcept;
     void join_status() noexcept;
@@ -233,6 +237,8 @@ private:
     mutable std::mutex active_mutex_;
     std::array<ActiveCall, kMaxActiveCalls> active_calls_{};
     size_t active_size_ = 0;
+    std::array<ActiveCall, kMaxActiveCalls> sealed_targets_{};
+    size_t sealed_target_size_ = 0;
     size_t active_capacity_ = 0;
     uint64_t next_admission_serial_ = 1;
     // Bound producer-owned data so it cannot independently exhaust the

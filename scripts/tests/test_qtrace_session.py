@@ -201,6 +201,14 @@ def orchestrator(device: FakeDevice, clock: ManualClock, collector: FakeCollecto
 
 
 class NativeRequestTests(unittest.TestCase):
+    def test_call_summary_selection_reaches_the_native_trace_options(self) -> None:
+        import dataclasses
+        selected = config()
+        selected = dataclasses.replace(selected, tracer=dataclasses.replace(selected.tracer, events="calls"))
+        request = build_native_request(selected, target(), SESSION_ID, 250)
+        self.assertEqual("calls", request["trace"]["events"])
+        self.assertNotIn("events", build_native_request(config(), target(), SESSION_ID, 250)["trace"])
+
     def test_builds_exact_native_request_without_host_or_absolute_fields(self) -> None:
         request = build_native_request(config(), target(), SESSION_ID, 250)
         self.assertEqual(1, request["schemaVersion"])
@@ -342,6 +350,17 @@ class SessionTests(unittest.TestCase):
 
     def run_request(self) -> RunRequest:
         return RunRequest(config(), None, Path(self.directory.name), 250, 2.0, 2.0, 0.5, 1.0)
+
+    def test_failed_abi_gate_prevents_deployment_and_injection(self) -> None:
+        report = Path(self.directory.name) / "abi.json"
+        report.write_text(json.dumps({"schema_version": 1, "result": "fail"}))
+        device = FakeDevice([status("sealed", transition=1, reason="duration_elapsed", acknowledged=True)], [4242])
+        runner, injector = orchestrator(device, ManualClock())
+        request = dataclasses.replace(self.run_request(), abi_report=report)
+        with patch.object(runner._deployer, "deploy") as deploy, self.assertRaisesRegex(QtraceError, "ABI report is not a completed pass"):
+            runner.run(request)
+        deploy.assert_not_called()
+        self.assertEqual([], injector.requests)
 
     def test_collect_reports_exact_bound_secondary_user_metadata(self) -> None:
         device = FakeDevice([
@@ -509,6 +528,8 @@ class SessionTests(unittest.TestCase):
         result = runner.monitor(request)
         self.assertEqual(0, result.exit_code)
         self.assertTrue(collector.calls[0]["_process_exited"])
+        report = json.loads(result.report.read_text())
+        self.assertEqual("exited", report["native"]["lifecycle"]["process_state"])
 
     def test_monitor_verifies_owned_process_identity_after_pidof_false_negative(self) -> None:
         device = FakeDevice(

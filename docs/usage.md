@@ -60,6 +60,10 @@ python3 -m qtrace run --config target.json --duration 30s --device SERIAL --outp
 python3 -m qtrace monitor --config target.json --device SERIAL --output results
 ```
 
+复杂目标采集前可按 [JNI 与 arm64 ABI 准入](jni-abi-acceptance.md)运行独立设备夹具，
+再为 `run` 或 `monitor` 传入 `--abi-report PATH`。CLI 在注入前拒绝失败、未完成收尾、
+设备身份变化或 tracer/companion SHA 不匹配的报告。未传此选项的旧命令保持原有行为。
+
 如果目标在 Frida 驻留的启动阶段出现兼容性问题，可给 `run` 或 `monitor` 加
 `--detach-before-resume`。该选项在发布原生配置后、恢复应用前卸载脚本并脱离会话，
 随后通过 ADB 校验绑定 session、PID、generation 和场景的原生安装凭据；不会将配置回执当作安装成功。
@@ -154,7 +158,42 @@ session report 保存包名、设备、目标和配置上下文。离线分析�
 
 三种配置都不会主动采样、丢弃或重排事件。两个异步缓冲区同时繁忙时，生产者会等待，并在 metrics 中记录 backpressure。
 
-Flight Recorder 始终按 full 语义采集目标模块内的指令、内存和 GPR，不受普通 trace profile 影响。完整字段、容量计算和兼容规则见 [QTRB 与文本格式说明](trace-format.md)。
+Flight Recorder 在默认 `events: "all"` 下按 full 语义采集目标模块内的指令、内存和 GPR，不受普通 trace profile 影响。完整字段、容量计算和兼容规则见 [QTRB 与文本格式说明](trace-format.md)。
+
+需要先定位调用时，可在 CLI 配置中设置 `tracer.events: "calls"`；native JSON 对应 `trace.events`。
+省略时保持 `"all"`。`calls` 保留已有 JNI/libc/执行转移语义事件，并为目标指令中的 `svc` 记录系统调用号与六个入口参数，关闭指令、memory 和逐指令 GPR 事件。
+Flight 仍保留必要的 chunk checkpoint 和场景边界。系统调用入口记录不证明调用成功或返回，也不覆盖目标模块外部的所有系统调用。
+这种模式降低输出量；短函数的建 VM、翻译和 hook 成本仍存在，当前测量没有证明 CPU 加速。
+先用现有 `target.module` 和少量 scene 聚焦，找到入口后在下一次采集改用 `all` 与所需 profile。
+
+## 场景状态与有界离线查询
+
+`report.json` 的 `native.lifecycle` 与采集目录 `session.json` 的 `lifecycle` 分开描述采集和目标调用。
+native `activeScenes[].sealed: true` 表示采集已经封口，但该目标调用仍未结束；实际返回或受控线程退出后才移除。
+`deadlineMonotonicNs` 是停止请求的截止时间，阻塞调用可能稍后才观察到请求。
+`process_state` 只有在监控器确认原进程退出后才为 `exited`；单独拉取的旧 status 不证明进程仍存活。
+开放 scene 的 TID、采集状态和截止时间可用于定位等待；这些字段不能确定 Java/Binder 等待原因，也不会自动采样 Java 栈。
+
+Flight 的 `scene_lifecycle` 使用实际 `qtrace.scene` 事件区分进入、返回和停止采集，最多保留最近 256 个调用，并报告省略和无效事件数量。
+文件 `complete` 仅描述保留数据的结构完整性。只有明确的返回事件证明采集窗口内目标返回；`capture_stopped` 和 `open_at_end` 的返回状态保持未知。
+普通 QTRB 的 `target_stop_reason` 可为 `duration_elapsed`、`thread_exit`、`process_exit` 或 `exec_boundary`；其中 exec 边界表示尝试，不表示 exec 成功。
+
+对大文件先读有界元数据，再决定是否索引：
+
+```bash
+python3 -m qtrace inspect-flight run.flight.bin --json --timeout 5
+python3 -m qtrace scenes-flight run.flight.bin \
+  --since-ns 1100000000 --until-ns 1102500000 --limit 2000 --timeout 5
+```
+
+`inspect-flight` 最多请求 8 MiB 元数据，支持最多 1024 个线程目录，不读取或校验事件 payload。
+它返回头部声明的数量，明确标记 `payload_verification: "not_performed"`，不能用于完整性或返回值验收。
+`scenes-flight` 按实际单调时钟纳秒筛选场景边界，时间端点均包含；每页最多 2000 行、累计 payload 扫描最多 64 MiB、单 chunk 最多 1 MiB。
+下一页传入返回的 `next_after_sequence` 作为 `--after-sequence`，同时保持文件与时间条件不变；每页会重新扫描。
+该查询校验所解码 chunk，不进行全文件恢复或调用配对。指令记录没有逐事件时间戳，不能按这些场景时间推算指令执行时刻。
+超出预算或截止时间会明确失败；Ctrl-C 会停止扫描。
+类型、地址和 sequence 分页查询继续使用分析器现有入口，单页最多 2000 行；索引本身也受资源预算和取消控制。
+256 MiB 密集输入的预算拒绝与较低占用输入的成功测量分别记录在[通用优化验收](benchmarks/qbdi-generic-2026-10-21.md)。
 
 ## Pull Traces
 

@@ -56,6 +56,7 @@ private:
     TraceProfile profile_ = TraceProfile::Fast;
     size_t hexdump_limit_ = 0;
     bool decode_memory_ = false;
+    bool calls_only_ = false;
     Arm64InstructionResolver resolver_{ModuleRange{}};
     CachedInstruction uncached_{};
     InstructionView current_view_{};

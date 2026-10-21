@@ -1,7 +1,19 @@
 use std::time::{Duration, Instant};
 
-use qtrace_provider::{BudgetDimension, WorkDelta, WorkGuard};
-use qtrace_service::{JobRegistry, JobState, ServiceBudget, ServiceLimits, WorkspaceId};
+use qtrace_provider::{BudgetDimension, OperationAbort, ProviderError, WorkDelta, WorkGuard};
+use qtrace_service::{AppError, JobRegistry, JobState, ServiceBudget, ServiceLimits, WorkspaceId};
+
+#[test]
+fn provider_cancellation_retains_the_service_cancellation_identity() {
+    let cancelled = AppError::from(ProviderError::from(OperationAbort::Cancelled));
+    assert_eq!(cancelled.code, "job.cancelled");
+    let budget = AppError::from(ProviderError::from(OperationAbort::budget_exceeded(
+        BudgetDimension::ResidentBytes,
+        10,
+        11,
+    )));
+    assert_eq!(budget.code, "control.budget_exceeded");
+}
 
 #[test]
 fn every_budget_dimension_and_deadline_is_enforced_monotonically() {

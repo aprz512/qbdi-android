@@ -26,7 +26,7 @@ _FORMAT4_COMPLETED_TERMINAL = re.compile(
 
 
 _FORMAT4_STOPPED_TERMINAL = re.compile(
-    r"TRACE_END status=stopped reason=duration_elapsed return_valid=0 elapsed_ms=\d+ "
+    r"TRACE_END status=stopped reason=(?:duration_elapsed|thread_exit|process_exit|exec_boundary) return_valid=0 elapsed_ms=\d+ "
     r"instructions=\d+ encoded_bytes=\d+ compressed_bytes=\d+ cache_hits=\d+ "
     r"cache_misses=\d+ cache_collisions=\d+ buffer_swaps=\d+ producer_waits=\d+ "
     r"producer_wait_ns=\d+ effective_buffer_bytes=\d+\Z"
@@ -150,6 +150,9 @@ def validate_pulled_artifacts(
                 started = time.monotonic()
                 stats = convert_binary_file(local, text, lz4=lz4, crash_marked=crash_marked)
                 record.update(decoder="qtrb", termination=stats.termination,
+                             target_stop_reason=stats.stop_reason,
+                             target_returned_in_capture=stats.termination == "completed" and not stats.partial,
+                             scene_name=stats.scene, tid=stats.tid, target_offset=stats.target_offset,
                              conversion_ms=round((time.monotonic() - started) * 1000, 3))
                 if crash_marked:
                     record["recovery_classification"] = "crash_marker"
@@ -170,6 +173,8 @@ def validate_pulled_artifacts(
                 if type(summary) is not dict or type(summary.get("complete")) is not bool:
                     raise ValueError("flight recovery summary is malformed")
                 record.update(decoder="flight", termination=summary.get("termination"),
+                             target_returned_in_capture=None,
+                             scene_lifecycle=summary.get("scene_lifecycle", []),
                              recovery_status=recovery_status(summary))
                 process_exited = (status is not None and
                                   status.get("_process_exited") is True)

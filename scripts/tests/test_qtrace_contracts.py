@@ -800,11 +800,12 @@ class SchemaContractsTests(unittest.TestCase):
         self.assertFalse(definitions["target"]["additionalProperties"])
         tracer = definitions["tracer"]
         self.assertEqual(
-            {"profile", "compression", "flightEnabled", "flightEntryScene", "library", "companion", "codeRules"},
+            {"profile", "events", "compression", "flightEnabled", "flightEntryScene", "library", "companion", "codeRules"},
             set(tracer["properties"]),
         )
         self.assertFalse(tracer["additionalProperties"])
         self.assertEqual(["fast", "balanced", "full"], tracer["properties"]["profile"]["enum"])
+        self.assertEqual(["all", "calls"], tracer["properties"]["events"]["enum"])
         self.assertEqual(1, schema["properties"]["scenes"]["minItems"])
         self.assertEqual(256, schema["properties"]["scenes"]["maxItems"])
         forms = definitions["scene"]["oneOf"]
@@ -1024,6 +1025,10 @@ class SchemaContractsTests(unittest.TestCase):
             candidate["scenes"][0]["symbol"] = symbol_value
             corpus[name] = candidate
         for name, tracer in {
+            "events-calls": {"events": "calls"},
+            "events-all": {"events": "all"},
+            "events-unknown": {"events": "instructions"},
+            "events-wrong-type": {"events": True},
             "tracer-library-only": {"library": "tracer.so"},
             "tracer-companion-only": {"companion": "agent.js"},
             "flight-missing-entry": {"flightEnabled": True},
@@ -1038,7 +1043,7 @@ class SchemaContractsTests(unittest.TestCase):
 
         expected = {
             "minimal-offset", "symbol-unicode",
-            "symbol-unbounded-scene-name-128-bytes", "flight-paired",
+            "symbol-unbounded-scene-name-128-bytes", "flight-paired", "events-calls", "events-all",
         }
         runtime_accepted = {name for name, value in corpus.items() if self.config_runtime_accepts(value)}
         schema = QtraceProjectSchemaEvaluator(self.load_schema("qtrace-config.schema.json"))

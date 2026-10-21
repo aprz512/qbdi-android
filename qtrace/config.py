@@ -274,6 +274,7 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
             "library",
             "companion",
             "codeRules",
+            "events",
         )),
     )
     profile = tracer.get("profile", "fast")
@@ -281,6 +282,9 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
         _fail("CONFIG_TYPE_INVALID", "tracer.profile must be a string")
     if profile not in _PROFILES:
         _fail("CONFIG_VALUE_INVALID", "tracer.profile must be fast, balanced, or full")
+    events = tracer.get("events", "all")
+    if type(events) is not str or events not in {"all", "calls"}:
+        _fail("CONFIG_VALUE_INVALID", "tracer.events must be all or calls")
     compression = _boolean(tracer, "compression", True)
     flight_enabled = _boolean(tracer, "flightEnabled", False)
     library = _optional_path(tracer, "library", "tracer", base)
@@ -309,6 +313,7 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
 
     return TracerConfig(
         code_rules=_boolean(tracer, "codeRules", False),
+        events=events,
         profile=profile,
         compression=compression,
         flight_enabled=flight_enabled,

@@ -43,6 +43,9 @@ enum class BinaryRecordType : uint16_t {
 
 enum class TraceStopReason : uint8_t {
     DurationElapsed = 1,
+    ThreadExit = 2,
+    ProcessExit = 3,
+    ExecBoundary = 4,
 };
 
 // RecordHeader (8 bytes): type u16, flags u16, payload_bytes u32. Flags are zero except for the

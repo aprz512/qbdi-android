@@ -20,6 +20,8 @@ from qtrace.artifacts import publish_collector_report
 from scripts.bounded_process import BoundedProcessError
 from qtrace.injector import InjectionRequest, InjectionResult
 from qtrace.lock import TargetLock
+from qtrace.lifecycle import summarize_lifecycle
+from qtrace.abi import require_abi_acceptance, require_abi_deployment
 from qtrace.models import AppConfig, OffsetScene, ResolvedScene, ResolvedTarget, SymbolScene, TargetConfig, TracerConfig, UserConfig
 from qtrace.report import ReportWriter, SessionReport, SessionStage
 from qtrace.status import (STATE_ORDER, NativeStatusValidationError, StrictJsonLoadError,
@@ -65,6 +67,7 @@ class RunRequest:
     pull_timeout: float
     installed_action: InstalledAction | None = None
     detach_before_resume: bool = False
+    abi_report: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,7 @@ class MonitorRequest:
     pull_timeout: float
     installed_action: InstalledAction | None = None
     detach_before_resume: bool = False
+    abi_report: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +239,7 @@ def _request_config(config: object) -> UserConfig:
         raise QtraceError("session.request_invalid", "session.request", "enabled rules require explicit target SHA-256")
     tracer = config.tracer
     if type(tracer.profile) is not str or tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
+            type(tracer.events) is not str or tracer.events not in {"all", "calls"} or \
             type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None) or \
             any(not host_path(item) for item in (
                 config.app.apk, config.target.binary, tracer.library, tracer.companion)):
@@ -327,6 +332,8 @@ def build_native_request(config: UserConfig, resolved: ResolvedTarget, session_i
                    for scene in resolved.scenes],
         "session": session,
     }
+    if config.tracer.events != "all":
+        native["trace"]["events"] = config.tracer.events
     if config.tracer.code_rules:
         native["codeRules"] = {"enabled": True, "sampleSha256": config.target.sha256}
     return native
@@ -377,7 +384,7 @@ class SessionOrchestrator:
         stage = SessionStage.PREFLIGHT
         status: Mapping[str, object] | None = None
         snapshot: tuple[str, ...] = ()
-        identity = artifacts = deployment = resolved = native = None
+        identity = artifacts = deployment = resolved = native = abi_acceptance = None
         collection_records: tuple[Mapping[str, object], ...] = ()
         collection_token: object | None = None
         report_path = Path(request.output) / session_id / "report.json"
@@ -393,9 +400,14 @@ class SessionOrchestrator:
                     collector_token: object | None = None) -> SessionResult:
             report = SessionReport(1, session_id, mode, outcome, stage.value, request.config.app.package,
                                    getattr(device, "serial", ""), pid, started, self._clock.utc_timestamp(), tuple(timeline),
-                                   {"identity": identity}, {"artifacts": artifacts, "deployment": deployment},
+                                   {"identity": identity}, {"artifacts": artifacts, "deployment": deployment,
+                                       **({"abi_acceptance": abi_acceptance} if abi_acceptance is not None else {})},
                                    {"resolved": resolved}, {"config": request.config},
-                                   {"request": native, "status": {key: value for key, value in dict(status or {}).items() if not key.startswith("_")}}, artifact_records, (),
+                                   {"request": native,
+                                    "status": {key: value for key, value in dict(status or {}).items() if not key.startswith("_")},
+                                    "lifecycle": summarize_lifecycle(status, artifact_records,
+                                        process_exited=outcome in {"process_exited", "crash_recovered"} or
+                                            bool(status and status.get("_process_exited") is True))}, artifact_records, (),
                                    None if error is None else {"code": error.code, "stage": error.stage, "detail": error.detail},
                                    tuple(str(item) for item in outputs))
             # A real collector token owns a held directory fd and the exact fragment
@@ -444,8 +456,13 @@ class SessionOrchestrator:
             resolved = self._resolver_factory(device).resolve(request.config)
             mark(SessionStage.BUILDING_TRACER)
             artifacts = self._builder.select_or_build(request.config.tracer, timeout=request.setup_timeout)
+            if request.abi_report is not None:
+                abi_acceptance = require_abi_acceptance(
+                    request.abi_report, device, artifacts, timeout=request.adb_timeout)
             mark(SessionStage.DEPLOYING)
             deployment = self._deployer.deploy(device, session_id, artifacts)
+            if abi_acceptance is not None:
+                require_abi_deployment(abi_acceptance, deployment)
             snapshot = self._snapshot_artifacts(device, request, session_id)
             native = build_native_request(
                 request.config, resolved, session_id, duration_ms,

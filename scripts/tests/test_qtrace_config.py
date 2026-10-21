@@ -34,6 +34,16 @@ class DurationTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_call_summary_mode_is_explicit_and_rejects_unknown_values(self):
+        payload = self.valid_payload()
+        payload["tracer"] = {"events": "calls"}
+        self.assertEqual("calls", load_config(self.write_json("calls.json", payload)).tracer.events)
+        self.assertEqual("all", load_config(self.write_json("all.json", self.valid_payload())).tracer.events)
+        for value in (True, 1, None, "fast", "CALLS"):
+            payload["tracer"] = {"events": value}
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                load_config(self.write_json("bad-events.json", payload))
+
     def test_accepts_explicit_sample_sha256_and_rules_opt_in(self):
         payload = self.valid_payload()
         payload["target"]["sha256"] = "a" * 64

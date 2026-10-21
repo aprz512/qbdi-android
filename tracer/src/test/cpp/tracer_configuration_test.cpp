@@ -315,6 +315,9 @@ static void publication_faults_preserve_the_prior_generation() {
 }
 
 int main() {
+    const auto calls = prepare_tracer_configuration(replace_once(document_with_scenes("[]"),
+        "\"profile\": \"fast\"", "\"profile\": \"fast\", \"events\": \"calls\""));
+    CHECK(calls.accepted() && calls.config.trace.calls_only);
     const char request[] = R"json({
       "schemaVersion": 1,
       "packageName": "com.aprz.qbdiandroid",

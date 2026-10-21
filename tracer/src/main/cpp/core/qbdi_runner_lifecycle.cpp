@@ -116,7 +116,9 @@ bool QbdiNormalStopLifecycle::seal(TraceStopReason reason) noexcept {
     stop_observed_ = true;
     ++seal_calls_;
     if (!enabled()) return false;
-    sealed_ = writer_->stop(reason, elapsed_(elapsed_opaque_));
+    const bool stopped = writer_->stop(reason, elapsed_(elapsed_opaque_));
+    const bool closed = writer_->close();
+    sealed_ = stopped && closed;
     return sealed_;
 }
 
@@ -125,6 +127,9 @@ void QbdiNormalStopLifecycle::acknowledge(bool sealed) noexcept {
     acknowledge_called_ = true;
     ++acknowledge_calls_;
     acknowledged_sealed_ = seal_called_ && sealed_ && sealed;
+    if (acknowledged_sealed_ && enabled()) {
+        runtime_->acknowledge_sealed(admission_);
+    }
 }
 
 void QbdiNormalStopLifecycle::finish(bool artifacts_finalized) noexcept {
@@ -137,6 +142,7 @@ void QbdiNormalStopLifecycle::finish(bool artifacts_finalized) noexcept {
     } else {
         runtime_->finish_call(admission_, false);
     }
+    runtime_->finish_target_call(admission_);
 }
 
 bool QbdiNormalStopLifecycle::stop_observed() const noexcept {

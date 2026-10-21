@@ -205,6 +205,33 @@ fn stopped_terminal_preserves_reason_and_metrics() {
     assert_eq!(terminal.metrics.encoded_bytes, 405);
 }
 
+#[test]
+fn nonreturn_boundaries_stop_capture_without_a_return_value() {
+    for (reason, name) in [
+        (2, "thread_exit"),
+        (3, "process_exit"),
+        (4, "exec_boundary"),
+    ] {
+        let mut bytes = fixture("v1.2-stopped.bin");
+        let offset = bytes.len() - 96;
+        bytes[offset] = reason;
+        let terminal = collect_bytes(bytes, OpenMode::Sealed)
+            .unwrap()
+            .into_iter()
+            .find_map(|event| {
+                if let EventPayload::Termination(value) = event.payload {
+                    Some(value)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(terminal.kind, TerminationKind::Stopped);
+        assert_eq!(terminal.reason.as_deref(), Some(name));
+        assert_eq!(terminal.return_value, None);
+    }
+}
+
 fn wire_string(value: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::new();
     encoded.extend_from_slice(&(value.len() as u16).to_le_bytes());

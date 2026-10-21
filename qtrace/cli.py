@@ -53,6 +53,8 @@ def _add_common(command: argparse.ArgumentParser, *, config: bool) -> None:
     if config:
         command.add_argument("--config", type=Path, required=True,
                              help="strict qtrace target configuration JSON")
+        command.add_argument("--abi-report", type=Path,
+                             help="require a passing device ABI report matching this tracer and device")
     command.add_argument("--device", help="ADB serial; required when more than one device is online")
     command.add_argument("--output", type=Path, default=_DEFAULT_OUTPUT,
                          help="directory for reports and artifacts (default: qtrace-output)")
@@ -77,6 +79,19 @@ def _add_pull_timeout(command: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qtrace", description="Trace one Android app session with QBDI.")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    inspect = commands.add_parser("inspect-flight", help="preview Flight metadata within fixed memory/time bounds")
+    inspect.add_argument("path", type=Path)
+    inspect.add_argument("--timeout", type=_positive_timeout, default=5.0)
+    inspect.add_argument("--json", action="store_true")
+
+    scenes = commands.add_parser("scenes-flight", help="query actual scene monotonic timestamps within fixed bounds")
+    scenes.add_argument("path", type=Path)
+    scenes.add_argument("--since-ns", type=int, default=0)
+    scenes.add_argument("--until-ns", type=int, default=2**64 - 1)
+    scenes.add_argument("--after-sequence", type=int, default=0)
+    scenes.add_argument("--limit", type=int, default=2000)
+    scenes.add_argument("--timeout", type=_positive_timeout, default=5.0)
 
     run = commands.add_parser("run", help="run a duration-bounded trace session")
     _add_common(run, config=True)
@@ -350,7 +365,8 @@ def _run(arguments: argparse.Namespace, repo_root: Path) -> int:
     request = RunRequest(load_config(arguments.config), arguments.device, arguments.output,
                          arguments.duration, arguments.setup_timeout, arguments.stop_timeout,
                          arguments.adb_timeout, arguments.pull_timeout,
-                         detach_before_resume=arguments.detach_before_resume)
+                         detach_before_resume=arguments.detach_before_resume,
+                         abi_report=arguments.abi_report)
     _progress("starting timed session")
     result = _make_orchestrator(repo_root).run(request)
     _emit_result(result.report, result.outputs, result.exit_code, arguments.json)
@@ -360,7 +376,8 @@ def _run(arguments: argparse.Namespace, repo_root: Path) -> int:
 def _monitor(arguments: argparse.Namespace, repo_root: Path) -> int:
     request = MonitorRequest(load_config(arguments.config), arguments.device, arguments.output,
                              arguments.setup_timeout, arguments.adb_timeout, arguments.pull_timeout,
-                             detach_before_resume=arguments.detach_before_resume)
+                             detach_before_resume=arguments.detach_before_resume,
+                             abi_report=arguments.abi_report)
     _progress("starting monitor session")
     result = _make_orchestrator(repo_root).monitor(request)
     _emit_result(result.report, result.outputs, result.exit_code, arguments.json)
@@ -416,6 +433,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
     try:
+        if arguments.command == "scenes-flight":
+            from qtrace.flight_inspection import query_scene_path
+            from scripts.flight_trace import FlightTraceError
+            try:
+                result = query_scene_path(arguments.path, since_ns=arguments.since_ns,
+                    until_ns=arguments.until_ns, after_sequence=arguments.after_sequence,
+                    limit=arguments.limit, timeout=arguments.timeout)
+            except (OSError, FlightTraceError) as error:
+                raise QtraceError("flight.scene_query_failed", "flight.scene_query", str(error)) from error
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if arguments.command == "inspect-flight":
+            from qtrace.flight_inspection import inspect_path
+            from scripts.flight_trace import FlightTraceError
+            try:
+                result = inspect_path(arguments.path, timeout=arguments.timeout)
+            except (OSError, FlightTraceError) as error:
+                raise QtraceError("flight.inspect_failed", "flight.inspect", str(error)) from error
+            if arguments.json:
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print(f"{result['target_module']} PID {result['pid']}: {result['artifact_bytes']} bytes, "
+                      f"{result['sealed_chunks']} sealed chunks, {result['active_chunks']} active chunks")
+                print("Metadata preview; event payloads and target return are unverified.")
+            return 0
         if arguments.command == "run":
             return _run(arguments, repo_root)
         if arguments.command == "monitor":

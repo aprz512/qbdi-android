@@ -1,5 +1,16 @@
 # qbdi-android 实战体验：AppGuard 防护库分析
 
+后续通用优化已完成两个 P0 的独立工具闭环，见[JNI/arm64 验收](../benchmarks/jni-abi-2026-10-21.md)。
+普通/V/A 解码、带符号数值和浮点返回文本已通过同输入 Java/native 正向对照；同线程 x18、真实栈及 attach/callback 纳入设备准入。
+CLI 可通过 `--abi-report` 在注入前绑定设备与产物 SHA。以下历史观察及其原始证据范围仍保留，不据此补写未执行的业务复验。
+后续固定 float/double 字段参数修复及构造器、实例、nonvirtual 普通/V/A 对照已纳入同一通用夹具，当前为 30 份轨迹、14 项设备准入。
+
+后续通用 P1/P2 已完成独立最小夹具验证，见[通用优化验收](../benchmarks/qbdi-generic-2026-10-21.md)。
+场景状态分开描述采集封口与真实返回；新增有界元数据预览、实际场景时间查询与可选 calls 事件选择。
+当前 ABI 的 vfork 故障已由新夹具复现并修复；exec、进程退出与 pthread_exit 的封口也完成设备正向对照。
+密集 Flight 索引的预算拒绝、无逐指令时间戳、原生子分支覆盖边界和未证明 CPU 加速均明确保留。
+这些通用结果不替代下文目标业务的实测，也不扩展其历史结论。
+
 本文分析 DIGIMON UP `com.bandainamcoent.dgup_ww` 1.5.0(55) 中的 AppGuard 防护库，
 重点为 native configure/status API、logical region、Flight 回收和 JNI 观测。
 本轮没有完整评测公开 qtrace CLI 或 qtrace-ui，不能把实验脚本的问题直接当作这些入口的缺陷。
@@ -35,12 +46,14 @@ Root 判定采用 QBDI、外部硬件执行/写入观察和静态解密的交叉
 
 | 问题 | 复现与影响 | 修复与证据 |
 | --- | --- | --- |
-| 目标使用虚拟栈 | traced native 调用进入 ART `AttachCurrentThread` 后，ART 发现 SP 不在真实 pthread 栈范围并 abort | 目标保留真实线程栈，QBDI engine 使用独立栈；后续验证需检查真实栈与 attach/callback。 |
-| Android arm64 x18 未初始化 | 历史 traced x18 为0，真实 JNI 随后 SIGSEGV | 初始化时复制同一 pthread 的平台 x18；以基线与 traced 值、Java 回调和异常状态交叉检查。 |
+| 目标使用虚拟栈 | traced native 调用进入 ART `AttachCurrentThread` 后，ART 发现 SP 不在真实 pthread 栈范围并 abort | 目标保留真实线程栈，QBDI engine 使用独立栈；后续独立 JNI/arm64 夹具覆盖真实栈与 attach/callback。 |
+| Android arm64 x18 未初始化 | 历史 traced x18 为0，真实 JNI 随后 SIGSEGV | 初始化时复制同一 pthread 的平台 x18；独立设备准入检查基线与 traced 值，并验证 Java 回调和异常状态。 |
 | 自动线程跟踪消耗 scene 槽 | 无关 pthread 占满有限槽位，显式目标无法进入 | 增加默认开启的 `flight.followThreads`；聚焦时可设 false，已有单槽及无关线程回归。 |
 | 多套 inline hook 复用 ELF gap | 已使用的 libc 跳板被另一套 ShadowHook 当作空闲岛，发生 ABI 冲突 | 调试构建避免复用 ELF gap，使用独占匿名岛或已有长跳转能力；不把跳板冲突解释为防护库检测。 |
 
-同线程 x18、真实栈与 JNI callback 需用独立的同输入夹具验证，不能把执行过目标检测函数当作工具 ABI 准入。
+独立设备夹具为 [jni_abi_probe.cpp](../../tracer/src/test/device/jni_abi_probe.cpp) 与
+[JniAbiProbe.java](../../tracer/src/test/device/JniAbiProbe.java)，运行方式见[JNI/arm64 准入](../jni-abi-acceptance.md)。
+它们验证工具 ABI，不需要执行或修改游戏检测函数。
 
 ## 历史痛点与优化验收
 
@@ -56,7 +69,8 @@ Root 判定采用 QBDI、外部硬件执行/写入观察和静态解密的交叉
 | P2 | 间接转移后是否返回或继续覆盖需要人工判断 | 用当前 ABI 做最小间接分支和进程控制夹具，报告未覆盖边界，不从旧产物推断当前缺陷。 |
 
 历史会话 `c13e8a4d-a4f7-40b7-9e85-ea2cde06a968` 的 vfork/_exit/stack protector 异常使用修复 x18 前的
-`bd973672…` tracer，不能作为当前版本缺陷的证据。后续须用当前 ABI 的最小夹具复验，不沿用旧故障推论。
+`bd973672…` tracer，不能作为当前版本缺陷的证据。后续通用 vfork 修复有独立夹具，
+见[进程边界验收](../benchmarks/qbdi-generic-2026-10-21.md#间接转移与进程边界)，两组证据分别保留。
 
 ## 后续分析方法与边界
 

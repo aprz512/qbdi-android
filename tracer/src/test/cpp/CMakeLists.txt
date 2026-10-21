@@ -46,11 +46,32 @@ add_trace_test(safe_memory_string_test
 add_trace_test(jni_formatter_test
     jni_formatter_test.cpp
     ../../main/cpp/jni/jni_formatter.cpp
+    ../../main/cpp/jni/jni_argument_decoder.cpp
     ../../main/cpp/jni/jni_state.cpp
     ../../main/cpp/core/safe_memory.cpp)
 
 add_trace_test(jni_function_table_test
     jni_function_table_test.cpp)
+
+add_trace_test(jni_argument_decoder_test
+    jni_argument_decoder_test.cpp
+    ../../main/cpp/jni/jni_argument_decoder.cpp
+    ../../main/cpp/jni/jni_formatter.cpp
+    ../../main/cpp/jni/jni_state.cpp
+    ../../main/cpp/core/safe_memory.cpp)
+
+add_trace_test(jni_call_handlers_test
+    jni_call_handlers_test.cpp
+    ../../main/cpp/handlers/call_handlers.cpp
+    ../../main/cpp/core/module_maps.cpp
+    ../../main/cpp/core/safe_memory.cpp
+    ../../main/cpp/jni/jni_argument_decoder.cpp
+    ../../main/cpp/jni/jni_formatter.cpp
+    ../../main/cpp/jni/jni_state.cpp
+    ../../main/cpp/jni/jni_state_updater.cpp
+    ../../main/cpp/jni/jni_call_resolver.cpp
+    ../../main/cpp/jni/jni_function_registry.cpp)
+target_link_libraries(jni_call_handlers_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 
 add_trace_test(jni_function_registry_test
     jni_function_registry_test.cpp
@@ -179,6 +200,17 @@ target_include_directories(protocol_fixture_emitter PRIVATE
     ../../main/cpp ${QTRACE_QBDI_INCLUDE_DIRS})
 target_link_libraries(protocol_fixture_emitter PRIVATE Threads::Threads)
 
+add_executable(flight_query_fixture
+    flight_query_fixture.cpp
+    ../../main/cpp/flight/flight_artifact.cpp
+    ../../main/cpp/flight/flight_chunk_writer.cpp
+    ../../main/cpp/flight/flight_encoder.cpp
+    ../../main/cpp/events/binary_trace_encoder.cpp)
+target_compile_features(flight_query_fixture PRIVATE cxx_std_20)
+target_compile_definitions(flight_query_fixture PRIVATE QTRACE_HOST_TEST=1)
+target_include_directories(flight_query_fixture PRIVATE ../../main/cpp ${QTRACE_QBDI_INCLUDE_DIRS})
+target_link_libraries(flight_query_fixture PRIVATE Threads::Threads)
+
 add_trace_test(flight_trace_sink_test
     flight_trace_sink_test.cpp
     ../../main/cpp/flight/flight_artifact.cpp
@@ -199,6 +231,10 @@ add_trace_test(instruction_collector_test
 add_trace_test(instruction_collector_integration_test
     instruction_collector_integration_test.cpp
     ../../main/cpp/core/instruction_collector.cpp
+    ../../main/cpp/core/arm64_syscall.cpp
+    ../../main/cpp/core/signal_broker.cpp
+    ../../main/cpp/core/signal_context_arm64.cpp
+    ../../main/cpp/flight/flight_artifact.cpp
     ../../main/cpp/core/instruction_cache.cpp
     ../../main/cpp/core/arm64_memory_operand.cpp
     ../../main/cpp/core/memory_trace_policy.cpp
@@ -393,6 +429,9 @@ add_trace_test(trace_number_formatter_test
 add_trace_test(arm64_syscall_test
     arm64_syscall_test.cpp
     ../../main/cpp/core/arm64_syscall.cpp)
+
+add_trace_test(vfork_boundary_test vfork_boundary_test.cpp ../../main/cpp/core/vfork_boundary.cpp)
+target_link_libraries(vfork_boundary_test PRIVATE Threads::Threads)
 
 add_trace_test(signal_context_arm64_test
     signal_context_arm64_test.cpp

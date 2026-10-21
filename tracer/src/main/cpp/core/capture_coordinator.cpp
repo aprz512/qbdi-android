@@ -668,6 +668,7 @@ void CaptureCoordinator::leave(QbdiThreadSession *session) noexcept {
     for (size_t index = 0; index < slot_count_; ++index) {
         if (slots_[index].session != session) continue;
         session->leave();
+        if (runtime_ != nullptr) runtime_->finish_target_call(slots_[index].admission);
         return;
     }
 }
@@ -696,10 +697,12 @@ void CaptureCoordinator::finish_thread(QbdiThreadSession *session,
                 }
             }
             if (retain_active_session) {
+                if (runtime_ != nullptr) runtime_->finish_target_call(slots_[index].admission);
                 owned = session;
                 break;
             }
             session->leave();
+            if (runtime_ != nullptr) runtime_->finish_target_call(slots_[index].admission);
             owned = session;
             slots_[index] = {};
             break;

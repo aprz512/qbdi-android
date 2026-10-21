@@ -40,6 +40,9 @@ impl AppError {
 }
 impl From<ProviderError> for AppError {
     fn from(e: ProviderError) -> Self {
+        if e.code() == "control.cancelled" {
+            return Self::cancelled();
+        }
         Self {
             code: e.code().into(),
             stage: e.stage().into(),

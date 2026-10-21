@@ -55,6 +55,10 @@ class ConversionStats:
     converted_text_bytes: int
     partial: bool
     termination: str | None
+    scene: str | None = None
+    tid: int | None = None
+    target_offset: int | None = None
+    stop_reason: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -663,12 +667,13 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
             if flags or len(payload) != TRACE_STOP_FIXED.size:
                 raise BinaryTraceError("invalid TRACE_STOP payload")
             reason, reserved, elapsed_ms, *metrics = TRACE_STOP_FIXED.unpack(payload)
-            if reason != 1:
+            if reason not in (1, 2, 3, 4):
                 raise BinaryTraceError("invalid TRACE_STOP reason")
             if reserved != b"\0" * 7:
                 raise BinaryTraceError("nonzero TRACE_STOP reserved bytes")
             terminal = TraceTerminal(
-                "stopped", "duration_elapsed", False, 0, elapsed_ms, *metrics
+                "stopped", {1: "duration_elapsed", 2: "thread_exit", 3: "process_exit",
+                            4: "exec_boundary"}[reason], False, 0, elapsed_ms, *metrics
             )
             if terminal.instructions != instruction_count:
                 raise BinaryTraceError("footer instruction count mismatch")
@@ -678,7 +683,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
                 raise BinaryTraceError("footer effective buffer mismatch")
             ended = True
             emit(
-                "TRACE_END status=stopped reason=duration_elapsed return_valid=0 "
+                f"TRACE_END status=stopped reason={terminal.reason} return_valid=0 "
                 f"elapsed_ms={terminal.elapsed_ms} instructions={terminal.instructions} "
                 f"encoded_bytes={terminal.encoded_bytes} "
                 f"compressed_bytes={terminal.compressed_bytes} "
@@ -703,6 +708,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
     stats = ConversionStats(
         instruction_count, text_bytes, not ended,
         terminal.termination if terminal is not None else None,
+        scene, tid, target_offset, terminal.reason if terminal is not None else None,
     )
     assert begin_compression is not None
     return _ConversionDetails(

@@ -1,0 +1,227 @@
+{
+  "date": "2026-10-21",
+  "base_head": "0660cc21d48bd05e490d35fc9e9850d31156dc88",
+  "baseline_includes_uncommitted_fixes": true,
+  "device": {
+    "serial": "1C111FDF600G6S",
+    "server": "tcp:localhost:5037",
+    "model": "Pixel 6",
+    "fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+    "abi": "arm64-v8a",
+    "sdk": "36",
+    "android_user": "0"
+  },
+  "red": {
+    "session_id": "429ea64b-8d3f-476d-87fc-d48a2cedbf30",
+    "tracer_sha256": "1fc04e315599a494782f64a08062ff0a75f1020a2caa2acf4923d32d4c87b66d",
+    "checks": {
+      "baseline_java_values": true,
+      "baseline_returns_exceptions": true,
+      "traced_java_values": true,
+      "traced_returns_exceptions": true,
+      "platform_register": true,
+      "real_thread_stack": true,
+      "attach_callback": true,
+      "jni_enter_leave_pairs": true,
+      "jni_argument_text": false,
+      "floating_return_text": false
+    },
+    "cleanup": true,
+    "evidence": "artifacts/qbdi-p0-2026-10-21/device-red-2/report.json"
+  },
+  "green": {
+    "session_id": "4f4179c1-79b4-4feb-a11e-e073e99e627e",
+    "artifacts": {
+      "libqbdi_tracer.so": "490e7c766bfd3a2a6157dce23615a129fac98f7d6435f4572a4f7cccb738e246",
+      "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+      "libjni_abi_probe.so": "1b17614d0c3b53eb3b22c5fea2d5ed0a02c92710e82fa53619e841592f5ddcbc",
+      "classes.dex": "cb950cfe751b3694e14e29dbcb41c2a2b29681e39d0e6f37885611dcb72465f6"
+    },
+    "probe_build": {
+      "schema_version": 1,
+      "abi": "arm64-v8a",
+      "api": 28,
+      "compiler": "/home/lyldalek/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++",
+      "build_tools": "36.0.0",
+      "sources": {
+        "JniAbiProbe.java": "0683e6ec3ad502db3f095c6c0d0e9b61d20454ec86573fa3d033f230b621fe3d",
+        "jni_abi_probe.cpp": "697f1ef5e84fec51899b9d9b0cf89829ac5d5e4450cff16b932a21b81e223a3c"
+      },
+      "artifacts": {
+        "libjni_abi_probe.so": "1b17614d0c3b53eb3b22c5fea2d5ed0a02c92710e82fa53619e841592f5ddcbc",
+        "classes.dex": "cb950cfe751b3694e14e29dbcb41c2a2b29681e39d0e6f37885611dcb72465f6"
+      }
+    },
+    "checks": {
+      "baseline_java_values": true,
+      "baseline_returns_exceptions": true,
+      "traced_java_values": true,
+      "traced_returns_exceptions": true,
+      "platform_register": true,
+      "real_thread_stack": true,
+      "attach_callback": true,
+      "jni_enter_leave_pairs": true,
+      "jni_argument_text": true,
+      "floating_return_text": true,
+      "trace_termination": true,
+      "native_status": true
+    },
+    "cleanup": {
+      "process": "exited",
+      "remote_directory_removed": true,
+      "trace_directory_removed": true
+    },
+    "evidence": "artifacts/qbdi-p0-2026-10-21/device-release/report.json",
+    "argument_calls": 15,
+    "trace_artifacts": 18
+  },
+  "build": {
+    "ndk": "27.0.12077973",
+    "cmake": "3.31.6",
+    "api": 28,
+    "type": "RelWithDebInfo",
+    "code_rules": "default empty",
+    "hook_options": "defaults"
+  },
+  "host": {
+    "targets": 14,
+    "failed": 0,
+    "log": "artifacts/qbdi-p0-2026-10-21/host-acceptance-tests.log"
+  },
+  "python": {
+    "tests": 886,
+    "skipped": 9,
+    "errors": 0,
+    "failures": 0,
+    "log": "artifacts/qbdi-p0-2026-10-21/python-suite-final.log"
+  },
+  "gate": {
+    "red_report": "rejected",
+    "green_report": "accepted",
+    "different_artifact": "rejected",
+    "owned_remote_paths_absent": true,
+    "evidence": "artifacts/qbdi-p0-2026-10-21/gate-device-binding.json"
+  },
+  "limitations": [
+    "Pixel 6 API36 only",
+    "standalone ART process; no full application acceptance",
+    "constructors/nonvirtual verified on Host only",
+    "explicit --abi-report enables CLI enforcement"
+  ],
+  "fixed_floating_round": {
+    "scope": "fixed JNI floating parameters and constructor/instance/nonvirtual ordinary/V/A calls",
+    "red": {
+      "session_id": "647ba119-e195-4f0b-8534-9bdfe784fc9d",
+      "result": "fail",
+      "artifacts": {
+        "libqbdi_tracer.so": "490e7c766bfd3a2a6157dce23615a129fac98f7d6435f4572a4f7cccb738e246",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libjni_abi_probe.so": "55594f91cc985ef235907128e1c0fd7f48375884a5e9d94acaaef8296a542cee",
+        "classes.dex": "7c926b31065303f82a0b785edeb5bc8162855a8c4518d50b657b128a089b5031"
+      },
+      "probe_build": {
+        "schema_version": 1,
+        "abi": "arm64-v8a",
+        "api": 28,
+        "compiler": "/home/lyldalek/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++",
+        "build_tools": "36.0.0",
+        "sources": {
+          "JniAbiProbe.java": "583278f0aed6179619fe514e56d8aef0f190c7110e88161d078be57483f30cdc",
+          "jni_abi_probe.cpp": "c8b94cc4acfaaaa53a75cbb2029ce8247f5ba8c472e4a493c7c65595ae30b9c1"
+        },
+        "artifacts": {
+          "libjni_abi_probe.so": "55594f91cc985ef235907128e1c0fd7f48375884a5e9d94acaaef8296a542cee",
+          "classes.dex": "7c926b31065303f82a0b785edeb5bc8162855a8c4518d50b657b128a089b5031"
+        }
+      },
+      "checks": {
+        "baseline_java_values": true,
+        "baseline_returns_exceptions": true,
+        "traced_java_values": true,
+        "traced_returns_exceptions": true,
+        "platform_register": true,
+        "real_thread_stack": true,
+        "attach_callback": true,
+        "jni_enter_leave_pairs": true,
+        "jni_argument_text": true,
+        "floating_return_text": true,
+        "fixed_floating_argument_text": false,
+        "fixed_floating_return_text": true,
+        "trace_termination": true,
+        "native_status": true
+      },
+      "cleanup": true,
+      "cleanup_receipt": {
+        "process": "exited",
+        "remote_directory_removed": true,
+        "trace_directory_removed": true
+      },
+      "evidence": "artifacts/qbdi-jni-fixed-2026-10-21/device-red-reset/report.json"
+    },
+    "green": {
+      "session_id": "6033611f-c411-47d8-a5b1-ae3f5cd8a885",
+      "result": "pass",
+      "artifacts": {
+        "libqbdi_tracer.so": "8a66b7b3e6f8a8e0740f75ef4090570a2dc85a8a5c13b5396bdcf1665473da9f",
+        "libshadowhook_nothing.so": "636fbfb054ef93d1ce7009654b2fe6489463bde5b2369503e519e8d4eda293fa",
+        "libjni_abi_probe.so": "55594f91cc985ef235907128e1c0fd7f48375884a5e9d94acaaef8296a542cee",
+        "classes.dex": "7c926b31065303f82a0b785edeb5bc8162855a8c4518d50b657b128a089b5031"
+      },
+      "probe_build": {
+        "schema_version": 1,
+        "abi": "arm64-v8a",
+        "api": 28,
+        "compiler": "/home/lyldalek/Android/sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++",
+        "build_tools": "36.0.0",
+        "sources": {
+          "JniAbiProbe.java": "583278f0aed6179619fe514e56d8aef0f190c7110e88161d078be57483f30cdc",
+          "jni_abi_probe.cpp": "c8b94cc4acfaaaa53a75cbb2029ce8247f5ba8c472e4a493c7c65595ae30b9c1"
+        },
+        "artifacts": {
+          "libjni_abi_probe.so": "55594f91cc985ef235907128e1c0fd7f48375884a5e9d94acaaef8296a542cee",
+          "classes.dex": "7c926b31065303f82a0b785edeb5bc8162855a8c4518d50b657b128a089b5031"
+        }
+      },
+      "checks": {
+        "baseline_java_values": true,
+        "baseline_returns_exceptions": true,
+        "traced_java_values": true,
+        "traced_returns_exceptions": true,
+        "platform_register": true,
+        "real_thread_stack": true,
+        "attach_callback": true,
+        "jni_enter_leave_pairs": true,
+        "jni_argument_text": true,
+        "floating_return_text": true,
+        "fixed_floating_argument_text": true,
+        "fixed_floating_return_text": true,
+        "trace_termination": true,
+        "native_status": true
+      },
+      "cleanup": true,
+      "cleanup_receipt": {
+        "process": "exited",
+        "remote_directory_removed": true,
+        "trace_directory_removed": true
+      },
+      "evidence": "artifacts/qbdi-jni-fixed-2026-10-21/device-green-reset/report.json"
+    },
+    "scenarios": 27,
+    "argument_calls": 24,
+    "fixed_field_setters": 12,
+    "trace_artifacts": 30,
+    "host": {
+      "targets": 14,
+      "failed": 0,
+      "log": "artifacts/qbdi-jni-fixed-2026-10-21/host-acceptance-tests.log"
+    },
+    "python": {
+      "tests": 889,
+      "skipped": 9,
+      "failed": 0,
+      "log": "artifacts/qbdi-jni-fixed-2026-10-21/python-full.log"
+    },
+    "gate_binding": "artifacts/qbdi-jni-fixed-2026-10-21/gate-device-binding.json",
+    "field_reset_before_each_scenario": true
+  }
+}

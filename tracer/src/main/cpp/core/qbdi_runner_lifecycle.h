@@ -61,9 +61,9 @@ using QbdiElapsedMillis = long (*)(void *opaque) noexcept;
 
 // Owns the normal-runner half of cooperative stop. QBDI only observes the token;
 // the runner thread seals the writer after vm.run() unwinds. The QBDI callback
-// records that outcome, but the exact admission is acknowledged only after the
-// runner has closed the writer and finished its crash marker. All operations
-// are idempotent.
+// records that outcome after closing the writer. The capture admission is then
+// acknowledged while the target remains visible until its real return or
+// deferred thread exit. All operations are idempotent.
 class QbdiNormalStopLifecycle final {
 public:
     QbdiNormalStopLifecycle(BinaryTraceWriter *writer,

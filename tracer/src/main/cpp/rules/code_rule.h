@@ -43,6 +43,7 @@ public:
     QBDI::VMAction on_post_instruction(CodeRuleContext &context);
 
     bool requires_immediate_post() const;
+    bool empty() const noexcept { return rules_.empty(); }
 
 private:
     std::vector<std::unique_ptr<CodeRule>> rules_;

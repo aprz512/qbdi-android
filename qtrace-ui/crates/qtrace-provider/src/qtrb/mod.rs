@@ -1453,7 +1453,7 @@ impl QtrbEventCursor {
         let elapsed_ms = cursor.u64_le()?;
         let metrics = decode_metrics(&mut cursor)?;
         cursor.finish()?;
-        if reason != 1 || reserved != [0; 7] {
+        if !matches!(reason, 1..=4) || reserved != [0; 7] {
             return Err(
                 self.invalid_terminal(&record, "invalid TRACE_STOP reason or reserved bytes")
             );
@@ -1464,7 +1464,12 @@ impl QtrbEventCursor {
             TerminalDraft {
                 kind: TerminationKind::Stopped,
                 reason: Some(allocation::try_copy_string(
-                    "duration_elapsed",
+                    match reason {
+                        1 => "duration_elapsed",
+                        2 => "thread_exit",
+                        3 => "process_exit",
+                        _ => "exec_boundary",
+                    },
                     guard,
                     "QTRB terminal reason allocation failed",
                 )?),

@@ -95,6 +95,16 @@ fn render(
     let mut definitions = HashMap::new();
     let mut lines = Vec::new();
     let mut instruction_count = 0_u64;
+    let begin = events.iter().find_map(|event| match &event.payload {
+        EventPayload::Begin(value) => Some(value),
+        _ => None,
+    });
+    let stop_reason = events.iter().find_map(|event| match &event.payload {
+        EventPayload::Termination(value) if value.kind == TerminationKind::Stopped => {
+            value.reason.as_deref()
+        }
+        _ => None,
+    });
     for event in events {
         match &event.payload {
             EventPayload::Begin(value) => lines.push(format!(
@@ -261,6 +271,10 @@ fn render(
             "converted_text_bytes": converted_text_bytes,
             "partial": summary.termination.is_none(),
             "termination": termination,
+            "scene": begin.map(|value| value.scene.as_str()),
+            "tid": begin.and_then(|value| value.tid),
+            "target_offset": begin.map(|value| value.target_offset),
+            "stop_reason": stop_reason,
         }),
     )
 }

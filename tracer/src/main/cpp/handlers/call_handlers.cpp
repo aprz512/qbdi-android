@@ -66,45 +66,54 @@ namespace {
                 std::chrono::steady_clock::now() - s_start).count();
     }
 
-    // ── JNI 调用记录（call/return 配对） ──
-    struct ActiveJniCall {
-        const JniFuncInfo *func = nullptr;
-        uint64_t args[8] = {};
-        int tid = 0;
-        long enter_ms = 0;
-    };
-
-    // QBDI 是单线程执行的, 用 thread_local 存储当前活跃的 JNI 调用
-    static thread_local ActiveJniCall t_active_jni;
     // ── emit_jni_enter: 检测到 JNI 调用 → 格式化输出 enter ──
-    void emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr, TraceSink *writer) {
+    bool emit_jni_enter(uintptr_t target, QBDI::GPRState *gpr,
+                        const QBDI::FPRState *fpr, TraceSink *writer,
+                        PendingExecTransfer *pending) {
         uintptr_t env = QBDI_GPR_GET(gpr, 0);
         const JniFuncInfo *function = jni_call_resolver().resolve(env, target);
-        if (function == nullptr) return;
+        if (function == nullptr) return false;
 
-        t_active_jni.func = function;
-        t_active_jni.tid = static_cast<int>(syscall(SYS_gettid));
-        t_active_jni.enter_ms = elapsed_ms();
+        // Each pending transfer owns its entry snapshot. A Java callback may
+        // reenter traced native code and issue another JNI call on this pthread.
+        auto &call = pending->jni;
+        call.func = function;
+        call.tid = static_cast<int>(syscall(SYS_gettid));
+        call.enter_ms = elapsed_ms();
+        pending->target = target;
+        pending->category = "jni";
+        pending->name = function->name;
 
-        for (int i = 0; i < 8; ++i)
-            t_active_jni.args[i] = QBDI_GPR_GET(gpr, i + 1);
+        for (int i = 0; i < 7; ++i)
+            call.args[i] = QBDI_GPR_GET(gpr, i + 1);
+        // x8 is the indirect-result register, not an eighth ordinary argument.
+        call.args[7] = 0;
+        if (function->args.size() > 7)
+            safe_read_memory(gpr->sp, &call.args[7], sizeof(uint64_t));
+
+        Arm64JniArguments abi;
+        for (size_t i = 0; i < abi.general.size(); ++i)
+            abi.general[i] = QBDI_GPR_GET(gpr, i);
+        abi.stack = gpr->sp;
+        abi.has_floating = fpr != nullptr;
+        if (fpr != nullptr) {
+            for (size_t i = 0; i < abi.floating.size(); ++i)
+                std::memcpy(&abi.floating[i], reinterpret_cast<const uint8_t *>(fpr) + 16 * i, 8);
+        }
 
         JniFormatter fmt;
-        int num_args = static_cast<int>(t_active_jni.func->args.size());
-        std::string line = fmt.format_enter(t_active_jni.tid, t_active_jni.enter_ms,
-                                             *t_active_jni.func, t_active_jni.args, num_args);
-        writer->call("jni-enter", t_active_jni.func->name, line);
-        if (writer->failed()) {
-            t_active_jni = ActiveJniCall{};
-            return;
-        }
+        int num_args = static_cast<int>(call.func->args.size());
+        std::string line = fmt.format_enter(call.tid, call.enter_ms,
+                                             *call.func, call.args.data(), num_args, &abi);
+        writer->call("jni-enter", call.func->name, line);
+        if (writer->failed()) return true;
 
         // ── 回溯: 检查是否需要打印调用栈 ──
         bool need_bt = false;
         {
             std::lock_guard<std::mutex> guard(g_bt_lock);
             need_bt = std::find(g_bt_funcs.begin(), g_bt_funcs.end(),
-                                std::string(t_active_jni.func->name)) != g_bt_funcs.end();
+                                std::string(call.func->name)) != g_bt_funcs.end();
         }
         // Android NDK does not expose execinfo's backtrace APIs.
 #if !defined(__ANDROID__)
@@ -125,29 +134,31 @@ namespace {
             }
             free(symbols);
             if (!frames.empty()) {
-                writer->call("jni-backtrace", t_active_jni.func->name,
+                writer->call("jni-backtrace", call.func->name,
                              JniFormatter::format_backtrace(frames));
-                if (writer->failed()) t_active_jni = ActiveJniCall{};
             }
         }
 #else
         (void) need_bt;
 #endif
+        return true;
     }
 
     // ── emit_jni_leave: JNI 返回 → 格式化输出 leave + 更新状态 ──
-    void emit_jni_leave(QBDI::GPRState *gpr, TraceSink *writer) {
-        if (t_active_jni.func == nullptr) return;
+    void emit_jni_leave(const JniCallSnapshot &call, QBDI::GPRState *gpr,
+                        const QBDI::FPRState *fpr, TraceSink *writer) {
+        if (call.func == nullptr) return;
 
         uint64_t retval = QBDI_GPR_GET(gpr, 0);
-        update_jni_state(jni_state(), *t_active_jni.func, t_active_jni.args, retval);
+        const bool floating_return = std::strcmp(call.func->ret_type, JniType::kFloat) == 0 ||
+                                     std::strcmp(call.func->ret_type, JniType::kDouble) == 0;
+        if (floating_return && fpr != nullptr) std::memcpy(&retval, fpr, sizeof(retval));
+        update_jni_state(jni_state(), *call.func, call.args.data(), retval);
 
         JniFormatter fmt;
-        std::string line = fmt.format_leave(t_active_jni.tid, t_active_jni.enter_ms,
-                                             *t_active_jni.func, retval);
-        writer->call("jni-leave", t_active_jni.func->name, line);
-
-        t_active_jni = ActiveJniCall{};
+        std::string line = fmt.format_leave(call.tid, call.enter_ms,
+                                             *call.func, retval, !floating_return || fpr != nullptr);
+        writer->call("jni-leave", call.func->name, line);
     }
 
     // ── 非 JNI 调用（保持原有逻辑） ──
@@ -214,7 +225,8 @@ void set_jni_backtrace_funcs(const std::vector<std::string> &funcs) {
 
 // ── 公开接口 ──
 void emit_exec_transfer_event(ExecTransferMonitor *monitor, const QBDI::VMState *vm_state,
-                              QBDI::GPRState *state, TraceSink *writer) {
+                              QBDI::GPRState *state, TraceSink *writer,
+                              const QBDI::FPRState *floating) {
     if (monitor == nullptr || vm_state == nullptr || state == nullptr || writer == nullptr) return;
     if (writer->failed()) return;
 
@@ -222,22 +234,18 @@ void emit_exec_transfer_event(ExecTransferMonitor *monitor, const QBDI::VMState 
 
     if ((vm_state->event & QBDI::EXEC_TRANSFER_CALL) != 0) {
         // 1) 尝试 JNI 匹配 → 走 jnitrace 风格格式化
-        emit_jni_enter(target, state, writer);
-        if (writer->failed()) return;
-        if (t_active_jni.func != nullptr) {
-            // JNI 调用已追踪，压一个占位 pending 用于配对 return
-            PendingExecTransfer placeholder;
-            placeholder.category = "jni";
-            placeholder.name = t_active_jni.func->name;
-            placeholder.target = target;
-            monitor->pending.push_back(std::move(placeholder));
+        PendingExecTransfer pending;
+        if (emit_jni_enter(target, state, floating, writer, &pending)) {
+            if (writer->failed()) return;
+            monitor->pending.push_back(std::move(pending));
             return;
         }
 
         // 2) 非 JNI — 走原有逻辑
-        PendingExecTransfer pending = emit_non_jni_call(target, state, writer);
+        pending = emit_non_jni_call(target, state, writer);
         if (writer->failed()) return;
-        if (!pending.name.empty()) monitor->pending.push_back(std::move(pending));
+        // Even an unrecognized native transfer must balance its own return.
+        monitor->pending.push_back(std::move(pending));
     }
 
     if ((vm_state->event & QBDI::EXEC_TRANSFER_RETURN) != 0) {
@@ -246,7 +254,7 @@ void emit_exec_transfer_event(ExecTransferMonitor *monitor, const QBDI::VMState 
             monitor->pending.pop_back();
 
             if (pending.category == "jni") {
-                emit_jni_leave(state, writer);
+                emit_jni_leave(pending.jni, state, floating, writer);
             } else {
                 emit_non_jni_return(pending, state, writer);
             }

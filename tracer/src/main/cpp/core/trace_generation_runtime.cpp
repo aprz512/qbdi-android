@@ -306,7 +306,11 @@ TraceAdmissionResult TraceGenerationRuntime::try_begin_call(
         if (active_calls_[index].scene_index == scene_index && active_calls_[index].tid == tid)
             return {TraceAdmissionStatus::Duplicate, {}};
     }
-    if (active_size_ >= active_capacity_)
+    for (size_t index = 0; index < sealed_target_size_; ++index) {
+        if (sealed_targets_[index].scene_index == scene_index && sealed_targets_[index].tid == tid)
+            return {TraceAdmissionStatus::Duplicate, {}};
+    }
+    if (active_size_ + sealed_target_size_ >= active_capacity_)
         return {TraceAdmissionStatus::ActiveSessionLimit, {}};
     const TraceAdmission admission{generation_, scene_index, tid, next_admission_serial_++};
     active_calls_[active_size_++] = ActiveCall{scene_index, tid, admission.serial};
@@ -331,7 +335,20 @@ void TraceGenerationRuntime::acknowledge_sealed(const TraceAdmission &admission)
     }
 #endif
     std::lock_guard<std::mutex> lock(active_mutex_);
-    complete_call_locked(admission, true);
+    complete_call_locked(admission, true, true);
+}
+
+void TraceGenerationRuntime::finish_target_call(const TraceAdmission &admission) noexcept {
+    std::lock_guard<std::mutex> lock(active_mutex_);
+    if (admission.generation != generation_ || admission.serial == 0) return;
+    for (size_t index = 0; index < sealed_target_size_; ++index) {
+        const ActiveCall &call = sealed_targets_[index];
+        if (call.scene_index != admission.scene_index || call.tid != admission.tid ||
+            call.serial != admission.serial) continue;
+        sealed_targets_[index] = sealed_targets_[--sealed_target_size_];
+        note_transition();
+        return;
+    }
 }
 
 bool TraceGenerationRuntime::record_artifact(std::string_view artifact_basename) noexcept {
@@ -426,7 +443,8 @@ bool TraceGenerationRuntime::record_status_issue(
     return true;
 }
 
-void TraceGenerationRuntime::complete_call_locked(const TraceAdmission &admission, bool sealed) noexcept {
+void TraceGenerationRuntime::complete_call_locked(const TraceAdmission &admission, bool sealed,
+                                                  bool target_open) noexcept {
     publish_deadline_stop_locked();
     if (admission.generation != generation_ || admission.serial == 0) {
         return;
@@ -441,6 +459,7 @@ void TraceGenerationRuntime::complete_call_locked(const TraceAdmission &admissio
         }
     }
     if (index == active_size_) return;
+    if (target_open && sealed) sealed_targets_[sealed_target_size_++] = active_calls_[index];
     active_calls_[index] = active_calls_[active_size_ - 1];
     --active_size_;
     note_transition();
@@ -623,6 +642,10 @@ SessionStatusSnapshot TraceGenerationRuntime::status_snapshot() const {
         for (size_t index = 0; index < active_size_; ++index) {
             snapshot.active_scenes.push_back(SessionActiveScene{
                     active_calls_[index].scene_index, active_calls_[index].tid, false});
+        }
+        for (size_t index = 0; index < sealed_target_size_; ++index) {
+            snapshot.active_scenes.push_back(SessionActiveScene{
+                    sealed_targets_[index].scene_index, sealed_targets_[index].tid, true});
         }
     }
     {

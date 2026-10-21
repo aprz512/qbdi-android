@@ -419,6 +419,29 @@ class ArtifactTests(unittest.TestCase):
             self.assertIn("artifact.incomplete", {error["code"] for error in result.errors})
             self.assertTrue((result.output_dir / "artifacts" / "run.flight.json").is_file())
 
+    def test_target_return_evidence_is_separate_from_artifact_completeness(self):
+        from scripts.tests.test_pull_trace import recoverable_flight_artifact, v3_sidecar
+        from scripts.tests.test_trace_binary import complete_stream, stopped_stream
+
+        for name, contents, returned in [
+            ("run.trace.bin", complete_stream(compression=0), True),
+            ("run.trace.bin", stopped_stream(compression=0), False),
+            ("run.flight.bin", recoverable_flight_artifact(), None),
+        ]:
+            with self.subTest(name=name, returned=returned), tempfile.TemporaryDirectory() as root:
+                status = self._status(artifacts=[name])
+                files = {name: contents}
+                if returned is False:
+                    files[name + ".metrics"] = v3_sidecar(
+                        termination="stopped", return_valid=0, profile="full", instructions=1,
+                        elapsed_ms=17, encoded_bytes=len(contents), compressed_bytes=len(contents))
+                result = self._processor(FakeClient(files)).collect_session(
+                    BOUND_DEVICE, "com.example.app", status["sessionId"], status, Path(root), 1,
+                )
+                report = json.loads((result.output_dir / "report.json").read_text())
+                artifact = next(row for row in report["artifacts"] if row.get("remote_name") == name)
+                self.assertIs(returned, artifact.get("target_returned_in_capture"))
+
     def test_validated_crash_marker_classifies_only_its_validated_qtrb_root(self):
         from scripts.tests.test_lz4_frames import uncompressed_lz4_frame
         from scripts.tests.test_pull_trace import crash_marker

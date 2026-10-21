@@ -29,6 +29,7 @@ from qtrace._artifact_reports import (_PublicationToken, _collector_token,
 from qtrace._artifact_validation import _json_status, validate_pulled_artifacts
 from qtrace.device import BoundTargetDevice
 from qtrace.errors import EXIT_PARTIAL, QtraceError
+from qtrace.lifecycle import summarize_lifecycle
 
 
 class ArtifactProcessor:
@@ -132,7 +133,9 @@ class ArtifactProcessor:
                                 "hostAckMs": status.get("_hostAckMs"),
                                 "processExited": status.get("_process_exited", False)}
             _write_json(stage_root / "session.json", {"schema": 1, "sessionId": session_id, "packageName": package,
-                                                        "status": native_status, "host": host_context})
+                                                        "status": native_status, "host": host_context,
+                                                        "lifecycle": summarize_lifecycle(status, records,
+                                                            process_exited=bool(status and status.get("_process_exited") is True))})
             effective = status.get("effectiveConfig") if status is not None else None
             if effective is None:
                 effective = None

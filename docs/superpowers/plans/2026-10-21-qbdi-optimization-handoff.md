@@ -1,5 +1,30 @@
 # qbdi-android 优化交接
 
+## 通用阶段执行记录（2026-10-21）
+
+P1 生命周期、有界 Flight 查询及 P2 调用摘要、进程控制边界已完成实现与独立设备对照，见
+[通用优化验收](../../benchmarks/qbdi-generic-2026-10-21.md)及[执行清单](2026-10-21-qbdi-generic-completion.md)。
+当前 tracer SHA 为 `f0ad3048b2d2d0ae4cea91182cf8c3de67e493a1a9b0fbf8bc864dcced1494d5`；
+20 组通用 native 配置与当前产物的 14 项 JNI 准入通过，设备均已清理。
+下文各轮产物 SHA、测量和未知状态继续按历史范围保留，不作为当前产物的验证身份。
+执行范围遵循用户后续限定，仅包含通用工具能力。
+
+## 首批执行记录（2026-10-21）
+
+两个 P0 已完成通用工具闭环，详见[JNI/arm64 验收](../../benchmarks/jni-abi-2026-10-21.md)与[复现说明](../../jni-abi-acceptance.md)。
+保留交接时 20 个文件的未提交基线及哈希快照，新增普通/V/A 解码、显式未解码原因、嵌套 JNI 快照、独立 ART 设备夹具和 CLI `--abi-report` 准入。
+Pixel 6/API36 的 15 组调用与 18 份轨迹完成 RED/GREEN，12 项准入通过；14 个相关 native Host 目标通过，Python 全量 886 项检查完成、9 项跳过。
+构建身份、设备收尾和原始证据位置见验收记录；本轮结果不替代后续 P1/P2 的测量和验收。
+
+后续补充修复了固定 JNI float/double 参数的寄存器来源，并扩展构造器、实例及 nonvirtual 的普通/V/A 真机对照。
+当前矩阵为 27 组场景、30 份轨迹和 14 项准入，Pixel 6 全部通过；14 个相关 native Host 目标与 Python 889 项检查完成，9 项跳过。
+当前 tracer SHA 为 `8a66b7b3e6f8a8e0740f75ef4090570a2dc85a8a5c13b5396bdcf1665473da9f`，原始证据见 `artifacts/qbdi-jni-fixed-2026-10-21/`。
+
+通用 P1 初查：native status 已提供 `deadlineMonotonicNs` 和 `activeScenes`；flight 摘要已分别记录完整性、termination 与未结束线程。
+公开分析器已有工作预算、取消与分页，见[现有边界及历史测量](../../benchmarks/qtrace-store-boundaries-2026-10-19.md)。
+后续应先测量具体入口和负载，区分离线 Python 转换与公开分析器，不能沿用私有脚本的历史耗时作为公共入口缺陷。
+本轮未执行 256 MiB 查询测量，也未完成 P1/P2 验收。
+
 ## 原始交接
 
 交接日期：2026-10-21。目标是在 DIGIMON UP / AppGuard 防护库分析经验基础上优化 qbdi-android 的正确性、稳定性和使用体验。本文件只交接后续工具工作，不表示下列优化已经实施。

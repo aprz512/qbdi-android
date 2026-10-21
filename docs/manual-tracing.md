@@ -6,6 +6,9 @@
 这两种入口使用不同配置格式；CLI `target.json` 由主机解析，本文的 `config.tracer` 直接发送给 native tracer。
 所有命令从仓库根目录执行。
 
+开始复杂目标采集前，先用[独立 JNI/arm64 夹具](jni-abi-acceptance.md)验收本次 tracer 字节。
+手动入口由调用者在准入退出码为 0 后继续；CLI 可使用 `--abi-report` 在注入前强制核对。
+
 ## 构建
 
 先完成[环境准备](usage.md#环境要求)，再构建 Debug APK、standalone tracer 和 companion：
@@ -162,7 +165,13 @@ Android arm64 的新 VM 还会从同一个 pthread 保留 `x18`，遵循 Android
 只初始化参数寄存器会让 VM 中的 `x18` 变为零，即使目标使用真实线程栈，JNI 回调仍可能失败。
 Pixel 6 的独立夹具先复现原值非零、traced 值为零；修复后两个实际 Guest actor 的值一致，
 `Integer.parseInt("42")` 的基线与 traced 回调均返回 42，且没有 pending exception。
-这项结果不替代具体游戏的 JNI 场景回归；`vfork/CLONE_VM` 的采集状态共享仍需单独验证。
+这项结果不替代具体业务的 JNI 场景回归。当前通用进程边界夹具另行验证了合法 `vfork` 的父进程与原生子进程执行，见[通用优化验收](benchmarks/qbdi-generic-2026-10-21.md)。
+
+native JSON 可在 `trace` 中增加 `events: "calls"`，用于保留调用与目标 `svc` 入口摘要，关闭指令和 memory 采集；默认仍为 `all`。
+各 profile、场景返回状态和离线预算见[使用指南](usage.md#场景状态与有界离线查询)。
+对 libc `exec*` 和 `exit/_Exit/_exit` 转移，采集先封口再执行原调用；exec 失败后的续跑不重新执行已经开始的目标。
+合法 `vfork` 的子分支直接在原生调用点继续至 exec 或 `_exit`，不进入共享 QBDI 引擎；父分支继续采集。
+子分支的指令不属于采集覆盖范围。原始 clone/vfork 系统调用、自定义 libc、未覆盖调用点和非法的子分支返回不能由这组结果外推。
 
 `session` 仅含 `id`、省略 `durationMs` 时即为 monitor 采集：它没有 native deadline，会持续
 采集到 App 自行退出或用户结束 App；后续仍可用手动拉取命令读取 app-private 产物。strict

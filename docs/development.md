@@ -5,6 +5,9 @@
 构建、主机测试、设备门禁和配置验收从仓库根目录执行。首次环境准备见[使用指南](usage.md#环境要求)。
 分析器的 Rust、前端、打包与性能检查见[qtrace-ui 开发指南](../qtrace-ui/docs/development.md)。
 
+JNI 解码或执行 ABI 变更还需运行[独立 arm64 设备准入](jni-abi-acceptance.md)，
+保存同输入原生/traced 对照、调用文本、产物 SHA 和清理终态。Host 测试不替代真实设备证明。
+
 ## 构建
 
 首次构建前初始化源码依赖，并安装两套固定版本的 CMake：
@@ -212,6 +215,16 @@ python3 scripts/pull_trace.py --package com.aprz.qbdiandroid \
 ```
 
 ## 性能与证据
+
+独立 native 边界夹具通过 `python3 scripts/build_runtime_probe.py --ndk "$ANDROID_NDK"` 构建。
+使用 `python3 scripts/runtime_acceptance.py --help` 选择设备、已构建库、场景 0–10 和既有 canonical guard；
+它在唯一自有目录中成对执行 baseline/traced，部署后核对哈希，并以 PID/epoch 证明父子进程清理。
+不需要安装或卸载应用。普通与 Flight 的完整性、目标返回和退出状态分别验收。
+Flight 生产语料生成目标为 Host `flight_query_fixture`，调用方式为 `flight_query_fixture OUTPUT [GROUPS]`；
+公开服务基准为 `cargo run --release -p qtrace-service --example flight_query_bench -- INPUT CACHE open`，
+最后一个参数改为 `cancel` 可验证初始阶段取消，`cancel-index` 等待实际索引处理事件后取消，并验证 worker join。
+命令在 `qtrace-ui` 目录运行。
+容量、占用、资源拒绝和复现范围见[通用优化记录](benchmarks/qbdi-generic-2026-10-21.md)。
 
 [性能与基线复现](benchmarking.md)单独说明设备身份、历史 APK、canonical SHA 和 benchmark 的计时边界。
 发布门禁成功与性能诊断是不同结论；历史基线和原始证据保留在 `docs/benchmarks/`。

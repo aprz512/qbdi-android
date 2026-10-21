@@ -2,6 +2,7 @@
 
 #include "events/trace_event.h"
 #include "jni/jni_function_table.h"
+#include "jni/jni_argument_decoder.h"
 
 #include <cstdint>
 #include <string>
@@ -25,12 +26,13 @@ public:
     // onEnter 调用:
     std::string format_enter(int tid, long elapsed_ms,
                              const JniFuncInfo &func,
-                             const uint64_t *args, int num_args);
+                             const uint64_t *args, int num_args,
+                             const Arm64JniArguments *abi = nullptr);
 
     // onLeave 调用:
     std::string format_leave(int tid, long elapsed_ms,
                              const JniFuncInfo &func,
-                             uint64_t retval);
+                             uint64_t retval, bool value_available = true);
 
     // ── 辅助 ──
     static std::string format_arg(const char *type, uint64_t value, const char *meta = nullptr);

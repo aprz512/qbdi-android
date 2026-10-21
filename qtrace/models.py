@@ -40,6 +40,7 @@ class TracerConfig:
     library: Path | None
     companion: Path | None
     code_rules: bool = False
+    events: str = "all"
 
 
 @dataclass(frozen=True)

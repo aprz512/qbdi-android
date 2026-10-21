@@ -182,7 +182,10 @@ bool semantic_event_type(BinaryRecordType type) noexcept {
 }
 
 bool valid_trace_stop_reason(TraceStopReason reason) noexcept {
-    return reason == TraceStopReason::DurationElapsed;
+    return reason == TraceStopReason::DurationElapsed ||
+           reason == TraceStopReason::ThreadExit ||
+           reason == TraceStopReason::ProcessExit ||
+           reason == TraceStopReason::ExecBoundary;
 }
 
 } // namespace

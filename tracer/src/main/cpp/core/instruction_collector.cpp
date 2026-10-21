@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 
 namespace {
 
@@ -61,6 +62,7 @@ InstructionCollector::InstructionCollector(InstructionCache *cache, TraceSink *w
           trace_gate_(trace_gate), profile_(options.profile),
           hexdump_limit_(options.hexdump_limit),
           decode_memory_(options.memory_enabled()),
+          calls_only_(options.calls_only),
           resolver_(retained_module),
           pending_(this, trace != nullptr ? trace->module_base : 0),
           signal_broker_(signal_broker), signal_thread_(signal_thread) {}
@@ -83,12 +85,12 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
     }
     if (signal_pc_changed) return QBDI::BREAK_TO_VM;
 
+    uint32_t opcode = 0;
+    const bool svc = gpr != nullptr && (signal_thread_ != nullptr || calls_only_) &&
+                     safe_read_memory(gpr->pc, &opcode, sizeof(opcode)) && is_arm64_svc(opcode);
+    Arm64SyscallSnapshot syscall{};
+    if (svc) syscall = snapshot_arm64_syscall(gpr->pc, *gpr);
     if (gpr != nullptr && signal_thread_ != nullptr) {
-        uint32_t opcode = 0;
-        const bool svc = safe_read_memory(gpr->pc, &opcode, sizeof(opcode)) &&
-                         is_arm64_svc(opcode);
-        Arm64SyscallSnapshot syscall{};
-        if (svc) syscall = snapshot_arm64_syscall(gpr->pc, *gpr);
         if (signal_broker_ != nullptr) {
             (void)signal_broker_->publish_guest_state(
                     signal_thread_, *gpr, svc ? &syscall : nullptr);
@@ -103,6 +105,20 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
         }
     }
 
+    if (calls_only_) {
+        if (svc && tracing_before_rule && writer_ != nullptr) {
+            char detail[512];
+            std::snprintf(detail, sizeof(detail),
+                "{\"number\":%lld,\"pc\":\"0x%llx\",\"args\":[\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\"]}",
+                static_cast<long long>(syscall.number), static_cast<unsigned long long>(syscall.pc),
+                static_cast<unsigned long long>(syscall.args[0]), static_cast<unsigned long long>(syscall.args[1]),
+                static_cast<unsigned long long>(syscall.args[2]), static_cast<unsigned long long>(syscall.args[3]),
+                static_cast<unsigned long long>(syscall.args[4]), static_cast<unsigned long long>(syscall.args[5]));
+            (void)writer_->call("syscall-enter", "svc", detail);
+        }
+        if (code_rules_ == nullptr || code_rules_->empty()) return QBDI::CONTINUE;
+    }
+
     current_view_ = resolve(vm, gpr);
     CodeRuleContext rule_context(
             vm, gpr, fpr, &current_view_, trace_,
@@ -113,6 +129,7 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
     if (trace_gate_ != nullptr && writer_ != nullptr) trace_gate_->observe_failure(writer_->failed());
     const bool continues = action == QBDI::CONTINUE && gpr != nullptr;
     const bool tracing_after_rule = trace_gate_ == nullptr || trace_gate_->enabled();
+    if (calls_only_) return action;
     if (tracing_after_rule && profile_ == TraceProfile::Full) {
         static constexpr CachedInstruction empty{};
         const CachedInstruction &decoded = current_view_.decoded != nullptr

@@ -5,6 +5,7 @@
 #include "core/capture_coordinator.h"
 #include "core/signal_broker.h"
 #include "core/trace_process_lifecycle.h"
+#include "core/vfork_boundary.h"
 
 #include <new>
 #include <pthread.h>
@@ -40,8 +41,10 @@
 
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -451,16 +454,61 @@ struct QbdiThreadSession::Impl {
     static QBDI::VMAction on_exec_transfer(QBDI::VM *,
                                            const QBDI::VMState *vm_state,
                                            QBDI::GPRState *gpr,
-                                           QBDI::FPRState *, void *opaque) {
+                                           QBDI::FPRState *fpr, void *opaque) {
         if (trace_process_child_detached()) return QBDI::CONTINUE;
         auto *self = static_cast<Impl *>(opaque);
+        if (vm_state != nullptr && gpr != nullptr &&
+            (vm_state->event & QBDI::EXEC_TRANSFER_RETURN) != 0 && self->vfork_pending) {
+            finish_native_vfork();
+            self->vfork_pending = false;
+        }
+        if (!self->control_only && vm_state != nullptr && gpr != nullptr &&
+            (vm_state->event & QBDI::EXEC_TRANSFER_CALL) != 0) {
+            const uintptr_t destination = vm_state->basicBlockStart;
+            const bool exits = destination == reinterpret_cast<uintptr_t>(_exit) ||
+                               destination == reinterpret_cast<uintptr_t>(_Exit) ||
+                               destination == reinterpret_cast<uintptr_t>(exit);
+            const bool execs = destination == reinterpret_cast<uintptr_t>(execl) ||
+                               destination == reinterpret_cast<uintptr_t>(execle) ||
+                               destination == reinterpret_cast<uintptr_t>(execlp) ||
+                               destination == reinterpret_cast<uintptr_t>(execv) ||
+                               destination == reinterpret_cast<uintptr_t>(execve) ||
+                               destination == reinterpret_cast<uintptr_t>(execvp) ||
+                               destination == reinterpret_cast<uintptr_t>(execvpe);
+            if (exits || execs) {
+                (void)self->sink->call("process-boundary", exits ? "process-exit" : "exec-attempt",
+                        "capture stops before the native call; its outcome is not a target return");
+                self->stop_observation = {true, exits ? TraceStopReason::ProcessExit
+                                                    : TraceStopReason::ExecBoundary};
+                // Engine::run cannot restart at an uninstrumented libc entry.
+                // Seal at this cold transfer boundary, then let the original
+                // broker execute the call once, including an exec failure.
+                self->collector->finish_last(*gpr);
+                (void)self->scene_boundary("capture_stopped", self->gateway_logical_entry);
+                if (self->owner != nullptr) {
+                    (void)self->owner->seal_observed_stop(self->stop_observation.reason);
+                }
+                self->control_only = true;
+                return QBDI::CONTINUE;
+            }
+        }
+        if (vm_state != nullptr && gpr != nullptr &&
+            (vm_state->event & QBDI::EXEC_TRANSFER_CALL) != 0 &&
+            vm_state->basicBlockStart == reinterpret_cast<uintptr_t>(vfork) &&
+            self->is_target_address(gpr->lr)) {
+            (void)self->sink->call("process-boundary", "vfork-child-native",
+                    "child resumes at the real caller until exec/_exit; parent remains traced");
+            if (prepare_native_vfork(reinterpret_cast<uintptr_t>(vfork), gpr->lr)) {
+                self->vfork_pending = true;
+                gpr->pc = native_vfork_boundary_address();
+                return QBDI::BREAK_TO_VM;
+            }
+        }
         TraceRunResult deferred_exit{};
-        const QBDI::VMAction deferred_action = self->flight
-                ? classify_deferred_pthread_exit_event(
+        const QBDI::VMAction deferred_action = classify_deferred_pthread_exit_event(
                           vm_state, gpr,
                           reinterpret_cast<uintptr_t>(pthread_exit),
-                          &deferred_exit)
-                : QBDI::CONTINUE;
+                          &deferred_exit);
         const bool requests_exit = deferred_action == QBDI::STOP;
         if (requests_exit) {
             self->thread_exit_requested = true;
@@ -490,7 +538,7 @@ struct QbdiThreadSession::Impl {
                         (!self->flight ||
                          self->flight_transfer.last_published)) {
                         emit_exec_transfer_event(&self->exec_transfer,
-                                                 vm_state, gpr, self->sink);
+                                                 vm_state, gpr, self->sink, fpr);
                     }
                     return !self->sink->failed();
                 });
@@ -557,6 +605,9 @@ struct QbdiThreadSession::Impl {
             chunk_writer.committed()) {
             stop_control.committed(stop_control.opaque);
         }
+        if (flight && trace_options.calls_only && !flight_sink.rule(
+                "qtrace.capture", "{\"events\":\"calls\",\"instructions\":false,\"memory\":false,\"syscalls\":\"entry\"}"))
+            return fail_setup("flight call summary initialization failed");
         if (flight &&
             needs_thread_begin_publication(thread_lifecycle_pending,
                                            thread_lifecycle_published) &&
@@ -586,6 +637,25 @@ struct QbdiThreadSession::Impl {
         }
         setup_succeeded = true;
         return true;
+    }
+
+    bool scene_boundary(const char *phase, uintptr_t entry, bool returned = false,
+                        uint64_t value = 0) noexcept {
+        if (!flight || trace_process_child_detached()) return true;
+        timespec now{};
+        (void)::clock_gettime(CLOCK_MONOTONIC, &now);
+        const uint64_t monotonic_ns = uint64_t(now.tv_sec) * 1000000000 + now.tv_nsec;
+        char detail[256];
+        char result[32] = "null";
+        if (returned) std::snprintf(result, sizeof(result), "\"0x%llx\"",
+                                     static_cast<unsigned long long>(value));
+        std::snprintf(detail, sizeof(detail),
+                      "{\"schema\":1,\"id\":%llu,\"phase\":\"%s\",\"address\":\"0x%llx\","
+                      "\"monotonicNs\":%llu,\"returnValue\":%s}",
+                      static_cast<unsigned long long>(scene_invocation), phase,
+                      static_cast<unsigned long long>(entry),
+                      static_cast<unsigned long long>(monotonic_ns), result);
+        return sink->rule("qtrace.scene", detail);
     }
 
     TraceRunResult call(uintptr_t logical_entry, uintptr_t execution_entry,
@@ -626,6 +696,11 @@ struct QbdiThreadSession::Impl {
             start = gpr->pc;
             if (start != execution_entry) target_execution_observed = true;
         }
+        ++scene_invocation;
+        if (!scene_boundary("enter", logical_entry)) {
+            signal_execution.clear();
+            return {};
+        }
         const bool executed = start == kReturnAddress || vm.run(start, kReturnAddress);
         signal_execution.clear();
         const bool returned = executed && gpr->pc == kReturnAddress;
@@ -634,7 +709,11 @@ struct QbdiThreadSession::Impl {
         if (trace_process_child_detached()) {
             return {target_executed, returned, value};
         }
-        if (target_executed || thread_exit_requested) collector->finish_last(*gpr);
+        if (!control_only) {
+            if (target_executed || thread_exit_requested) collector->finish_last(*gpr);
+            if (returned) (void)scene_boundary("return", logical_entry, true, value);
+            else if (stop_observation.observed) (void)scene_boundary("capture_stopped", logical_entry);
+        }
         if (stop_observation.observed && owner != nullptr) {
             (void)owner->seal_observed_stop(stop_observation.reason);
         }
@@ -758,6 +837,8 @@ struct QbdiThreadSession::Impl {
     uint64_t thread_exit_value = 0;
     static constexpr QBDI::rword kReturnAddress = 42;
     bool target_execution_observed = false;
+    uint64_t scene_invocation = 0;
+    bool vfork_pending = false;
     QbdiStopObservation stop_observation{};
     bool control_only = false;
 };

@@ -124,6 +124,8 @@ add_library(qbdi_tracer SHARED
         hooks/thread_create_gateway.cpp
         core/qbdi_runner.cpp
         core/native_fallback_arm64.S
+        core/vfork_boundary.cpp
+        core/vfork_boundary_arm64.S
         handlers/call_handlers.cpp
         rules/code_rule.cpp
         rules/code_rule_context.cpp
@@ -132,7 +134,8 @@ add_library(qbdi_tracer SHARED
         jni/jni_function_registry.cpp
         jni/jni_state.cpp
         jni/jni_state_updater.cpp
-        jni/jni_formatter.cpp)
+        jni/jni_formatter.cpp
+        jni/jni_argument_decoder.cpp)
 
 # nlohmann/json reports malformed input through C++ exceptions, and the exported
 # JSON ABI must contain allocation failures before they cross the C boundary. Keep

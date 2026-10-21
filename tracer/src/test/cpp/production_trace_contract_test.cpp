@@ -375,10 +375,10 @@ void proxy_admission_precedes_qbdi_and_stop_completes_control_only() {
     const std::string_view target_pre = function_source(
             session, "static QBDI::VMAction on_target_pre(");
     CHECK(target_pre.find("return QBDI::STOP;") != std::string_view::npos);
-    const std::string_view call_gateway = function_source(
-            session, "TraceRunResult QbdiThreadSession::call_gateway(");
-    const size_t seal = call_gateway.find("seal_observed_stop(");
-    const size_t continuation = call_gateway.find("continue_execution();");
+    const std::string_view engine_call = function_source(
+            session, "TraceRunResult QbdiThreadSession::call_on_engine_stack(");
+    const size_t seal = engine_call.find("seal_observed_stop(");
+    const size_t continuation = engine_call.find("continue_execution();");
     CHECK(seal != std::string_view::npos);
     CHECK(continuation != std::string_view::npos);
     CHECK(seal < continuation);

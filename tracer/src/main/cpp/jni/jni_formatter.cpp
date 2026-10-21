@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 // 标准 hexdump（对标 jnitrace hexdump 库输出格式）
@@ -58,7 +59,8 @@ static std::string fmt_ptr(uint64_t value) {
 
 // 是否是对象/引用类型（hex 显示）
 static bool is_ref_type(const char *type) {
-    return strcmp(type, JniType::kObject)    == 0 ||
+    return std::string_view(type).ends_with("Array") ||
+           strcmp(type, JniType::kObject)    == 0 ||
            strcmp(type, JniType::kClass)     == 0 ||
            strcmp(type, JniType::kString)    == 0 ||
            strcmp(type, JniType::kArray)     == 0 ||
@@ -73,10 +75,41 @@ static bool is_ref_type(const char *type) {
 static std::string fmt_value(const char *type, uint64_t value) {
     if (is_ref_type(type)) return fmt_ptr(value);
     if (strcmp(type, JniType::kBoolean) == 0)
-        return value ? "true" : "false";
-    char buf[64];
-    snprintf(buf, sizeof(buf), "0x%lx (%ld)",
-             static_cast<unsigned long>(value), static_cast<long>(value));
+        return static_cast<uint8_t>(value) ? "true" : "false";
+    char buf[96];
+    if (strcmp(type, JniType::kFloat) == 0 || strcmp(type, JniType::kDouble) == 0) {
+        double number;
+        if (strcmp(type, JniType::kFloat) == 0) {
+            const uint32_t bits = static_cast<uint32_t>(value);
+            float narrow;
+            std::memcpy(&narrow, &bits, sizeof(narrow));
+            number = narrow;
+            value = bits;
+        } else {
+            std::memcpy(&number, &value, sizeof(number));
+        }
+        snprintf(buf, sizeof(buf), "0x%llx (%.*g)", static_cast<unsigned long long>(value),
+                 strcmp(type, JniType::kFloat) == 0 ? 9 : 17, number);
+        return buf;
+    }
+    int64_t number;
+    if (strcmp(type, JniType::kInt) == 0 || strcmp(type, JniType::kSize) == 0) {
+        value = static_cast<uint32_t>(value);
+        number = static_cast<int32_t>(value);
+    } else if (strcmp(type, JniType::kByte) == 0) {
+        value = static_cast<uint8_t>(value);
+        number = static_cast<int8_t>(value);
+    } else if (strcmp(type, JniType::kShort) == 0) {
+        value = static_cast<uint16_t>(value);
+        number = static_cast<int16_t>(value);
+    } else if (strcmp(type, JniType::kChar) == 0) {
+        value = static_cast<uint16_t>(value);
+        number = static_cast<int64_t>(value);
+    } else {
+        number = static_cast<int64_t>(value);
+    }
+    snprintf(buf, sizeof(buf), "0x%llx (%lld)",
+             static_cast<unsigned long long>(value), static_cast<long long>(number));
     return buf;
 }
 
@@ -162,7 +195,8 @@ std::string JniFormatter::format_ret(const char *type, uint64_t value, const cha
 
 std::string JniFormatter::format_enter(int tid, long elapsed_ms,
                                         const JniFuncInfo &func,
-                                        const uint64_t *args, int num_args) {
+                                        const uint64_t *args, int num_args,
+                                        const Arm64JniArguments *abi) {
     auto &state = jni_state();
     std::ostringstream out;
 
@@ -173,33 +207,53 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
     out.width(7);
     out << elapsed_ms << " ms [+] " << func.struct_name << "->" << func.name << "\n";
 
-    // 逐参数
-    for (int i = 0; i < num_args && i < static_cast<int>(func.args.size()); ++i) {
-        const char *arg_type = func.args[i];
-        if (strcmp(arg_type, JniType::kVarArgs) == 0) break;
-        if (strcmp(arg_type, JniType::kVaList) == 0) break;
-
-        uint64_t val = args[i];
-        std::string meta = resolve_meta(arg_type, val);
-
-        out << "           "
-            << format_data_line(elapsed_ms, "|-", arg_type, val,
-                                 meta.empty() ? nullptr : meta.c_str(), 0)
-            << "\n";
+    // Fixed JNI parameters have independent GP and FP register cursors too.
+    JniDecodedArguments fixed;
+    if (abi != nullptr) {
+        fixed = decode_arm64_jni_fixed_arguments(func, *abi, safe_read_memory);
+    } else {
+        for (int i = 0; i < num_args && i < static_cast<int>(func.args.size()); ++i) {
+            const char *type = func.args[i];
+            if (strcmp(type, JniType::kVarArgs) == 0 || strcmp(type, JniType::kVaList) == 0) break;
+            if (strcmp(type, JniType::kFloat) == 0 || strcmp(type, JniType::kDouble) == 0) {
+                fixed.values.clear();
+                fixed.error = "floating argument registers unavailable";
+                break;
+            }
+            fixed.values.push_back({type, args[i]});
+        }
+    }
+    if (!fixed.error.empty()) {
+        out << "           |- <undecoded: " << fixed.error << ">\n";
+    } else {
+        for (const auto &argument : fixed.values) {
+            const char *type = argument.type.c_str();
+            const std::string meta = resolve_meta(type, argument.bits);
+            out << "           "
+                << format_data_line(elapsed_ms, "|-", type, argument.bits,
+                                     meta.empty() ? nullptr : meta.c_str(), 0)
+                << "\n";
+        }
     }
 
     // ── 特殊处理: Call*Method → 展开 Java 参数 ──
-    if (strncmp(func.name, "Call", 4) == 0 && strstr(func.name, "Method") != nullptr) {
-        uintptr_t method_id = args[1];
-        const auto sig = state.method_sig(method_id);
-        if (sig) {
-            auto params = JniState::parse_method_params(sig->c_str());
-            int param_offset = 2;
-            if (strncmp(func.name, "CallNonvirtual", 14) == 0) param_offset = 3;
-
-            for (size_t pi = 0; pi < params.size() && (param_offset + pi) < 8; ++pi) {
-                uint64_t pval = args[param_offset + pi];
-                const char *ptype = params[pi].c_str();
+    const std::string_view name(func.name);
+    if ((name.starts_with("Call") && name.find("Method") != std::string_view::npos) ||
+        name == "NewObject" || name == "NewObjectV" || name == "NewObjectA") {
+        std::optional<std::string> signature;
+        for (size_t index = 0; index < func.args.size() && index < static_cast<size_t>(num_args); ++index) {
+            if (strcmp(func.args[index], JniType::kMethodID) == 0) signature = state.method_sig(args[index]);
+        }
+        JniDecodedArguments decoded;
+        if (!signature) decoded.error = "method signature unavailable";
+        else if (abi == nullptr) decoded.error = "arm64 argument state unavailable";
+        else decoded = decode_arm64_jni_arguments(func, *abi, signature, safe_read_memory);
+        if (!decoded.error.empty()) {
+            out << "           :   <undecoded: " << decoded.error << ">\n";
+        } else {
+            for (const auto &argument : decoded.values) {
+                const uint64_t pval = argument.bits;
+                const char *ptype = argument.type.c_str();
                 std::string pmeta = resolve_meta(ptype, pval);
                 out << "           :   "
                     << format_data_line(elapsed_ms, ":", ptype, pval,
@@ -265,7 +319,7 @@ std::string JniFormatter::format_enter(int tid, long elapsed_ms,
 
 std::string JniFormatter::format_leave(int tid, long elapsed_ms,
                                         const JniFuncInfo &func,
-                                        uint64_t retval) {
+                                        uint64_t retval, bool value_available) {
     (void)tid;
     std::ostringstream out;
 
@@ -273,6 +327,10 @@ std::string JniFormatter::format_leave(int tid, long elapsed_ms,
         out << "           "
             << format_data_line(elapsed_ms, "|=", func.ret_type, 0, nullptr, 0)
             << "\n";
+        return out.str();
+    }
+    if (!value_available) {
+        out << "           |= " << func.ret_type << ": <undecoded: floating return register unavailable>\n";
         return out.str();
     }
 

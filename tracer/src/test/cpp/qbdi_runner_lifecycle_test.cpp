@@ -426,7 +426,9 @@ void normal_stop_lifecycle_acknowledges_only_after_artifact_finalization() {
     CHECK(lifecycle.seal_calls() == 1);
     CHECK(lifecycle.acknowledge_calls() == 1);
     CHECK(!lifecycle.admission_finished());
-    CHECK(runtime->snapshot().phase == TraceGenerationPhase::StopRequested);
+    CHECK(runtime->snapshot().phase == TraceGenerationPhase::Sealed);
+    const auto durable = read_file(path);
+    CHECK(contains_record(std::string(durable.begin(), durable.end()), BinaryRecordType::TraceStop));
     CHECK(!writer.end(0x44, true, 38));
     CHECK(writer.close());
     lifecycle.finish(true);

@@ -145,8 +145,8 @@ def complete_stream(*events: bytes, profile: int = 2, compression: int = 1,
     )
 
 
-def stopped_stream() -> bytes:
-    prefix = (stream_header(minor=2, features=1) + begin() + module()
+def stopped_stream(*, compression: int = 1) -> bytes:
+    prefix = (stream_header(minor=2, features=1) + begin(compression=compression) + module()
               + instruction_definition() + instruction())
     terminal_size = len(stopped(encoded_bytes=0, compressed_bytes=0))
     total = len(prefix) + terminal_size
@@ -167,6 +167,17 @@ class BinaryTraceConversionTests(unittest.TestCase):
             "TRACE_END status=stopped reason=duration_elapsed return_valid=0", output
         )
         self.assertEqual("stopped", stats.termination)
+
+    def test_nonreturn_boundaries_never_claim_a_target_return(self):
+        for reason, name in ((2, "thread_exit"), (3, "process_exit"), (4, "exec_boundary")):
+            with self.subTest(reason=name):
+                data = bytearray(stopped_stream())
+                terminal = len(data) - TRACE_STOP.size
+                data[terminal] = reason
+                output, stats = self.convert(bytes(data))
+                self.assertIn(f"status=stopped reason={name} return_valid=0", output)
+                self.assertEqual("stopped", stats.termination)
+                self.assertEqual(name, stats.stop_reason)
 
     def test_rejects_malformed_stopped_terminals_and_stops_stream_parsing(self):
         complete = stopped_stream()

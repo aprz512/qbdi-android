@@ -341,7 +341,16 @@ bool parse_trace(const json &trace, TraceOptions *options, ConfigurationIssue *i
         return false;
     }
     if (!exact_keys(trace, {"profile", "compression", "lz4Level", "autoBuffer", "bufferMb",
-                            "hexdumpLimit"}, issue, "$.trace")) return false;
+                            "hexdumpLimit", "events"}, issue, "$.trace")) return false;
+    if (trace.contains("events")) {
+        std::string events;
+        if (!string_member(trace, "events", &events, issue, "$.trace")) return false;
+        if (events != "all" && events != "calls") {
+            *issue = {"INVALID_TRACE_OPTIONS", "$.trace.events", "events must be all or calls"};
+            return false;
+        }
+        options->calls_only = events == "calls";
+    }
     std::string profile;
     bool compression = false;
     bool auto_buffer = false;

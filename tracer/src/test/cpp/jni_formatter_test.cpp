@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <string_view>
 
@@ -107,6 +108,53 @@ void null_state_handles_do_not_resolve_metadata() {
     }
 }
 
+void absent_abi_state_never_formats_a_va_list_pointer_as_a_java_int() {
+    constexpr uintptr_t method = 0xabc123;
+    jni_state().on_get_method_id(method, "conditionCallback", "(II[B)V");
+    const uint64_t arguments[8] = {0x1234, method, 0x7fff12345678, 0, 0, 0, 0, 0};
+    JniFuncInfo function{"CallVoidMethodV", JniType::kVoid, "JNIEnv",
+                         {JniType::kObject, JniType::kMethodID, JniType::kVaList}};
+    const std::string output = JniFormatter{}.format_enter(7, 0, function, arguments, 3);
+    CHECK(output.find("undecoded") != std::string::npos);
+    CHECK(output.find("jint           : 0x7fff12345678") == std::string::npos);
+}
+
+void object_array_creation_is_not_mistaken_for_a_constructor_call() {
+    JniFuncInfo function{"NewObjectArray", JniType::kArray, "JNIEnv",
+                         {JniType::kSize, JniType::kClass, JniType::kObject}};
+    const uint64_t arguments[3] = {2, 0x1234, 0};
+    const auto output = JniFormatter{}.format_enter(7, 0, function, arguments, 3);
+    CHECK(output.find("undecoded") == std::string::npos);
+}
+
+void fixed_floating_field_values_use_their_own_register_bank() {
+    const auto table = build_jni_function_table();
+    for (const char *name : {"SetFloatField", "SetDoubleField", "SetStaticFloatField", "SetStaticDoubleField"}) {
+        const auto function = std::find_if(table.begin(), table.end(), [&](const JniFuncInfo &entry) {
+            return std::string_view(entry.name) == name;
+        });
+        CHECK(function != table.end());
+        const uint64_t arguments[3] = {0x1111, 0x2222, 0x12345678};
+        Arm64JniArguments abi;
+        abi.general = {0x3333, arguments[0], arguments[1], arguments[2], 0, 0, 0, 0};
+        abi.has_floating = true;
+        const bool is_float = std::string_view(function->args[2]) == JniType::kFloat;
+        if (is_float) {
+            const float value = -1.5f;
+            std::memcpy(&abi.floating[0], &value, sizeof(value));
+        } else {
+            const double value = -3.25;
+            std::memcpy(&abi.floating[0], &value, sizeof(value));
+        }
+        const auto output = JniFormatter{}.format_enter(7, 0, *function, arguments, 3, &abi);
+        CHECK(output.find(is_float ? "(-1.5)" : "(-3.25)") != std::string::npos);
+        CHECK(output.find("0x12345678") == std::string::npos);
+        const auto unavailable = JniFormatter{}.format_enter(7, 0, *function, arguments, 3);
+        CHECK(unavailable.find("undecoded") != std::string::npos);
+        CHECK(unavailable.find("0x12345678") == std::string::npos);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -116,4 +164,7 @@ int main() {
     known_jstrings_use_captured_state_without_reading_unknown_handles();
     known_jstrings_do_not_require_pointer_like_handle_values();
     null_state_handles_do_not_resolve_metadata();
+    absent_abi_state_never_formats_a_va_list_pointer_as_a_java_int();
+    object_array_creation_is_not_mistaken_for_a_constructor_call();
+    fixed_floating_field_values_use_their_own_register_bank();
 }

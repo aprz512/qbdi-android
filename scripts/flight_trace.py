@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+from collections import OrderedDict
+import json
+import re
 import struct
 from typing import BinaryIO
 
@@ -898,6 +901,79 @@ def _missing_ranges(start: int, end: int, observed: set[int]) -> list[list[int]]
     return result
 
 
+def _read_chunk_header(source, superblock, index, directory_tids):
+    """Validate structural header claims without reading/validating payloads."""
+    offset = superblock.chunk_offset + index * superblock.chunk_bytes
+    raw = _read_at(source, offset, CHUNK_HEADER_BYTES, f"chunk {index} header")
+    state = struct.unpack_from("<I", raw, 12)[0]
+    if state == 0:
+        return None
+    if state not in (1, 2):
+        raise FlightTraceError(f"invalid chunk state at index {index}")
+    (magic, version, size, encoded_index, _, tid, generation, first, last,
+     committed, count, checksum) = CHUNK_HEADER.unpack(raw)
+    if (magic != MAGIC or version != superblock.version or size != CHUNK_HEADER_BYTES or encoded_index != index):
+        raise FlightTraceError(f"invalid chunk header identity at index {index}")
+    if tid == 0 or generation == 0 or tid not in directory_tids or any(raw[52:]):
+        raise FlightTraceError(f"invalid chunk ownership at index {index}")
+    if state == 2:
+        if (first == 0) != (last == 0) or (first != 0 and first > last):
+            raise FlightTraceError(f"invalid chunk sequence range at index {index}")
+        if committed > superblock.chunk_bytes - CHUNK_HEADER_BYTES or committed & 7:
+            raise FlightTraceError(f"invalid sealed chunk extent at index {index}")
+    return state, tid, generation, first, last, committed, count, checksum
+
+
+def scene_lifecycle(events, maximum=256):
+    """Keep bounded scene outcomes; a sealed file alone proves no return."""
+    calls = OrderedDict()
+    omitted = invalid = 0
+    for event in events:
+        if event.kind != "rule" or event.data.get("name") != "qtrace.scene":
+            continue
+        try:
+            detail = event.data["detail"]
+            if len(detail) > 512:
+                raise ValueError("scene boundary exceeds bound")
+            def unique(pairs):
+                result = dict(pairs)
+                if len(result) != len(pairs):
+                    raise ValueError("duplicate scene field")
+                return result
+            data = json.loads(detail, object_pairs_hook=unique)
+            if (type(data) is not dict or set(data) != {"schema", "id", "phase", "address", "monotonicNs", "returnValue"}
+                    or type(data["schema"]) is not int or data["schema"] != 1
+                    or type(data["id"]) is not int or not 0 < data["id"] <= 2**64 - 1
+                    or type(data["monotonicNs"]) is not int or not 0 <= data["monotonicNs"] <= 2**64 - 1
+                    or data["phase"] not in ("enter", "return", "capture_stopped")
+                    or type(data["address"]) is not str or not re.fullmatch(r"0x[0-9a-f]{1,16}", data["address"])
+                    or (data["phase"] == "return" and (type(data["returnValue"]) is not str or
+                        not re.fullmatch(r"0x[0-9a-f]{1,16}", data["returnValue"])))
+                    or (data["phase"] != "return" and data["returnValue"] is not None)):
+                raise ValueError("invalid scene boundary")
+            key = (event.tid, data["id"])
+            previous = calls.get(key)
+            if previous and (previous["address"] != data["address"] or
+                             data["monotonicNs"] < previous["last_monotonic_ns"]):
+                raise ValueError("scene identity/time regressed")
+        except (ValueError, TypeError, KeyError):
+            invalid += 1
+            continue
+        row = calls.pop(key, {"tid": event.tid, "id": data["id"], "address": data["address"],
+                              "entry_sequence": None, "entered_monotonic_ns": None})
+        row.update(last_sequence=event.global_seq, last_monotonic_ns=data["monotonicNs"],
+                   target_returned=True if data["phase"] == "return" else None,
+                   state={"enter": "open_at_end", "return": "returned", "capture_stopped": "capture_stopped"}[data["phase"]],
+                   return_value=data["returnValue"])
+        if data["phase"] == "enter":
+            row.update(entry_sequence=event.global_seq, entered_monotonic_ns=data["monotonicNs"])
+        if len(calls) >= maximum:
+            calls.popitem(last=False)
+            omitted += 1
+        calls[key] = row
+    return list(calls.values()), omitted, invalid
+
+
 def recover_flight(source: BinaryIO) -> FlightRecovery:
     """Recover committed records without accepting damage past protocol boundaries."""
     source_size = _source_size(source)
@@ -922,30 +998,17 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
 
     for index in range(superblock.chunk_count):
         offset = superblock.chunk_offset + index * superblock.chunk_bytes
-        header = _read_at(source, offset, CHUNK_HEADER_BYTES, f"chunk {index} header")
-        state = struct.unpack_from("<I", header, 12)[0]
-        if state == 0:
+        header = _read_chunk_header(source, superblock, index, directory_by_tid)
+        if header is None:
             continue
-        if state not in (1, 2):
-            raise FlightTraceError(f"invalid chunk state at index {index}")
-        (magic, version, header_bytes, encoded_index, _, tid, generation, first, last,
-         committed, count, checksum) = CHUNK_HEADER.unpack(header)
-        if (magic != MAGIC or version != superblock.version or
-                header_bytes != CHUNK_HEADER_BYTES or encoded_index != index):
-            raise FlightTraceError(f"invalid chunk header identity at index {index}")
-        if tid == 0 or generation == 0 or tid not in directory_by_tid or any(header[52:]):
-            raise FlightTraceError(f"invalid chunk ownership at index {index}")
+        state, tid, generation, first, last, committed, count, checksum = header
         capacity = superblock.chunk_bytes - CHUNK_HEADER_BYTES
         chunk_headers[index] = (tid, generation, state)
         if state == 1:
             active_chunk_indexes.append(index)
         if state == 2:
-            if (first == 0) != (last == 0) or (first != 0 and first > last):
-                raise FlightTraceError(f"invalid chunk sequence range at index {index}")
             if first != 0:
                 sealed_ranges.append((first, last, offset))
-            if committed > capacity or committed & 7:
-                raise FlightTraceError(f"invalid sealed chunk extent at index {index}")
             data = _read_at(source, offset + CHUNK_HEADER_BYTES, committed,
                             f"sealed chunk {index} data")
             if _fnv32(data) != checksum:
@@ -1143,6 +1206,7 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
          for sequence in sequences),
         default=(0, None),
     )[1]
+    scenes, omitted_scenes, invalid_scenes = scene_lifecycle(events)
     summary: dict[str, object] = {
         "format_version": superblock.version,
         "run_id": superblock.run_id,
@@ -1161,6 +1225,9 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
                               not incomplete_logical_events and not stale_entries and
                               not any(event.data.get("typed_damage") for event in events)),
         "termination": termination,
+        "scene_lifecycle": scenes,
+        "scene_lifecycle_omitted": omitted_scenes,
+        "scene_lifecycle_invalid": invalid_scenes,
         "final_signal": next((event.data for event in reversed(events)
                               if event.kind == "signal"), None),
         "last_recorded_thread": last_recorded_thread,

@@ -337,6 +337,8 @@ bool BinaryTraceWriter::begin(const TraceContext &context) {
     writer_.commit(result.size);
     if (writer_.failed()) return fail();
     began_ = true;
+    if (options_.calls_only)
+        return rule("qtrace.capture", "{\"events\":\"calls\",\"instructions\":false,\"memory\":false,\"syscalls\":\"entry\"}");
     return true;
 }
 
