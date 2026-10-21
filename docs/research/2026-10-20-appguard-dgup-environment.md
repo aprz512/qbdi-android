@@ -128,7 +128,7 @@ report(JNIEnv *env, jobject engine, int type, int code,
 1,224条 call、54,439条 memory；存在3个缺失区间、共16个 sequence。
 它确认了 Settings 读取和五组正常返回的 `conditionCallback(II[B)V`，不能宣称完整检测覆盖。
 历史 variadic jint 文本曾误把栈指针当参数，检测类型须与原始寄存器互证；
-解码实现尚未独立核对时，不把格式化文本作为检测类型的唯一证据。
+后续通用修复与独立对照见[JNI/arm64 验收](../benchmarks/jni-abi-2026-10-21.md)。
 
 早期构造阶段会话 `f720cd78-67c4-43e6-aad1-e1f11737ff3c` 保留1,671,415条指令和412条 call，
 证明 pre-constructor 入口取得了实际记录，但未确认目标完整返回。

@@ -1,18 +1,17 @@
 # qbdi-android 实战体验：AppGuard 防护库分析
 
-后续离线优化已使原 256 MiB 密集语料在原 2 GiB 预算内完成索引，并新增按真实场景时间返回场景内事件的查询，
-见[Flight 查询优化](../benchmarks/flight-query-2026-10-21.md)。场景范围与逐事件时间仍明确区分，以下历史测量及业务证明范围保持原样。
+后续离线优化已使原256 MiB密集语料在原2 GiB预算内完成索引，并新增按真实场景时间返回场景内事件的查询，
+见[Flight 查询优化](../benchmarks/flight-query-2026-10-21.md)。场景范围与逐事件时间仍明确区分，以下历史测量及证据范围保持原样。
 
-后续通用优化已完成两个 P0 的独立工具闭环，见[JNI/arm64 验收](../benchmarks/jni-abi-2026-10-21.md)。
+两个 P0 已完成独立工具验证，见[JNI/arm64 验收](../benchmarks/jni-abi-2026-10-21.md)。
 普通/V/A 解码、带符号数值和浮点返回文本已通过同输入 Java/native 正向对照；同线程 x18、真实栈及 attach/callback 纳入设备准入。
-CLI 可通过 `--abi-report` 在注入前绑定设备与产物 SHA。以下历史观察及其原始证据范围仍保留，不据此补写未执行的业务复验。
-后续固定 float/double 字段参数修复及构造器、实例、nonvirtual 普通/V/A 对照已纳入同一通用夹具，当前为 30 份轨迹、14 项设备准入。
+CLI 可通过 `--abi-report` 在注入前绑定设备与产物 SHA。固定 float/double 参数、构造器、实例及 nonvirtual 调用已纳入同一通用夹具，当前为30份轨迹、14项设备准入。
 
-后续通用 P1/P2 已完成独立最小夹具验证，见[通用优化验收](../benchmarks/qbdi-generic-2026-10-21.md)。
-场景状态分开描述采集封口与真实返回；新增有界元数据预览、实际场景时间查询与可选 calls 事件选择。
-当前 ABI 的 vfork 故障已由新夹具复现并修复；exec、进程退出与 pthread_exit 的封口也完成设备正向对照。
-密集 Flight 索引的预算拒绝、无逐指令时间戳、原生子分支覆盖边界和未证明 CPU 加速均明确保留。
-这些通用结果不替代下文目标业务的实测，也不扩展其历史结论。
+后续 P1/P2 已完成独立最小夹具验证，见[通用优化验收](../benchmarks/qbdi-generic-2026-10-21.md)。
+场景状态分开描述采集封口与真实返回；新增有界元数据预览、实际场景时间查询和可选 calls 事件选择。
+vfork、exec、进程退出与 pthread_exit 的封口已有设备正向对照。
+无逐指令时间戳、原生子分支覆盖边界和未证明 CPU 加速等限制仍保留。
+这些通用结果不替代下文防护库场景的实测，也不扩展其历史结论。
 
 本文分析 DIGIMON UP `com.bandainamcoent.dgup_ww` 1.5.0(55) 中的 AppGuard 防护库，
 重点为 native configure/status API、logical region、Flight 回收和 JNI 观测。

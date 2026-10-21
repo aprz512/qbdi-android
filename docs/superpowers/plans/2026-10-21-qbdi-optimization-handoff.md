@@ -59,7 +59,7 @@ Pixel 6/API36 的 15 组调用与 18 份轨迹完成 RED/GREEN，12 项准入通
 
 已验证 tracer 的 SHA-256 为 `67f3aed005ba3c487df413265304190f20188e8a0b521c5e91bf6556e3e3b262`。它是历史有效产物身份，新构建须记录自己的 SHA，不能沿用该哈希声明新产物已通过。
 
-真实线程栈、同线程 x18 和 JNI callback 均需独立的同输入正向对照。夹具、构建身份与设备结果在实现后记录，不用历史哈希代替新产物验证。
+可复用设备夹具及同输入基线见 [JNI/arm64 准入说明](../../jni-abi-acceptance.md)，源码为 [jni_abi_probe.cpp](../../../tracer/src/test/device/jni_abi_probe.cpp) 和 [JniAbiProbe.java](../../../tracer/src/test/device/JniAbiProbe.java)。该独立夹具覆盖同线程 x18、真实栈、attach/callback、返回值与异常状态；使用前核对实际文件、产物哈希和准入报告。
 
 ## 第一阶段：两个 P0
 
