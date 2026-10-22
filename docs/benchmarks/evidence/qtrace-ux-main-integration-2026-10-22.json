@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-22",
+  "result": "pass",
+  "operation": "authorized local fast-forward into main",
+  "base": "eb79bcb2c37acb27affda4983ecb099e3ac5c497",
+  "implementation_commit": "bb8783103627146fd7f33809e179908c5fd33c9e",
+  "implementation_tree": "8541dbfeb6899f71426e6bc9c1809fd1f4841863",
+  "main_worktree": "/home/lyldalek/workspace/qbdi-android",
+  "main_premerge_status": "clean",
+  "files_integrated": 89,
+  "source_files_verified_against_device_accepted_candidate": 389,
+  "original_release_gate": "qtrace-acceptance-evidence/b8e25dc5-5e33-48cf-b6e8-a71d13581fd9/historical-benchmark-gate.success.json",
+  "original_release_gate_sha256": "bef604b519088cec23006dc760a5ff593ca6f2f6bd5b182c2a9da057f44b8074",
+  "original_release_scenarios_verified": 8,
+  "merged_main_checks": [
+    {
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/tests",
+        "-p",
+        "test_*.py"
+      ],
+      "cwd": "/home/lyldalek/workspace/qbdi-android",
+      "started_ns": 1792664707818617268,
+      "completed_ns": 1792664771870859900,
+      "returncode": 0
+    },
+    {
+      "command": [
+        "python3",
+        "qtrace-ui/tools/check_protocol_matrix.py",
+        "--check",
+        "--skip-rust"
+      ],
+      "cwd": "/home/lyldalek/workspace/qbdi-android",
+      "started_ns": 1792664719657405122,
+      "completed_ns": 1792664729659152166,
+      "returncode": 0
+    }
+  ],
+  "python_result": {
+    "tests": 963,
+    "skipped": 9,
+    "failures": 0
+  },
+  "protocol_result": {
+    "cpp_python": "pass",
+    "python_protocol_tests": 16,
+    "rust_rerun": false
+  },
+  "reused_checks": {
+    "debug_release_build": "pass",
+    "native_host": {
+      "passed": 50
+    },
+    "rust_workspace": {
+      "passed": 524,
+      "ignored": 2
+    },
+    "full_device_gate": "pass; source inputs unchanged; no device rerun"
+  },
+  "raw_evidence": [
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/before.json",
+      "sha256": "e7cede6d9d79b9cffd26a8bb766060c86b473af5292e08e4d4b766d31fd29c25",
+      "bytes": 15996
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/staged-files.json",
+      "sha256": "4c853d48485f12db828da125f5f066582d002b612ab03ba32eb7aadd3bd5f486",
+      "bytes": 12952
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/merge.json",
+      "sha256": "f5ebc12dfd931c8677b07ac295f2b2c48916cbc74f116fe9b86636683011563f",
+      "bytes": 370
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/main-python.json",
+      "sha256": "06070b118b70bfdc20d9125b608fc91b4bca04b69c9460881730029bfc54b93b",
+      "bytes": 282
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/main-python.stdout",
+      "sha256": "a4cb6985ac1743c7efdae98ed92c68b703003fee638edded3a796ba98afa8a40",
+      "bytes": 509
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/main-python.stderr",
+      "sha256": "0470f815ad6afec2f434e86cd42accf8dc4c491d9e1e7847b34d46d4fc6530f7",
+      "bytes": 4617
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/main-protocol.json",
+      "sha256": "0f4a1effdb91b91c35783db450ac6525df79f09ed29b4ab8925c56fee4a08b2c",
+      "bytes": 264
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/main-protocol.stdout",
+      "sha256": "8094f06d38db2bee81066ba858fe0a0898a69cb7b74506d148a755b23390dc4f",
+      "bytes": 308
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/integration-ux-20261022/main-protocol.stderr",
+      "sha256": "c2db846f4c73f5290c817e3509847dd58a669c35bcbc72ed81447d87e722e272",
+      "bytes": 115
+    }
+  ],
+  "restoration_reports": [
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-remaining-20261022/restore-pixel6/report.json",
+      "sha256": "667a39b04b0ef84f2dfe3536b7fcf49f1352f94eba063046fd1c9782722e2660",
+      "bytes": 2622
+    },
+    {
+      "path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-remaining-20261022/restore-mi11/report.json",
+      "sha256": "8187298865a2702903bc8b9809478f03da1df7da425befbc31dd1d7542aedb9d",
+      "bytes": 1786
+    }
+  ],
+  "push_performed": false,
+  "branches_or_worktrees_removed": false,
+  "original_evidence_preserved": true,
+  "research_scope": "subsequent refusal-cause and remote-reporting investigation is independent; unknown findings are not product release gates",
+  "evidence_revision_semantics": "Original collection revision and tree remain historical identities; documentation history was rewritten with identical non-documentation inputs.",
+  "rewritten_implementation_commit": "2bd271f1f360dc69e337ba8b3a57470f321b511c"
+}

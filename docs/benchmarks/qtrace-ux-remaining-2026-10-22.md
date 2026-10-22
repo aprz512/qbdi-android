@@ -2,7 +2,7 @@
 
 [handoff](../superpowers/plans/2026-10-22-qbdi-ux-handoff.md) · [实施计划](../superpowers/plans/2026-10-22-qbdi-ux-remaining.md) · [机器证据](evidence/qtrace-ux-remaining-2026-10-22.json)
 
-本轮完成更多路径 syscall、普通 QTRB、嵌套信号/SA_RESTART、PC 来源及可选运行时/Java 快照。独立功能验收、新版发布基线校准、完整设备发布门禁及恢复均通过，当前状态为 **PASS**。实现保留在 `cd7b` / `feat/qtrace-ux-handoff`，基线 `eb79bcb2c37acb27affda4983ecb099e3ac5c497`，尚未提交、合入或推送。
+本轮完成更多路径 syscall、普通 QTRB、嵌套信号/SA_RESTART、PC 来源及可选运行时/Java 快照。独立功能验收、新版发布基线校准、完整设备发布门禁及恢复均通过，当前状态为 **PASS**。验收时实现位于 `cd7b` / `feat/qtrace-ux-handoff`，基线 `eb79bcb2c37acb27affda4983ecb099e3ac5c497`。后续已提交为 `2bd271f1f360dc69e337ba8b3a57470f321b511c` 并本地合入 main；[合入复核](qtrace-ux-main-integration-2026-10-22.md)单独记录，不改写本轮设备来源。尚未推送。
 
 ## 实现
 

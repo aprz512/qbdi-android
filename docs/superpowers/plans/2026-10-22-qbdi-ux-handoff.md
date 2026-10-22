@@ -6,6 +6,8 @@
 
 用户授权的剩余功能、Java/JIT 快照、新版发布基线、完整设备门禁及设备恢复均已完成。Java 范围为“运行时/JIT 映射、线程信息及可用的 Java 线程栈”。本轮状态为 **PASS**；[验收报告](../../benchmarks/qtrace-ux-remaining-2026-10-22.md)区分功能、基线校准与完整门禁，保留原失败和未覆盖边界。
 
+实现已提交为 `2bd271f1f360dc69e337ba8b3a57470f321b511c`，本地快进合入 main。合入后 963 项 Python（9 跳过）及 C++/Python 协议检查通过，见[合入复核](../../benchmarks/qtrace-ux-main-integration-2026-10-22.md)。赛马娘拒绝根因与远端上报按独立调查继续，不是剩余功能。
+
 | 顺序 | 状态与入口 |
 | --- | --- |
 | 1. 配置与前置诊断 | 完成。严格 CLI/native 接口、字段修正提示、bindings/版本诊断；[使用说明](../../usage.md#配置接口与前置诊断)。 |
@@ -17,15 +19,16 @@
 
 ## 工作区与证据
 
-- 实现工作树：`/home/lyldalek/.codex/worktrees/cd7b/qbdi-android`，分支 `feat/qtrace-ux-handoff`，基线 `eb79bcb2c37acb27affda4983ecb099e3ac5c497`。实现、文档及证据尚未提交；不重新从 main 建树而遗漏这些改动。
+- 主交付工作区：`/home/lyldalek/workspace/qbdi-android`，本地 main 已包含实现提交 `2bd271f1f360dc69e337ba8b3a57470f321b511c`；功能已完成，不重复实现。
+- 原实现工作树：`/home/lyldalek/.codex/worktrees/cd7b/qbdi-android`。原功能分支 `feat/qtrace-ux-handoff` 和原始证据保留；后续独立调查可从当前 main 在此隔离树建立研究分支。实际设备验收基线仍为 `eb79bcb2c37acb27affda4983ecb099e3ac5c497`，按源码 SHA 绑定，不回写成新采集。
 - 原资料工作树：`/home/lyldalek/.codex/worktrees/6580/qbdi-android`。其中原始交接、样本参考及其他调查材料保留原样。
-- 主工作区：`/home/lyldalek/workspace/qbdi-android`。本任务未授权其他项目改动、合入、推送或清理其他会话文件。
+- 本轮只授权 qbdi-android 本地合入与继续调查；未推送，也未清理其他会话文件。
 - `.codegraph/` 存在但无可用索引。按规则先尝试查询，失败后用 `rg` 和定点读取，不自行重建索引。
 
-进入后先核对目录、分支和未提交状态；目录失效时先用 `git worktree list --porcelain` 定位既有交付：
+进入后先核对 main、工作树和状态；目录失效时先用 `git worktree list --porcelain` 定位既有交付：
 
 ```bash
-cd /home/lyldalek/.codex/worktrees/cd7b/qbdi-android
+cd /home/lyldalek/workspace/qbdi-android
 git branch --show-current
 git status --short
 git rev-parse HEAD
@@ -67,15 +70,15 @@ git rev-parse HEAD
 旧 oracle 为 21718 条指令与 `0x5745c858653f5a7f`；旧文档已说明原生返回不同。新版同机参考的 18 个预热/测量 artifact，以及独立、不加载 tracer 的原生调用确认 21714 条指令与 `0x20a128f3d199a008`，当前候选一致。新版速率与单次大小门槛不变，旧格式仍可读，未知版本拒绝。原始采集在 `reference-baseline-v2/`，严格摘要随基线保存。
 
 首次通过历史比较后，timed-offset 暴露空 `.crash` 占位文件在列出后被 native 收尾删除的竞争条件。collector 现在仅跳过空占位与该绑定路径的精确 ENOENT；权限、异路径及已观察为非空的 marker 消失继续保留失败。红/绿回归与原失败报告均保留。修复后的完整门禁已通过：`b8e25dc5-5e33-48cf-b6e8-a71d13581fd9`，八个场景报告齐全，原 HEAD 与最终 Debug tracer SHA 绑定。门禁逐条执行记录在 `release-transcript-v2-fixed/`。
-固定 demo 包的原 APK 与用户 0 数据保留在 `release-gate/`、`release-gate-pixel6/`；旧 traces 原子备份路径保存在成功 manifest。Pixel 6 原 APK、原私有 tracer/companion 已核对恢复；Mi 11 原 APK 已恢复，并移除本轮新增且原先不存在的两个私有文件。两机 demo 均停止，`restore-{pixel6,mi11}/report.json` 与自有 server cleanup 均通过。未覆盖整个 userdata，历史 traces/证据继续保留；未卸载应用，也未触碰用户 11 数据。提交、合入及推送尚未执行。
+固定 demo 包的原 APK 与用户 0 数据保留在 `release-gate/`、`release-gate-pixel6/`；旧 traces 原子备份路径保存在成功 manifest。Pixel 6 原 APK、原私有 tracer/companion 已核对恢复；Mi 11 原 APK 已恢复，并移除本轮新增且原先不存在的两个私有文件。两机 demo 均停止，`restore-{pixel6,mi11}/report.json` 与自有 server cleanup 均通过。未覆盖整个 userdata，历史 traces/证据继续保留；未卸载应用，也未触碰用户 11 数据。实现已提交并本地合入 main，尚未推送；本次合入没有重跑设备操作。
 
 ## 可复制的新会话提示词
 
 ```text
 请先读取：
-/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/docs/superpowers/plans/2026-10-22-qbdi-ux-handoff.md
+/home/lyldalek/workspace/qbdi-android/docs/superpowers/plans/2026-10-22-qbdi-ux-handoff.md
 
-复核现有 cd7b / feat/qtrace-ux-handoff 交付，保留未提交实现、原资料及历史证据。
+handoff 已以 2bd271f1f360dc69e337ba8b3a57470f321b511c 本地合入 main；保留 cd7b 原始产物、6580 原资料及历史证据。
 剩余功能和可用 Java 栈快照已完成；新版发布基线保留原性能门槛，完整门禁已通过。
 成功 manifest：qtrace-acceptance-evidence/b8e25dc5-5e33-48cf-b6e8-a71d13581fd9/historical-benchmark-gate.success.json。
 先核对实施计划、最终 diff、机器证据及 restore-{pixel6,mi11}/report.json；不要重复实现已完成能力。
@@ -83,5 +86,6 @@ git rev-parse HEAD
 保留 stdout/JSON、未知返回、只读与 cleanup 契约；不自动重放可能完成的启动。
 样本补证见 docs/research/2026-10-22-umamusume-verification.md：CrackProof 公开指纹已复核，五种路径子串函数已离线验证，保留局部返回与完整流程之间的证据边界。
 厂商官方样本认证、实际分支命中/物理拒绝原因、上报及完整流程仍未知；旧 QBDI 差异原因也未由基线校准证明。
-提交、合入、推送和其他会话清理需另有明确请求。
+拒绝根因和远端上报是独立调查，从当前 main 建立研究分支；不要重复实现已完成的 handoff。
+尚未推送；其他项目改动、推送及清理需另有明确请求。
 ```
