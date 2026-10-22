@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Protocol
@@ -418,7 +419,9 @@ class Preflight:
             _fail(
                 ErrorCode.FRIDA_VERSION_MISMATCH,
                 "preflight.frida",
-                f"Frida host {host_version} does not match server {server_version}",
+                f"Frida host {host_version} does not match server {server_version}; "
+                f"qtrace Python: {sys.executable}. Use matching host/server versions; "
+                "see docs/usage.md#配置接口与前置诊断",
             )
 
         # Deployment is allowed only after every prerequisite succeeds. Bind only after

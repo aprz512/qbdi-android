@@ -146,6 +146,33 @@ def evaluate_probe(probe, observations, calls):
     checks["platform_register"] = bool(probe.get("baseline_x18")) and probe.get("baseline_x18") == probe.get("traced_x18")
     checks["real_thread_stack"] = probe.get("baseline_stack") == probe.get("traced_stack") == 1
     checks["attach_callback"] = probe.get("baseline_attach") == probe.get("traced_attach") == 42
+    diagnostics = probe.get("diagnostics", {})
+    from qtrace.diagnostics import validate_snapshot
+    available = diagnostics.get("available", {})
+    try:
+        validate_snapshot(available, probe["pid"], available.get("starttime"))
+        validate_snapshot(diagnostics.get("disabled"), probe["pid"], available.get("starttime"), include_java=False)
+        validate_snapshot(diagnostics.get("pending"), probe["pid"], available.get("starttime"))
+        valid_snapshot = True
+    except (KeyError, TypeError, ValueError):
+        valid_snapshot = False
+    except Exception:
+        valid_snapshot = False
+    checks["snapshot_schema"] = valid_snapshot
+    java = available.get("java", {})
+    checks["snapshot_java_stack"] = java.get("status") == "available" and any(
+        "org.qbdi.abi.JniAbiProbe.main" in frame
+        for row in java.get("rows", []) for frame in row.get("frames", []))
+    checks["snapshot_runtime_mappings"] = available.get("mappings", {}).get("status") == "available" and any(
+        row.get("classification") == "art_runtime_name_match" for row in available.get("mappings", {}).get("rows", []))
+    checks["snapshot_native_threads"] = any(row.get("tid") == probe.get("pid")
+        for row in available.get("nativeThreads", {}).get("rows", []))
+    checks["snapshot_identity_rejection"] = diagnostics.get("wrong_epoch") == {
+        "schema": 1, "ok": False, "reason": "process_identity_mismatch"}
+    checks["snapshot_transport_bounds"] = diagnostics.get("transport_bounds") is True
+    checks["snapshot_exception_errno_attachment"] = (
+        all(diagnostics.get(key) is True for key in ("exception_preserved", "errno_preserved", "attachment_preserved")) and
+        diagnostics.get("pending", {}).get("java", {}).get("reason") == "preexisting_java_exception")
     argument_calls = []
     pairing = True
     for artifact in calls:

@@ -1,0 +1,940 @@
+{
+  "collection_report": {
+    "bytes": 3487,
+    "path": "out/ux-remaining-20261022/reference-baseline-v2/report.json",
+    "sha256": "f36ad880ce3d6acbf5680e99bcc9adf905365cfcec929b80b2bacb48b35ecedd"
+  },
+  "device_identity": {
+    "abi": "arm64-v8a",
+    "android": "16",
+    "android_build_type": "user",
+    "app_build_type": "Debug",
+    "build_fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+    "build_type": "Debug",
+    "device": "oriole",
+    "model": "Pixel 6",
+    "package": "com.aprz.qbdiandroid",
+    "selinux": "Enforcing"
+  },
+  "native": {
+    "return": "0x20a128f3d199a008",
+    "status": "native_fallback"
+  },
+  "native_agent": {
+    "bytes": 866,
+    "path": "out/ux-remaining-20261022/reference-baseline-v2/native-reference.js",
+    "sha256": "87b9d6d1ec07ef5f02579211da65a5d2501e9d3ea4731e620b6df38a317fdbee"
+  },
+  "profiles": {
+    "balanced": {
+      "maximum_measured_compressed_bytes": 362328,
+      "measured_elapsed_ms": [
+        23,
+        27,
+        27,
+        28,
+        29
+      ],
+      "median_elapsed_ms": 27,
+      "median_instructions_per_second": "804222.222222",
+      "report": {
+        "bytes": 6732,
+        "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced.json",
+        "sha256": "e450b61c10e79fb1642694cbaf52a0c0fc7eb1278b861dfb4d40b0579d5dee88"
+      },
+      "runs": [
+        {
+          "artifact": {
+            "bytes": 362326,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661372074_27659_27672_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "38a4bacac7a0ab5982529901b3599c77de53e70bd1c22d918c3f4cc9ac163fd5"
+          },
+          "decoded": {
+            "bytes": 9053214,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661372074_27659_27672_benchmark_0x6e828_0.trace.txt",
+            "sha256": "cb432ee8266873fca0dd8c029920439c39496ea51f07c2ffb07fb4be639c77cf"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 362326,
+            "compression_ratio": "0.233345",
+            "disk_bytes_per_second": "18116300.000000",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 20,
+            "encoded_bytes": 1552743,
+            "encoded_bytes_per_second": "77637150.000000",
+            "instructions": 21714,
+            "instructions_per_second": "1085700.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 3555949,
+            "producer_waits": 1,
+            "profile": "balanced",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "warmup",
+          "sidecar": {
+            "bytes": 488,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661372074_27659_27672_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "0df9cfbe7a9de670fa6dcc922b0021ab06c56c377e725066ac45e95bd151139a"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 362321,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661373816_27719_27733_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "079493e4a027f52eccdb266dbc8a254c3d1cb22c611fec999d2eaabd6df6f776"
+          },
+          "decoded": {
+            "bytes": 9053215,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661373816_27719_27733_benchmark_0x6e828_0.trace.txt",
+            "sha256": "36787799cca75fb6e32eeb85fb5d16a6ab428a7a0a228242f10e7cd4423996fa"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 362321,
+            "compression_ratio": "0.233342",
+            "disk_bytes_per_second": "15753086.956521",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 23,
+            "encoded_bytes": 1552743,
+            "encoded_bytes_per_second": "67510565.217391",
+            "instructions": 21714,
+            "instructions_per_second": "944086.956521",
+            "metrics_version": 3,
+            "producer_wait_ns": 21336833,
+            "producer_waits": 1,
+            "profile": "balanced",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 488,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661373816_27719_27733_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "0733cad17e978269f78f2b241c0cc14d4057b30c90f42402a46f732af28c86e2"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 362322,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661375585_27790_27810_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "e7963cf5c31a45b9828bbbb7118da6d55a8c49e5218bf91c008c882a0f28019a"
+          },
+          "decoded": {
+            "bytes": 9053214,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661375585_27790_27810_benchmark_0x6e828_0.trace.txt",
+            "sha256": "2de7d17fd939995fe0a4d6ad1e6579176e2df2fd7adf410d4da21ae10e2c03a1"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 362322,
+            "compression_ratio": "0.233343",
+            "disk_bytes_per_second": "13419333.333333",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 27,
+            "encoded_bytes": 1552743,
+            "encoded_bytes_per_second": "57509000.000000",
+            "instructions": 21714,
+            "instructions_per_second": "804222.222222",
+            "metrics_version": 3,
+            "producer_wait_ns": 5031005,
+            "producer_waits": 1,
+            "profile": "balanced",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 487,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661375585_27790_27810_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "c422a7329380a9ec9a5f5f0aeb6a22c96c6f465a77d1c229017f86a9c6b22b38"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 362328,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661377326_27858_27871_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "6f525dcf9d6d0ceab908d9d36bf519c506ad238b3dc812479459edb32e641eb8"
+          },
+          "decoded": {
+            "bytes": 9053204,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661377326_27858_27871_benchmark_0x6e828_0.trace.txt",
+            "sha256": "f54048e91e418a0b138afd37428bb895e11b4b3cef92120aa7f9811dd3bca7e0"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 362328,
+            "compression_ratio": "0.233347",
+            "disk_bytes_per_second": "13419555.555555",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 27,
+            "encoded_bytes": 1552743,
+            "encoded_bytes_per_second": "57509000.000000",
+            "instructions": 21714,
+            "instructions_per_second": "804222.222222",
+            "metrics_version": 3,
+            "producer_wait_ns": 4511922,
+            "producer_waits": 1,
+            "profile": "balanced",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 487,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661377326_27858_27871_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "bacecfc5de4a9a4849eeb876579c5eef27c468b662e14f649f1f8ae437724cfd"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 362317,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661379190_27921_27934_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "9ddb0c9b938fb3037e017060db8cfab4fe6b327a6ad04a76f0ac4519c076406c"
+          },
+          "decoded": {
+            "bytes": 9053214,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661379190_27921_27934_benchmark_0x6e828_0.trace.txt",
+            "sha256": "3732b8b59993807c136c9f2709d578c1ce1883584cb1f5264cf8589c2c2d3239"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 362317,
+            "compression_ratio": "0.233339",
+            "disk_bytes_per_second": "12939892.857142",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 28,
+            "encoded_bytes": 1552743,
+            "encoded_bytes_per_second": "55455107.142857",
+            "instructions": 21714,
+            "instructions_per_second": "775500.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 7656820,
+            "producer_waits": 1,
+            "profile": "balanced",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 487,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661379190_27921_27934_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "1fe3cd68aa83edd2ab8e501b67a3940757d3f690a3089616b24100896ad8a840"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 362315,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661380928_27980_27994_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "4fbe8e17f0ba247a0d18a9459fedd00b7ca620e6791c348b2c95a003429a7d6e"
+          },
+          "decoded": {
+            "bytes": 9053214,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661380928_27980_27994_benchmark_0x6e828_0.trace.txt",
+            "sha256": "80f323f485b30d1bd73525fbacf6a616d377c32d48476b0fd18a00ff16f25d1e"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 362315,
+            "compression_ratio": "0.233338",
+            "disk_bytes_per_second": "12493620.689655",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 29,
+            "encoded_bytes": 1552743,
+            "encoded_bytes_per_second": "53542862.068965",
+            "instructions": 21714,
+            "instructions_per_second": "748758.620689",
+            "metrics_version": 3,
+            "producer_wait_ns": 6466187,
+            "producer_waits": 1,
+            "profile": "balanced",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 487,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/balanced/artifacts/1792661380928_27980_27994_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "02670908efee412f81a81a7178adb14f1c169eb49b462e5dc0a6430d40ac1f8a"
+          }
+        }
+      ]
+    },
+    "fast": {
+      "maximum_measured_compressed_bytes": 265881,
+      "measured_elapsed_ms": [
+        21,
+        21,
+        17,
+        20,
+        17
+      ],
+      "median_elapsed_ms": 20,
+      "median_instructions_per_second": "1085700.000000",
+      "report": {
+        "bytes": 6713,
+        "path": "out/ux-remaining-20261022/reference-baseline-v2/fast.json",
+        "sha256": "7e1a9ebb55f036ac86a030d0c83051fed6bc6e7723549826827dbd0440d20e4f"
+      },
+      "runs": [
+        {
+          "artifact": {
+            "bytes": 265881,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661362231_27262_27275_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "145f140b28cf3fecd7b82e98085f5efc171ad615ba3138ba34f6f273bf3bd7c5"
+          },
+          "decoded": {
+            "bytes": 6006180,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661362231_27262_27275_benchmark_0x6e828_0.trace.txt",
+            "sha256": "5d668f30f70406795a9a73776448d9e8438b4c0204d2c1a3429ed70387b3403b"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 265881,
+            "compression_ratio": "0.245461",
+            "disk_bytes_per_second": "12085500.000000",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 22,
+            "encoded_bytes": 1083187,
+            "encoded_bytes_per_second": "49235772.727272",
+            "instructions": 21714,
+            "instructions_per_second": "987000.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 4347819,
+            "producer_waits": 1,
+            "profile": "fast",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "warmup",
+          "sidecar": {
+            "bytes": 483,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661362231_27262_27275_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "aed41ee075ad368107fbd70eb3f2ce1406a5a1acc005cb09eba8198992361aef"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 265877,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661363835_27324_27337_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "5c8d274977624706a3bd8e5425b0f3213c76c5bc4df3df43ba5ebef6fafb5d35"
+          },
+          "decoded": {
+            "bytes": 6006180,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661363835_27324_27337_benchmark_0x6e828_0.trace.txt",
+            "sha256": "197377fe1a7a5242ca1824d7c7a84da596cad8b3a932fecd86e71ff74c1941ef"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 265877,
+            "compression_ratio": "0.245458",
+            "disk_bytes_per_second": "12660809.523809",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 21,
+            "encoded_bytes": 1083187,
+            "encoded_bytes_per_second": "51580333.333333",
+            "instructions": 21714,
+            "instructions_per_second": "1034000.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 3356160,
+            "producer_waits": 1,
+            "profile": "fast",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 484,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661363835_27324_27337_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "8bf1908b677993d80b87f0f996666065b02a0305433a8a83bf547dbb44f07caa"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 265881,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661365391_27384_27401_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "e2bf6e288cb7cda4f04c14ef43de33be6cdda8b438053311cc170666ff07478a"
+          },
+          "decoded": {
+            "bytes": 6006180,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661365391_27384_27401_benchmark_0x6e828_0.trace.txt",
+            "sha256": "764891c1fe175c8062281a147c3414f03099ef6786e92457eb857a6cf4c7a8b8"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 265881,
+            "compression_ratio": "0.245461",
+            "disk_bytes_per_second": "12661000.000000",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 21,
+            "encoded_bytes": 1083187,
+            "encoded_bytes_per_second": "51580333.333333",
+            "instructions": 21714,
+            "instructions_per_second": "1034000.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 3080119,
+            "producer_waits": 1,
+            "profile": "fast",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 484,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661365391_27384_27401_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "2f1fee73ccfff667badc246e4785446c187557164d2c725836a288711070e0b3"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 265876,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661366979_27451_27464_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "2bae33b734291c14d5dbaea832f9198081cdd0a7b1c3a2144b9ed85a7f516c48"
+          },
+          "decoded": {
+            "bytes": 6006180,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661366979_27451_27464_benchmark_0x6e828_0.trace.txt",
+            "sha256": "16c53e50d5f40c3d2a7d404258ca276b34194e596548154cee3b4578a496dc20"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 265876,
+            "compression_ratio": "0.245457",
+            "disk_bytes_per_second": "15639764.705882",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 17,
+            "encoded_bytes": 1083187,
+            "encoded_bytes_per_second": "63716882.352941",
+            "instructions": 21714,
+            "instructions_per_second": "1277294.117647",
+            "metrics_version": 3,
+            "producer_wait_ns": 4280314,
+            "producer_waits": 1,
+            "profile": "fast",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 484,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661366979_27451_27464_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "7521a4997db65751035e1fdd60ca999953310f61ec966d4adc59c7fcd33a5629"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 265877,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661368654_27513_27527_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "1c9eca1ed0d54b037e523c7671b5fd1c12c27469e3d150642a060dcc943fa791"
+          },
+          "decoded": {
+            "bytes": 6006180,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661368654_27513_27527_benchmark_0x6e828_0.trace.txt",
+            "sha256": "a9ef491d80485a967d83817b9cd7949e24bf519741552091d18f13d4c8c9cab9"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 265877,
+            "compression_ratio": "0.245458",
+            "disk_bytes_per_second": "13293850.000000",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 20,
+            "encoded_bytes": 1083187,
+            "encoded_bytes_per_second": "54159350.000000",
+            "instructions": 21714,
+            "instructions_per_second": "1085700.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 3760294,
+            "producer_waits": 1,
+            "profile": "fast",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 484,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661368654_27513_27527_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "005fec2b7a35b7f330b1fecfefd217d321ffd7d019ace22edaf7bf660f43e3fb"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 265876,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661370292_27587_27601_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "9abac26d71bc5b6202ddfd8ee97f5b2b200a0fe082a61625af8860de6edfac88"
+          },
+          "decoded": {
+            "bytes": 6006180,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661370292_27587_27601_benchmark_0x6e828_0.trace.txt",
+            "sha256": "2c472d660c2296374c32006f2556a3259942e88c85adc55ba491e24d41719241"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 265876,
+            "compression_ratio": "0.245457",
+            "disk_bytes_per_second": "15639764.705882",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 17,
+            "encoded_bytes": 1083187,
+            "encoded_bytes_per_second": "63716882.352941",
+            "instructions": 21714,
+            "instructions_per_second": "1277294.117647",
+            "metrics_version": 3,
+            "producer_wait_ns": 2850016,
+            "producer_waits": 1,
+            "profile": "fast",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 484,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/fast/artifacts/1792661370292_27587_27601_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "abc2c62ee7f99abac5c9e08c2327db22da2ceeb426ec34d86b5ddb60a93517e6"
+          }
+        }
+      ]
+    },
+    "full": {
+      "maximum_measured_compressed_bytes": 378432,
+      "measured_elapsed_ms": [
+        42,
+        42,
+        45,
+        44,
+        41
+      ],
+      "median_elapsed_ms": 42,
+      "median_instructions_per_second": "517000.000000",
+      "report": {
+        "bytes": 6701,
+        "path": "out/ux-remaining-20261022/reference-baseline-v2/full.json",
+        "sha256": "8bc3140353cab6a8ba2a3eb5cd91889f74c616e3dcb5180351f6a1e1e9daf771"
+      },
+      "runs": [
+        {
+          "artifact": {
+            "bytes": 378422,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661382733_28049_28065_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "7fb65397b9444826dabec4844632e1e0de24a30731d42c92d137481ef690947e"
+          },
+          "decoded": {
+            "bytes": 9074818,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661382733_28049_28065_benchmark_0x6e828_0.trace.txt",
+            "sha256": "da6fc82b09298e24ea17a6df9037aa68158d76a7e97ffb5706f5e1ebb6f6bcc8"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 378422,
+            "compression_ratio": "0.228118",
+            "disk_bytes_per_second": "8800511.627906",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 43,
+            "encoded_bytes": 1658887,
+            "encoded_bytes_per_second": "38578767.441860",
+            "instructions": 21714,
+            "instructions_per_second": "504976.744186",
+            "metrics_version": 3,
+            "producer_wait_ns": 4970906,
+            "producer_waits": 1,
+            "profile": "full",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "warmup",
+          "sidecar": {
+            "bytes": 482,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661382733_28049_28065_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "dec40774a31383e52e0c5d25b8f5e4dfe482dc5741ce7fbd7cb816b1e8158ff1"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 378424,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661384552_28123_28136_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "e9192ca043427f84498e60efdb6f3861a1b3cd7dcc6c13ba62f1f2bcd79d4f90"
+          },
+          "decoded": {
+            "bytes": 9074818,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661384552_28123_28136_benchmark_0x6e828_0.trace.txt",
+            "sha256": "44e9812352ab4fef4ebb0374a3b4fbfc863029d5355959c84f5d704f8b5c4a86"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 378424,
+            "compression_ratio": "0.228119",
+            "disk_bytes_per_second": "9010095.238095",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 42,
+            "encoded_bytes": 1658887,
+            "encoded_bytes_per_second": "39497309.523809",
+            "instructions": 21714,
+            "instructions_per_second": "517000.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 5036173,
+            "producer_waits": 1,
+            "profile": "full",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 482,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661384552_28123_28136_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "de017fe1edcc23ff7b191e06bdde715a92e22bee8f4babddafc3155348e4498d"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 378431,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661386217_28195_28214_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "9b44003b3166a50d84f30e4b04d8ada477b8064ce5e9c16960eb8dbc4c37f780"
+          },
+          "decoded": {
+            "bytes": 9074818,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661386217_28195_28214_benchmark_0x6e828_0.trace.txt",
+            "sha256": "07a8ee985a9435b6a26120c42aa91c1e406a5263f81080e508286c74f7062f54"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 378431,
+            "compression_ratio": "0.228123",
+            "disk_bytes_per_second": "9010261.904761",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 42,
+            "encoded_bytes": 1658887,
+            "encoded_bytes_per_second": "39497309.523809",
+            "instructions": 21714,
+            "instructions_per_second": "517000.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 5544881,
+            "producer_waits": 1,
+            "profile": "full",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 482,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661386217_28195_28214_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "7a487d58d93f6d5fb574019560d47111d0ce696cf21dbce1192a7aa14a3ce519"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 378425,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661387935_28264_28278_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "40de207946019200990822bb928519c8bb80964c4330519fc7cd6f251cbddd42"
+          },
+          "decoded": {
+            "bytes": 9074818,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661387935_28264_28278_benchmark_0x6e828_0.trace.txt",
+            "sha256": "a7d8e04c9e7d7222b9ad50a91feaf52751916f26415ffd53939a238b15adf737"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 378425,
+            "compression_ratio": "0.228119",
+            "disk_bytes_per_second": "8409444.444444",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 45,
+            "encoded_bytes": 1658887,
+            "encoded_bytes_per_second": "36864155.555555",
+            "instructions": 21714,
+            "instructions_per_second": "482533.333333",
+            "metrics_version": 3,
+            "producer_wait_ns": 5585775,
+            "producer_waits": 1,
+            "profile": "full",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 482,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661387935_28264_28278_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "9c37e835ade1076d9e7c2aaa04c4b0da355a47960802c890fef6e3462e470a5a"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 378430,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661389715_28326_28342_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "133d3833e3c4d7a88a1e798421b2a586da8d395bd56d2806d449198e77daea38"
+          },
+          "decoded": {
+            "bytes": 9074818,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661389715_28326_28342_benchmark_0x6e828_0.trace.txt",
+            "sha256": "728e03b3b9315f464ffc363f9d5ac7b3a4a0227c6e91ac770be115e697423257"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 378430,
+            "compression_ratio": "0.228122",
+            "disk_bytes_per_second": "8600681.818181",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 44,
+            "encoded_bytes": 1658887,
+            "encoded_bytes_per_second": "37701977.272727",
+            "instructions": 21714,
+            "instructions_per_second": "493500.000000",
+            "metrics_version": 3,
+            "producer_wait_ns": 4654663,
+            "producer_waits": 1,
+            "profile": "full",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 482,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661389715_28326_28342_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "3c99c68c58aa3fb8bdad607523f82e1892617246c1abcddeb11c5b6d3d4855c5"
+          }
+        },
+        {
+          "artifact": {
+            "bytes": 378432,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661391467_28389_28402_benchmark_0x6e828_0.trace.bin.lz4",
+            "sha256": "f6fcef239a5446eda3004339cfc60e7bcba68e62742c89e2deb9ad08c4f20ab7"
+          },
+          "decoded": {
+            "bytes": 9074818,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661391467_28389_28402_benchmark_0x6e828_0.trace.txt",
+            "sha256": "7ecc0483ea503eb43ea7f4310f5fdadf76d2ba2cb6aedf85c7433fde98e38df3"
+          },
+          "metrics": {
+            "buffer_swaps": 2,
+            "cache_collisions": 0,
+            "cache_hit_rate": "0.994980",
+            "cache_hits": 21605,
+            "cache_misses": 109,
+            "compressed_bytes": 378432,
+            "compression_ratio": "0.228124",
+            "disk_bytes_per_second": "9230048.780487",
+            "effective_buffer_bytes": 67108864,
+            "elapsed_ms": 41,
+            "encoded_bytes": 1658887,
+            "encoded_bytes_per_second": "40460658.536585",
+            "instructions": 21714,
+            "instructions_per_second": "529609.756097",
+            "metrics_version": 3,
+            "producer_wait_ns": 4633423,
+            "producer_waits": 1,
+            "profile": "full",
+            "return": "0x20a128f3d199a008",
+            "return_valid": 1,
+            "termination": "completed"
+          },
+          "oracle": {
+            "decoded_event_count": 21714,
+            "first_instruction": "1 libdemo_target.so+0x6e82c STRXui",
+            "last_instruction": "21714 libdemo_target.so+0x6ea28 RET"
+          },
+          "role": "measured",
+          "sidecar": {
+            "bytes": 482,
+            "path": "out/ux-remaining-20261022/reference-baseline-v2/full/artifacts/1792661391467_28389_28402_benchmark_0x6e828_0.trace.bin.lz4.metrics",
+            "sha256": "056ad0b37010253e4836a65c98ff38b42de62ac271785d9ad12fd2e6794113d3"
+          }
+        }
+      ]
+    }
+  },
+  "reference": {
+    "archive_sha256": "ee0e6fd97e7e0e61facf29222b13202d92bdba64d7fbd6eb336b46cc9c4f238b",
+    "associated_head": "eb79bcb2c37acb27affda4983ecb099e3ac5c497",
+    "companion_sha256": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd",
+    "historical_apk_sha256": "2eb3d9e50aad1a49986895f4cda322b4736e55c987e3c44be9c148770d3eb985",
+    "historical_commit": "2d6b1022a14ae554804a57e267544c12dea29353",
+    "preexisting_diff_sha256": "0d037c542feab0b487ad362bfe2934688361eaede83820e25116ae53baba5df6",
+    "target_canonical_sha256": "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169",
+    "target_raw_sha256": "6629d11aa68bafbcdf96353930271fd1d77fdd62dcb539123e134581d17a311b",
+    "tracer_sha256": "288b34e69557011ed0160b845cfa1538019691368af61a853e7d57a34c475ace"
+  },
+  "release_gate": "separate; this reference collection does not certify the candidate",
+  "schema_version": 2,
+  "serial": "1C111FDF600G6S",
+  "server_report": {
+    "bytes": 964,
+    "path": "out/ux-remaining-20261022/reference-server-v2/report.json",
+    "sha256": "286f58d8d0d3b754f644ad81cbb015db6e0285876b678cf5b83298f43640724c"
+  },
+  "source_budget": {
+    "bytes": 18209,
+    "path": "docs/benchmarks/binary-trace-baseline.md",
+    "sha256": "91dc77002b802b6c2dd1d3c1229292b4bf9a455e3c4acb52438c6a6a0a51d1ed"
+  },
+  "status": "reference_collected"
+}

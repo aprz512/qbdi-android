@@ -562,16 +562,36 @@ fn canonical_oracle_event(event: &Value, artifact: ArtifactDigest) -> Value {
             })
         }
         "signal" => {
-            let bytes = hex_bytes(raw);
-            let mut value = json!({"tid": tid, "number": le_u32(&bytes, 0) as i32});
-            for (key, field) in [
-                ("code", u64::from(le_u32(&bytes, 4))),
-                ("fault_address", le_u64(&bytes, 8)),
-                ("pc", le_u64(&bytes, 16)),
-            ] {
-                if field != 0 {
-                    value[key] = json!(field);
+            let mut value;
+            if raw.get("signal_number").is_some() {
+                value = json!({"tid":tid, "number":raw["signal_number"].as_u64().unwrap() as i32});
+                for key in ["pc", "sp", "fault_address", "flags"] {
+                    if raw[key].as_u64() != Some(0) {
+                        value[key] = raw[key].clone();
+                    }
                 }
+                let code = raw["signal_code"].as_u64().unwrap() as i32;
+                if code != 0 {
+                    value["code"] = json!(code);
+                }
+            } else {
+                let bytes = hex_bytes(raw);
+                value = json!({"tid": tid, "number": le_u32(&bytes, 0) as i32});
+                for (key, field) in [
+                    ("code", u64::from(le_u32(&bytes, 4))),
+                    ("fault_address", le_u64(&bytes, 8)),
+                    ("pc", le_u64(&bytes, 16)),
+                ] {
+                    if field != 0 {
+                        value[key] = json!(field);
+                    }
+                }
+            }
+            if raw["pc_source"]
+                .as_str()
+                .is_some_and(|source| source != "unknown")
+            {
+                value["pc_source"] = raw["pc_source"].clone();
             }
             value
         }
@@ -605,6 +625,12 @@ fn canonical_oracle_event(event: &Value, artifact: ArtifactDigest) -> Value {
             }
             if kind.ends_with("return") {
                 value["begin_sequence"] = raw["fault_address"].clone();
+            }
+            if raw["pc_source"]
+                .as_str()
+                .is_some_and(|source| source != "unknown")
+            {
+                value["pc_source"] = raw["pc_source"].clone();
             }
             value
         }
@@ -1134,6 +1160,9 @@ fn every_flight_fixture_matches_the_python_recovery_oracle() {
         "v2-stale-directory.bin",
         "native/flight-active.bin",
         "native/flight-sealed.bin",
+        "native/flight-syscall-details.bin",
+        "native/flight-signal-pc.bin",
+        "native/flight-syscall-details-v2.bin",
     ] {
         let expected = oracle(&fixture_path(name));
         let actual = collect(name);

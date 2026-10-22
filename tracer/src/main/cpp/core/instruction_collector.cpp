@@ -13,9 +13,13 @@
 
 #include <algorithm>
 #include <bit>
+#include <atomic>
+#include <cerrno>
 #include <cstdio>
 
 namespace {
+
+std::atomic<uint64_t> next_syscall_id{1};
 
 const QBDI::AnalysisType kRequiredAnalysis = static_cast<QBDI::AnalysisType>(
         QBDI::ANALYSIS_INSTRUCTION | QBDI::ANALYSIS_DISASSEMBLY |
@@ -63,12 +67,14 @@ InstructionCollector::InstructionCollector(InstructionCache *cache, TraceSink *w
           hexdump_limit_(options.hexdump_limit),
           decode_memory_(options.memory_enabled()),
           calls_only_(options.calls_only),
+          syscall_details_(options.syscall_details),
           resolver_(retained_module),
           pending_(this, trace != nullptr ? trace->module_base : 0),
           signal_broker_(signal_broker), signal_thread_(signal_thread) {}
 
 QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                                             QBDI::FPRState *fpr) {
+    if (syscall_id_ != 0) end_syscall(false, 0, "post_not_observed");
     if (trace_gate_ != nullptr && writer_ != nullptr) trace_gate_->observe_failure(writer_->failed());
 
     bool signal_pc_changed = false;
@@ -85,6 +91,8 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
     }
     if (signal_pc_changed) return QBDI::BREAK_TO_VM;
 
+    const uint64_t signal_epoch = syscall_details_ && signal_thread_ != nullptr
+                                          ? signal_thread_->observation_epoch() : 0;
     uint32_t opcode = 0;
     const bool svc = gpr != nullptr && (signal_thread_ != nullptr || calls_only_) &&
                      safe_read_memory(gpr->pc, &opcode, sizeof(opcode)) && is_arm64_svc(opcode);
@@ -107,6 +115,9 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
 
     if (calls_only_) {
         if (svc && tracing_before_rule && writer_ != nullptr) {
+            if (syscall_details_) {
+                begin_syscall(syscall, signal_epoch);
+            } else {
             char detail[512];
             std::snprintf(detail, sizeof(detail),
                 "{\"number\":%lld,\"pc\":\"0x%llx\",\"args\":[\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\"]}",
@@ -115,6 +126,7 @@ QBDI::VMAction InstructionCollector::on_pre(QBDI::VM *vm, QBDI::GPRState *gpr,
                 static_cast<unsigned long long>(syscall.args[2]), static_cast<unsigned long long>(syscall.args[3]),
                 static_cast<unsigned long long>(syscall.args[4]), static_cast<unsigned long long>(syscall.args[5]));
             (void)writer_->call("syscall-enter", "svc", detail);
+            }
         }
         if (code_rules_ == nullptr || code_rules_->empty()) return QBDI::CONTINUE;
     }
@@ -184,6 +196,15 @@ QBDI::VMAction InstructionCollector::on_memory(QBDI::VM *vm, QBDI::GPRState *gpr
 
 QBDI::VMAction InstructionCollector::on_post(QBDI::VM *vm, QBDI::GPRState *gpr,
                                              QBDI::FPRState *fpr) {
+    if (syscall_id_ != 0) {
+        const uint64_t raw = gpr != nullptr ? gpr->x0 : 0;
+        const bool signal = signal_thread_ == nullptr ||
+                            signal_thread_->observation_epoch() != syscall_signal_epoch_;
+        const bool pc_matches = gpr != nullptr && syscall_pending_.pc <= UINTPTR_MAX - 4 &&
+                                gpr->pc == syscall_pending_.pc + 4;
+        end_syscall(!signal && pc_matches, raw,
+                    signal ? "signal_intervened" : pc_matches ? "post_instruction" : "unexpected_pc");
+    }
     if (trace_gate_ != nullptr && writer_ != nullptr) trace_gate_->observe_failure(writer_->failed());
     CodeRuleContext rule_context(
             vm, gpr, fpr, &current_view_, trace_,
@@ -196,9 +217,37 @@ QBDI::VMAction InstructionCollector::on_post(QBDI::VM *vm, QBDI::GPRState *gpr,
 }
 
 void InstructionCollector::finish_last(const QBDI::GPRState &gpr) noexcept {
+    if (syscall_id_ != 0) end_syscall(false, 0, "capture_ended");
     if (trace_gate_ != nullptr && !trace_gate_->enabled()) return;
     if (!pending_.has_pending()) return;
     pending_.finish_last(snapshot(gpr, kTraceValidGprMask));
+}
+
+void InstructionCollector::begin_syscall(const Arm64SyscallSnapshot &call,
+                                         uint64_t signal_epoch) noexcept {
+    const int saved_errno = errno;
+    const uint64_t id = next_syscall_id.fetch_add(1, std::memory_order_relaxed);
+    char detail[4096];
+    const auto path = snapshot_syscall_paths(call, safe_read_memory);
+    if (id != 0 && id != UINT64_MAX &&
+        format_syscall_entry(call, id, path, detail, sizeof(detail)) &&
+        writer_->call("syscall-enter", "svc", detail)) {
+        syscall_id_ = id;
+        syscall_pending_ = call;
+        syscall_signal_epoch_ = signal_epoch;
+    }
+    errno = saved_errno;
+}
+
+void InstructionCollector::end_syscall(bool observed, uint64_t raw, const char *reason) noexcept {
+    const int saved_errno = errno;
+    char detail[512];
+    if (writer_ != nullptr && (trace_gate_ == nullptr || trace_gate_->enabled()) &&
+        format_syscall_return(syscall_pending_, syscall_id_, observed, raw, reason, detail, sizeof(detail), 2)) {
+        (void)writer_->call("syscall-return", "svc", detail);
+    }
+    syscall_id_ = 0;
+    errno = saved_errno;
 }
 
 QBDI::VMAction InstructionCollector::pre_callback(QBDI::VM *vm, QBDI::GPRState *gpr,

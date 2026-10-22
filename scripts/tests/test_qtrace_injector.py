@@ -821,6 +821,7 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertIn(("abort-original-process", 4242), harness.events)
         self.assertIn("inject.cleanup_incomplete", caught.exception.detail)
         self.assertLess(elapsed, setup_timeout + 0.1)
+        self.assertEqual(1, list(harness.events).count(("spawn", (PACKAGE,))))
 
     def test_process_exit_uses_spawned_pid_and_never_kills_after_resume(self):
         scenario = Scenario()
@@ -930,6 +931,7 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertIn("inject.cleanup_incomplete: spawned PID 4242", caught.exception.detail)
         self.assertEqual([], harness.adb.kill_calls)
         self.assertNotIn(("adb", ("am", "force-stop", PACKAGE)), harness.events[1:])
+        self.assertEqual(1, list(harness.events).count(("spawn", (PACKAGE,))))
 
     def test_attach_failure_records_unowned_spawn_without_guessing_pid_identity(self):
         scenario = Scenario()
@@ -941,6 +943,7 @@ class FridaInjectorTests(unittest.TestCase):
         self.assertIn("inject.cleanup_incomplete: spawned PID 4242", caught.exception.detail)
         self.assertEqual([], harness.adb.kill_calls)
         self.assertNotIn(("abort-original-process", 4242), harness.events)
+        self.assertEqual(1, list(harness.events).count(("spawn", (PACKAGE,))))
 
     def test_long_primary_error_cannot_truncate_cleanup_incomplete_evidence(self):
         scenario = Scenario()

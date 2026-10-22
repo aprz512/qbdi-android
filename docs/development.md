@@ -157,7 +157,10 @@ python3 scripts/qtrace_device_acceptance.py --device SERIAL
 该门禁先构建并持有本次候选 APK、tracer 和 companion，再从提交
 `2d6b1022a14ae554804a57e267544c12dea29353` 私有归档目标源码，以 `--offline` 在隔离目录
 构建历史 APK。第一阶段安装历史 APK，并用同一份候选 tracer 执行 binary benchmark
-`--compare`；第二阶段重新安装当前 APK、重新部署同一对 tracer/companion，等待最多 15 秒
+`--compare docs/benchmarks/binary-trace-baseline-v2.md`。新版基线通过同机原生调用与改动前
+保存的 tracer 校准正确性，沿用旧版全部速率和每次压缩大小门槛；旧版文档保留不变，仍可
+显式传给 benchmark 作历史核查，未知版本直接拒绝。第二阶段重新安装当前 APK、重新部署
+同一对 tracer/companion，等待最多 15 秒
 的无追踪 timed oracle，再完成 timed offset/symbol 和四种手动 pull，最后验证 monitor-exit
 与预期返回 2 的 flight-crash recovery。任一历史构建、身份或 benchmark 失败都属于发布门禁
 失败，绝不会回退为仅检查语义。

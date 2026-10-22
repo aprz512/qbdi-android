@@ -23,6 +23,7 @@ struct TraceOptions {
     size_t buffer_bytes = 0;
     size_t hexdump_limit = 32;
     bool calls_only = false;
+    bool syscall_details = false;
 
     bool memory_enabled() const { return !calls_only && profile != TraceProfile::Fast; }
     bool hexdump_enabled() const { return !calls_only && profile == TraceProfile::Full; }

@@ -2279,7 +2279,7 @@ def run_acceptance(device: str, directory: Path, *, runner: Runner,
             "--profile", "fast", "--runs", "5", "--candidate-tracer",
             str(pair.tracer.path), "--expected-installed-apk-sha256",
             historical.apk_sha256, "--compare",
-            "docs/benchmarks/binary-trace-baseline.md",
+            "docs/benchmarks/binary-trace-baseline-v2.md",
         ), timeout=900.0)
         state.phase = "install-current"
         _install_held_apk(device, runner, current)

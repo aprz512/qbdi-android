@@ -212,6 +212,36 @@ def core_records(tid: int, generation: int = 1, *, start: int = 1,
 
 
 class FlightRecoveryTests(unittest.TestCase):
+    def test_signal_pc_source_requires_matching_policy_in_same_thread_before_event(self):
+        policy = b'{"schema":1,"firstLevel":"qbdi_logical","nested":"kernel_ucontext","handlerReturn":"guest_handler_context"}'
+        for detail, kind, depth, expected in (
+                (policy, 11, 1, "qbdi_logical"), (policy, 12, 2, "kernel_ucontext"),
+                (policy, 13, 2, "guest_handler_context"), (policy, 11, 0, "unknown"),
+                (b'{}', 11, 1, "unknown"), (None, 11, 1, "unknown")):
+            with self.subTest(kind=kind, depth=depth, detail=detail):
+                records = core_records(77)
+                if detail is not None:
+                    records += [flight_record(6, 3, string_definition(1, b'qtrace.signal_pc'), flags=3),
+                                flight_record(6, 4, string_definition(2, detail), flags=3),
+                                flight_record(7, 5, struct.pack('<II', 1, 2))]
+                raw = artifact(directories=[directory_entry(77, 1, len(records), 0, 1)],
+                    chunks=[chunk(0, 77, 1, records)], emergencies=[emergency(kind, 77, 8, flags=depth)])
+                signals = [event for event in recover_flight(io.BytesIO(raw)).merged if event.kind.startswith('signal')]
+                self.assertEqual([expected], [event.data['pc_source'] for event in signals])
+
+    def test_signal_pc_policy_never_applies_to_another_tid_or_earlier_signal(self):
+        policy = b'{"schema":1,"firstLevel":"qbdi_logical","nested":"kernel_ucontext","handlerReturn":"guest_handler_context"}'
+        for signal_tid, first in ((78, 3), (77, 10)):
+            records = core_records(77) + [
+                flight_record(6, first, string_definition(1, b'qtrace.signal_pc'), flags=3),
+                flight_record(6, first+1, string_definition(2, policy), flags=3),
+                flight_record(7, first+2, struct.pack('<II', 1, 2))]
+            raw = artifact(directories=[directory_entry(77, 1, first+2, 0, 1),
+                                        directory_entry(78, 0, 0, 0xffffffff, 0)],
+                chunks=[chunk(0, 77, 1, records)], emergencies=[emergency(11, signal_tid, 8, flags=1)])
+            signals = [event for event in recover_flight(io.BytesIO(raw)).merged if event.kind == 'signal']
+            self.assertEqual(['unknown'], [event.data['pc_source'] for event in signals])
+
     def test_emergency_failure_flag_can_never_recover_as_complete(self):
         raw = artifact(
             directories=[directory_entry(77, 0, 0, 0xFFFFFFFF, 0)],

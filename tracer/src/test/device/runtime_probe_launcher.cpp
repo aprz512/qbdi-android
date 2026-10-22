@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <chrono>
 #include <cstdio>
@@ -42,19 +43,35 @@ static void *worker(void *opaque) {
             std::chrono::steady_clock::now() - started).count();
         json values = json::array();
         for (int index = 0; index < 16; ++index) values.push_back(uint64_t(input.values[index]));
-        work.results.push_back({{"return",value},{"values",values},{"observed_pid",input.observed_pid},
-                                {"wait_status",input.wait_status},{"elapsed_ns",elapsed}});
+        json syscalls = json::array();
+        for (uint32_t index = 0; index < input.syscall_count; ++index) {
+            const auto &row = input.syscalls[index];
+            char raw[32]; std::snprintf(raw,sizeof(raw),"0x%llx",static_cast<unsigned long long>(row.raw_return));
+            json args = json::array();
+            for (auto argument : row.args) {
+                char encoded[32]; std::snprintf(encoded,sizeof(encoded),"0x%llx",static_cast<unsigned long long>(argument));
+                args.push_back(encoded);
+            }
+            syscalls.push_back({{"name",row.name},{"number",row.number},{"raw_return",raw},{"args",args},
+                               {"errno_before",row.errno_before},{"errno_after",row.errno_after}});
+        }
+        work.results.push_back({{"return",value},{"tid",syscall(SYS_gettid)},{"values",values},{"observed_pid",input.observed_pid},
+                                {"wait_status",input.wait_status},{"elapsed_ns",elapsed},{"syscalls",syscalls},
+                                {"signal_count",input.signal_count},{"signal_order",input.signal_order}});
     }
     return reinterpret_cast<void *>(42);
 }
 
 static int phase(const std::string &directory, const std::string &package,
-                 const std::string &session, int scenario, const std::string &profile, bool flight, bool traced) {
+                 const std::string &session, int scenario, const std::string &profile, bool flight,
+                 bool traced, bool syscall_details) {
     alarm(20);
     const std::string label = traced ? "traced" : "baseline";
     void *target_library = dlopen((directory+"/libruntime_probe.so").c_str(), RTLD_NOW | RTLD_LOCAL);
     auto target = reinterpret_cast<RuntimeProbeTarget>(dlsym(target_library,"runtime_probe_target"));
     if (!target_library || !target) return 91;
+    const auto prepare = reinterpret_cast<int (*)(int)>(dlsym(target_library,"runtime_probe_prepare"));
+    if (!prepare || prepare(scenario) != 0) return 90;
     Configure configure = nullptr;
     Status status = nullptr;
     json configuration;
@@ -72,9 +89,11 @@ static int phase(const std::string &directory, const std::string &package,
             {"flight",{{"enabled",flight},{"followThreads",false},{"entryScene",flight?"runtime":""},{"capacityMb",64},{"chunkKb",256},{"maxThreads",4},{"protectedChunks",2}}},
             {"session",{{"id",session}}},
             {"scenes",json::array({{{"name","runtime"},{"location",{{"offset",offset}}}}})}};
-        if (scenario == 7) configuration["session"]["durationMs"] = 100;
+        if (scenario == 7 || scenario == 18) configuration["session"]["durationMs"] = 100;
         if (profile == "calls") configuration["trace"]["events"] = "calls";
+        if (syscall_details) configuration["trace"]["syscallDetails"] = true;
         const auto request = configuration.dump();
+        write(directory+"/configure-request.json",request);
         char response[65536]{}; uint64_t length = 0;
         const auto configured = configure(request.data(),request.size(),response,sizeof(response),&length);
         write(directory+"/configure-response.json",response);
@@ -97,9 +116,9 @@ static int phase(const std::string &directory, const std::string &package,
     pthread_t thread; void *joined = nullptr;
     pthread_t second; void *second_joined = nullptr;
     if (pthread_create(&thread,nullptr,worker,&work)) return 97;
-    if (scenario == 10 && pthread_create(&second,nullptr,worker,&concurrent)) return 97;
+    if ((scenario == 10 || scenario == 12) && pthread_create(&second,nullptr,worker,&concurrent)) return 97;
     if (pthread_join(thread,&joined)) return 97;
-    if (scenario == 10) {
+    if (scenario == 10 || scenario == 12) {
         if (pthread_join(second,&second_joined) || second_joined != reinterpret_cast<void *>(42)) return 97;
         for (auto &row : concurrent.results) work.results.push_back(std::move(row));
     }
@@ -118,11 +137,12 @@ static int phase(const std::string &directory, const std::string &package,
 }
 
 int main(int argc,char **argv) {
-    if (argc != 7) return 2;
+    if (argc != 7 && argc != 8) return 2;
     alarm(45);
     const std::string directory=argv[1], package=argv[2], session=argv[3], profile=argv[5];
     const int scenario=std::stoi(argv[4]);
     const bool flight=std::string(argv[6])=="1";
+    const bool syscall_details=argc == 8 && std::string(argv[7])=="1";
     json result = {{"scenario",scenario},{"profile",profile},{"flight",flight}};
     const std::string status_path="/data/user/0/"+package+"/files/qbdi-traces/session-"+session+".status.json";
     for (int traced=0; traced<2; ++traced) {
@@ -131,7 +151,7 @@ int main(int argc,char **argv) {
         if (child<0) return 3;
         if (child==0) {
             raise(SIGSTOP);
-            _exit(phase(directory,package,session,scenario,profile,flight,traced));
+            _exit(phase(directory,package,session,scenario,profile,flight,traced,syscall_details));
         }
         int wait_status=0;
         if (waitpid(child,&wait_status,WUNTRACED)!=child || !WIFSTOPPED(wait_status)) return 4;

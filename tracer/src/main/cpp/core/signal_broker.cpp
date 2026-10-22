@@ -391,16 +391,25 @@ bool SignalBrokerThreadState::initialize(
         uint32_t tid, FlightArtifact *artifact,
         const FlightThreadRegistration &registration,
         QBDI::GPRState *guest_gpr) noexcept {
-    if (guest_gpr == nullptr) return false;
-    if (attached_.load(std::memory_order_acquire) || tid == 0 || artifact == nullptr ||
+    if (artifact == nullptr ||
         !artifact->valid() || registration.tid != tid ||
         registration.directory_index == kFlightInvalidIndex) {
         return false;
     }
-    tid_ = tid;
+    if (!initialize_observation(tid, guest_gpr)) return false;
     artifact_ = artifact;
     registration_ = registration;
+    return true;
+}
+
+bool SignalBrokerThreadState::initialize_observation(
+        uint32_t tid, QBDI::GPRState *guest_gpr) noexcept {
+    if (guest_gpr == nullptr || tid == 0 || attached_.load(std::memory_order_acquire)) return false;
+    tid_ = tid;
+    artifact_ = nullptr;
+    registration_ = {};
     next_return_sequence_.store(1, std::memory_order_relaxed);
+    observation_epoch_.store(0, std::memory_order_relaxed);
     next_execution_epoch_.store(1, std::memory_order_relaxed);
     execution_epoch_.store(0, std::memory_order_relaxed);
     for (ReturnedSnapshot &snapshot : returned_snapshots_) {
@@ -1042,7 +1051,8 @@ bool SignalBroker::register_thread(SignalBrokerThreadState *thread) noexcept {
             return true;
         }
     }
-    thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+    if (thread->artifact_ != nullptr)
+        thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
     return false;
 }
 
@@ -1234,6 +1244,7 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
                                        &restore_mask, nullptr);
         return true;
     }
+    thread->observation_epoch_.fetch_add(1, std::memory_order_acq_rel);
     const uint32_t depth = thread->active_deliveries_.fetch_add(
                                    1, std::memory_order_acq_rel) +
                            1U;
@@ -1320,7 +1331,8 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
         return result;
     }
     if (!have_guest) {
-        thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+        if (thread->artifact_ != nullptr)
+            thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
         thread->active_deliveries_.fetch_sub(1, std::memory_order_release);
         return false;
     }
@@ -1452,7 +1464,8 @@ bool SignalBroker::dispatch(const SignalBrokerDelivery &delivery,
     if ((!stored || !queued) &&
         thread->execution_epoch_.load(std::memory_order_acquire) ==
                 execution_epoch) {
-        thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
+        if (thread->artifact_ != nullptr)
+            thread->artifact_->mark_incomplete(FlightIncompleteReason::EmergencyFailure);
     }
     (void)thread->publish(FlightRecordType::SignalHandlerReturn, guest.pc,
                           guest.sp, static_cast<uintptr_t>(begin_sequence),

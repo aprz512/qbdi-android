@@ -333,7 +333,7 @@ def _decode_instruction_definition(payload: bytes) -> tuple[int, _InstructionDef
 
 
 def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
-                           allow_partial: bool) -> _ConversionDetails:
+                           allow_partial: bool, on_call=None) -> _ConversionDetails:
     reader = _CountingReader(source)
     header = _read_exact(reader, STREAM_HEADER.size, "stream header")
     magic, major, minor, endian, pointer_width, profile_value, reserved, size, features = (
@@ -368,6 +368,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
     terminal: TraceTerminal | None = None
     pending_call: _PendingCall | None = None
     pending_event: _PendingEvent | None = None
+    record_ordinal = 0
 
     def emit(line: str) -> None:
         nonlocal text_bytes
@@ -375,10 +376,16 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
         output.write(rendered)
         text_bytes += len(rendered.encode("utf-8"))
 
+    def emit_call(category: str, name: str, detail: str) -> None:
+        emit(f"CALL category={_quoted(category)} name={_quoted(name)} detail={_quoted(detail)}")
+        if on_call is not None:
+            on_call(tid, record_ordinal, category, name, detail)
+
     while True:
         record_header = _read_optional_exact(reader, RECORD_HEADER.size, "record header")
         if record_header is None:
             break
+        record_ordinal += 1
         record_type, flags, payload_size = RECORD_HEADER.unpack(record_header)
         if payload_size > MAX_RECORD_PAYLOAD:
             raise BinaryTraceError("record payload exceeds protocol maximum")
@@ -529,10 +536,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
                 name = cursor.string(MAX_CALL_NAME, "CALL name")
                 detail = cursor.string(MAX_EVENT_DETAIL, "CALL detail")
                 cursor.finish()
-                emit(
-                    f"CALL category={_quoted(category)} name={_quoted(name)} "
-                    f"detail={_quoted(detail)}"
-                )
+                emit_call(category, name, detail)
             else:
                 event_id, total, index, count = cursor.unpack(CALL_CHUNK_FIXED)
                 category_raw = cursor.string_bytes(MAX_CALL_CATEGORY, "CALL category")
@@ -574,11 +578,7 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
                         logical_detail = bytes(pending_call.detail).decode("utf-8")
                     except UnicodeDecodeError as error:
                         raise BinaryTraceError("CALL detail is not valid UTF-8") from error
-                    emit(
-                        f"CALL category={_quoted(pending_call.category)} "
-                        f"name={_quoted(pending_call.name)} "
-                        f"detail={_quoted(logical_detail)}"
-                    )
+                    emit_call(pending_call.category, pending_call.name, logical_detail)
                     pending_call = None
         elif record_type in (7, 8) and flags == 0:
             cursor = _Payload(payload, "RULE" if record_type == 7 else "ERROR")
@@ -717,6 +717,6 @@ def _convert_binary_stream(source: BinaryIO, output: TextIO, *,
 
 
 def convert_binary_stream(source: BinaryIO, output: TextIO, *,
-                          allow_partial: bool = False) -> ConversionStats:
+                          allow_partial: bool = False, on_call=None) -> ConversionStats:
     """Validate and render one already-decompressed QTRB stream."""
-    return _convert_binary_stream(source, output, allow_partial=allow_partial).stats
+    return _convert_binary_stream(source, output, allow_partial=allow_partial, on_call=on_call).stats

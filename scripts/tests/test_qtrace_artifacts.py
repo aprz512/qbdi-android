@@ -117,6 +117,75 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(123, client.size(name, timeout=1.5))
         self.assertGreater(len(device.path), 128)
 
+    def _collect_with_crash_placeholder(self, behavior):
+        from scripts.bounded_process import BoundedProcessError
+
+        class BoundDevice:
+            serial = "SERIAL"
+            package = "com.example.app"
+            access_mode, root_strategy, target_strategy = "root", "direct", "run-as"
+            package_uid = 20000
+            trace_directory = "/data/user/0/com.example.app/files/qbdi-traces"
+
+            def missing(self, path, message="No such file or directory"):
+                failure = BoundedProcessError("subprocess failed (1)", returncode=1,
+                                              stderr=f"wc: {path}: {message}".encode())
+                raise QtraceError("process.failed", "process", str(failure)) from failure
+
+            def target_shell(self, *args, timeout, maximum_bytes):
+                if args[0] == "ls":
+                    return b"run.trace.txt\nrun.trace.txt.crash\n"
+                if args[0] == "wc":
+                    if args[-1].endswith(".crash"):
+                        if behavior == "empty":
+                            if getattr(self, "placeholder_sized", False):
+                                self.missing(args[-1])
+                            self.placeholder_sized = True
+                            return b"0\n"
+                        if behavior == "permission":
+                            self.missing(args[-1], "Permission denied")
+                        if behavior == "different_path":
+                            self.missing("/data/user/10/com.other.app/files/other.crash")
+                        if behavior == "similar_path":
+                            self.missing(args[-1] + ".other")
+                        if behavior == "nonempty_then_missing":
+                            return b"12\n"
+                        self.missing(args[-1])
+                    return str(len(COMPLETE_TERMINAL)).encode()
+                raise AssertionError(args)
+
+            def stream_target_file(self, path, output, *, timeout, maximum_bytes):
+                if path.endswith(".crash"):
+                    if behavior == "nonempty_then_missing":
+                        self.missing(path)
+                    if behavior == "empty":
+                        return
+                    self.missing(path)
+                output.write(COMPLETE_TERMINAL)
+
+        status = self._status(artifacts=["run.trace.txt"])
+        with tempfile.TemporaryDirectory() as root:
+            result = ArtifactProcessor().collect_session(
+                BoundDevice(), "com.example.app", status["sessionId"], status, Path(root), 1)
+            report = json.loads((result.output_dir / "report.json").read_text())
+        return result, report
+
+    def test_empty_or_unlinked_native_crash_placeholder_does_not_fail_collection(self):
+        for behavior in ("empty", "missing"):
+            with self.subTest(behavior=behavior):
+                result, report = self._collect_with_crash_placeholder(behavior)
+                self.assertEqual(0, result.exit_code)
+                self.assertEqual([], report["errors"])
+                self.assertFalse(any(row.get("remote_name", "").endswith(".crash")
+                                     for row in report["artifacts"]))
+
+    def test_crash_placeholder_handling_preserves_unrelated_errors_and_nonempty_evidence(self):
+        for behavior in ("permission", "different_path", "similar_path", "nonempty_then_missing"):
+            with self.subTest(behavior=behavior):
+                result, report = self._collect_with_crash_placeholder(behavior)
+                self.assertEqual(2, result.exit_code)
+                self.assertTrue(any(row["code"] == "process.failed" for row in report["errors"]))
+
     def test_default_client_rejects_package_mismatch_despite_legacy_client_capabilities(self):
         from qtrace.artifacts import _client_for
 

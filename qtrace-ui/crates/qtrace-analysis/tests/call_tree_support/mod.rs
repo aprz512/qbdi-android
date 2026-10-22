@@ -107,6 +107,7 @@ impl Spec {
                 sp: 0,
                 fault_address: 0,
                 flags: 0,
+                pc_source: qtrace_provider::SignalPcSource::Unknown,
                 depth: 1,
                 nested_delivery_count: 0,
                 begin_sequence: None,

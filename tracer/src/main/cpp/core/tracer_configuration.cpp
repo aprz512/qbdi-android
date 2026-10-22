@@ -341,7 +341,9 @@ bool parse_trace(const json &trace, TraceOptions *options, ConfigurationIssue *i
         return false;
     }
     if (!exact_keys(trace, {"profile", "compression", "lz4Level", "autoBuffer", "bufferMb",
-                            "hexdumpLimit", "events"}, issue, "$.trace")) return false;
+                            "hexdumpLimit", "events", "syscallDetails"}, issue, "$.trace")) return false;
+    if (trace.contains("syscallDetails") &&
+        !boolean_member(trace, "syscallDetails", &options->syscall_details, issue, "$.trace")) return false;
     if (trace.contains("events")) {
         std::string events;
         if (!string_member(trace, "events", &events, issue, "$.trace")) return false;
@@ -637,6 +639,11 @@ PreparedConfiguration prepare_tracer_configuration(std::string_view request) {
             PreparedConfiguration prepared;
             prepared.error = std::move(issue);
             return prepared;
+        }
+        if (config.trace.syscall_details &&
+            (!config.trace.calls_only || config.code_rules.enabled)) {
+            return reject("INVALID_TRACE_OPTIONS", "$.trace.syscallDetails",
+                          "syscallDetails requires calls and disabled codeRules");
         }
         const json *scenes = required_member(root, "scenes", &issue, "$");
         if (scenes == nullptr || !parse_scenes(*scenes, &config.scenes, &issue)) {

@@ -25,6 +25,7 @@ NATIVE = UI / "fixtures-native"
 sys.path.insert(0, str(ROOT))
 
 from scripts import flight_trace, trace_binary  # noqa: E402
+from scripts.syscall_evidence import pair_syscall_events, recover_qtrb_syscalls  # noqa: E402
 
 
 def run(arguments: list[str], **kwargs: object) -> None:
@@ -108,6 +109,13 @@ def finalize(directory: Path) -> dict[str, bytes]:
             "path": path.name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
             "format": format_name, "version": version, "producer": "production-cpp-encoder",
         })
+        if "syscall-details-v2" in path.name:
+            evidence = (recover_qtrb_syscalls(io.BytesIO(data)) if format_name == "QTRB" else
+                        pair_syscall_events(recovered.merged))
+            calls = evidence["calls"]
+            if (len(calls) != 2 or len(calls[0]["entry"]["paths"]) != 2 or
+                    calls[0]["return"]["rawReturn"] != "0x0" or calls[1]["return"] is not None):
+                raise ValueError(f"native syscall schema 2 semantics drift: {path.name}")
     (directory / "manifest.json").write_text(json.dumps({
         "generator_schema": 1, "fixtures": fixtures,
     }, sort_keys=True, indent=2) + "\n", encoding="utf-8")

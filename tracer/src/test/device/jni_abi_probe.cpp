@@ -6,6 +6,8 @@
 
 #include <cstdarg>
 #include <cstdint>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include "third_party/nlohmann/json.hpp"
@@ -15,6 +17,72 @@ namespace {
 using Configure = int (*)(const char *, uint64_t, char *, uint64_t, uint64_t *);
 using Status = int (*)(uint64_t, char *, uint64_t, uint64_t *);
 JavaVM *java_vm;
+
+json snapshot_probe(void *tracer, JNIEnv *env) {
+    auto snapshot = reinterpret_cast<Configure>(dlsym(tracer,"qbdi_tracer_snapshot_json"));
+    if (!snapshot) return {{"error","snapshot export missing"}};
+    char stat[4096]{};
+    FILE *source = std::fopen("/proc/self/stat","re");
+    if (!source) return {{"error","stat unavailable"}};
+    const bool read = std::fgets(stat,sizeof(stat),source) != nullptr;
+    std::fclose(source);
+    char *cursor = read ? std::strrchr(stat,')') : nullptr;
+    if (!cursor) return {{"error","stat invalid"}};
+    ++cursor;
+    std::string epoch;
+    for (unsigned index = 0; index <= 19; ++index) {
+        while (*cursor == ' ') ++cursor;
+        char *end = cursor;
+        while (*end && *end != ' ' && *end != '\n') ++end;
+        if (index == 19) epoch.assign(cursor,end);
+        cursor = end;
+    }
+    json request = {{"schema",1},{"expectedPid",getpid()},{"expectedStarttime",epoch},
+                    {"includeJava",true},{"maxThreads",32},{"maxFrames",32}};
+    bool preserved_errno = true;
+    const auto capture = [&](const json &value) {
+        const auto input = value.dump();
+        char output[65536]{}; uint64_t length = 0;
+        errno = 123;
+        const int code = snapshot(input.data(),input.size(),output,sizeof(output),&length);
+        preserved_errno &= errno == 123;
+        if (code || length < 2 || length > sizeof(output) || output[length-1])
+            return json{{"error","snapshot transport"},{"code",code},{"size",length}};
+        return json::parse(output,output+length-1);
+    };
+    json result;
+    result["available"] = capture(request);
+    request["includeJava"] = false;
+    result["disabled"] = capture(request);
+    request["includeJava"] = true;
+    request["expectedStarttime"] = "1";
+    result["wrong_epoch"] = capture(request);
+    request["expectedStarttime"] = epoch;
+    jclass exception = env->FindClass("java/lang/IllegalStateException");
+    env->ThrowNew(exception,"snapshot-existing-exception");
+    const auto before = env->ExceptionOccurred();
+    result["pending"] = capture(request);
+    const auto after = env->ExceptionOccurred();
+    env->ExceptionClear();
+    result["exception_preserved"] = before && after && env->IsSameObject(before,after);
+    env->DeleteLocalRef(before); env->DeleteLocalRef(after); env->DeleteLocalRef(exception);
+    JNIEnv *current = nullptr;
+    result["attachment_preserved"] = java_vm->GetEnv(reinterpret_cast<void **>(&current),JNI_VERSION_1_6) == JNI_OK && current == env;
+    result["errno_preserved"] = preserved_errno;
+    bool rejected = true;
+    for (const char *field : {"maxThreads","maxFrames","schema"}) {
+        auto invalid = request; invalid[field] = field == std::string("schema") ? json(true) : json(0);
+        const auto input = invalid.dump(); char output[32]; std::memset(output,'q',sizeof(output));
+        uint64_t length = 0;
+        rejected &= snapshot(input.data(),input.size(),output,sizeof(output),&length) == 2 && output[0] == 'q';
+    }
+    request["includeJava"] = false;
+    const auto input = request.dump(); char output[8]; std::memset(output,'q',sizeof(output)); uint64_t required = 0;
+    result["transport_bounds"] = rejected &&
+        snapshot(input.data(),input.size(),output,sizeof(output),&required) == 1 &&
+        required > sizeof(output) && required <= 65536 && output[0] == 'q';
+    return result;
+}
 
 __attribute__((noinline, optnone)) uintptr_t platform_register() {
     uintptr_t value;
@@ -328,6 +396,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_org_qbdi_abi_JniAbiProbe_run(
     char response[65536]{}; uint64_t length = 0;
     work.status(1, response, sizeof(response), &length);
     work.result["status"] = json::parse(response);
+    work.result["diagnostics"] = snapshot_probe(tracer,env);
     env->DeleteGlobalRef(work.type);
     env->DeleteGlobalRef(work.receivers.base);
     env->DeleteGlobalRef(work.receivers.derived);

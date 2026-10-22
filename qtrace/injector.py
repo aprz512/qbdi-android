@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import dataclasses
 import ipaddress
+import importlib.util
 import math
 import multiprocessing
 import re
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -73,6 +75,17 @@ class InjectionResult:
 class FridaProvider:
     """Lazy default provider; callers may inject a structural fake instead."""
 
+    @staticmethod
+    def check_host() -> None:
+        """Reject missing bindings without initializing Frida in the parent."""
+        if sys.modules.get("frida") is None and importlib.util.find_spec("frida") is None:
+            raise QtraceError(
+                "frida.python_missing", "preflight.frida",
+                f"Frida Python bindings are unavailable in {sys.executable}; "
+                "install frida into this interpreter or use a Frida-enabled Python. "
+                "See docs/usage.md#配置接口与前置诊断",
+            )
+
     def get_device(self, device: AdbDevice, timeout: float) -> object:
         try:
             import frida  # type: ignore[import-not-found]
@@ -80,7 +93,8 @@ class FridaProvider:
             raise QtraceError(
                 "frida.python_missing",
                 "inject.frida",
-                "Frida Python bindings are required for injection",
+                f"Frida Python bindings cannot be imported in {sys.executable}: {error}; "
+                "see docs/usage.md#配置接口与前置诊断",
             ) from error
         if (
             isinstance(timeout, bool)

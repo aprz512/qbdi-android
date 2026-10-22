@@ -88,6 +88,7 @@ add_library(qbdi_tracer SHARED
         tracer_entry.cpp
         core/module_maps.cpp
         core/arm64_syscall.cpp
+        core/diagnostics_snapshot.cpp
         core/signal_context_arm64.cpp
         core/signal_broker.cpp
         core/signal_probe.cpp
@@ -144,6 +145,7 @@ set_source_files_properties(
         tracer_entry.cpp
         core/tracer_configuration.cpp
         core/tracer_json_endpoint.cpp
+        core/diagnostics_snapshot.cpp
         PROPERTIES
         COMPILE_OPTIONS "-fexceptions")
 

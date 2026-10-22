@@ -17,6 +17,7 @@ from qtrace._artifact_common import (PulledArtifact, PullMode, PullSelection,
 from qtrace._artifact_publication import _open_output
 from qtrace.device import BoundTargetDevice
 from qtrace.errors import QtraceError
+from scripts.bounded_process import BoundedProcessError
 
 
 def _call(method: Any, *args: Any, timeout: float | None = None, **kwargs: Any) -> Any:
@@ -90,6 +91,16 @@ class _BoundDeviceClient:
             f"{self.directory}/{name}", output,
             timeout=timeout, maximum_bytes=_MAX_ARTIFACT_BYTES,
         )
+
+
+def _missing_bound_file(client: object, name: str, error: QtraceError) -> bool:
+    """Recognize only ENOENT for this adapter's exact bound remote file."""
+    failure = error.__cause__
+    if (not isinstance(client, _BoundDeviceClient) or error.code != "process.failed" or
+            not isinstance(failure, BoundedProcessError) or failure.returncode != 1):
+        return False
+    path = f"{client.directory}/{name}".encode("utf-8")
+    return failure.stderr.strip() == b"wc: " + path + b": No such file or directory"
 
 
 def pull_named_artifacts(client: object, package: str, names: Sequence[str], destination: Path,

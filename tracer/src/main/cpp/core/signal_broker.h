@@ -62,12 +62,16 @@ public:
     bool initialize(uint32_t tid, FlightArtifact *artifact,
                     const FlightThreadRegistration &registration,
                     QBDI::GPRState *guest_gpr) noexcept;
+    bool initialize_observation(uint32_t tid, QBDI::GPRState *guest_gpr) noexcept;
     uint64_t activate_execution(QBDI::GPRState *guest_gpr) noexcept;
     void deactivate_execution() noexcept;
     void observe_target_post(const QBDI::GPRState *guest_gpr,
                              uintptr_t return_address) noexcept;
 
     uint32_t tid() const noexcept { return tid_; }
+    uint64_t observation_epoch() const noexcept {
+        return observation_epoch_.load(std::memory_order_acquire);
+    }
 #if defined(QTRACE_HOST_TEST)
     bool test_load_guest(Arm64SignalContext *context) const noexcept {
         const uint64_t epoch = execution_epoch_.load(std::memory_order_acquire);
@@ -149,6 +153,7 @@ private:
     std::atomic<uint64_t> execution_epoch_{0};
     std::atomic<uint32_t> guest_snapshot_index_{0};
     std::atomic<uint32_t> active_deliveries_{0};
+    std::atomic<uint64_t> observation_epoch_{0};
     std::atomic<uint32_t> nested_deliveries_{0};
     std::atomic<bool> attached_{false};
     uint32_t tid_ = 0;

@@ -241,6 +241,8 @@ def _request_config(config: object) -> UserConfig:
     tracer = config.tracer
     if type(tracer.profile) is not str or tracer.profile not in {"fast", "balanced", "full"} or type(tracer.compression) is not bool or \
             type(tracer.events) is not str or tracer.events not in {"all", "calls"} or \
+            type(tracer.syscall_details) is not bool or \
+            (tracer.syscall_details and (tracer.events != "calls" or tracer.code_rules)) or \
             type(tracer.flight_enabled) is not bool or (tracer.library is None) != (tracer.companion is None) or \
             any(not host_path(item) for item in (
                 config.app.apk, config.target.binary, tracer.library, tracer.companion)):
@@ -335,6 +337,8 @@ def build_native_request(config: UserConfig, resolved: ResolvedTarget, session_i
     }
     if config.tracer.events != "all":
         native["trace"]["events"] = config.tracer.events
+    if config.tracer.syscall_details:
+        native["trace"]["syscallDetails"] = True
     if config.tracer.code_rules:
         native["codeRules"] = {"enabled": True, "sampleSha256": config.target.sha256}
     return native

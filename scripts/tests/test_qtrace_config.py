@@ -34,6 +34,24 @@ class DurationTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_syscall_details_is_opt_in_and_requires_read_only_calls(self):
+        payload=self.valid_payload()
+        self.assertFalse(load_config(self.write_json("default-details.json",payload)).tracer.syscall_details)
+        payload["tracer"]={"events":"calls","flightEnabled":True,"flightEntryScene":"one","syscallDetails":True}
+        self.assertTrue(load_config(self.write_json("details.json",payload)).tracer.syscall_details)
+        payload["tracer"]={"events":"calls","syscallDetails":True}
+        self.assertTrue(load_config(self.write_json("qtrb-details.json",payload)).tracer.syscall_details)
+        for replacement in ({"syscallDetails":1}, {"syscallDetails":True},
+                            {"flightEnabled":True,"flightEntryScene":"one","syscallDetails":True}):
+            payload["tracer"]=replacement
+            with self.subTest(replacement=replacement),self.assertRaises(ConfigError):
+                load_config(self.write_json("bad-details.json",payload))
+        payload["target"]["sha256"]="a"*64
+        payload["tracer"]={"events":"calls","flightEnabled":True,"flightEntryScene":"one",
+                           "syscallDetails":True,"codeRules":True}
+        with self.assertRaises(ConfigError):
+            load_config(self.write_json("rules-details.json",payload))
+
     def test_call_summary_mode_is_explicit_and_rejects_unknown_values(self):
         payload = self.valid_payload()
         payload["tracer"] = {"events": "calls"}

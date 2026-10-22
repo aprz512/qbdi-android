@@ -166,6 +166,15 @@ struct QbdiThreadSession::Impl {
               context(external_context), sink(external_sink), gate(external_gate),
               normal_writer(writer), stop_control(control),
               trace_options(source_config.trace) {
+        if (trace_options.syscall_details) {
+            signal_broker = &SignalBroker::process();
+            if (context == nullptr || !signal_broker->install() ||
+                !signal_thread.initialize_observation(static_cast<uint32_t>(context->tid), vm.getGPRState()) ||
+                !signal_broker->register_thread(&signal_thread)) return;
+            signal_registered = true;
+            signal_execution = {&signal_thread, activate_signal_execution,
+                                clear_signal_execution, observe_signal_target_post};
+        }
         initialize_collector();
     }
 
@@ -606,8 +615,13 @@ struct QbdiThreadSession::Impl {
             stop_control.committed(stop_control.opaque);
         }
         if (flight && trace_options.calls_only && !flight_sink.rule(
-                "qtrace.capture", "{\"events\":\"calls\",\"instructions\":false,\"memory\":false,\"syscalls\":\"entry\"}"))
+                "qtrace.capture", trace_options.syscall_details
+                    ? "{\"events\":\"calls\",\"instructions\":false,\"memory\":false,\"syscalls\":\"entry_and_return\",\"detailSchema\":2,\"maxPaths\":2,\"pathBytes\":128}"
+                    : "{\"events\":\"calls\",\"instructions\":false,\"memory\":false,\"syscalls\":\"entry\"}"))
             return fail_setup("flight call summary initialization failed");
+        if (flight && !flight_sink.rule("qtrace.signal_pc",
+                "{\"schema\":1,\"firstLevel\":\"qbdi_logical\",\"nested\":\"kernel_ucontext\",\"handlerReturn\":\"guest_handler_context\"}"))
+            return fail_setup("signal PC policy initialization failed");
         if (flight &&
             needs_thread_begin_publication(thread_lifecycle_pending,
                                            thread_lifecycle_published) &&
@@ -621,6 +635,10 @@ struct QbdiThreadSession::Impl {
                 code_rules.requires_immediate_post()};
         if (!register_qbdi_callbacks(registration_callbacks)) {
             return fail_setup("QBDI callback registration failed");
+        }
+        if (trace_options.syscall_details &&
+            vm.addMnemonicCB("SVC", QBDI::POSTINST, on_target_post, this) == QBDI::INVALID_EVENTID) {
+            return fail_setup("syscall POSTINST callback registration failed");
         }
         if (trace_options.memory_enabled()) {
             const bool recording =

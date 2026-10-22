@@ -238,6 +238,24 @@ pub struct Signal {
     pub fault_address: u64,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub flags: u32,
+    #[serde(default, skip_serializing_if = "SignalPcSource::is_unknown")]
+    pub pc_source: SignalPcSource,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalPcSource {
+    #[default]
+    Unknown,
+    QbdiLogical,
+    KernelUcontext,
+    GuestHandlerContext,
+}
+
+impl SignalPcSource {
+    pub fn is_unknown(&self) -> bool {
+        *self == Self::Unknown
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -263,6 +281,8 @@ pub struct SignalHandlerBoundary {
     pub fault_address: u64,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub flags: u32,
+    #[serde(default, skip_serializing_if = "SignalPcSource::is_unknown")]
+    pub pc_source: SignalPcSource,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub depth: u16,
     #[serde(default, skip_serializing_if = "is_zero_u16")]

@@ -98,8 +98,14 @@ public final class JniAbiProbe {
 
     private static native String run(String directory, String packageName, String session);
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws InterruptedException {
         System.load(args[0] + "/libjni_abi_probe.so");
         System.out.println("QTRACE_ABI_RESULT " + run(args[0], args[1], args[2]));
+        // Explicit fixture hold for the independent CLI snapshot check.
+        if (args.length == 4) {
+            int milliseconds = Integer.parseInt(args[3]);
+            if (milliseconds < 0 || milliseconds > 30000) throw new IllegalArgumentException("hold exceeds 30 seconds");
+            Thread.sleep(milliseconds);
+        }
     }
 }

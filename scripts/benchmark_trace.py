@@ -89,6 +89,15 @@ PROFILE_RATE_TARGETS = {
     "balanced": Decimal(800_000),
     "full": Decimal(500_000),
 }
+# These remain the immutable format-2 per-artifact budgets. A corrected
+# execution oracle must not silently reset the performance limits.
+PROFILE_COMPRESSED_LIMITS = {"fast": 307925, "balanced": 365877, "full": 429199}
+VERSION_TWO_BASELINE_HEADING = "## Version-2 correctness and performance gates"
+VERSION_TWO_BASELINE_COLUMNS = (
+    "Profile", "Instructions", "Return", "Decoded event count",
+    "First sequence", "Last sequence", "Maximum compressed bytes",
+    "Minimum instructions/s",
+)
 
 
 def require_binary_acceptance_candidate(run: dict[str, int | Decimal | str]) -> None:
@@ -210,7 +219,8 @@ def compare_to_profile_baseline(
         if str(current.get(key, "")).lower() != str(baseline.get(key, "")).lower():
             raise ValueError(f"format-2 oracle mismatch for {key}")
     for run in measured:
-        for key in ("decoded_event_count", "first_instruction", "last_instruction"):
+        for key in ("instructions", "return", "decoded_event_count",
+                    "first_instruction", "last_instruction"):
             if str(run.get(key, "")).lower() != str(baseline.get(key, "")).lower():
                 raise ValueError(f"format-2 oracle mismatch for {key}")
     rate = Decimal(current["instructions_per_second"])
@@ -390,14 +400,89 @@ def parse_baseline_document(document: str) -> dict[str, str]:
 
 
 def parse_profile_baseline(document: str, profile: str) -> dict[str, int | str]:
-    """Return one validated profile row from the current format-2 Markdown baseline."""
+    """Read an explicitly versioned baseline or the immutable format-2 table."""
     if profile not in FORMAT_TWO_PROFILES:
         raise ValueError(f"unknown profile: {profile}")
+    if baseline_schema(document) == 2:
+        return _version_two_baseline_rows(document)[profile]
     rows = _format_two_baseline_rows(document)
     for row in rows:
         if row["profile"] == profile:
             return row
     raise ValueError(f"baseline table has no {profile} profile")
+
+
+def baseline_schema(document: str) -> int:
+    values = re.findall(r"^\| Baseline schema \|\s*(.*?)\s*\|$", document, re.MULTILINE)
+    if not values:
+        if VERSION_TWO_BASELINE_HEADING in document:
+            raise ValueError("version-2 baseline has no Baseline schema")
+        return 1
+    if values != ["2"]:
+        raise ValueError("unsupported or duplicate Baseline schema")
+    return 2
+
+
+def _version_two_baseline_rows(document: str) -> dict[str, dict[str, int | str]]:
+    if document.count(VERSION_TWO_BASELINE_HEADING) != 1:
+        raise ValueError("version-2 baseline has no unique gate table")
+    parse_baseline_document(document)
+    for label, pattern in (
+        ("Reference evidence SHA-256", r"[0-9a-f]{64}"),
+        ("Reference source HEAD", r"[0-9a-f]{40}"),
+        ("Historical size budget source SHA-256", r"[0-9a-f]{64}"),
+        ("Native return", r"0x[0-9a-f]{1,16}"),
+        ("Warmups per profile", "1"),
+        ("Measured runs per profile", "5"),
+    ):
+        values = re.findall(rf"^\| {re.escape(label)} \|\s*(.*?)\s*\|$", document, re.MULTILINE)
+        if len(values) != 1 or re.fullmatch(pattern, values[0]) is None:
+            raise ValueError(f"version-2 baseline has invalid {label}")
+    native_return = re.search(r"^\| Native return \|\s*(.*?)\s*\|$", document, re.MULTILINE).group(1)
+    table_lines = []
+    for line in document.split(VERSION_TWO_BASELINE_HEADING, 1)[1].splitlines():
+        if line.startswith("#"):
+            break
+        if line.startswith("|"):
+            table_lines.append(line)
+    if len(table_lines) != 5:
+        raise ValueError("version-2 baseline requires exactly three profile rows")
+    if tuple(_baseline_markdown_cells(table_lines[0])) != VERSION_TWO_BASELINE_COLUMNS:
+        raise ValueError("version-2 baseline table has missing columns")
+    separator = _baseline_markdown_cells(table_lines[1])
+    if (len(separator) != len(VERSION_TWO_BASELINE_COLUMNS) or
+            any(re.fullmatch(r":?-{3,}:?", cell) is None for cell in separator)):
+        raise ValueError("version-2 baseline table has invalid column separator")
+    rows: dict[str, dict[str, int | str]] = {}
+    for line in table_lines[2:]:
+        cells = _baseline_markdown_cells(line)
+        if len(cells) != len(VERSION_TWO_BASELINE_COLUMNS):
+            raise ValueError("version-2 baseline table row has missing columns")
+        profile, instructions, returned, count, first, last, compressed, rate = cells
+        if profile not in FORMAT_TWO_PROFILES or profile in rows:
+            raise ValueError("version-2 baseline has unknown or duplicate profile")
+        if any(re.fullmatch(r"[1-9][0-9]*", value) is None
+               for value in (instructions, count, compressed, rate)):
+            raise ValueError("version-2 baseline has invalid positive integer")
+        if (int(compressed) != PROFILE_COMPRESSED_LIMITS[profile] or
+                Decimal(rate) != PROFILE_RATE_TARGETS[profile]):
+            raise ValueError("version-2 baseline must retain historical performance limits")
+        if (returned != native_return or instructions != count or
+                re.fullmatch(r"1 libdemo_target\.so\+0x[0-9a-f]+ [A-Za-z0-9_]+", first) is None or
+                re.fullmatch(rf"{count} libdemo_target\.so\+0x[0-9a-f]+ RET", last) is None):
+            raise ValueError("version-2 baseline has inconsistent native/sequence oracle")
+        rows[profile] = {
+            "profile": profile, "instructions": int(instructions), "return": returned,
+            "decoded_event_count": int(count), "first_instruction": first,
+            "last_instruction": last, "compressed_bytes": int(compressed),
+        }
+    if set(rows) != set(FORMAT_TWO_PROFILES):
+        raise ValueError("version-2 baseline has missing profiles")
+    semantic_keys = ("instructions", "return", "decoded_event_count", "first_instruction", "last_instruction")
+    if any(rows[profile][key] != rows["fast"][key]
+           for profile in FORMAT_TWO_PROFILES for key in semantic_keys):
+        raise ValueError("version-2 baseline profiles have different semantic oracles")
+    return rows
 
 
 def ensure_same_device(
@@ -1514,7 +1599,8 @@ def main() -> int:
                 re.fullmatch(r"[0-9a-f]{64}", args.expected_installed_apk_sha256) is None):
             raise ValueError("--expected-installed-apk-sha256 must be one lowercase 64-hex value")
         baseline_document = Path(args.compare).read_text(encoding="utf-8")
-        if "## Current format-2 artifact baselines" in baseline_document:
+        schema = baseline_schema(baseline_document)
+        if schema == 2 or "## Current format-2 artifact baselines" in baseline_document:
             profile_baseline = parse_profile_baseline(baseline_document, args.profile)
             baseline_identity = parse_baseline_document(baseline_document)
             identity = live_device_identity(args)
@@ -1538,6 +1624,9 @@ def main() -> int:
     stable_return = ensure_stable_return([str(warmup["return"]), *[str(run["return"]) for run in runs]])
     report = median_report(runs)
     report["return"] = stable_return
+    if args.compare:
+        report["baseline_schema"] = schema
+        report["baseline_document_sha256"] = hashlib.sha256(baseline_document.encode("utf-8")).hexdigest()
     if candidate_tracer_sha256 is not None:
         report["candidate_tracer_sha256"] = candidate_tracer_sha256
     if baseline_candidate_tracer_sha256 is not None:

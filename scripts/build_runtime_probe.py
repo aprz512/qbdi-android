@@ -21,12 +21,14 @@ def main():
                     "-o", str(args.output / "libruntime_probe.so")], check=True)
     subprocess.run([*common, "-fPIE", "-pie", "-I", str(ROOT / "tracer/src/main/cpp"),
                     str(source / "runtime_probe_launcher.cpp"), "-ldl", "-o", str(args.output / "runtime_probe")], check=True)
+    subprocess.run([*common, "-fPIE", "-pie", "-I", str(ROOT / "tracer/src/main/cpp"),
+                    str(source / "snapshot_native_probe.cpp"), "-ldl", "-o", str(args.output / "snapshot_native_probe")], check=True)
     def digest(path):
         with path.open("rb") as stream:
             return hashlib.file_digest(stream,"sha256").hexdigest()
     identity = {"compiler":str(compiler),"abi":"arm64-v8a","api":28,
-                "sources":{name:digest(source/name) for name in ("runtime_probe.h","runtime_probe_target.cpp","runtime_probe_launcher.cpp")},
-                "artifacts":{name:digest(args.output/name) for name in ("runtime_probe","libruntime_probe.so")}}
+                "sources":{name:digest(source/name) for name in ("runtime_probe.h","runtime_probe_target.cpp","runtime_probe_launcher.cpp","snapshot_native_probe.cpp")},
+                "artifacts":{name:digest(args.output/name) for name in ("runtime_probe","libruntime_probe.so","snapshot_native_probe")}}
     (args.output / "build-identity.json").write_text(json.dumps(identity,indent=2)+"\n")
 
 

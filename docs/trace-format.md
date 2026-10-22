@@ -340,7 +340,60 @@ old unprotected chunks is expected and represented as sequence ranges rather tha
 Optional `trace.events: "calls"` suppresses instruction, memory and per-instruction register
 delta events while retaining semantic transfers, target `svc` entry summaries, chunk checkpoints
 and scene metadata. `RULE qtrace.capture` describes that selection. It does not claim whole-process
-call or syscall coverage, nor syscall return observations.
+call or syscall coverage. By default it contains no syscall return observations.
+
+### Optional syscall detail evidence
+
+`trace.syscallDetails: true` requires calls mode and disabled CodeRules, for Flight or QTRB.
+It changes only the JSON detail of existing semantic CALL records; it adds no QTRB/Flight
+record type or wire version. Generic Python and Rust readers preserve detail as a string.
+The default legacy `syscall-enter` detail remains unchanged when this option is omitted/false.
+These semantic records are separate from Flight's dedicated
+Syscall record and its existing signal/termination semantics.
+
+Both categories use name `svc`. The current producer writes exact schema-2 detail keys:
+
+| Category | JSON detail |
+| --- | --- |
+| `syscall-enter` | `schema:2`, positive process invocation `id`, signed arm64 `number`, logical SVC `pc`, six hexadecimal `args`, `paths` (0..2 entries) |
+| `syscall-return` | `schema:2`, matching `id/number/pc`, boolean `observed`, `rawReturn`, `linuxErrorNumber`, `reason` |
+
+`id` is a nonzero u64. Pair identity is `(artifact, TID, id)`, with matching number/PC
+and a strictly later sequence (Flight global sequence, QTRB physical record ordinal).
+Schemas must also match. Do not pair across artifacts or infer identity from
+the most recent syscall/scene. A return may be overwritten independently of its entry.
+`scripts/syscall_evidence.py` validates exact keys/types/ranges and rejects duplicate or
+ambiguous pairs; legacy entries and orphan returns are counted separately. Its default
+entry bound is 4096. See the [usage example](syscall-details.md#离线配对).
+
+Each schema-2 path has exact keys `argument` (0..5), hexadecimal `address` equal to
+`args[argument]`, `status`, `limit:128`, lowercase `bytesHex`, and `display`.
+Arguments must be unique within a call. Supported syscall selectors are listed in the
+[usage guide](syscall-details.md#路径与返回的含义). NUL is observed but
+excluded from the byte payload. `complete` has 0..127 bytes and an observed terminator;
+`unreadable` has zero bytes; `partial` has 1..127 bytes before a failed read;
+`truncated` has exactly 128 bytes without an observed terminator. Display preserves printable
+ASCII and escapes each other byte as literal `\xNN`; raw bytes remain authoritative.
+Schema 1 remains readable: it has singular `path`, present only for openat (56),
+argument 1; other syscall numbers require `path:null`. Schema 2 uses `paths:[]` for no
+supported selector. The strict helper caps a detail at 4096 UTF-8 bytes.
+The snapshot does not prove which bytes the kernel
+later reads under concurrent mutation.
+
+An observed return has `reason:"post_instruction"` and hexadecimal u64 `rawReturn`, sampled
+at the corresponding SVC POSTINST with logical PC equal to SVC PC + 4. A broker signal epoch
+change invalidates this observation. For raw values representing -4095..-1,
+`linuxErrorNumber` is the positive error number; otherwise it is null. It is not libc errno.
+Unobserved returns have both values null and reason `signal_intervened`, `unexpected_pc`,
+`post_not_observed`, or `capture_ended`. An absent return record also stays unknown.
+Broker epochs cover only observed signals, not arbitrary bypassed delivery/restarts; an
+observed x0 does not establish unique kernel execution cause. Broker/termination handling
+can consume an SVC before this optional CALL observation. No whole-process coverage is implied.
+Stop is cooperative: a blocking SVC's POST may precede the next PRE which observes the stop.
+Its observed return and a stopped scene with unknown target return are consistent evidence.
+Asynchronous QTRB buffers are not a crash-durability promise for an unflushed entry or footer.
+
+### Scene and signal evidence
 
 `RULE qtrace.scene` has JSON fields `schema` (1), `id` (positive invocation number within the
 thread session), `phase` (`enter`, `return` or `capture_stopped`), `address` (hexadecimal logical
@@ -357,6 +410,19 @@ records delimit that untraced interval and returned GPR changes are applied befo
 resumes. Direct `tkill`, `tgkill`, `exit`, and `exit_group` paths publish evidence without relying
 on libc hooks. `SIGKILL` cannot be brokered; only a target-issued pre-syscall termination intent is
 available for that case.
+
+New producers emit a per-thread `RULE qtrace.signal_pc` with the exact detail
+`{"schema":1,"firstLevel":"qbdi_logical","nested":"kernel_ucontext","handlerReturn":"guest_handler_context"}`.
+After that rule, Python/Rust readers annotate signal and handler events with `pc_source`:
+first-level observations/begins use `qbdi_logical`, nested observations/begins use
+`kernel_ucontext`, and handler returns use `guest_handler_context`. Existing flag bits
+remain depth/nested-delivery counts; the emergency layout is unchanged. Missing, overwritten,
+unsupported or later policy, and zero depth, retain `unknown` (Rust omits this default in JSON).
+The policy applies only to its own TID and sequence range. A kernel ucontext can describe
+runtime execution; neither that source nor a logical PC establishes a fault's root cause.
+
+Optional runtime/JIT mappings and Java stacks use a separate, actively requested JSON ABI,
+not signal records. See [runtime snapshots](runtime-snapshot.md).
 
 Pull and recover the newest or an explicit flight artifact without installing LZ4:
 

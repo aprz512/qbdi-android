@@ -289,6 +289,7 @@ fn every_valid_fixture_matches_the_python_oracle_exactly() {
         "v1.2-stopped.bin",
         "native/qtrb-completed.bin",
         "native/qtrb-stopped.bin",
+        "native/qtrb-syscall-details-v2.bin",
     ] {
         let path = fixture_path(name);
         let bytes = std::fs::read(&path).unwrap();

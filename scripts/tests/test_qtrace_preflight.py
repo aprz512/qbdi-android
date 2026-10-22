@@ -1,5 +1,6 @@
 import math
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -390,6 +391,9 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(code, caught.exception.code)
             self.assertNotIn("\n", str(caught.exception))
             self.assertFalse(any(event[0] == "bind" for event in device.events))
+            if code == ErrorCode.FRIDA_VERSION_MISMATCH.value:
+                for expected in ("16.3.3", "16.3.4", sys.executable, "docs/usage.md"):
+                    self.assertIn(expected, caught.exception.detail)
 
     def test_rejects_nonfinite_time_budgets_before_side_effects(self):
         selector = FakeSelector(FakeDevice())

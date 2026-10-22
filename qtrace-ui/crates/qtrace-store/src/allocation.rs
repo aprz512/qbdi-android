@@ -882,6 +882,8 @@ pub(crate) mod tests {
                 sp: 5,
                 fault_address: 6,
                 flags: 7,
+
+                pc_source: qtrace_provider::SignalPcSource::Unknown,
             }),
             EventPayload::SignalHandlerBoundary(SignalHandlerBoundary {
                 tid: 1,
@@ -892,6 +894,7 @@ pub(crate) mod tests {
                 sp: 5,
                 fault_address: 6,
                 flags: 7,
+                pc_source: qtrace_provider::SignalPcSource::Unknown,
                 depth: 8,
                 nested_delivery_count: 9,
                 begin_sequence: Some(10),

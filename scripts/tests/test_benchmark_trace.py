@@ -55,6 +55,105 @@ from scripts.benchmark_trace import (
 )
 
 
+class VersionedBaselineTests(unittest.TestCase):
+    def document(self):
+        legacy = Path("docs/benchmarks/binary-trace-baseline.md").read_text(encoding="utf-8")
+        identity = legacy.split("## Device and build identity", 1)[1].split(
+            "The raw target SHA-256", 1)[0]
+        metadata = (
+            "| Baseline schema | 2 |\n"
+            f"| Reference evidence SHA-256 | {'a' * 64} |\n"
+            f"| Reference source HEAD | {'b' * 40} |\n"
+            f"| Historical size budget source SHA-256 | {'c' * 64} |\n"
+            "| Native return | 0x20a128f3d199a008 |\n"
+            "| Warmups per profile | 1 |\n"
+            "| Measured runs per profile | 5 |\n"
+        )
+        columns = "| " + " | ".join(benchmark_trace.VERSION_TWO_BASELINE_COLUMNS) + " |\n"
+        rows = []
+        for profile in ("fast", "balanced", "full"):
+            rows.append(
+                f"| {profile} | 21714 | 0x20a128f3d199a008 | 21714 | "
+                "1 libdemo_target.so+0x6e82c STRXui | "
+                "21714 libdemo_target.so+0x6ea28 RET | "
+                f"{benchmark_trace.PROFILE_COMPRESSED_LIMITS[profile]} | "
+                f"{PROFILE_RATE_TARGETS[profile]} |\n"
+            )
+        return (identity + metadata + "\n" + benchmark_trace.VERSION_TWO_BASELINE_HEADING +
+                "\n\n" + columns + "| " + " | ".join(["---"] * 8) + " |\n" + "".join(rows))
+
+    def test_corrected_oracle_retains_all_historical_performance_limits(self):
+        document = self.document()
+        self.assertEqual(2, benchmark_trace.baseline_schema(document))
+        for profile in ("fast", "balanced", "full"):
+            row = benchmark_trace.parse_profile_baseline(document, profile)
+            self.assertEqual(21714, row["instructions"])
+            self.assertEqual("0x20a128f3d199a008", row["return"])
+            self.assertEqual(benchmark_trace.PROFILE_COMPRESSED_LIMITS[profile], row["compressed_bytes"])
+
+    def test_unknown_missing_or_duplicate_schema_cannot_fall_back_to_legacy(self):
+        document = self.document()
+        for changed in (
+            document.replace("| Baseline schema | 2 |", "| Baseline schema | 3 |"),
+            document.replace("| Baseline schema | 2 |", ""),
+            document + "\n| Baseline schema | 2 |\n",
+            document.replace(benchmark_trace.VERSION_TWO_BASELINE_HEADING, "## Missing table"),
+        ):
+            with self.subTest(document=changed), self.assertRaises(ValueError):
+                benchmark_trace.parse_profile_baseline(changed, "fast")
+
+    def test_cannot_rebase_size_or_rate_limits_to_new_measurements(self):
+        document = self.document()
+        for before, after in (("307925", "999999"), ("365877", "400000"),
+                              ("1000000", "900000"), ("500000", "400000")):
+            with self.subTest(before=before), self.assertRaisesRegex(ValueError, "retain historical"):
+                benchmark_trace.parse_profile_baseline(document.replace(before, after), "fast")
+
+    def test_requires_complete_profiles_provenance_and_native_sequence_agreement(self):
+        document = self.document()
+        for changed in (
+            document.replace("| full |", "| fast |"),
+            "\n".join(line for line in document.splitlines() if not line.startswith("| balanced |")),
+            document.replace("| 21714 | 0x20a128f3d199a008 | 21714 |", "| 21714 | 0x42 | 21714 |", 1),
+            document.replace("1 libdemo_target.so+0x6e82c STRXui", "1 libdemo_target.so+0x6e828 STPXpre", 1),
+            document.replace("| Warmups per profile | 1 |", "| Warmups per profile | 0 |"),
+            document.replace("| Measured runs per profile | 5 |", "| Measured runs per profile | 1 |"),
+            document.replace("a" * 64, "invalid hash"),
+        ):
+            with self.subTest(document=changed), self.assertRaises(ValueError):
+                benchmark_trace.parse_profile_baseline(changed, "fast")
+
+    def test_rejects_single_measured_return_or_instruction_drift(self):
+        baseline = benchmark_trace.parse_profile_baseline(self.document(), "fast")
+        run = {**baseline, "metrics_version": 3, "trace": "one.trace.bin.lz4",
+               "termination": "completed", "return_valid": 1,
+               "instructions_per_second": Decimal(1_100_000), "compressed_bytes": 260000}
+        for field, value in (("instructions", 21718), ("return", "0x42")):
+            runs = [dict(run) for _ in range(5)]
+            runs[3][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, f"oracle mismatch for {field}"):
+                compare_to_profile_baseline(run, baseline, runs)
+
+    def test_checked_in_version_binds_reference_evidence_and_preserved_budget(self):
+        document = Path("docs/benchmarks/binary-trace-baseline-v2.md").read_text(encoding="utf-8")
+        evidence_path = Path("docs/benchmarks/evidence/binary-trace-baseline-v2.json")
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        self.assertIn(hashlib.sha256(evidence_path.read_bytes()).hexdigest(), document)
+        legacy_path = Path("docs/benchmarks/binary-trace-baseline.md")
+        self.assertEqual(hashlib.sha256(legacy_path.read_bytes()).hexdigest(), evidence["source_budget"]["sha256"])
+        self.assertEqual("0x20a128f3d199a008", evidence["native"]["return"])
+        for profile in ("fast", "balanced", "full"):
+            row = benchmark_trace.parse_profile_baseline(document, profile)
+            runs = evidence["profiles"][profile]["runs"]
+            self.assertEqual(1, sum(run["role"] == "warmup" for run in runs))
+            self.assertEqual(5, sum(run["role"] == "measured" for run in runs))
+            for run in runs:
+                self.assertEqual(row["instructions"], run["metrics"]["instructions"])
+                self.assertEqual(row["return"], run["metrics"]["return"])
+                self.assertEqual(row["first_instruction"], run["oracle"]["first_instruction"])
+                self.assertEqual(row["last_instruction"], run["oracle"]["last_instruction"])
+
+
 class HistoricalTargetIdentityTests(unittest.TestCase):
     RAW_SHA = "5f1a970825ae8bacb17d8dd656e01bd1fe7172638ba3ddcacd82ffaaad6e62c0"
     CANONICAL_SHA = "0d8e856c819fb3cd7ae5917053172b4b75a7924784c43e09cb2855a298647169"

@@ -6,6 +6,10 @@
 这两种入口使用不同配置格式；CLI `target.json` 由主机解析，本文的 `config.tracer` 直接发送给 native tracer。
 所有命令从仓库根目录执行。
 
+字段对照与同一 Python 环境的检查见[配置接口与前置诊断](usage.md#配置接口与前置诊断)。
+`NATIVE_CONFIG_REJECTED` 或手动 `tracer config rejected` 时，先按响应的 `error.path` 修正下面的完整 native 配置；
+不要用 CLI `target.json` 替换 `config.tracer`。独立的基线、calls + Flight 与窄场景返回示例见[逐步采集](narrow-capture.md)。
+
 开始复杂目标采集前，先用[独立 JNI/arm64 夹具](jni-abi-acceptance.md)验收本次 tracer 字节。
 手动入口由调用者在准入退出码为 0 后继续；CLI 可使用 `--abi-report` 在注入前强制核对。
 
@@ -168,6 +172,7 @@ Pixel 6 的独立夹具先复现原值非零、traced 值为零；修复后两�
 这项结果不替代具体业务的 JNI 场景回归。当前通用进程边界夹具另行验证了合法 `vfork` 的父进程与原生子进程执行，见[通用优化验收](benchmarks/qbdi-generic-2026-10-21.md)。
 
 native JSON 可在 `trace` 中增加 `events: "calls"`，用于保留调用与目标 `svc` 入口摘要，关闭指令和 memory 采集；默认仍为 `all`。
+需要有界路径与返回证据时，另设 `trace.syscallDetails: true`；要求 calls、CodeRules 关闭，默认关闭，支持 Flight/QTRB。最多快照两个路径，返回缺失保持未知；完整含义和配对示例见[syscall 说明](syscall-details.md)。主动运行时/JIT 与 Java 线程栈诊断使用独立的 [snapshot 入口](runtime-snapshot.md)，不在信号回调中执行。
 各 profile、场景返回状态和离线预算见[使用指南](usage.md#场景状态与有界离线查询)。
 对 libc `exec*` 和 `exit/_Exit/_exit` 转移，采集先封口再执行原调用；exec 失败后的续跑不重新执行已经开始的目标。
 合法 `vfork` 的子分支直接在原生调用点继续至 exec 或 `_exit`，不进入共享 QBDI 引擎；父分支继续采集。
@@ -178,6 +183,9 @@ native JSON 可在 `trace` 中增加 `events: "calls"`，用于保留调用与�
 schema 不接受额外的 `mode` 字段。
 
 脚本完成配置后，恢复应用并在界面选择 JNI、libc、algorithm、integrity 或 benchmark 场景。constructor、持久 `pthread_create` gateway 和 signal gateway 都需要在目标初始化前安装；attach 到已运行进程无法补回遗漏的开头。
+
+信号观察、信号实际交付、handler 返回与进程终止分别判断。新 Flight producer policy 允许恢复 `pc_source`：`qbdi_logical`、`kernel_ucontext`、`guest_handler_context`，缺失或不支持的 policy 为 `unknown`；[格式说明](trace-format.md#scene-and-signal-evidence)列出规则。PC 来源不证明故障根因。不要为了补充诊断而全局安装 `Process.setExceptionHandler`；它可能接管 ART 正常隐式异常。
+外部手工 daemon 启动超时后，先核对原 PID/starttime 和端点；连接超时本身不能证明启动失败，也不应触发自动重放。
 
 ## 拉取与排障
 

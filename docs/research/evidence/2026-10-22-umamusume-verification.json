@@ -1,0 +1,705 @@
+{
+  "schema_version": 2,
+  "date": "2026-10-22",
+  "scope": "Analysis-only extract: sample classification, saved-code experiments, Java loading and syscall observation limits. Separate captures are not one continuous execution.",
+  "sample": {
+    "package": "com.cygames.umamusume",
+    "version_name": "1.35.2",
+    "version_code": 153,
+    "library": "lib__4e06__.so",
+    "sha256": "160483775aae439b392ff12f0879925b3064cc0b7aff36fa0782efec1d7b59ee"
+  },
+  "classifier_verification": {
+    "schema_version": 1,
+    "engine": "yara-python",
+    "engine_version": "4.5.4",
+    "sample_sha256": "160483775aae439b392ff12f0879925b3064cc0b7aff36fa0782efec1d7b59ee",
+    "classifier_repository": "rednaga/APKiD",
+    "classifier_commit": "deb0b623f2a1b9f64f23a72e2c125b63123c60f3",
+    "rule_source_url": "https://raw.githubusercontent.com/rednaga/APKiD/deb0b623f2a1b9f64f23a72e2c125b63123c60f3/apkid/rules/elf/packers.yara",
+    "rule_source_sha256": "9e2130c855fb74d470a2ec1a5af4d9a2b8e3a4df7b54cf43a1088de87d707984",
+    "common_source_url": "https://raw.githubusercontent.com/rednaga/APKiD/deb0b623f2a1b9f64f23a72e2c125b63123c60f3/apkid/rules/elf/common.yara",
+    "common_source_sha256": "27efe2d2f0cdbf57e9ff5badcddb853117c7fcea6d0734105e34eea8f93a0d33",
+    "evaluation": "unaltered upstream crackproof_a and its original is_elf dependency compiled in original YARA engine; no APKiD CLI execution",
+    "matches": [
+      {
+        "rule": "crackproof_a",
+        "meta": {
+          "description": "CrackProof",
+          "url": "https://www.hypertech.co.jp/eng/",
+          "sample": "a296f4c1d48b830bb26c6ca7f2889e47756fb4adf0dd86d193a8b60d3bc4ae7d",
+          "author": "Eduardo Novella"
+        },
+        "strings": [
+          {
+            "identifier": "$init_proc",
+            "instances": [
+              {
+                "offset": "0x1d54",
+                "matched_length": 132,
+                "matched_data_sha256": "0461d0dab36072a338adc4a22a07405071978eefd473895f090688b8eef315f0"
+              }
+            ]
+          },
+          {
+            "identifier": "$do_asm_syscall",
+            "instances": [
+              {
+                "offset": "0x5e08",
+                "matched_length": 52,
+                "matched_data_sha256": "2d07b46d43590e7995deb00a6fc22e4030b775ea480b6fc79119010bedf027b6"
+              }
+            ]
+          },
+          {
+            "identifier": "$func1",
+            "instances": [
+              {
+                "offset": "0x1ae4",
+                "matched_length": 28,
+                "matched_data_sha256": "0a1b5cfe5ac40c4c63984ff8ac061a1336a3d67e2d40434bc84a16d9fcce534f"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "negative_controls": [
+      {
+        "control": "required_init",
+        "host_buffer_flip_offset": "0x1d54",
+        "matched_rules": [],
+        "bytes_written_to_target_or_sample_file": false
+      },
+      {
+        "control": "required_syscall",
+        "host_buffer_flip_offset": "0x5e08",
+        "matched_rules": [],
+        "bytes_written_to_target_or_sample_file": false
+      },
+      {
+        "control": "only_matching_func",
+        "host_buffer_flip_offset": "0x1ae4",
+        "matched_rules": [],
+        "bytes_written_to_target_or_sample_file": false
+      }
+    ],
+    "original_bytes_unchanged": true,
+    "limit": "CrackProof classifier attribution; no vendor-authenticated sample identity or enabled detector proof"
+  },
+  "saved_snapshot": {
+    "pid": 26145,
+    "starttime": 3911236,
+    "pc": "0x7238030134",
+    "sp": "0x7febd33780",
+    "x0_input_at_fdcwd": "0xffffffffffffff9c",
+    "x1_path_pointer": "0x7febd33de8",
+    "x2_stat_buffer": "0x7febd33818",
+    "x8_syscall_number": 79,
+    "path_recovered_from_saved_stack": "/data/user/0/com.cygames.umamusume/lib/lib__4e06__.so",
+    "observation": "syscall-entry stop; x0 is AT_FDCWD input, not syscall return/errno",
+    "code_base": "0x723801e000",
+    "code_sha256": "b33faadd9b3447d699e7040b0b1967a0121214d0b40222bd2287e1aad25bdc56",
+    "rw_sha256": "5295054f50d46c31e90cff78834ef75b5da4da7ec924f5beb4a07080ed29ca59",
+    "address_limit": "all anonymous-code addresses apply only to this saved mapping; not original ELF offsets"
+  },
+  "offline_path_function": {
+    "engine": "Unicorn",
+    "engine_version": "2.1.4",
+    "entry": "0x72380213dc",
+    "native_instructions_unchanged": true,
+    "environment": "host-only AArch64 emulator; synthetic path/output/stack/stack_chk_guard data; no Android process or original file modified",
+    "neutral_case": {
+      "path": "/data/app/~~neutral/com.cygames.umamusume/lib/arm64/lib__4e06__.so",
+      "return_x0": 0,
+      "out_code": 0
+    },
+    "positive_case_count": 5,
+    "negative_case_count": 5,
+    "cases": [
+      {
+        "marker": "/com.cyjh.mobileanjian",
+        "out_code": "0x26",
+        "positive": {
+          "path": "/data/user/0/com.cyjh.mobileanjian/lib/lib__4e06__.so",
+          "return_x0": 1,
+          "out_code": 38
+        },
+        "negative": {
+          "path": "/data/user/0/_com.cyjh.mobileanjian/lib/lib__4e06__.so",
+          "return_x0": 0,
+          "out_code": 0
+        }
+      },
+      {
+        "marker": "/com.dualapp.multispace",
+        "out_code": "0x34",
+        "positive": {
+          "path": "/data/user/0/com.dualapp.multispace/lib/lib__4e06__.so",
+          "return_x0": 1,
+          "out_code": 52
+        },
+        "negative": {
+          "path": "/data/user/0/_com.dualapp.multispace/lib/lib__4e06__.so",
+          "return_x0": 0,
+          "out_code": 0
+        }
+      },
+      {
+        "marker": "/com.kcm.cloneapp",
+        "out_code": "0x42",
+        "positive": {
+          "path": "/data/user/0/com.kcm.cloneapp/lib/lib__4e06__.so",
+          "return_x0": 1,
+          "out_code": 66
+        },
+        "negative": {
+          "path": "/data/user/0/_com.kcm.cloneapp/lib/lib__4e06__.so",
+          "return_x0": 0,
+          "out_code": 0
+        }
+      },
+      {
+        "marker": "/io.va.exposed",
+        "out_code": "0x50",
+        "positive": {
+          "path": "/data/user/0/io.va.exposed/lib/lib__4e06__.so",
+          "return_x0": 1,
+          "out_code": 80
+        },
+        "negative": {
+          "path": "/data/user/0/_io.va.exposed/lib/lib__4e06__.so",
+          "return_x0": 0,
+          "out_code": 0
+        }
+      },
+      {
+        "marker": "/com.rinzz.wdf",
+        "out_code": "0x5e",
+        "positive": {
+          "path": "/data/user/0/com.rinzz.wdf/lib/lib__4e06__.so",
+          "return_x0": 1,
+          "out_code": 94
+        },
+        "negative": {
+          "path": "/data/user/0/_com.rinzz.wdf/lib/lib__4e06__.so",
+          "return_x0": 0,
+          "out_code": 0
+        }
+      }
+    ],
+    "meaning": "path substring matching, not installed-package enumeration; synthetic results do not prove Android branch execution or refusal cause"
+  },
+  "offline_string_decoder": {
+    "entry": "0x723802ef98",
+    "formula": "plain[i] = (~rol8(cipher[i], 5) - (i & 3)) & 255; stop on cipher zero or length",
+    "direct_call_count": 55,
+    "complete_within_block_inputs": 46,
+    "native_decoder_crosschecks_passed": 46,
+    "decoded_strings": [
+      {
+        "call_address": "0x7238020770",
+        "plaintext": "arm64"
+      },
+      {
+        "call_address": "0x72380208b0",
+        "plaintext": "%s@%s"
+      },
+      {
+        "call_address": "0x7238020ab0",
+        "plaintext": "%s/lib"
+      },
+      {
+        "call_address": "0x7238020c9c",
+        "plaintext": "%s/lib"
+      },
+      {
+        "call_address": "0x7238020dcc",
+        "plaintext": "/lib"
+      },
+      {
+        "call_address": "0x7238021080",
+        "plaintext": "/mnt/asec/%s-%d/lib"
+      },
+      {
+        "call_address": "0x7238021454",
+        "plaintext": "/com.cyjh.mobileanjian"
+      },
+      {
+        "call_address": "0x723802157c",
+        "plaintext": "/com.kcm.cloneapp"
+      },
+      {
+        "call_address": "0x7238021730",
+        "plaintext": "/proc/self/comm"
+      },
+      {
+        "call_address": "0x72380217bc",
+        "plaintext": "/proc/self/"
+      },
+      {
+        "call_address": "0x723802214c",
+        "plaintext": "lib/%s/%s"
+      },
+      {
+        "call_address": "0x72380222f0",
+        "plaintext": "%s/%s"
+      },
+      {
+        "call_address": "0x72380239f8",
+        "plaintext": "%s%s"
+      },
+      {
+        "call_address": "0x7238023c90",
+        "plaintext": ".text"
+      },
+      {
+        "call_address": "0x7238024460",
+        "plaintext": "/vendor/lib64:/system/lib64"
+      },
+      {
+        "call_address": "0x723802451c",
+        "plaintext": "LD_LIBRARY_PATH"
+      },
+      {
+        "call_address": "0x72380246c8",
+        "plaintext": "%s/%s"
+      },
+      {
+        "call_address": "0x7238029408",
+        "plaintext": "ANDROID_DATA"
+      },
+      {
+        "call_address": "0x723802942c",
+        "plaintext": "/data"
+      },
+      {
+        "call_address": "0x72380294e8",
+        "plaintext": "ANDROID_ROOT"
+      },
+      {
+        "call_address": "0x7238029510",
+        "plaintext": "/system"
+      },
+      {
+        "call_address": "0x72380295d4",
+        "plaintext": "ASEC_MOUNTPOINT"
+      },
+      {
+        "call_address": "0x7238029604",
+        "plaintext": "/mnt/asec"
+      },
+      {
+        "call_address": "0x72380296c4",
+        "plaintext": "ANDROID_ASSETS"
+      },
+      {
+        "call_address": "0x72380296f8",
+        "plaintext": "/system/app"
+      },
+      {
+        "call_address": "0x72380297c0",
+        "plaintext": "EXTERNAL_STORAGE"
+      },
+      {
+        "call_address": "0x72380297e8",
+        "plaintext": "/sdcard"
+      },
+      {
+        "call_address": "0x72380298ac",
+        "plaintext": "ANDROID_STORAGE"
+      },
+      {
+        "call_address": "0x72380298d8",
+        "plaintext": "/storage"
+      },
+      {
+        "call_address": "0x72380299a4",
+        "plaintext": "/proc/"
+      },
+      {
+        "call_address": "0x7238029ee4",
+        "plaintext": "/proc/self/environ"
+      },
+      {
+        "call_address": "0x723802a114",
+        "plaintext": "/proc/%d/cmdline"
+      },
+      {
+        "call_address": "0x723802a254",
+        "plaintext": "/proc/%d/task/%d/comm"
+      },
+      {
+        "call_address": "0x723802a58c",
+        "plaintext": "/system/lib/libhoudini.so"
+      },
+      {
+        "call_address": "0x723802a924",
+        "plaintext": "LD_LIBRARY_PATH"
+      },
+      {
+        "call_address": "0x723802ab50",
+        "plaintext": "/system/lib64/"
+      },
+      {
+        "call_address": "0x723802d1ec",
+        "plaintext": "/proc/"
+      },
+      {
+        "call_address": "0x723802d24c",
+        "plaintext": "/maps"
+      },
+      {
+        "call_address": "0x723802d304",
+        "plaintext": "/proc/self/maps"
+      },
+      {
+        "call_address": "0x723802d3f4",
+        "plaintext": "/proc/self/maps"
+      },
+      {
+        "call_address": "0x723802f304",
+        "plaintext": "unknown"
+      },
+      {
+        "call_address": "0x723802f324",
+        "plaintext": "x86"
+      },
+      {
+        "call_address": "0x723802f374",
+        "plaintext": "armeabi"
+      },
+      {
+        "call_address": "0x723802f3a8",
+        "plaintext": "armeabi-v7a"
+      },
+      {
+        "call_address": "0x723802f3d8",
+        "plaintext": "arm64-v8a"
+      },
+      {
+        "call_address": "0x723802f3f8",
+        "plaintext": "mips"
+      }
+    ],
+    "unresolved_within_block_calls": [
+      "0x7238020ed4",
+      "0x7238020fe0",
+      "0x7238021508",
+      "0x72380215e4",
+      "0x723802164c",
+      "0x7238024470",
+      "0x7238024560",
+      "0x723802f348",
+      "0x723802f418"
+    ],
+    "limit": "code/data availability proves capability, not that all listed call sites executed in this run; no network conclusion from missing strings"
+  },
+  "syscall_capture_coverage": {
+    "source": "native_wait.py",
+    "source_filter_line": 112,
+    "included": [
+      "openat",
+      "newfstatat",
+      "fstat",
+      "statx",
+      "faccessat",
+      "faccessat2",
+      "readlink",
+      "readlinkat",
+      "read",
+      "lseek",
+      "fcntl",
+      "close",
+      "getuid",
+      "geteuid",
+      "getresuid",
+      "getgid",
+      "getegid",
+      "uname",
+      "mmap",
+      "mprotect",
+      "munmap",
+      "mremap",
+      "rt_sigaction",
+      "rt_sigprocmask",
+      "rt_sigreturn",
+      "tgkill",
+      "kill",
+      "exit",
+      "exit_group",
+      "prctl",
+      "ptrace",
+      "clone",
+      "clone3",
+      "connect"
+    ],
+    "omitted_relevant_calls": [
+      "write",
+      "writev",
+      "pwrite64",
+      "sendto",
+      "sendmsg",
+      "sendmmsg",
+      "socket"
+    ],
+    "read_payloads": "raw pointers, not decoded buffers",
+    "runs": [
+      {
+        "pid": 19897,
+        "lines": 68420,
+        "connect_entries": 9,
+        "address_family_counts": {
+          "AF_UNIX": 9
+        },
+        "af_inet_connect_entries": 0,
+        "starttime_from_two_second_sample": 3831440
+      },
+      {
+        "pid": 20658,
+        "lines": 15388,
+        "connect_entries": 6,
+        "address_family_counts": {
+          "AF_UNIX": 6
+        },
+        "af_inet_connect_entries": 0,
+        "starttime_from_two_second_sample": 3834098
+      }
+    ],
+    "local_file_conclusion": "20658 has existing 21-byte file stat and O_RDWR|O_CREAT open before SIGABRT; no write syscall capture",
+    "network_conclusion": "no AF_INET/AF_INET6 connect entries in the two bounded captures; missing write/send coverage, preexisting FDs and delegation prevent an upload yes/no conclusion",
+    "local_file_observation": {
+      "pid": 20658,
+      "existing_bytes": 21,
+      "open_flags": [
+        "O_RDWR",
+        "O_CREAT"
+      ],
+      "later_signal": "SIGABRT",
+      "write_captured": false,
+      "limit": "A file stat and open do not establish a write, payload or upload."
+    },
+    "export_scope": "Coverage and target behavior only; environment-specific paths and deployment identities are not exported."
+  },
+  "native_check_context": {
+    "path_match_caller": "0x7238020ba8",
+    "match_branch": "0x7238020bb0 -> 0x7238020f30",
+    "record_dispatch": "0x7238020f5c -> 0x723802fc64 -> 0x723802f910",
+    "observation": "visible handler constructs and saves an 80-byte context in memory; following consumers and remote transmission not established",
+    "selected_buffer_pointer_at_0x723804d140": "0x0",
+    "default_context_at_0x723804d0f0_zero": true,
+    "limit": "zero at this snapshot is not proof of no detection or no other record"
+  },
+  "dex_entry": {
+    "classes6_sha256": "a338f6c97a56069f1093d7bf6793dcead2b7408309bf96601c60b51179de6455",
+    "classes6_bytes": 2992,
+    "tool": "Android SDK build-tools 35.0.0 dexdump",
+    "chain": [
+      "EntryApplication.attachBaseContext",
+      "util001.framework.load.entry class initialization",
+      "load.<clinit>",
+      "System.loadLibrary(__4e06__)"
+    ],
+    "entry_and_class_initializer_catches": "none",
+    "limit": "source chain supports stage inference; no complete native constructor trace return for the older captures"
+  },
+  "preserved_unknowns": [
+    "exact sample vendor attestation and protection version",
+    "physical-device refusal cause and per-detector root/Frida/Xposed/Magisk/emulator A/B",
+    "remote reporting occurrence, payload and responsible component",
+    "complete unpacking/protection procedure and explicit return in the older stopped QBDI constructor captures"
+  ],
+  "source_roots": {
+    "original_raw": "/home/lyldalek/.codex/worktrees/6580/qbdi-android/artifacts/pixel6-umamusume-20261022",
+    "new_local": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android"
+  },
+  "source_manifest": [
+    {
+      "kind": "original_raw",
+      "path": "static/lib__4e06__.so",
+      "sha256": "160483775aae439b392ff12f0879925b3064cc0b7aff36fa0782efec1d7b59ee",
+      "bytes": 1667671
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/yara-verification.json",
+      "sha256": "fe4754ecf3f2f5ae0b83369ca1ff5404639c14b99c9863106dee755e0ecf4afb",
+      "bytes": 2814
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/apkid-fingerprint.json",
+      "sha256": "ccd6ad7b38d73b12aeb52c91c54203847c3ac51486bbb13d649630f2a5337467",
+      "bytes": 1819
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/path-helper-emulation.json",
+      "sha256": "7d29b87f80f4d19bf0a799e5e18419b87c1c19d1312df1018c07bc4fcb437d93",
+      "bytes": 20020
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/decoded-strings.json",
+      "sha256": "23c4a2eb8f5726df570127a0229d8a09d8c939bcc6356e0fe27edb34de1b3699",
+      "bytes": 20239
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-snapshot-seccomp/26145-snapshot/registers.json",
+      "sha256": "c6a23b4dc76bd50803296da70dbcd1eb44f2773d994af1764bf75e9515fd335b",
+      "bytes": 501
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-snapshot-seccomp/26145-snapshot/stat",
+      "sha256": "e73df0042f81c4d71d35b08da818be27a74635eb4e411aa725aef940ed0bccb7",
+      "bytes": 306
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-snapshot-seccomp/26145-snapshot/7feb543000-7febd42000.memory.bin",
+      "sha256": "145c53c5d9a4069b30ad020f7bb4ecca2f6a34f04b82d68bee36dd361431f33c",
+      "bytes": 8384512
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-snapshot-seccomp/26145-snapshot/723801e000-7238035000.memory.bin",
+      "sha256": "b33faadd9b3447d699e7040b0b1967a0121214d0b40222bd2287e1aad25bdc56",
+      "bytes": 94208
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-snapshot-seccomp/26145-snapshot/7238035000-723804e000.memory.bin",
+      "sha256": "5295054f50d46c31e90cff78834ef75b5da4da7ec924f5beb4a07080ed29ca59",
+      "bytes": 102400
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-snapshot-seccomp/26145-snapshot/checkLoadPath.disassembly.txt",
+      "sha256": "7905b19ac6d999f859ddc07efa121eb23fd15acb7ffc2782cfc0dffbc964a9e4",
+      "bytes": 18762
+    },
+    {
+      "kind": "original_raw",
+      "path": "native_wait.py",
+      "sha256": "f96e39d6db2d4ff228feffff91395e3e0b993e576cee460ae046e32bf3776c07",
+      "bytes": 12685
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-strace-seccomp/19897.strace",
+      "sha256": "e1a3b3987a2bc46856af2b04b505404c043c453fa8c370dd6d3f5a09d9042f55",
+      "bytes": 8507212
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-strace-seccomp/19897.tracer-identity.txt",
+      "sha256": "e390420af64aa736619c925bf16b1518e6ffa941a37840a150c52b4d4b2ddc9b",
+      "bytes": 1078
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-strace-seccomp/19897-2/stat",
+      "sha256": "eeb856bdd6dc21f9a7d08fd7469d0eb40485b1a1eb2be64f9a110b880408601d",
+      "bytes": 315
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-strace-seccomp/20658.strace",
+      "sha256": "7da9b51480d182d5268b856ad3d7a4380959dff42e083de8780effa968224e77",
+      "bytes": 1956831
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-strace-seccomp/20658.tracer-identity.txt",
+      "sha256": "5f652c06ace755d8fe21e22c6a7ffaa3f7ae60ae8549fd7fb0845d6acbeee1c4",
+      "bytes": 1078
+    },
+    {
+      "kind": "original_raw",
+      "path": "native-strace-seccomp/20658-2/stat",
+      "sha256": "02d474f9071feb79180c67235d2a29fc46999b5e11bd07d7d62f5cbc3c42cb41",
+      "bytes": 306
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/dex/classes6.dex",
+      "sha256": "a338f6c97a56069f1093d7bf6793dcead2b7408309bf96601c60b51179de6455",
+      "bytes": 2992
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/dex/classes6-dump.txt",
+      "sha256": "97b606f79cf2b7da2d6a4ef12e88cb3c2761036a7fa3cdb6c8399d820e816e1b",
+      "bytes": 17405
+    },
+    {
+      "kind": "original_raw",
+      "path": "backup/com.cygames.umamusume/base.apk",
+      "sha256": "5aca7ca236cf698e33ced1cf46cf63de01c01724ead6cd949f6558331e8587c9",
+      "bytes": 100934863
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/public-sources/apkid-elf-packers.yara",
+      "sha256": "9e2130c855fb74d470a2ec1a5af4d9a2b8e3a4df7b54cf43a1088de87d707984",
+      "bytes": 33087
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/public-sources/apkid-elf-common.yara",
+      "sha256": "27efe2d2f0cdbf57e9ff5badcddb853117c7fcea6d0734105e34eea8f93a0d33",
+      "bytes": 1460
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/public-sources/apkid-rule-source.json",
+      "sha256": "eb2a2382cc972fa0e26148a9170a8c5271a65a4ad226452beee84c8dc4313af5",
+      "bytes": 250
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/verify-yara.py",
+      "sha256": "167ce5221af7406f87682edb9977bb78d434b40014e7a186f4e0b44cc8462a74",
+      "bytes": 2761
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/decode-snapshot-strings.py",
+      "sha256": "784aebf784f42dcc9755c7c70cffddf0109b0690ede471ab264d253db50f8dc7",
+      "bytes": 7293
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/emulate-path-helper.py",
+      "sha256": "8362228d0bfaf7ccc945cf0d5911e265b0b670ac1f75dfb4824cf41543a577b3",
+      "bytes": 5707
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/path-check-helpers-disassembly.txt",
+      "sha256": "a0be8a3250ac4580434f0558867db3ce3da6b8022c5c6ad09bf82971b4255ac5",
+      "bytes": 9355
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/check-result-dispatch-disassembly.txt",
+      "sha256": "df73df4cd2da0e785f1956159b8862302cd16348425a79912dea92416fcfd12a",
+      "bytes": 5426
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/check-result-handler-disassembly.txt",
+      "sha256": "3fb7f584ac56de93abbee6536ba0b4ef59f9613c00f8f346f5996e6a853351a0",
+      "bytes": 6180
+    },
+    {
+      "kind": "new_local",
+      "path": "out/protection-verification-20261022/string-decoder-disassembly.txt",
+      "sha256": "64fb7f0f456d65989a8787d9d2ddce1b03ef3dac1df544dc334985d5bac17753",
+      "bytes": 501
+    }
+  ],
+  "export_policy": "This is a reduced analysis extract, not a copy of a complete device/deployment report. Source digests describe the retained analysis inputs."
+}

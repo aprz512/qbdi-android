@@ -41,6 +41,7 @@ class TracerConfig:
     companion: Path | None
     code_rules: bool = False
     events: str = "all"
+    syscall_details: bool = False
 
 
 @dataclass(frozen=True)

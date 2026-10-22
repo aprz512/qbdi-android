@@ -103,6 +103,18 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--limit", type=int, default=2000)
     events.add_argument("--timeout", type=_positive_timeout, default=30.0)
 
+    snapshot = commands.add_parser("snapshot", help="capture bounded runtime/JIT mappings, threads and available Java stacks")
+    snapshot.add_argument("--device", help="ADB serial; required when more than one device is online")
+    snapshot.add_argument("--pid", type=int, required=True, help="PID of a process with the tracer already loaded")
+    snapshot.add_argument("--starttime", required=True, help="expected /proc/PID/stat field 22, in clock ticks")
+    snapshot.add_argument("--output", type=Path, required=True, help="new JSON file; existing paths are never replaced")
+    snapshot.add_argument("--no-java-stacks", action="store_true", help="collect mappings and native thread names only")
+    snapshot.add_argument("--max-threads", type=int, choices=range(1, 33), default=32, metavar="1..32")
+    snapshot.add_argument("--max-frames", type=int, choices=range(1, 33), default=32, metavar="1..32")
+    snapshot.add_argument("--timeout", type=_positive_timeout, default=10.0)
+    snapshot.add_argument("--json", action="store_true")
+    _add_adb_timeout(snapshot)
+
     run = commands.add_parser("run", help="run a duration-bounded trace session")
     _add_common(run, config=True)
     run.add_argument("--duration", type=_duration, required=True, metavar="DURATION",
@@ -171,7 +183,8 @@ def _query_frida_versions(runtime: "_FridaRuntime", device: object,
         import frida  # type: ignore[import-not-found]
     except ImportError as error:
         raise QtraceError("frida.python_missing", "preflight.frida",
-                          "Frida Python bindings are required for injection") from error
+                          f"Frida Python bindings cannot be imported in {sys.executable}: {error}; "
+                          "see docs/usage.md#配置接口与前置诊断") from error
     remote = runtime.get_device(device, timeout)
     try:
         parameters = remote.query_system_parameters()
@@ -325,9 +338,10 @@ def _make_orchestrator(repo_root: Path, inspector: ElfInspector | None = None, *
     # These imports intentionally stay behind run/monitor construction.  Manual
     # pull needs neither Gradle nor Frida's Python package.
     from qtrace.build import ArtifactBuilder, Deployer
-    from qtrace.injector import FridaInjector
+    from qtrace.injector import FridaInjector, FridaProvider
     from qtrace.preflight import Preflight
 
+    FridaProvider.check_host()
     runner = BoundedRunner()
     selector = DeviceSelector(runner)
     inspector = inspector or _make_inspector(runner)
@@ -454,6 +468,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
     try:
+        if arguments.command == "snapshot":
+            from qtrace.diagnostics import capture_snapshot
+            runner = BoundedRunner()
+            device = _select_device(arguments.device, runner, arguments.adb_timeout)
+            result = capture_snapshot(device, arguments.pid, arguments.starttime, arguments.output,
+                include_java=not arguments.no_java_stacks, max_threads=arguments.max_threads,
+                max_frames=arguments.max_frames, timeout=arguments.timeout, runner=runner)
+            if arguments.json:
+                print(json.dumps({"snapshot": str(arguments.output), "pid": result["pid"],
+                                  "starttime": result["starttime"], "exitCode": 0}, separators=(",", ":")))
+            else:
+                _progress(f"snapshot PID {result['pid']}: mappings={result['mappings']['status']}, "
+                          f"nativeThreads={result['nativeThreads']['status']}, java={result['java']['status']}")
+                print(arguments.output)
+            return 0
         if arguments.command == "events-flight":
             from qtrace.flight_scene_events import query_scene_events_path
             from scripts.flight_trace import FlightTraceError

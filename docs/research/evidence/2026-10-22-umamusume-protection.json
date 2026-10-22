@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-22",
+  "scope": "Tool-focused reference extract. Runtime and application acceptance are not exported. Separate captures are not one continuous execution.",
+  "sample": {
+    "package": "com.cygames.umamusume",
+    "version_name": "1.35.2",
+    "version_code": 153,
+    "library": "lib__4e06__.so",
+    "soname": "lib__XXXX__.so",
+    "sha256": "160483775aae439b392ff12f0879925b3064cc0b7aff36fa0782efec1d7b59ee",
+    "machine": "EM_AARCH64",
+    "elf_entry": "0x1d54",
+    "constructor_offset": "0x1d54",
+    "syscall_wrapper_range": [
+      "0x5e08",
+      "0x5e3c"
+    ],
+    "instruction_words": [
+      {
+        "module_offset": "0x5e1c",
+        "bytes_le": "e80307aa"
+      },
+      {
+        "module_offset": "0x5e20",
+        "bytes_le": "010000d4"
+      }
+    ]
+  },
+  "constructor_capture": {
+    "event_count": 70,
+    "syscall_entries": {
+      "56": 1,
+      "57": 1,
+      "62": 1,
+      "63": 62,
+      "222": 1
+    },
+    "scene_phases": {
+      "enter": 1,
+      "capture_stopped": 1
+    },
+    "signal_event_count": 0,
+    "source_events_sha256": "9462fe6696da81b54abc6645ec27019b5d9c73e9202048e4e944a6af964da326"
+  },
+  "wrapper_capture": {
+    "event_count": 353,
+    "syscall_entries": {
+      "56": 3,
+      "57": 3,
+      "62": 5,
+      "63": 68,
+      "215": 2,
+      "222": 4,
+      "226": 3
+    },
+    "scene_phases": {
+      "enter": 88,
+      "return": 88
+    },
+    "signal_event_count": 0,
+    "source_events_sha256": "76012af79f25b96278d0aa659bab6be5c90ddfda49c8d1e5ce91150e3ea37712",
+    "explicit_returns": 88,
+    "last_return_x0": "0x0",
+    "coverage": "Only the syscall wrapper; no proof that its caller or constructor returned.",
+    "paired_wrapper_invocations": 88,
+    "one_syscall_entry_per_invocation": true,
+    "pairing_key": [
+      "tid",
+      "scene_id"
+    ]
+  },
+  "runtime_string_markers": {
+    "source_snapshot_strings_sha256": "8157aa0d9d4d377c7103cd9290681b01c8e1dcf401fce088f9d6c1d19c8fff41",
+    "values": [
+      {
+        "address": "0x7238030200",
+        "text": "bool checkLoadPath_extractNativeLibs_true(const char*)"
+      },
+      {
+        "address": "0x72380302f0",
+        "text": "jni/checkSystemLib.cpp"
+      }
+    ],
+    "limit": "Markers alone do not prove an executed check, vendor identity, or rejection condition."
+  },
+  "arm64_syscall_names": {
+    "56": "openat",
+    "57": "close",
+    "62": "lseek",
+    "63": "read",
+    "215": "munmap",
+    "222": "mmap",
+    "226": "mprotect"
+  },
+  "qualified_observations": [
+    "A diagnostic capture observed reading /proc/self/maps and reopening the library path.",
+    "A timed runtime snapshot contains a load-path check marker and a system-library source-file marker.",
+    "Observed path accesses and termination do not isolate a causal rejection branch."
+  ],
+  "source_digests": {
+    "elf_metadata": "5af8a653824cbf971292d8ed79831d1c9828065a5f78b791fa889ca135207c2d",
+    "constructor_disassembly": "5999c193531ae48d5d1f9a9f0d0170daf1cbe125803ee4b61dc719025a148d34",
+    "diagnostic_syscalls": "e1a3b3987a2bc46856af2b04b505404c043c453fa8c370dd6d3f5a09d9042f55",
+    "load_path_disassembly": "7905b19ac6d999f859ddc07efa121eb23fd15acb7ffc2782cfc0dffbc964a9e4"
+  },
+  "source_policy": "Only named facts, target-only counters, and source digests are exported. Broad logs and unrelated project context are outside this reference.",
+  "diagnostic_observation_presence": {
+    "proc_self_maps_access": true,
+    "library_path_access": true,
+    "local_record_path": true,
+    "sigabrt": true
+  }
+}

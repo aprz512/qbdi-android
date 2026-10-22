@@ -32,10 +32,78 @@ def config() -> UserConfig:
 
 
 class QtraceCliTests(unittest.TestCase):
+    def test_config_errors_identify_interface_field_and_guide_before_setup(self):
+        from qtrace import cli
+
+        valid = {
+            "schemaVersion": 1, "app": {"package": "com.example.app"},
+            "target": {"module": "libtarget.so"},
+            "scenes": [{"name": "target", "symbol": "target_function"}],
+        }
+        cases = (
+            ({**valid, "app": {}}, "CONFIG_MISSING_FIELD", "app", "package"),
+            ({**valid, "app": {"package": 7}}, "CONFIG_TYPE_INVALID", "app.package", "string"),
+            ({**valid, "tracer": {"followThreads": False}}, "CONFIG_UNKNOWN_FIELD", "tracer", "followThreads"),
+            ({**valid, "tracer": {"long" * 200: True}}, "CONFIG_UNKNOWN_FIELD", "tracer", "longlong"),
+            ({"schemaVersion": 1, "packageName": "com.example.app"},
+             "CONFIG_UNKNOWN_FIELD", "root", "packageName"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "target.json"
+            for payload, code, field, detail in cases:
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                for command in ("run", "monitor"):
+                    arguments = [command, "--config", str(path), "--json"]
+                    if command == "run":
+                        arguments += ["--duration", "1s"]
+                    with self.subTest(code=code, command=command), \
+                            patch.object(cli, "_make_orchestrator") as setup, \
+                            contextlib.redirect_stdout(stdout := io.StringIO()), \
+                            contextlib.redirect_stderr(stderr := io.StringIO()):
+                        self.assertEqual(1, cli.main(arguments))
+                    setup.assert_not_called()
+                    self.assertEqual("", stdout.getvalue())
+                    self.assertEqual(1, len(stderr.getvalue().splitlines()))
+                    for expected in (code, field, detail, "CLI --config", "native JSON", "docs/usage.md"):
+                        self.assertIn(expected, stderr.getvalue())
+
+    def test_missing_bindings_fail_before_ndk_build_or_device_selection(self):
+        from qtrace import cli
+
+        with patch.object(cli, "load_config", return_value=config()), \
+                patch.dict(sys.modules, {"frida": None}), \
+                patch("importlib.util.find_spec", return_value=None), \
+                patch.object(cli, "_make_inspector") as inspector, \
+                patch.object(cli.DeviceSelector, "select") as select, \
+                contextlib.redirect_stdout(stdout := io.StringIO()), \
+                contextlib.redirect_stderr(stderr := io.StringIO()):
+            self.assertEqual(1, cli.main(["run", "--config", "target.json", "--duration", "1s"]))
+        inspector.assert_not_called()
+        select.assert_not_called()
+        self.assertEqual("", stdout.getvalue())
+        for expected in ("frida.python_missing", sys.executable, "docs/usage.md"):
+            self.assertIn(expected, stderr.getvalue())
+
+    def test_binding_availability_check_does_not_initialize_frida(self):
+        from qtrace.injector import FridaProvider
+
+        original_import = builtins.__import__
+
+        def checked_import(name, *args, **kwargs):
+            if name in {"frida", "_frida"}:
+                raise AssertionError("Frida must initialize only in the isolated worker")
+            return original_import(name, *args, **kwargs)
+
+        with patch.dict(sys.modules, {"frida": None}), \
+                patch("importlib.util.find_spec", return_value=object()), \
+                patch("builtins.__import__", side_effect=checked_import):
+            FridaProvider.check_host()
+
     def test_generic_orchestrator_keeps_default_flight_capacity(self):
         from qtrace import cli
 
-        with patch.object(cli, "SessionOrchestrator", return_value=Mock()) as constructor:
+        with patch.object(cli, "SessionOrchestrator", return_value=Mock()) as constructor, \
+                patch("qtrace.injector.FridaProvider.check_host"):
             cli._make_orchestrator(Path.cwd(), Mock())
 
         self.assertEqual(512, constructor.call_args.kwargs["flight_capacity_mb"])
@@ -394,6 +462,42 @@ class QtraceCliTests(unittest.TestCase):
         self.assertEqual({"report": "out/report.json", "artifacts": [], "exitCode": 2},
                          json.loads(stdout.getvalue()))
         self.assertEqual("", stderr.getvalue())
+
+    def test_monitor_channels_keep_observed_returns_and_stopped_scenes_distinct(self):
+        from qtrace import cli
+
+        report = SimpleNamespace(native={"lifecycle": {
+            "capture_state": "sealed", "process_state": "exited", "open_scenes": [],
+        }}, artifacts=({
+            "decoder": "flight", "remote_name": "narrow.flight.bin", "recovery_status": "complete",
+            "scene_lifecycle": [
+                {"state": "returned", "target_returned": True},
+                {"state": "capture_stopped", "target_returned": None},
+            ],
+            "scene_lifecycle_omitted": 0, "scene_lifecycle_invalid": 0,
+            "missing_sequence_ranges": 0, "coverage_gap_count": 0,
+        },))
+        result = SessionResult("123e4567-e89b-42d3-a456-426614174000", 0,
+                               Path("out/report.json"), (Path("out/narrow.flight.bin"),), report)
+        for as_json in (False, True):
+            orchestrator = Mock()
+            orchestrator.monitor.return_value = result
+            arguments = ["monitor", "--config", "target.json"] + (["--json"] if as_json else [])
+            with self.subTest(as_json=as_json), \
+                    patch.object(cli, "load_config", return_value=config()), \
+                    patch.object(cli, "_make_orchestrator", return_value=orchestrator), \
+                    contextlib.redirect_stdout(stdout := io.StringIO()), \
+                    contextlib.redirect_stderr(stderr := io.StringIO()):
+                self.assertEqual(0, cli.main(arguments))
+                if as_json:
+                    self.assertEqual({"report": "out/report.json", "artifacts": ["out/narrow.flight.bin"],
+                                      "exitCode": 0}, json.loads(stdout.getvalue()))
+                    self.assertEqual("qtrace: starting monitor session\n", stderr.getvalue())
+                else:
+                    self.assertEqual("out/report.json\nout/narrow.flight.bin\n", stdout.getvalue())
+                    self.assertIn("scene returns observed 1; unconfirmed 1", stderr.getvalue())
+                    self.assertIn("Capture: sealed; process: exited", stderr.getvalue())
+                    self.assertIn("File completeness does not prove target return", stderr.getvalue())
 
     def test_keyboard_interrupt_maps_to_130_after_orchestrator_returns_control(self):
         from qtrace import cli

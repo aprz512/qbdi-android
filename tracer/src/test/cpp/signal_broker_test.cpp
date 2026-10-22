@@ -2666,9 +2666,36 @@ void returned_context_queue_survives_nested_publication_wrap() {
     CHECK(gap.signal_code >= 1U);
 }
 
+void observation_without_flight_preserves_delivery_and_invalidates_returns() {
+    FakeKernel kernel;
+    kernel.actions[SIGUSR1].handler = reinterpret_cast<uintptr_t>(install_race_handler);
+    SignalBroker broker(kernel.platform());
+    const std::array signals{SIGUSR1};
+    CHECK(broker.install(signals));
+    QBDI::GPRState gpr{};
+    gpr.pc = 0x4000; gpr.sp = 0x8000;
+    SignalBrokerThreadState thread;
+    CHECK(thread.initialize_observation(731, &gpr));
+    CHECK(broker.register_thread(&thread));
+    CHECK(thread.activate_execution(&gpr) != 0);
+    CHECK(broker.publish_guest_state(&thread, gpr));
+    const int before = g_install_race_calls;
+    siginfo_t info{};
+    info.si_signo = SIGUSR1;
+    SignalBrokerGuestContext native{};
+    CHECK(broker.dispatch(SIGUSR1, &info, &native, &thread));
+    CHECK(g_install_race_calls == before + 1);
+    CHECK(thread.observation_epoch() == 1);
+    CHECK(broker.apply_pending_guest_state(&thread, &gpr));
+    CHECK(gpr.pc == 0x4000 && gpr.sp == 0x8000);
+    thread.deactivate_execution();
+    broker.unregister_thread(&thread);
+}
+
 } // namespace
 
 int main() {
+    observation_without_flight_preserves_delivery_and_invalidates_returns();
     incumbent_is_visible_before_the_kernel_can_deliver_to_master();
     concurrent_action_replacement_never_swallows_a_delivery();
     reset_generation_stays_pinned_while_reset_reads_it();

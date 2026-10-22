@@ -4,6 +4,7 @@
 #include "core/pending_instruction.h"
 #include "core/qbdi_instruction_decoder.h"
 #include "core/trace_config.h"
+#include "core/arm64_syscall.h"
 
 #include <QBDI.h>
 
@@ -47,6 +48,8 @@ private:
     InstructionView resolve(QBDI::VM *vm, const QBDI::GPRState *gpr) noexcept;
     static RegisterSnapshot snapshot(const QBDI::GPRState &gpr, uint64_t mask) noexcept;
     void capture_pre_memory(QBDI::VM *vm) noexcept;
+    void begin_syscall(const Arm64SyscallSnapshot &call, uint64_t signal_epoch) noexcept;
+    void end_syscall(bool observed, uint64_t raw, const char *reason) noexcept;
 
     InstructionCache *cache_ = nullptr;
     TraceSink *writer_ = nullptr;
@@ -57,6 +60,10 @@ private:
     size_t hexdump_limit_ = 0;
     bool decode_memory_ = false;
     bool calls_only_ = false;
+    bool syscall_details_ = false;
+    uint64_t syscall_id_ = 0;
+    uint64_t syscall_signal_epoch_ = 0;
+    Arm64SyscallSnapshot syscall_pending_{};
     Arm64InstructionResolver resolver_{ModuleRange{}};
     CachedInstruction uncached_{};
     InstructionView current_view_{};

@@ -315,6 +315,23 @@ static void publication_faults_preserve_the_prior_generation() {
 }
 
 int main() {
+    auto details = nlohmann::json::parse(document_with_scenes(
+        R"json([{"name":"init","location":{"offset":"0x100"}}])json"));
+    details["trace"]["events"] = "calls";
+    details["trace"]["syscallDetails"] = true;
+    details["flight"]["enabled"] = true;
+    details["flight"]["entryScene"] = "init";
+    CHECK(prepare_tracer_configuration(details.dump()).config.trace.syscall_details);
+    details["trace"]["syscallDetails"] = 1;
+    expect_rejection(details.dump(), "TYPE_MISMATCH", "$.trace.syscallDetails");
+    details["trace"]["syscallDetails"] = true;
+    details["flight"]["enabled"] = false;
+    details["flight"]["entryScene"] = "";
+    CHECK(prepare_tracer_configuration(details.dump()).accepted());
+    details["flight"]["enabled"] = true;
+    details["flight"]["entryScene"] = "init";
+    details["trace"]["events"] = "all";
+    expect_rejection(details.dump(), "INVALID_TRACE_OPTIONS", "$.trace.syscallDetails");
     const auto calls = prepare_tracer_configuration(replace_once(document_with_scenes("[]"),
         "\"profile\": \"fast\"", "\"profile\": \"fast\", \"events\": \"calls\""));
     CHECK(calls.accepted() && calls.config.trace.calls_only);

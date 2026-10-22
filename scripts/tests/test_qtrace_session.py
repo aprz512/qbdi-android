@@ -40,6 +40,17 @@ def target() -> ResolvedTarget:
                           ElfIdentity("ELF64", "AArch64", "ab", ((0x100, 0x200),)), SCENES)
 
 
+class SyscallRequestTests(unittest.TestCase):
+    def test_details_native_field_is_emitted_only_when_enabled(self):
+        ordinary=build_native_request(config(),target(),SESSION_ID,1000)
+        self.assertNotIn("syscallDetails",ordinary["trace"])
+        selected=dataclasses.replace(config(),tracer=dataclasses.replace(config().tracer,
+            events="calls",flight_enabled=True,flight_entry_scene="work",syscall_details=True))
+        native=build_native_request(selected,target(),SESSION_ID,1000)
+        self.assertIs(True,native["trace"]["syscallDetails"])
+        self.assertEqual("calls",native["trace"]["events"])
+
+
 def status(state: str, *, transition: int, pid: int = 4242, reason: str = "",
            acknowledged: bool = False, artifacts: list[str] | None = None) -> dict[str, object]:
     if state in {"stop_requested", "stopping", "stop_incomplete"} and reason == "":

@@ -17,6 +17,30 @@
       "version": "2"
     },
     {
+      "bytes": 65536,
+      "format": "Flight",
+      "path": "flight-signal-pc.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "86e492c9e834da11bc3bfe370309e7b1b9996f57533ed48f904b8b762ec69423",
+      "version": "2"
+    },
+    {
+      "bytes": 65536,
+      "format": "Flight",
+      "path": "flight-syscall-details-v2.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "00a55d27d1e6eec17e3c296e464965f7c6e33660bcf10ea086febd1d4f684182",
+      "version": "2"
+    },
+    {
+      "bytes": 65536,
+      "format": "Flight",
+      "path": "flight-syscall-details.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "3e4fa5a4385e42c07dc0dbe9d87fe08df7545218a974ba2b92f59b0e20d15a78",
+      "version": "2"
+    },
+    {
       "bytes": 672,
       "format": "QTRB",
       "path": "qtrb-completed.bin",
@@ -30,6 +54,14 @@
       "path": "qtrb-stopped.bin",
       "producer": "production-cpp-encoder",
       "sha256": "f0084f0a7a244fdbd36fede813728264c149e91da66b916cbe6d24998f17836b",
+      "version": "1.2"
+    },
+    {
+      "bytes": 1315,
+      "format": "QTRB",
+      "path": "qtrb-syscall-details-v2.bin",
+      "producer": "production-cpp-encoder",
+      "sha256": "bd5f56d8b69034b88ff85d4d7155c8a4e42663286b7102bec0d26942628fc797",
       "version": "1.2"
     }
   ],

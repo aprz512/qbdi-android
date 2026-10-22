@@ -20,7 +20,7 @@ from qtrace._artifact_publication import (_OutputDirectory, _close_token_and_rec
                                          _reclaim_parent_fallback_sibling, _remove_tree_at,
                                          _rename_noreplace, publish_stage)
 from qtrace._artifact_remote import (_call, _client_for, _relevant_manual_temporaries,
-                                    _remote_size, _status_name, _temporary_name,
+                                    _missing_bound_file, _remote_size, _status_name, _temporary_name,
                                     _trace_roots, _validate_listing, pull_named_artifacts)
 from qtrace._artifact_reports import (_PublicationToken, _collector_token,
                                      _rewrite_published_report, _write_json,
@@ -96,7 +96,17 @@ class ArtifactProcessor:
                 pulled_list: list[PulledArtifact] = []
                 for name in names:
                     try:
-                        remote_before = _remote_size(client, name, timeout)
+                        try:
+                            remote_before = _remote_size(client, name, timeout)
+                        except QtraceError as error:
+                            if name.endswith(".crash") and _missing_bound_file(client, name, error):
+                                continue
+                            raise
+                        # Native teardown unlinks unused empty crash placeholders.
+                        # Never pull that transient file or discard a marker already
+                        # observed as nonempty. Other missing files remain errors.
+                        if name.endswith(".crash") and remote_before == 0:
+                            continue
                         pulled_list.extend(pull_named_artifacts(client, package, [name], stage_artifacts,
                                                                  timeout=timeout))
                         remote_after = _remote_size(client, name, timeout)

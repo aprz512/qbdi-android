@@ -85,7 +85,14 @@ void write(const std::filesystem::path &path, const std::vector<uint8_t> &bytes)
     require(output.good());
 }
 
-void qtrb(const std::filesystem::path &path, bool stopped) {
+constexpr const char *kSyscallV2Entry =
+    R"({"schema":2,"id":1,"number":38,"pc":"0x1000","args":["0x0","0x2000","0x0","0x3000","0x0","0x0"],"paths":[{"argument":1,"address":"0x2000","status":"complete","limit":128,"bytesHex":"2f6f6c64","display":"/old"},{"argument":3,"address":"0x3000","status":"complete","limit":128,"bytesHex":"2f6e6577","display":"/new"}]})";
+constexpr const char *kSyscallV2Return =
+    R"({"schema":2,"id":1,"number":38,"pc":"0x1000","observed":true,"rawReturn":"0x0","linuxErrorNumber":null,"reason":"post_instruction"})";
+constexpr const char *kSyscallV2Missing =
+    R"({"schema":2,"id":2,"number":101,"pc":"0x1004","args":["0x4000","0x0","0x0","0x0","0x0","0x0"],"paths":[]})";
+
+void qtrb(const std::filesystem::path &path, bool stopped, bool syscall_v2 = false) {
     const BinaryTraceEncoder encoder;
     const TraceContext ctx = context();
     const CachedInstruction decoded = definition();
@@ -120,6 +127,11 @@ void qtrb(const std::filesystem::path &path, bool stopped) {
                                       {2, 3, 1, 2}, "guard", std::string_view("\x82\xac", 2)));
     append(encoder.encode_event(scratch.data(), scratch.size(), BinaryRecordType::Error,
                                 "native-error", "detail"));
+    if (syscall_v2) {
+        append(encoder.encode_call(scratch.data(),scratch.size(),"syscall-enter","svc",kSyscallV2Entry));
+        append(encoder.encode_call(scratch.data(),scratch.size(),"syscall-return","svc",kSyscallV2Return));
+        append(encoder.encode_call(scratch.data(),scratch.size(),"syscall-enter","svc",kSyscallV2Missing));
+    }
     TraceMetrics metrics{};
     metrics.instructions = 1;
     metrics.encoded_bytes = bytes.size() + (stopped ? kBinaryTraceStopRecordBytes : kBinaryTraceEndRecordBytes);
@@ -134,7 +146,8 @@ void qtrb(const std::filesystem::path &path, bool stopped) {
     write(path, bytes);
 }
 
-void flight(const std::filesystem::path &path, bool sealed) {
+void flight(const std::filesystem::path &path, bool sealed, bool syscall_details = false,
+            bool pc_policy = false, bool syscall_v2 = false) {
     const TraceContext ctx = context();
     FlightOptions options{};
     options.enabled = true;
@@ -155,13 +168,38 @@ void flight(const std::filesystem::path &path, bool sealed) {
     FlightEncoder encoder;
     require(encoder.initialize(&writer, TraceProfile::Full, ctx, &registers));
     require(encoder.thread_begin(701, ctx.tid, ctx.target_address, 9));
+    if (pc_policy) require(encoder.rule("qtrace.signal_pc",
+        R"({"schema":1,"firstLevel":"qbdi_logical","nested":"kernel_ucontext","handlerReturn":"guest_handler_context"})"));
     const CachedInstruction decoded = definition();
     require(encoder.instruction(ctx, instruction(ctx, decoded)));
     require(encoder.memory(ctx, ctx.target_address, memory()));
     require(encoder.call("jni", "native", "line\n\"utf8: \xe2\x82\xac"));
+    if (syscall_details) {
+        require(encoder.call("syscall-enter", "svc",
+            R"({"schema":1,"id":1,"number":56,"pc":"0x1000","args":["0x0","0x2000","0x0","0x0","0x0","0x0"],"path":{"argument":1,"address":"0x2000","status":"partial","limit":128,"bytesHex":"2f646576","display":"/dev"}})"));
+        require(encoder.call("syscall-return", "svc",
+            R"({"schema":1,"id":1,"number":56,"pc":"0x1000","observed":true,"rawReturn":"0xfffffffffffffff2","linuxErrorNumber":14,"reason":"post_instruction"})"));
+        require(encoder.call("syscall-enter", "svc",
+            R"({"schema":1,"id":2,"number":101,"pc":"0x1000","args":["0x0","0x0","0x0","0x0","0x0","0x0"],"path":null})"));
+    }
     require(encoder.rule("guard", "native-\xe4\xb8\xad"));
+    if (syscall_v2) {
+        require(encoder.call("syscall-enter","svc",kSyscallV2Entry));
+        require(encoder.call("syscall-return","svc",kSyscallV2Return));
+        require(encoder.call("syscall-enter","svc",kSyscallV2Missing));
+    }
     require(encoder.error("native-error"));
     require(encoder.thread_end(ctx.tid));
+    if (pc_policy) {
+        FlightEmergencyRecord signal{};
+        signal.type = static_cast<uint32_t>(FlightRecordType::Signal);
+        signal.tid = ctx.tid;
+        signal.sequence = artifact.next_sequence();
+        signal.pc = ctx.target_address;
+        signal.signal_number = 10;
+        signal.flags = 2;
+        require(artifact.write_emergency(thread, signal));
+    }
     if (sealed) require(writer.seal());
     writer.detach();
     artifact.close();
@@ -199,8 +237,12 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories(output);
     qtrb(output / "qtrb-completed.bin", false);
     qtrb(output / "qtrb-stopped.bin", true);
+    qtrb(output / "qtrb-syscall-details-v2.bin", false, true);
     flight(output / "flight-active.bin", false);
     flight(output / "flight-sealed.bin", true);
+    flight(output / "flight-syscall-details.bin", true, true);
+    flight(output / "flight-signal-pc.bin", true, false, true);
+    flight(output / "flight-syscall-details-v2.bin", true, false, false, true);
     constants(output / "constants.json");
     return 0;
 }

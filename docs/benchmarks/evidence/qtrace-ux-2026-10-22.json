@@ -1,0 +1,635 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-22",
+  "scope": "Host CLI diagnostics and standalone native fixture evidence. No game acceptance, generic syscall return, path snapshot, signal-causality or performance claim.",
+  "workspace": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android",
+  "branch": "feat/qtrace-ux-handoff",
+  "base_head": "eb79bcb2c37acb27affda4983ecb099e3ac5c497",
+  "working_tree_source_sha256": {
+    "qtrace/cli.py": "18189a1c746e121111fda78c6865ed0142b6832a3ab1e4d60ed553af6fb830d5",
+    "qtrace/config.py": "c61e0e1c7a381f242ac91adb2337090f85c47fd4703f99b884a148dbf923b925",
+    "qtrace/injector.py": "d2deb1e2c52f4faeb9b272e09caa93ffdd3e66279667968abca8a8a5ed63f575",
+    "qtrace/preflight.py": "fb2e200b8d79cf36c22b6f665f27f10dabb212c41d5b82fcb6aafb6cbe6bb18b",
+    "qtrace/session.py": "6911d3b36e0c96be697bceafdb3dd5c7dd0e313c5300d20fc8cd9328f31ffb50",
+    "qtrace/summary.py": "88857aa0baa9fc8cfd0242d34f1640ff0a718d1a53a6611c3c8c3c39934ae701",
+    "scripts/runtime_acceptance.py": "ddcbd2d36905bd74b797899247e26623de47a516021387e872332ead3fdc78bb",
+    "scripts/build_runtime_probe.py": "b4ac04109b3e77171c2fd1b55f67c2c11484818805e7da281187d5460efb3510",
+    "tracer/src/main/cpp/core/arm64_syscall.cpp": "c2cb84a88101752075a30b874f0d5330934e7b7d2c4a69b5054b07f4d638afd2",
+    "tracer/src/main/cpp/core/arm64_syscall.h": "09e8773121689cf9faf8fd7088bfcc8b31c4b53f1563e5174af33240c9cf7195",
+    "scripts/tests/test_qtrace_cli.py": "b516912db75cf0967e7acf4c68deff60ceb75a56588fb9d88fad8c9a96adf3bd",
+    "scripts/tests/test_qtrace_preflight.py": "8162d98e223aff6e90bc04b4c237581f366b667b29778dd9c0e520f672a280a4"
+  },
+  "native_build": {
+    "source_workspace": "/home/lyldalek/workspace/qbdi-android",
+    "source_head": "eb79bcb2c37acb27affda4983ecb099e3ac5c497",
+    "source_clean": true,
+    "native_diff_from_implementation_head": false,
+    "command": "./gradlew :tracer:copyTracerDebug --no-daemon",
+    "log_sha256": "9fc3bd70ec5eac6f0e6312ba6286cc9a688534af4e37e9ef6fe9821c2166f4e6",
+    "qbdi_source_head": "09b2efb66d242b3616a4723e4b487f623b0e93d7"
+  },
+  "device": {
+    "serial": "1C111FDF600G6S",
+    "server": "tcp:localhost:5037",
+    "abi": "arm64-v8a",
+    "sdk": "36",
+    "fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+    "android_user": 0
+  },
+  "probe_build": {
+    "compiler": "/home/lyldalek/Android/sdk/ndk/26.1.10909125/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++",
+    "abi": "arm64-v8a",
+    "api": 28,
+    "sources": {
+      "runtime_probe.h": "3973ca136c566bc428572737c3ffa6d19078516683b35f6d1149741ca07a12cf",
+      "runtime_probe_target.cpp": "468f6d6edcc50261682a6d69450830e34d792df64e93fef8768fc1d707597b2a",
+      "runtime_probe_launcher.cpp": "fe55707861458d287c742de9a16c18146c596aab4abca28b224f152dca67a19b"
+    },
+    "artifacts": {
+      "runtime_probe": "18d86d6a628a3fcf68a9abd05f483fb0efbc0c6d6888047f71236274acde898e",
+      "libruntime_probe.so": "537bf83bbc7dc924b9459d4322da2b3bb73b304e7fa76cc87cfc74ecaedffcbd"
+    }
+  },
+  "cli_subprocess_checks": [
+    {
+      "case": "missing-field",
+      "exit_code": 1,
+      "stdout_empty": true,
+      "adb_invoked": false
+    },
+    {
+      "case": "wrong-type",
+      "exit_code": 1,
+      "stdout_empty": true,
+      "adb_invoked": false
+    },
+    {
+      "case": "unknown-field",
+      "exit_code": 1,
+      "stdout_empty": true,
+      "adb_invoked": false
+    },
+    {
+      "case": "native-interface",
+      "exit_code": 1,
+      "stdout_empty": true,
+      "adb_invoked": false
+    },
+    {
+      "case": "missing-bindings",
+      "exit_code": 1,
+      "stdout_empty": true,
+      "adb_invoked": false
+    }
+  ],
+  "captures": [
+    {
+      "name": "calls-flight",
+      "session_id": "8dbe1c5f-d705-46db-902f-9fefde4642fb",
+      "created_utc": "2026-10-22T05:21:55.117851+00:00",
+      "report_path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-handoff-20261022/final-calls-flight/report.json",
+      "report_sha256": "fd648fa4375f699b8a0844decad239c8c8a1ab59ab5c68c7dea1bafc0244acdc",
+      "flight_path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-handoff-20261022/final-calls-flight/traces/78827053541905_29499_libruntime_probe.so.flight.bin",
+      "flight_sha256": "7cf16d6e14be933087f00a3f6052b4ec540615dad5e990d4c3c1a2e4faf6ebc2",
+      "result": "pass",
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_side_effects": true,
+        "traced_semantics": true,
+        "traced_side_effects": true,
+        "trace_decoding": true
+      },
+      "cleanup": true,
+      "artifacts": {
+        "libqbdi_tracer.so": "288b34e69557011ed0160b845cfa1538019691368af61a853e7d57a34c475ace",
+        "libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd",
+        "libruntime_probe.so": "537bf83bbc7dc924b9459d4322da2b3bb73b304e7fa76cc87cfc74ecaedffcbd",
+        "runtime_probe": "18d86d6a628a3fcf68a9abd05f483fb0efbc0c6d6888047f71236274acde898e"
+      },
+      "scene_lifecycle": [
+        {
+          "tid": 29508,
+          "id": 1,
+          "address": "0x77231608d8",
+          "entry_sequence": 9,
+          "entered_monotonic_ns": 57768842211189,
+          "last_sequence": 28,
+          "last_monotonic_ns": 57768845148934,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 29508,
+          "id": 2,
+          "address": "0x77231608d8",
+          "entry_sequence": 31,
+          "entered_monotonic_ns": 57768845184293,
+          "last_sequence": 40,
+          "last_monotonic_ns": 57768847351367,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 29508,
+          "id": 3,
+          "address": "0x77231608d8",
+          "entry_sequence": 43,
+          "entered_monotonic_ns": 57768847379443,
+          "last_sequence": 50,
+          "last_monotonic_ns": 57768849565560,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 29508,
+          "id": 4,
+          "address": "0x77231608d8",
+          "entry_sequence": 53,
+          "entered_monotonic_ns": 57768849592171,
+          "last_sequence": 62,
+          "last_monotonic_ns": 57768851768074,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 29508,
+          "id": 5,
+          "address": "0x77231608d8",
+          "entry_sequence": 65,
+          "entered_monotonic_ns": 57768851789030,
+          "last_sequence": 72,
+          "last_monotonic_ns": 57768853975838,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        }
+      ],
+      "event_counts": {
+        "rule": 11,
+        "register_delta": 5,
+        "call": 25
+      },
+      "syscall_entries": 5,
+      "complete": true,
+      "scene_lifecycle_invalid": 0,
+      "scene_lifecycle_omitted": 0,
+      "coverage_gaps": [],
+      "recovery_damage": [],
+      "baseline_return_values": [
+        42,
+        42,
+        42,
+        42,
+        42
+      ],
+      "traced_return_values": [
+        42,
+        42,
+        42,
+        42,
+        42
+      ],
+      "termination_signals": {
+        "baseline": 0,
+        "traced": 0
+      },
+      "process_identities": {
+        "supervisor": {
+          "pid": 29486,
+          "starttime_ticks": 5776864,
+          "initial_stat": "29486 (sh) S 29485 29485 29485 0 -1 4194560 469 0 0 0 0 1 0 0 20 0 1 0 5776864 11031633920 918 18446744073709551615 415161614336 415161867440 549716552576 0 0 0 0 0 1208083711 1 0 0 17 4 0 0 0 0 0 415161876480 415161877120 416061317120 549716555940 549716556377 549716556377 549716561897 0"
+        },
+        "baseline": {
+          "pid": 29488,
+          "starttime_ticks": 5776867,
+          "initial_stat": "29488 (runtime_probe) T 29486 29485 29485 0 -1 4194368 29 0 0 0 0 0 0 0 20 0 1 0 5776867 11044904960 148 18446744073709551615 417709710208 417710341328 549324026176 0 0 0 0 0 1073775864 1 0 0 17 3 0 0 0 0 0 417710406104 417710406480 418203566080 549324028123 549324028371 549324028371 549324033958 0"
+        },
+        "traced": {
+          "pid": 29499,
+          "starttime_ticks": 5776874,
+          "initial_stat": "29499 (runtime_probe) T 29486 29485 29485 0 -1 4194368 29 0 0 0 0 0 0 0 20 0 1 0 5776874 11044904960 170 18446744073709551615 417709710208 417710341328 549324026176 0 0 0 0 0 1073775864 1 0 0 17 7 0 0 0 0 0 417710406104 417710406480 418203566080 549324028123 549324028371 549324028371 549324033958 0"
+        }
+      },
+      "native_request": {
+        "flight": {
+          "capacityMb": 64,
+          "chunkKb": 256,
+          "enabled": true,
+          "entryScene": "runtime",
+          "followThreads": false,
+          "maxThreads": 4,
+          "protectedChunks": 2
+        },
+        "packageName": "org.qbdi.runtime.p8dbe1c5fd70546db902f9fefde4642fb",
+        "scenes": [
+          {
+            "location": {
+              "offset": "0x48d8"
+            },
+            "name": "runtime"
+          }
+        ],
+        "schemaVersion": 1,
+        "session": {
+          "id": "8dbe1c5f-d705-46db-902f-9fefde4642fb"
+        },
+        "targetModule": "libruntime_probe.so",
+        "trace": {
+          "autoBuffer": false,
+          "bufferMb": 8,
+          "compression": false,
+          "events": "calls",
+          "hexdumpLimit": 32,
+          "lz4Level": 0,
+          "profile": "fast"
+        }
+      },
+      "cleanup_receipt": {
+        "supervisor_stop": {
+          "process": "exited",
+          "remote_directory_removed": false,
+          "trace_directory_removed": false
+        },
+        "baseline": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "traced": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "supervisor": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        }
+      },
+      "syscall_enter_fields": [
+        "args",
+        "number",
+        "pc"
+      ]
+    },
+    {
+      "name": "stopped-flight",
+      "session_id": "89c85c34-f0a4-4af9-891a-c0a713eb2cba",
+      "created_utc": "2026-10-22T05:22:29.974358+00:00",
+      "report_path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-handoff-20261022/final-stopped-flight/report.json",
+      "report_sha256": "7afed326ce3ab87ddb6193484a3521c8831fb506a49249127d8594f6ef161499",
+      "flight_path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-handoff-20261022/final-stopped-flight/traces/72406950254422_30024_libruntime_probe.so.flight.bin",
+      "flight_sha256": "2013e57afb29459af85b83e66326741ee4b522c2751c8a9ade4777aa13a5feb5",
+      "result": "pass",
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "sealed_target_still_visible": true,
+        "actual_return_clears_open_target": true,
+        "file_complete_is_not_target_return": true
+      },
+      "cleanup": true,
+      "artifacts": {
+        "libqbdi_tracer.so": "288b34e69557011ed0160b845cfa1538019691368af61a853e7d57a34c475ace",
+        "libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd",
+        "libruntime_probe.so": "537bf83bbc7dc924b9459d4322da2b3bb73b304e7fa76cc87cfc74ecaedffcbd",
+        "runtime_probe": "18d86d6a628a3fcf68a9abd05f483fb0efbc0c6d6888047f71236274acde898e"
+      },
+      "scene_lifecycle": [
+        {
+          "tid": 30027,
+          "id": 1,
+          "address": "0x77aa5708d8",
+          "entry_sequence": 9,
+          "entered_monotonic_ns": 57804077905014,
+          "last_sequence": 22137,
+          "last_monotonic_ns": 57804162031397,
+          "target_returned": null,
+          "state": "capture_stopped",
+          "return_value": null
+        }
+      ],
+      "event_counts": {
+        "rule": 3,
+        "register_delta": 1,
+        "call": 17468
+      },
+      "syscall_entries": 0,
+      "complete": true,
+      "scene_lifecycle_invalid": 0,
+      "scene_lifecycle_omitted": 0,
+      "coverage_gaps": [],
+      "recovery_damage": [],
+      "baseline_return_values": [
+        42
+      ],
+      "traced_return_values": [
+        42
+      ],
+      "termination_signals": {
+        "baseline": 0,
+        "traced": 0
+      },
+      "process_identities": {
+        "supervisor": {
+          "pid": 30001,
+          "starttime_ticks": 5780345,
+          "initial_stat": "30001 (sh) S 30000 30000 30000 0 -1 4194560 465 0 0 0 0 0 0 0 20 0 1 0 5780345 11052605440 920 18446744073709551615 384752123904 384752377008 549491345616 0 0 0 0 0 1208083711 1 0 0 17 5 0 0 0 0 0 384752386048 384752386688 385622089728 549491349668 549491350105 549491350105 549491355625 0"
+        },
+        "baseline": {
+          "pid": 30004,
+          "starttime_ticks": 5780348,
+          "initial_stat": "30004 (runtime_probe) T 30001 30000 30000 0 -1 4194368 30 0 0 0 0 0 0 0 20 0 1 0 5780348 11118305280 148 18446744073709551615 397718936448 397719567568 549676764480 0 0 0 0 0 1073775864 1 0 0 17 7 0 0 0 0 0 397719632344 397719632720 398034329600 549676767451 549676767699 549676767699 549676773286 0"
+        },
+        "traced": {
+          "pid": 30024,
+          "starttime_ticks": 5780394,
+          "initial_stat": "30024 (runtime_probe) T 30001 30000 30000 0 -1 4194368 30 0 0 0 0 0 0 0 20 0 1 0 5780394 11118305280 161 18446744073709551615 397718936448 397719567568 549676764480 0 0 0 0 0 1073775864 1 0 0 17 7 0 0 0 0 0 397719632344 397719632720 398034329600 549676767451 549676767699 549676767699 549676773286 0"
+        }
+      },
+      "native_request": {
+        "flight": {
+          "capacityMb": 64,
+          "chunkKb": 256,
+          "enabled": true,
+          "entryScene": "runtime",
+          "followThreads": false,
+          "maxThreads": 4,
+          "protectedChunks": 2
+        },
+        "packageName": "org.qbdi.runtime.p89c85c34f0a44af9891ac0a713eb2cba",
+        "scenes": [
+          {
+            "location": {
+              "offset": "0x48d8"
+            },
+            "name": "runtime"
+          }
+        ],
+        "schemaVersion": 1,
+        "session": {
+          "durationMs": 100,
+          "id": "89c85c34-f0a4-4af9-891a-c0a713eb2cba"
+        },
+        "targetModule": "libruntime_probe.so",
+        "trace": {
+          "autoBuffer": false,
+          "bufferMb": 8,
+          "compression": false,
+          "events": "calls",
+          "hexdumpLimit": 32,
+          "lz4Level": 0,
+          "profile": "fast"
+        }
+      },
+      "cleanup_receipt": {
+        "supervisor_stop": {
+          "process": "exited",
+          "remote_directory_removed": false,
+          "trace_directory_removed": false
+        },
+        "baseline": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "traced": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "supervisor": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        }
+      }
+    },
+    {
+      "name": "all-flight",
+      "session_id": "872a8a15-fc46-438b-8afb-427d46fccb99",
+      "created_utc": "2026-10-22T05:22:53.852469+00:00",
+      "report_path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-handoff-20261022/final-all-flight/report.json",
+      "report_sha256": "c2b0bc446948a738fc62c55ffd179a46824cc3aaa0ddb45eeca15fd528f1cd11",
+      "flight_path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-handoff-20261022/final-all-flight/traces/74577631563161_30532_libruntime_probe.so.flight.bin",
+      "flight_sha256": "98d8a6c4d0fd037e5fc14610d09da8edf87c28e0188103ce182294b6cb8becfb",
+      "result": "pass",
+      "checks": {
+        "baseline_semantics": true,
+        "baseline_side_effects": true,
+        "traced_semantics": true,
+        "traced_side_effects": true,
+        "trace_decoding": true
+      },
+      "cleanup": true,
+      "artifacts": {
+        "libqbdi_tracer.so": "288b34e69557011ed0160b845cfa1538019691368af61a853e7d57a34c475ace",
+        "libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd",
+        "libruntime_probe.so": "537bf83bbc7dc924b9459d4322da2b3bb73b304e7fa76cc87cfc74ecaedffcbd",
+        "runtime_probe": "18d86d6a628a3fcf68a9abd05f483fb0efbc0c6d6888047f71236274acde898e"
+      },
+      "scene_lifecycle": [
+        {
+          "tid": 30543,
+          "id": 1,
+          "address": "0x779a3958d8",
+          "entry_sequence": 6,
+          "entered_monotonic_ns": 57827278324174,
+          "last_sequence": 6826,
+          "last_monotonic_ns": 57827298102697,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 30543,
+          "id": 2,
+          "address": "0x779a3958d8",
+          "entry_sequence": 6829,
+          "entered_monotonic_ns": 57827298214026,
+          "last_sequence": 13649,
+          "last_monotonic_ns": 57827309640987,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 30543,
+          "id": 3,
+          "address": "0x779a3958d8",
+          "entry_sequence": 13652,
+          "entered_monotonic_ns": 57827309769405,
+          "last_sequence": 20473,
+          "last_monotonic_ns": 57827319206661,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 30543,
+          "id": 4,
+          "address": "0x779a3958d8",
+          "entry_sequence": 20476,
+          "entered_monotonic_ns": 57827319285193,
+          "last_sequence": 27283,
+          "last_monotonic_ns": 57827327662593,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        },
+        {
+          "tid": 30543,
+          "id": 5,
+          "address": "0x779a3958d8",
+          "entry_sequence": 27286,
+          "entered_monotonic_ns": 57827327739742,
+          "last_sequence": 34106,
+          "last_monotonic_ns": 57827337158036,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a"
+        }
+      ],
+      "event_counts": {
+        "register_delta": 15538,
+        "rule": 10,
+        "instruction": 15535,
+        "memory": 2645,
+        "call": 20
+      },
+      "syscall_entries": 0,
+      "complete": true,
+      "scene_lifecycle_invalid": 0,
+      "scene_lifecycle_omitted": 0,
+      "coverage_gaps": [],
+      "recovery_damage": [],
+      "baseline_return_values": [
+        42,
+        42,
+        42,
+        42,
+        42
+      ],
+      "traced_return_values": [
+        42,
+        42,
+        42,
+        42,
+        42
+      ],
+      "termination_signals": {
+        "baseline": 0,
+        "traced": 0
+      },
+      "process_identities": {
+        "supervisor": {
+          "pid": 30519,
+          "starttime_ticks": 5782706,
+          "initial_stat": "30519 (sh) S 30518 30518 30518 0 -1 4194560 465 0 0 0 0 0 0 0 20 0 1 0 5782706 11042119680 915 18446744073709551615 370993098752 370993351856 549363618336 0 0 0 0 0 1208083711 1 0 0 17 4 0 0 0 0 0 370993360896 370993361536 371578105856 549363620005 549363620441 549363620441 549363625961 0"
+        },
+        "baseline": {
+          "pid": 30521,
+          "starttime_ticks": 5782710,
+          "initial_stat": "30521 (runtime_probe) T 30519 30518 30518 0 -1 4194368 29 0 0 0 0 0 0 0 20 0 1 0 5782710 11032322048 147 18446744073709551615 416977738624 416978369744 548868836016 0 0 0 0 0 1073775864 1 0 0 17 4 0 0 0 0 0 416978434520 416978434896 417471397888 548868839644 548868839891 548868839891 548868845478 0"
+        },
+        "traced": {
+          "pid": 30532,
+          "starttime_ticks": 5782717,
+          "initial_stat": "30532 (runtime_probe) T 30519 30518 30518 0 -1 4194368 29 0 0 0 0 0 0 0 20 0 1 0 5782717 11032322048 168 18446744073709551615 416977738624 416978369744 548868836016 0 0 0 0 0 1073775864 1 0 0 17 5 0 0 0 0 0 416978434520 416978434896 417471397888 548868839644 548868839891 548868839891 548868845478 0"
+        }
+      },
+      "native_request": {
+        "flight": {
+          "capacityMb": 64,
+          "chunkKb": 256,
+          "enabled": true,
+          "entryScene": "runtime",
+          "followThreads": false,
+          "maxThreads": 4,
+          "protectedChunks": 2
+        },
+        "packageName": "org.qbdi.runtime.p872a8a15fc46438b8afb427d46fccb99",
+        "scenes": [
+          {
+            "location": {
+              "offset": "0x48d8"
+            },
+            "name": "runtime"
+          }
+        ],
+        "schemaVersion": 1,
+        "session": {
+          "id": "872a8a15-fc46-438b-8afb-427d46fccb99"
+        },
+        "targetModule": "libruntime_probe.so",
+        "trace": {
+          "autoBuffer": false,
+          "bufferMb": 8,
+          "compression": false,
+          "hexdumpLimit": 32,
+          "lz4Level": 0,
+          "profile": "full"
+        }
+      },
+      "cleanup_receipt": {
+        "supervisor_stop": {
+          "process": "exited",
+          "remote_directory_removed": false,
+          "trace_directory_removed": false
+        },
+        "baseline": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "traced": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "supervisor": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        }
+      }
+    }
+  ],
+  "host_python": "/usr/bin/python3",
+  "offline_cli_checks": {
+    "inspect-flight": {
+      "exit_code": 0,
+      "stdout_single_json": true,
+      "stderr_empty": true,
+      "rows": 0,
+      "has_more": null
+    },
+    "scenes-flight": {
+      "exit_code": 0,
+      "stdout_single_json": true,
+      "stderr_empty": true,
+      "rows": 10,
+      "has_more": false
+    },
+    "events-flight": {
+      "exit_code": 0,
+      "stdout_single_json": true,
+      "stderr_empty": true,
+      "rows": 35,
+      "has_more": false
+    }
+  },
+  "host_tests": {
+    "command": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+    "total": 931,
+    "skipped": 9,
+    "exit_code": 0,
+    "log_path": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android/out/ux-handoff-20261022/python-tests.log",
+    "log_sha256": "cf8d5c2079269a24fc76cc806d1d61f22554b7c026fe911d631233cd2e0179ef"
+  }
+}

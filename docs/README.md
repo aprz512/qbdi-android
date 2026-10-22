@@ -10,6 +10,9 @@
 | 文档 | 内容 |
 | --- | --- |
 | [使用指南](usage.md) | 环境要求、CLI 配置、采集档位、拉取转换、恢复判断与常见问题 |
+| [窄场景采集示例](narrow-capture.md) | 独立基线、calls + Flight、显式返回与停止后未知状态 |
+| [可选 syscall 证据](syscall-details.md) | 有界多路径、Flight/QTRB 返回观察、未知状态及严格离线配对 |
+| [运行时与线程快照](runtime-snapshot.md) | PID/starttime 绑定的运行时/JIT 映射、native 线程和可用 Java 栈 |
 | [手动 Frida 追踪](manual-tracing.md) | 脚本配置、APK 与 tracer 部署、spawn 注入、入口定位 |
 | [架构与设计](architecture.md) | 模块职责、会话与停止、样本身份、写入恢复、配置状态与 JSON ABI |
 | [开发与验证](development.md) | 构建产物、QBDI submodule 管理、主机测试、设备发布门禁与配置验收 |
@@ -28,6 +31,9 @@
 - [数码宝贝 UP / AppGuard 实测](research/2026-10-19-appguard-dgup.md)
 - [数码宝贝 UP / AppGuard 环境检测清单](research/2026-10-20-appguard-dgup-environment.md)
 - [qbdi-android 实战体验与优化建议：AppGuard 防护库分析](research/2026-10-21-qbdi-dgup-tool-experience.md)
+- [赛马娘防护库分析参考](research/2026-10-22-umamusume-protection-reference.md)
+- [赛马娘保护库补证：CrackProof 指纹、路径函数与观察边界](research/2026-10-22-umamusume-verification.md)
+- [2026-10-22 使用体验优化交接](superpowers/plans/2026-10-22-qbdi-ux-handoff.md)
 - [离线分析器前期调研](research/2026-08-30-trace-ui-analysis.md)
 
 ## 设计与历史记录
@@ -48,12 +54,16 @@
 复现步骤见[性能指南](benchmarking.md)和[分析器开发指南](../qtrace-ui/docs/development.md)。
 按日期保留的原始记录统一位于 [benchmarks/](benchmarks/)，常用入口：
 
-- [QTRB 设备性能与大小基线](benchmarks/binary-trace-baseline.md)
+- [QTRB 发布基线 v2：正确性校准与原性能门槛](benchmarks/binary-trace-baseline-v2.md)
+- [不可变历史 QTRB 性能与大小基线](benchmarks/binary-trace-baseline.md)
 - [追踪吞吐优化过程](benchmarks/trace-throughput-baseline.md)
 - [Flight Recorder 多线程崩溃验收](benchmarks/flight-recorder-acceptance.md)
 - [跟踪可靠性与样本身份验收](benchmarks/qtrace-tracing-reliability-2026-10-19.md)
 - [JNI 普通/V/A 与 arm64 ABI 验收](benchmarks/jni-abi-2026-10-21.md)
 - [通用生命周期、Flight 查询与进程边界验收](benchmarks/qbdi-generic-2026-10-21.md)
+- [使用体验配置与窄场景验收](benchmarks/qtrace-ux-2026-10-22.md)
+- [可选 syscall 路径与返回验收](benchmarks/qtrace-syscall-2026-10-22.md)
+- [剩余体验优化、Java/JIT 快照与最终验收](benchmarks/qtrace-ux-remaining-2026-10-22.md)
 - [分析器当前性能基线](benchmarks/qtrace-ui-performance-current.md)
 - [分析器调用树分页验收](benchmarks/qtrace-ui-call-tree-pages.md)
 - [分析器时间线请求验收](benchmarks/qtrace-ui-timeline-pages.md)

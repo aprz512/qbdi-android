@@ -110,6 +110,55 @@ CLI 在主机解析 symbol，再把 offset 交给 native tracer；这与[手动 
 | `tracer.flightEnabled` / `tracer.flightEntryScene` | 开启 Flight 并明确指定已配置的入口场景；关闭时省略 `flightEntryScene` |
 | `tracer.library` / `tracer.companion` | 同时指定预构建 tracer 与 ShadowHook companion；路径相对配置文件目录解析 |
 | `tracer.codeRules` | 显式启用样本规则，要求同时提供 `target.sha256` |
+| `tracer.syscallDetails` | 可选只读路径与返回证据，默认关闭；要求 `events: "calls"`、CodeRules 关闭，支持 Flight/QTRB，见[使用说明](syscall-details.md) |
+
+### 配置接口与前置诊断
+
+`run/monitor --config` 只接受上面的 CLI JSON。手动脚本发送的 native JSON 是另一种接口：
+
+| 用途 | CLI `--config` | 手动 native `config.tracer` |
+| --- | --- | --- |
+| 包名、模块 | `app.package`、`target.module` | `packageName`、`targetModule` |
+| 事件模式 | `tracer.events` | `trace.events` |
+| Flight 入口 | `tracer.flightEnabled/flightEntryScene` | `flight.enabled/entryScene` |
+| 场景位置 | `startOffset/endOffset` 或 `symbol` | `location.offset/endOffset` 或 image-base locator |
+| 时限 | `run --duration` | `session.durationMs` |
+| 自动线程跟踪 | 当前无 CLI 字段 | 可选 `flight.followThreads` |
+
+不要把完整 native JSON 或 `flight.followThreads` 粘到 CLI 配置中。CLI 会保留严格拒绝，
+错误指出 `CLI --config`、字段和本节入口。CLI 的 native 请求由 `build_native_request` 构造；
+手动入口请以[完整 native 配置](manual-tracing.md#配置-tracer)为起点，保留必填的 `trace`、`flight` 和场景字段。
+手动拒绝信息中的 `error.path` 是 native 字段路径，不能把缺字段的手写请求视为 CLI 构造器缺陷。
+
+只检查配置可直接调用现有解析器；不会选择设备、构建或导入 Frida：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+from qtrace.config import load_config
+from qtrace.errors import ConfigError
+try:
+    load_config(Path("target.json"))
+except ConfigError as error:
+    raise SystemExit(str(error))
+print("CLI schema valid; device, target and artifact availability not checked")
+PY
+```
+
+`frida --version` 对应的 Python 可能与运行 qtrace 的 Python 不同。用同一个解释器检查：
+
+```bash
+python3 -c 'import sys; print(sys.executable)'
+python3 -m pip show frida
+python3 -c 'import frida; print(frida.__version__)'
+```
+
+若报 `frida.python_missing`，将 `frida` 安装到错误中显示的解释器环境，或改用已有 bindings 的 Python
+运行 `-m qtrace`。CLI 在构建设备会话前检查 bindings 是否存在，保持 Frida 实际初始化在隔离 worker 中。
+包存在但导入失败时，worker 仍会报告对应导入错误。`FRIDA_VERSION_MISMATCH` 已给出实际 host/server 版本；
+调整该 Python 环境中的 `frida` 或所选设备的 server，使版本匹配后再重试，不凭另一个 `frida` 命令的版本判断。
+
+从独立输入学习 calls、Flight 和显式返回，见[窄场景采集示例](narrow-capture.md)。
 
 ### 拉取与 demo
 
@@ -180,6 +229,7 @@ Flight Recorder 在默认 `events: "all"` 下按 full 语义采集目标模块�
 需要先定位调用时，可在 CLI 配置中设置 `tracer.events: "calls"`；native JSON 对应 `trace.events`。
 省略时保持 `"all"`。`calls` 保留已有 JNI/libc/执行转移语义事件，并为目标指令中的 `svc` 记录系统调用号与六个入口参数，关闭指令、memory 和逐指令 GPR 事件。
 Flight 仍保留必要的 chunk checkpoint 和场景边界。系统调用入口记录不证明调用成功或返回，也不覆盖目标模块外部的所有系统调用。
+需要路径与原始返回观察时，可显式开启 `tracer.syscallDetails`。calls 的 Flight/QTRB 最多读取两个各 128 字节的路径，分别表达原始 x0、Linux 错误解释与未知返回；见[配置及离线配对](syscall-details.md)。
 这种模式降低输出量；短函数的建 VM、翻译和 hook 成本仍存在，当前测量没有证明 CPU 加速。
 先用现有 `target.module` 和少量 scene 聚焦，找到入口后在下一次采集改用 `all` 与所需 profile。
 
@@ -189,7 +239,7 @@ Flight 仍保留必要的 chunk checkpoint 和场景边界。系统调用入口�
 native `activeScenes[].sealed: true` 表示采集已经封口，但该目标调用仍未结束；实际返回或受控线程退出后才移除。
 `deadlineMonotonicNs` 是停止请求的截止时间，阻塞调用可能稍后才观察到请求。
 `process_state` 只有在监控器确认原进程退出后才为 `exited`；单独拉取的旧 status 不证明进程仍存活。
-开放 scene 的 TID、采集状态和截止时间可用于定位等待；这些字段不能确定 Java/Binder 等待原因，也不会自动采样 Java 栈。
+开放 scene 的 TID、采集状态和截止时间可用于定位等待；这些字段不能确定 Java/Binder 等待原因。需要额外证据时，显式使用 [snapshot](runtime-snapshot.md) 保存运行时/JIT 映射、线程及可用的 Java 栈；不会自动采样。
 
 Flight 的 `scene_lifecycle` 使用实际 `qtrace.scene` 事件区分进入、返回和停止采集，最多保留最近 256 个调用，并报告省略和无效事件数量。
 文件 `complete` 仅描述保留数据的结构完整性。只有明确的返回事件证明采集窗口内目标返回；`capture_stopped` 和 `open_at_end` 的返回状态保持未知。

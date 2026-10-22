@@ -605,6 +605,8 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
                 sp: 0,
                 fault_address: 0,
                 flags: 0,
+
+                pc_source: qtrace_provider::SignalPcSource::Unknown,
             }),
             EventKind::Signal,
         ),
@@ -618,6 +620,7 @@ fn event_record_kind_is_derived_from_every_closed_payload_variant() {
                 sp: 0,
                 fault_address: 0,
                 flags: 0,
+                pc_source: qtrace_provider::SignalPcSource::Unknown,
                 depth: 0,
                 nested_delivery_count: 0,
                 begin_sequence: None,

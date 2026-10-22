@@ -4067,7 +4067,7 @@ class AcceptanceHarnessTests(unittest.TestCase):
                 "--profile", "fast", "--runs", "5", "--candidate-tracer",
                 str(pair.tracer.path), "--expected-installed-apk-sha256",
                 historical.apk_sha256, "--compare",
-                "docs/benchmarks/binary-trace-baseline.md",
+                "docs/benchmarks/binary-trace-baseline-v2.md",
             )
             with patch.object(acceptance, "_snapshot_current_inputs",
                               side_effect=snapshot_current_inputs, create=True), \

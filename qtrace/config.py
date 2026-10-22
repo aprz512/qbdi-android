@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from qtrace.errors import ConfigError
+from qtrace.errors import ConfigError, _single_line_utf8
 from qtrace.models import (
     AppConfig,
     OffsetScene,
@@ -275,6 +275,7 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
             "companion",
             "codeRules",
             "events",
+            "syscallDetails",
         )),
     )
     profile = tracer.get("profile", "fast")
@@ -311,8 +312,13 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
             _fail("FLIGHT_ENTRY_SCENE_INVALID", "flightEntryScene is forbidden when Flight is disabled")
         flight_entry_scene = None
 
+    syscall_details = _boolean(tracer, "syscallDetails", False)
+    code_rules = _boolean(tracer, "codeRules", False)
+    if syscall_details and (events != "calls" or code_rules):
+        _fail("CONFIG_VALUE_INVALID", "tracer.syscallDetails requires calls and disabled codeRules")
     return TracerConfig(
-        code_rules=_boolean(tracer, "codeRules", False),
+        code_rules=code_rules,
+        syscall_details=syscall_details,
         events=events,
         profile=profile,
         compression=compression,
@@ -323,7 +329,7 @@ def _load_tracer(value: Any, base: Path, scene_names: frozenset[str]) -> TracerC
     )
 
 
-def load_config(path: Path) -> UserConfig:
+def _load_config(path: Path) -> UserConfig:
     try:
         config_path, raw = _read_config_bytes(path)
         root_value = json.loads(
@@ -368,3 +374,17 @@ def load_config(path: Path) -> UserConfig:
         tracer=tracer,
         scenes=scenes,
     )
+
+
+def load_config(path: Path) -> UserConfig:
+    """Load strict CLI input and identify its interface in every diagnostic."""
+    try:
+        return _load_config(path)
+    except ConfigError as error:
+        raise ConfigError(
+            error.code,
+            f"CLI --config: {_single_line_utf8(error.detail, max_bytes=240)}; "
+            "use app/target/tracer/scenes. "
+            "native JSON belongs to scripts/spawn_trace.js config.tracer. "
+            "See docs/usage.md#配置接口与前置诊断",
+        ) from error

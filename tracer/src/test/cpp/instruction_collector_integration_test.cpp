@@ -1,6 +1,7 @@
 #include "core/instruction_collector.h"
 #include "core/instruction_cache.h"
 #include "core/trace_callback_gate.h"
+#include "core/signal_broker.h"
 #include "events/binary_trace_format.h"
 #include "events/binary_trace_writer.h"
 #include "events/trace_sink.h"
@@ -113,6 +114,38 @@ void calls_only_omits_instructions_but_observes_syscall_arguments() {
     CHECK(std::memcmp(&before, &gpr, sizeof(gpr)) == 0);
 }
 
+void details_keep_unrelated_posts_and_missing_posts_unknown() {
+    TraceOptions options{};
+    options.calls_only = true;
+    options.syscall_details = true;
+    const uint32_t svc = 0xd4000001;
+    TraceContext trace{};
+    trace.module_base = reinterpret_cast<uintptr_t>(&svc);
+    ModuleRange module{};
+    module.start = trace.module_base; module.end = module.start + sizeof(svc);
+    InstructionCache cache;
+    RecordingSink sink;
+    SignalBrokerThreadState signal_thread;
+    InstructionCollector collector(&cache,&sink,nullptr,&trace,nullptr,options,module,nullptr,&signal_thread);
+    QBDI::GPRState gpr{};
+    gpr.pc = module.start; gpr.x8 = 56;
+    gpr.x1 = reinterpret_cast<uintptr_t>("/dev/null");
+    const auto before = gpr;
+    CHECK(collector.on_pre(nullptr,&gpr,nullptr) == QBDI::CONTINUE);
+    CHECK(std::memcmp(&before,&gpr,sizeof(gpr)) == 0);
+    CHECK(sink.last_detail.find("/dev/null") != std::string::npos);
+    gpr.pc = module.start + 8; gpr.x0 = 77;
+    CHECK(collector.on_post(nullptr,&gpr,nullptr) == QBDI::CONTINUE);
+    CHECK(sink.last_category == "syscall-return");
+    CHECK(sink.last_detail.find("\"observed\":false") != std::string::npos);
+    CHECK(sink.last_detail.find("\"rawReturn\":null") != std::string::npos);
+    CHECK(sink.last_detail.find("unexpected_pc") != std::string::npos);
+    gpr.pc = module.start;
+    CHECK(collector.on_pre(nullptr,&gpr,nullptr) == QBDI::CONTINUE);
+    collector.finish_last(gpr);
+    CHECK(sink.last_detail.find("capture_ended") != std::string::npos);
+}
+
 void completion_forwards_the_complete_post_instruction_registers() {
     TraceOptions options{};
     TraceContext trace{};
@@ -191,6 +224,7 @@ void latched_writer_blocks_collector_trace_work_but_preserves_rule_action() {
 
 int main() {
     calls_only_omits_instructions_but_observes_syscall_arguments();
+    details_keep_unrelated_posts_and_missing_posts_unknown();
     completed_pending_instruction_is_emitted_to_injected_sink();
     completion_forwards_the_complete_post_instruction_registers();
     latched_writer_blocks_collector_trace_work_but_preserves_rule_action();

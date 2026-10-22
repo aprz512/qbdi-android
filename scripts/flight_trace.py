@@ -1134,6 +1134,19 @@ def recover_flight(source: BinaryIO) -> FlightRecovery:
     events.extend(emergency_events)
     events.sort(key=lambda item: item.global_seq)
 
+    pc_policy = {}
+    policy = '{"schema":1,"firstLevel":"qbdi_logical","nested":"kernel_ucontext","handlerReturn":"guest_handler_context"}'
+    for event in events:
+        if event.kind == "rule" and event.data.get("name") == "qtrace.signal_pc":
+            pc_policy[event.tid] = event.data.get("detail") == policy
+        elif event.kind in {"signal", "signal_handler_begin", "signal_handler_return"}:
+            depth = int(event.data.get("flags", 0)) & 0xffff
+            source = "unknown"
+            if pc_policy.get(event.tid) and depth:
+                source = ("guest_handler_context" if event.kind == "signal_handler_return" else
+                          "kernel_ucontext" if depth > 1 else "qbdi_logical")
+            event.data["pc_source"] = source
+
     thread_events: dict[int, list[FlightEvent]] = {}
     for event in events:
         thread_events.setdefault(event.tid, []).append(event)

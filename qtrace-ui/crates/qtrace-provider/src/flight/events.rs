@@ -9,8 +9,8 @@ use crate::{
     CoverageGap, EventKey, EventPayload, EventRecord, EventScope, OpaqueOptionalRecord, Provenance,
     ProviderError, RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot,
     RegisterValue, SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase,
-    SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase, WorkDelta,
-    WorkGuard,
+    SignalPcSource, SourceCoordinate, StringDefinition, Syscall, ThreadLifecycle,
+    ThreadLifecyclePhase, WorkDelta, WorkGuard,
 };
 
 use super::{
@@ -365,6 +365,47 @@ pub(super) fn decode(
         guard,
     )?;
     output = guarded_sort_events(output, guard)?;
+    let mut pc_policies = HashMap::new();
+    const PC_POLICY: &str = r#"{"schema":1,"firstLevel":"qbdi_logical","nested":"kernel_ucontext","handlerReturn":"guest_handler_context"}"#;
+    for (index, event) in output.iter_mut().enumerate() {
+        if index as u64 % crate::MAX_UNGUARDED_RECORDS == 0 {
+            guard.consume(WorkDelta::default())?;
+        }
+        match &mut event.payload {
+            EventPayload::SemanticRule(rule) if rule.name == "qtrace.signal_pc" => {
+                if let Some(tid) = event.key.tid {
+                    if !pc_policies.contains_key(&tid) {
+                        allocation::try_reserve_hash_map(
+                            &mut pc_policies,
+                            1,
+                            guard,
+                            "signal PC policy allocation failed",
+                        )?;
+                    }
+                    pc_policies.insert(tid, rule.detail == PC_POLICY);
+                }
+            }
+            EventPayload::Signal(signal) if pc_policies.get(&signal.tid) == Some(&true) => {
+                signal.pc_source = match signal.flags & 0xffff {
+                    0 => SignalPcSource::Unknown,
+                    1 => SignalPcSource::QbdiLogical,
+                    _ => SignalPcSource::KernelUcontext,
+                };
+            }
+            EventPayload::SignalHandlerBoundary(boundary)
+                if pc_policies.get(&boundary.tid) == Some(&true) && boundary.depth != 0 =>
+            {
+                boundary.pc_source = if boundary.phase == SignalHandlerPhase::Return {
+                    SignalPcSource::GuestHandlerContext
+                } else if boundary.depth == 1 {
+                    SignalPcSource::QbdiLogical
+                } else {
+                    SignalPcSource::KernelUcontext
+                };
+            }
+            _ => {}
+        }
+    }
     target_pcs = guarded_sort_u64(target_pcs, guard)?;
     let final_registers = finalize_registers(final_state, guard)?;
     Ok(DecodedFlight {
@@ -1286,6 +1327,8 @@ fn decode_signal(bytes: &[u8], tid: u32, width: u8) -> Result<Signal, ProviderEr
         sp: 0,
         fault_address,
         flags: 0,
+
+        pc_source: SignalPcSource::Unknown,
     })
 }
 
@@ -1323,6 +1366,8 @@ fn decode_emergency(
             sp,
             fault_address: fault,
             flags,
+
+            pc_source: SignalPcSource::Unknown,
         }),
         12 | 13 => EventPayload::SignalHandlerBoundary(SignalHandlerBoundary {
             tid,
@@ -1337,6 +1382,7 @@ fn decode_emergency(
             sp,
             fault_address: fault,
             flags,
+            pc_source: SignalPcSource::Unknown,
             depth: (flags & 0xffff) as u16,
             nested_delivery_count: (flags >> 16) as u16,
             begin_sequence: (kind == 13).then_some(fault),

@@ -28,8 +28,9 @@ pub use model::{
     Provenance, ProviderCapabilities, ProviderCounters, ProviderSummary, RangeBounds, RangeDomain,
     RegisterCheckpoint, RegisterDelta, RegisterSlot, RegisterSnapshot, RegisterValue,
     SemanticDefinition, SemanticEvent, Signal, SignalHandlerBoundary, SignalHandlerPhase,
-    SourceIdentity, StringDefinition, Syscall, ThreadLifecycle, ThreadLifecyclePhase,
-    TimelineDescriptor, TimelineId, completeness_canonical_key, merge_canonical_completeness,
+    SignalPcSource, SourceIdentity, StringDefinition, Syscall, ThreadLifecycle,
+    ThreadLifecyclePhase, TimelineDescriptor, TimelineId, completeness_canonical_key,
+    merge_canonical_completeness,
 };
 pub use qtrb::{
     BeginMetadata, CaptureBytes, Instruction, InstructionDefinition, Memory, MemoryAddressMode,
