@@ -1,0 +1,785 @@
+{
+  "schema": 1,
+  "date": "2026-10-22",
+  "branch": "feat/flight-query-bounded",
+  "base_commit": "eb79bcb2c37acb27affda4983ecb099e3ac5c497",
+  "scope": "host-only offline tools and manual payload deployment contract; synthetic production encoder inputs; no new device acceptance",
+  "state": "uncommitted implementation in isolated worktree; main unchanged",
+  "environment": {
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "sqlite": "3.45.1",
+    "logical_cpus": 16
+  },
+  "measurement_limits": {
+    "single_runs": true,
+    "cold_cache_isolation": false,
+    "concurrent_scans_possible": true,
+    "reported_elapsed_clock": "GNU time; monitor monotonic values also retained",
+    "temporary_disk_sampling_seconds": 0.5,
+    "source_equivalence": "final source alias guard does not alter distinct-path queries; fragment-group ordering and its extra empty index do not alter these zero-fragment corpus results; focused regressions validate final changes"
+  },
+  "source_hashes_at_report": {
+    "qtrace/_artifact_validation.py": "092a60feb587bd1172a0ac801653cea96877c118333d28a92f0ffd3f6a0468dd",
+    "qtrace/build.py": "745cb9d5559f700357f81ba9e7795971a45799ea89386bf2c1513ff0542c2078",
+    "qtrace/cli.py": "42bf96d13385c1c82b70fe71c9f89fb3b99672bd6022089321c10bf423dea22d",
+    "qtrace/flight_inspection.py": "7d23be93f28b68f1e7193e1d4cdd781df41aa4cde38bce12a4dd4ddb2ba20ac9",
+    "qtrace/flight_reader.py": "93389030824f56d27b90215235a9a96d194a33d713fe28db44516460e6cdeea6",
+    "qtrace/flight_tail.py": "b926e9d21acd722f16dd2add0e4dfe499265225394d7686cb0f9048b2bb000a0",
+    "qtrace/flight_scene_index.py": "c9bb19ba6e8cfeaf6a3d28440ea55989147209a753dd20a661b3153e50c0aeeb",
+    "qtrace/manual_deploy.py": "f03e4889254e2d81deccd69af2a4e7512919d1988d636fa793f784f109c1f145",
+    "scripts/flight_convert.py": "f582b3b8a0658e3afcda3ba7daee24eb6cc9386cfeefd6a0ef05f6c3c124b6e4",
+    "scripts/flight_trace.py": "c5d1a5b6cd6f05c8b5763cf7040277d7ae502a841fb3a1dc7ea9c10db3334e8a",
+    "scripts/flight_storage.py": "8ad010df016132007cd2f8dfca5f5c424af606970d727e226e4f33e5247ccbf2",
+    "scripts/pull_trace.py": "2e4b9b494bb72bc52478fdfeaae7328b03050949784ede52b132d909f6dc1e1c",
+    "scripts/tracer_build_identity.py": "1ce8a4e3693a51106a502587450049a6f552c54a8972558775ce530e8278700a",
+    "tracer/build.gradle": "d8994183857728678e225f44cbaacac1fa3e0aee20fa6d8743fb1508561af327",
+    "tracer/src/test/cpp/flight_query_fixture.cpp": "7540627ef16bb8a054983b43231eb62f39cd641f284fa7fc3bce40d0d287e52f"
+  },
+  "test_hashes_at_report": {
+    "scripts/tests/test_flight_tail.py": "a872bb4dce23075e39cdb601beec67faf2c96473f5333a5efda385ccbb388575",
+    "scripts/tests/test_flight_scene_index.py": "6518ccd8170ba9453081045bf451d06b044420ac3379f15853160a0c8839ae27",
+    "scripts/tests/test_flight_streaming.py": "70309fab745353f5a2ff29bcc454e9521be9ed43d850b9614665101ba7ad963e",
+    "scripts/tests/test_manual_deploy.py": "f84d95fec1c81fcbb944631ace476b8c39cc6f7725ac1334b060e68821bdd92e",
+    "scripts/tests/test_tracer_build_identity.py": "70cf6e54815ca70cfb882dd57b4d6acf924c1b02a1ac3c869217223fa9c956da"
+  },
+  "producer": {
+    "binary": "build/native-tests/flight_query_fixture",
+    "binary_sha256": "ad27e58e945964726fbe21a272bc4daf8c3cb7a5bb297dd33af365135bd258b5",
+    "source_sha256": "7540627ef16bb8a054983b43231eb62f39cd641f284fa7fc3bce40d0d287e52f",
+    "groups_memory_events": 32,
+    "memory_before_after_bytes": 64
+  },
+  "inputs": {
+    "dense.flight.bin": {
+      "path": "out/flight-query-20261022-6580/dense.flight.bin",
+      "bytes": 2147483648,
+      "allocated_bytes": 2147233792,
+      "sha256": "1cb01f1d0a1351e6f81715fb1910a39154ae410253fdd4ff9457521378df237b"
+    },
+    "dense-open.flight.bin": {
+      "path": "out/flight-query-20261022-6580/dense-open.flight.bin",
+      "bytes": 2147483648,
+      "allocated_bytes": 2138402816,
+      "sha256": "e5999b7b5adefcdc8a89af34024fd0dba649eea43512d795370f628de2002f15"
+    },
+    "small.flight.bin": {
+      "path": "out/flight-query-20261022-6580/small.flight.bin",
+      "bytes": 688128,
+      "allocated_bytes": 688128,
+      "sha256": "4e67a9b34b14716d2115a42ce7ebf98dc002eeaa4a46cff6c48c7cba740cb462"
+    }
+  },
+  "open_scene": {
+    "generator": {
+      "capacity_bytes": 2147483648,
+      "groups": 330000,
+      "instructions": 330000,
+      "memory": 10560000,
+      "calls": 0,
+      "scene_boundaries": 1,
+      "open_scene": true
+    },
+    "metadata": {
+      "format_version": 2,
+      "run_id": 270544960,
+      "pid": 4242,
+      "target_module": "libquery.so",
+      "artifact_bytes": 2147483648,
+      "artifact_flags": 0,
+      "tids": [
+        42
+      ],
+      "chunk_count": 8191,
+      "active_chunks": 0,
+      "sealed_chunks": 8158,
+      "claimed_records": 10914479,
+      "claimed_committed_bytes": 2136905608,
+      "metadata_bytes_read": 528384,
+      "payload_verification": "not_performed",
+      "target_returned": null
+    },
+    "tail": {
+      "result": {
+        "has_more": true,
+        "next_until_sequence": 10914449,
+        "payload_bytes_read": 80064,
+        "decoded_chunks": 1,
+        "metadata_bytes_read": 528640,
+        "scene_context": "not_resolved",
+        "target_returned": null,
+        "verification_scope": "decoded chunks and emergency slots; no global recovery; fragments are not assembled",
+        "row_count": 30,
+        "first_sequence": 10914450,
+        "last_sequence": 10914479
+      },
+      "gnu_elapsed_seconds": 0.11,
+      "max_rss_kib": 27604,
+      "raw_time_log": "out/flight-query-20261022-6580/open-tail.time"
+    },
+    "index": {
+      "index": "out/flight-query-20261022-6580/open.scenes.sqlite",
+      "payload_bytes_read": 2136905608,
+      "decoded_chunks": 8158,
+      "scene_summary": {
+        "scene_count": 1,
+        "returns_observed": 0,
+        "capture_stopped": 0,
+        "unpaired_scenes": 1,
+        "invalid_boundaries": 0,
+        "instruction_count": 330000,
+        "typed_damage": 0,
+        "stale_directory_entries": [],
+        "unreliable_directory_ranges": [],
+        "physical_records": 10914479,
+        "first_sequence": 1,
+        "last_sequence": 10914479,
+        "recorded_tids": [
+          42
+        ],
+        "thread_begin_tids": [
+          42
+        ],
+        "unfollowed_threads": null,
+        "installation_status": null,
+        "missing_sequence_ranges": 0,
+        "coverage_gaps": 0,
+        "entry_registers": "not_recorded_as_an_explicit_scene_snapshot",
+        "scenes": [
+          {
+            "address": "0x71000088",
+            "hit_count": 1,
+            "returns_observed": 0,
+            "instruction_count": 330000,
+            "first_observed_sequence": 6,
+            "last_observed_sequence": 10914479
+          }
+        ],
+        "scene_summaries_omitted": 0,
+        "verification_scope": "all decoded chunks and emergency slots; scene boundary index, not full recovery"
+      },
+      "gnu_elapsed_seconds": 253.42,
+      "max_rss_kib": 43040,
+      "raw_time_log": "out/flight-query-20261022-6580/open-index.time",
+      "bytes": 12472320
+    },
+    "boundaries_after_tail": {
+      "result": {
+        "has_more": false,
+        "next_after_sequence": null,
+        "payload_bytes_read": 0,
+        "decoded_chunks": 0,
+        "query_scope": "boundaries_after_cursor",
+        "verification_scope": "source-bound scene index; no payload reread",
+        "row_count": 0,
+        "first_sequence": null,
+        "last_sequence": null
+      },
+      "gnu_elapsed_seconds": 0.07,
+      "max_rss_kib": 25352,
+      "raw_time_log": "out/flight-query-20261022-6580/open-index-reuse.time"
+    },
+    "scene_at_tail": {
+      "result": {
+        "sequence": 10914450,
+        "tid": 42,
+        "scenes": [
+          {
+            "tid": 42,
+            "id": 1,
+            "address": "0x71000088",
+            "entry_sequence": 6,
+            "entered_monotonic_ns": 1000000000,
+            "last_sequence": 6,
+            "last_monotonic_ns": 1000000000,
+            "target_returned": null,
+            "state": "open_at_end",
+            "return_value": null,
+            "observed_until_sequence": 10914479,
+            "instruction_count": 330000,
+            "membership": "observed",
+            "uncertainty": []
+          }
+        ],
+        "has_more": false,
+        "membership_status": "observed",
+        "unpaired_scenes": 1,
+        "payload_bytes_read": 0,
+        "verification_scope": "source-bound scene index; no payload reread"
+      },
+      "gnu_elapsed_seconds": 0.06,
+      "max_rss_kib": 25448,
+      "raw_time_log": "out/flight-query-20261022-6580/open-scene-at.time"
+    },
+    "commands": {
+      "open-inspect": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "inspect-flight",
+          "out/flight-query-20261022-6580/dense-open.flight.bin",
+          "--json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.09403018798911944
+      },
+      "open-tail": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "tail-flight",
+          "out/flight-query-20261022-6580/dense-open.flight.bin",
+          "--limit",
+          "30"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.11468720901757479
+      },
+      "open-index": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "index-flight",
+          "out/flight-query-20261022-6580/dense-open.flight.bin",
+          "--index",
+          "out/flight-query-20261022-6580/open.scenes.sqlite",
+          "--timeout",
+          "900"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 247.46188328199787
+      }
+    },
+    "reuse_commands": {
+      "open-index-reuse": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "scenes-flight",
+          "out/flight-query-20261022-6580/dense-open.flight.bin",
+          "--index",
+          "out/flight-query-20261022-6580/open.scenes.sqlite",
+          "--after-sequence",
+          "10914449"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.07417549699312076
+      },
+      "open-scene-at": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "scene-at-flight",
+          "out/flight-query-20261022-6580/dense-open.flight.bin",
+          "--index",
+          "out/flight-query-20261022-6580/open.scenes.sqlite",
+          "--sequence",
+          "10914450",
+          "--tid",
+          "42"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.06970577995525673
+      }
+    }
+  },
+  "overwritten_entry": {
+    "generator": {
+      "capacity_bytes": 2147483648,
+      "groups": 350000,
+      "instructions": 350000,
+      "memory": 11200000,
+      "calls": 0,
+      "scene_boundaries": 1,
+      "open_scene": true
+    },
+    "metadata": {
+      "format_version": 2,
+      "run_id": 270544960,
+      "pid": 4242,
+      "target_module": "libquery.so",
+      "artifact_bytes": 2147483648,
+      "artifact_flags": 0,
+      "tids": [
+        42
+      ],
+      "chunk_count": 8191,
+      "active_chunks": 0,
+      "sealed_chunks": 8191,
+      "claimed_records": 10959140,
+      "claimed_committed_bytes": 2145650256,
+      "metadata_bytes_read": 528384,
+      "payload_verification": "not_performed",
+      "target_returned": null
+    },
+    "tail": {
+      "result": {
+        "has_more": true,
+        "next_until_sequence": 11575931,
+        "payload_bytes_read": 180024,
+        "decoded_chunks": 1,
+        "metadata_bytes_read": 528640,
+        "scene_context": "not_resolved",
+        "target_returned": null,
+        "verification_scope": "decoded chunks and emergency slots; no global recovery; fragments are not assembled",
+        "row_count": 30,
+        "first_sequence": 11575932,
+        "last_sequence": 11575961
+      },
+      "gnu_elapsed_seconds": 0.13,
+      "max_rss_kib": 28628,
+      "raw_time_log": "out/flight-query-20261022-6580/dense-tail-repeat.time"
+    },
+    "index": {
+      "index": "out/flight-query-20261022-6580/dense.scenes.sqlite",
+      "payload_bytes_read": 2145650256,
+      "decoded_chunks": 8191,
+      "scene_summary": {
+        "scene_count": 0,
+        "returns_observed": 0,
+        "capture_stopped": 0,
+        "unpaired_scenes": 0,
+        "invalid_boundaries": 0,
+        "instruction_count": 331350,
+        "typed_damage": 0,
+        "stale_directory_entries": [],
+        "unreliable_directory_ranges": [],
+        "physical_records": 10959140,
+        "first_sequence": 1,
+        "last_sequence": 11575961,
+        "recorded_tids": [
+          42
+        ],
+        "thread_begin_tids": [],
+        "unfollowed_threads": null,
+        "installation_status": null,
+        "missing_sequence_ranges": 1,
+        "coverage_gaps": 0,
+        "entry_registers": "not_recorded_as_an_explicit_scene_snapshot",
+        "scenes": [],
+        "scene_summaries_omitted": 0,
+        "verification_scope": "all decoded chunks and emergency slots; scene boundary index, not full recovery"
+      },
+      "gnu_elapsed_seconds": 259.86,
+      "max_rss_kib": 43684,
+      "raw_time_log": "out/flight-query-20261022-6580/dense-index.time",
+      "bytes": 12529664
+    },
+    "boundaries_after_tail": {
+      "result": {
+        "has_more": false,
+        "next_after_sequence": null,
+        "payload_bytes_read": 0,
+        "decoded_chunks": 0,
+        "query_scope": "boundaries_after_cursor",
+        "verification_scope": "source-bound scene index; no payload reread",
+        "row_count": 0,
+        "first_sequence": null,
+        "last_sequence": null
+      },
+      "gnu_elapsed_seconds": 0.09,
+      "max_rss_kib": 25448,
+      "raw_time_log": "out/flight-query-20261022-6580/dense-index-reuse.time"
+    },
+    "scene_at_tail": {
+      "result": {
+        "sequence": 11575932,
+        "tid": 42,
+        "scenes": [],
+        "has_more": false,
+        "membership_status": "unknown",
+        "unpaired_scenes": 0,
+        "payload_bytes_read": 0,
+        "verification_scope": "source-bound scene index; no payload reread"
+      },
+      "gnu_elapsed_seconds": 0.08,
+      "max_rss_kib": 25336,
+      "raw_time_log": "out/flight-query-20261022-6580/dense-scene-at.time"
+    },
+    "baseline_commands": {
+      "dense-old-scenes": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "scenes-flight",
+          "out/flight-query-20261022-6580/dense.flight.bin",
+          "--limit",
+          "30"
+        ],
+        "exit_code": 1,
+        "elapsed_seconds": 5.1072973780101165
+      },
+      "dense-old-events": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "events-flight",
+          "out/flight-query-20261022-6580/dense.flight.bin",
+          "--after-sequence",
+          "11575931",
+          "--limit",
+          "30"
+        ],
+        "exit_code": 1,
+        "elapsed_seconds": 30.109031978005078
+      }
+    },
+    "reuse_commands": {
+      "dense-index-reuse": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "scenes-flight",
+          "out/flight-query-20261022-6580/dense.flight.bin",
+          "--index",
+          "out/flight-query-20261022-6580/dense.scenes.sqlite",
+          "--after-sequence",
+          "11575931"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.100391422980465
+      },
+      "dense-scene-at": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "scene-at-flight",
+          "out/flight-query-20261022-6580/dense.flight.bin",
+          "--index",
+          "out/flight-query-20261022-6580/dense.scenes.sqlite",
+          "--sequence",
+          "11575932",
+          "--tid",
+          "42"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.08719019900308922
+      },
+      "dense-summary": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "inspect-flight",
+          "out/flight-query-20261022-6580/dense.flight.bin",
+          "--index",
+          "out/flight-query-20261022-6580/dense.scenes.sqlite",
+          "--json"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.10563121101586148
+      },
+      "dense-tail-repeat": {
+        "argv": [
+          "python3",
+          "-m",
+          "qtrace",
+          "tail-flight",
+          "out/flight-query-20261022-6580/dense.flight.bin",
+          "--limit",
+          "30"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 0.13688249501865357
+      }
+    },
+    "conversion": {
+      "argv": [
+        "python3",
+        "-m",
+        "qtrace",
+        "convert-flight",
+        "out/flight-query-20261022-6580/dense.flight.bin",
+        "--output",
+        "out/flight-query-20261022-6580/dense-selected",
+        "--after-sequence",
+        "11575931",
+        "--max-events",
+        "30",
+        "--json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 800.964885008987,
+      "peak_temporary_bytes": 14736580608,
+      "peak_temporary_allocated_bytes": 14733045760,
+      "gnu_elapsed_seconds": 821.02,
+      "max_rss_kib": 50060,
+      "raw_time_log": "out/flight-query-20261022-6580/dense-convert.time",
+      "peak_temporary_bytes_including_open_deleted_files": 14932125055,
+      "peak_temporary_allocated_bytes_including_open_deleted_files": 14932119552,
+      "sampling_interval_seconds": 0.5,
+      "samples": 974,
+      "correctness": {
+        "tail_and_range_output_sequences_equal": true,
+        "partial_output_marked_incomplete": true,
+        "temporary_spool_removed": true,
+        "summary": {
+          "complete": false,
+          "source_complete": true,
+          "provider_complete": false,
+          "output_scope": {
+            "after_sequence": 11575931,
+            "emitted_events": 30,
+            "first_sequence": 11575932,
+            "has_more": false,
+            "last_sequence": 11575961,
+            "max_events": 30,
+            "until_sequence": 18446744073709551615
+          }
+        },
+        "outputs": {
+          "dense.merged.trace.txt": 14500,
+          "dense.flight.json": 1123478,
+          "dense.tid-42.trace.txt": 14500
+        }
+      },
+      "outputs": {
+        "out/flight-query-20261022-6580/dense-selected/dense.merged.trace.txt": {
+          "bytes": 14500,
+          "sha256": "023445aaf03e69c4f70a1eca1155408b0068acfaaa9e29407598c49e92829d52"
+        },
+        "out/flight-query-20261022-6580/dense-selected/dense.flight.json": {
+          "bytes": 1123478,
+          "sha256": "a938b0cede2c4cac60a90e7231b3786fb77a007346245b5a90aad73f903bf105"
+        },
+        "out/flight-query-20261022-6580/dense-selected/dense.tid-42.trace.txt": {
+          "bytes": 14500,
+          "sha256": "59fcb2a072413ccc594f0c9a2d883bb3c1143f430423a1c5715592a69b629cd3"
+        }
+      }
+    }
+  },
+  "small_complete_conversion": {
+    "input_bytes": 688128,
+    "outputs_byte_equivalent": true,
+    "baseline": {
+      "elapsed_seconds": 1.8744003099855036,
+      "peak_python_allocation_bytes": 25244889,
+      "modules": {
+        "scripts.flight_trace": {
+          "file": "/home/lyldalek/.codex/worktrees/6580/qbdi-android/out/flight-query-20261022-6580/baseline/scripts/flight_trace.py",
+          "sha256": "23efdfc13ef02a4d1ac3c551650fb62da568793e51def099279d93ade010ca94"
+        },
+        "scripts.flight_convert": {
+          "file": "/home/lyldalek/.codex/worktrees/6580/qbdi-android/out/flight-query-20261022-6580/baseline/scripts/flight_convert.py",
+          "sha256": "df27eba2560108b9d08c54a1b8db9dc06c3aa2c4d437dc9682bb8155ce76c0ca"
+        }
+      },
+      "outputs": {
+        "small.merged.trace.txt": {
+          "bytes": 2513062,
+          "sha256": "8495a6c729e92e0f9e49824e39fc28e401df53f67b28d42fff960a1f65dfb5e5"
+        },
+        "small.tid-42.trace.txt": {
+          "bytes": 2513062,
+          "sha256": "0e72210b31308e79ec576afa97bd86b90660ac37a1cc25309a2de4a830040f1e"
+        },
+        "small.flight.json": {
+          "bytes": 1924650,
+          "sha256": "1650527a6af76e5c17239b4b5c376c740020228a43c2055ac8a19723a52f9710"
+        }
+      },
+      "gnu_elapsed_seconds": 1.93,
+      "max_rss_kib": 67152,
+      "raw_time_log": "out/flight-query-20261022-6580/small-baseline.time"
+    },
+    "optimized": {
+      "elapsed_seconds": 4.33700505096931,
+      "peak_python_allocation_bytes": 2331944,
+      "modules": {
+        "scripts.flight_trace": {
+          "file": "/home/lyldalek/.codex/worktrees/6580/qbdi-android/scripts/flight_trace.py",
+          "sha256": "c5d1a5b6cd6f05c8b5763cf7040277d7ae502a841fb3a1dc7ea9c10db3334e8a"
+        },
+        "scripts.flight_convert": {
+          "file": "/home/lyldalek/.codex/worktrees/6580/qbdi-android/scripts/flight_convert.py",
+          "sha256": "f582b3b8a0658e3afcda3ba7daee24eb6cc9386cfeefd6a0ef05f6c3c124b6e4"
+        }
+      },
+      "outputs": {
+        "small.merged.trace.txt": {
+          "bytes": 2513062,
+          "sha256": "8495a6c729e92e0f9e49824e39fc28e401df53f67b28d42fff960a1f65dfb5e5"
+        },
+        "small.tid-42.trace.txt": {
+          "bytes": 2513062,
+          "sha256": "0e72210b31308e79ec576afa97bd86b90660ac37a1cc25309a2de4a830040f1e"
+        },
+        "small.flight.json": {
+          "bytes": 1924650,
+          "sha256": "1650527a6af76e5c17239b4b5c376c740020228a43c2055ac8a19723a52f9710"
+        }
+      },
+      "gnu_elapsed_seconds": 4.38,
+      "max_rss_kib": 32552,
+      "raw_time_log": "out/flight-query-20261022-6580/small-optimized.time"
+    }
+  },
+  "cancellation": {
+    "index": {
+      "argv": [
+        "python3",
+        "-m",
+        "qtrace",
+        "index-flight",
+        "out/flight-query-20261022-6580/dense-open.flight.bin",
+        "--index",
+        "out/flight-query-20261022-6580/cancellation/interrupted.sqlite"
+      ],
+      "exit_code": 130,
+      "sigint_to_exit_seconds": 0.015568816976156086
+    },
+    "convert": {
+      "argv": [
+        "python3",
+        "-m",
+        "qtrace",
+        "convert-flight",
+        "out/flight-query-20261022-6580/dense-open.flight.bin",
+        "--output",
+        "out/flight-query-20261022-6580/cancellation/interrupted-output"
+      ],
+      "exit_code": 130,
+      "sigint_to_exit_seconds": 0.015488877019379288
+    },
+    "partial_outputs_published": false,
+    "owned_temporary_files_remaining": false
+  },
+  "validation": {
+    "python_full": {
+      "command": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+      "log": "/tmp/qtrace-flight-full-python-accepted-20261022.log",
+      "sha256": "25c0cbaab98cd3e3b881a0e77940f78841a83a24f6cb705af51bb53a639a2eb8",
+      "exit_code": 0,
+      "tests": 957,
+      "skipped": 9,
+      "archived_log": "out/flight-query-20261022-6580/validation/qtrace-flight-full-python-accepted-20261022.log"
+    },
+    "recovery_pull": {
+      "command": "python3 -m unittest scripts.tests.test_flight_streaming scripts.tests.test_flight_trace scripts.tests.test_flight_convert scripts.tests.test_qtrace_artifacts scripts.tests.test_qtrace_session scripts.tests.test_pull_trace",
+      "log": "/tmp/qtrace-flight-storage-final-20261022.log",
+      "sha256": "205456b17dc7e561443170854b3b45183a9a271936a3208ac3be887a118c2169",
+      "exit_code": 0,
+      "tests": 278,
+      "skipped": 0,
+      "archived_log": "out/flight-query-20261022-6580/validation/qtrace-flight-storage-final-20261022.log"
+    },
+    "deploy_final": {
+      "command": "python3 -m unittest scripts.tests.test_manual_deploy scripts.tests.test_tracer_build_identity scripts.tests.test_qtrace_build scripts.tests.test_qtrace_abi",
+      "log": "/tmp/qtrace-flight-deploy-accepted-20261022.log",
+      "sha256": "f45e3d0da70c35f4cd0d4ce7cca046bbc983a80f3c2752b8d1dc894b891ce34b",
+      "exit_code": 0,
+      "tests": 43,
+      "skipped": 0,
+      "archived_log": "out/flight-query-20261022-6580/validation/qtrace-flight-deploy-accepted-20261022.log"
+    },
+    "index_final": {
+      "command": "python3 -m unittest scripts.tests.test_flight_scene_index",
+      "log": "/tmp/qtrace-flight-index-final-20261022.log",
+      "sha256": "0816065fe0d5a82ace2cd6e57c13acf798ab7e69d339f516b2e112daecf68ee0",
+      "exit_code": 0,
+      "tests": 9,
+      "skipped": 0,
+      "archived_log": "out/flight-query-20261022-6580/validation/qtrace-flight-index-final-20261022.log"
+    },
+    "native_full": {
+      "command": "./gradlew nativeHostTest --no-daemon",
+      "log": "/tmp/qtrace-flight-native-suite-20261022.log",
+      "sha256": "c96d46638da7c87e5f815ad27ee95c710a1ed67b7cfee6a0caf4a85e60ef0766",
+      "exit_code": 0,
+      "tests": 50,
+      "skipped": 0,
+      "archived_log": "out/flight-query-20261022-6580/validation/qtrace-flight-native-suite-20261022.log"
+    }
+  },
+  "pending": [
+    "original experience input and loaded payload provenance",
+    "subsequent business process loading identity for manual deployment"
+  ],
+  "android_build": {
+    "command": "taskset -c 0,1,2,3 ./gradlew :tracer:copyTracerDebug --no-daemon --max-workers=2",
+    "environment": {
+      "CMAKE_BUILD_PARALLEL_LEVEL": "2"
+    },
+    "exit_code": 0,
+    "log": "out/flight-query-20261022-6580/android-build.log",
+    "log_sha256": "1fa013f50632b488cf451d1d75c7484ca7c89a4439d7cca7dac1c1642a5fbdb6",
+    "payload": {
+      "artifacts": {
+        "libqbdi_tracer.so": "366113d821b8d2e2ba586d1050c8d055f8fab9b5d3356d6119fba6ca290fddb8",
+        "libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+      },
+      "build_identity": {
+        "artifacts": {
+          "libqbdi_tracer.so": "366113d821b8d2e2ba586d1050c8d055f8fab9b5d3356d6119fba6ca290fddb8",
+          "libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+        },
+        "build": {
+          "abi": "arm64-v8a",
+          "cmake_configurations": [
+            {
+              "path": "tracer/.cxx/Debug/2t2s1166/arm64-v8a/CMakeCache.txt",
+              "sha256": "169ffdf0b4695798612849fff64ecc74d8ae2b32b2bf50769a7e6fcd8b0b372d",
+              "values": {
+                "ANDROID_NDK": "/home/lyldalek/Android/sdk/ndk/26.1.10909125",
+                "ANDROID_PLATFORM": "android-24",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_FLAGS": "-std=c++20 -fno-exceptions -fno-rtti",
+                "CMAKE_SHARED_LINKER_FLAGS": ""
+              }
+            }
+          ],
+          "task": ":tracer:copyTracerDebug"
+        },
+        "created_utc": "2026-10-22T13:34:21.505531+00:00",
+        "schema_version": 1,
+        "source": {
+          "build_parameters": {
+            "ANDROID_HOME": "/home/lyldalek/Android/sdk",
+            "ANDROID_NDK_HOME": null,
+            "CC": null,
+            "CFLAGS": null,
+            "CXX": null,
+            "CXXFLAGS": null,
+            "QTRACE_USER_RULES_SAMPLE_SHA256": null,
+            "QTRACE_USER_RULES_SOURCE": null
+          },
+          "dirty_diff_sha256": "297879f5ea95e53f574d2cf8288596cdcfddd540197bee8c0969bdb34b76af04",
+          "repository": "/home/lyldalek/.codex/worktrees/6580/qbdi-android",
+          "revision": "eb79bcb2c37acb27affda4983ecb099e3ac5c497",
+          "source_tree_sha256": "bba4b50ceec784f4d3998d702d337c653136bedea7497737a2364ef2d7769e86",
+          "submodules": {
+            "tracer/src/main/cpp/third_party/qbdi": {
+              "dirty_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "expected_revision": "09b2efb66d242b3616a4723e4b487f623b0e93d7",
+              "revision": "09b2efb66d242b3616a4723e4b487f623b0e93d7",
+              "untracked_input_count": 0,
+              "untracked_inputs_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+            }
+          },
+          "untracked_input_count": 1
+        }
+      },
+      "source_status": "recorded"
+    }
+  },
+  "follow_up_device_validation": {
+    "report": "flight-device-2026-10-22.json",
+    "jni_result": "pass",
+    "jni_checks": 14,
+    "manual_result": "pass",
+    "real_flight_cases": 2,
+    "python_tests": 961,
+    "python_skipped": 9,
+    "note": "original offline measurements and source hashes retained; host deployment fixes validated in follow-up"
+  }
+}

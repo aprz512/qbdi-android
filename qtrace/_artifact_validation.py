@@ -168,19 +168,17 @@ def validate_pulled_artifacts(
                     record["producer_wait_ns"] = values.get("producer_wait_ns")
             elif local.name.endswith(".flight.bin"):
                 from scripts.flight_convert import publish_flight_outputs, recovery_status
-                derived = publish_flight_outputs(local, stage_artifacts, force=False)
-                summary = json.loads(derived[-1].read_text(encoding="utf-8"))
+                summary = {}
+                derived = publish_flight_outputs(local, stage_artifacts, force=False, summary_out=summary)
                 if type(summary) is not dict or type(summary.get("complete")) is not bool:
                     raise ValueError("flight recovery summary is malformed")
-                missing_ranges = summary.get("lost_sequences")
-                coverage_gaps = summary.get("coverage_gaps")
                 record.update(decoder="flight", termination=summary.get("termination"),
                              target_returned_in_capture=None,
                              scene_lifecycle=summary.get("scene_lifecycle", []),
                              scene_lifecycle_omitted=summary.get("scene_lifecycle_omitted"),
                              scene_lifecycle_invalid=summary.get("scene_lifecycle_invalid"),
-                             missing_sequence_ranges=len(missing_ranges) if type(missing_ranges) is list else None,
-                             coverage_gap_count=len(coverage_gaps) if type(coverage_gaps) is list else None,
+                             missing_sequence_ranges=summary.get("missing_sequence_ranges"),
+                             coverage_gap_count=summary.get("coverage_gap_count"),
                              recovery_status=recovery_status(summary))
                 process_exited = (status is not None and
                                   status.get("_process_exited") is True)
@@ -248,10 +246,15 @@ def validate_pulled_artifacts(
         relative = "artifacts/" + path.name if path.parent == stage_artifacts else path.name
         if relative in recorded_paths:
             continue
-        data = path.read_bytes()
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as binary:
+            while block := binary.read(1024 * 1024):
+                digest.update(block)
+                size += len(block)
         records.append({"remote_name": path.name, "local_path": relative,
-                        "source_size": None, "destination_size": len(data),
-                        "sha256": hashlib.sha256(data).hexdigest(), "decoder": None,
+                        "source_size": None, "destination_size": size,
+                        "sha256": digest.hexdigest(), "decoder": None,
                         "termination": None, "stop_reason": None, "metrics_schema": None,
                         "producer_waits": None, "producer_wait_ns": None,
                         "conversion_ms": None, "native_stop_acknowledged": None,

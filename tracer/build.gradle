@@ -41,9 +41,31 @@ android {
     }
 }
 
+def tracerIdentitySnapshot = "$buildDir/qtrace-source-identity.json"
+def tracerIdentityScript = "$rootDir/scripts/tracer_build_identity.py"
+
+tasks.register("captureTracerBuildIdentity", Exec) {
+    commandLine "python3", tracerIdentityScript, "capture", "--repository", "$rootDir",
+            "--snapshot", tracerIdentitySnapshot
+}
+
+tasks.named("preBuild").configure {
+    dependsOn "captureTracerBuildIdentity"
+}
+
 tasks.register("copyTracerDebug", Copy) {
     dependsOn "assembleDebug"
     from("$buildDir/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a")
     into("$rootDir/out/arm64-v8a")
     include("libqbdi_tracer.so", "libshadowhook_nothing.so")
+    outputs.upToDateWhen { false }
+    doLast {
+        exec {
+            commandLine "python3", tracerIdentityScript, "publish", "--repository", "$rootDir",
+                    "--snapshot", tracerIdentitySnapshot,
+                    "--tracer", "$rootDir/out/arm64-v8a/libqbdi_tracer.so",
+                    "--companion", "$rootDir/out/arm64-v8a/libshadowhook_nothing.so",
+                    "--output", "$rootDir/out/arm64-v8a/build-identity.json"
+        }
+    }
 }

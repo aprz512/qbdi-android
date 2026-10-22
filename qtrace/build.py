@@ -752,7 +752,8 @@ class Deployer:
                     raise staging_cleanup
 
     def deploy(
-        self, device: BoundTargetDevice, session_id: str, artifacts: TracerArtifacts
+        self, device: BoundTargetDevice, session_id: str, artifacts: TracerArtifacts,
+        *, private_only: bool = False,
     ) -> Deployment:
         if not isinstance(session_id, str) or _UUID4.fullmatch(session_id) is None:
             _fail("session.id_invalid", "deploy", "session ID must be a lowercase UUIDv4")
@@ -775,6 +776,9 @@ class Deployer:
                     snapshots,
                 )
             except _PrivateCapabilityFailure as private_error:
+                if private_only:
+                    raise QtraceError(ErrorCode.TRACER_LOAD_FAILED, "deploy.probe",
+                                      f"app-private deployment is unavailable: {private_error}") from private_error
                 fallback_dir = f"/data/local/tmp/qtrace/{session_id}"
                 try:
                     deployment = self._attempt(

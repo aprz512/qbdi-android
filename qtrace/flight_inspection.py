@@ -144,7 +144,7 @@ def query_scene_boundaries(source, source_size: int, *, since_ns: int = 0,
                 heapq.heapreplace(rows, item)
         check()
     ordered = [item[2] for item in sorted(rows, key=lambda item: (-item[0], -item[1]))]
-    return {"rows": ordered, "has_more": matched > limit,
+    return {"rows": ordered, "has_more": matched > limit, "query_scope": "boundaries_after_cursor",
             "next_after_sequence": ordered[-1]["sequence"] if matched > limit else None,
             "matched_boundaries": matched, "invalid_boundaries": invalid,
             "payload_bytes_read": payload_bytes, "decoded_chunks": decoded_chunks,

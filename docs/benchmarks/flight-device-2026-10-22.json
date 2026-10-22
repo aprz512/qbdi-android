@@ -1,0 +1,1324 @@
+{
+  "schema": 1,
+  "date": "2026-10-22",
+  "branch": "feat/flight-query-bounded",
+  "base_commit": "eb79bcb2c37acb27affda4983ecb099e3ac5c497",
+  "scope": "current payload device ABI acceptance, manual app-private deployment, real Flight offline query and range conversion; no original target capture reproduction",
+  "device": {
+    "serial": "1C111FDF600G6S",
+    "server": "tcp:localhost:5037",
+    "model": "Pixel 6",
+    "fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+    "abi": "arm64-v8a",
+    "sdk": "36",
+    "android_user": "0"
+  },
+  "artifacts": {
+    "libqbdi_tracer.so": "366113d821b8d2e2ba586d1050c8d055f8fab9b5d3356d6119fba6ca290fddb8",
+    "libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd",
+    "libjni_abi_probe.so": "fdfddaec924cb2d1f020f42514c30bf6f807a592cf380aabebdbaab35495eb43",
+    "classes.dex": "7c926b31065303f82a0b785edeb5bc8162855a8c4518d50b657b128a089b5031"
+  },
+  "build_identity": {
+    "path": "out/arm64-v8a/build-identity.json",
+    "bytes": 1989,
+    "sha256": "964431eff161d3dd90722a91e417ce44bb2623574a1b5e204e66ae2a293df55a"
+  },
+  "jni": {
+    "result": "pass",
+    "session_id": "f8069b44-0664-484a-8d18-89f12e5bf232",
+    "checks": {
+      "baseline_java_values": true,
+      "baseline_returns_exceptions": true,
+      "traced_java_values": true,
+      "traced_returns_exceptions": true,
+      "platform_register": true,
+      "real_thread_stack": true,
+      "attach_callback": true,
+      "jni_enter_leave_pairs": true,
+      "jni_argument_text": true,
+      "floating_return_text": true,
+      "fixed_floating_argument_text": true,
+      "fixed_floating_return_text": true,
+      "trace_termination": true,
+      "native_status": true
+    },
+    "process_exit_code": 0,
+    "cleanup": true,
+    "cleanup_receipt": {
+      "process": "exited",
+      "remote_directory_removed": true,
+      "trace_directory_removed": true
+    },
+    "report": {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/report.json",
+      "bytes": 18266,
+      "sha256": "41031a6992c7c19ddb8bae738f0d113e6af4121ed92ea976d424f54a19e0841d"
+    },
+    "independent_check": {
+      "trace_artifacts": 30,
+      "java_observations": 54,
+      "jni_recomputed_checks": {
+        "baseline_java_values": true,
+        "baseline_returns_exceptions": true,
+        "traced_java_values": true,
+        "traced_returns_exceptions": true,
+        "platform_register": true,
+        "real_thread_stack": true,
+        "attach_callback": true,
+        "jni_enter_leave_pairs": true,
+        "jni_argument_text": true,
+        "floating_return_text": true,
+        "fixed_floating_argument_text": true,
+        "fixed_floating_return_text": true
+      },
+      "real_return_terminals": 30,
+      "instructions": 4067,
+      "cleanup_receipt": {
+        "process": "exited",
+        "remote_directory_removed": true,
+        "trace_directory_removed": true
+      },
+      "report_sha256": "41031a6992c7c19ddb8bae738f0d113e6af4121ed92ea976d424f54a19e0841d"
+    }
+  },
+  "manual": {
+    "result": "pass",
+    "checks": {
+      "receipt_keeps_loaded_identity_unknown": true,
+      "matching_abi_report_bound": true,
+      "remote_payload_config_hashes_match": true,
+      "optional_session_added_and_source_config_preserved": true,
+      "duplicate_receipt_preserves_files_and_sessions": true,
+      "wrong_payload_abi_report_rejected_before_deploy": true,
+      "application_remains_stopped": true,
+      "preexisting_session_and_staging_entries_preserved": true
+    },
+    "route": "app-private",
+    "load_probe_status": "ok",
+    "loaded_payload_status": "unknown",
+    "session_id": "4cd3e851-a139-4417-b40f-fabbfb6f9d61",
+    "abi_report_sha256": "41031a6992c7c19ddb8bae738f0d113e6af4121ed92ea976d424f54a19e0841d",
+    "config_sha256": "56b96ef9bccc8e355cbf0595847ad2a298321d4ca4bebd9429f18ad2a8b85a49",
+    "cleanup": true,
+    "report": {
+      "path": "out/flight-validation-20261022-6580/manual-verification.json",
+      "bytes": 12552,
+      "sha256": "5a92906edfcb2875655688230a7af52604d26b855a95cab107c5446ee6b6f42a"
+    },
+    "receipt": {
+      "path": "out/flight-validation-20261022-6580/manual-deployment.json",
+      "bytes": 8287,
+      "sha256": "b6a1505148002f8108c540ab1300f68bccb051860577f3b5fa92d8949edc02fc"
+    },
+    "parent_mode_owner_group_context_unchanged": true,
+    "final_preservation": {
+      "path": "out/flight-validation-20261022-6580/final-preservation.json",
+      "bytes": 634,
+      "sha256": "a023b98d53eb8f5d15074000a1333d3adf6a96a4d897542a07e9cb053468873a"
+    }
+  },
+  "real_flight": {
+    "flight-returned": {
+      "result": "pass",
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "flight_target_return_observed": true
+      },
+      "session_id": "57381330-5226-44c4-b5bc-55e145cb57ed",
+      "cleanup": true,
+      "cleanup_receipt": {
+        "supervisor_stop": {
+          "process": "exited",
+          "remote_directory_removed": false,
+          "trace_directory_removed": false
+        },
+        "baseline": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "traced": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "supervisor": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        }
+      },
+      "report": {
+        "path": "out/flight-validation-20261022-6580/flight-returned/report.json",
+        "bytes": 8615,
+        "sha256": "830339b160d244c7248b57a85cbfcc651c7d485e759027fbab361862ee86ef2b"
+      },
+      "input": {
+        "path": "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+        "bytes": 67108864,
+        "sha256": "bed1b8c48d82b66c0565b708410938779f2d3514a741a5b6fc111a4b1360f6f1"
+      },
+      "offline": {
+        "commands": [
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "tail-flight",
+              "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+              "--limit",
+              "30"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "index-flight",
+              "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-returned/offline-verified/scenes.sqlite"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "scene-at-flight",
+              "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-returned/offline-verified/scenes.sqlite",
+              "--sequence",
+              "8"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "inspect-flight",
+              "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-returned/offline-verified/scenes.sqlite",
+              "--json"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "scenes-flight",
+              "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-returned/offline-verified/scenes.sqlite",
+              "--after-sequence",
+              "8"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "convert-flight",
+              "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+              "--output",
+              "out/flight-validation-20261022-6580/flight-returned/offline-verified/converted",
+              "--after-sequence",
+              "67",
+              "--max-events",
+              "30",
+              "--json"
+            ],
+            "exit_code": 0
+          }
+        ],
+        "source": "out/flight-validation-20261022-6580/flight-returned/traces/68150374479102_28026_libruntime_probe.so.flight.bin",
+        "input_bytes": 67108864,
+        "tail_events": 30,
+        "tail_equals_full_recovery": true,
+        "comparison_scope": "public JSON event values including registers, memory, sequence, TID and source offset",
+        "scene_query_sequence": 8,
+        "scene_context": {
+          "tid": 28037,
+          "id": 1,
+          "address": "0x73e48518d8",
+          "entry_sequence": 6,
+          "entered_monotonic_ns": 88517120317797,
+          "last_sequence": 107,
+          "last_monotonic_ns": 88517121219042,
+          "target_returned": true,
+          "state": "returned",
+          "return_value": "0x2a",
+          "observed_until_sequence": 107,
+          "instruction_count": 28,
+          "membership": "observed",
+          "uncertainty": []
+        },
+        "index_payload_bytes_read": 262080,
+        "reused_payload_bytes_read": 0,
+        "indexed_summary": {
+          "scene_count": 1,
+          "returns_observed": 1,
+          "capture_stopped": 0,
+          "unpaired_scenes": 0,
+          "invalid_boundaries": 0,
+          "instruction_count": 28,
+          "typed_damage": 0,
+          "stale_directory_entries": [],
+          "unreliable_directory_ranges": [],
+          "physical_records": 107,
+          "first_sequence": 1,
+          "last_sequence": 107,
+          "recorded_tids": [
+            28037
+          ],
+          "thread_begin_tids": [],
+          "unfollowed_threads": null,
+          "installation_status": null,
+          "missing_sequence_ranges": 0,
+          "coverage_gaps": 0,
+          "entry_registers": "not_recorded_as_an_explicit_scene_snapshot",
+          "scenes": [
+            {
+              "address": "0x73e48518d8",
+              "hit_count": 1,
+              "returns_observed": 1,
+              "instruction_count": 28,
+              "first_observed_sequence": 6,
+              "last_observed_sequence": 107
+            }
+          ],
+          "scene_summaries_omitted": 0,
+          "verification_scope": "all decoded chunks and emergency slots; scene boundary index, not full recovery"
+        },
+        "partial_conversion_marked_incomplete": true
+      }
+    },
+    "flight-capture-stopped": {
+      "result": "pass",
+      "checks": {
+        "baseline_semantics": true,
+        "traced_semantics": true,
+        "trace_decoding": true,
+        "sealed_target_still_visible": true,
+        "actual_return_clears_open_target": true,
+        "file_complete_is_not_target_return": true
+      },
+      "session_id": "4ef7ea7c-ca77-426a-b1eb-1264f1ade169",
+      "cleanup": true,
+      "cleanup_receipt": {
+        "supervisor_stop": {
+          "process": "exited",
+          "remote_directory_removed": false,
+          "trace_directory_removed": false
+        },
+        "baseline": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "traced": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        },
+        "supervisor": {
+          "process": "exited",
+          "remote_directory_removed": true,
+          "trace_directory_removed": true
+        }
+      },
+      "report": {
+        "path": "out/flight-validation-20261022-6580/flight-capture-stopped/report.json",
+        "bytes": 11522,
+        "sha256": "6a72bd3790ceb3ae25795adc813387eb6e97305433ecf431bd84f81ecd3d6b9c"
+      },
+      "input": {
+        "path": "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+        "bytes": 67108864,
+        "sha256": "b9ce0b8f6ff0df046b68037c912ad7ae6d8441936103647688f25626a0b19719"
+      },
+      "offline": {
+        "commands": [
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "tail-flight",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+              "--limit",
+              "30"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "index-flight",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/scenes.sqlite"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "scene-at-flight",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/scenes.sqlite",
+              "--sequence",
+              "8"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "inspect-flight",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/scenes.sqlite",
+              "--json"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "scenes-flight",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+              "--index",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/scenes.sqlite",
+              "--after-sequence",
+              "8"
+            ],
+            "exit_code": 0
+          },
+          {
+            "argv": [
+              "/usr/bin/python3",
+              "-m",
+              "qtrace",
+              "convert-flight",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+              "--output",
+              "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/converted",
+              "--after-sequence",
+              "43828",
+              "--max-events",
+              "30",
+              "--json"
+            ],
+            "exit_code": 0
+          }
+        ],
+        "source": "out/flight-validation-20261022-6580/flight-capture-stopped/traces/70255195856567_28515_libruntime_probe.so.flight.bin",
+        "input_bytes": 67108864,
+        "tail_events": 30,
+        "tail_equals_full_recovery": true,
+        "comparison_scope": "public JSON event values including registers, memory, sequence, TID and source offset",
+        "scene_query_sequence": 8,
+        "scene_context": {
+          "tid": 28518,
+          "id": 1,
+          "address": "0x75dd1e88d8",
+          "entry_sequence": 6,
+          "entered_monotonic_ns": 88538891578956,
+          "last_sequence": 43861,
+          "last_monotonic_ns": 88538972178566,
+          "target_returned": null,
+          "state": "capture_stopped",
+          "return_value": null,
+          "observed_until_sequence": 43861,
+          "instruction_count": 16058,
+          "membership": "observed",
+          "uncertainty": []
+        },
+        "index_payload_bytes_read": 2866624,
+        "reused_payload_bytes_read": 0,
+        "indexed_summary": {
+          "scene_count": 1,
+          "returns_observed": 0,
+          "capture_stopped": 1,
+          "unpaired_scenes": 0,
+          "invalid_boundaries": 0,
+          "instruction_count": 16058,
+          "typed_damage": 0,
+          "stale_directory_entries": [],
+          "unreliable_directory_ranges": [],
+          "physical_records": 43861,
+          "first_sequence": 1,
+          "last_sequence": 43861,
+          "recorded_tids": [
+            28518
+          ],
+          "thread_begin_tids": [],
+          "unfollowed_threads": null,
+          "installation_status": null,
+          "missing_sequence_ranges": 0,
+          "coverage_gaps": 0,
+          "entry_registers": "not_recorded_as_an_explicit_scene_snapshot",
+          "scenes": [
+            {
+              "address": "0x75dd1e88d8",
+              "hit_count": 1,
+              "returns_observed": 0,
+              "instruction_count": 16058,
+              "first_observed_sequence": 6,
+              "last_observed_sequence": 43861
+            }
+          ],
+          "scene_summaries_omitted": 0,
+          "verification_scope": "all decoded chunks and emergency slots; scene boundary index, not full recovery"
+        },
+        "partial_conversion_marked_incomplete": true
+      }
+    }
+  },
+  "fixes": [
+    {
+      "problem": "session reservation and cleanup used app identity under an existing root-owned parent",
+      "diagnosis": {
+        "path": "out/flight-validation-20261022-6580/manual-permission-diagnosis.json",
+        "bytes": 992,
+        "sha256": "2fd3a0588902ac4afe14e18178e47693f1f5353a2faea532ad02a77a7fa76efb"
+      },
+      "before_fix": {
+        "path": "out/flight-validation-20261022-6580/manual-before-fix/manual-verification.json",
+        "bytes": 1304,
+        "sha256": "631afde30d17be27fbadffae6c029455c5d8806d8adb9a2a49ff8491e2351a2c"
+      },
+      "regression_red": {
+        "path": "out/flight-validation-20261022-6580/manual-regression-red.log",
+        "bytes": 2543,
+        "sha256": "9f3af0d6a59d130fe81a0a89707358e6c6b427edcd0bb913dad2b08237b693df"
+      },
+      "change": "reuse Deployer app-private control identity for reservation and owned cleanup; preserve parent ownership and permissions"
+    },
+    {
+      "problem": "native config used an O_RDWR temporary file but push_open_file requires O_RDONLY",
+      "before_fix": {
+        "path": "out/flight-validation-20261022-6580/manual-after-directory-fix/manual-verification.json",
+        "bytes": 1229,
+        "sha256": "6873de5ba7ce02b29db35266b4f04b09f7f71f7e767cb76090b56f98075c912a"
+      },
+      "regression_red": {
+        "path": "out/flight-validation-20261022-6580/config-fd-regression-red.log",
+        "bytes": 1809,
+        "sha256": "cffa349b547077100b4d7ba04382f073beba8746b62e5d20a0a5c5f0dc6e4c85"
+      },
+      "change": "close private config writer, reopen as read-only, and pass the held regular-file descriptor; retain transport validation"
+    }
+  ],
+  "source_files": {
+    "qtrace/manual_deploy.py": "aa1e7d7703ef596c6e1690f5bc804f5959fcc05218dc2446efcfd1d624879df9",
+    "scripts/tests/test_manual_deploy.py": "4c85d2b2bc423333d4c72854854b23876db75aa14d1e91fbbc1894f4dc0075ef",
+    "scripts/jni_abi_acceptance.py": "45dda801b0a358c3e77ac496bd7b2d6e26e304bf7ae4a0a7c021137c8b75d811",
+    "scripts/runtime_acceptance.py": "ec9f01aa763bb00a43e33b08856c7ee67e78802408f6a73a79838491abee79d4",
+    "scripts/build_jni_abi_probe.py": "36692fa8e49c5e948931f24ffcb71218cff1af5da6ba0de9bcf6dfbd8f371db9",
+    "scripts/build_runtime_probe.py": "b4ac04109b3e77171c2fd1b55f67c2c11484818805e7da281187d5460efb3510"
+  },
+  "validation": {
+    "focused_tests": {
+      "tests": 67,
+      "exit_code": 0,
+      "log": {
+        "path": "out/flight-validation-20261022-6580/manual-regression-green.log",
+        "bytes": 1294,
+        "sha256": "ed68c73803e933c44b6112ee98b51094a8ca190fd9147c7b5311fd8ce2d2965d"
+      }
+    },
+    "python_full": {
+      "tests": 961,
+      "skipped": 9,
+      "exit_code": 0,
+      "log": {
+        "path": "out/flight-validation-20261022-6580/python-full-final.log",
+        "bytes": 5148,
+        "sha256": "b013f5119787e84d09a571e1e9a492dcbd40e87887b0e94fceeab42926826e56"
+      }
+    },
+    "native_prior_result_reused": "50/50; native source/build identity and selected SO pair unchanged"
+  },
+  "remaining": [
+    "original experience payload provenance and source artifact remain unavailable",
+    "manual deployment does not attest a later business process loading the deployed bytes"
+  ],
+  "evidence": [
+    {
+      "path": "out/flight-validation-20261022-6580/config-fd-regression-red.log",
+      "bytes": 1809,
+      "sha256": "cffa349b547077100b4d7ba04382f073beba8746b62e5d20a0a5c5f0dc6e4c85"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/deployed-native-config.json",
+      "bytes": 338,
+      "sha256": "56b96ef9bccc8e355cbf0595847ad2a298321d4ca4bebd9429f18ad2a8b85a49"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/boundaries.json",
+      "bytes": 369,
+      "sha256": "53aaf354f55543e4f0064c1dc6e68065bcf476cf5db4fb63474b365865949202"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/boundaries.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/convert.json",
+      "bytes": 474,
+      "sha256": "f7a136aa7fd49825a65358f1b144ec7fd3e64b09c61713411f69e8359076196f"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/convert.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/converted/70255195856567_28515_libruntime_probe.so.flight.json",
+      "bytes": 15553,
+      "sha256": "7f8e5025aca2209c475455d468ba4fe5117ac4867d138e8303c47706f5e6caa3"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/converted/70255195856567_28515_libruntime_probe.so.merged.trace.txt",
+      "bytes": 9374,
+      "sha256": "62689c1759acea562c244ca266b187423281f808fc7ecb29e2d28f4fa2f60a48"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/converted/70255195856567_28515_libruntime_probe.so.tid-28518.trace.txt",
+      "bytes": 9377,
+      "sha256": "7fc834a81b3b2fd8adc4b6eb490e95c0fea081a18c8f3f15048c8132f1ebd4ea"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/index.json",
+      "bytes": 999,
+      "sha256": "2a7b97620870bb0f016c403441b511d7a9035c146c5241da2bdc6d20c6a5e974"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/index.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/inspect.json",
+      "bytes": 1230,
+      "sha256": "9bb8f5a63e38b79642a63a24eecbe1dbd99c553f96a643a11c79610b3ae97131"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/inspect.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/scene-at.json",
+      "bytes": 565,
+      "sha256": "8a6bd97c0ff047262217a86170ce2721059224bc54bbca64e398e2eeb91b96e2"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/scene-at.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/tail.json",
+      "bytes": 12383,
+      "sha256": "e69275d97a5a878889cf4f0ceb5e9a101864dd70806d93e9f4e447f8add4d7c6"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/offline-verified/tail.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/report.json",
+      "bytes": 11522,
+      "sha256": "6a72bd3790ceb3ae25795adc813387eb6e97305433ecf431bd84f81ecd3d6b9c"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/stderr.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/stdout.txt",
+      "bytes": 3949,
+      "sha256": "6669993f3a89cb0f550e7d1435b93bac8f7dbabd90941e4273ad1787f9daaf3d"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/traces/session-4ef7ea7c-ca77-426a-b1eb-1264f1ade169.status.json",
+      "bytes": 495,
+      "sha256": "e2953f95c78d70ca80eacd0c7d968d11af194f4422dc6769df4abcadf4918f49"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped/traces.tar",
+      "bytes": 67112448,
+      "sha256": "0ce42e9e234bc19233bebd076fa3446645d335f28e7b79fc5276a99dcbbbb8a0"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-capture-stopped.stdout",
+      "bytes": 331,
+      "sha256": "08b4a60eb113cc757f8bf916542a9cf367467a447085567b85705696d6c163c3"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline/tail.json",
+      "bytes": 13166,
+      "sha256": "6eec7432bc8a78472aeeb9b15556b167dd582ce5174d8ba86d506a00e1118f82"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline/tail.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/boundaries.json",
+      "bytes": 360,
+      "sha256": "88f04a14f021eb13b5368860330e2da5f4bd36f7760d7702bf2d58841fa80409"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/boundaries.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/convert.json",
+      "bytes": 453,
+      "sha256": "e56f482f8a32863828b8b2ebe2defaf95fbb2b8586d4fccfe4684e5b67d48b73"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/convert.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/converted/68150374479102_28026_libruntime_probe.so.flight.json",
+      "bytes": 17078,
+      "sha256": "dabe6ad38c1e476909fc4725b2d2a1d37599aa6ba06c3d90d30a779f477afc14"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/converted/68150374479102_28026_libruntime_probe.so.merged.trace.txt",
+      "bytes": 10031,
+      "sha256": "67e816cf1b3e8d10eaafe16f6fe80042d3e7c15b91ada8046fb3662301241059"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/converted/68150374479102_28026_libruntime_probe.so.tid-28037.trace.txt",
+      "bytes": 10034,
+      "sha256": "f97f9e0fe411c4270fcc6f9a955791ef68d6eeab2c6a4a6894af5f20817a03a8"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/index.json",
+      "bytes": 978,
+      "sha256": "27a2a1a75475c64135bcf8d9a1caa4279ee4e627750b95e4088a4868f72e9eba"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/index.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/inspect.json",
+      "bytes": 1207,
+      "sha256": "ec6599cb1a3951ea394ae5b6bd2ea469f4138aeb56643d99ec82eafc972beb14"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/inspect.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/scene-at.json",
+      "bytes": 553,
+      "sha256": "1c4ccd554efd7838dce4a06fe1f0b67f2ae222ef76105c9ebdca9cbc534af77a"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/scene-at.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/tail.json",
+      "bytes": 13166,
+      "sha256": "6eec7432bc8a78472aeeb9b15556b167dd582ce5174d8ba86d506a00e1118f82"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/offline-verified/tail.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/report.json",
+      "bytes": 8615,
+      "sha256": "830339b160d244c7248b57a85cbfcc651c7d485e759027fbab361862ee86ef2b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/stderr.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/stdout.txt",
+      "bytes": 2340,
+      "sha256": "6db02325a7a3f3fa3cd6d58bcd9029a35eb9f9280b192bafc7401c25370b0949"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/traces/session-57381330-5226-44c4-b5bc-55e145cb57ed.status.json",
+      "bytes": 415,
+      "sha256": "1b8b9dfc167a7bc0b985bbe50bc96e869f5ee0109c3a6c531bf66edbf0f5489e"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned/traces.tar",
+      "bytes": 67114496,
+      "sha256": "5ff6f2f615916b81d41a02104bf1a6016dd53d0eda0c07574f3ebbb8dcb14ff2"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/flight-returned.stdout",
+      "bytes": 240,
+      "sha256": "0508d3e668f73672aef027868a153bf48ab28695c2dbb2435ecf55ad31dceae2"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/jni-driver.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/jni-driver.stdout",
+      "bytes": 539,
+      "sha256": "4715ac891fe84a52ab42d4724493e6d6106520a264feb0446b1fe7c84466226b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/jni-independent-check.json",
+      "bytes": 776,
+      "sha256": "24231baa896f8862f31d54be4fb59f402fc5b2c55cd526f231d9e15044104bb3"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/jni-probe/build-identity.json",
+      "bytes": 631,
+      "sha256": "66414676d4b1c41c27fe7e5b5be34d837d9a815ca8cc3146ddad84b35d6a02d4"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-after-directory-fix/manual-deploy.stderr",
+      "bytes": 109,
+      "sha256": "e4c2d1438968881848b31d70eb67b861f87e466b970cb214458f5152a46f161d"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-after-directory-fix/manual-deploy.stdout",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-after-directory-fix/manual-driver.stderr",
+      "bytes": 395,
+      "sha256": "7f43b04ec26c4b7e59cf21b23cc9ea14622ef22d61c45b7bcfc9057d141fa4bd"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-after-directory-fix/manual-driver.stdout",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-after-directory-fix/manual-verification.json",
+      "bytes": 1229,
+      "sha256": "6873de5ba7ce02b29db35266b4f04b09f7f71f7e767cb76090b56f98075c912a"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-before-fix/manual-deploy.stderr",
+      "bytes": 184,
+      "sha256": "7fe1c136c4e09fee7119bac8c7851976b77dbf20c6b204b6c290d3dda3c1932f"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-before-fix/manual-deploy.stdout",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-before-fix/manual-driver.stderr",
+      "bytes": 470,
+      "sha256": "83b6fc5e481d56c852491fef6c5f353b5738bf743e929a3feaeaebb9edc0ada1"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-before-fix/manual-driver.stdout",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-before-fix/manual-verification.json",
+      "bytes": 1304,
+      "sha256": "631afde30d17be27fbadffae6c029455c5d8806d8adb9a2a49ff8491e2351a2c"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-deploy.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-deploy.stdout",
+      "bytes": 7629,
+      "sha256": "f54edd45e65297fef1daaa3e003be07ab2491a3809c762c5a59427fa308a1ae1"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-deployment.json",
+      "bytes": 8287,
+      "sha256": "b6a1505148002f8108c540ab1300f68bccb051860577f3b5fa92d8949edc02fc"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-driver.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-driver.stdout",
+      "bytes": 593,
+      "sha256": "a49745c39cf236b43d7e10a86d24a421c4b949aabeec9311f5f724c4d17fa6e4"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-duplicate-receipt.stderr",
+      "bytes": 198,
+      "sha256": "0de18ed5c0fd5c8916a862bcedad897a4f2870a30f7665a79b06071b878eaaf7"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-duplicate-receipt.stdout",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-permission-diagnosis.json",
+      "bytes": 992,
+      "sha256": "2fd3a0588902ac4afe14e18178e47693f1f5353a2faea532ad02a77a7fa76efb"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-regression-green.log",
+      "bytes": 1294,
+      "sha256": "ed68c73803e933c44b6112ee98b51094a8ca190fd9147c7b5311fd8ce2d2965d"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-regression-red.log",
+      "bytes": 2543,
+      "sha256": "9f3af0d6a59d130fe81a0a89707358e6c6b427edcd0bb913dad2b08237b693df"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-target-preflight.json",
+      "bytes": 1083,
+      "sha256": "a6050ebe0207ae0cd54aa5f73fa4d0ef2c8415f66ac00da452af52e7eb344d92"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-verification.json",
+      "bytes": 12552,
+      "sha256": "5a92906edfcb2875655688230a7af52604d26b855a95cab107c5446ee6b6f42a"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-wrong-abi-report.stderr",
+      "bytes": 115,
+      "sha256": "6848b4db4b7835a69e615a584135a83f9e97d2c3c579390e6eb43038967c134a"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/manual-wrong-abi-report.stdout",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/native-config.json",
+      "bytes": 396,
+      "sha256": "25877f9bf4eeabd3236d4a3e928f98c251841063ff9faea4620a411440452c35"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/negative/wrong-artifact-report.json",
+      "bytes": 18266,
+      "sha256": "70599bd7117a7f3ade339fc3b320fc5ddcd537ff74c6961e1fd3ea7745ced95e"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/payload-identity.json",
+      "bytes": 1948,
+      "sha256": "192973fbb98c73b4839c861e17ed3288d8a9a083472a30bb0ed8dded1fd5853c"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/report.json",
+      "bytes": 18266,
+      "sha256": "41031a6992c7c19ddb8bae738f0d113e6af4121ed92ea976d424f54a19e0841d"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/stderr.txt",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/stdout.txt",
+      "bytes": 11058,
+      "sha256": "b4a46922e8a2e95762ec44a3a1a49f3b44804b7038131448a64e71002fdc97bd"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733025_26372_26403_platform-register_0x394fc_0.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "1347f55effa245ab6d616a6713d6a084290ee15fdd50ff439f84e5f088d82c96"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733025_26372_26403_platform-register_0x394fc_0.trace.txt",
+      "bytes": 2592,
+      "sha256": "c7734dd2e47833f6e690b5ce3a3208a7c6150733bf0ebbc85b340f68a8683e67"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733034_26372_26403_thread-stack_0x39514_1.trace.bin.metrics",
+      "bytes": 449,
+      "sha256": "0b798d0b1e33c0f6a40fc1dc427268aacfe41edc5908e1e7a1f90b4c96902700"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733034_26372_26403_thread-stack_0x39514_1.trace.txt",
+      "bytes": 22737,
+      "sha256": "51705cdf36ad1bbc604fcfa5362243a57534c8af363ce53350142ed9b6a2e622"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733041_26372_26403_jni-arguments_0x395c4_2.trace.bin.metrics",
+      "bytes": 452,
+      "sha256": "ec569d6332126a75b559efad93dafab0f6db2c03a65cb08e5a517c1322401217"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733041_26372_26403_jni-arguments_0x395c4_2.trace.txt",
+      "bytes": 37054,
+      "sha256": "00115bc8b868e6641055a1854d15cad8a808c3d77cc0e4ebbf1ad23a371ee027"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733055_26372_26403_jni-arguments_0x395c4_3.trace.bin.metrics",
+      "bytes": 451,
+      "sha256": "c1e1be2b128333e25e3bc855f10ea3a32940f6c62751bc4daff734b5ca474d65"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733055_26372_26403_jni-arguments_0x395c4_3.trace.txt",
+      "bytes": 37168,
+      "sha256": "9228a4fac3faf8fc39534a3b8452a85d5783aea4bdea6db6a1a7d35f137730e4"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733062_26372_26403_jni-arguments_0x395c4_4.trace.bin.metrics",
+      "bytes": 456,
+      "sha256": "0d213449ef9cd8880622071e5f2b47d6b68dec293f3ac88b6a0cbf52339fcb6b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733062_26372_26403_jni-arguments_0x395c4_4.trace.txt",
+      "bytes": 161641,
+      "sha256": "1b265a1824380a25fa2ed32adc24050795edafcecb32534b18a691e3a1076cce"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733071_26372_26403_jni-arguments_0x395c4_5.trace.bin.metrics",
+      "bytes": 452,
+      "sha256": "b37e1ced45c972b745e1e456f65227ad4f2d35ac33daf3dac1381dcd501ba247"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733071_26372_26403_jni-arguments_0x395c4_5.trace.txt",
+      "bytes": 35545,
+      "sha256": "ab72c7add9c32a05d422afa9deb8f3d807672377040ca65d5991a278d2488a5a"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733078_26372_26403_jni-arguments_0x395c4_6.trace.bin.metrics",
+      "bytes": 450,
+      "sha256": "2301c5bb5988638948461a621013af970bdc263b74390c4b716c1b56e506633b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733078_26372_26403_jni-arguments_0x395c4_6.trace.txt",
+      "bytes": 28267,
+      "sha256": "ae0ff2063662193ea17b7988ab9546fe8804a1bee0b17ec1ef70adde07c17e8b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733087_26372_26403_jni-arguments_0x395c4_7.trace.bin.metrics",
+      "bytes": 454,
+      "sha256": "91e179f089dc5f10d7b2200b800cbd20cb427c6044513c6387aa9ade16dfb062"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733087_26372_26403_jni-arguments_0x395c4_7.trace.txt",
+      "bytes": 114854,
+      "sha256": "d4b3f43267ea3ebcbf1fab8ee2bf432622120894afc2b1648d9536829594811a"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733101_26372_26403_jni-arguments_0x395c4_8.trace.bin.metrics",
+      "bytes": 455,
+      "sha256": "6804097e22305211e55266695ea69bc5f020fa07aa8d233e7a408bc7e6261bdd"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733101_26372_26403_jni-arguments_0x395c4_8.trace.txt",
+      "bytes": 56422,
+      "sha256": "9f6ef7f57deefbca7a6d694c3bd3a73c4e7dd3b21ce153547ac9642fbbbf2f50"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733109_26372_26403_jni-arguments_0x395c4_9.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "78fcf9b42830f8965738ae4ff4148ef8894fc8813e4081d75fc248e4f88c5a7e"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733109_26372_26403_jni-arguments_0x395c4_9.trace.txt",
+      "bytes": 40186,
+      "sha256": "194925896de856bcd0be185bd043b1edb22d25704b7b82d4d61d7e99e0f6b2c9"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733116_26372_26403_jni-arguments_0x395c4_10.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "b32e0766ec8edfd6736017524a5d607cb2de15b0e3fb5756503b1451daf0b220"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733116_26372_26403_jni-arguments_0x395c4_10.trace.txt",
+      "bytes": 41677,
+      "sha256": "2b407c3f7ee0f2b6ee44d65920fbc790e9d96211e9fdcd16906c4127a49ebdaf"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733129_26372_26403_jni-arguments_0x395c4_11.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "aa517377b5646fd57fc27b57c3e2f1d9411b8db3bb7106358e43d9a031656894"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733129_26372_26403_jni-arguments_0x395c4_11.trace.txt",
+      "bytes": 54420,
+      "sha256": "35f7cd0fe292d945a9a75c01321707444e23cb6ab3c98cbc3bf36f84b9baed52"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733138_26372_26403_jni-arguments_0x395c4_12.trace.bin.metrics",
+      "bytes": 454,
+      "sha256": "6f1a98ff182c2ac6766a50929f6fe533bdb73c2c735d55cd65f66548358da4d2"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733138_26372_26403_jni-arguments_0x395c4_12.trace.txt",
+      "bytes": 54550,
+      "sha256": "a93d9662017d9a7ad4dc0f4e98bf57126251ed4f2b45b4d1acdbce25b9e4b7fb"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733145_26372_26403_jni-arguments_0x395c4_13.trace.bin.metrics",
+      "bytes": 456,
+      "sha256": "531b82ad1f5c17fd419623b94950b3180cd041af5e4904f585578edaaedbf4b4"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733145_26372_26403_jni-arguments_0x395c4_13.trace.txt",
+      "bytes": 179156,
+      "sha256": "fc55c407a0625baca95f3c5f085ac394179501a748ed22992617b79705bfa31e"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733154_26372_26403_jni-arguments_0x395c4_14.trace.bin.metrics",
+      "bytes": 454,
+      "sha256": "48bd8db241bc28492e9ff212ee6059a5be1c7e1c6e0a42bf708979a467051563"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733154_26372_26403_jni-arguments_0x395c4_14.trace.txt",
+      "bytes": 52921,
+      "sha256": "6805d57efec254fe9d6d293deb313330f7e20df5a1c69dc762eb576aac65b5c7"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733163_26372_26403_jni-arguments_0x395c4_15.trace.bin.metrics",
+      "bytes": 451,
+      "sha256": "dd8ed31ae2e0dda30200772b2cff1273ed272fe28f1cad0b74a0b16daed53945"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733163_26372_26403_jni-arguments_0x395c4_15.trace.txt",
+      "bytes": 45656,
+      "sha256": "4829b7920957883a4cb41cb00108948fc23ad5e87b2d7aa11f5d4d8d5c4c2965"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733173_26372_26403_jni-arguments_0x395c4_16.trace.bin.metrics",
+      "bytes": 455,
+      "sha256": "6ddf8d25d62e8bdb1fed03b217fcdf82264994f747de0c3594034aac72110b5b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733173_26372_26403_jni-arguments_0x395c4_16.trace.txt",
+      "bytes": 114856,
+      "sha256": "0074058d7882509749023573761e7d44d8d03f0f9905b20cd07ccb4023e858fc"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733182_26372_26403_jni-arguments_0x395c4_17.trace.bin.metrics",
+      "bytes": 455,
+      "sha256": "266a0b52f828ac4583b43419bdf33ac1ea3c5eacf0c0306908ebf126ac7c4242"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733182_26372_26403_jni-arguments_0x395c4_17.trace.txt",
+      "bytes": 73832,
+      "sha256": "eb5f5cbfc2ecd6ebf9e90872d200099c9b6e258795ae6ebaa104b7789701dc0b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733190_26372_26403_jni-arguments_0x395c4_18.trace.bin.metrics",
+      "bytes": 455,
+      "sha256": "3e1e1e1bc090fa1dfa843ee502f7f60441a0095afef9f02098df780dd20cfda6"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733190_26372_26403_jni-arguments_0x395c4_18.trace.txt",
+      "bytes": 57562,
+      "sha256": "933cc86331cd0932f7ef1ffe34562b147cc86309ecd4b91bad2daa7016613cd5"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733196_26372_26403_jni-arguments_0x395c4_19.trace.bin.metrics",
+      "bytes": 455,
+      "sha256": "c489b64661e2c9ae43458d34ff01f2bd17fe4465288a3f867e52ad3b51093fda"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733196_26372_26403_jni-arguments_0x395c4_19.trace.txt",
+      "bytes": 58451,
+      "sha256": "968730998490dc89458394aea4e9fd98c7e87af07139536a636ee1a00175932d"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733207_26372_26403_jni-arguments_0x395c4_20.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "140267ac12d381ca22a2e4bb165f2871cc4a8a495f8521a6aa78d911d1d5cd1f"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733207_26372_26403_jni-arguments_0x395c4_20.trace.txt",
+      "bytes": 36484,
+      "sha256": "eea55679565fd7bf2719573d25f08fed95e9c1dd0cd1dbbef60603e5ecdfd7e6"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733217_26372_26403_jni-arguments_0x395c4_21.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "fc70de79f1ac83287713f563ab6dad4ecf42b9a69fcdc4ed5ecea6d18d791305"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733217_26372_26403_jni-arguments_0x395c4_21.trace.txt",
+      "bytes": 36585,
+      "sha256": "ddd945a9fbf4896698027c9cbfd8ccd0d2a1b2c57d66a3e82e71008cc4e6bf1e"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733223_26372_26403_jni-arguments_0x395c4_22.trace.bin.metrics",
+      "bytes": 456,
+      "sha256": "6f554b77af7bfd238490e222983945311d47fb926605f92e58d163a442cea798"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733223_26372_26403_jni-arguments_0x395c4_22.trace.txt",
+      "bytes": 152347,
+      "sha256": "dbf25c2a57ea8eb797fe5563a9240e52da676847366e52f54d78cba14c5ffdcf"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733231_26372_26403_jni-arguments_0x395c4_23.trace.bin.metrics",
+      "bytes": 452,
+      "sha256": "9cd8fa478536248b3a553f56a5e831cd8181604319c76968f64862d0e7cf72cc"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733231_26372_26403_jni-arguments_0x395c4_23.trace.txt",
+      "bytes": 35487,
+      "sha256": "2968f4fd14065049d91583a680bb9e9d9afa1b875b094d75a557bca9f7e3dd51"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733236_26372_26403_jni-arguments_0x395c4_24.trace.bin.metrics",
+      "bytes": 450,
+      "sha256": "475c0f2862c24b17eda5e73bdd1ed6c9a401ead026ebd598dba16c5b6c0be4ef"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733236_26372_26403_jni-arguments_0x395c4_24.trace.txt",
+      "bytes": 29220,
+      "sha256": "42538bbe4d9a8c2c3dbfb21cb291bde6f3e7c56790c6ddf792e57cb984cdeffe"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733242_26372_26403_jni-arguments_0x395c4_25.trace.bin.metrics",
+      "bytes": 455,
+      "sha256": "b40dcf1d564f98eb58c24f4e736fdefdce8df3a2b8bcc92f8be468972bdbc53c"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733242_26372_26403_jni-arguments_0x395c4_25.trace.txt",
+      "bytes": 114856,
+      "sha256": "9a0169facbbc2e6bde91b09049f44b937cb74a2b47a04c9ef14fc8541bd69288"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733255_26372_26403_jni-arguments_0x395c4_26.trace.bin.metrics",
+      "bytes": 455,
+      "sha256": "8b44b84ce56e2dc2dc2dde9ceceeeb33be784d5e894e9d47a79fc0b65f089b6b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733255_26372_26403_jni-arguments_0x395c4_26.trace.txt",
+      "bytes": 56524,
+      "sha256": "74e348324d8e5e2592ce1b77518e7d822ff6ac3e9b5e1572448a1aa3eb214f65"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733265_26372_26403_jni-arguments_0x395c4_27.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "2d2cf8e8fb24171386f368d04427c930c4da409db7b984920d8f9ce61258cacf"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733265_26372_26403_jni-arguments_0x395c4_27.trace.txt",
+      "bytes": 40289,
+      "sha256": "59311adc25dd6f48aa4b8823f001b32089347ec6e04dedd569a5f38c1051162d"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733271_26372_26403_jni-arguments_0x395c4_28.trace.bin.metrics",
+      "bytes": 453,
+      "sha256": "f23cd06da52aaf1f0900128beabab0be5c335c0124841f7278f07de2dd13faf0"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733271_26372_26403_jni-arguments_0x395c4_28.trace.txt",
+      "bytes": 42014,
+      "sha256": "cbf18589fe5c331cb682e1b6b4fd2d6d9025867292c531128f21099f8325f54b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733278_26372_26435_attach-callback_0x34b1c_29.trace.bin.metrics",
+      "bytes": 452,
+      "sha256": "c559c34f0706c0b413c377365cb75f1f84307f24896b0d4b4bb84b0a63f79a9d"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/1792676733278_26372_26435_attach-callback_0x34b1c_29.trace.txt",
+      "bytes": 58331,
+      "sha256": "ba02adb260e5bf1770e4c0795f81fbbbf65921b464c4c2e3d0f3d24a26cd81e2"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces/session-f8069b44-0664-484a-8d18-89f12e5bf232.status.json",
+      "bytes": 2487,
+      "sha256": "0645f80b85e740d4b846d81d993543c62eda5692a72aa7053ea830e37603135b"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/pixel6-jni/traces.tar",
+      "bytes": 728576,
+      "sha256": "9c6d8ea7336514e8248d6f94dbdb01a290c6f13b88b93ba840070a8f79e2180e"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/preflight.json",
+      "bytes": 265,
+      "sha256": "dff5a32c84f96a43c2426c056c106906166e2199c233f700c7f447f467efc953"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/python-full-final.log",
+      "bytes": 5148,
+      "sha256": "b013f5119787e84d09a571e1e9a492dcbd40e87887b0e94fceeab42926826e56"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/real-flight-offline-verification.json",
+      "bytes": 9350,
+      "sha256": "5845fd3626c8b62f2a93a5fd88f26d17feae4d0458cd811efe9fc1b2894ba7b7"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/runtime-build.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/runtime-probe/build-identity.json",
+      "bytes": 691,
+      "sha256": "54b12ea9593e2820e0ed42344125de5cee9a71ec46e9d4f8474456cac9ddab60"
+    },
+    {
+      "path": "out/flight-validation-20261022-6580/final-preservation.json",
+      "bytes": 634,
+      "sha256": "a023b98d53eb8f5d15074000a1333d3adf6a96a4d897542a07e9cb053468873a"
+    }
+  ]
+}

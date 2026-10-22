@@ -23,6 +23,34 @@ QBDI 由 submodule 源码构建；首次编译会下载并编译 LLVM 等依赖�
 3.31.6，fixture 使用 3.22.1。版本同步与升级见[QBDI 源码依赖](development.md#qbdi-源码依赖)，
 产物路径及主机验证见[开发指南](development.md)。
 
+## 通用手动加载与部署
+
+`copyTracerDebug` 同时生成 `out/arm64-v8a/build-identity.json`，关联源码 revision、本地差异、构建配置和两个 SO 的 SHA-256。可以先独立核验：
+
+```bash
+python3 -m qtrace inspect-payload \
+  --library out/arm64-v8a/libqbdi_tracer.so \
+  --companion out/arm64-v8a/libshadowhook_nothing.so --json
+```
+
+为已有 native 加载入口部署现成 payload 和 native JSON，可使用：
+
+```bash
+python3 -m qtrace deploy --device SERIAL --package com.example.app \
+  --library out/arm64-v8a/libqbdi_tracer.so \
+  --companion out/arm64-v8a/libshadowhook_nothing.so \
+  --config native-config.json --abi-report abi-results/current/report.json \
+  --output deploy-receipts/run-20261022.json
+```
+
+该命令复用 app-private 部署、哈希核对和 staging 收尾，不启动 Frida 或应用业务。`--config` 接收已有 native JSON，不接受 CLI 的 `target.json`。除为本次部署生成新的 `session.id` 外保留配置内容；配置省略 `session` 时自动补入该对象。原主机配置文件不变，回执同时记录源与部署配置 SHA。native 配置的最终合法性仍由 configure 接口确认。
+
+回执和远端 session 目录默认拒绝覆盖。部署命令会核对实际设备上的 payload/config SHA；`--abi-report` 复用现有设备、系统和 SO 身份门禁。不传报告不表示已通过 ABI 准入。
+
+`loaded_payload_status: "unknown"` 表示尚未证明目标进程实际加载这些字节。后续手动加载应使用回执中的路径，并另保留实际 PID/starttime 与加载身份；设备部署成功不能代替进程内证据。只有 SO 哈希与构建身份匹配时才回显记录的源码来源；旧 payload 没有侧车时来源保持未知。
+
+当前候选的设备准入、独立部署与拒绝路径记录见[设备补验](benchmarks/flight-device-2026-10-22.md)。报告只适用于其中匹配的 SO、companion 和设备系统。
+
 ## 安装与部署
 
 安装 APK，并把 tracer 与 companion 放到 `spawn_trace.js` 默认读取的目录：
