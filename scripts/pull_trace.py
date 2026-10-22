@@ -340,14 +340,19 @@ def pull_artifact_set(
                 except Exception as error:
                     raise PullTraceError(str(error)) from error
                 if compressed_only:
+                    try:
+                        from scripts.flight_storage import spooled_recovery
+                    except ModuleNotFoundError:
+                        from flight_storage import spooled_recovery
                     with source.open("rb") as binary:
-                        status = recovery_status(recover_flight(binary).summary)
+                        with spooled_recovery(binary) as recovery:
+                            status = recovery_status(recovery.summary)
                     _publish_temp(source, destination, force)
                     return PullResult(name, status, (destination,))
+                summary = {}
                 staged_outputs = publish_flight_outputs(
-                    source, staging / "converted", force=False
+                    source, staging / "converted", force=False, summary_out=summary
                 )
-                summary = json.loads(staged_outputs[-1].read_text(encoding="utf-8"))
                 outputs = tuple(output_directory / path.name for path in staged_outputs)
                 publish_flight_file_set(
                     [(source, destination), *zip(staged_outputs, outputs, strict=True)],

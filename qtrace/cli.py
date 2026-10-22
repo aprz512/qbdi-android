@@ -86,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("path", type=Path)
     inspect.add_argument("--timeout", type=_positive_timeout, default=5.0)
     inspect.add_argument("--json", action="store_true")
+    inspect.add_argument("--index", type=Path, help="include a source-bound scene index summary without scanning payload")
 
     scenes = commands.add_parser("scenes-flight", help="query actual scene monotonic timestamps within fixed bounds")
     scenes.add_argument("path", type=Path)
@@ -94,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     scenes.add_argument("--after-sequence", type=int, default=0)
     scenes.add_argument("--limit", type=int, default=2000)
     scenes.add_argument("--timeout", type=_positive_timeout, default=5.0)
+    scenes.add_argument("--index", type=Path, help="query an existing source-bound scene index")
 
     events = commands.add_parser("events-flight", help="page events in whole scenes overlapping a captured time range")
     events.add_argument("path", type=Path)
@@ -114,6 +116,54 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--timeout", type=_positive_timeout, default=10.0)
     snapshot.add_argument("--json", action="store_true")
     _add_adb_timeout(snapshot)
+
+    tail = commands.add_parser("tail-flight", help="read the last raw Flight events without requiring a closed scene")
+    tail.add_argument("path", type=Path)
+    tail.add_argument("--after-sequence", type=int, default=0)
+    tail.add_argument("--until-sequence", type=int, default=2**64 - 1)
+    tail.add_argument("--limit", type=int, default=30)
+    tail.add_argument("--timeout", type=_positive_timeout, default=30.0)
+
+    index = commands.add_parser("index-flight", help="build a bounded, reusable Flight scene index")
+    index.add_argument("path", type=Path)
+    index.add_argument("--index", type=Path, required=True)
+    index.add_argument("--max-scan-bytes", type=int, default=4 * 1024**3)
+    index.add_argument("--timeout", type=_positive_timeout, default=300.0)
+    index.add_argument("--force", action="store_true")
+
+    scene_at = commands.add_parser("scene-at-flight", help="find scenes containing a sequence using an existing index")
+    scene_at.add_argument("path", type=Path)
+    scene_at.add_argument("--index", type=Path, required=True)
+    scene_at.add_argument("--sequence", type=int, required=True)
+    scene_at.add_argument("--tid", type=int)
+    scene_at.add_argument("--limit", type=int, default=2000)
+
+    convert = commands.add_parser("convert-flight", help="stream strict Flight recovery to an atomic output set")
+    convert.add_argument("path", type=Path)
+    convert.add_argument("--output", type=Path, required=True)
+    convert.add_argument("--after-sequence", type=int, default=0)
+    convert.add_argument("--until-sequence", type=int, default=2**64 - 1)
+    convert.add_argument("--max-events", type=int)
+    convert.add_argument("--max-spool-bytes", type=int, default=16 * 1024**3)
+    convert.add_argument("--force", action="store_true")
+    convert.add_argument("--json", action="store_true")
+
+    payload = commands.add_parser("inspect-payload", help="verify payload SHA-256 and a recorded build identity")
+    payload.add_argument("--library", type=Path, required=True)
+    payload.add_argument("--companion", type=Path, required=True)
+    payload.add_argument("--identity", type=Path)
+    payload.add_argument("--json", action="store_true")
+
+    deploy = commands.add_parser("deploy", help="deploy payload and native JSON into app-private storage without Frida")
+    deploy.add_argument("--package", required=True)
+    deploy.add_argument("--library", type=Path, required=True)
+    deploy.add_argument("--companion", type=Path, required=True)
+    deploy.add_argument("--config", type=Path, required=True, help="existing native JSON, not the public CLI config")
+    deploy.add_argument("--identity", type=Path)
+    deploy.add_argument("--abi-report", type=Path)
+    deploy.add_argument("--device")
+    deploy.add_argument("--output", type=Path, required=True, help="new local deployment receipt JSON")
+    _add_adb_timeout(deploy)
 
     run = commands.add_parser("run", help="run a duration-bounded trace session")
     _add_common(run, config=True)
@@ -483,6 +533,67 @@ def main(argv: Sequence[str] | None = None) -> int:
                           f"nativeThreads={result['nativeThreads']['status']}, java={result['java']['status']}")
                 print(arguments.output)
             return 0
+        if arguments.command in {"inspect-payload", "deploy"}:
+            from qtrace.build import TracerArtifacts
+            from qtrace.manual_deploy import deploy_manual, payload_identity, read_manual_config
+            try:
+                artifacts = TracerArtifacts(arguments.library, arguments.companion)
+                identity = payload_identity(artifacts, arguments.identity)
+                if arguments.command == "deploy":
+                    read_manual_config(arguments.config, arguments.output, arguments.package)
+                    runner = BoundedRunner()
+                    device = _select_device(arguments.device, runner, arguments.adb_timeout)
+                    device = bind_package_access(device, arguments.package, timeout=arguments.adb_timeout)
+                    result = deploy_manual(device, artifacts, arguments.config, arguments.output,
+                        identity_path=arguments.identity, abi_report=arguments.abi_report,
+                        timeout=arguments.adb_timeout)
+                    print(json.dumps(result, ensure_ascii=False))
+                elif arguments.json:
+                    print(json.dumps(identity, ensure_ascii=False))
+                else:
+                    for name, digest in identity["artifacts"].items():
+                        print(f"{name}: {digest}")
+                    recorded = identity["build_identity"]
+                    print(f"Source: {recorded['source'] if recorded else 'unknown (no matching build identity)'}")
+            except (OSError, ValueError) as error:
+                raise QtraceError("deploy.input_invalid", "deploy", str(error)) from error
+            return 0
+        if arguments.command == "convert-flight":
+            from scripts.flight_convert import publish_flight_outputs
+            from scripts.flight_trace import FlightTraceError
+            try:
+                paths = publish_flight_outputs(arguments.path, arguments.output, arguments.force,
+                    after_sequence=arguments.after_sequence, until_sequence=arguments.until_sequence,
+                    max_events=arguments.max_events, max_spool_bytes=arguments.max_spool_bytes)
+            except (OSError, FlightTraceError) as error:
+                raise QtraceError("flight.convert_failed", "flight.convert", str(error)) from error
+            _emit_result(paths[-1], paths[:-1], 0, arguments.json)
+            return 0
+        if arguments.command in {"index-flight", "scene-at-flight"}:
+            from qtrace.flight_scene_index import build_scene_index, scene_at
+            from scripts.flight_trace import FlightTraceError
+            try:
+                if arguments.command == "index-flight":
+                    result = build_scene_index(arguments.path, arguments.index,
+                        timeout=arguments.timeout, max_payload_bytes=arguments.max_scan_bytes,
+                        force=arguments.force)
+                else:
+                    result = scene_at(arguments.path, arguments.index, sequence=arguments.sequence,
+                        tid=arguments.tid, limit=arguments.limit)
+            except (OSError, FlightTraceError) as error:
+                raise QtraceError("flight.index_failed", "flight.index", str(error)) from error
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if arguments.command == "tail-flight":
+            from qtrace.flight_tail import query_tail_path
+            from scripts.flight_trace import FlightTraceError
+            try:
+                result = query_tail_path(arguments.path, after_sequence=arguments.after_sequence,
+                    until_sequence=arguments.until_sequence, limit=arguments.limit, timeout=arguments.timeout)
+            except (OSError, FlightTraceError) as error:
+                raise QtraceError("flight.tail_failed", "flight.tail", str(error)) from error
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if arguments.command == "events-flight":
             from qtrace.flight_scene_events import query_scene_events_path
             from scripts.flight_trace import FlightTraceError
@@ -498,9 +609,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             from qtrace.flight_inspection import query_scene_path
             from scripts.flight_trace import FlightTraceError
             try:
-                result = query_scene_path(arguments.path, since_ns=arguments.since_ns,
-                    until_ns=arguments.until_ns, after_sequence=arguments.after_sequence,
-                    limit=arguments.limit, timeout=arguments.timeout)
+                if arguments.index is not None:
+                    from qtrace.flight_scene_index import query_indexed_boundaries
+                    result = query_indexed_boundaries(arguments.path, arguments.index,
+                        since_ns=arguments.since_ns, until_ns=arguments.until_ns,
+                        after_sequence=arguments.after_sequence, limit=arguments.limit, timeout=arguments.timeout)
+                else:
+                    result = query_scene_path(arguments.path, since_ns=arguments.since_ns,
+                        until_ns=arguments.until_ns, after_sequence=arguments.after_sequence,
+                        limit=arguments.limit, timeout=arguments.timeout)
             except (OSError, FlightTraceError) as error:
                 raise QtraceError("flight.scene_query_failed", "flight.scene_query", str(error)) from error
             print(json.dumps(result, ensure_ascii=False))
@@ -510,6 +627,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             from scripts.flight_trace import FlightTraceError
             try:
                 result = inspect_path(arguments.path, timeout=arguments.timeout)
+                if arguments.index is not None:
+                    from qtrace.flight_scene_index import indexed_summary
+                    result["scene_summary"] = indexed_summary(arguments.path, arguments.index)
             except (OSError, FlightTraceError) as error:
                 raise QtraceError("flight.inspect_failed", "flight.inspect", str(error)) from error
             if arguments.json:
@@ -517,7 +637,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(f"{result['target_module']} PID {result['pid']}: {result['artifact_bytes']} bytes, "
                       f"{result['sealed_chunks']} sealed chunks, {result['active_chunks']} active chunks")
-                print("Metadata preview; event payloads and target return are unverified.")
+                if "scene_summary" in result:
+                    summary = result["scene_summary"]
+                    print(f"Scene index: {summary['scene_count']} scenes, "
+                          f"{summary['returns_observed']} returns observed, "
+                          f"{summary['unpaired_scenes']} unpaired; "
+                          f"{summary['instruction_count']} instructions.")
+                    print("Installation and threads outside the capture: unknown.")
+                else:
+                    print("Metadata preview; event payloads and target return are unverified.")
             return 0
         if arguments.command == "run":
             return _run(arguments, repo_root)

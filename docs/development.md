@@ -10,6 +10,8 @@ JNI 解码或执行 ABI 变更还需运行[独立 arm64 设备准入](jni-abi-ac
 
 ## 构建
 
+`:tracer:copyTracerDebug` 在构建前采集 native 输入身份，完成后比较源码是否改变，并为两个实际 SO 写出 `out/arm64-v8a/build-identity.json`。输入包含 tracked/untracked 的 native 文件、本地差异、QBDI submodule revision、相关构建参数及可用的 CMake cache。构建期间源码变化时拒绝发布身份；记录的是本轮构建与字节的关联，不代替设备 ABI 验收或进程实际加载证明。独立检查和手动部署见[手动追踪](manual-tracing.md#通用手动加载与部署)。
+
 首次构建前初始化源码依赖，并安装两套固定版本的 CMake：
 
 ```bash

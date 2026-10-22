@@ -235,6 +235,9 @@ Flight 仍保留必要的 chunk checkpoint 和场景边界。系统调用入口�
 
 ## 场景状态与有界离线查询
 
+大产物的原始尾部查询、可复用 scene 索引及磁盘暂存转换，见 [Flight 离线查询与转换](flight-offline.md)。
+`tail-flight` 允许查询未闭合场景的事件；已有 `events-flight` 保持配对场景语义。
+
 `report.json` 的 `native.lifecycle` 与采集目录 `session.json` 的 `lifecycle` 分开描述采集和目标调用。
 native `activeScenes[].sealed: true` 表示采集已经封口，但该目标调用仍未结束；实际返回或受控线程退出后才移除。
 `deadlineMonotonicNs` 是停止请求的截止时间，阻塞调用可能稍后才观察到请求。

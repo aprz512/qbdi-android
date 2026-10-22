@@ -1,0 +1,203 @@
+{
+  "artifacts": {
+    "libqbdi_tracer.so": "d1e9952f6c589735c44b78b1bbab098094b459acbba617ae9385a634f3bdbe6b",
+    "libshadowhook_nothing.so": "4fe29375379c3c6bd7dae1f8af60f9b89a670149f3152ab0cedf8efa890fe2dd"
+  },
+  "date": "2026-10-22",
+  "implementation_sha256": {
+    "qtrace/_artifact_validation.py": "092a60feb587bd1172a0ac801653cea96877c118333d28a92f0ffd3f6a0468dd",
+    "qtrace/build.py": "745cb9d5559f700357f81ba9e7795971a45799ea89386bf2c1513ff0542c2078",
+    "qtrace/cli.py": "c7454cad3e4befd9bad651b4ec797324ad878a51d0f3f3124277dd8471c002a8",
+    "qtrace/flight_inspection.py": "7d23be93f28b68f1e7193e1d4cdd781df41aa4cde38bce12a4dd4ddb2ba20ac9",
+    "qtrace/flight_reader.py": "93389030824f56d27b90215235a9a96d194a33d713fe28db44516460e6cdeea6",
+    "qtrace/flight_scene_index.py": "c9bb19ba6e8cfeaf6a3d28440ea55989147209a753dd20a661b3153e50c0aeeb",
+    "qtrace/flight_tail.py": "b926e9d21acd722f16dd2add0e4dfe499265225394d7686cb0f9048b2bb000a0",
+    "qtrace/manual_deploy.py": "aa1e7d7703ef596c6e1690f5bc804f5959fcc05218dc2446efcfd1d624879df9",
+    "scripts/flight_convert.py": "f582b3b8a0658e3afcda3ba7daee24eb6cc9386cfeefd6a0ef05f6c3c124b6e4",
+    "scripts/flight_storage.py": "620348d6d50c0923ca0ddaaa3d52e00f9e40ce7224d7ce49f924bfa696c98f30",
+    "scripts/flight_trace.py": "25e3c2eda1eef17cf54eadb5d490fff0814db517028cef2be082106e1c59ef8e",
+    "scripts/pull_trace.py": "2e4b9b494bb72bc52478fdfeaae7328b03050949784ede52b132d909f6dc1e1c",
+    "scripts/tests/test_flight_scene_index.py": "6518ccd8170ba9453081045bf451d06b044420ac3379f15853160a0c8839ae27",
+    "scripts/tests/test_flight_streaming.py": "70309fab745353f5a2ff29bcc454e9521be9ed43d850b9614665101ba7ad963e",
+    "scripts/tests/test_flight_tail.py": "a872bb4dce23075e39cdb601beec67faf2c96473f5333a5efda385ccbb388575",
+    "scripts/tests/test_manual_deploy.py": "4c85d2b2bc423333d4c72854854b23876db75aa14d1e91fbbc1894f4dc0075ef",
+    "scripts/tests/test_tracer_build_identity.py": "70cf6e54815ca70cfb882dd57b4d6acf924c1b02a1ac3c869217223fa9c956da",
+    "scripts/tracer_build_identity.py": "1ce8a4e3693a51106a502587450049a6f552c54a8972558775ce530e8278700a",
+    "tracer/build.gradle": "d8994183857728678e225f44cbaacac1fa3e0aee20fa6d8743fb1508561af327",
+    "tracer/src/test/cpp/flight_query_fixture.cpp": "7540627ef16bb8a054983b43231eb62f39cd641f284fa7fc3bce40d0d287e52f"
+  },
+  "integration": {
+    "feature_commit": "a00c7db2d46b79f79c6d8d2f762b57c290fa91b5",
+    "former_main": "ee4a3b7dfb21a4f2cc2daeaec00c013a2304f111",
+    "local_only": true,
+    "preserve_branch_and_worktree": true
+  },
+  "merge_resolution": {
+    "cli": "retain snapshot and new offline/manual commands",
+    "spill": "persist signal PC annotations; strict recovery replay failed before fix and passed after fix"
+  },
+  "proofs": [
+    {
+      "path": "out/flight-main-integration-20261022/python-full.log",
+      "sha256": "b47d4128deab033d91b2ee76a15abec71afcceeebeb9dcc9a10ae8c1482bb5e2",
+      "size_bytes": 5160
+    },
+    {
+      "path": "out/flight-main-integration-20261022/build.log",
+      "sha256": "01ef30e9abaf405769e4931b02b114f924d7e263e0b25d08596b7d854652e93a",
+      "size_bytes": 56501
+    },
+    {
+      "path": "out/flight-main-integration-20261022/protocol.log",
+      "sha256": "a48b1d5c2dcd96a2e8fe21933312f6016d2eccd6031784f63f1c7b53e7d848f9",
+      "size_bytes": 423
+    },
+    {
+      "path": "out/flight-main-integration-20261022/focused-green.log",
+      "sha256": "918fb0318d577a2241bf4e1919e490c8650c4bd96749cf4928a24b8f9d30b181",
+      "size_bytes": 19205
+    },
+    {
+      "path": "out/flight-main-integration-20261022/spill-red.log",
+      "sha256": "f862c9cfce20162ad814de368c03733b66a6f6440b85ae7e6c159cc54433c18e",
+      "size_bytes": 7093
+    },
+    {
+      "path": "out/flight-main-integration-20261022/jni.log",
+      "sha256": "2876a38a9911c1925109afbfe942e21140f96c70bce457a7e0aa2218a44d4311",
+      "size_bytes": 779
+    },
+    {
+      "path": "out/flight-main-integration-20261022/probe-build.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "out/flight-main-integration-20261022/pixel6-jni/report.json",
+      "sha256": "4e0a4cf6d335c19db71280ee9234ac0de55f253ea0d35ad37bb594008023f706",
+      "size_bytes": 86451
+    },
+    {
+      "path": "out/flight-main-integration-20261022/build-identity-at-validation.json",
+      "sha256": "6a4d404b3bb4158b466b787f2117e4b7418f18ab6af0dc7a213cc5c390b4d71f",
+      "size_bytes": 2448
+    },
+    {
+      "path": "out/flight-main-integration-20261022/payload-identity.json",
+      "sha256": "a8fed59d27883f80281005bf323d2f81fde4927fb33aa268f1be483aebdd477c",
+      "size_bytes": 2309
+    },
+    {
+      "path": "out/flight-main-integration-20261022/jni-probe/build-identity.json",
+      "sha256": "5bed4340e0622752df42e1e63a20cedfb6e66cd1e623776e79d6f5740eafc94f",
+      "size_bytes": 631
+    }
+  ],
+  "schema_version": 1,
+  "scope": {
+    "business_process_loaded_payload": "unknown",
+    "large_benchmark_rerun": false,
+    "manual_deployment_rerun": false,
+    "prior_benchmarks_keep_original_identity": true,
+    "project_context_matches_in_added_lines": 0,
+    "unrelated_original_worktree_files_preserved": 5
+  },
+  "source_at_validation": {
+    "build_parameters": {
+      "ANDROID_HOME": "/home/lyldalek/Android/sdk",
+      "ANDROID_NDK_HOME": null,
+      "CC": null,
+      "CFLAGS": null,
+      "CXX": null,
+      "CXXFLAGS": null,
+      "QTRACE_USER_RULES_SAMPLE_SHA256": null,
+      "QTRACE_USER_RULES_SOURCE": null
+    },
+    "dirty_diff_sha256": "06855c71141d2717e6584956b627ce6f0d75bae0c4873f1fbaf2da235f36520a",
+    "repository": "/home/lyldalek/workspace/qbdi-android",
+    "revision": "ee4a3b7dfb21a4f2cc2daeaec00c013a2304f111",
+    "source_tree_sha256": "d6e18ccd3eac0e848206bb302afb1d87871325c32920457f9f150d3b1a47cc1c",
+    "submodules": {
+      "tracer/src/main/cpp/third_party/qbdi": {
+        "dirty_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "expected_revision": "09b2efb66d242b3616a4723e4b487f623b0e93d7",
+        "revision": "09b2efb66d242b3616a4723e4b487f623b0e93d7",
+        "untracked_input_count": 0,
+        "untracked_inputs_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      }
+    },
+    "untracked_input_count": 0
+  },
+  "verification": {
+    "focused": {
+      "command": "python3 -m unittest scripts.tests.test_flight_streaming scripts.tests.test_flight_trace scripts.tests.test_qtrace_cli scripts.tests.test_qtrace_diagnostics -v",
+      "errors": 0,
+      "failures": 0,
+      "ran": 95
+    },
+    "jni": {
+      "all_returns_valid": true,
+      "checks": {
+        "attach_callback": true,
+        "baseline_java_values": true,
+        "baseline_returns_exceptions": true,
+        "fixed_floating_argument_text": true,
+        "fixed_floating_return_text": true,
+        "floating_return_text": true,
+        "jni_argument_text": true,
+        "jni_enter_leave_pairs": true,
+        "native_status": true,
+        "platform_register": true,
+        "real_thread_stack": true,
+        "snapshot_exception_errno_attachment": true,
+        "snapshot_identity_rejection": true,
+        "snapshot_java_stack": true,
+        "snapshot_native_threads": true,
+        "snapshot_runtime_mappings": true,
+        "snapshot_schema": true,
+        "snapshot_transport_bounds": true,
+        "trace_termination": true,
+        "traced_java_values": true,
+        "traced_returns_exceptions": true
+      },
+      "cleanup": true,
+      "cleanup_receipt": {
+        "process": "exited",
+        "remote_directory_removed": true,
+        "trace_directory_removed": true
+      },
+      "command": "python3 scripts/jni_abi_acceptance.py --serial 1C111FDF600G6S --adb <sdk>/platform-tools/adb --guard-root <existing-device-guard> --tracer out/arm64-v8a/libqbdi_tracer.so --companion out/arm64-v8a/libshadowhook_nothing.so --probe-dir out/flight-main-integration-20261022/jni-probe --output out/flight-main-integration-20261022/pixel6-jni",
+      "device": {
+        "abi": "arm64-v8a",
+        "android_user": "0",
+        "fingerprint": "google/oriole/oriole:16/CP1A.260405.005/15001963:user/release-keys",
+        "model": "Pixel 6",
+        "sdk": "36",
+        "serial": "1C111FDF600G6S",
+        "server": "tcp:localhost:5037"
+      },
+      "instructions": 4067,
+      "session_id": "28fa7911-31c8-48a3-84df-a4945e2514fd",
+      "trace_count": 30
+    },
+    "native_android": {
+      "build": "passed",
+      "command": "./gradlew nativeHostTest :tracer:copyTracerDebug --no-daemon",
+      "native_passed": 50,
+      "native_total": 50
+    },
+    "protocol": {
+      "command": "python3 qtrace-ui/tools/check_protocol_matrix.py --check --skip-rust",
+      "passed": true,
+      "python_tests": 16,
+      "rust_rerun": false
+    },
+    "python": {
+      "command": "python3 -m unittest discover -s scripts/tests -p 'test_*.py'",
+      "errors": 0,
+      "failures": 0,
+      "ran": 997,
+      "skipped": 9
+    }
+  }
+}

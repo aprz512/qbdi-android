@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import itertools
 from pathlib import Path
 
 try:
@@ -50,22 +51,25 @@ def _render_event(event: FlightEvent) -> str:
     return line + (" " + suffix if suffix else "")
 
 
-def _render(recovery: FlightRecovery, events: tuple[FlightEvent, ...], *,
-            tid: int | None) -> str:
+def _render_lines(recovery, events, *, tid):
     identity = recovery.summary
     scope = "merged" if tid is None else f"tid-{tid}"
-    lines = [
+    yield (
         "FLIGHT_BEGIN "
         f"format=1 scope={scope} run_id={identity['run_id']} pid={identity['pid']} "
         f"module_generation={identity['module_generation']} "
         f"target={json.dumps(identity['target_module'], ensure_ascii=False)}"
-    ]
-    lines.extend(_render_event(event) for event in events)
-    lines.append(
+    ) + "\n"
+    for event in events:
+        yield _render_event(event) + "\n"
+    yield (
         f"FLIGHT_END complete={str(bool(identity['complete'])).lower()} "
         f"events={len(events)}"
-    )
-    return "\n".join(lines) + "\n"
+    ) + "\n"
+
+
+def _render(recovery: FlightRecovery, events: tuple[FlightEvent, ...], *, tid: int | None) -> str:
+    return "".join(_render_lines(recovery, events, tid=tid))
 
 
 def _temporary(directory: Path, suffix: str) -> Path:
@@ -74,11 +78,15 @@ def _temporary(directory: Path, suffix: str) -> Path:
     return Path(name)
 
 
-def _write_temporary(directory: Path, suffix: str, data: str) -> Path:
+def _write_temporary(directory: Path, suffix: str, data) -> Path:
     temporary = _temporary(directory, suffix)
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as output:
-            output.write(data)
+            if isinstance(data, str):
+                output.write(data)
+            else:
+                for part in data:
+                    output.write(part)
             output.flush()
             os.fsync(output.fileno())
         return temporary
@@ -312,20 +320,79 @@ def publish_flight_file_set(pairs: list[tuple[Path, Path]], force: bool) -> None
         _publish_no_replace(pairs)
 
 
-def publish_flight_outputs(source: Path, output_dir: Path,
-                           force: bool) -> tuple[Path, ...]:
-    """Recover once, then publish merged, per-TID, and summary files as one set."""
-    basename = _stem(source)
+def compact_summary(summary):
+    """Session metadata without materializing the physical-record projection."""
+    keys = ("complete", "termination", "scene_lifecycle", "scene_lifecycle_omitted", "scene_lifecycle_invalid")
+    result = {key: summary[key] for key in keys}
+    result["missing_sequence_ranges"] = len(summary["lost_sequences"])
+    result["coverage_gap_count"] = len(summary["coverage_gaps"])
+    return result
+
+
+def publish_flight_outputs(source: Path, output_dir: Path, force: bool, *,
+                           after_sequence=0, until_sequence=2**64 - 1, max_events=None,
+                           max_spool_bytes=16 * 1024**3, summary_out=None) -> tuple[Path, ...]:
+    """Strictly recover using disk spill, then atomically stream the output set."""
+    _stem(source)
+    if not (type(after_sequence) is int and type(until_sequence) is int and
+            0 <= after_sequence <= until_sequence <= 2**64 - 1 and
+            (max_events is None or type(max_events) is int and max_events > 0)):
+        raise FlightTraceError("invalid Flight output sequence range or event limit")
     try:
+        try:
+            from scripts.flight_storage import spooled_recovery
+        except ModuleNotFoundError:
+            from flight_storage import spooled_recovery
         with source.open("rb") as binary:
-            recovery = recover_flight(binary)
+            before = os.fstat(binary.fileno())
+
+            def verify_source():
+                after = os.fstat(binary.fileno())
+                if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    raise FlightTraceError("Flight source changed during conversion")
+
+            with spooled_recovery(binary, max_spool_bytes=max_spool_bytes) as recovery:
+                return _publish_recovery(source, output_dir, force, recovery,
+                    after_sequence=after_sequence, until_sequence=until_sequence,
+                    max_events=max_events, summary_out=summary_out, verify_source=verify_source)
     except FlightTraceError:
+        raise
+    except FileExistsError:
         raise
     except FileNotFoundError as error:
         raise FlightTraceError(f"flight artifact does not exist: {source}") from error
     except OSError as error:
         raise FlightTraceError(f"cannot read flight artifact {source}: {error}") from error
 
+
+def _publish_recovery(source, output_dir, force, recovery, *, after_sequence,
+                      until_sequence, max_events, summary_out, verify_source):
+    basename = _stem(source)
+    scoped = after_sequence != 0 or until_sequence != 2**64 - 1 or max_events is not None
+    has_more = False
+    if scoped:
+        selected = recovery.merged.storage.list()
+        for event in recovery.merged:
+            if not after_sequence < event.global_seq <= until_sequence:
+                continue
+            if max_events is not None and len(selected) >= max_events:
+                has_more = True
+                break
+            selected.append(event)
+        selected.sort()
+        first = selected[0].global_seq if selected else None
+        last = selected[-1].global_seq if selected else None
+        summary = dict(recovery.summary)
+        summary.update(source_complete=summary["complete"], complete=False, provider_complete=False,
+            output_scope={"after_sequence": after_sequence, "until_sequence": until_sequence,
+                "max_events": max_events, "emitted_events": len(selected),
+                "first_sequence": first, "last_sequence": last, "has_more": has_more})
+        summary["physical_records"] = recovery.merged.storage.list(
+            row for row in summary["physical_records"]
+            if first is not None and first <= row["global_seq"] <= last)
+        recovery = FlightRecovery(selected, {
+            tid: type(thread)(tid, selected.for_tid(tid), thread.registers)
+            for tid, thread in recovery.threads.items()}, summary)
     destinations = [output_dir / f"{basename}.merged.trace.txt"]
     destinations.extend(
         output_dir / f"{basename}.tid-{tid}.trace.txt" for tid in sorted(recovery.threads)
@@ -343,22 +410,22 @@ def publish_flight_outputs(source: Path, output_dir: Path,
     if not output_dir.is_dir():
         raise FlightTraceError("flight output path is not a directory")
 
-    contents = [_render(recovery, recovery.merged, tid=None)]
-    contents.extend(
-        _render(recovery, recovery.threads[tid].events, tid=tid)
-        for tid in sorted(recovery.threads)
-    )
-    contents.append(json.dumps(recovery.summary, ensure_ascii=False, sort_keys=True,
-                               indent=2) + "\n")
+    contents = itertools.chain(
+        (_render_lines(recovery, recovery.merged, tid=None),),
+        (_render_lines(recovery, recovery.threads[tid].events, tid=tid) for tid in sorted(recovery.threads)),
+        (itertools.chain(json.JSONEncoder(ensure_ascii=False, sort_keys=True, indent=2).iterencode(recovery.summary), ("\n",)),))
     temporaries: list[Path] = []
     try:
         for destination, content in zip(destinations, contents, strict=True):
             temporaries.append(_write_temporary(output_dir, destination.suffix, content))
+        verify_source()
         pairs = list(zip(temporaries, destinations, strict=True))
         if force:
             _publish_force(pairs)
         else:
             _publish_no_replace(pairs)
+        if summary_out is not None:
+            summary_out.update(compact_summary(recovery.summary))
         return tuple(destinations)
     except FileExistsError:
         raise
