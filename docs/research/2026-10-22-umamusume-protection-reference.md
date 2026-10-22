@@ -28,7 +28,7 @@
 | --- | --- | --- |
 | 绕过 libc 的直接 SVC | `+0x5e1c` 为 `mov x8,x7`，`+0x5e20` 为 `svc #0`；原始指令字分别为 `e80307aa`、`010000d4`。动态采集有 syscall-enter。 | 仅 hook libc 会漏观察路径；直接 syscall 也可服务加载/解包，不单独证明反调试。 |
 | 进程映射和自身库路径观察 | 只读诊断记录过读取 `/proc/self/maps`、按映射中的路径重新打开自身库。 | 存在映射/路径观察；不能仅凭访问 maps 判定具体检测目标或拒绝条件。 |
-| 加载路径与目录 metadata | 定点运行时快照与反汇编关联到路径查询，镜像中出现 `bool checkLoadPath_extractNativeLibs_true(const char*)`；后续恢复五种路径子串匹配及输出码，并在主机执行原 ARM64 函数通过 11 个对照。 | 已确认这一局部函数的输入/输出逻辑；实际 Android 分支命中、完整通过条件及拒绝根因仍未知。主机合成结果不能当作设备执行证据。 |
+| 加载路径与目录 metadata | 定点运行时快照与反汇编关联到路径查询，镜像中出现 `bool checkLoadPath_extractNativeLibs_true(const char*)`；后续恢复五种路径子串匹配及输出码，并在主机执行原 ARM64 函数通过 11 个对照。 | 已确认这一局部函数的输入/输出逻辑；实际 Android 分支命中及完整通过条件仍未知，与后续定位的 Cygames Root 拒绝未建立关联。主机合成结果不能当作设备执行证据。 |
 | 系统库相关检查 | 同一镜像有 `jni/checkSystemLib.cpp` 标记。 | 是进一步定位的线索；字符串不能代替已执行调用链、校验算法或失败判定。 |
 | 本地文件访问及主动终止 | 诊断窗口确认 `app_4e06` 下既有文件的 stat、`O_RDWR|O_CREAT` 打开，随后 SIGABRT。原 strace 未采集 `write/send*`。 | 证明文件访问与终止；不能直接证明该轮写入、记录内容或远端上报，也未隔离导致终止的具体条件。 |
 | 子进程与信号观察 | 不同诊断轮次观察过父子进程、ptrace 和信号交互。 | 需结合实际 syscall 返回、signal 交付与 handler 返回分析，不能把子进程存在、SIGSEGV 或末端 SIGKILL 直接称为防护检测命中。 |

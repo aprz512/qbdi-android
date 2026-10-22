@@ -6,7 +6,7 @@
 
 用户授权的剩余功能、Java/JIT 快照、新版发布基线、完整设备门禁及设备恢复均已完成。Java 范围为“运行时/JIT 映射、线程信息及可用的 Java 线程栈”。本轮状态为 **PASS**；[验收报告](../../benchmarks/qtrace-ux-remaining-2026-10-22.md)区分功能、基线校准与完整门禁，保留原失败和未覆盖边界。
 
-实现已提交为 `2bd271f1f360dc69e337ba8b3a57470f321b511c`，本地快进合入 main。合入后 963 项 Python（9 跳过）及 C++/Python 协议检查通过，见[合入复核](../../benchmarks/qtrace-ux-main-integration-2026-10-22.md)。赛马娘拒绝根因与远端上报按独立调查继续，不是剩余功能。
+实现已提交为 `2bd271f1f360dc69e337ba8b3a57470f321b511c`，本地快进合入 main。合入后 963 项 Python（9 跳过）及 C++/Python 协议检查通过，见[合入复核](../../benchmarks/qtrace-ux-main-integration-2026-10-22.md)。另行完成的[赛马娘独立调查](../../research/2026-10-22-umamusume-rejection-reporting.md)已确认本版本物理设备的本地 Root 拒绝路径；远端上报仍未证实。研究文档随本次更新合入本地 main，不作为 handoff 的剩余功能。
 
 | 顺序 | 状态与入口 |
 | --- | --- |
@@ -20,9 +20,9 @@
 ## 工作区与证据
 
 - 主交付工作区：`/home/lyldalek/workspace/qbdi-android`，本地 main 已包含实现提交 `2bd271f1f360dc69e337ba8b3a57470f321b511c`；功能已完成，不重复实现。
-- 原实现工作树：`/home/lyldalek/.codex/worktrees/cd7b/qbdi-android`。原功能分支 `feat/qtrace-ux-handoff` 和原始证据保留；后续独立调查可从当前 main 在此隔离树建立研究分支。实际设备验收基线仍为 `eb79bcb2c37acb27affda4983ecb099e3ac5c497`，按源码 SHA 绑定，不回写成新采集。
+- 原实现工作树：`/home/lyldalek/.codex/worktrees/cd7b/qbdi-android`。原功能分支 `feat/qtrace-ux-handoff` 和原始证据保留；独立调查分支为 `research/umamusume-rejection-reporting`，研究提交 `a84eced` 及本次文档同步一并合入本地 main。实际设备验收基线仍为 `eb79bcb2c37acb27affda4983ecb099e3ac5c497`，按源码 SHA 绑定，不回写成新采集。
 - 原资料工作树：`/home/lyldalek/.codex/worktrees/6580/qbdi-android`。其中原始交接、样本参考及其他调查材料保留原样。
-- 本轮只授权 qbdi-android 本地合入与继续调查；未推送，也未清理其他会话文件。
+- 用户已授权 qbdi-android 实现与研究文档的本地合入；未推送，也未删除分支、工作树或其他会话文件。
 - `.codegraph/` 存在但无可用索引。按规则先尝试查询，失败后用 `rg` 和定点读取，不自行重建索引。
 
 进入后先核对 main、工作树和状态；目录失效时先用 `git worktree list --porcelain` 定位既有交付：
@@ -47,7 +47,9 @@ git rev-parse HEAD
 
 已有证据包括本地检测线索、拒绝界面、诊断文件访问、终止行为及有限 QBDI 前缀。[补证](../../research/2026-10-22-umamusume-verification.md)以原始 YARA 引擎确认 CrackProof 公开指纹及三个负对照，并在主机执行原 ARM64 指令验证五种路径子串的返回逻辑。
 
-厂商对具体 SHA 的认证、各分支实际命中与物理设备拒绝根因、远端上报、完整解包/防护流程仍未证实。原 strace 未覆盖写入/发送，旧“写入本地记录”应收窄为既有文件访问。构造器记录仍为进入后停止、返回未知；另一轮 88 次包装函数返回仅证明局部调用，不与其他轮次观察拼接。新增通用工具通过独立 fixture 验证，样本补证不承担工具验收。
+[独立拒绝调查](../../research/2026-10-22-umamusume-rejection-reporting.md)将 Java 字节码、运行时 JNI 参数、IL2CPP 分支、TextId 和新启动 UI 对应起来：Cygames `CheckApp.isRootUser` 创建 `su` 未抛 `IOException` 后返回 true，游戏显示 `Error0032` 并停止推进。这不证明取得 root 权限，不归为 CrackProof 的 Root 检测，也不排除其他拒绝路径。候选保护库回调的 16 槽内存队列逻辑已通过主机原指令验证，实际绑定和后续发送仍缺证据。
+
+厂商对具体 SHA 的认证、五种路径检查在设备上的实际命中、远端上报及完整解包/防护流程仍未证实。原 strace 未覆盖写入/发送，旧“写入本地记录”应收窄为既有文件访问。构造器记录仍为进入后停止、返回未知；另一轮 88 次包装函数返回仅证明局部调用，不与其他轮次拼接。新增通用工具通过独立 fixture 验证，样本补证不承担工具验收。
 
 ## 继续维护时保留的契约
 
@@ -85,7 +87,9 @@ handoff 已以 2bd271f1f360dc69e337ba8b3a57470f321b511c 本地合入 main；保�
 后续有实际改动时重跑适用检查；设备操作仍使用既有 ADB server 和 canonical serial guard。
 保留 stdout/JSON、未知返回、只读与 cleanup 契约；不自动重放可能完成的启动。
 样本补证见 docs/research/2026-10-22-umamusume-verification.md：CrackProof 公开指纹已复核，五种路径子串函数已离线验证，保留局部返回与完整流程之间的证据边界。
-厂商官方样本认证、实际分支命中/物理拒绝原因、上报及完整流程仍未知；旧 QBDI 差异原因也未由基线校准证明。
-拒绝根因和远端上报是独立调查，从当前 main 建立研究分支；不要重复实现已完成的 handoff。
+独立调查见 docs/research/2026-10-22-umamusume-rejection-reporting.md 及同名 evidence JSON；研究提交 a84eced 及文档同步已本地合入 main。
+本版本物理拒绝已定位到 Cygames CheckApp.isRootUser 的 su 进程创建检查和 Error0032 分支；不证明取得 root 权限，也不归因于 CrackProof。
+候选回调为 16 槽内存队列追加器；实际绑定、后续发送和远端上报仍未证实。厂商官方样本认证、五种路径分支实际命中、完整流程及旧 QBDI 差异原因也仍未知。
+后续上报调查保持独立，按需从当前 main 隔离；不要复用旧 PID 或重复实现已完成的 handoff。
 尚未推送；其他项目改动、推送及清理需另有明确请求。
 ```

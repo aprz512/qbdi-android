@@ -66,4 +66,4 @@
 
 目前已取得 **本样本满足 CrackProof 公开分类器规则的强指纹证据**，并已确认 **CrackProof 的开发厂商及其 Android 产品存在**。尚未取得该 SHA-256 的厂商官方认证；不能把分类器命中进一步扩展为具体版本、完整检测清单或其他厂商的排除结论。
 
-本报告汇总公开资料、字节比对及 YARA 复核；未修改目标程序或执行检测绕过。设备现状与离线路径函数验证另见[补证报告](2026-10-22-umamusume-verification.md)。
+本报告汇总公开资料、字节比对及 YARA 复核；未修改目标程序或执行检测绕过。历史设备现场与离线路径函数验证另见[补证报告](2026-10-22-umamusume-verification.md)。后续[独立调查](2026-10-22-umamusume-rejection-reporting.md)已定位的 Root 拒绝属于 Cygames Java / Cute.Core 调用链，不能将它直接归为 CrackProof 的检测项；远端上报仍未证实。
