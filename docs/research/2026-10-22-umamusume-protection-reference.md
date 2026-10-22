@@ -6,6 +6,8 @@
 
 后续[补证报告](2026-10-22-umamusume-verification.md)与[新机器摘要](evidence/2026-10-22-umamusume-verification.json)确认了 CrackProof 指纹命中、五种路径子串函数的离线正/负对照，同时修正了本地文件写入证据的强度。旧 QBDI 采集的返回边界保持不变。
 
+在 handoff 本地合入 main 后，另行完成[拒绝根因与远端上报调查](2026-10-22-umamusume-rejection-reporting.md)：本版本物理设备拒绝已定位到 Cygames `CheckApp.isRootUser` 的 `su` 进程创建检查及 IL2CPP `Error0032` 对话框分支。候选保护库回调已恢复为 16 槽内存队列追加器；实际绑定、后续传输及远端上报仍未证实。该调查独立于工具功能验收。
+
 ## 样本身份与加载入口
 
 | 项目 | 本轮输入 |
@@ -30,8 +32,9 @@
 | 系统库相关检查 | 同一镜像有 `jni/checkSystemLib.cpp` 标记。 | 是进一步定位的线索；字符串不能代替已执行调用链、校验算法或失败判定。 |
 | 本地文件访问及主动终止 | 诊断窗口确认 `app_4e06` 下既有文件的 stat、`O_RDWR|O_CREAT` 打开，随后 SIGABRT。原 strace 未采集 `write/send*`。 | 证明文件访问与终止；不能直接证明该轮写入、记录内容或远端上报，也未隔离导致终止的具体条件。 |
 | 子进程与信号观察 | 不同诊断轮次观察过父子进程、ptrace 和信号交互。 | 需结合实际 syscall 返回、signal 交付与 handler 返回分析，不能把子进程存在、SIGSEGV 或末端 SIGKILL 直接称为防护检测命中。 |
+| Cygames Java Root 拒绝 | 后续字节码、运行时 JNI 类名/方法名、IL2CPP 分支及新启动 UI 对应到 `CheckApp.isRootUser` 和 `Error0032`。 | 已确认本设备、本版本的这条本地拒绝路径；条件是创建 `su` 未抛 IOException，不证明获得 root 权限，也不归因于 CrackProof。 |
 
-本轮没有完成针对 Root、Frida、Xposed/LSPosed、Magisk 或模拟器的逐项受控 A/B。独立启动曾显示 `You are not permitted to play on this device.`；这只证明该轮界面拒绝，不证明具体检测项、厂商或根因。
+原始采集没有完成针对 Root、Frida、Xposed/LSPosed、Magisk 或模拟器的逐项受控 A/B。单独的 `You are not permitted to play on this device.` 截图只能证明界面拒绝；后续独立调查通过字节码、运行时代码与参数、无内存读取对照补齐了上述 Root 分支证据，但仍未完成全部检测项的逐项 A/B。
 
 ## 分析过程与有效观察边界
 

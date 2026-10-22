@@ -1,0 +1,1308 @@
+{
+  "schema_version": 2,
+  "date": "2026-10-22",
+  "root_refusal": {
+    "schema_version": 1,
+    "result": "pass",
+    "scope": "version 1.35.2 / code 153 on the recorded Pixel 6; this local refusal path, not all possible refusals",
+    "confirmed_cause": "Cygames CheckApp.isRootUser succeeds in creating and destroying a su process, returns true; GameSystem.InitializeGame uses IsIllegalUser true to show Error0032 in a no-button dialog and does not write the false-branch progress value 2",
+    "java_condition_limit": "process creation without IOException, not a waitFor/exitValue/UID/elevation test",
+    "native_method_mapping": {
+      "accepted": "image-local method order, cross-validated by static signatures, live JNI class/method strings, unique direct caller, dialog callees and TextId defaults",
+      "rejected": {
+        "method": "ordinary token-RID indexing",
+        "candidate_rva": "0x341c55c",
+        "reason": "native body is an instance field constructor and fails the zero-argument static boolean method signature; no cause of token mismatch asserted"
+      }
+    },
+    "validated_methods": [
+      {
+        "method_index": 229466,
+        "image": "Cute.Core.Assembly.dll",
+        "owner": "Cute.Core.Device",
+        "name": "IsIllegalUser",
+        "token": "0x6000159",
+        "image_order_slot": 106,
+        "pointer": "0x6e44112ad4",
+        "rva": "0x3412ad4",
+        "parameter_count": 0,
+        "flags": "0x96",
+        "return_type_byval_name": "System.Boolean"
+      },
+      {
+        "method_index": 102999,
+        "image": "umamusume.dll",
+        "owner": "Gallop.GameSystem.<InitializeGame>d__33",
+        "name": "MoveNext",
+        "token": "0x6014f7c",
+        "image_order_slot": 102999,
+        "pointer": "0x6e47007760",
+        "rva": "0x6307760",
+        "parameter_count": 0,
+        "flags": "0x1e1",
+        "return_type_byval_name": "System.Boolean"
+      },
+      {
+        "method_index": 107373,
+        "image": "umamusume.dll",
+        "owner": "Gallop.LocalizeExtention",
+        "name": "Text",
+        "token": "0x60154f5",
+        "image_order_slot": 107373,
+        "pointer": "0x6e47127fc0",
+        "rva": "0x6427fc0",
+        "parameter_count": 1,
+        "flags": "0x96",
+        "return_type_byval_name": "System.String"
+      },
+      {
+        "method_index": 23369,
+        "image": "umamusume.dll",
+        "owner": "Gallop.DialogCommon.Data",
+        "name": "SetSimpleNoButtonMessage",
+        "token": "0x6000636",
+        "image_order_slot": 23369,
+        "pointer": "0x6e475a76c8",
+        "rva": "0x68a76c8",
+        "parameter_count": 2,
+        "flags": "0x86",
+        "return_type_byval_name": "Gallop.DialogCommon.Data"
+      },
+      {
+        "method_index": 101953,
+        "image": "umamusume.dll",
+        "owner": "Gallop.DialogManager",
+        "name": "PushDialog",
+        "token": "0x601d23c",
+        "image_order_slot": 101953,
+        "pointer": "0x6e46fdca58",
+        "rva": "0x62dca58",
+        "parameter_count": 1,
+        "flags": "0x96",
+        "return_type_byval_name": "Gallop.DialogCommon"
+      }
+    ],
+    "localized_texts": [
+      {
+        "field_index": 90904,
+        "name": "Common0071",
+        "value": 982,
+        "value_hex": "0x3d6",
+        "data_offset": "0xfe2fbc",
+        "encoded_hex": "87ac",
+        "jp_field_index": 96934,
+        "jp_text": "Error",
+        "jp_text_length": 5
+      },
+      {
+        "field_index": 91148,
+        "name": "Error0032",
+        "value": 1226,
+        "value_hex": "0x4ca",
+        "data_offset": "0xfe31a4",
+        "encoded_hex": "8994",
+        "jp_field_index": 97178,
+        "jp_text": "You are not permitted to play on this device.",
+        "jp_text_length": 45
+      }
+    ],
+    "root_call_site_rva": "0x630816c",
+    "false_branch_rva": "0x63082a4",
+    "native_wrapper_code_sha256": "a67852c72bc080529c483a24236d5ff56e40c2846119f3b990b78b35bce24f04",
+    "live_argument_observation": {
+      "pid": 31698,
+      "starttime": 7912331,
+      "arguments": [
+        {
+          "argument": "class",
+          "got_rva": "0x782d348",
+          "global_slot_rva": "0x7b4a310",
+          "managed_string": "0x6ce18dcb40",
+          "utf16_length": 34,
+          "text": "jp.co.cygames.androidroot.CheckApp",
+          "utf16_sha256": "045dac21f8e81a6583b9f11d321418716156d475098017530121e0ea948d39cf",
+          "references_stable": true
+        },
+        {
+          "argument": "method",
+          "got_rva": "0x782d360",
+          "global_slot_rva": "0x7b49b68",
+          "managed_string": "0x6cf3404e40",
+          "utf16_length": 10,
+          "text": "isRootUser",
+          "utf16_sha256": "67e940a21123c23d0adfdbd45a8ef393ffc5bc705bb67c36bfa540d31c2ad028",
+          "references_stable": true
+        }
+      ]
+    },
+    "full_code_observation": {
+      "pid": 28811,
+      "starttime": 7825056,
+      "load_bias": "0x6e40d00000",
+      "library_sha256": "144c6b1ca7d88d5a1455bf1b91b2c00137bd9475e3b89a6ddd50aebc066bee8b",
+      "atomic": false
+    },
+    "remaining_limits": [
+      "does not rule out additional root/emulator/debugger/integrity gates in other runs",
+      "does not establish remote upload occurrence, payload or responsible module",
+      "does not change the unknown native constructor return in earlier QBDI captures"
+    ]
+  },
+  "sample": {
+    "package": "com.cygames.umamusume",
+    "version_name": "1.35.2",
+    "version_code": 153,
+    "classes5_sha256": "f29cb6dc7496c214335480e7421e95fc353e53092ce8ff23f7bcc1209ddbfb02",
+    "global_metadata_sha256": "75ed0dc144073cd925de615401ffa5c8b2877493ed24b62d8ddb9afeed167706",
+    "libil2cpp_sha256": "144c6b1ca7d88d5a1455bf1b91b2c00137bd9475e3b89a6ddd50aebc066bee8b",
+    "protection_library_sha256": "160483775aae439b392ff12f0879925b3064cc0b7aff36fa0782efec1d7b59ee"
+  },
+  "fresh_device_cases": [
+    {
+      "pid": 25804,
+      "starttime": 7783454,
+      "uid": 10172,
+      "result": "unavailable",
+      "root_logs": [
+        "10-22 18:56:29.579 25804 26056 D DEBUG===CheckApp:  activity",
+        "10-22 18:56:29.579 25804 26056 D DEBUG===CheckApp:  PackageManager",
+        "10-22 18:56:29.581 25804 26056 D DEBUG===CheckApp: rootUser"
+      ],
+      "memory_status": "unavailable",
+      "case": "physical-root-control",
+      "source_result_semantics": "partial UI/root prefix; memory failed and target exited",
+      "error": {
+        "type": "RuntimeError",
+        "detail": "cat: /proc/25804/stat: No such file or directory\n"
+      },
+      "memory_failure": [
+        {
+          "mode": "pread",
+          "returncode": 67,
+          "bytes": 0,
+          "stderr": "read failed mode=pread offset=0 bytes=0 errno=0\n"
+        },
+        {
+          "mode": "vmread",
+          "returncode": 65,
+          "bytes": 0,
+          "stderr": ""
+        }
+      ],
+      "cleanup": {
+        "errors": [],
+        "owned_target_run_stopped": true,
+        "temporary_reader_removed_or_not_deployed": true
+      }
+    },
+    {
+      "pid": 27437,
+      "starttime": 7811004,
+      "uid": 10172,
+      "result": "captured",
+      "root_logs": [
+        "10-22 19:01:04.463 27437 27693 D DEBUG===CheckApp:  activity",
+        "10-22 19:01:04.464 27437 27693 D DEBUG===CheckApp:  PackageManager",
+        "10-22 19:01:04.466 27437 27693 D DEBUG===CheckApp: rootUser"
+      ],
+      "memory_status": "not_requested",
+      "case": "physical-ui-only-control",
+      "source_result_semantics": "completed bounded observation",
+      "liveness_samples": [
+        {
+          "sample": 0,
+          "observed_ns": 1792666866973529971,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 1,
+          "observed_ns": 1792666867591290235,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 2,
+          "observed_ns": 1792666868195231048,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 3,
+          "observed_ns": 1792666868795897253,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 4,
+          "observed_ns": 1792666869399495054,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 5,
+          "observed_ns": 1792666869993453777,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 6,
+          "observed_ns": 1792666870586647032,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 7,
+          "observed_ns": 1792666871187391504,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 8,
+          "observed_ns": 1792666871798982700,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 9,
+          "observed_ns": 1792666872407629716,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 10,
+          "observed_ns": 1792666873016328138,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 11,
+          "observed_ns": 1792666873614255120,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 12,
+          "observed_ns": 1792666874217081873,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 13,
+          "observed_ns": 1792666874810325115,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 14,
+          "observed_ns": 1792666875414277956,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 15,
+          "observed_ns": 1792666876015155030,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 16,
+          "observed_ns": 1792666876634322503,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 17,
+          "observed_ns": 1792666877245366725,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 18,
+          "observed_ns": 1792666877846692796,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 19,
+          "observed_ns": 1792666878450156509,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 20,
+          "observed_ns": 1792666879048565115,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 21,
+          "observed_ns": 1792666879658804129,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 22,
+          "observed_ns": 1792666880236803502,
+          "exists": true,
+          "starttime": 7811004
+        },
+        {
+          "sample": 23,
+          "observed_ns": 1792666880844276584,
+          "exists": true,
+          "starttime": 7811004
+        }
+      ],
+      "cleanup": {
+        "errors": [],
+        "owned_target_run_stopped": true,
+        "temporary_reader_removed_or_not_deployed": true
+      }
+    },
+    {
+      "pid": 28811,
+      "starttime": 7825056,
+      "uid": 10172,
+      "result": "captured",
+      "root_logs": [
+        "10-22 19:03:24.950 28811 29106 D DEBUG===CheckApp:  activity",
+        "10-22 19:03:24.950 28811 29106 D DEBUG===CheckApp:  PackageManager",
+        "10-22 19:03:24.952 28811 29106 D DEBUG===CheckApp: rootUser"
+      ],
+      "memory_status": "complete",
+      "case": "physical-vmread-control",
+      "source_result_semantics": "completed bounded observation",
+      "cleanup": {
+        "errors": [],
+        "owned_target_run_stopped": true,
+        "temporary_reader_removed_or_not_deployed": true
+      }
+    },
+    {
+      "pid": 31698,
+      "starttime": 7912331,
+      "uid": 10172,
+      "result": "captured",
+      "root_logs": [
+        "10-22 19:17:57.673 31698 31949 D DEBUG===CheckApp:  activity",
+        "10-22 19:17:57.673 31698 31949 D DEBUG===CheckApp:  PackageManager",
+        "10-22 19:17:57.676 31698 31949 D DEBUG===CheckApp: rootUser"
+      ],
+      "memory_status": "minimal_root_chain_complete",
+      "case": "physical-root-chain-control",
+      "source_result_semantics": "completed bounded observation",
+      "root_jni_arguments": [
+        {
+          "argument": "class",
+          "got_rva": "0x782d348",
+          "global_slot_rva": "0x7b4a310",
+          "managed_string": "0x6ce18dcb40",
+          "utf16_length": 34,
+          "text": "jp.co.cygames.androidroot.CheckApp",
+          "utf16_sha256": "045dac21f8e81a6583b9f11d321418716156d475098017530121e0ea948d39cf",
+          "references_stable": true
+        },
+        {
+          "argument": "method",
+          "got_rva": "0x782d360",
+          "global_slot_rva": "0x7b49b68",
+          "managed_string": "0x6cf3404e40",
+          "utf16_length": 10,
+          "text": "isRootUser",
+          "utf16_sha256": "67e940a21123c23d0adfdbd45a8ef393ffc5bc705bb67c36bfa540d31c2ad028",
+          "references_stable": true
+        }
+      ],
+      "root_wrapper_code_sha256": "a67852c72bc080529c483a24236d5ff56e40c2846119f3b990b78b35bce24f04",
+      "cleanup": {
+        "errors": [],
+        "owned_target_run_stopped": true,
+        "temporary_reader_removed_or_not_deployed": true
+      }
+    }
+  ],
+  "historical_root_observations": [
+    {
+      "pid": 12018,
+      "starttime": 3545067,
+      "source": "physical-baseline/rejection-logcat.txt",
+      "root_logs": [
+        {
+          "line": 1006,
+          "text": "10-22 07:10:06.126 12018 12562 D DEBUG===CheckApp:  activity"
+        },
+        {
+          "line": 1007,
+          "text": "10-22 07:10:06.126 12018 12562 D DEBUG===CheckApp:  PackageManager"
+        },
+        {
+          "line": 1008,
+          "text": "10-22 07:10:06.128 12018 12562 D DEBUG===CheckApp: rootUser"
+        }
+      ],
+      "scope": "historical physical refusal"
+    }
+  ],
+  "live_memory_observation": {
+    "pid": 28811,
+    "starttime": 7825056,
+    "load_bias": "0x6e40d00000",
+    "bytes": 135086080,
+    "mapping_count": 5,
+    "method": "process_vm_readv with PID/starttime checks and no ptrace attach",
+    "atomic": false,
+    "scope": "captured mapped library regions, not an ELF file copied from disk"
+  },
+  "remote_reporting": {
+    "status": "unconfirmed",
+    "confirmed_local_mechanisms": [
+      "Java root gate creates/destroys su process and returns a boolean",
+      "matched native callback candidate appends 80-byte records to a 16-slot in-memory queue"
+    ],
+    "queue_proof": {
+      "schema_version": 1,
+      "result": "pass",
+      "engine": "Unicorn",
+      "engine_version": "2.1.4",
+      "snapshot_pid": 26145,
+      "snapshot_starttime": 3911236,
+      "source_code_sha256": "dd0960ac4963c05cafd3a7db1e2783067288d0f4544e1a703ff30e378f502b1e",
+      "source_rw_sha256": "03ff6c9ca5e01ccdce18cc143dc2d9826949e6ba3de5b98462e695cfede64b78",
+      "entry": "0x723aaf55a4",
+      "count_address": "0x723ab13430",
+      "queue_address": "0x723ab13438",
+      "record_bytes": 80,
+      "valid_nonnegative_count_capacity": 16,
+      "cases": [
+        {
+          "initial_count": 0,
+          "final_count": 1,
+          "return_x0": 1,
+          "payload_copied": true,
+          "overflow_guard_preserved": true
+        },
+        {
+          "initial_count": 15,
+          "final_count": 16,
+          "return_x0": 1,
+          "payload_copied": true,
+          "overflow_guard_preserved": true
+        },
+        {
+          "initial_count": 16,
+          "final_count": 16,
+          "return_x0": 1,
+          "payload_copied": false,
+          "overflow_guard_preserved": true
+        },
+        {
+          "sequence_calls": 17,
+          "final_count": 16,
+          "first_16_records_preserved": true,
+          "seventeenth_not_appended": true,
+          "overflow_guard_preserved": true
+        }
+      ],
+      "decoder_crosscheck_count": 36,
+      "decoder_crosschecks": [
+        {
+          "call_address": "0x723aaf5718",
+          "plaintext": "/proc/self/cmdline",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf5ad8",
+          "plaintext": "split_",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf5bec",
+          "plaintext": "/base.apk",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf5fa8",
+          "plaintext": "ro.product.cpu.abi",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf60c8",
+          "plaintext": "arm64-v8a",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf62c8",
+          "plaintext": "/proc/self/exe",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf65f4",
+          "plaintext": "persist.sys.dalvik.vm.lib",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf6734",
+          "plaintext": "/system/lib64/libhoudini.so",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf6994",
+          "plaintext": "__tmp__sec3__",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf6a1c",
+          "plaintext": "%0zx",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf7864",
+          "plaintext": "/system/lib/libhoudini.so",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf7e9c",
+          "plaintext": "%s/data/%s",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf8018",
+          "plaintext": "%s/user/%d/%s",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf818c",
+          "plaintext": "%s/user/%d/%s",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf8440",
+          "plaintext": "selinux.restorecon_recursive",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf85e4",
+          "plaintext": "%s/data/%s/",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf8624",
+          "plaintext": "%s/user/%d/%s/",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf966c",
+          "plaintext": "ANDROID_DATA",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9690",
+          "plaintext": "/data",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf974c",
+          "plaintext": "ANDROID_ROOT",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9774",
+          "plaintext": "/system",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9838",
+          "plaintext": "ASEC_MOUNTPOINT",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9868",
+          "plaintext": "/mnt/asec",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9928",
+          "plaintext": "ANDROID_ASSETS",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf995c",
+          "plaintext": "/system/app",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9a24",
+          "plaintext": "EXTERNAL_STORAGE",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9a4c",
+          "plaintext": "/sdcard",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9b10",
+          "plaintext": "ANDROID_STORAGE",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9b3c",
+          "plaintext": "/storage",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aaf9c38",
+          "plaintext": "libc.so",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aafa104",
+          "plaintext": "/proc/self/environ",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aafa8ac",
+          "plaintext": "/proc/",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aafb530",
+          "plaintext": "/proc/",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aafb590",
+          "plaintext": "/maps",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aafb648",
+          "plaintext": "/proc/self/maps",
+          "native_decoder_agrees": true
+        },
+        {
+          "call_address": "0x723aafb738",
+          "plaintext": "/proc/self/maps",
+          "native_decoder_agrees": true
+        }
+      ],
+      "actual_android_execution_claim": false,
+      "meaning": "the candidate module-143 callback is an in-memory queue appender; this does not establish its actual binding/execution in the historical run or behavior of later queue consumers",
+      "native_code_unchanged": true,
+      "target_process_modified": false
+    },
+    "queue_binding_limit": "descriptor (143, 0x15a4) matches the saved candidate with ID getter 143; runtime lookup-table heap and actual callback execution were not captured",
+    "legacy_syscall_coverage": {
+      "source": "native_wait.py",
+      "source_filter_line": 112,
+      "included": [
+        "openat",
+        "newfstatat",
+        "fstat",
+        "statx",
+        "faccessat",
+        "faccessat2",
+        "readlink",
+        "readlinkat",
+        "read",
+        "lseek",
+        "fcntl",
+        "close",
+        "getuid",
+        "geteuid",
+        "getresuid",
+        "getgid",
+        "getegid",
+        "uname",
+        "mmap",
+        "mprotect",
+        "munmap",
+        "mremap",
+        "rt_sigaction",
+        "rt_sigprocmask",
+        "rt_sigreturn",
+        "tgkill",
+        "kill",
+        "exit",
+        "exit_group",
+        "prctl",
+        "ptrace",
+        "clone",
+        "clone3",
+        "connect"
+      ],
+      "omitted_relevant_calls": [
+        "write",
+        "writev",
+        "pwrite64",
+        "sendto",
+        "sendmsg",
+        "sendmmsg",
+        "socket"
+      ],
+      "read_payloads": "raw pointers, not decoded buffers",
+      "runs": [
+        {
+          "pid": 19897,
+          "lines": 68420,
+          "connect_entries": 9,
+          "address_family_counts": {
+            "AF_UNIX": 9
+          },
+          "af_inet_connect_entries": 0,
+          "starttime_from_two_second_sample": 3831440
+        },
+        {
+          "pid": 20658,
+          "lines": 15388,
+          "connect_entries": 6,
+          "address_family_counts": {
+            "AF_UNIX": 6
+          },
+          "af_inet_connect_entries": 0,
+          "starttime_from_two_second_sample": 3834098
+        }
+      ],
+      "local_file_conclusion": "20658 has existing 21-byte file stat and O_RDWR|O_CREAT open before SIGABRT; no write syscall capture",
+      "network_conclusion": "no AF_INET/AF_INET6 connect entries in the two bounded captures; missing write/send coverage, preexisting FDs and delegation prevent an upload yes/no conclusion",
+      "local_file_observation": {
+        "pid": 20658,
+        "existing_bytes": 21,
+        "open_flags": [
+          "O_RDWR",
+          "O_CREAT"
+        ],
+        "later_signal": "SIGABRT",
+        "write_captured": false,
+        "limit": "A file stat and open do not establish a write, payload or upload."
+      },
+      "export_scope": "Coverage and target behavior only; environment-specific paths and deployment identities are not exported."
+    },
+    "kernel_network_probe_scope": {
+      "entry_points": [
+        "__sys_connect",
+        "__sys_sendto",
+        "__sys_recvfrom"
+      ],
+      "send_sample_limit_bytes": 384,
+      "not_covered": [
+        "write",
+        "writev",
+        "sendmsg",
+        "delegation to other UIDs"
+      ],
+      "transport_limit": "TLS ciphertext/SNI cannot identify a protection report, even when the endpoint is the game API"
+    },
+    "missing": [
+      "actual queue reader/transport binding in one process epoch",
+      "module-attributed, semantically identified outbound payload"
+    ]
+  },
+  "observation_limits": [
+    "ordinary /proc/PID/mem pread attempt coincided with EXIT_SELF 0; no-memory control remained alive; cause of that observer effect not proven",
+    "process_vm_readv controls and live JNI argument/code identity checks completed with original process epochs intact",
+    "no new explicit native constructor-return proof for earlier QBDI captures"
+  ],
+  "resource_cleanup": {
+    "all_fresh_case_cleanup_errors": [],
+    "temporary_readers_removed": true,
+    "owned_physical_launches_returned_to_original_stopped_state": true,
+    "no_apk_replacement_uninstall_root_policy_or_network_configuration_change": true,
+    "no_target_code_or_return_value_modification": true
+  },
+  "source_roots": {
+    "original": "/home/lyldalek/.codex/worktrees/6580/qbdi-android/artifacts/pixel6-umamusume-20261022",
+    "local": "/home/lyldalek/.codex/worktrees/cd7b/qbdi-android"
+  },
+  "source_manifest": [
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/root-refusal-chain-verified.json",
+      "bytes": 4987,
+      "sha256": "40936db2e578bee8c7c7adb03e3fe3bd9e51d304cbd0c8889c883153e03b99a4"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/context-queue-emulation.json",
+      "bytes": 5961,
+      "sha256": "cd4121f80e5917a440d1873f6a40c108c21ced83dcfa1ccc386564fe2db142c7"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-control/root-only-logcat.txt",
+      "bytes": 188,
+      "sha256": "e2d1f9bb0e96b462fde0b902041b36a207862a01c2cfa65be05954f0a1111cc9"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-control/main-stat-before",
+      "bytes": 310,
+      "sha256": "3f90c386151856f7f8b7df5965a22979da84d4a4a2ebc9991a10aa4c49b1dc51"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-control/screen-before-memory.png",
+      "bytes": 840539,
+      "sha256": "3b21aab606f4f3671b6694df6b47e3f8fa321e1cb61507bdd2cfe93e2437358d"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-control/reader-selftest.stderr",
+      "bytes": 44,
+      "sha256": "49fe68700c4efa899be5d50f2404e92562d358ea40fffab81a02b0964242b86b"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-ui-only-control/root-only-logcat.txt",
+      "bytes": 188,
+      "sha256": "93dcd7526c843d2942c5f85e0f3cf1e236afcc329175cad2c5ffb1c61f3ec867"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-ui-only-control/main-stat-before",
+      "bytes": 309,
+      "sha256": "e2821cbb2821dd948cb17b28cab1ad6d1b1be6b13f88c826088d2478191de4c9"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-ui-only-control/screen-before-memory.png",
+      "bytes": 840539,
+      "sha256": "3b21aab606f4f3671b6694df6b47e3f8fa321e1cb61507bdd2cfe93e2437358d"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/root-only-logcat.txt",
+      "bytes": 188,
+      "sha256": "9b9c2705820f4ae8720eddb370646b044acdaa74f97ff473ab103f8da927e0ee"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/main-stat-before",
+      "bytes": 309,
+      "sha256": "35d293aa82b34a7ac54023f902f41eb0f449d9db5ace586973805aa3ea083b39"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/main-stat-after",
+      "bytes": 312,
+      "sha256": "bded6eb433f9d532c0dff13e92f21fc05ca5fa4ffcc50fd4234588510e49c84e"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/screen-before-memory.png",
+      "bytes": 818665,
+      "sha256": "86661094804ffdbdd73ed2bf455bee82d57855dbadd93c5ef8a1ab8955be7e07"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/screen-after-memory.png",
+      "bytes": 840539,
+      "sha256": "3b21aab606f4f3671b6694df6b47e3f8fa321e1cb61507bdd2cfe93e2437358d"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/reader-selftest.stderr",
+      "bytes": 44,
+      "sha256": "49fe68700c4efa899be5d50f2404e92562d358ea40fffab81a02b0964242b86b"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/6e40d00000-6e439a5000.memory.bin",
+      "bytes": 46813184,
+      "sha256": "fe5c93848fb446e481e723abea309197f4973cd64a2b92bbc7989b354039a737"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/6e439a8000-6e48175000.memory.bin",
+      "bytes": 75288576,
+      "sha256": "37b06fb5ac9bc432dde96e6a183ba5038732ef0c1ce9668805c99a3a7991edde"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/6e48179000-6e48630000.memory.bin",
+      "bytes": 4943872,
+      "sha256": "7c5774b82682344dc5a59564c431f54e8ea045bf6b7cee6d762a104a98ff94ba"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/6e48633000-6e48ba4000.memory.bin",
+      "bytes": 5705728,
+      "sha256": "16df97de1c446bf09d20efd981e9b47ffd47f15d5be1bde1b8a2ec60372478c8"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-vmread-control/6e48ba4000-6e48dde000.memory.bin",
+      "bytes": 2334720,
+      "sha256": "85f9ffb25cca5829e12dfedafd43bd52c921861da4e35a7a947e858a39878aa2"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-chain-control/root-only-logcat.txt",
+      "bytes": 188,
+      "sha256": "a102842486b61260be641e0732b52b119b8e9be9e05424072d6183e53d0a9fa1"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-chain-control/main-stat-before",
+      "bytes": 310,
+      "sha256": "3ed1d85014d09cd0e85c8e65b651090cf04c00422e677d3201642b1a68826d55"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-chain-control/main-stat-after",
+      "bytes": 313,
+      "sha256": "3e708346f78f8762d50e2e7efe44007c86d2cf4aa2bdde500cd7ffbbadd9db86"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-chain-control/screen-before-memory.png",
+      "bytes": 817575,
+      "sha256": "067bc50e62e38dc1cadc23b4ac0aa66b5f85f58da4e3d53c8a1a8970ad18f3cf"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-chain-control/screen-after-memory.png",
+      "bytes": 840539,
+      "sha256": "3b21aab606f4f3671b6694df6b47e3f8fa321e1cb61507bdd2cfe93e2437358d"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-chain-control/reader-selftest.stderr",
+      "bytes": 44,
+      "sha256": "49fe68700c4efa899be5d50f2404e92562d358ea40fffab81a02b0964242b86b"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/physical-root-chain-control/root-wrapper-code.bin",
+      "bytes": 580,
+      "sha256": "a67852c72bc080529c483a24236d5ff56e40c2846119f3b990b78b35bce24f04"
+    },
+    {
+      "kind": "original",
+      "path": "physical-baseline/rejection-logcat.txt",
+      "bytes": 426896,
+      "sha256": "126a58a8af04f886ecd592d5f0e72d5a6b7ef62e2e9088af0d0d5c71aee6982e"
+    },
+    {
+      "kind": "original",
+      "path": "physical-baseline/process-stat.txt",
+      "bytes": 206,
+      "sha256": "95582e562be75474a2a7d6370da1d4b7d34899d31bce021e7ddc1bbd62f83049"
+    },
+    {
+      "kind": "original",
+      "path": "backup/com.cygames.umamusume/base.apk",
+      "bytes": 100934863,
+      "sha256": "5aca7ca236cf698e33ced1cf46cf63de01c01724ead6cd949f6558331e8587c9"
+    },
+    {
+      "kind": "original",
+      "path": "backup/com.cygames.umamusume/lib/arm64-v8a/libil2cpp.so",
+      "bytes": 190372152,
+      "sha256": "144c6b1ca7d88d5a1455bf1b91b2c00137bd9475e3b89a6ddd50aebc066bee8b"
+    },
+    {
+      "kind": "original",
+      "path": "static/lib__4e06__.so",
+      "bytes": 1667671,
+      "sha256": "160483775aae439b392ff12f0879925b3064cc0b7aff36fa0782efec1d7b59ee"
+    },
+    {
+      "kind": "original",
+      "path": "native-snapshot-seccomp/26145-snapshot/723aaf4000-723ab01000.memory.bin",
+      "bytes": 53248,
+      "sha256": "dd0960ac4963c05cafd3a7db1e2783067288d0f4544e1a703ff30e378f502b1e"
+    },
+    {
+      "kind": "original",
+      "path": "native-snapshot-seccomp/26145-snapshot/723ab01000-723ab18000.memory.bin",
+      "bytes": 94208,
+      "sha256": "03ff6c9ca5e01ccdce18cc143dc2d9826949e6ba3de5b98462e695cfede64b78"
+    },
+    {
+      "kind": "original",
+      "path": "native-snapshot-seccomp/26145-snapshot/723801e000-7238035000.memory.bin",
+      "bytes": 94208,
+      "sha256": "b33faadd9b3447d699e7040b0b1967a0121214d0b40222bd2287e1aad25bdc56"
+    },
+    {
+      "kind": "original",
+      "path": "native-snapshot-seccomp/26145-snapshot/7238035000-723804e000.memory.bin",
+      "bytes": 102400,
+      "sha256": "5295054f50d46c31e90cff78834ef75b5da4da7ec924f5beb4a07080ed29ca59"
+    },
+    {
+      "kind": "original",
+      "path": "native-snapshot-seccomp/26145-snapshot/stat",
+      "bytes": 306,
+      "sha256": "e73df0042f81c4d71d35b08da818be27a74635eb4e411aa725aef940ed0bccb7"
+    },
+    {
+      "kind": "original",
+      "path": "native-snapshot-seccomp/26145-snapshot/registers.json",
+      "bytes": 501,
+      "sha256": "c6a23b4dc76bd50803296da70dbcd1eb44f2773d994af1764bf75e9515fd335b"
+    },
+    {
+      "kind": "original",
+      "path": "trace_game_network.py",
+      "bytes": 3253,
+      "sha256": "689f44f1a3a5f32fcb2d7eb606163cde66c7c88a7fd49e6bf5544c8c3ab412c2"
+    },
+    {
+      "kind": "original",
+      "path": "native_wait.py",
+      "bytes": 12685,
+      "sha256": "f96e39d6db2d4ff228feffff91395e3e0b993e576cee460ae046e32bf3776c07"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/classes5.dex",
+      "bytes": 5662192,
+      "sha256": "f29cb6dc7496c214335480e7421e95fc353e53092ce8ff23f7bcc1209ddbfb02"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/global-metadata.dat",
+      "bytes": 30771772,
+      "sha256": "75ed0dc144073cd925de615401ffa5c8b2877493ed24b62d8ddb9afeed167706"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/checkapp-java-disassembly.txt",
+      "bytes": 7406,
+      "sha256": "9bf2a04b67254965f6dfc41ec738f5e40524072cf59a28ae29b8a521c760a68d"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/emulator-java-disassembly.txt",
+      "bytes": 9611,
+      "sha256": "2458ae174d1acc1700f893db7f943d2a1df84f6f967d53763391c1c3373c8d09"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/managed-detector-metadata.json",
+      "bytes": 6589,
+      "sha256": "415500f578c1be92137d27421533be1882b4d1891a92656f43d59b2fe29f1e32"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/root-bridge-metadata.json",
+      "bytes": 6915,
+      "sha256": "525644d6e7a3c27234fa69d35b56ab90891b423ee020d5c4f2905c92afefe767"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/root-order-callers.json",
+      "bytes": 1215,
+      "sha256": "76c9b124b99e316d37a0a089e8ba24485c5a7cb2652ddc1ebe5c7d6293cfe00d"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/root-order-disassembly.txt",
+      "bytes": 26622,
+      "sha256": "29e35af443ca46f3915d19291f9067189893236379367ac1283ea1464f10b8d3"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/root-native-callers.json",
+      "bytes": 745,
+      "sha256": "d3f43b06f26d280ad9662d7a4a4b228557c7e178e96159a61d9104da1fcfe791"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/root-native-disassembly.txt",
+      "bytes": 487,
+      "sha256": "1ee8c4864aeef1046add67f14302ffc9f7386fb92b421f8edff3edfa91cacc95"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/root-refusal-branch.txt",
+      "bytes": 3071,
+      "sha256": "a32b19e6aba6db5985f3550e40a92f92fe47e8d856f6291680dcd855e9f84fb9"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/refusal-text-id-candidates.json",
+      "bytes": 1846,
+      "sha256": "76b79da3ae316ba3a3aab0f113d6139b33a95f4059282963aa8e00456c55b38b"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/module143-handler-disassembly.txt",
+      "bytes": 15481,
+      "sha256": "2961d89df24cacc464071709a5e2abd0f342e63ae92bfb971b842314c0bb8c11"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/callback-resolver-disassembly.txt",
+      "bytes": 3595,
+      "sha256": "c2c8e0151c325263ab4663b9927c94d585ac171f168d7c02c8216f473bced2c2"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/context-consumers-disassembly.txt",
+      "bytes": 10408,
+      "sha256": "cc1827feeee9b57a6401db122d2bff6068e1cf5527d470f566e86e4c6b9758a7"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/context-queue-descriptors.json",
+      "bytes": 4125,
+      "sha256": "8a7cee00b64085def412b326a8d2980bf2eda8871b149a02ca4a114d400acdf0"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/decoded-module143-strings.json",
+      "bytes": 17417,
+      "sha256": "7fb983a6c1627192ac441e4f0f76fc16fa66ba157eebf816d3c5fe488d1ea376"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/module143-string-decoder-disassembly.txt",
+      "bytes": 501,
+      "sha256": "0aaf9dec70bb75f524cacb8f94ab54bedcbdfa9541c2453a6d5602b91e00b741"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/snapshot-module-inventory.json",
+      "bytes": 8372,
+      "sha256": "1c9a182e02a3eb85bc57fa3a97390ea1d9346107f4749522564d531aeba28835"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/il2cpp-elf-inventory.json",
+      "bytes": 1305,
+      "sha256": "01a19acd2cc1bc5bc92b4923b35138f181b588ccee55a02e9fa08478f0c8ebba"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/runtime-module-candidates.json",
+      "bytes": 1486,
+      "sha256": "9a44b916f3d82dcda21f653aaa5e6647542d82f0a62377f97b6959f816702bb7"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/parse-metadata.py",
+      "bytes": 6255,
+      "sha256": "f9dc3c8f2fa9daaa4b6ebc5e6f5fffac80c5694d8654d544079043a5491f9db5"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/read_memory.c",
+      "bytes": 3497,
+      "sha256": "6401db741b90005227d373e0892c55b850f5abe9ff75676e46e43e3d86749493"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/read_memory_arm64",
+      "bytes": 691936,
+      "sha256": "31dd36a16bc9943a31f76b379d51f6bc1c73ba63617c51f1b521055b7d468767"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/verify-root-chain.py",
+      "bytes": 7872,
+      "sha256": "f6cac1faf4cec91a214658dad77f36dc08649aa99a0b7f91869d2aaf9305df29"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/emulate-context-queue.py",
+      "bytes": 4390,
+      "sha256": "ebef66a3f839735efefa3756f487bbeb4cba3ae32e46aec239a4be638ff99282"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/decode-module143-strings.py",
+      "bytes": 7313,
+      "sha256": "3e658fb4532fd55db2ad94282d06d73e1dabd83abffb46b5811f2d193efc1d1b"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/trace-root-native.py",
+      "bytes": 4452,
+      "sha256": "6d2812a29d32ef1d58f238474248a4a1977c97fac4aa1fe75f982b4d8502c964"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/trace-root-order.py",
+      "bytes": 4677,
+      "sha256": "fdef92ce1861a87c010b6e65abe4c034196fcef951e743f371ad5d45736269e8"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/BinaryReaderExtensions.cs",
+      "bytes": 3198,
+      "sha256": "7a01fd286d5fc3eb1a7ddef4fc85da255719b647e0f2fa676b59fabc7346894d"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/BinaryStream.cs",
+      "bytes": 8209,
+      "sha256": "ce5f97946dd45621fb41ec2bf42364f9293fcd64645f90a0fe9552886db7b684"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/CustomAttributeDataReader.cs",
+      "bytes": 6732,
+      "sha256": "78c2dab52f0f9e4fe919acd4efda3cb5d5f9baabc008d7e2ba5e9c508709d6a3"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/Il2Cpp.cs",
+      "bytes": 15496,
+      "sha256": "43194b19da551543a1b599bca3cfee047cf98d404a40694668b5207006fb8761"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/Il2CppClass.cs",
+      "bytes": 10645,
+      "sha256": "e92cfbc617de4bc1dfade5df3dc5056e80b87038ca9b2a67efeedc9c1e939ecc"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/Il2CppExecutor.cs",
+      "bytes": 19772,
+      "sha256": "ee687bc8938dac508d01954d18803c556d98497654e34defc78e0a132b83ed45"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/Metadata.cs",
+      "bytes": 13383,
+      "sha256": "aabb0ef28ea25509aee460df2863bcce1ca3b3f246f7dff6538c350b3a240334"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/MetadataClass.cs",
+      "bytes": 13636,
+      "sha256": "d66c9f867e66bf7709a2789b708c846517241e6aa54e8a6480271720b5fcc3cd"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/default-value-source-paths.json",
+      "bytes": 159,
+      "sha256": "84f49e109cb0daef1ead4b520c4d8a601d2aba37341ce47dfd409619beadf306"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/il2cpp-parser-source.json",
+      "bytes": 607,
+      "sha256": "a85ea74cd3312c6ec33843d81c25fdbcb38213e2122272d8b0234721f68ec0b3"
+    },
+    {
+      "kind": "local",
+      "path": "out/umamusume-independent-20261022/public-sources/repository-tree.json",
+      "bytes": 21341,
+      "sha256": "83327920985104d50196d9aa2817e99c30b0407fe0fa67b45f231b975ce9a799"
+    },
+    {
+      "kind": "local",
+      "path": "docs/research/evidence/2026-10-22-umamusume-verification.json",
+      "bytes": 22737,
+      "sha256": "c3218f3ff2d597d8fe93f26523f7d3a1cff93dd88192eadc077bbde95d5ac857"
+    }
+  ],
+  "scope": "Analysis-only extract: Java root condition, runtime method mapping, dialog branch, read-only controls and candidate memory queue.",
+  "export_policy": "Only analysis facts and selected target observations are exported. Input hashes do not assert that complete operational reports have been republished."
+}

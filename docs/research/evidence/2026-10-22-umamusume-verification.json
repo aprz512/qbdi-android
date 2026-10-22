@@ -505,7 +505,7 @@
   },
   "preserved_unknowns": [
     "exact sample vendor attestation and protection version",
-    "physical-device refusal cause and per-detector root/Frida/Xposed/Magisk/emulator A/B",
+    "per-detector root/Frida/Xposed/Magisk/emulator A/B and unobserved refusal paths; the separately verified Java root branch is recorded in the refusal report",
     "remote reporting occurrence, payload and responsible component",
     "complete unpacking/protection procedure and explicit return in the older stopped QBDI constructor captures"
   ],

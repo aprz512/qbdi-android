@@ -33,6 +33,7 @@
 - [qbdi-android 实战体验与优化建议：AppGuard 防护库分析](research/2026-10-21-qbdi-dgup-tool-experience.md)
 - [赛马娘防护库分析参考](research/2026-10-22-umamusume-protection-reference.md)
 - [赛马娘保护库补证：CrackProof 指纹、路径函数与观察边界](research/2026-10-22-umamusume-verification.md)
+- [赛马娘独立调查：Root 拒绝根因与远端上报边界](research/2026-10-22-umamusume-rejection-reporting.md)
 - [2026-10-22 使用体验优化交接](superpowers/plans/2026-10-22-qbdi-ux-handoff.md)
 - [离线分析器前期调研](research/2026-08-30-trace-ui-analysis.md)
 
